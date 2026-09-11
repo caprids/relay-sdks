@@ -24,6 +24,7 @@ from mux_relay.webtransport import (
     CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
     WebTransportError,
     WebTransportSessionBase,
+    _open_socket,
     _parse_url,
     connect_webtransport,
     encode_close_session_capsule,
@@ -85,6 +86,43 @@ class TestWireHelpers:
 
     def test_the_close_capsule_type_is_the_registered_value(self) -> None:
         assert CAPSULE_CLOSE_WEBTRANSPORT_SESSION == 0x2843
+
+    def test_socket_fallback_picks_an_ipv4_address_when_ipv6_sockets_are_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import socket as socket_module
+
+        real_socket = socket_module.socket
+
+        def no_ipv6(family: int = socket_module.AF_INET, *args: Any, **kwargs: Any) -> Any:
+            if family == socket_module.AF_INET6:
+                raise OSError("IPv6 is unavailable")
+
+            return real_socket(family, *args, **kwargs)
+
+        monkeypatch.setattr(socket_module, "socket", no_ipv6)
+        # The resolver put an IPv6 address first; the IPv4 socket must not be pointed at it.
+        sock, address = _open_socket([("2001:db8::1", 443, 0, 0), ("192.0.2.1", 443)])
+
+        try:
+            assert sock.family == socket_module.AF_INET
+            assert address == ("192.0.2.1", 443)
+        finally:
+            sock.close()
+
+        with pytest.raises(WebTransportError, match="only to IPv6"):
+            _open_socket([("2001:db8::1", 443, 0, 0)])
+
+    def test_dual_stack_socket_maps_ipv4_addresses(self) -> None:
+        try:
+            sock, address = _open_socket([("192.0.2.1", 443)])
+        except WebTransportError:
+            pytest.skip("no IPv6 socket support on this host")
+
+        try:
+            assert address == ("::ffff:192.0.2.1", 443, 0, 0)
+        finally:
+            sock.close()
 
 
 @pytest.fixture
@@ -219,6 +257,43 @@ class TestLoopback:
 
         assert await publisher.closed == Closed()
         assert await subscriber.closed == Closed()
+
+    async def test_closing_a_session_whose_connect_is_unanswered_fails_ready_at_once(self) -> None:
+        requests: list[dict[bytes, bytes]] = []
+        server = await start_webtransport_server(
+            lambda session: None, respond_to_connect=False, on_request=requests.append
+        )
+
+        try:
+            created = connect_webtransport(
+                server.url_for("/hung"), ["moqt-20"], configuration=server.client_configuration()
+            )
+            await wait_for(lambda: len(requests) == 1, timeout=5)  # the CONNECT reached the server; no answer is coming
+
+            created.transport.close()
+
+            with pytest.raises(WebTransportError, match="closed before the session was established"):
+                await asyncio.wait_for(created.ready, 2)
+
+            await asyncio.wait_for(created.transport.wait_closed(), 2)
+        finally:
+            server.close()
+
+    async def test_a_connection_dropped_before_the_connect_answer_fails_ready(self) -> None:
+        requests: list[dict[bytes, bytes]] = []
+        server = await start_webtransport_server(
+            lambda session: None, respond_to_connect=False, on_request=requests.append
+        )
+        created = connect_webtransport(
+            server.url_for("/hung"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await wait_for(lambda: len(requests) == 1, timeout=5)
+
+        # The server goes away: the QUIC connection terminates with an error, and so must `ready`.
+        server.close()
+
+        with pytest.raises(WebTransportError):
+            await asyncio.wait_for(created.ready, 5)
 
     async def test_reports_a_rejected_connect(self) -> None:
         # A plain HTTPS/QUIC server that is not there: the handshake never completes.

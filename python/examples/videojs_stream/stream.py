@@ -621,6 +621,15 @@ async def run(config: Config, log: Log) -> Stats:
     producer = Producer(config, loop, queue)
     stats = Stats()
     closing = False
+    stopped: asyncio.Future[None] = loop.create_future()
+
+    # Registered before anything can cancel the lifetime: a publisher connection that drops during
+    # setup cancels it, and a callback added afterwards would never run.
+    def on_cancelled(reason: BaseException) -> None:
+        if not stopped.done():
+            stopped.set_result(None)
+
+    lifetime.add_callback(on_cancelled)
 
     def watch(label: str, closed: asyncio.Future[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
@@ -675,19 +684,18 @@ async def run(config: Config, log: Log) -> Stats:
 
     producer.start()
     deadline = loop.call_later(config.duration, lambda: lifetime.cancel()) if config.duration else None
-    stopped: asyncio.Future[None] = loop.create_future()
-
-    def on_cancelled(reason: BaseException) -> None:
-        if not stopped.done():
-            stopped.set_result(None)
-
-    lifetime.add_callback(on_cancelled)
+    media_task = tasks[1]
 
     try:
-        await asyncio.wait([stopped, tasks[1]], return_when=asyncio.FIRST_COMPLETED)
+        await asyncio.wait([stopped, media_task], return_when=asyncio.FIRST_COMPLETED)
 
         if producer.error is not None:
             raise RuntimeError(f"media pipeline failed: {describe(producer.error)}") from producer.error
+
+        # The media loop ending on its own is either the source running out (a file without --loop)
+        # or a failure; a failure must not read as a clean finish.
+        if media_task.done() and not media_task.cancelled() and media_task.exception() is not None:
+            raise RuntimeError(f"publishing failed: {describe(media_task.exception())}") from media_task.exception()
 
         # A deadline cancels with the default reason; anything else (a connection loss) is a failure.
         if lifetime.cancelled and lifetime.reason is not None and not isinstance(lifetime.reason, Cancelled):

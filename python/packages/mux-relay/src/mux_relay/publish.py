@@ -407,7 +407,9 @@ class RelayTrackWriter:
             self._check(operation)
 
             if self._alias is None:
-                raise RelayClosedError("Relay subscription ended before the write started")
+                # Demand came and went before the write could start. The track itself is still open,
+                # so this is a retryable failure, not a closed track.
+                raise RelayError("Relay subscription ended before the write started")
 
         self._check(operation)
         return self._alias

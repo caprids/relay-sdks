@@ -750,7 +750,7 @@ class WebTransportSession(WebTransportSessionBase):
 
             configuration = self._build_configuration(endpoint.host)
             connection = QuicConnection(configuration=configuration)
-            sock, addr = _open_socket(infos[0][4])
+            sock, addr = _open_socket([info[4] for info in infos])
             udp_transport, protocol = await loop.create_datagram_endpoint(
                 lambda: WebTransportProtocol(connection), sock=sock
             )
@@ -849,16 +849,23 @@ class WebTransportSession(WebTransportSessionBase):
     def close(self, close_code: int = 0, reason: str = "") -> None:
         if self._protocol is None and not self._closing:
             self._closing = True
-
-            if not self.ready.done():
-                self.ready.set_exception(WebTransportError("closed before the session was established"))
-
             self._finish(None)
             self._connect_task.cancel()
             self._teardown_connection()
             return
 
         super().close(close_code, reason)
+
+    def _finish(self, error: BaseException | None) -> None:
+        # Every way the session can end (a local close, the QUIC connection terminating, a peer close
+        # capsule) runs through here, so a handshake still waiting on the CONNECT response fails now
+        # instead of hanging until the caller's connect deadline.
+        if not self.ready.done():
+            self.ready.set_exception(
+                error if error is not None else WebTransportError("closed before the session was established")
+            )
+
+        super()._finish(error)
 
     def _teardown_connection(self) -> None:
         protocol = self._protocol or self._pending_protocol
@@ -867,8 +874,15 @@ class WebTransportSession(WebTransportSessionBase):
             protocol.close_after_drain(ErrorCode.H3_NO_ERROR)
 
 
-def _open_socket(address: tuple[Any, ...]) -> tuple[socket.socket, tuple[Any, ...]]:
-    """Bind a UDP socket the way aioquic's client does: dual-stack IPv6 when available, IPv4 otherwise."""
+def _open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, tuple[Any, ...]]:
+    """Bind a UDP socket and pick the resolved address it can reach.
+
+    Like aioquic's client: a dual-stack IPv6 socket when the host offers one (IPv4 addresses are
+    mapped onto it), otherwise an IPv4 socket with the first IPv4 address the resolver returned.
+    """
+    if not addresses:
+        raise WebTransportError("no addresses to connect to")
+
     try:
         sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         try:
@@ -878,9 +892,18 @@ def _open_socket(address: tuple[Any, ...]) -> tuple[socket.socket, tuple[Any, ..
             sock.close()
             raise
     except OSError:
+        ipv4 = [address for address in addresses if len(address) == 2]
+
+        if not ipv4:
+            raise WebTransportError(
+                "the host resolves only to IPv6 addresses, but IPv6 sockets are unavailable"
+            ) from None
+
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", 0))
-        return sock, address[:2]
+        return sock, ipv4[0]
+
+    address = addresses[0]
 
     if len(address) == 2:
         address = ("::ffff:" + address[0], address[1], 0, 0)

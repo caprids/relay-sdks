@@ -172,6 +172,25 @@ class TestOpenGroup:
         assert group.closed
         assert video.bound
 
+    async def test_demand_that_vanishes_before_the_write_starts_is_retryable(self, cleanup: Cleanup) -> None:
+        _, publisher, subscriber = await connect_hub(cleanup)
+        video = publisher.publish("video")
+        writing = asyncio.ensure_future(video.write(b"x"))
+        await asyncio.sleep(0)
+
+        # The relay subscribes and unsubscribes before the waiting write resumes.
+        video._bind(5)
+        video._bind(None)
+
+        with pytest.raises(RelayError, match="ended before the write started") as raised:
+            await writing
+
+        # Not a closed track: demand simply came and went, and the next write can wait again.
+        assert not isinstance(raised.value, RelayClosedError)
+        objects = receive(subscriber, "video")
+        await video.write(b"y")
+        await wait_for(lambda: len(objects) == 1)
+
     async def test_rejects_oversized_objects(self, cleanup: Cleanup) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
         video = publisher.publish("video")

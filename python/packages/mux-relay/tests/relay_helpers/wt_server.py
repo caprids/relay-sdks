@@ -73,15 +73,30 @@ SessionHandler = Callable[[WebTransportServerSession], None]
 class WebTransportServerProtocol(WebTransportProtocol):
     """Accepts extended CONNECT requests and hands each session to ``on_session``."""
 
-    def __init__(self, quic: QuicConnection, on_session: SessionHandler, stream_handler: Any = None) -> None:
+    def __init__(
+        self,
+        quic: QuicConnection,
+        on_session: SessionHandler,
+        stream_handler: Any = None,
+        respond_to_connect: bool = True,
+        on_request: Callable[[dict[bytes, bytes]], None] | None = None,
+    ) -> None:
         super().__init__(quic, stream_handler)
         self._on_session = on_session
+        self._respond_to_connect = respond_to_connect
+        self._on_request = on_request
         self.on_request_headers = self._handle_request
         self.requests: list[dict[bytes, bytes]] = []
 
     def _handle_request(self, event: HeadersReceived) -> None:
         headers = {key.lower(): value for key, value in event.headers}
         self.requests.append(headers)
+
+        if self._on_request is not None:
+            self._on_request(headers)
+
+        if not self._respond_to_connect:
+            return  # A server that accepts QUIC but never answers the CONNECT: the hung-handshake case.
 
         if headers.get(b":method") != b"CONNECT" or headers.get(b":protocol") != b"webtransport":
             self.h3.send_headers(event.stream_id, [(b":status", b"404")], end_stream=True)
@@ -121,7 +136,12 @@ class LoopbackWebTransportServer:
         self._server.close()
 
 
-async def start_webtransport_server(on_session: SessionHandler) -> LoopbackWebTransportServer:
+async def start_webtransport_server(
+    on_session: SessionHandler,
+    *,
+    respond_to_connect: bool = True,
+    on_request: Callable[[dict[bytes, bytes]], None] | None = None,
+) -> LoopbackWebTransportServer:
     certificate, key, pem = generate_self_signed_certificate()
     configuration = QuicConfiguration(
         is_client=False, alpn_protocols=["h3"], max_datagram_frame_size=65536, idle_timeout=20.0
@@ -132,7 +152,12 @@ async def start_webtransport_server(on_session: SessionHandler) -> LoopbackWebTr
         "127.0.0.1",
         0,
         configuration=configuration,
-        create_protocol=partial(WebTransportServerProtocol, on_session=on_session),
+        create_protocol=partial(
+            WebTransportServerProtocol,
+            on_session=on_session,
+            respond_to_connect=respond_to_connect,
+            on_request=on_request,
+        ),
     )
     transport = server._transport
     assert transport is not None
