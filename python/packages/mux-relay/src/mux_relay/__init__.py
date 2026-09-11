@@ -1,10 +1,127 @@
 """Relay Python SDK.
 
-Owns the Relay product API and authentication convention, built on ``moq_core``. The planned
-transport is aioquic's WebTransport support, which lets this SDK reach a relay natively with no
-browser. Nothing is implemented yet beyond the package boundary.
+Owns the Relay product API and authentication convention, built on ``moq_core``. The default
+transport is WebTransport over HTTP/3 through aioquic, which reaches a relay natively with no
+browser; ``create_transport`` swaps in another implementation of the same seam.
 """
 
-from moq_core import MOQT_PROTOCOL_ID
+from moq_core import (
+    MAX_OBJECT_PAYLOAD_LENGTH,
+    MOQT_PROTOCOL_ID,
+    PUBLISH_DONE_STATUS,
+    REQUEST_ERROR_CODE,
+    AbsoluteLocationFilter,
+    Closed,
+    FetchEndOfRange,
+    FetchHandle,
+    FetchHandlers,
+    FetchObject,
+    FetchOk,
+    FetchReset,
+    FetchStreamEntry,
+    Goaway,
+    KeyValuePair,
+    Location,
+    LocationFilter,
+    MessageParameters,
+    MoqtObject,
+    MoqtProtocolError,
+    MoqTrackSource,
+    MoqtSubscribeOptions,
+    MoqtTransport,
+    NextObjectFilter,
+    NoLocationFilter,
+    PublishDone,
+    RelativeGroupFilter,
+    RequestError,
+    SubgroupEnd,
+    SubgroupReset,
+    SubscribeOk,
+    Subscription,
+    SubscriptionHandlers,
+    TrackStatusHandlers,
+    TrackStatusOk,
+)
 
-__all__ = ["MOQT_PROTOCOL_ID"]
+from .cancellation import CancellationToken, Cancelled
+from .connect import RelayConnection, connect_relay
+from .connect_session import (
+    DEFAULT_CONNECT_TIMEOUT,
+    DEFAULT_REQUEST_TIMEOUT,
+    ConnectingTransport,
+    RelayTransportFactory,
+    TokenProvider,
+)
+from .errors import RelayClosedError, RelayError, RelayGoawayError, RelayTimeoutError, RelayWritePendingError
+from .publish import (
+    DEFAULT_WRITE_TIMEOUT,
+    RelayGroupWriter,
+    RelayPublisher,
+    RelayTrackWriter,
+    connect_relay_publisher,
+)
+from .webtransport import WebTransportError, WebTransportSession, connect_webtransport
+
+DEFAULT_ENDPOINT = "https://sjc.relay.mux.global"
+"""The default Relay endpoint pinned in ``spec/protocol.json``."""
+
+__all__ = [
+    "DEFAULT_CONNECT_TIMEOUT",
+    "DEFAULT_ENDPOINT",
+    "DEFAULT_REQUEST_TIMEOUT",
+    "DEFAULT_WRITE_TIMEOUT",
+    "MAX_OBJECT_PAYLOAD_LENGTH",
+    "MOQT_PROTOCOL_ID",
+    "PUBLISH_DONE_STATUS",
+    "REQUEST_ERROR_CODE",
+    "AbsoluteLocationFilter",
+    "CancellationToken",
+    "Cancelled",
+    "Closed",
+    "ConnectingTransport",
+    "FetchEndOfRange",
+    "FetchHandle",
+    "FetchHandlers",
+    "FetchObject",
+    "FetchOk",
+    "FetchReset",
+    "FetchStreamEntry",
+    "Goaway",
+    "KeyValuePair",
+    "Location",
+    "LocationFilter",
+    "MessageParameters",
+    "MoqTrackSource",
+    "MoqtObject",
+    "MoqtProtocolError",
+    "MoqtSubscribeOptions",
+    "MoqtTransport",
+    "NextObjectFilter",
+    "NoLocationFilter",
+    "PublishDone",
+    "RelativeGroupFilter",
+    "RelayClosedError",
+    "RelayConnection",
+    "RelayError",
+    "RelayGoawayError",
+    "RelayGroupWriter",
+    "RelayPublisher",
+    "RelayTimeoutError",
+    "RelayTrackWriter",
+    "RelayTransportFactory",
+    "RelayWritePendingError",
+    "RequestError",
+    "SubgroupEnd",
+    "SubgroupReset",
+    "SubscribeOk",
+    "Subscription",
+    "SubscriptionHandlers",
+    "TokenProvider",
+    "TrackStatusHandlers",
+    "TrackStatusOk",
+    "WebTransportError",
+    "WebTransportSession",
+    "connect_relay",
+    "connect_relay_publisher",
+    "connect_webtransport",
+]

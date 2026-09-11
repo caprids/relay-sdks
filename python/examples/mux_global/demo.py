@@ -1,0 +1,341 @@
+#!/usr/bin/env python3
+"""Publish JSON ticks to a Relay namespace and subscribe to them again.
+
+The SDK usage lives in :func:`run_demo`. It connects a publisher with ``connect_relay_publisher``,
+registers a track, connects a subscriber with ``connect_relay`` to the same track, publishes JSON
+objects one second apart, and prints each object as it comes back through the relay. It decodes the
+JSON itself; the SDK only delivers bytes. Unlike the TypeScript example, no browser is involved: the
+aioquic WebTransport transport runs natively.
+
+    RELAY_TOKEN=... mise run python:example:mux-global -- --namespace mattypoo/relay-sdk-example
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import datetime
+import json
+import os
+import sys
+import uuid
+from collections.abc import Callable
+from dataclasses import dataclass
+from getpass import getpass
+from typing import Any
+from urllib.parse import urlsplit
+
+from mux_relay import (
+    DEFAULT_ENDPOINT,
+    CancellationToken,
+    Closed,
+    MoqtObject,
+    RelayConnection,
+    RelayPublisher,
+    RelayTimeoutError,
+    RelayTrackWriter,
+    SubscriptionHandlers,
+    connect_relay,
+    connect_relay_publisher,
+)
+
+Log = Callable[[dict[str, Any]], None]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class Config:
+    url: str
+    token: str
+    namespace: list[str]
+    track: str
+    mode: str
+    count: int
+    interval: float
+    timeout: float
+
+
+async def run_demo(config: Config, log: Log) -> dict[str, int]:
+    lifetime = CancellationToken()
+    loop = asyncio.get_running_loop()
+    deadline = loop.call_later(
+        config.timeout, lambda: lifetime.cancel(RelayTimeoutError(f"Run exceeded {config.timeout:.0f} s"))
+    )
+    connections: list[RelayPublisher | RelayConnection] = []
+    problems: list[str] = []
+    received = 0
+    closing = False
+
+    # Both connection kinds expose `closed`; a connection ending before we close it is a failure.
+    def watch(label: str, closed: asyncio.Future[Closed]) -> None:
+        def done(future: asyncio.Future[Closed]) -> None:
+            if not closing:
+                problems.append(f"{label} connection closed: {describe(future.result().error)}")
+
+        closed.add_done_callback(done)
+
+    def fail_if_broken() -> None:
+        if problems:
+            raise RuntimeError("; ".join(problems))
+
+        lifetime.throw_if_cancelled()
+
+    try:
+        writer: RelayTrackWriter | None = None
+
+        if config.mode != "subscribe":
+            # One publisher connection serves one namespace; register as many tracks on it as needed.
+            try:
+                publisher = await connect_relay_publisher(
+                    config.url, namespace=config.namespace, get_token=lambda: config.token, cancellation=lifetime
+                )
+            except Exception as error:
+                raise RuntimeError(
+                    f"publisher failed to connect (check the token and endpoint): {describe(error)}"
+                ) from error
+
+            connections.append(publisher)
+            watch("publisher", publisher.closed)
+            log({"event": "publisher connected", "url": config.url, "namespace": "/".join(config.namespace)})
+            writer = publisher.publish(config.track, write_timeout=15)
+
+        if config.mode != "publish":
+            try:
+                subscriber = await connect_relay(config.url, get_token=lambda: config.token, cancellation=lifetime)
+            except Exception as error:
+                raise RuntimeError(
+                    f"subscriber failed to connect (check the token and endpoint): {describe(error)}"
+                ) from error
+
+            connections.append(subscriber)
+            watch("subscriber", subscriber.closed)
+            log({"event": "subscriber connected", "url": config.url})
+
+            def on_object(obj: MoqtObject) -> None:
+                nonlocal received
+
+                # Status-only objects (end-of-group and end-of-track markers) carry no payload.
+                if obj.status != "normal":
+                    return
+
+                received += 1
+                log({"event": "received", "group": obj.group_id, "bytes": len(obj.payload), **inspect(obj.payload)})
+
+            subscriber.subscribe(
+                config.namespace,
+                config.track,
+                SubscriptionHandlers(
+                    on_ok=lambda ok: log(
+                        {
+                            "event": "subscribed",
+                            "namespace": "/".join(config.namespace),
+                            "track": config.track,
+                            "alias": ok.track_alias,
+                        }
+                    ),
+                    on_object=on_object,
+                    on_error=lambda error: problems.append(
+                        f"subscribe rejected: code {error.error_code} {error.reason}"
+                    ),
+                    on_subgroup_reset=lambda reset: problems.append(
+                        f"group {reset.group_id} reset: {describe(reset.error)}"
+                    ),
+                    on_done=lambda done: log(
+                        {"event": "publisher done", "status": done.status_code, "reason": done.reason}
+                    ),
+                ),
+            )
+
+        if writer is not None:
+            for seq in range(1, config.count + 1):
+                payload = json.dumps(
+                    {
+                        "seq": seq,
+                        "sentAt": datetime.datetime.now(datetime.UTC).isoformat(),
+                        "message": f"tick {seq} from the mux-relay example",
+                    }
+                ).encode("utf-8")
+                await write_when_demanded(writer, payload, fail_if_broken, log)
+                log({"event": "published", "seq": seq, "bytes": len(payload)})
+
+                if seq < config.count:
+                    await sleep(config.interval, lifetime)
+
+        while config.mode != "publish" and received < config.count:
+            fail_if_broken()
+            await sleep(0.1, lifetime)
+
+        fail_if_broken()
+        return {"published": config.count if writer is not None else 0, "received": received}
+    finally:
+        closing = True
+        deadline.cancel()
+
+        # publisher.close() retracts the namespace and awaits shutdown; subscriber.close() is synchronous.
+        for connection in connections:
+            result = connection.close()
+
+            if result is not None:
+                await result
+
+
+async def write_when_demanded(
+    writer: RelayTrackWriter, payload: bytes, fail_if_broken: Callable[[], None], log: Log
+) -> None:
+    """write() waits until the relay wants the track. Timing out there means no subscriber yet; it is retryable."""
+    while True:
+        try:
+            await writer.write(payload)
+            return
+        except RelayTimeoutError:
+            fail_if_broken()
+            log({"event": "waiting", "detail": "no subscriber has requested the track yet; retrying the write"})
+
+
+def inspect(payload: bytes) -> dict[str, Any]:
+    """The SDK delivers raw bytes. This expects the JSON written above and shows anything else as text."""
+    text = payload.decode("utf-8", errors="replace")
+
+    try:
+        parsed = json.loads(text)
+        sent_at = parsed.get("sentAt")
+        age_ms = None
+
+        if sent_at:
+            sent = datetime.datetime.fromisoformat(sent_at)
+            age_ms = max(0, int((datetime.datetime.now(datetime.UTC) - sent).total_seconds() * 1000))
+
+        # Only a real one-way latency when the same process published it; across machines this includes clock skew.
+        return {"seq": parsed.get("seq"), "ageMs": age_ms}
+    except (ValueError, AttributeError):
+        return {"text": text[:60]}
+
+
+def describe(error: BaseException | None) -> str:
+    if error is None:
+        return "no error"
+
+    name = type(error).__name__
+    return f"{name}: {error}" if str(error) else name
+
+
+async def sleep(seconds: float, lifetime: CancellationToken) -> None:
+    lifetime.throw_if_cancelled()
+    woken: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def cancelled(reason: BaseException) -> None:
+        if not woken.done():
+            woken.set_exception(reason)
+
+    lifetime.add_callback(cancelled)
+
+    try:
+        await asyncio.wait_for(asyncio.shield(woken), seconds)
+    except TimeoutError:
+        return
+    finally:
+        lifetime.remove_callback(cancelled)
+
+
+def read_token() -> str:
+    token = os.environ.get("RELAY_TOKEN")
+
+    if not token and sys.stdin.isatty():
+        token = getpass("Relay token (input hidden): ").strip()
+    elif not token:
+        token = sys.stdin.readline().strip()
+
+    return token or ""
+
+
+def parse_args(argv: list[str]) -> Config:
+    parser = argparse.ArgumentParser(description="Publish JSON ticks to a Relay namespace and subscribe to them again.")
+    parser.add_argument("--url", default=os.environ.get("RELAY_URL", DEFAULT_ENDPOINT), help="Relay endpoint")
+    parser.add_argument(
+        "--namespace",
+        help="Namespace, slash-separated, including the token's root prefix "
+        "(default RELAY_NAMESPACE_PREFIX or relay-sdk-example, plus a random field)",
+    )
+    parser.add_argument("--track", default="ticker", help="Track name (default ticker)")
+    parser.add_argument("--mode", choices=["both", "publish", "subscribe"], default="both")
+    parser.add_argument("--count", type=int, default=5, help="Objects to publish and/or wait for (default 5)")
+    parser.add_argument(
+        "--interval", type=int, default=1000, help="Delay between published objects in ms (default 1000)"
+    )
+    parser.add_argument("--timeout", type=int, default=60, help="Deadline for the whole run in seconds (default 60)")
+    args = parser.parse_args(argv)
+
+    parts = urlsplit(args.url)
+    if parts.scheme != "https":
+        parser.error("--url must be an https URL")
+    if "jwt=" in parts.query:
+        parser.error("Supply the token via RELAY_TOKEN or the prompt, not inside --url")
+
+    for name in ("count", "interval", "timeout"):
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name} must be a positive integer")
+
+    namespace_text = (
+        args.namespace or f"{os.environ.get('RELAY_NAMESPACE_PREFIX', 'relay-sdk-example')}/{uuid.uuid4().hex[:8]}"
+    )
+    namespace = [field for field in namespace_text.split("/") if field]
+    if not namespace:
+        parser.error("--namespace must contain at least one field")
+    if not args.track:
+        parser.error("--track must not be empty")
+
+    token = read_token()
+    if not token:
+        parser.error("A Relay token is required (RELAY_TOKEN or the prompt)")
+
+    return Config(
+        url=args.url,
+        token=token,
+        namespace=namespace,
+        track=args.track,
+        mode=args.mode,
+        count=args.count,
+        interval=args.interval / 1000,
+        timeout=float(args.timeout),
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    config = parse_args(sys.argv[1:] if argv is None else argv)
+
+    def redact(text: str) -> str:
+        return text.replace(config.token, "[redacted]")
+
+    def log(entry: dict[str, Any]) -> None:
+        event = str(entry.pop("event"))
+        fields = " ".join(
+            f"{key}={value if isinstance(value, str) else json.dumps(value)}"
+            for key, value in entry.items()
+            if value is not None
+        )
+        print(redact(f"{event:<20} {fields}".rstrip()), flush=True)
+
+    log(
+        {
+            "event": "starting",
+            "mode": config.mode,
+            "namespace": "/".join(config.namespace),
+            "track": config.track,
+            "count": config.count,
+        }
+    )
+
+    try:
+        result = asyncio.run(run_demo(config, log))
+    except KeyboardInterrupt:
+        print(redact("interrupted"), file=sys.stderr)
+        return 130
+    except BaseException as error:
+        print(redact(f"{'failed':<20} error={describe(error)}"), file=sys.stderr)
+        return 1
+
+    log({"event": "finished", **result})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

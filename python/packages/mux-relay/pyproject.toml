@@ -2,8 +2,11 @@
 name = "mux-relay"
 version = "0.0.0"
 description = "Relay Python SDK"
+readme = "README.md"
 requires-python = ">=3.11"
-dependencies = ["moq-core"]
+# The product package owns the Relay API, the authentication convention, and the default
+# transport: WebTransport over HTTP/3 through aioquic, so this SDK runs natively with no browser.
+dependencies = ["moq-core", "aioquic>=1.2,<2"]
 
 [tool.uv.sources]
 moq-core = { workspace = true }

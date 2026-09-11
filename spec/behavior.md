@@ -63,6 +63,14 @@ against that file.
 - Closing a track writer cancels an outstanding write and ends that track; other tracks continue.
   Closing the publisher ends all tracks, retracts the namespace, and waits for transport shutdown.
 - Track names cannot be reused within a publisher connection, including after their writer closes.
+- A track writer may open a multi-object group: objects are appended with object IDs 0, 1, 2, ...
+  on one stream, and closing the group FINs the stream. Object 0 is the group's random-access point,
+  which is how LOC/MSF media (one GOP per group) is published. A group that fails part-way is reset
+  rather than completed, and the track stays open for the next group; only one write or group may
+  be pending per track. Implemented in `python/`; not yet in `ts/`.
+- A track writer exposes whether the relay currently demands the track and lets the application
+  observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
+  Implemented in `python/`; not yet in `ts/`.
 
 ## Package boundaries
 

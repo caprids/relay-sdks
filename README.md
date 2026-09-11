@@ -10,7 +10,7 @@ This is an initial development workspace. Package names are provisional and publ
 | --- | --- | --- |
 | `spec/` | Protocol pins, the behavior contract every SDK implements, and language-neutral test vectors | Source of truth |
 | `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol package, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
-| `python/` | Python SDK `mux-relay` and the generic `moq-core` package, as a uv workspace | Scaffold; protocol implementation not yet ported |
+| `python/` | Python SDK `mux-relay` and the generic `moq-core` package, as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
 
 ## Development
 
@@ -22,6 +22,7 @@ mise run check            # every SDK
 mise run ts:check
 mise run python:check
 mise run ts:test:relay    # opt-in live smoke test; needs RELAY_TOKEN or a hidden prompt
+mise run python:test:relay
 ```
 
 Each directory keeps its native tooling, and the tasks only fan out to it. `cd ts && pnpm ...` and
