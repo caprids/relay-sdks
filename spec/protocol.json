@@ -1,0 +1,18 @@
+{
+  "moqt": {
+    "document": "draft-ietf-moq-transport-20",
+    "protocolId": "moqt-20",
+    "note": "Every SDK implements draft-ietf-moq-transport-20 and no other version. protocolId is that draft's wire identifier (draft §1.4 rule: \"moqt-\" plus the draft number), offered as the WebTransport protocol identifier (WT-Available-Protocols / ALPN)."
+  },
+  "relay": {
+    "defaultEndpoint": "https://sjc.relay.mux.global",
+    "authentication": {
+      "scheme": "jwt-query-parameter",
+      "parameter": "jwt",
+      "note": "An explicit jwt parameter already present on the URL takes precedence over a token callback."
+    }
+  },
+  "limits": {
+    "maxObjectPayloadBytes": 16777216
+  }
+}

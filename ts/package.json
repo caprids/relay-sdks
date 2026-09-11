@@ -23,7 +23,8 @@
     "format": "prettier --write .",
     "check": "pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm format:check",
     "check:boundaries": "node scripts/check-boundaries.mjs",
-    "test:relay": "pnpm build && node scripts/test-relay.mjs"
+    "test:relay": "pnpm build && node scripts/test-relay.mjs",
+    "example:mux-global": "pnpm build && node examples/mux-global/run.mjs"
   },
   "dependencies": {
     "@mux/moq-core": "workspace:*"

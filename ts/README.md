@@ -1,0 +1,170 @@
+# Relay JavaScript SDK
+
+A standalone product SDK for Relay. Connect to a Relay endpoint and subscribe to arbitrary
+track objects without installing Video.js, loading a media catalog, or creating a player.
+
+This is the TypeScript SDK in the Relay SDKs repository. The shared protocol pins, behavior
+contract, and test vectors live in `../spec`; the root README describes the suite. Package names
+are provisional and publication is disabled.
+
+## Development
+
+Tool versions are pinned in the repository's root `mise.toml`. Run the root tasks from anywhere in
+the repository, or run pnpm from this directory under `mise exec`:
+
+```sh
+mise install          # once
+mise run ts:install
+mise run ts:check     # equivalent to: cd ts && mise exec -- pnpm check
+```
+
+## Subscribe to a track
+
+```ts
+import { connectRelay } from '@mux/relay';
+
+const lifetime = new AbortController();
+const relay = await connectRelay({
+  url: 'https://relay.example.com/moq',
+  // Obtain this token from your application backend.
+  getToken: () => playbackToken,
+  signal: lifetime.signal,
+});
+
+const readings = relay.subscribe(
+  { namespace: ['sensors', 'lab'], track: 'readings' },
+  {
+    onOk: (info) => console.log('Subscribed', info.trackProperties),
+    onObject: (object) => consumeBytes(object.payload, object.properties),
+    onError: (error) => console.error('Subscription rejected', error),
+    onSubgroupReset: (gap) => console.warn('Objects may be missing', gap),
+    onDone: (info) => console.log('Publisher finished; trailing objects may still arrive', info),
+  },
+);
+
+void relay.closed.then(({ error }) => console.log('Connection ended', error));
+
+// When this consumer finishes: readings.cancel();
+// When the application finishes: relay.close(); or lifetime.abort();
+```
+
+Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK
+neither interprets the payload nor assumes that a track contains audio, video, or timestamps.
+An accepted data subscription can stay quiet indefinitely. The request timeout only bounds its
+initial response. Subscriptions have independent cancellation; the application owns connection shutdown.
+
+Object callbacks run synchronously as streams deliver objects. The SDK adds no application queue,
+ordering across streams, JSON decoding, clock synchronization, or media scheduling. Handle subgroup
+resets and connection closure explicitly; this API makes no exactly-once or gap-free delivery promise.
+`onDone` is the publisher's control notification, and may precede trailing objects in transit.
+
+`connectRelay` has a deadline covering token resolution and both handshakes. Its optional abort
+signal controls the connection's entire lifetime. An explicit `jwt` query parameter takes precedence
+over `getToken`, matching the current Relay connection authentication convention.
+
+## Publish data for testing
+
+Use a dedicated publisher connection with a token authorized to publish the namespace:
+
+```ts
+import { connectRelayPublisher } from '@mux/relay';
+
+const publisher = await connectRelayPublisher({
+  url: 'https://relay.example.com/moq',
+  namespace: ['testing', 'data'],
+  getToken: () => publishToken,
+});
+
+const events = publisher.publish({ track: 'events' });
+
+try {
+  await events.write(new TextEncoder().encode(JSON.stringify({ message: 'hello' })));
+} finally {
+  events.close();
+  await publisher.close();
+}
+```
+
+In another client, use `connectRelay` to subscribe to namespace `['testing', 'data']`, track
+`'events'`. The publisher connection currently serves one namespace with multiple tracks.
+It uses a separate transport from subscriber connections; both directions share the authentication
+and connection-lifetime implementation. No camera, microphone, catalog, or timestamps are required.
+
+Publishing follows Relay's announce-and-serve ingest flow. `publish()` registers the track;
+`write()` waits for the relay to subscribe upstream before sending bytes. Start a subscriber to
+create that demand. The default 10-second write deadline covers both demand and transport writes.
+A timeout waiting for demand can be retried. A failure once a write is bound to a relay subscription
+ends that track, since an incomplete group may have reached the relay.
+
+Each write copies its bytes and sends one independent group containing one object. Await each
+write; a concurrent call rejects rather than growing a queue. Completion means the transport
+accepted the complete group, not that a viewer acknowledged it. There is no publisher-side replay
+or retention after an object is sent. Late-subscriber behavior also depends on relay caching and
+subscription filters. A failed write may have delivered partial data; there is no automatic retry.
+
+Optional `trackProperties` on `publish()` and `properties` on `write()` carry explicit protocol
+metadata. Raw tracks have no default timescale or LOC framing. Objects are limited to 16 MiB.
+`events.close()` cancels an outstanding write and ends that track; other tracks keep running.
+`publisher.close()` ends all tracks, retracts the namespace, and waits for transport shutdown.
+Track names cannot be reused within a publisher connection, including after their writer closes.
+
+Run the data-only publishing/subscribing integration test without a live relay:
+
+```sh
+cd ts && mise exec -- pnpm test tests/publish.test.ts
+```
+
+## Example against a live Relay
+
+`examples/mux-global` publishes JSON ticks to `sjc.relay.mux.global` and subscribes to them again,
+either in one page or split across a publisher process and a subscriber process. Node has no
+WebTransport, so the runner drives the SDK in headless Chromium. See `examples/mux-global/README.md`.
+
+```sh
+RELAY_TOKEN=... mise run ts:example:mux-global -- --namespace mattypoo/relay-sdk-example
+```
+
+## Package boundaries
+
+- The `ts/` root package, `@mux/relay`, owns the Relay product API and authentication convention.
+- `packages/moq-core` is an independently buildable, Apache-2.0 generic protocol package. It uses
+  standard streams, has no runtime dependencies, and imports no player, UI, or media engine.
+- `relay.tracks` exposes the generic `MoqTrackSource` contract for future player integrations. It
+  offers track requests and closure observation, with no operation to close the shared connection.
+- `tests/spec-protocol.test.ts` and `tests/spec-vectors.test.ts` check the core against the shared
+  `../spec`, which is how this SDK stays in lockstep with the other languages.
+
+The core starts from an attributed snapshot of the existing Video.js protocol modules and their
+regression tests. Video.js is unchanged and still has the original implementation. Migrating it to
+this separately versioned dependency is the next integration step; the snapshot is not intended to
+become a separately maintained protocol fork. See `packages/moq-core/UPSTREAM.json`.
+
+## Initial scope
+
+This slice supports one connection, arbitrary reliable-stream track subscriptions, subscription
+updates and cancellation, plus data-only publication on a dedicated connection. The borrowed generic interface also exposes FETCH and TRACK_STATUS.
+The protocol is pinned to `moqt-20`, matching the extracted implementation.
+
+Automatic reconnection, token refresh on a live session, datagram reception, product
+resource discovery, typed payload helpers, and a Video.js adapter are not implemented yet. A GOAWAY
+ends the connection with an error; callers can open a replacement. A custom `createTransport`
+factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
+
+## Live Relay smoke test
+
+This opt-in Chromium test publishes and subscribes against a real relay. It is excluded from
+`pnpm check` and needs a token authorized for both operations. The token can be supplied through
+hidden stdin input or the `RELAY_TOKEN` environment variable; it is never written to a file.
+
+```sh
+cd ts && mise exec -- pnpm exec playwright install chromium   # once
+RELAY_NAMESPACE_PREFIX=mattypoo/relay-sdk-smoke mise run ts:test:relay
+```
+
+Use the namespace prefix authorized by your token. The test appends a random UUID, checks binary
+and empty payloads plus independent track closure, then closes both connections. It defaults to
+`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
+the SDK are absolute: include the token's root prefix when required by the relay.
+
+The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
+on `status`, with the second status object delivered after the events track closed.

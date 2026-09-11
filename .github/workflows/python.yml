@@ -1,0 +1,22 @@
+name: Python SDK
+
+on:
+  push:
+    branches: [main]
+    paths: ['python/**', 'spec/**', 'mise.toml', '.github/workflows/python.yml']
+  pull_request:
+    paths: ['python/**', 'spec/**', 'mise.toml', '.github/workflows/python.yml']
+
+concurrency:
+  group: python-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: python uv
+      - run: mise run python:check

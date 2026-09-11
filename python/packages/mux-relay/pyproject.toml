@@ -1,0 +1,13 @@
+[project]
+name = "mux-relay"
+version = "0.0.0"
+description = "Relay Python SDK"
+requires-python = ">=3.11"
+dependencies = ["moq-core"]
+
+[tool.uv.sources]
+moq-core = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"

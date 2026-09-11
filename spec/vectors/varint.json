@@ -1,0 +1,40 @@
+{
+  "description": "MOQT variable-length integers as specified in draft-ietf-moq-transport-20 §1.4.1. The number of leading 1 bits in the first byte is the encoded length minus one (1 to 9 bytes); the remaining bits of the first byte and every following byte carry the value in network byte order. This is MOQT's own scheme, not the RFC 9000 QUIC varint.",
+  "sources": [
+    "minimal: the examples in draft-ietf-moq-transport-20 §1.4.1 Table 2, plus the smallest and largest value of each encoded length derived from the encoding rules",
+    "nonMinimal: the two-byte encoding of 37 from draft-ietf-moq-transport-20 §1.4.1 Table 2, plus zero at longer lengths",
+    "beyond53Bits: derived; values above 2^53-1 exercise implementations without exact 64-bit integers"
+  ],
+  "minimal": [
+    { "value": "0", "bytes": "00" },
+    { "value": "37", "bytes": "25" },
+    { "value": "127", "bytes": "7f" },
+    { "value": "128", "bytes": "8080" },
+    { "value": "15293", "bytes": "bbbd" },
+    { "value": "16383", "bytes": "bfff" },
+    { "value": "16384", "bytes": "c04000" },
+    { "value": "2097151", "bytes": "dfffff" },
+    { "value": "2097152", "bytes": "e0200000" },
+    { "value": "226442877", "bytes": "ed7f3e7d" },
+    { "value": "268435455", "bytes": "efffffff" },
+    { "value": "268435456", "bytes": "f010000000" },
+    { "value": "34359738367", "bytes": "f7ffffffff" },
+    { "value": "34359738368", "bytes": "f80800000000" },
+    { "value": "2893212287960", "bytes": "faa1a0e403d8" },
+    { "value": "4398046511103", "bytes": "fbffffffffff" },
+    { "value": "4398046511104", "bytes": "fc040000000000" },
+    { "value": "151288809941952", "bytes": "fc8998abc66bc0" },
+    { "value": "562949953421311", "bytes": "fdffffffffffff" },
+    { "value": "562949953421312", "bytes": "fe02000000000000" },
+    { "value": "9007199254740991", "bytes": "fe1fffffffffffff" }
+  ],
+  "nonMinimal": [
+    { "value": "37", "bytes": "8025" },
+    { "value": "0", "bytes": "8000" },
+    { "value": "0", "bytes": "c00000" }
+  ],
+  "beyond53Bits": [
+    { "value": "9007199254740992", "bytes": "ff0020000000000000" },
+    { "value": "18446744073709551615", "bytes": "ffffffffffffffffff" }
+  ]
+}

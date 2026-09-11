@@ -1,0 +1,22 @@
+name: TypeScript SDK
+
+on:
+  push:
+    branches: [main]
+    paths: ['ts/**', 'spec/**', 'mise.toml', '.github/workflows/ts.yml']
+  pull_request:
+    paths: ['ts/**', 'spec/**', 'mise.toml', '.github/workflows/ts.yml']
+
+concurrency:
+  group: ts-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm
+      - run: mise run ts:check

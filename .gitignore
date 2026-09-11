@@ -5,3 +5,16 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Python (python/)
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.import_linter_cache/
+*.egg-info/
+
+# Personal mise overrides
+mise.local.toml
+.mise.local.toml

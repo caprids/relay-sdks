@@ -1,0 +1,75 @@
+# Tool versions and task entry points for every Relay SDK in this repository.
+#
+# Each language keeps its native tooling (pnpm under ts/, uv under python/). These tasks only fan
+# out to it, so `cd ts && pnpm ...` and `cd python && uv ...` keep working under `mise exec`.
+# Run `mise install` once, then `mise run check` or a per-language task such as `mise run ts:test`.
+
+[tools]
+node = "24.14.0"
+pnpm = "11.17.0"
+python = "3.13.15"
+uv = "0.12.12"
+
+[env]
+# uv uses the interpreter pinned above instead of downloading a second one.
+UV_PYTHON_DOWNLOADS = "never"
+
+[tasks.install]
+description = "Install every SDK's dependencies from its lockfile"
+depends = ["ts:install", "python:install"]
+
+[tasks.check]
+description = "Run every SDK's full check"
+depends = ["ts:check", "python:check"]
+
+[tasks."ts:install"]
+description = "Install TypeScript dependencies from pnpm-lock.yaml"
+dir = "ts"
+run = "pnpm install --frozen-lockfile"
+
+[tasks."ts:build"]
+description = "Build @mux/moq-core and @mux/relay"
+dir = "ts"
+run = "pnpm build"
+
+[tasks."ts:test"]
+description = "Run the TypeScript unit and integration tests"
+dir = "ts"
+run = "pnpm test"
+
+[tasks."ts:check"]
+description = "Build, typecheck, test, boundary-check, and format-check the TypeScript SDK"
+depends = ["ts:install"]
+dir = "ts"
+run = "pnpm check"
+
+[tasks."ts:test:relay"]
+description = "Opt-in live smoke test against a real Relay (RELAY_TOKEN or hidden prompt)"
+dir = "ts"
+run = "pnpm test:relay"
+
+[tasks."ts:example:mux-global"]
+description = "Run the mux.global example; pass its options after --"
+dir = "ts"
+run = "pnpm example:mux-global"
+
+[tasks."python:install"]
+description = "Create the Python workspace environment from uv.lock"
+dir = "python"
+run = "uv sync --locked"
+
+[tasks."python:test"]
+description = "Run the Python tests"
+dir = "python"
+run = "uv run pytest"
+
+[tasks."python:check"]
+description = "Lint, format-check, import-boundary-check, and test the Python SDK"
+dir = "python"
+run = [
+  "uv sync --locked",
+  "uv run ruff check .",
+  "uv run ruff format --check .",
+  "uv run lint-imports",
+  "uv run pytest",
+]
