@@ -19,9 +19,10 @@
     "build": "pnpm --filter @mux/moq-core build && tsc -p tsconfig.build.json",
     "test": "pnpm --filter @mux/moq-core build && vitest run",
     "typecheck": "pnpm --filter @mux/moq-core build && tsc --noEmit -p tsconfig.json",
-    "format:check": "prettier --check .",
-    "format": "prettier --write .",
-    "check": "pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm format:check",
+    "lint": "biome check --error-on-warnings .",
+    "fix": "biome check --write .",
+    "format": "biome format --write .",
+    "check": "pnpm lint && pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries",
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "test:relay": "pnpm build && node scripts/test-relay.mjs",
     "example:mux-global": "pnpm build && node examples/mux-global/run.mjs"
@@ -30,9 +31,9 @@
     "@mux/moq-core": "workspace:*"
   },
   "devDependencies": {
+    "@biomejs/biome": "2.5.13",
     "@types/node": "24.12.2",
     "playwright": "1.59.1",
-    "prettier": "3.8.1",
     "typescript": "6.0.2",
     "vitest": "4.1.10"
   },

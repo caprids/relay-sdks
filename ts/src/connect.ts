@@ -6,7 +6,8 @@ import {
   type Subscription,
   type SubscriptionHandlers,
 } from '@mux/moq-core';
-import { openRelaySession, type ConnectRelayOptions } from './connect-session.js';
+import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+
 export type { ConnectRelayOptions, RelayTransportFactory } from './connect-session.js';
 
 export interface RelayTrackOptions {

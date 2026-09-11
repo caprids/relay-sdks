@@ -1,16 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  connectRelay,
-  type ConnectRelayOptions,
-  type RelayConnection,
-  type RelayTransportFactory,
-  type MoqtObject,
-} from '../src/index.js';
-import {
-  encodeSubscribeOk,
   encodeRequestError,
+  encodeSubscribeOk,
   REQUEST_ERROR_CODE,
 } from '../packages/moq-core/src/protocol/control-messages.js';
+import {
+  type ConnectRelayOptions,
+  connectRelay,
+  type MoqtObject,
+  type RelayConnection,
+  type RelayTransportFactory,
+} from '../src/index.js';
 import { createFakeTransport, encodeSubgroup } from './helpers/relay.js';
 
 const connections: RelayConnection[] = [];

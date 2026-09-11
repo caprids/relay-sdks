@@ -1,5 +1,3 @@
-export { connectRelay } from './connect.js';
-export type { ConnectRelayOptions, RelayConnection, RelayTrackOptions, RelayTransportFactory } from './connect.js';
 export type {
   KeyValuePair,
   LocationFilter,
@@ -13,5 +11,7 @@ export type {
   Subscription,
   SubscriptionHandlers,
 } from '@mux/moq-core';
-export { connectRelayPublisher } from './publish.js';
+export type { ConnectRelayOptions, RelayConnection, RelayTrackOptions, RelayTransportFactory } from './connect.js';
+export { connectRelay } from './connect.js';
 export type { ConnectRelayPublisherOptions, PublishTrackOptions, RelayPublisher, RelayTrackWriter } from './publish.js';
+export { connectRelayPublisher } from './publish.js';

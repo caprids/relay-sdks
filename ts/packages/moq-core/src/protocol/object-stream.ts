@@ -80,7 +80,7 @@ export interface MoqtObject {
   objectId: number;
   subgroupId: number;
   /** Publisher priority; `undefined` inherits the subscription's priority. */
-  priority?: number;
+  priority?: number | undefined;
   status: ObjectStatus;
   properties: KeyValuePair[];
   payload: Uint8Array;
@@ -106,9 +106,9 @@ export interface SubgroupHeader {
   groupId: number;
   subgroupIdMode: SubgroupIdMode;
   /** Present when `subgroupIdMode` is `'explicit'`. */
-  subgroupId?: number;
+  subgroupId?: number | undefined;
   /** Present when the header carries an explicit priority. */
-  priority?: number;
+  priority?: number | undefined;
   /** All objects in this subgroup carry a Properties field. */
   hasProperties: boolean;
   /** This subgroup contains the largest object in the group (on FIN). */
@@ -239,7 +239,7 @@ export type FetchStreamEntry =
       groupId: number;
       objectId: number;
       /** Absent for objects with Forwarding Preference = Datagram. */
-      subgroupId?: number;
+      subgroupId?: number | undefined;
       priority: number;
       properties: KeyValuePair[];
       payload: Uint8Array;
@@ -264,7 +264,9 @@ export async function* readFetchEntries(
   reader: StreamReader,
   groupOrder: 'ascending' | 'descending' = 'ascending'
 ): AsyncGenerator<FetchStreamEntry> {
-  let prior: { groupId: number; objectId: number; subgroupId?: number; priority?: number } | undefined;
+  let prior:
+    | { groupId: number; objectId: number; subgroupId?: number | undefined; priority?: number | undefined }
+    | undefined;
 
   while (!(await reader.atEnd())) {
     const flags = await reader.readVarint();

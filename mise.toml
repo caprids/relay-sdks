@@ -37,8 +37,18 @@ description = "Run the TypeScript unit and integration tests"
 dir = "ts"
 run = "pnpm test"
 
+[tasks."ts:lint"]
+description = "Format-check and lint the TypeScript SDK with Biome"
+dir = "ts"
+run = "pnpm lint"
+
+[tasks."ts:fix"]
+description = "Apply Biome's safe formatting and lint fixes to the TypeScript SDK"
+dir = "ts"
+run = "pnpm fix"
+
 [tasks."ts:check"]
-description = "Build, typecheck, test, boundary-check, and format-check the TypeScript SDK"
+description = "Lint, build, typecheck, test, and boundary-check the TypeScript SDK"
 depends = ["ts:install"]
 dir = "ts"
 run = "pnpm check"

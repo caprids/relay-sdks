@@ -1,14 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { createTransportPair } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
 import {
   connectRelay,
   connectRelayPublisher,
-  type RelayPublisher,
-  type RelayConnection,
   type MoqtObject,
+  type RelayConnection,
   type RelayTransportFactory,
 } from '../src/index.js';
 import { createRelayHub } from './helpers/relay-hub.js';
-import { createTransportPair } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
 
 const namespace = ['testing', 'data'];
 const url = 'https://relay.example.com/moq';

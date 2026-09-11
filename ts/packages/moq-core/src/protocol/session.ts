@@ -197,14 +197,14 @@ export interface MoqtSessionConfig {
    * failing it. The draft expects implementations to bound control exchanges (§3.5's CONTROL_MESSAGE_TIMEOUT); without
    * this a relay that accepts the stream and then goes quiet leaves the request pending forever. Default 10000ms.
    */
-  requestTimeoutMs?: number;
-  callbacks?: MoqtSessionCallbacks;
+  requestTimeoutMs?: number | undefined;
+  callbacks?: MoqtSessionCallbacks | undefined;
 }
 
 export interface MoqtSubscribeOptions {
   trackNamespace: TrackNamespace;
   trackName: string;
-  parameters?: MessageParameters;
+  parameters?: MessageParameters | undefined;
 }
 
 /**
@@ -251,7 +251,7 @@ interface RequestRecordBase {
    * stream is a failure; after it, those are ordinary end-of-request events.
    */
   settled: boolean;
-  responseTimer?: ReturnType<typeof setTimeout>;
+  responseTimer?: ReturnType<typeof setTimeout> | undefined;
 }
 
 interface SubscriptionRecord extends RequestRecordBase {

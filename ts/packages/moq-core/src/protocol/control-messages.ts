@@ -698,7 +698,8 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
       case PARAMETER_TYPE.AUTHORIZATION_TOKEN: {
         const token = reader.readBytes(reader.readVarint());
 
-        (parameters.authorizationTokens ??= []).push(token);
+        parameters.authorizationTokens ??= [];
+        parameters.authorizationTokens.push(token);
         break;
       }
       case PARAMETER_TYPE.EXPIRES:
@@ -759,7 +760,8 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
         if (RANGE_FILTER_TYPES.includes(type)) {
           const value = reader.readBytes(reader.readVarint());
 
-          (parameters.rangeFilters ??= []).push({ type, value });
+          parameters.rangeFilters ??= [];
+          parameters.rangeFilters.push({ type, value });
           break;
         }
 
@@ -901,7 +903,7 @@ export interface SubscribeRequest {
   requestId: number;
   trackNamespace: TrackNamespace;
   trackName: string;
-  parameters?: MessageParameters;
+  parameters?: MessageParameters | undefined;
 }
 
 /**
