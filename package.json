@@ -1,0 +1,42 @@
+{
+  "name": "@mux/relay",
+  "version": "0.0.0",
+  "private": true,
+  "description": "JavaScript SDK for Relay",
+  "license": "UNLICENSED",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "pnpm --filter @mux/moq-core build && tsc -p tsconfig.build.json",
+    "test": "pnpm --filter @mux/moq-core build && vitest run",
+    "typecheck": "pnpm --filter @mux/moq-core build && tsc --noEmit -p tsconfig.json",
+    "format:check": "prettier --check .",
+    "format": "prettier --write .",
+    "check": "pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm format:check",
+    "check:boundaries": "node scripts/check-boundaries.mjs",
+    "test:relay": "pnpm build && node scripts/test-relay.mjs"
+  },
+  "dependencies": {
+    "@mux/moq-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.2",
+    "playwright": "1.59.1",
+    "prettier": "3.8.1",
+    "typescript": "6.0.2",
+    "vitest": "4.1.10"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "packageManager": "pnpm@11.17.0"
+}

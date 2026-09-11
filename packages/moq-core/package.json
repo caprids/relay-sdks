@@ -1,0 +1,27 @@
+{
+  "name": "@mux/moq-core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Transport-independent MOQT track primitives",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "UPSTREAM.json"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

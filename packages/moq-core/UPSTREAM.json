@@ -1,0 +1,25 @@
+{
+  "repository": "https://github.com/videojs/v10",
+  "revision": "5a486737dad4a5874a4f4d3250c7cc8195f5d704",
+  "protocol": "moqt-20",
+  "files": {
+    "packages/spf/src/network/moqt/bytes.ts": "50cd814e1b601047e26d11954191c1fc91ecc559d1b9cc4cca1a48424af00bba",
+    "packages/spf/src/network/moqt/control-messages.ts": "f0832fd5e4974a07e308ab7fcdffa92b73e4fdd9eb6916f17a9481d2d3830935",
+    "packages/spf/src/network/moqt/errors.ts": "a3b9498efb1133bbdbe5047c95ac63744c69ea98c805a01941f996e28eff3e3d",
+    "packages/spf/src/network/moqt/object-stream.ts": "1e57fd00bc4437c7f983305a00bf3473e1dcec04d65a1bb9d08a68901f9f92e7",
+    "packages/spf/src/network/moqt/request-stream.ts": "f89104ecc12e18882905557292e43fd6b4b927564487b49b2a7ca6a01ed2cd68",
+    "packages/spf/src/network/moqt/session.ts": "948459b9bc7508d2573a1a428201e5be691e01c9910c17a483aff88b1ab5796a",
+    "packages/spf/src/network/moqt/varint.ts": "c4f2b9db079f99d36c18cee22cc223bfbe154453944d48e616094aeb512cd7a5",
+    "packages/spf/src/publish/session/publish-session.ts": "5dede482ff4f56362be532ef28376f53935f143ef8465a781fa7ffda4f072190",
+    "packages/spf/src/network/moqt/subgroup-writer.ts": "716633da1bf9defe2b8f99dce33f61f9aa9c91cdadf044df71cf55d79a60a012"
+  },
+  "adaptations": [
+    "Relative imports use .js suffixes for native ESM.",
+    "Tests use Vitest directly and import protocol modules from their new directory.",
+    "The default SETUP implementation identifier names @mux/moq-core. The existing error identity symbol is retained for interoperability.",
+    "Publish session extraction excludes the SPF actor and accepts explicit track properties instead of imposing the LOC microsecond timescale.",
+    "Publish protocol tests exclude media-engine integration and actor tests; raw tracks assert no implicit timescale.",
+    "SDK relay-hub test helper is derived from Video.js publish tests and adapted to local protocol imports."
+  ],
+  "migration": "Initial extraction snapshot. Video.js still contains the original modules; migrating it to this independently versioned package is a separate integration step. Do not maintain divergent protocol implementations."
+}
