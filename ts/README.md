@@ -16,7 +16,12 @@ the repository, or run pnpm from this directory under `mise exec`:
 mise install          # once
 mise run ts:install
 mise run ts:check     # equivalent to: cd ts && mise exec -- pnpm check
+mise run ts:lint      # Biome format and lint check only
+mise run ts:fix       # apply Biome's safe formatting and lint fixes
 ```
+
+Formatting and linting are configured in `biome.jsonc`, and every package extends the strict compiler
+options in `tsconfig.base.json`. `pnpm lint` fails on warnings, so a clean check prints nothing.
 
 ## Subscribe to a track
 

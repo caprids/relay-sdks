@@ -35,7 +35,6 @@ import {
   type KeyValuePair,
   MESSAGE_TYPE,
   type MessageParameters,
-  MOQT_PROTOCOL_ID,
   REQUEST_ERROR_CODE,
   SETUP_OPTION,
   type TrackNamespace,
@@ -1053,4 +1052,3 @@ export function createMoqtPublishSession(
 ): MoqtPublishSession {
   return new MoqtPublishSessionImpl(transport, config);
 }
-

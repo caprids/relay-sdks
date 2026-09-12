@@ -471,9 +471,7 @@ describe('createMoqtSession', () => {
     const onError = vi.fn();
 
     harness.session.trackStatus({ trackNamespace: ['live'], trackName: 'video' }, { onError });
-    await (
-      await harness.nextRequestStream()
-    ).firstMessage;
+    await (await harness.nextRequestStream()).firstMessage;
     harness.dropTransport();
 
     await vi.waitFor(() => expect(onError).toHaveBeenCalled());
@@ -489,9 +487,7 @@ describe('createMoqtSession', () => {
     const onDropError = vi.fn();
 
     dropped.session.subscribe({ trackNamespace: ['live'], trackName: 'video' }, { onError: onDropError });
-    await (
-      await dropped.nextRequestStream()
-    ).firstMessage;
+    await (await dropped.nextRequestStream()).firstMessage;
     dropped.dropTransport();
     await vi.waitFor(() => expect(onDropError).toHaveBeenCalled());
 
@@ -501,9 +497,7 @@ describe('createMoqtSession', () => {
     const onCloseError = vi.fn();
 
     closed.session.subscribe({ trackNamespace: ['live'], trackName: 'video' }, { onError: onCloseError });
-    await (
-      await closed.nextRequestStream()
-    ).firstMessage;
+    await (await closed.nextRequestStream()).firstMessage;
     closed.session.close();
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(onCloseError).not.toHaveBeenCalled();

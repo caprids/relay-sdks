@@ -3,10 +3,30 @@
     "target": "ES2022",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+
+    // Type safety beyond `strict`.
     "strict": true,
+    "exactOptionalPropertyTypes": true,
     "noUncheckedIndexedAccess": true,
-    "skipLibCheck": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUncheckedSideEffectImports": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+
+    // Every file stands alone for single-file transpilers, and only syntax that can be erased is allowed
+    // (no enums, namespaces, or parameter properties). `isolatedDeclarations` is deliberately off: the core's
+    // symbol-branded error class (see packages/moq-core/UPSTREAM.json) is a shape TypeScript cannot emit under it.
+    "isolatedModules": true,
+    "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "skipLibCheck": true,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true

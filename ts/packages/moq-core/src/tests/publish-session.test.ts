@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { utf8Decode, utf8Encode } from '../protocol/bytes.js';
 import {
   type ControlMessage,
   ControlMessageDeframer,
@@ -11,23 +10,17 @@ import {
   encodeSetup,
   encodeSubscribe,
   REQUEST_ERROR_CODE,
-  SETUP_OPTION,
-  TRACK_PROPERTY,
   type TrackNamespace,
 } from '../protocol/control-messages.js';
 import type { MoqtObject } from '../protocol/object-stream.js';
-import { createMoqtSession, type MoqtSession } from '../protocol/session.js';
-import {
-  openRawRequest,
-  rawSubscribe as rawSubscribeTo,
-  solicitNamespace,
-} from './helpers/raw-peer.js';
-import { createTransportPair } from './helpers/transport-pair.js';
 import {
   createMoqtPublishSession,
   type IncomingSubscribe,
   type MoqtPublishSessionCallbacks,
 } from '../protocol/publish-session.js';
+import { createMoqtSession, type MoqtSession } from '../protocol/session.js';
+import { openRawRequest, rawSubscribe as rawSubscribeTo, solicitNamespace } from './helpers/raw-peer.js';
+import { createTransportPair } from './helpers/transport-pair.js';
 
 const NAMESPACE = ['live', 'abc123'];
 
@@ -1054,5 +1047,4 @@ describe('createMoqtPublishSession', () => {
   // ---------------------------------------------------------------------------
   // The end-to-end proof: publish session ↔ existing subscribe driver.
   // ---------------------------------------------------------------------------
-
 });

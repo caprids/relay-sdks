@@ -98,7 +98,7 @@ try {
       const waitForCount = async (track, count) => {
         const until = performance.now() + 10_000;
         while (received[track].length < count) {
-          if (errors.length) throw new Error(errors.join('; '));
+          if (errors.length > 0) throw new Error(errors.join('; '));
           lifetime.signal.throwIfAborted();
           if (performance.now() >= until)
             throw new Error(`Timed out receiving ${track}: ${received[track].length}/${count}`);
@@ -151,7 +151,7 @@ try {
         if (!samePayloads(received.events, expectedEvents) || !samePayloads(received.status, [[42], [43]])) {
           throw new Error(`Payload mismatch: ${JSON.stringify(received)}`);
         }
-        if (errors.length) throw new Error(errors.join('; '));
+        if (errors.length > 0) throw new Error(errors.join('; '));
         return {
           endpoint,
           namespace,

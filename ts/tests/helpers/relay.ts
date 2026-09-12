@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  * See packages/moq-core/LICENSE and packages/moq-core/UPSTREAM.json.
  */
+
+import type { BidirectionalStreamLike, MoqtTransport } from '@mux/moq-core';
 import { vi } from 'vitest';
 import { ByteWriter, StreamReader } from '../../packages/moq-core/src/protocol/bytes.js';
 import {
@@ -11,7 +13,6 @@ import {
   decodeControlMessage,
   encodeSetup,
 } from '../../packages/moq-core/src/protocol/control-messages.js';
-import type { BidirectionalStreamLike, MoqtTransport } from '@mux/moq-core';
 
 interface PushChannel<T> {
   stream: ReadableStream<T>;
@@ -45,7 +46,26 @@ interface ServerRequestStream {
   reset(reason?: unknown): void;
 }
 
-export function createFakeTransport() {
+/** A scripted server-side transport: the test plays the relay while the SDK plays the client. */
+export interface FakeTransport {
+  transport: MoqtTransport;
+  /** The SETUP control stream the client opened (first client uni stream). */
+  clientControlStream(): Promise<StreamReader>;
+  /** Wait for the next client-initiated request stream. */
+  nextRequestStream(): Promise<ServerRequestStream>;
+  /** Open the server's control stream and send its SETUP. */
+  sendServerSetup(): void;
+  /** Open a unidirectional data stream to the client. */
+  openDataStream(bytes: Uint8Array): void;
+  /** Open a unidirectional data stream the test writes to (and may reset). */
+  openControlledDataStream(): { write(bytes: Uint8Array): Promise<void>; reset(error: unknown): void };
+  openIncomingBidi(bytes: Uint8Array): { responses: Promise<Uint8Array[]> };
+  getCloseInfo(): { closeCode?: number; reason?: string } | undefined;
+  /** Simulate a transport-side drop (peer/network close, not a local `close()`). */
+  dropTransport(): void;
+}
+
+export function createFakeTransport(): FakeTransport {
   const incomingUni = pushChannel<ReadableStream<Uint8Array>>();
   const incomingBidi = pushChannel<BidirectionalStreamLike>();
   const clientUniStreams: ReadableStream<Uint8Array>[] = [];

@@ -1,4 +1,4 @@
-import { MOQT_PROTOCOL_ID, type MoqtTransport, type MoqtSessionCallbacks } from '@mux/moq-core';
+import { MOQT_PROTOCOL_ID, type MoqtSessionCallbacks, type MoqtTransport } from '@mux/moq-core';
 
 /** Supply a browser transport or a compatible implementation in another runtime. */
 export type RelayTransportFactory = (
@@ -28,6 +28,18 @@ interface Session {
   destroy(): void;
 }
 
+/** A connected session together with the connection lifetime its public handle exposes. */
+interface RelaySessionLifetime<T extends Session> {
+  session: T;
+  /** Settles once the connection has ended, carrying the error that ended it if any. */
+  closed: Promise<{ error?: unknown }>;
+  transportClosed: MoqtTransport['closed'];
+  /** Throws the closing error once the connection has ended. */
+  assertOpen(): void;
+  /** Close the connection. Idempotent. */
+  close(): void;
+}
+
 function createBrowserTransport(url: string, protocols: string[]) {
   if (typeof WebTransport === 'undefined') {
     throw new Error('WebTransport is unavailable; supply createTransport for this runtime');
@@ -42,7 +54,7 @@ function createBrowserTransport(url: string, protocols: string[]) {
 export async function openRelaySession<T extends Session>(
   options: ConnectRelayOptions,
   createSession: (transport: MoqtTransport, callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>) => T,
-) {
+): Promise<RelaySessionLifetime<T>> {
   const url = new URL(options.url);
   if (url.protocol !== 'https:') throw new TypeError('Relay endpoints must use HTTPS');
   if (url.hash || url.username || url.password)
@@ -93,7 +105,7 @@ export async function openRelaySession<T extends Session>(
     rejectConnect(stopError);
   };
 
-  const onAbort = () => finish({ error: options.signal!.reason });
+  const onAbort = (): void => finish({ error: options.signal?.reason });
   const timer = setTimeout(() => finish({ error: new Error('Relay connection timed out') }), timeoutMs);
 
   options.signal?.addEventListener('abort', onAbort, { once: true });
@@ -102,7 +114,7 @@ export async function openRelaySession<T extends Session>(
     if (stopped) throw stopError;
   };
 
-  const establish = async (): Promise<T> => {
+  const establish = async (): Promise<{ session: T; transport: MoqtTransport }> => {
     if (!url.searchParams.has('jwt') && options.getToken) {
       const token = await options.getToken();
 
@@ -139,10 +151,10 @@ export async function openRelaySession<T extends Session>(
 
     await session.ready;
     assertOpen();
-    return session;
+    return { session, transport };
   };
 
-  let connected: T;
+  let connected: { session: T; transport: MoqtTransport };
 
   try {
     connected = await Promise.race([establish(), interrupted]);
@@ -154,5 +166,11 @@ export async function openRelaySession<T extends Session>(
 
   clearTimeout(timer);
 
-  return { session: connected, closed, transportClosed: transport!.closed, assertOpen, close: () => finish() };
+  return {
+    session: connected.session,
+    closed,
+    transportClosed: connected.transport.closed,
+    assertOpen,
+    close: () => finish(),
+  };
 }

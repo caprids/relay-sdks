@@ -1,0 +1,113 @@
+{
+  "$schema": "https://biomejs.dev/schemas/2.5.13/schema.json",
+  "files": {
+    "ignoreUnknown": true,
+    "includes": ["**", "!**/dist", "!**/coverage", "!pnpm-lock.yaml"]
+  },
+  "formatter": {
+    "enabled": true,
+    "indentStyle": "space",
+    "indentWidth": 2,
+    "lineWidth": 120
+  },
+  "javascript": {
+    "formatter": {
+      "quoteStyle": "single"
+    }
+  },
+  "linter": {
+    "enabled": true,
+    "rules": {
+      "preset": "recommended",
+      "correctness": {
+        "noUnusedImports": "error",
+        "noUnusedVariables": "error",
+        "noUnusedFunctionParameters": "error",
+        "noUnusedPrivateClassMembers": "error",
+        // Sources are compiled by tsc without rewriting specifiers, so relative imports name the emitted `.js`.
+        "useImportExtensions": { "level": "error", "options": { "forceJsExtensions": true } }
+      },
+      "suspicious": {
+        "noConsole": "error",
+        "noEvolvingTypes": "error",
+        "noImportCycles": "error"
+      },
+      "complexity": {
+        // Protocol tables are keyed by the spec's hexadecimal flag values.
+        "useSimpleNumberKeys": "off"
+      },
+      "style": {
+        "noCommonJs": "error",
+        "noExportedImports": "error",
+        "noInferrableTypes": "error",
+        "noNamespace": "error",
+        "noNonNullAssertion": "error",
+        "noParameterAssign": "error",
+        "noUnusedTemplateLiteral": "error",
+        "noUselessElse": "error",
+        "noYodaExpression": "error",
+        "useArrayLiterals": "error",
+        "useAsConstAssertion": "error",
+        "useCollapsedElseIf": "error",
+        "useCollapsedIf": "error",
+        "useConsistentArrayType": "error",
+        "useConsistentBuiltinInstantiation": "error",
+        "useConst": "error",
+        "useDefaultParameterLast": "error",
+        "useEnumInitializers": "error",
+        "useExplicitLengthCheck": "error",
+        "useExponentiationOperator": "error",
+        "useExportType": "error",
+        "useImportType": "error",
+        "useNodejsImportProtocol": "error",
+        "useNumberNamespace": "error",
+        "useObjectSpread": "error",
+        "useShorthandAssign": "error",
+        "useShorthandFunctionType": "error",
+        "useSingleVarDeclarator": "error",
+        "useSymbolDescription": "error",
+        "useTemplate": "error",
+        "useThrowNewError": "error",
+        "useThrowOnlyError": "error",
+        "useTrimStartEnd": "error"
+      }
+    }
+  },
+  "assist": {
+    "enabled": true,
+    "actions": {
+      "source": {
+        "organizeImports": "on"
+      }
+    }
+  },
+  "overrides": [
+    {
+      // Attributed Video.js snapshot (see packages/moq-core/UPSTREAM.json). It keeps upstream's
+      // formatting and non-null-assertion style so the diff against upstream stays readable.
+      "includes": ["packages/moq-core/src/protocol/**", "packages/moq-core/src/tests/**"],
+      "javascript": { "formatter": { "trailingCommas": "es5" } },
+      "linter": { "rules": { "style": { "noNonNullAssertion": "off" } } }
+    },
+    {
+      // Tests may assert non-null on state they set up themselves, and may log.
+      "includes": ["tests/**", "packages/moq-core/src/tests/**"],
+      "linter": {
+        "rules": {
+          "style": { "noNonNullAssertion": "off" },
+          "suspicious": { "noConsole": "off" }
+        }
+      }
+    },
+    {
+      // Scripts and examples are CLI programs; the SDK packages themselves must not log.
+      "includes": ["scripts/**", "examples/**"],
+      "linter": { "rules": { "suspicious": { "noConsole": "off" } } }
+    },
+    {
+      // TypeScript reads its config files as JSONC.
+      "includes": ["**/tsconfig*.json"],
+      "json": { "parser": { "allowComments": true, "allowTrailingCommas": true } }
+    }
+  ]
+}

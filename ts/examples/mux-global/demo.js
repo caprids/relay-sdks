@@ -47,7 +47,7 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
     return connection;
   };
   const failIfBroken = () => {
-    if (problems.length) throw new Error(problems.join('; '));
+    if (problems.length > 0) throw new Error(problems.join('; '));
     lifetime.signal.throwIfAborted();
   };
 

@@ -1,11 +1,11 @@
 import {
   createMoqtPublishSession,
   createSubgroupWriter,
-  MAX_OBJECT_PAYLOAD_LENGTH,
   type KeyValuePair,
+  MAX_OBJECT_PAYLOAD_LENGTH,
   type SubgroupWriter,
 } from '@mux/moq-core';
-import { openRelaySession, type ConnectRelayOptions } from './connect-session.js';
+import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
   /** One namespace per publisher connection. Register any number of tracks within it. */
@@ -100,7 +100,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       let alias: number | undefined;
       let ended = false;
       let nextGroupId = 0;
-      let active: { alias?: number; wake(): void; cancel(error: unknown): void } | undefined;
+      let active: { alias?: number | undefined; wake(): void; cancel(error: unknown): void } | undefined;
 
       const close = (error: unknown = new Error('Published track is closed')): void => {
         if (ended) return;
