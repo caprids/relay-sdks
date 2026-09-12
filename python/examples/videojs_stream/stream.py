@@ -46,7 +46,6 @@ from mux_relay import (
     RelayError,
     RelayGroupWriter,
     RelayPublisher,
-    RelayTimeoutError,
     RelayTrackWriter,
     SubscriptionHandlers,
     connect_relay,
@@ -440,6 +439,7 @@ class Stats:
     video_objects: int = 0
     audio_objects: int = 0
     skipped_video: int = 0
+    skipped_audio: int = 0
     catalog_sends: int = 0
 
 
@@ -491,10 +491,13 @@ async def publish_media(
                 try:
                     await audio.write(sample.payload, properties=loc_properties(sample.timestamp_us))
                     stats.audio_objects += 1
-                except RelayTimeoutError:
-                    pass
-                except RelayClosedError:
+                except RelayClosedError as error:
+                    log("audio track ended", {"error": describe(error)})
                     audio = None
+                except RelayError:
+                    # Demand came and went before the write started, or the write timed out: the
+                    # track is still open, so this frame is skipped and the next one tries again.
+                    stats.skipped_audio += 1
 
                 continue
 
@@ -891,6 +894,7 @@ def main(argv: list[str] | None = None) -> int:
             "videoObjects": stats.video_objects,
             "audioObjects": stats.audio_objects,
             "skippedVideo": stats.skipped_video,
+            "skippedAudio": stats.skipped_audio,
             "catalogSends": stats.catalog_sends,
         },
     )
