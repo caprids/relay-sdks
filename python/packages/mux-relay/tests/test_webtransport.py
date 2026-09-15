@@ -10,6 +10,14 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
+from aioquic.asyncio.protocol import QuicConnectionProtocol
+from aioquic.h3.connection import H3Connection, H3Stream
+from aioquic.h3.events import WebTransportStreamDataReceived
+from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.connection import QuicConnection
+from aioquic.quic.packet_builder import QuicDeliveryState
+from aioquic.quic.rangeset import RangeSet
+from aioquic.quic.stream import QuicStream, QuicStreamReceiver, QuicStreamSender
 from core_helpers.waiting import wait_for
 from relay_helpers.relay_hub import RelayHub, create_relay_hub
 from relay_helpers.wt_server import (
@@ -510,3 +518,182 @@ class TestSendBackpressure:
         await asyncio.wait_for(transport.wait_closed(), 5)
         server.close()
         await asyncio.sleep(0.05)
+
+    async def test_a_retransmitted_fin_on_a_bidirectional_stream_is_not_a_new_stream(self) -> None:
+        # The peer opens a bidirectional stream and FINs its half while our half still has a write
+        # queued. aioquic reports a retransmitted FIN as another end-of-stream event; that must not
+        # queue a second incoming stream or replace the send half whose write is still pending.
+        sessions: list[Any] = []
+        echoed: list[int] = []
+        tasks: list[asyncio.Task[None]] = []
+
+        def on_session(session: Any) -> None:
+            sessions.append(session)
+
+            async def open_fin_then_read_the_reply() -> None:
+                pair = await session.create_bidirectional_stream()
+                await pair.writable.write(b"hello")
+                await pair.writable.close()
+                total = 0
+                while (chunk := await pair.readable.read()) is not None:
+                    total += len(chunk)
+                echoed.append(total)
+
+            tasks.append(asyncio.ensure_future(open_fin_then_read_the_reply()))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+        pair = await asyncio.wait_for(anext(transport.incoming_bidirectional_streams()), 5)
+        assert await pair.readable.read() == b"hello"
+        assert await pair.readable.read() is None  # the peer's FIN
+        stream_id: int = pair.writable._stream_id
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+
+        sessions[0].impair(paused=True)  # our bytes stop leaving, so the write below stays pending
+        pending = asyncio.ensure_future(pair.writable.write(b"\5" * (256 * 1024)))
+        await asyncio.sleep(0.1)
+        assert not pending.done()
+
+        # Exactly what aioquic emits for a retransmitted FIN: its receiver reports end-of-stream again.
+        session: Any = transport
+        session._on_stream_data(
+            WebTransportStreamDataReceived(
+                stream_id=stream_id, data=b"", session_id=session.session_id, stream_ended=True
+            )
+        )
+
+        assert len(transport.incoming_bidirectional_streams()._items) == 0  # no phantom second stream
+        assert session._sends[stream_id] is pair.writable  # the open send half was not replaced
+        assert not pending.done()
+
+        sessions[0].impair()
+        await asyncio.wait_for(pending, 20)  # the pending write still settles
+        await asyncio.wait_for(pair.writable.close(), 20)
+        await wait_for(lambda: echoed == [256 * 1024], timeout=20)
+        transport.close()
+        await asyncio.wait_for(transport.wait_closed(), 5)
+        server.close()
+        await asyncio.sleep(0.05)
+
+    async def test_a_cancelled_write_does_not_poison_the_stream_for_other_writers(self) -> None:
+        # Giving up on a blocked write (a deadline, a cancelled task) must not cancel the transmit
+        # future that concurrent and later writers on the stream share: the second writer keeps
+        # waiting, and close() still completes once the link heals. The abandoned bytes stay queued,
+        # the documented "a failed write may have delivered partial data".
+        received: list[int] = []
+        sessions: list[Any] = []
+        drainers: list[asyncio.Task[None]] = []
+
+        def on_session(session: Any) -> None:
+            sessions.append(session)
+            drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+        sessions[0].impair(paused=True)
+
+        stream = await transport.create_unidirectional_stream()
+        victim = asyncio.ensure_future(asyncio.wait_for(stream.write(b"\1" * (256 * 1024)), 0.05))
+        await asyncio.sleep(0)
+        second = asyncio.ensure_future(stream.write(b"tail"))
+
+        with pytest.raises(TimeoutError):
+            await victim
+
+        await asyncio.sleep(0.05)
+        assert not second.done()  # neither cancelled nor failed by the victim's deadline
+
+        sessions[0].impair()
+        await asyncio.wait_for(second, 20)
+        await asyncio.wait_for(stream.close(), 20)  # a following close on the same stream completes
+        await wait_for(lambda: received == [256 * 1024 + 4], timeout=20)
+        transport.close()
+        await asyncio.wait_for(transport.wait_closed(), 5)
+        server.close()
+        await asyncio.sleep(0.05)
+
+
+class TestAioquicInternals:
+    """Pins the aioquic internals the adapter reaches into.
+
+    The send half's backpressure, the close drain, stream pruning and the FIN retry depend on state
+    aioquic's public API does not expose. A rename in a later aioquic 1.x would otherwise fail
+    silently and only under load (a write that never settles, a FIN never re-armed), so a dependency
+    bump has to fail here first. Behaviour is asserted alongside the names, since the adapter relies
+    on both.
+    """
+
+    async def test_the_private_aioquic_members_the_adapter_relies_on_still_exist(self) -> None:
+        # Verified with `uv run --with "aioquic==<version>" pytest <this file> -k aioquic` on:
+        #   1.3.0 (the locked version): passes.
+        #   1.2.0 (the only other 1.2.x release on PyPI): every QuicStreamSender / QuicStreamReceiver /
+        #     QuicConnection member below exists, but `H3Connection._get_or_create_stream` is a plain method
+        #     there and only became a context manager in 1.3.0; `create_bidirectional_stream` relied on that
+        #     before this test existed, so the adapter's real floor is 1.3.0 despite the `>=1.2` pin.
+        # Revisit this list, and the members below, with any aioquic bump.
+
+        # QuicStreamSender: what write() queues, what a transmit consumes (settling a write), what an
+        # ACK finishes (pruning the stream), and how a reset shows.
+        sender = QuicStreamSender(stream_id=2, writable=True)
+        assert isinstance(sender._pending, RangeSet)
+        assert len(sender._pending) == 0  # `len`, never truthiness: RangeSet.__bool__ is not implemented
+        assert isinstance(sender._buffer, bytearray)
+        assert sender._pending_eof is False
+        assert sender._acked_fin is False
+        assert sender._buffer_fin is None
+        assert sender._reset_error_code is None
+        assert sender.buffer_is_empty is True
+        assert sender.is_finished is False
+
+        sender.write(b"abc", end_stream=True)
+        assert len(sender._pending) == 1
+        assert sender._pending_eof is True
+        assert sender._buffer_fin == 3
+        assert sender.buffer_is_empty is False
+
+        frame = sender.get_frame(1024)
+        assert frame is not None and frame.fin and frame.data == b"abc"
+        assert len(sender._pending) == 0 and sender._pending_eof is False  # transmitted
+
+        sender.on_data_delivery(QuicDeliveryState.ACKED, 0, 3, True)
+        assert sender._acked_fin is True
+        assert len(sender._buffer) == 0
+        assert sender.is_finished is True
+
+        # The FIN retry re-arms exactly these two after aioquic consumed a FIN it could not send.
+        rearmed = QuicStreamSender(stream_id=6, writable=True)
+        rearmed.write(b"", end_stream=True)
+        rearmed._pending_eof = False
+        rearmed.buffer_is_empty = True
+        rearmed.reset(0)
+        assert rearmed._reset_error_code == 0
+
+        # QuicStreamReceiver: the half `_finish_receiving_half` marks done on a send-only stream.
+        receiver = QuicStreamReceiver(stream_id=2, readable=False)
+        assert receiver.is_finished is False  # aioquic ignores `readable` here; the adapter sets it
+        receiver.is_finished = True
+
+        # QuicConnection / QuicStream: the live stream table the settle and drain paths read.
+        connection = QuicConnection(configuration=QuicConfiguration(is_client=True))
+        h3 = H3Connection(connection, enable_webtransport=True)
+        stream_id = connection.get_next_available_stream_id(is_unidirectional=True)
+        connection.send_stream_data(stream_id, b"x")
+        assert isinstance(connection._streams, dict)
+        stream = connection._streams[stream_id]
+        assert isinstance(stream, QuicStream)
+        assert isinstance(stream.sender, QuicStreamSender)
+        assert isinstance(stream.receiver, QuicStreamReceiver)
+
+        # H3Connection: the per-stream record the adapter drops once both halves are done.
+        assert isinstance(h3._stream, dict)
+        with h3._get_or_create_stream(stream_id) as h3_stream:
+            assert isinstance(h3_stream, H3Stream)
+        assert stream_id in h3._stream
+
+        # QuicConnectionProtocol: the asyncio glue the adapter drives transmits through.
+        protocol = QuicConnectionProtocol(connection)
+        assert protocol._quic is connection
+        assert callable(protocol._transmit_soon)
+        assert protocol._transport is None
+        assert protocol._loop is asyncio.get_running_loop()
