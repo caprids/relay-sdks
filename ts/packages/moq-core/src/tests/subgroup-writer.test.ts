@@ -228,7 +228,7 @@ describe('createSubgroupWriter', () => {
     writer.abort(reason);
     const reader = pipe.readable.getReader();
     // A TransformStream releases its pending write once the peer reads.
-    await reader.read();
+    await expect(reader.read()).rejects.toBe(reason);
     await rejected;
     await expect(reader.read()).rejects.toBe(reason);
   });
