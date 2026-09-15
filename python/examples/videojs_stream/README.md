@@ -54,13 +54,41 @@ starts at the next keyframe, and a subscription that changes mid-GOP resets that
 at the next keyframe. The encoder runs `libx264` `veryfast` / `zerolatency` with a fixed GOP and no
 B-frames so timestamps are monotonic.
 
+## Recovering from a slow or interrupted uplink
+
+Audio and video have independent writer tasks. A blocked audio frame cannot hold up video, and
+neither track builds an unlimited backlog. The producer hands each batch to the event loop before
+encoding the next one, so pending thread callbacks cannot become another unbounded queue.
+
+| Buffer | Maximum queued frames | Maximum queued payload | Stale after |
+| --- | --- | --- | --- |
+| Video | 120 | 16 MiB | One GOP (`--gop`, default 2 seconds) |
+| Audio | 100 | 1 MiB | 250 ms |
+
+The first limit reached triggers discard. These bounds cover queued payloads; the encoder and one
+write in flight per track also use memory. Lag is measured against the producer's monotonic start
+clock and each frame's media timestamp. Old audio is discarded individually. A video overflow or
+stale frame resets the current GOP, skips its dependent frames, and resumes at a fresh keyframe.
+Timestamps keep their original timeline; the publisher does not replay an outage at reduced speed.
+
+Audio still uses one group per frame on the wire, now through `open_group()` / `write()` / `close()`.
+A five-second group-operation deadline resets an interrupted audio frame or video GOP while keeping
+the track usable. Once the link recovers, audio resumes with recent frames and video with the next
+usable keyframe. A connection that closes still ends the run; this example does not reconnect.
+
+Every second a `media progress` line reports queued frame counts, current lag (including a blocked
+write), cumulative sent/skipped/dropped/stale counts, and the maximum observed lag. `staleVideo` and
+`staleAudio` include buffer overflow and frames discarded while waiting for a recovery keyframe.
+The shutdown path joins the producer and drains both queues so its final encoded frames are counted.
+
 ## When a track ends under you
 
-A failed publish comes in two shapes, and the example keeps them apart because they mean opposite
-things. A write that never reached a relay subscription — demand that came and went, or a deadline
+The catalog uses a single-object write. A catalog write that never reached a relay subscription — demand that came and went, or a deadline
 spent waiting for it — costs one object; the track is still open and the next sample tries again.
-A write that had bound to a subscription and then failed ends that track, and the name cannot be
-reused on this connection, so nothing on this publisher will ever carry it again. `RelayError` alone
+A catalog write that had bound to a subscription and then failed ends that track, and the name cannot be
+reused on this connection, so nothing on this publisher will ever carry it again. Media groups instead
+reset after an interrupted write and keep the track open. A closed media track or connection is still
+terminal. `RelayError` alone
 does not say which happened, so the example classifies the failure and then confirms it with the
 writer's own `bindings()`, which stops once a track is closed (`bound` cannot say it: `False` is
 equally what "nobody is subscribed" looks like).
@@ -76,7 +104,7 @@ The `finished` summary accounts for every sample the encoder produced, and it is
 the run fails:
 
 ```
-finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skippedAudio=11 droppedVideo=0 droppedAudio=0 discardedVideo=0 discardedAudio=0 catalogSends=1 catalogFailures=0
+finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skippedAudio=11 droppedVideo=0 droppedAudio=0 discardedVideo=0 discardedAudio=0 staleVideo=0 staleAudio=0 maxLagSeconds=0.01 catalogSends=1 catalogFailures=0
 ```
 
 | Counter | Meaning |
@@ -84,7 +112,9 @@ finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skip
 | `videoObjects`, `audioObjects` | Sent to the relay |
 | `skippedVideo`, `skippedAudio` | Not sent because the relay had no subscription for the track, because a write failed before it bound, or because the group they belonged to was reset — the track is fine and publishing resumes at the next sample or keyframe |
 | `droppedVideo`, `droppedAudio` | Not sent because the track had ended; these samples are gone for good |
-| `discardedVideo`, `discardedAudio` | Encoded but still queued when the run stopped, so never attempted — a stop mid-stream can leave seconds of media here |
+| `discardedVideo`, `discardedAudio` | Encoded but abandoned while queued or in flight when the run stopped |
+| `staleVideo`, `staleAudio` | Discarded because of buffer overflow, excessive age, or waiting for a recovery keyframe |
+| `maxLagSeconds` | Largest observed frame age relative to the producer clock |
 | `catalogSends`, `catalogFailures` | Catalog documents accepted, and retryable catalog write failures |
 | `endedTracks` | Present only when a track ended, listing which |
 
