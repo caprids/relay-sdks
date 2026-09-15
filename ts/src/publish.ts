@@ -5,7 +5,7 @@ import {
   MAX_OBJECT_PAYLOAD_LENGTH,
   type SubgroupWriter,
 } from '@mux/moq-core';
-import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
   /** One namespace per publisher connection. Register any number of tracks within it. */
@@ -16,7 +16,7 @@ export interface PublishTrackOptions {
   track: string;
   /** Explicit track metadata; raw data has no implied timestamp unit. */
   trackProperties?: readonly KeyValuePair[];
-  /** Deadline for relay demand and stream writes. Default 10 seconds. */
+  /** Deadline for relay demand and stream writes. Default 10 seconds, maximum 2147483647. */
   writeTimeoutMs?: number;
 }
 
@@ -88,9 +88,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       if (closing) throw new Error('Relay publisher is closed');
       if (typeof track !== 'string' || track.length === 0) throw new TypeError('Track name must be non-empty');
       if (tracks.has(track)) throw new Error('Track name is already registered on this publisher connection');
-      if (!Number.isFinite(writeTimeoutMs) || writeTimeoutMs <= 0 || writeTimeoutMs > 2_147_483_647) {
-        throw new RangeError('writeTimeoutMs must be between 0 (exclusive) and 2147483647');
-      }
+      assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
 
       const registered = session.registerTrack({
         trackNamespace: namespace,

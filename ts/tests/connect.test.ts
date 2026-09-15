@@ -306,10 +306,47 @@ describe('connectRelay', () => {
     await expect(connectRelay({ url: endpoint })).rejects.toThrow(/createTransport/);
   });
 
-  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+  // Fake timers never advance here, so a rejection can only come from validating the argument.
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648])(
     'rejects invalid connection deadlines: %s',
     async (connectTimeoutMs) => {
-      await expect(connectRelay({ url: endpoint, connectTimeoutMs })).rejects.toThrow(RangeError);
+      vi.useFakeTimers();
+      const createTransport = vi.fn<RelayTransportFactory>();
+      const rejected = connectRelay({ url: endpoint, connectTimeoutMs, createTransport });
+
+      await expect(rejected).rejects.toThrow(RangeError);
+      await expect(rejected).rejects.toThrow('connectTimeoutMs must be between 0 (exclusive) and 2147483647');
+      expect(createTransport).not.toHaveBeenCalled();
     },
   );
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY, 2_147_483_648])(
+    'rejects invalid request deadlines: %s',
+    async (requestTimeoutMs) => {
+      vi.useFakeTimers();
+      const createTransport = vi.fn<RelayTransportFactory>();
+      const rejected = connectRelay({ url: endpoint, requestTimeoutMs, createTransport });
+
+      await expect(rejected).rejects.toThrow(RangeError);
+      await expect(rejected).rejects.toThrow('requestTimeoutMs must be between 0 (exclusive) and 2147483647');
+      expect(createTransport).not.toHaveBeenCalled();
+    },
+  );
+
+  it('accepts the largest deadline a timer can hold rather than firing it on the next tick', async () => {
+    vi.useFakeTimers();
+    const fake = await connectFake({ connectTimeoutMs: 2_147_483_647, requestTimeoutMs: 2_147_483_647 });
+    const onError = vi.fn();
+    const onOk = vi.fn();
+
+    fake.connection.subscribe({ namespace: ['scores'], track: 'current' }, { onOk, onError });
+    const request = await fake.nextRequestStream();
+
+    await request.firstMessage;
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(onError).not.toHaveBeenCalled();
+    await request.send(encodeSubscribeOk(11));
+    await vi.waitFor(() => expect(onOk).toHaveBeenCalled());
+    expect(onError).not.toHaveBeenCalled();
+  });
 });

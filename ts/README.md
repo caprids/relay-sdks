@@ -65,7 +65,10 @@ resets and connection closure explicitly; this API makes no exactly-once or gap-
 
 `connectRelay` has a deadline covering token resolution and both handshakes. Its optional abort
 signal controls the connection's entire lifetime. An explicit `jwt` query parameter takes precedence
-over `getToken`, matching the current Relay connection authentication convention.
+over `getToken`, matching the current Relay connection authentication convention. Every deadline
+(`connectTimeoutMs`, `requestTimeoutMs`, and `writeTimeoutMs`) must be between 0 (exclusive) and
+2147483647 milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError`
+rather than a deadline that fires immediately.
 
 ## Publish data for testing
 
