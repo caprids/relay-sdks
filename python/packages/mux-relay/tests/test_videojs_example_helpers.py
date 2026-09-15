@@ -370,7 +370,7 @@ class TestPublishMediaTrackEnd:
         assert stats.dropped_audio == 7
         assert stats.skipped_audio == 0
         assert [(track, str(error)) for track, error in ended] == [("audio", str(rebind))]
-        assert audio.writes == 3
+        assert audio.groups == 3
         assert summarize(stats)["droppedAudio"] == 7
 
     async def test_frames_with_no_subscription_stay_skipped_not_dropped(self) -> None:

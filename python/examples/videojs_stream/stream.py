@@ -22,7 +22,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from getpass import getpass
 from pathlib import Path
@@ -112,6 +112,83 @@ class EncodedSample:
     timestamp_us: int
     payload: bytes
     key: bool
+    discontinuity: bool = False
+
+
+class LiveQueue(asyncio.Queue[EncodedSample | None]):
+    """A bounded track buffer. Mutations happen on the event loop, including producer handoff.
+
+    Overflow clears the buffered video GOP: its dependent frames cannot be decoded after a loss.
+    A discontinuity on the next sample tells the writer to reset the open group as well. EOF has
+    its own reserved slot, so it never evicts the last frame or gets lost behind a full queue.
+    """
+
+    def __init__(
+        self, kind: Literal["video", "audio"], stats: Stats, *, max_samples: int, max_bytes: int, max_lag: float
+    ):
+        super().__init__()
+        self.kind = kind
+        self.stats = stats
+        self.max_samples = max_samples
+        self.max_bytes = max_bytes
+        self.max_lag = max_lag
+        self.started: float | None = None
+        self.buffered_bytes = 0
+        self.discontinuity = False
+        self.latest_lag = 0.0
+        self.pending: EncodedSample | None = None
+        self._source_finished = False
+
+    def put_nowait(self, item: EncodedSample | None) -> None:
+        if item is None:
+            if not self._source_finished:
+                self._source_finished = True
+                super().put_nowait(None)
+            return
+        if self._source_finished:
+            discard_sample(item, self.stats)
+            return
+        while self.qsize() and (
+            self.qsize() >= self.max_samples or self.buffered_bytes + len(item.payload) > self.max_bytes
+        ):
+            self._drop_oldest()
+            if self.kind == "video":
+                while not self.empty():
+                    self._drop_oldest()
+        if len(item.payload) > self.max_bytes:
+            self.discontinuity = True
+            stale_sample(item, self.stats)
+            return
+        self.buffered_bytes += len(item.payload)
+        super().put_nowait(item)
+
+    def _drop_oldest(self) -> None:
+        sample = self.get_nowait()
+        assert sample is not None
+        stale_sample(sample, self.stats)
+        self.discontinuity = True
+
+    def get_nowait(self) -> EncodedSample | None:
+        sample = super().get_nowait()
+        self.task_done()
+        if sample is not None:
+            self.buffered_bytes -= len(sample.payload)
+            if self.discontinuity:
+                sample = replace(sample, discontinuity=True)
+                self.discontinuity = False
+        return sample
+
+    def current_lag(self) -> float:
+        return self.lag(self.pending) if self.pending is not None else 0.0
+
+    def lag(self, sample: EncodedSample) -> float:
+        self.latest_lag = (
+            max(0.0, time.monotonic() - self.started - sample.timestamp_us / MICROSECONDS_PER_SECOND)
+            if self.started is not None
+            else 0.0
+        )
+        self.stats.max_lag_seconds = max(self.stats.max_lag_seconds, self.latest_lag)
+        return self.latest_lag
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -342,10 +419,10 @@ def file_frames(
 
 
 class Producer:
-    def __init__(self, config: Config, loop: asyncio.AbstractEventLoop, queue: asyncio.Queue[EncodedSample | None]):
+    def __init__(self, config: Config, loop: asyncio.AbstractEventLoop, queues: dict[str, LiveQueue]):
         self._config = config
         self._loop = loop
-        self._queue = queue
+        self._queues = queues
         self._stop = threading.Event()
         self.video = VideoEncoder(config.width, config.height, config.fps, config.bitrate, config.gop_seconds)
         self.audio: AudioEncoder | None = None
@@ -362,18 +439,43 @@ class Producer:
             return len(container.streams.audio) > 0
 
     def start(self) -> None:
+        for queue in self._queues.values():
+            queue.started = time.monotonic()
         self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
 
+    async def join(self) -> None:
+        await asyncio.to_thread(self._thread.join)
+
+    def _handoff(self, samples: list[EncodedSample] | None) -> None:
+        # Wait for this callback before scheduling another. Merely bounding asyncio.Queue leaves
+        # call_soon_threadsafe's callback queue unbounded when encoding outpaces the event loop.
+        delivered = threading.Event()
+
+        def deliver() -> None:
+            try:
+                if samples is None:
+                    for queue in self._queues.values():
+                        queue.put_nowait(None)
+                else:
+                    for sample in samples:
+                        self._queues[sample.kind].put_nowait(sample)
+            finally:
+                delivered.set()
+
+        self._loop.call_soon_threadsafe(deliver)
+        delivered.wait()
+
     def _emit(self, samples: list[EncodedSample]) -> None:
-        for sample in samples:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, sample)
+        if samples:
+            self._handoff(samples)
 
     def _run(self) -> None:
         config = self._config
-        started = time.monotonic()
+        started = self._queues["video"].started
+        assert started is not None
 
         try:
             if config.input is not None:
@@ -405,7 +507,7 @@ class Producer:
         except BaseException as error:
             self.error = error
         finally:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, None)
+            self._handoff(None)
 
 
 def _interleave(
@@ -500,6 +602,9 @@ class Stats:
     dropped_audio: int = 0
     discarded_video: int = 0
     discarded_audio: int = 0
+    stale_video: int = 0
+    stale_audio: int = 0
+    max_lag_seconds: float = 0.0
     catalog_sends: int = 0
     catalog_failures: int = 0
     ended_tracks: dict[str, str] = field(default_factory=dict)
@@ -515,6 +620,14 @@ def discard_sample(sample: EncodedSample, stats: Stats) -> None:
         stats.discarded_audio += 1
     else:
         stats.discarded_video += 1
+
+
+def stale_sample(sample: EncodedSample, stats: Stats) -> None:
+    """Count media abandoned to keep the publisher near the live edge."""
+    if sample.kind == "audio":
+        stats.stale_audio += 1
+    else:
+        stats.stale_video += 1
 
 
 def discard_queue(queue: asyncio.Queue[EncodedSample | None], stats: Stats) -> None:
@@ -628,6 +741,7 @@ async def publish_media(
     """Route encoded samples: video as one group per GOP while the relay wants the track, audio one group per frame."""
     group: RelayGroupWriter | None = None
     video_ended = False
+    recovering_video = False
 
     async def end_group() -> None:
         nonlocal group
@@ -657,12 +771,17 @@ async def publish_media(
     try:
         while True:
             pending = None
+            if isinstance(queue, LiveQueue):
+                queue.pending = None
             sample = await queue.get()
 
             if sample is None:
                 break
 
             pending = sample
+            if isinstance(queue, LiveQueue):
+                queue.pending = sample
+            late = isinstance(queue, LiveQueue) and queue.lag(sample) > queue.max_lag
 
             if sample.kind == "audio":
                 if audio is None:
@@ -670,8 +789,12 @@ async def publish_media(
                     stats.dropped_audio += 1
                     continue
 
-                # Sampled before the write, because a failure once the write reached this
-                # subscription retires the track while an unbound one only costs the frame.
+                if late:
+                    stale_sample(sample, stats)
+                    continue
+
+                # Confirm the writer state on failure: a group reset is retryable, but a closed
+                # track or connection still needs the existing track-end policy.
                 bound = audio.bound
 
                 if not bound:
@@ -679,13 +802,26 @@ async def publish_media(
                     continue
 
                 try:
-                    await audio.write(sample.payload, properties=loc_properties(sample.timestamp_us))
+                    # Keep the one-frame-per-group wire shape while allowing an interrupted frame
+                    # to reset its group without retiring the audio track during an uplink outage.
+                    audio_group = await audio.open_group()
+                    if isinstance(queue, LiveQueue) and queue.lag(sample) > queue.max_lag:
+                        audio_group.abort()
+                        stale_sample(sample, stats)
+                        continue
+                    try:
+                        await audio_group.write(sample.payload, properties=loc_properties(sample.timestamp_us))
+                        await audio_group.close()
+                    except BaseException:
+                        audio_group.abort()
+                        raise
                     stats.audio_objects += 1
                 except RelayError as error:
                     if not await write_ended_track(audio, error, bound=bound):
                         # Demand came and went before the write started: the track is still open, so
                         # this frame is skipped and the next one tries again.
                         stats.skipped_audio += 1
+                        log("audio group interrupted", {"error": describe(error)})
                         continue
 
                     audio = None
@@ -694,8 +830,23 @@ async def publish_media(
 
                 continue
 
+            if not video_ended and (late or sample.discontinuity):
+                if group is not None:
+                    group.abort()
+                    group = None
+                recovering_video = True
+
+            if not video_ended and (late or (recovering_video and not sample.key)):
+                stale_sample(sample, stats)
+                continue
+
             if sample.key:
+                recovering_video = False
                 await end_group()
+                if not video_ended and isinstance(queue, LiveQueue) and queue.lag(sample) > queue.max_lag:
+                    recovering_video = True
+                    stale_sample(sample, stats)
+                    continue
 
                 if not video_ended and video.bound:
                     try:
@@ -721,6 +872,13 @@ async def publish_media(
 
                 continue
 
+            if isinstance(queue, LiveQueue) and queue.lag(sample) > queue.max_lag:
+                group.abort()
+                group = None
+                recovering_video = True
+                stale_sample(sample, stats)
+                continue
+
             try:
                 await group.write(
                     sample.payload,
@@ -744,7 +902,49 @@ async def publish_media(
 
         raise
     finally:
+        if isinstance(queue, LiveQueue):
+            queue.pending = None
         await end_group()
+
+
+async def publish_live_media(
+    queues: dict[str, LiveQueue],
+    video: RelayTrackWriter,
+    audio: RelayTrackWriter | None,
+    encoder: VideoEncoder,
+    stats: Stats,
+    log: Log,
+    on_track_end: TrackEndHandler,
+    lifetime: CancellationToken,
+) -> None:
+    """Each track gets its own writer so an audio FIN cannot hold up the video timeline."""
+
+    async def report() -> None:
+        while True:
+            await asyncio.sleep(1)
+            log(
+                "media progress",
+                {
+                    "queuedVideo": queues["video"].qsize(),
+                    "queuedAudio": queues["audio"].qsize(),
+                    "videoLagSeconds": round(queues["video"].current_lag(), 3),
+                    "audioLagSeconds": round(queues["audio"].current_lag(), 3),
+                    **summarize(stats),
+                },
+            )
+
+    writers = [
+        asyncio.create_task(publish_media(queue, video, audio, encoder, stats, log, on_track_end, lifetime))
+        for queue in queues.values()
+    ]
+    reporter = asyncio.create_task(report())
+    try:
+        # gather preserves the original failure object used by run_failure (TaskGroup wraps it).
+        await asyncio.gather(*writers)
+    finally:
+        for task in [*writers, reporter]:
+            task.cancel()
+        await asyncio.gather(*writers, reporter, return_exceptions=True)
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -834,8 +1034,11 @@ async def verify(config: Config, lifetime: CancellationToken, log: Log) -> tuple
 async def run(config: Config, stats: Stats, log: Log) -> None:
     lifetime = CancellationToken()
     loop = asyncio.get_running_loop()
-    queue: asyncio.Queue[EncodedSample | None] = asyncio.Queue()
-    producer = Producer(config, loop, queue)
+    queues = {
+        "video": LiveQueue("video", stats, max_samples=120, max_bytes=16 * 1024 * 1024, max_lag=config.gop_seconds),
+        "audio": LiveQueue("audio", stats, max_samples=100, max_bytes=1024 * 1024, max_lag=0.25),
+    }
+    producer = Producer(config, loop, queues)
     closing = False
     stopped: asyncio.Future[None] = loop.create_future()
 
@@ -901,7 +1104,9 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     tasks = [
         asyncio.ensure_future(serve_catalog(catalog, document, stats, log, on_track_end)),
-        asyncio.ensure_future(publish_media(queue, video, audio, producer.video, stats, log, on_track_end, lifetime)),
+        asyncio.ensure_future(
+            publish_live_media(queues, video, audio, producer.video, stats, log, on_track_end, lifetime)
+        ),
     ]
     verifier: Any = None
     verified: Verified | None = None
@@ -931,15 +1136,16 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
             deadline.cancel()
 
         producer.stop()
+        await producer.join()
 
         for task in tasks:
             task.cancel()
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        # A run that stops mid-stream leaves encoded media queued -- seconds of it, if a write was
-        # blocked on a deadline. It was produced, so the summary owes an account of it.
-        discard_queue(queue, stats)
+        # The producer is joined before accounting so even its final flush is included.
+        for queue in queues.values():
+            discard_queue(queue, stats)
 
         if verified is not None:
             report_verification(verified, log)
@@ -968,6 +1174,9 @@ def summarize(stats: Stats) -> dict[str, Any]:
         "droppedAudio": stats.dropped_audio,
         "discardedVideo": stats.discarded_video,
         "discardedAudio": stats.discarded_audio,
+        "staleVideo": stats.stale_video,
+        "staleAudio": stats.stale_audio,
+        "maxLagSeconds": round(stats.max_lag_seconds, 3),
         "catalogSends": stats.catalog_sends,
         "catalogFailures": stats.catalog_failures,
         "endedTracks": ",".join(stats.ended_tracks) or None,
