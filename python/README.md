@@ -232,6 +232,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `relay.subscribe({ namespace, track, parameters }, handlers)` | `relay.subscribe(namespace, track, SubscriptionHandlers(...), parameters=...)` |
 | `publisher.publish({ track, trackProperties, writeTimeoutMs })` | `publisher.publish(track, track_properties=..., write_timeout=seconds)` |
 | `writer.write(bytes, { properties })` | `await writer.write(payload, properties=...)` |
+| `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
 | `relay.closed` resolves `{ error? }` | `await relay.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
 | `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError` |

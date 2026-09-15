@@ -272,4 +272,37 @@ describe('connectRelayPublisher', () => {
 
     await expect(track.write(new Uint8Array(16 * 1024 * 1024 + 1))).rejects.toThrow(/16 MiB/);
   });
+
+  it.each<[string, unknown]>([
+    ['a string', 'hello'],
+    ['an ArrayBuffer', new Uint8Array([1, 2, 3]).buffer],
+    ['a plain array', [1, 2, 3]],
+    ['null', null],
+  ])('rejects %s payload without taking the write slot or ending the track', async (_label, payload) => {
+    const { publisher, subscriber } = await connectHub();
+    const events = publisher.publish({ track: 'events' });
+    const received = receive(subscriber, 'events');
+    const rejected = events.write(payload as ArrayBufferView);
+    // Issued in the same tick: the rejected write must not have claimed the single write slot.
+    const writing = events.write(new Uint8Array([9]));
+
+    await expect(rejected).rejects.toThrow(TypeError);
+    await expect(rejected).rejects.toThrow(/Uint8Array/);
+    await writing;
+    await vi.waitFor(() => expect(received.objects).toHaveLength(1));
+    expect(received.objects[0]?.payload).toEqual(new Uint8Array([9]));
+  });
+
+  it('publishes the bytes a view spans rather than its whole buffer, for any ArrayBufferView', async () => {
+    const { publisher, subscriber } = await connectHub();
+    const events = publisher.publish({ track: 'events' });
+    const received = receive(subscriber, 'events');
+    const buffer = new Uint8Array([9, 9, 9, 1, 2, 3, 9, 9]).buffer;
+
+    await events.write(new Uint8Array(buffer, 3, 3));
+    await events.write(new DataView(buffer, 3, 3));
+    await vi.waitFor(() => expect(received.objects).toHaveLength(2));
+    expect(received.objects.find((object) => object.groupId === 0)?.payload).toEqual(new Uint8Array([1, 2, 3]));
+    expect(received.objects.find((object) => object.groupId === 1)?.payload).toEqual(new Uint8Array([1, 2, 3]));
+  });
 });

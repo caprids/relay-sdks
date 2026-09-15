@@ -104,9 +104,11 @@ create that demand. The default 10-second write deadline covers both demand and 
 A timeout waiting for demand can be retried. A failure once a write is bound to a relay subscription
 ends that track, since an incomplete group may have reached the relay.
 
-Each write copies its bytes and sends one independent group containing one object. Await each
-write; a concurrent call rejects rather than growing a queue. Completion means the transport
-accepted the complete group, not that a viewer acknowledged it. There is no publisher-side replay
+Each write copies its bytes and sends one independent group containing one object. The payload is a
+`Uint8Array`; any other `ArrayBufferView` is accepted and copied as the raw bytes it spans, while a
+string, an `ArrayBuffer`, or an array is a `TypeError` raised before the write starts, so the track
+stays usable. Await each write; a concurrent call rejects rather than growing a queue. Completion
+means the transport accepted the complete group, not that a viewer acknowledged it. There is no publisher-side replay
 or retention after an object is sent. Late-subscriber behavior also depends on relay caching and
 subscription filters. A failed write may have delivered partial data; there is no automatic retry.
 

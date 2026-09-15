@@ -50,6 +50,8 @@ against that file.
   write.
 - A timeout while waiting for demand is retryable. A failure after the write is bound to a relay
   subscription ends that track, because an incomplete group may have reached the relay.
+- A write's payload must be a byte sequence in the language's own terms. Any other type is rejected
+  before the write starts, which is a local argument error and leaves the track usable.
 - Each write copies its bytes and sends one independent group containing one object. Only one
   write may be pending per track; a concurrent write is rejected rather than queued.
 - Write completion means the transport accepted the complete group, not that any viewer received

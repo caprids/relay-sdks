@@ -24,10 +24,11 @@ export interface RelayTrackWriter {
   /**
    * Write one independent object/group. Waits for relay demand. Resolves when the
    * transport accepts the complete group, not when a downstream viewer acknowledges it.
-   * Only one write may be pending; await it before writing again. Bytes are copied.
+   * Only one write may be pending; await it before writing again. Any ArrayBufferView is
+   * copied as its raw bytes; anything else is a TypeError that leaves the track usable.
    * A failed bound write ends this track; a timeout waiting for demand permits another write.
    */
-  write(payload: Uint8Array, options?: { properties?: readonly KeyValuePair[] }): Promise<void>;
+  write(payload: ArrayBufferView, options?: { properties?: readonly KeyValuePair[] }): Promise<void>;
   /** End the track and cancel an outstanding write. The publisher connection stays open. */
   close(): void;
 }
@@ -123,10 +124,15 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           lifetime.assertOpen();
           if (ended || closing) throw new Error('Published track is closed');
           if (active) throw new Error('A write is already pending; await it before writing another object');
+          // Check the payload before the write slot and alias are taken, so a caller's type error
+          // stays local and leaves the track usable instead of retiring it.
+          if (!ArrayBuffer.isView(payload))
+            throw new TypeError('Payload must be a Uint8Array or other ArrayBufferView; wrap an ArrayBuffer in one');
           if (payload.byteLength > MAX_OBJECT_PAYLOAD_LENGTH)
             throw new RangeError('Payload exceeds the 16 MiB object limit');
 
-          const bytes = payload.slice();
+          // Any view is published as the bytes it spans, which is what Python's bytes-like payloads do.
+          const bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength).slice();
           const properties = copyProperties(writeOptions.properties);
           let writer: SubgroupWriter | undefined;
           let cancelled = false;
