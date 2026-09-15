@@ -46,6 +46,21 @@ function deferred<T>() {
 }
 
 describe('connectRelay', () => {
+  it.each([[], ['live', ''], ['live', 7], 'live', null])(
+    'rejects invalid subscription namespace %j before sending',
+    async (namespace) => {
+      const fake = await connectFake();
+      const invalid = namespace as unknown as string[];
+      expect(() => fake.connection.subscribe({ namespace: invalid, track: 'events' })).toThrow(TypeError);
+      expect(() => fake.connection.tracks.subscribe({ trackNamespace: invalid, trackName: 'events' })).toThrow(
+        TypeError,
+      );
+      fake.connection.subscribe({ namespace: ['live', 'room/42'], track: 'events' });
+      const request = await fake.nextRequestStream();
+      expect(await request.firstMessage).toMatchObject({ requestId: 0, trackNamespace: ['live', 'room/42'] });
+    },
+  );
+
   it('subscribes to arbitrary binary tracks without WebTransport globals, a catalog, or media timestamps', async () => {
     vi.stubGlobal('WebTransport', undefined);
     const fake = await connectFake();
