@@ -725,6 +725,11 @@ class TestAioquicInternals:
         assert receiver.is_finished is False  # aioquic ignores `readable` here; the adapter sets it
         receiver.is_finished = True
 
+        # The mirror image, which the adapter relies on and does not set: the unused send half of a
+        # peer-initiated unidirectional stream is finished from the start, so the FIN alone lets
+        # aioquic discard the stream and the settle path prune a received group's entries.
+        assert QuicStreamSender(stream_id=3, writable=False).is_finished is True
+
         # QuicConnection / QuicStream: the live stream table the settle and drain paths read.
         connection = QuicConnection(configuration=QuicConfiguration(is_client=True))
         h3 = H3Connection(connection, enable_webtransport=True)
@@ -748,3 +753,106 @@ class TestAioquicInternals:
         assert callable(protocol._transmit_soon)
         assert protocol._transport is None
         assert protocol._loop is asyncio.get_running_loop()
+
+
+class TestReceivePruning:
+    """Per-stream state for peer-initiated streams is dropped once aioquic discards the stream."""
+
+    async def _connect(self, server: LoopbackWebTransportServer) -> Any:
+        created = connect_webtransport(
+            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        return created.transport
+
+    @staticmethod
+    def _maps(transport: Any) -> tuple[int, ...]:
+        protocol = transport._protocol
+        return (
+            len(transport._receives),
+            len(protocol.stream_owners),
+            len(protocol.h3._stream),
+            len(protocol._quic._streams),
+            len(protocol._settling),
+        )
+
+    async def test_received_streams_leave_no_per_stream_state_behind(self) -> None:
+        # Hundreds of received groups must not grow the adapter's maps, the settle map or the FIN
+        # sweep: a peer-initiated unidirectional stream has no send half of ours to finish.
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+        protocol = transport._protocol
+        baseline = self._maps(transport)
+        received: list[int] = []
+
+        async def read_all() -> None:
+            async for stream in transport.incoming_unidirectional_streams():
+                total = 0
+
+                while (chunk := await stream.read()) is not None:
+                    total += len(chunk)
+
+                received.append(total)
+
+        reader = asyncio.ensure_future(read_all())
+
+        try:
+            count = 300
+
+            for _ in range(count):
+                sender = await sessions[0].create_unidirectional_stream()
+                await sender.write(b"\1" * 64)
+                await sender.close()
+
+            await wait_for(lambda: len(received) == count, timeout=30)
+            # Pruning follows aioquic's own discard, which follows the acknowledgement.
+            await wait_for(lambda: self._maps(transport) == baseline, timeout=10)
+            await wait_for(lambda: protocol._fin_retry_handle is None, timeout=5)
+        finally:
+            reader.cancel()
+            transport.close()
+            await asyncio.wait_for(transport.wait_closed(), 5)
+            server.close()
+            await asyncio.sleep(0.05)
+
+    async def test_a_cancelled_receive_half_is_pruned_when_the_peer_ends_the_stream(self) -> None:
+        # The application stops reading (STOP_SENDING) and the peer's FIN crosses with it. The half
+        # ignores the FIN, but the stream is over as far as QUIC is concerned, so its entries must go.
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+        protocol = transport._protocol
+
+        try:
+            sender = await sessions[0].create_unidirectional_stream()
+            await sender.write(b"head")
+            incoming = await asyncio.wait_for(anext(transport.incoming_unidirectional_streams()), 5)
+            assert await incoming.read() == b"head"
+            stream_id: int = incoming._stream_id
+
+            # Our STOP_SENDING never reaches the peer, so its FIN is already on the way: the half is
+            # cancelled when the end of stream arrives.
+            sessions[0].impair(paused=True)
+            incoming.cancel()
+            await asyncio.wait_for(sender.close(), 10)
+            await wait_for(lambda: incoming._cancelled and not incoming.ended, timeout=5)
+            sessions[0].impair()
+
+            await wait_for(
+                lambda: (
+                    stream_id not in transport._receives
+                    and stream_id not in protocol.stream_owners
+                    and stream_id not in protocol.h3._stream
+                    and stream_id not in protocol._quic._streams
+                    and stream_id not in protocol._settling
+                ),
+                timeout=10,
+            )
+        finally:
+            transport.close()
+            await asyncio.wait_for(transport.wait_closed(), 5)
+            server.close()
+            await asyncio.sleep(0.05)
