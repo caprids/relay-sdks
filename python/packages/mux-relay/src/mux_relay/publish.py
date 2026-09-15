@@ -43,7 +43,14 @@ from .connect_session import (
     TokenProvider,
     open_relay_session,
 )
-from .errors import RelayClosedError, RelayError, RelayTimeoutError, RelayTrackEndedError, RelayWritePendingError
+from .errors import (
+    RelayClosedError,
+    RelayError,
+    RelayNamespaceError,
+    RelayTimeoutError,
+    RelayTrackEndedError,
+    RelayWritePendingError,
+)
 
 IMPLEMENTATION_NAME = "mux-relay (Python) publisher"
 DEFAULT_WRITE_TIMEOUT = 10.0
@@ -365,12 +372,18 @@ class RelayTrackWriter:
         return operation
 
     def _arm_timeout(self, operation: _Operation) -> asyncio.TimerHandle:
-        return call_later(
-            self._write_timeout,
-            lambda: self._cancel_operation(
-                operation, RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
-            ),
-        )
+        def expire() -> None:
+            error: RelayError
+            if operation.alias is None and self._session.namespace_solicited is False:
+                error = RelayNamespaceError(
+                    "Publisher namespace is not covered by the relay namespace solicitations; "
+                    "check the token and namespace"
+                )
+            else:
+                error = RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
+            self._cancel_operation(operation, error)
+
+        return call_later(self._write_timeout, expire)
 
     async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
         """Write one independent object/group.
