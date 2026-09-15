@@ -122,7 +122,9 @@ Publishing follows Relay's announce-and-serve ingest flow. `publish()` registers
 `write()` waits for the relay to subscribe upstream before sending bytes. Start a subscriber to
 create that demand. The default 10-second write deadline (`write_timeout`) covers both demand and
 transport writes. A `RelayTimeoutError` waiting for demand can be retried. A failure once a write is
-bound to a relay subscription ends that track, since an incomplete group may have reached the relay.
+bound to a relay subscription ends that track, since an incomplete group may have reached the relay:
+a relay re-bind raises `RelayTrackEndedError`, a transport timeout keeps its `RelayTimeoutError`, and
+either way `track.closed` turns `True`, `bound` turns `False`, and `bindings()` terminates.
 
 Each write copies its bytes and sends one independent group containing one object. Await each
 write; a concurrent call raises `RelayWritePendingError` rather than growing a queue. Completion
@@ -235,9 +237,9 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
 | `relay.closed` resolves `{ error? }` | `await relay.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
-| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError` |
+| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayTrackEndedError` |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
-| Single-object groups only | also `open_group()` multi-object groups and `bindings()` demand observation (see `spec/behavior.md`) |
+| Single-object groups only | also `open_group()` multi-object groups and `bindings()` demand observation, plus `writer.closed` and `RelayTrackEndedError`, which report the track end those watchers stop on (see `spec/behavior.md`) |
 | Browser `WebTransport` | aioquic WebTransport client (`connect_webtransport`) |
 
 ## Initial scope

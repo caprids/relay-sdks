@@ -147,6 +147,8 @@ class TestConnectRelayPublisher:
         with pytest.raises(RelayTimeoutError, match="timed out"):
             await events.write(bytes([1]))
 
+        # Nothing was bound, so the track is still live and the next write can wait for demand again.
+        assert not events.closed
         received = Received(subscriber, "events")
         await events.write(bytes([2]))
         await wait_for(lambda: len(received.objects) == 1)
@@ -372,6 +374,26 @@ class TestConnectRelayPublisher:
 
         with pytest.raises(ValueError, match="16 MiB"):
             await track.write(bytes(16 * 1024 * 1024 + 1))
+
+    async def test_releases_the_pending_slot_when_a_payload_or_property_cannot_be_converted(
+        self, cleanup: Cleanup
+    ) -> None:
+        _, publisher, _ = await connect_hub(cleanup)
+        events = publisher.publish("events", write_timeout=0.05)
+        text: Any = "not bytes"
+        unconvertible: Any = object()
+
+        with pytest.raises(TypeError):
+            await events.write(text)
+
+        with pytest.raises(TypeError):
+            await events.write(bytes([1]), properties=[KeyValuePair(3, unconvertible)])
+
+        # Neither call ever held the track's single in-flight slot, so the next write fails the
+        # ordinary retryable way (nobody is subscribed) instead of reporting a write that does not
+        # exist for the life of the connection.
+        with pytest.raises(RelayTimeoutError, match="timed out"):
+            await events.write(bytes([2]))
 
     async def test_rejects_an_empty_namespace_and_track_name(self, cleanup: Cleanup) -> None:
         hub = create_relay_hub()

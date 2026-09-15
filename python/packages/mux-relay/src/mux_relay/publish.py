@@ -43,7 +43,7 @@ from .connect_session import (
     TokenProvider,
     open_relay_session,
 )
-from .errors import RelayClosedError, RelayError, RelayTimeoutError, RelayWritePendingError
+from .errors import RelayClosedError, RelayError, RelayTimeoutError, RelayTrackEndedError, RelayWritePendingError
 
 IMPLEMENTATION_NAME = "mux-relay (Python) publisher"
 DEFAULT_WRITE_TIMEOUT = 10.0
@@ -200,15 +200,29 @@ class RelayTrackWriter:
 
     @property
     def bound(self) -> bool:
-        """True while the relay has a live subscription for this track, so writes can flow at once."""
-        return self._alias is not None
+        """True while the relay has a live subscription for this track, so writes can flow at once.
+
+        Always ``False`` once the track has ended: no write can flow again, whatever the relay asks
+        for. Read ``closed`` to tell a track that ended apart from one nobody is subscribed to.
+        """
+        return self._alias is not None and not self._ended
+
+    @property
+    def closed(self) -> bool:
+        """True once the track has ended: the application closed it, or a bound write failed.
+
+        A timeout waiting for relay demand leaves this ``False``, which is how a caller tells the
+        retryable failure apart from the terminal one even where both raise ``RelayTimeoutError``.
+        """
+        return self._ended
 
     def bindings(self) -> AsyncIterator[bool]:
         """Iterate the track's demand state: the current value first, then every change.
 
         Yields ``True`` when the relay (re)subscribes and ``False`` when its subscription ends, and
-        stops once the track is closed. A replacement subscription yields ``True`` again, so a
-        publisher that re-sends state on every subscribe (a catalog) can key off each ``True``.
+        stops once the track ends, however it ended. A replacement subscription yields ``True``
+        again, so a publisher that re-sends state on every subscribe (a catalog) can key off each
+        ``True``.
         """
         queue: asyncio.Queue[bool | None] = asyncio.Queue()
         queue.put_nowait(None if self._ended else self.bound)
@@ -235,12 +249,14 @@ class RelayTrackWriter:
         active = self._active
 
         if active is not None and active.alias is not None and active.alias != next_alias:
-            message = (
-                "Relay subscription changed during a write; the object may be incomplete"
+            # A bound write is about to retire the track, so it raises a terminal error; a group is
+            # only reset, and its failure stays retryable.
+            error = (
+                RelayTrackEndedError("Relay subscription changed during a write; the object may be incomplete")
                 if active.kind == "write"
-                else "Relay subscription changed during the group; it may be incomplete"
+                else RelayError("Relay subscription changed during the group; it may be incomplete")
             )
-            self._cancel_operation(active, RelayError(message))
+            self._cancel_operation(active, error)
 
         changed = self._alias != next_alias
         self._alias = next_alias
@@ -266,8 +282,7 @@ class RelayTrackWriter:
         # was reset explicitly, the peer knows the group is incomplete, and the next group starts at
         # the caller's next random-access point, so the track stays open.
         if operation.kind == "write" and operation.alias is not None:
-            self._ended = True
-            self._registered.end()
+            self._end_track()
 
         # Release an outstanding wait for relay demand as well as the public future.
         operation.wake()
@@ -278,6 +293,19 @@ class RelayTrackWriter:
         if operation.kind == "group" and self._active is operation:
             self._active = None
 
+    def _end_track(self) -> None:
+        """Retire the track once: refuse later writes, end the registration, and tell the watchers.
+
+        Every path that ends a track goes through here, so a ``bindings()`` consumer always learns
+        the track is over whether the application closed it or a bound write retired it.
+        """
+        if self._ended:
+            return
+
+        self._ended = True
+        self._registered.end()
+        self._notify_watchers(None)
+
     # ------------------------------------------------------------------ public API
 
     def close(self, error: BaseException | None = None) -> None:
@@ -285,15 +313,14 @@ class RelayTrackWriter:
         if self._ended:
             return
 
-        self._ended = True
-
         if self._active is not None:
             self._cancel_operation(self._active, error or RelayClosedError("Published track is closed"))
 
-        self._registered.end()
-        self._notify_watchers(None)
+        # Cancelling a bound write retires the track itself; ending it again is a no-op.
+        self._end_track()
 
-    def _begin(self, kind: Literal["write", "group"]) -> _Operation:
+    def _assert_writable(self) -> None:
+        """What a new write or group needs: an open connection, a live track, and a free slot."""
         self._lifetime.assert_open()
 
         if self._ended or self._publisher._closing:
@@ -302,6 +329,8 @@ class RelayTrackWriter:
         if self._active is not None:
             raise RelayWritePendingError("A write or group is already pending; await it before writing another object")
 
+    def _begin(self, kind: Literal["write", "group"]) -> _Operation:
+        self._assert_writable()
         loop = asyncio.get_running_loop()
         operation = _Operation(kind=kind, demand=loop.create_future(), interrupted=loop.create_future())
         observe(operation.interrupted)
@@ -321,25 +350,20 @@ class RelayTrackWriter:
 
         Waits for relay demand. Returns when the transport accepts the complete group, not when a
         downstream viewer acknowledges it. Only one write or group may be pending; await it before
-        writing again. Bytes are copied. A failed bound write ends this track; a timeout waiting for
-        demand permits another write.
+        writing again. Bytes are copied. A failed bound write ends this track, which ``closed``
+        reports; a timeout waiting for demand permits another write.
         """
+        self._assert_writable()
+
         if len(payload) > MAX_OBJECT_PAYLOAD_LENGTH:
-            self._lifetime.assert_open()
-
-            if self._ended or self._publisher._closing:
-                raise RelayClosedError("Published track is closed")
-
-            if self._active is not None:
-                raise RelayWritePendingError(
-                    "A write or group is already pending; await it before writing another object"
-                )
-
             raise ValueError("Payload exceeds the 16 MiB object limit")
 
-        operation = self._begin("write")
+        # Copy the arguments before taking the track's single in-flight slot: a payload or property
+        # that cannot be converted must not leave the slot held for the life of the connection.
         data = bytes(payload)
         object_properties = _copy_properties(properties)
+
+        operation = self._begin("write")
         timer = self._arm_timeout(operation)
 
         try:

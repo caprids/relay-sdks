@@ -1,19 +1,24 @@
 """Multi-object groups and demand observation on ``RelayTrackWriter``, the additions video publishing needs."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from typing import Any
 
 import pytest
 from core_helpers.waiting import settle, wait_for
 from relay_helpers.relay_hub import RelayHub, create_relay_hub
 
-from moq_core import KeyValuePair, MoqtObject, SubscriptionHandlers
+from moq_core import KeyValuePair, MoqtObject, SubscriptionHandlers, TrackBinding
+from moq_core.transport import SendStream
 from mux_relay import (
+    ConnectingTransport,
     RelayClosedError,
     RelayConnection,
     RelayError,
     RelayPublisher,
     RelayTimeoutError,
+    RelayTrackEndedError,
+    RelayTrackWriter,
     RelayWritePendingError,
     connect_relay,
     connect_relay_publisher,
@@ -51,6 +56,62 @@ def receive(subscriber: RelayConnection, track: str) -> list[MoqtObject]:
     objects: list[MoqtObject] = []
     subscriber.subscribe(NAMESPACE, track, SubscriptionHandlers(on_object=objects.append))
     return objects
+
+
+class HeldStreams:
+    """A publisher transport whose data-stream opens can be held, freezing a write while it is bound.
+
+    A write takes the relay's alias just before it opens its stream, so holding that open is how a
+    test keeps a write bound and in flight long enough for the relay to move the binding under it.
+    """
+
+    def __init__(self, hub: RelayHub) -> None:
+        self._hub = hub
+        self.holding = False
+        self.holds = 0
+        self._held: asyncio.Future[SendStream] = asyncio.get_running_loop().create_future()
+
+    def connect(self, url: str, protocols: Sequence[str]) -> ConnectingTransport:
+        created = self._hub.connect_publisher(url, protocols)
+        transport: Any = created.transport
+        open_stream = transport.create_unidirectional_stream
+
+        async def open_or_hold() -> SendStream:
+            if self.holding:
+                self.holds += 1
+                return await self._held
+
+            return await open_stream()
+
+        transport.create_unidirectional_stream = open_or_hold
+        return created
+
+    def release(self) -> None:
+        """Let go of the held open so no send task is left parked when the test ends."""
+        if not self._held.done():
+            self._held.cancel()
+
+
+async def connect_held_hub(cleanup: Cleanup) -> tuple[HeldStreams, RelayPublisher, RelayConnection]:
+    hub = create_relay_hub()
+    cleanup.append(hub.destroy)
+    streams = HeldStreams(hub)
+    cleanup.append(streams.release)
+    publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=streams.connect)
+    subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+    cleanup.append(subscriber.close)
+    cleanup.append(publisher.close)
+    return streams, publisher, subscriber
+
+
+def watch_bindings(track: RelayTrackWriter, seen: list[bool]) -> asyncio.Task[None]:
+    """Collect a track's demand changes in the background until its ``bindings()`` iterator stops."""
+
+    async def collect() -> None:
+        async for bound in track.bindings():
+            seen.append(bound)
+
+    return asyncio.ensure_future(collect())
 
 
 class TestOpenGroup:
@@ -191,6 +252,23 @@ class TestOpenGroup:
         await video.write(b"y")
         await wait_for(lambda: len(objects) == 1)
 
+    async def test_a_payload_that_cannot_be_converted_leaves_the_group_open(self, cleanup: Cleanup) -> None:
+        _, publisher, subscriber = await connect_hub(cleanup)
+        video = publisher.publish("video")
+        objects = receive(subscriber, "video")
+        group = await video.open_group()
+        text: Any = "not bytes"
+
+        with pytest.raises(TypeError):
+            await group.write(text)
+
+        # Nothing left the process, so the group keeps its object numbering and stays usable.
+        assert not group.closed
+        assert group.object_count == 0
+        await group.write(b"key")
+        await group.close()
+        await wait_for(lambda: len(objects) == 1)
+
     async def test_rejects_oversized_objects(self, cleanup: Cleanup) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
         video = publisher.publish("video")
@@ -227,9 +305,11 @@ class TestBindings:
         catalog._bind(None)
         await wait_for(lambda: seen == [False, True, False])
         assert not catalog.bound
+        assert not catalog.closed
 
         catalog.close()
         await wait_for(lambda: watcher.done())
+        assert catalog.closed
 
     async def test_yields_true_again_for_a_replacement_subscription(self, cleanup: Cleanup) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
@@ -247,6 +327,63 @@ class TestBindings:
         catalog._bind(7)
         await wait_for(lambda: seen == [False, True, True])
         watcher.cancel()
+
+    async def test_a_relay_re_bind_during_a_bound_write_ends_the_track_and_stops_its_watchers(
+        self, cleanup: Cleanup
+    ) -> None:
+        streams, publisher, subscriber = await connect_held_hub(cleanup)
+        audio = publisher.publish("audio")
+        seen: list[bool] = []
+        watcher = watch_bindings(audio, seen)
+        receive(subscriber, "audio")
+        await wait_for(lambda: audio.bound)
+
+        # Hold the write's stream open so it stays bound in flight, then move the relay's binding to
+        # another alias: the shape of a relay re-subscribing under a running publisher.
+        streams.holding = True
+        writing = asyncio.ensure_future(audio.write(b"x"))
+        await wait_for(lambda: streams.holds == 1)
+        alias = audio._alias
+        assert alias is not None
+        publisher._on_track_binding(TrackBinding(track_name="audio", track_alias=alias + 1))
+
+        with pytest.raises(RelayTrackEndedError, match="subscription changed") as raised:
+            await writing
+
+        # The track is retired, and the failure is terminal rather than the retryable timeout.
+        assert isinstance(raised.value, RelayClosedError)
+        assert not isinstance(raised.value, RelayTimeoutError)
+        assert audio.closed
+        assert not audio.bound
+
+        # Every watcher hears the end, including one that arrives after it.
+        await wait_for(lambda: watcher.done())
+        assert seen == [False, True]
+        assert [bound async for bound in audio.bindings()] == []
+
+        with pytest.raises(RelayClosedError, match="closed"):
+            await audio.write(b"y")
+
+    async def test_a_bound_write_that_times_out_reports_a_closed_track_and_stops_its_watchers(
+        self, cleanup: Cleanup
+    ) -> None:
+        # A bound write that times out on the transport keeps raising RelayTimeoutError, as the spec
+        # says, so `closed` is what tells this terminal case from the retryable wait for demand.
+        streams, publisher, subscriber = await connect_held_hub(cleanup)
+        audio = publisher.publish("audio", write_timeout=0.05)
+        seen: list[bool] = []
+        watcher = watch_bindings(audio, seen)
+        receive(subscriber, "audio")
+        await wait_for(lambda: audio.bound)
+        streams.holding = True
+
+        with pytest.raises(RelayTimeoutError, match="timed out"):
+            await audio.write(b"x")
+
+        assert audio.closed
+        assert not audio.bound
+        await wait_for(lambda: watcher.done())
+        assert seen == [False, True]
 
     async def test_replays_state_on_every_subscribe(self, cleanup: Cleanup) -> None:
         # The catalog pattern: a fresh subscription must not wait for the next change.
