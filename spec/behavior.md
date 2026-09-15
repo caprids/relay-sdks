@@ -14,7 +14,11 @@ against that file.
 - Authentication is a JWT supplied by the application. The SDK sends it as the `jwt` query
   parameter on the endpoint URL. An explicit `jwt` parameter already present on the URL takes
   precedence over a token callback.
-- SDKs and their tooling never write the token to disk and never include it in logs or error text.
+- SDK-generated logs and error text do not include the token, and SDK tooling does not persist it
+  to disk. Tooling redacts the supplied token from browser diagnostics it forwards. The browser
+  itself is outside that guarantee: Chromium can log the full authenticated WebTransport URL on
+  handshake failure. Applications must sanitize captured diagnostics before storing or forwarding
+  them; see `ts/README.md`, "Browser token exposure".
 - Connecting has one deadline that covers token resolution and both handshakes, transport and
   MOQT setup.
 - The application can give the SDK a cancellation primitive, such as an abort signal or a
@@ -27,7 +31,8 @@ against that file.
 
 - Namespaces are ordered tuples of fields sent verbatim. The SDK adds no prefix and performs no
   normalization. Fields are absolute: the token's root prefix is part of the namespace the
-  application supplies.
+  application supplies. Subscription namespaces must contain non-empty string fields; invalid
+  namespaces are rejected locally before sending a request.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The SDK adds no application queue, no
@@ -49,6 +54,10 @@ against that file.
   publisher connection serves one namespace and any number of tracks.
 - Publishing follows the relay's announce-and-serve flow. Registering a track announces it. A write
   waits for the relay to subscribe upstream before sending bytes; a subscriber creates that demand.
+  If namespace solicitations have arrived but none currently covers the publisher namespace when
+  the demand deadline expires, the write reports a namespace coverage error instead of an ordinary
+  demand timeout. Check the token and namespace before retrying. This does not prove authorization
+  was denied: solicitations can arrive independently, and a later matching prefix permits writes.
 - The default write deadline is 10 seconds and covers both waiting for demand and the transport
   write.
 - A timeout while waiting for demand is retryable. A failure after the write is bound to a relay

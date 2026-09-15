@@ -162,6 +162,7 @@ describe('createMoqtPublishSession', () => {
     session.announce(NAMESPACE);
     session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'catalog' });
 
+    expect(session.namespaceSolicited).toBeUndefined();
     const solicitation = await solicitNamespace(pair.server, ['other']);
 
     await vi.waitFor(() => {
@@ -170,6 +171,12 @@ describe('createMoqtPublishSession', () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(solicitation.received).toHaveLength(1);
     expect(announced).toEqual([]);
+    expect(session.namespaceSolicited).toBe(false);
+    const matching = await solicitNamespace(pair.server, ['live'], 3);
+    await vi.waitFor(() => expect(matching.received.map((m) => m.kind)).toEqual(['request-ok', 'namespace']));
+    expect(session.namespaceSolicited).toBe(true);
+    matching.reset();
+    await vi.waitFor(() => expect(session.namespaceSolicited).toBe(false));
     session.destroy();
     subscriber.destroy();
   });

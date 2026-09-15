@@ -51,6 +51,7 @@ export async function connectRelay(options: ConnectRelayOptions): Promise<RelayC
     closed,
     subscribe: (...args: Parameters<MoqtSession['subscribe']>) => {
       assertOpen();
+      validateNamespace(args[0].trackNamespace);
       return connected.subscribe(...args);
     },
     fetch: (...args: Parameters<MoqtSession['fetch']>) => {
@@ -66,8 +67,20 @@ export async function connectRelay(options: ConnectRelayOptions): Promise<RelayC
   return {
     closed,
     tracks,
-    subscribe: ({ namespace, track, parameters }, handlers) =>
-      tracks.subscribe({ trackNamespace: [...namespace], trackName: track, parameters }, handlers),
+    subscribe: ({ namespace, track, parameters }, handlers) => {
+      validateNamespace(namespace);
+      return tracks.subscribe({ trackNamespace: [...namespace], trackName: track, parameters }, handlers);
+    },
     close,
   };
+}
+
+function validateNamespace(namespace: readonly string[]): void {
+  if (
+    !Array.isArray(namespace) ||
+    namespace.length === 0 ||
+    Array.from(namespace).some((field) => typeof field !== 'string' || field.length === 0)
+  ) {
+    throw new TypeError('A subscription namespace must contain non-empty string fields');
+  }
 }

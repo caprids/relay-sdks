@@ -65,6 +65,21 @@ async def connect_fake(
 
 
 class TestConnectRelay:
+    @pytest.mark.parametrize("namespace", [[], ["live", ""], ["live", 7], "live", None])
+    async def test_rejects_invalid_namespace_before_sending(
+        self, connections: list[RelayConnection], namespace: Any
+    ) -> None:
+        fake, connection, _ = await connect_fake(connections)
+        with pytest.raises(TypeError, match="non-empty string fields"):
+            connection.subscribe(namespace, "events")
+        with pytest.raises(TypeError, match="non-empty string fields"):
+            connection.tracks.subscribe(MoqtSubscribeOptions(track_namespace=namespace, track_name="events"))
+        connection.subscribe(["live", "room/42"], "events")
+        request = await fake.next_request_stream()
+        assert await request.first_message == Subscribe(
+            request_id=0, track_namespace=["live", "room/42"], track_name="events"
+        )
+
     async def test_subscribes_to_arbitrary_binary_tracks_without_a_catalog_or_media_timestamps(
         self, connections: list[RelayConnection]
     ) -> None:

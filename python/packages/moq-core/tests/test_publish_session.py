@@ -159,12 +159,19 @@ class TestCreateMoqtPublishSession:
         harness.session.announce(NAMESPACE)
         register(harness.session, "catalog")
 
+        assert harness.session.namespace_solicited is None
         solicitation = await solicit_namespace(harness.pair.server, ["other"])
 
         await wait_for(lambda: solicitation.kinds() == ["request-ok"])
         await settle()
         assert len(solicitation.received) == 1
         assert announced == []
+        assert harness.session.namespace_solicited is False
+        matching = await solicit_namespace(harness.pair.server, ["live"], 3)
+        await wait_for(lambda: matching.kinds() == ["request-ok", "namespace"])
+        assert harness.session.namespace_solicited is True
+        matching.reset()
+        await wait_for(lambda: harness.session.namespace_solicited is False)
         harness.destroy()
 
     async def test_reports_on_announce_ended_when_the_solicitation_carrying_the_announce_ends(self) -> None:

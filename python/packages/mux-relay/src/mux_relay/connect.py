@@ -39,6 +39,16 @@ from .connect_session import (
 IMPLEMENTATION_NAME = "mux-relay (Python)"
 
 
+def _validate_namespace(namespace: Sequence[str]) -> None:
+    if (
+        not isinstance(namespace, Sequence)
+        or isinstance(namespace, (str, bytes, bytearray))
+        or not namespace
+        or any(not isinstance(field, str) or not field for field in namespace)
+    ):
+        raise TypeError("A subscription namespace must contain non-empty string fields")
+
+
 class _BorrowedTracks:
     """Generic borrowed track access for integrations.
 
@@ -58,6 +68,7 @@ class _BorrowedTracks:
 
     def subscribe(self, options: MoqtSubscribeOptions, handlers: SubscriptionHandlers | None = None) -> Subscription:
         self._lifetime.assert_open()
+        _validate_namespace(options.track_namespace)
         return self._lifetime.session.subscribe(options, handlers)
 
     def fetch(self, options: MoqtSubscribeOptions, handlers: FetchHandlers | None = None) -> FetchHandle:
@@ -101,6 +112,7 @@ class RelayConnection:
         ``namespace`` fields are sent verbatim, without splitting or joining on slashes.
         ``parameters`` carries protocol subscription controls such as the location filter and priority.
         """
+        _validate_namespace(namespace)
         return self._tracks.subscribe(
             MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters), handlers
         )
