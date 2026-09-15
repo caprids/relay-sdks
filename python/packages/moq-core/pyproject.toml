@@ -2,10 +2,12 @@
 name = "moq-core"
 version = "0.0.0"
 description = "Transport-independent MOQT track primitives"
+readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11"
 # Boundary: the generic core has no runtime dependencies. A transport belongs in mux-relay,
-# behind an abstract interface declared here, matching the TypeScript `createTransport` seam.
+# behind the abstract interface declared in moq_core.transport, matching the TypeScript
+# `createTransport` seam.
 dependencies = []
 
 [build-system]

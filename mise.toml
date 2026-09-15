@@ -74,12 +74,28 @@ dir = "python"
 run = "uv run pytest"
 
 [tasks."python:check"]
-description = "Lint, format-check, import-boundary-check, and test the Python SDK"
+description = "Lint, format-check, import-boundary-check, type-check, and test the Python SDK"
 dir = "python"
 run = [
   "uv sync --locked",
   "uv run ruff check .",
   "uv run ruff format --check .",
   "uv run lint-imports",
+  "uv run ty check",
   "uv run pytest",
 ]
+
+[tasks."python:test:relay"]
+description = "Opt-in live smoke test against a real Relay (RELAY_TOKEN or hidden prompt)"
+dir = "python"
+run = "uv run python scripts/test_relay.py"
+
+[tasks."python:example:mux-global"]
+description = "Run the mux.global example natively over aioquic; pass its options after --"
+dir = "python"
+run = "uv run python examples/mux_global/demo.py"
+
+[tasks."python:example:videojs"]
+description = "Stream H.264 (and optional Opus) to a namespace for a Video.js MoQ player; pass options after --"
+dir = "python"
+run = "uv run python examples/videojs_stream/stream.py"

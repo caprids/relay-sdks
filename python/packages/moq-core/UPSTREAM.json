@@ -1,0 +1,26 @@
+{
+  "repository": "https://github.com/videojs/v10",
+  "revision": "5a486737dad4a5874a4f4d3250c7cc8195f5d704",
+  "protocol": "moqt-20",
+  "portedFrom": "ts/packages/moq-core (this repository); the TypeScript snapshot is the reference implementation",
+  "files": {
+    "packages/spf/src/network/moqt/bytes.ts": "50cd814e1b601047e26d11954191c1fc91ecc559d1b9cc4cca1a48424af00bba",
+    "packages/spf/src/network/moqt/control-messages.ts": "f0832fd5e4974a07e308ab7fcdffa92b73e4fdd9eb6916f17a9481d2d3830935",
+    "packages/spf/src/network/moqt/errors.ts": "a3b9498efb1133bbdbe5047c95ac63744c69ea98c805a01941f996e28eff3e3d",
+    "packages/spf/src/network/moqt/object-stream.ts": "1e57fd00bc4437c7f983305a00bf3473e1dcec04d65a1bb9d08a68901f9f92e7",
+    "packages/spf/src/network/moqt/request-stream.ts": "f89104ecc12e18882905557292e43fd6b4b927564487b49b2a7ca6a01ed2cd68",
+    "packages/spf/src/network/moqt/session.ts": "948459b9bc7508d2573a1a428201e5be691e01c9910c17a483aff88b1ab5796a",
+    "packages/spf/src/network/moqt/varint.ts": "c4f2b9db079f99d36c18cee22cc223bfbe154453944d48e616094aeb512cd7a5",
+    "packages/spf/src/publish/session/publish-session.ts": "5dede482ff4f56362be532ef28376f53935f143ef8465a781fa7ffda4f072190",
+    "packages/spf/src/network/moqt/subgroup-writer.ts": "716633da1bf9defe2b8f99dce33f61f9aa9c91cdadf044df71cf55d79a60a012"
+  },
+  "adaptations": [
+    "Ported from TypeScript to Python 3.11+ asyncio; module names are snake_case and the WHATWG stream seam becomes moq_core.transport.",
+    "Discriminated unions (control messages, location filters, fetch entries) are frozen dataclasses carrying a `kind`/`type` class attribute with the TypeScript spelling.",
+    "Varints cover the full 64-bit wire range because Python integers are exact; the TypeScript 2^53-1 ceiling and its guards are not needed.",
+    "Timers use the asyncio event loop; durations in the SDK API are seconds rather than milliseconds.",
+    "The default SETUP implementation identifier names moq-core (Python). The MoqtProtocolError type is the identity test for session-fatal codec errors.",
+    "Publish session extraction excludes the SPF actor and accepts explicit track properties instead of imposing the LOC microsecond timescale."
+  ],
+  "migration": "Port of the initial extraction snapshot. Keep the two cores in lockstep through spec/; do not let the ports drift into separately maintained protocol implementations."
+}

@@ -9,10 +9,23 @@ requires-python = ">=3.11"
 dependencies = ["moq-core", "mux-relay"]
 
 [dependency-groups]
-dev = ["import-linter>=2.0", "pytest>=8.0", "ruff>=0.13"]
+dev = [
+  "import-linter>=2.0",
+  "pytest>=8.0",
+  "pytest-asyncio>=0.24",
+  "ruff>=0.13",
+  "ty>=0.0.1a1",
+]
+examples = [
+    "av>=15",
+    "numpy>=2",
+]
 
 [tool.uv]
 package = false
+# The examples group (PyAV, numpy) is synced by default so `uv run` starts the examples without
+# extra flags and ty resolves their imports in `python:check`.
+default-groups = ["dev", "examples"]
 
 [tool.uv.workspace]
 members = ["packages/*"]
@@ -21,22 +34,80 @@ members = ["packages/*"]
 moq-core = { workspace = true }
 mux-relay = { workspace = true }
 
+# ---------------------------------------------------------------------------------------------------
+# Astral tooling: ruff lints and formats, ty type-checks. Both read this file from the workspace root.
+# ---------------------------------------------------------------------------------------------------
+
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+src = ["packages/moq-core/src", "packages/mux-relay/src"]
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
+select = [
+  "E",     # pycodestyle errors
+  "F",     # pyflakes
+  "I",     # isort
+  "B",     # bugbear
+  "UP",    # pyupgrade
+  "ASYNC", # asyncio pitfalls
+  "C4",    # comprehensions
+  "SIM",   # simplify
+  "RUF",   # ruff-specific
+]
+ignore = [
+  "RUF012", # mutable class attributes are annotated ClassVar where they matter
+  "SIM105", # contextlib.suppress hides intent in protocol teardown paths
+  "SIM108", # ternaries are not always clearer than an if/else
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = [
+  "ASYNC109", # wait_for(timeout=...) mirrors vi.waitFor; the loop is cancellation-safe
+  "ASYNC110", # tests poll with short sleeps on purpose (the vi.waitFor equivalent)
+  "RUF029",   # async test helpers stay async for pytest-asyncio even when they need no await
+]
+"scripts/**" = ["ASYNC110"]
+"examples/**" = ["ASYNC110"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.ty.environment]
+python = ".venv"
+python-version = "3.11"
+root = [
+  "packages/moq-core/src",
+  "packages/mux-relay/src",
+  "packages/moq-core/tests",
+  "packages/mux-relay/tests",
+  "examples",
+]
+
+[tool.ty.src]
+include = ["packages", "scripts", "examples"]
 
 [tool.pytest.ini_options]
 testpaths = ["packages/moq-core/tests", "packages/mux-relay/tests"]
+pythonpath = ["packages/moq-core/tests", "packages/mux-relay/tests", "examples"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 
-# The Python counterpart of ts/scripts/check-boundaries.mjs: the generic core must not know about Relay.
+# The Python counterpart of ts/scripts/check-boundaries.mjs: the generic core must not know about
+# Relay or any transport library. `include_external_packages` lets the second contract see aioquic.
 [tool.importlinter]
 root_packages = ["moq_core", "mux_relay"]
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "moq_core is protocol-only and imports nothing from mux_relay"
 type = "forbidden"
 source_modules = ["moq_core"]
 forbidden_modules = ["mux_relay"]
+
+[[tool.importlinter.contracts]]
+name = "moq_core has no runtime dependencies; the transport lives in mux_relay"
+type = "forbidden"
+source_modules = ["moq_core"]
+forbidden_modules = ["aioquic", "cryptography", "certifi"]
