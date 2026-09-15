@@ -138,7 +138,10 @@ relay caching and subscription filters. A failed write may have delivered partia
 automatic retry.
 
 Optional `track_properties` on `publish()` and `properties` on `write()` carry explicit protocol
-metadata as `KeyValuePair` values. Raw tracks have no default timescale or LOC framing. Objects are
+metadata as `KeyValuePair` values. Property types and even-type values must be non-negative 64-bit
+integers (excluding `bool`); odd-type values must expose a bytes-like buffer. Invalid properties
+raise `TypeError` before a write starts or a track is registered. Raw tracks have no default timescale
+or LOC framing. Objects are
 limited to 16 MiB. `events.close()` cancels an outstanding write and ends that track; other tracks
 keep running. `await publisher.close()` ends all tracks, retracts the namespace, and waits for
 transport shutdown. Track names cannot be reused within a publisher connection, including after

@@ -32,6 +32,7 @@ from moq_core import (
     create_subgroup_writer,
 )
 from moq_core._tasks import call_later, observe, spawn
+from moq_core.varint import MAX_VARINT_VALUE
 
 from .cancellation import CancellationToken
 from .connect_session import (
@@ -60,11 +61,15 @@ MAX_WRITE_TIMEOUT = 2_147_483.647
 def _copy_properties(properties: Sequence[KeyValuePair] | None) -> list[KeyValuePair]:
     copied: list[KeyValuePair] = []
     for index, prop in enumerate(properties or ()):
-        if not isinstance(prop.type, int) or isinstance(prop.type, bool) or not 0 <= prop.type <= 2**53 - 1:
-            raise TypeError(f"Property {index} type must be a non-negative safe integer")
+        if not isinstance(prop.type, int) or isinstance(prop.type, bool) or not 0 <= prop.type <= MAX_VARINT_VALUE:
+            raise TypeError(f"Property {index} type must be a non-negative 64-bit integer")
         if prop.type % 2 == 0:
-            if not isinstance(prop.value, int) or isinstance(prop.value, bool) or not 0 <= prop.value <= 2**53 - 1:
-                raise TypeError(f"Property {index} value must be a non-negative safe integer for an even type")
+            if (
+                not isinstance(prop.value, int)
+                or isinstance(prop.value, bool)
+                or not 0 <= prop.value <= MAX_VARINT_VALUE
+            ):
+                raise TypeError(f"Property {index} value must be a non-negative 64-bit integer for an even type")
             value = prop.value
         else:
             if isinstance(prop.value, int):
