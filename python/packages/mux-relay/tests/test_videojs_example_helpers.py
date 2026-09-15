@@ -25,16 +25,18 @@ from videojs_stream.moq_media import (
 from videojs_stream.stream import (
     EncodedSample,
     Stats,
+    TrackEnded,
     failure_ends_track,
     make_track_end_handler,
     publish_media,
+    run_failure,
     serve_catalog,
     summarize,
     track_has_ended,
     write_ended_track,
 )
 
-from mux_relay import RelayClosedError, RelayError, RelayTimeoutError
+from mux_relay import CancellationToken, Cancelled, RelayClosedError, RelayError, RelayTimeoutError
 
 
 class TestAnnexB:
@@ -326,27 +328,32 @@ def video_samples(count: int) -> list[EncodedSample]:
     return [EncodedSample(kind="video", timestamp_us=i * 33_333, payload=b"\x00", key=i == 0) for i in range(count)]
 
 
-async def drive(
-    samples: list[EncodedSample], *, video: FakeTrack, audio: FakeTrack | None
-) -> tuple[Stats, list[tuple[str, RelayError]]]:
-    """Run the example's publish loop over a scripted sample list and report what it counted."""
+def queue_of(samples: list[EncodedSample]) -> asyncio.Queue[EncodedSample | None]:
     queue: asyncio.Queue[EncodedSample | None] = asyncio.Queue()
 
     for sample in samples:
         queue.put_nowait(sample)
 
     queue.put_nowait(None)
+    return queue
+
+
+async def drive(
+    samples: list[EncodedSample], *, video: object, audio: object
+) -> tuple[Stats, list[tuple[str, RelayError]]]:
+    """Run the example's publish loop over a scripted sample list and report what it counted."""
     stats = Stats()
     ended: list[tuple[str, RelayError]] = []
     encoder = cast(Any, SimpleNamespace(avcc=b"\x01\x42"))
     await publish_media(
-        queue,
+        queue_of(samples),
         cast(Any, video),
         cast(Any, audio),
         encoder,
         stats,
         cast(Any, lambda event, fields: None),
         lambda track, error: ended.append((track, error)),
+        CancellationToken(),
     )
     return stats, ended
 
@@ -422,6 +429,158 @@ class TestPublishMediaTrackEnd:
         audio_total = stats.audio_objects + stats.skipped_audio + stats.dropped_audio
 
         assert (video_total, audio_total) == (6, 4)
+
+
+class CancellingGroup:
+    """A group whose writes and close re-raise the lifetime's cancel reason, as `assert_open` does."""
+
+    def __init__(self, lifetime: CancellationToken, track: "CancellingTrack") -> None:
+        self.group_id = 0
+        self._lifetime = lifetime
+        self._track = track
+
+    async def write(self, payload: bytes, *, properties: object = None) -> None:
+        self._lifetime.throw_if_cancelled()
+
+    async def close(self) -> None:
+        self._track.closes += 1
+        self._lifetime.throw_if_cancelled()
+
+
+class CancellingTrack:
+    """A video writer that fails everything in flight with the reason the lifetime was cancelled with."""
+
+    def __init__(self, lifetime: CancellationToken) -> None:
+        self.bound = True
+        self.ended = False
+        self.closes = 0
+        self._lifetime = lifetime
+
+    async def open_group(self) -> CancellingGroup:
+        self._lifetime.throw_if_cancelled()
+        return CancellingGroup(self._lifetime, self)
+
+
+async def drive_until_stopped(
+    samples: list[EncodedSample], lifetime: CancellationToken, video: CancellingTrack, audio: FakeTrack
+) -> tuple[Stats, BaseException | None, BaseException | None]:
+    """Publish under the `stop` policy and report what the media task and the handler each produced."""
+    stats = Stats()
+    reasons: list[BaseException] = []
+
+    def stop(reason: BaseException) -> None:
+        reasons.append(reason)
+        lifetime.cancel(reason)
+
+    on_track_end = make_track_end_handler("stop", stats, cast(Any, lambda event, fields: None), stop)
+    media_failure: BaseException | None = None
+
+    try:
+        await publish_media(
+            queue_of(samples),
+            cast(Any, video),
+            cast(Any, audio),
+            cast(Any, SimpleNamespace(avcc=b"\x01\x42")),
+            stats,
+            cast(Any, lambda event, fields: None),
+            on_track_end,
+            lifetime,
+        )
+    except BaseException as error:
+        media_failure = error
+
+    return stats, media_failure, reasons[0] if reasons else None
+
+
+class TestStopPolicyReporting:
+    """Cancelling for a retired track must not come back as an anonymous publishing failure."""
+
+    async def test_a_track_end_under_the_stop_policy_is_reported_as_itself(self) -> None:
+        # The SDK re-raises the application's cancel reason out of the video write still in flight,
+        # and it is not a RelayError, so it escapes the publish loop.
+        lifetime = CancellationToken()
+        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        samples = [
+            EncodedSample(kind="video", timestamp_us=0, payload=b"\x00", key=True),
+            EncodedSample(kind="audio", timestamp_us=0, payload=b"\xfc\xff", key=True),
+            EncodedSample(kind="video", timestamp_us=33_333, payload=b"\x00", key=False),
+        ]
+        video = CancellingTrack(lifetime)
+        stats, media_failure, track_end_reason = await drive_until_stopped(
+            samples, lifetime, video, FakeTrack(fail_on=0, error=rebind)
+        )
+
+        assert media_failure is lifetime.reason
+        assert isinstance(track_end_reason, TrackEnded)
+        assert stats.ended_tracks == {"audio": f"RelayError: {rebind}"}
+
+        failure = run_failure(
+            producer_error=None,
+            media_failure=media_failure,
+            cancel_reason=lifetime.reason,
+            track_end_reason=track_end_reason,
+        )
+
+        # Not `RuntimeError: publishing failed: TrackEnded: ...`, which says nothing about the track.
+        assert failure is track_end_reason
+        assert "the audio track ended mid-run" in str(failure)
+
+    async def test_abandoning_a_group_does_not_re_raise_the_cancellation(self) -> None:
+        # `end_group` runs in the publish loop's finally; raising the cancellation again there would
+        # replace whatever was already on its way out.
+        lifetime = CancellationToken()
+        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        samples = [
+            EncodedSample(kind="video", timestamp_us=0, payload=b"\x00", key=True),
+            EncodedSample(kind="audio", timestamp_us=0, payload=b"\xfc\xff", key=True),
+        ]
+        video = CancellingTrack(lifetime)
+        _, media_failure, track_end_reason = await drive_until_stopped(
+            samples, lifetime, video, FakeTrack(fail_on=0, error=rebind)
+        )
+
+        assert video.closes == 1
+        assert media_failure is None
+        assert isinstance(track_end_reason, TrackEnded)
+
+
+class TestRunFailure:
+    def test_a_clean_finish_reports_nothing(self) -> None:
+        assert run_failure(producer_error=None, media_failure=None, cancel_reason=None, track_end_reason=None) is None
+
+    def test_a_deadline_is_reported_exactly_as_it_is_on_main(self) -> None:
+        # #27: a `--duration` run whose media task catches the deadline still reports it as a
+        # publishing failure. That is a separate issue; this branch must not change it.
+        deadline = Cancelled("cancelled")
+        wrapped = run_failure(
+            producer_error=None, media_failure=deadline, cancel_reason=deadline, track_end_reason=None
+        )
+
+        assert isinstance(wrapped, RuntimeError)
+        assert str(wrapped) == "publishing failed: Cancelled: cancelled"
+        # And a deadline the media task did not notice is still a clean finish.
+        assert (
+            run_failure(producer_error=None, media_failure=None, cancel_reason=deadline, track_end_reason=None) is None
+        )
+
+    def test_the_media_pipeline_wins_over_everything_else(self) -> None:
+        broken = RuntimeError("no frames")
+        failure = run_failure(
+            producer_error=broken, media_failure=None, cancel_reason=TrackEnded("x"), track_end_reason=None
+        )
+
+        assert isinstance(failure, RuntimeError)
+        assert str(failure) == "media pipeline failed: RuntimeError: no frames"
+        assert failure.__cause__ is broken
+
+    def test_an_unrelated_publish_failure_is_still_wrapped(self) -> None:
+        # Identity, not class: another failure during a track-end cancellation is its own story.
+        ended = TrackEnded("the audio track ended mid-run: ...")
+        other = RuntimeError("something else")
+        failure = run_failure(producer_error=None, media_failure=other, cancel_reason=ended, track_end_reason=ended)
+
+        assert isinstance(failure, RuntimeError)
+        assert str(failure) == "publishing failed: RuntimeError: something else"
 
 
 class TestTrackEndHandler:

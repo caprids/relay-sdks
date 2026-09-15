@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import math
 import os
 import sys
@@ -538,6 +537,42 @@ def make_track_end_handler(
     return on_track_end
 
 
+def run_failure(
+    *,
+    producer_error: BaseException | None,
+    media_failure: BaseException | None,
+    cancel_reason: BaseException | None,
+    track_end_reason: BaseException | None,
+) -> BaseException | None:
+    """The one exception that explains why the run is over, or None for a clean finish.
+
+    Cancelling the lifetime for a retired track makes the SDK re-raise that very object out of
+    every write in flight, so the media task usually fails with it too. Reporting that as a separate
+    publishing failure would bury the track that ended, so the cancellation wins -- matched by
+    identity, which leaves a ``--duration`` deadline reporting exactly what it reports today.
+    """
+    if producer_error is not None:
+        return _caused_by(RuntimeError(f"media pipeline failed: {describe(producer_error)}"), producer_error)
+
+    # The media loop ending on its own is either the source running out (a file without --loop) or
+    # a failure; a failure must not read as a clean finish.
+    if media_failure is not None and media_failure is not track_end_reason:
+        return _caused_by(RuntimeError(f"publishing failed: {describe(media_failure)}"), media_failure)
+
+    # A deadline cancels with the default reason; anything else (a connection loss, a retired track)
+    # is a failure.
+    if cancel_reason is not None and not isinstance(cancel_reason, Cancelled):
+        return cancel_reason
+
+    return None
+
+
+def _caused_by(error: BaseException, cause: BaseException) -> BaseException:
+    """What ``raise error from cause`` records, for a failure chosen before it is raised."""
+    error.__cause__ = cause
+    return error
+
+
 async def serve_catalog(
     catalog: RelayTrackWriter, document: bytes, stats: Stats, log: Log, on_track_end: TrackEndHandler
 ) -> None:
@@ -569,6 +604,7 @@ async def publish_media(
     stats: Stats,
     log: Log,
     on_track_end: TrackEndHandler,
+    lifetime: CancellationToken,
 ) -> None:
     """Route encoded samples: video as one group per GOP while the relay wants the track, audio one group per frame."""
     group: RelayGroupWriter | None = None
@@ -577,11 +613,22 @@ async def publish_media(
     async def end_group() -> None:
         nonlocal group
 
-        if group is not None:
-            with contextlib.suppress(RelayError, ValueError):
-                await group.close()
+        if group is None:
+            return
 
-            group = None
+        closing, group = group, None
+
+        try:
+            await closing.close()
+        except (RelayError, ValueError):
+            # Expected while abandoning a group: the relay moved on, or the track is already gone.
+            pass
+        except BaseException as error:
+            # Cancelling the lifetime makes the SDK re-raise that same reason out of everything in
+            # flight, this close included. `run` reports it once; raising it again from a teardown
+            # would only replace the exception already on its way out. Anything else is a real bug.
+            if error is not lifetime.reason:
+                raise
 
     try:
         while True:
@@ -760,7 +807,16 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     closing = False
     stopped: asyncio.Future[None] = loop.create_future()
 
-    on_track_end = make_track_end_handler(config.on_track_end, stats, log, lifetime.cancel)
+    # Kept so a write killed by this very cancellation is reported as the track end it was, rather
+    # than wrapped as a second, unrelated-looking publishing failure.
+    track_end_reason: BaseException | None = None
+
+    def stop_for_track_end(reason: BaseException) -> None:
+        nonlocal track_end_reason
+        track_end_reason = reason
+        lifetime.cancel(reason)
+
+    on_track_end = make_track_end_handler(config.on_track_end, stats, log, stop_for_track_end)
 
     # Registered before anything can cancel the lifetime: a publisher connection that drops during
     # setup cancels it, and a callback added afterwards would never run.
@@ -813,7 +869,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     tasks = [
         asyncio.ensure_future(serve_catalog(catalog, document, stats, log, on_track_end)),
-        asyncio.ensure_future(publish_media(queue, video, audio, producer.video, stats, log, on_track_end)),
+        asyncio.ensure_future(publish_media(queue, video, audio, producer.video, stats, log, on_track_end, lifetime)),
     ]
     verifier: Any = None
     verified: Verified | None = None
@@ -827,18 +883,15 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     try:
         await asyncio.wait([stopped, media_task], return_when=asyncio.FIRST_COMPLETED)
+        failure = run_failure(
+            producer_error=producer.error,
+            media_failure=media_task.exception() if media_task.done() and not media_task.cancelled() else None,
+            cancel_reason=lifetime.reason,
+            track_end_reason=track_end_reason,
+        )
 
-        if producer.error is not None:
-            raise RuntimeError(f"media pipeline failed: {describe(producer.error)}") from producer.error
-
-        # The media loop ending on its own is either the source running out (a file without --loop)
-        # or a failure; a failure must not read as a clean finish.
-        if media_task.done() and not media_task.cancelled() and media_task.exception() is not None:
-            raise RuntimeError(f"publishing failed: {describe(media_task.exception())}") from media_task.exception()
-
-        # A deadline cancels with the default reason; anything else (a connection loss) is a failure.
-        if lifetime.cancelled and lifetime.reason is not None and not isinstance(lifetime.reason, Cancelled):
-            raise lifetime.reason
+        if failure is not None:
+            raise failure
     finally:
         closing = True
 
