@@ -203,13 +203,20 @@ class TestFailureEndsTrack:
 
 
 class FakeGroup:
-    """Enough of RelayGroupWriter for the example's publish loop."""
+    """Enough of RelayGroupWriter for the example's publish loop, with a scripted failing object."""
 
-    def __init__(self, group_id: int) -> None:
+    def __init__(self, group_id: int, *, fail_on: int | None = None, error: RelayError | None = None) -> None:
         self.group_id = group_id
         self.objects = 0
+        self._fail_on = fail_on
+        self._error = error
 
     async def write(self, payload: bytes, *, properties: object = None) -> None:
+        if self._fail_on is not None and self.objects == self._fail_on:
+            assert self._error is not None
+            self._fail_on = None
+            raise self._error
+
         self.objects += 1
 
     async def close(self) -> None:
@@ -232,6 +239,8 @@ class FakeTrack:
         fail_on: int | None = None,
         error: RelayError | None = None,
         retires: bool = True,
+        group_fail_on: int | None = None,
+        group_error: RelayError | None = None,
     ) -> None:
         self.bound = bound
         self.ended = False
@@ -240,6 +249,8 @@ class FakeTrack:
         self._fail_on = fail_on
         self._error = error
         self._retires = retires
+        self._group_fail_on = group_fail_on
+        self._group_error = group_error
 
     def _maybe_fail(self) -> None:
         if self._fail_on is not None and self.writes + self.groups == self._fail_on:
@@ -255,7 +266,7 @@ class FakeTrack:
 
     async def open_group(self) -> FakeGroup:
         self._maybe_fail()
-        group = FakeGroup(self.groups)
+        group = FakeGroup(self.groups, fail_on=self._group_fail_on, error=self._group_error)
         self.groups += 1
         return group
 
@@ -308,6 +319,11 @@ class TestWriteEndedTrack:
 
 def audio_samples(count: int) -> list[EncodedSample]:
     return [EncodedSample(kind="audio", timestamp_us=i * 20_000, payload=b"\xfc\xff", key=True) for i in range(count)]
+
+
+def video_samples(count: int) -> list[EncodedSample]:
+    """One keyframe then delta frames, the shape a GOP arrives in."""
+    return [EncodedSample(kind="video", timestamp_us=i * 33_333, payload=b"\x00", key=i == 0) for i in range(count)]
 
 
 async def drive(
@@ -375,6 +391,37 @@ class TestPublishMediaTrackEnd:
 
         assert (stats.video_groups, stats.video_objects, stats.dropped_video, stats.skipped_video) == (0, 0, 3, 0)
         assert [track for track, _ in ended] == ["video"]
+
+    async def test_an_interrupted_group_counts_its_own_sample_as_skipped(self) -> None:
+        # The group is reset and the track survives, so the sample that failed is a skip like the
+        # ones that follow it before the next keyframe -- and it is in a counter either way.
+        interrupted = RelayError("Relay subscription changed during the group; it may be incomplete")
+        video = FakeTrack(group_fail_on=0, group_error=interrupted)
+        stats, ended = await drive(video_samples(3), video=video, audio=None)
+
+        assert (stats.video_groups, stats.video_objects, stats.skipped_video, stats.dropped_video) == (1, 0, 3, 0)
+        assert ended == []
+
+    async def test_a_terminal_group_write_failure_counts_its_own_sample_as_dropped(self) -> None:
+        closed = RelayClosedError("Published track is closed")
+        video = FakeTrack(group_fail_on=0, group_error=closed)
+        stats, ended = await drive(video_samples(3), video=video, audio=None)
+
+        assert (stats.video_groups, stats.video_objects, stats.skipped_video, stats.dropped_video) == (1, 0, 0, 3)
+        assert [track for track, _ in ended] == ["video"]
+
+    async def test_every_sample_lands_in_exactly_one_counter(self) -> None:
+        # What `summarize` promises: sent + skipped + dropped accounts for the whole timeline.
+        interrupted = RelayError("Relay subscription changed during the group; it may be incomplete")
+        samples = video_samples(6) + audio_samples(4)
+        stats, _ = await drive(
+            samples, video=FakeTrack(group_fail_on=2, group_error=interrupted), audio=FakeTrack(bound=False)
+        )
+
+        video_total = stats.video_objects + stats.skipped_video + stats.dropped_video
+        audio_total = stats.audio_objects + stats.skipped_audio + stats.dropped_audio
+
+        assert (video_total, audio_total) == (6, 4)
 
 
 class TestTrackEndHandler:

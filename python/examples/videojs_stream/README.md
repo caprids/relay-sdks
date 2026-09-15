@@ -82,7 +82,7 @@ finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skip
 | Counter | Meaning |
 | --- | --- |
 | `videoObjects`, `audioObjects` | Sent to the relay |
-| `skippedVideo`, `skippedAudio` | Not sent because the relay had no subscription for the track, or a write failed before it bound — the track is fine and the next sample tries again |
+| `skippedVideo`, `skippedAudio` | Not sent because the relay had no subscription for the track, because a write failed before it bound, or because the group they belonged to was reset — the track is fine and publishing resumes at the next sample or keyframe |
 | `droppedVideo`, `droppedAudio` | Not sent because the track had ended; these samples are gone for good |
 | `catalogSends`, `catalogFailures` | Catalog documents accepted, and retryable catalog write failures |
 | `endedTracks` | Present only when a track ended, listing which |

@@ -654,12 +654,15 @@ async def publish_media(
                 )
                 stats.video_objects += 1
             except RelayError as error:
+                # This sample went nowhere either, so it belongs in a counter like every other one.
                 group_id, group = group.group_id, None
 
                 if failure_ends_track(error, operation="group", bound=True):
                     video_ended = True
+                    stats.dropped_video += 1
                     on_track_end(VIDEO_TRACK, error)
                 else:
+                    stats.skipped_video += 1
                     log("group interrupted", {"group": group_id, "error": describe(error)})
     finally:
         await end_group()
