@@ -34,6 +34,7 @@ from moq_core._tasks import observe, spawn
 from moq_core.transport import BidirectionalStream, ReceiveStream, SendStream
 
 from .connect_session import ConnectingTransport
+from .errors import RelayError
 
 # ---------------------------------------------------------------------------------------------------
 # Wire constants
@@ -56,8 +57,8 @@ _FIN_RETRY_INTERVAL = 0.25
 # The send half's backpressure, the close drain, stream pruning and the FIN retry read aioquic state
 # its public API does not expose: QuicStreamSender._pending, _pending_eof, _buffer, _buffer_fin,
 # _acked_fin and _reset_error_code (with buffer_is_empty and is_finished), QuicStreamReceiver.is_finished,
-# QuicConnection._streams, H3Connection._stream, and the asyncio protocol's _transmit_soon. A rename in
-# a later aioquic 1.x (the package pins ``aioquic>=1.2,<2``) would fail silently and only under load, as
+# QuicConnection._streams, H3Connection._stream, and the asyncio protocol's _transmit_soon and _connected_waiter.
+# A rename in a later aioquic 1.x (the package pins ``aioquic>=1.2,<2``) would fail silently and only under load, as
 # a write that never settles or a FIN that is never re-armed, so
 # tests/test_webtransport.py::TestAioquicInternals pins every one of them. Revisit both with any bump.
 
@@ -138,7 +139,7 @@ def parse_sf_list_of_strings(value: bytes) -> list[str]:
 # ---------------------------------------------------------------------------------------------------
 
 
-class WebTransportError(Exception):
+class WebTransportError(RelayError):
     """A WebTransport session or stream failure. ``code`` is the peer's application error code when known."""
 
     def __init__(self, message: str, *, code: int | None = None, reason: str = "") -> None:
@@ -395,6 +396,15 @@ class WebTransportProtocol(QuicConnectionProtocol):
         """Streams whose owner waits on a transmission or acknowledgement (a write, a FIN, a reset)."""
         self._draining: list[WebTransportSessionBase] = []
         self._fin_retry_handle: asyncio.TimerHandle | None = None
+
+    async def wait_connected(self) -> None:
+        try:
+            await super().wait_connected()
+        finally:
+            # aioquic shields this waiter, so cancelling the connect task leaves it live. Its
+            # eventual ConnectionError during teardown must still have an observer.
+            if self._connected_waiter is not None:
+                observe(self._connected_waiter)
 
     def register_session(self, session: WebTransportSessionBase) -> None:
         self.sessions[session.session_id] = session

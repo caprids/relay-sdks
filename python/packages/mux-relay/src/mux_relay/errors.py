@@ -20,6 +20,10 @@ class RelayTrackEndedError(RelayClosedError):
     """
 
 
+class RelayNamespaceError(RelayError):
+    """The relay's namespace solicitations do not cover the publisher namespace; check token and namespace."""
+
+
 class RelayTimeoutError(RelayError):
     """A deadline elapsed: connecting, or waiting for relay demand and the transport write."""
 
@@ -36,6 +40,7 @@ __all__ = [
     "RelayClosedError",
     "RelayError",
     "RelayGoawayError",
+    "RelayNamespaceError",
     "RelayTimeoutError",
     "RelayTrackEndedError",
     "RelayWritePendingError",

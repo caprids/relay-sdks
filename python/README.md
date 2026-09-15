@@ -121,7 +121,11 @@ connection-lifetime implementation. No camera, microphone, catalog, or timestamp
 Publishing follows Relay's announce-and-serve ingest flow. `publish()` registers the track;
 `write()` waits for the relay to subscribe upstream before sending bytes. Start a subscriber to
 create that demand. The default 10-second write deadline (`write_timeout`) covers both demand and
-transport writes. A `RelayTimeoutError` waiting for demand can be retried. A failure once a write is
+transport writes. A `RelayTimeoutError` waiting for demand can be retried. If the relay has solicited
+namespace prefixes but none covers this publisher's namespace, the demand deadline instead raises
+`RelayNamespaceError`: check the token and namespace instead of blindly retrying. The track stays
+open, and a later matching solicitation can let it proceed. An ordinary absence of subscriber
+demand still raises `RelayTimeoutError`. A failure once a write is
 bound to a relay subscription ends that track, since an incomplete group may have reached the relay:
 a relay re-bind raises `RelayTrackEndedError`, a transport timeout keeps its `RelayTimeoutError`, and
 either way `track.closed` turns `True`, `bound` turns `False`, and `bindings()` terminates.
@@ -134,7 +138,10 @@ relay caching and subscription filters. A failed write may have delivered partia
 automatic retry.
 
 Optional `track_properties` on `publish()` and `properties` on `write()` carry explicit protocol
-metadata as `KeyValuePair` values. Raw tracks have no default timescale or LOC framing. Objects are
+metadata as `KeyValuePair` values. Property types and even-type values must be non-negative 64-bit
+integers (excluding `bool`); odd-type values must expose a bytes-like buffer. Invalid properties
+raise `TypeError` before a write starts or a track is registered. Raw tracks have no default timescale
+or LOC framing. Objects are
 limited to 16 MiB. `events.close()` cancels an outstanding write and ends that track; other tracks
 keep running. `await publisher.close()` ends all tracks, retracts the namespace, and waits for
 transport shutdown. Track names cannot be reused within a publisher connection, including after
@@ -142,7 +149,11 @@ their writer closes.
 
 For media, a track needs more than one object per group: LOC/MSF maps one GOP to one MOQT group
 whose object 0 is the keyframe. `open_group()` waits for relay demand like `write()`, then returns a
-`RelayGroupWriter` that appends objects with increasing IDs and FINs the group on `close()`:
+`RelayGroupWriter` that appends objects with increasing IDs and FINs the group on `close()`.
+Opening the group, each `group.write()`, and `group.close()` get a separate `write_timeout`
+deadline. Time between calls does not count toward a deadline. A timeout resets that group and
+raises `RelayTimeoutError`; the track stays open for a new group at the next keyframe:
+
 
 ```python
 video = publisher.publish("video", track_properties=[KeyValuePair(0x08, 1_000_000)])
@@ -237,7 +248,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
 | `relay.closed` resolves `{ error? }` | `await relay.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
-| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayTrackEndedError` |
+| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayTrackEndedError`, `RelayNamespaceError`, `WebTransportError` |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
 | Single-object groups only | also `open_group()` multi-object groups and `bindings()` demand observation, plus `writer.closed` and `RelayTrackEndedError`, which report the track end those watchers stop on (see `spec/behavior.md`) |
 | Browser `WebTransport` | aioquic WebTransport client (`connect_webtransport`) |
@@ -270,3 +281,8 @@ the SDK are absolute: include the token's root prefix when required by the relay
 The live test passed against `sjc.relay.mux.global` on 2026-09-11 over the aioquic WebTransport
 transport: three objects on `events` and two on `status`, with the second status object delivered
 after the events track closed, and both connections closed cleanly.
+
+`RelayError` is the base class for Relay connection and publishing failures, including
+`WebTransportError` for QUIC, WebTransport session, and stream failures. Transport errors preserve
+their message and optional `code` and `reason` details; catch `RelayError` to handle these together
+with the SDK's deadline and closed errors.
