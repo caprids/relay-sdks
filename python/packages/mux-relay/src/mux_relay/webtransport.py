@@ -1162,7 +1162,9 @@ class WebTransportSession(WebTransportSessionBase):
         return headers
 
     def _on_connect_headers(self, event: HeadersReceived) -> None:
-        if self.ready.done():
+        # A response that crossed with a local close arrives at a session that already rejects
+        # writes, so it must not revive `ready`; the connection is already on its way out.
+        if self.ready.done() or self._closing:
             return
 
         headers = {key.lower(): value for key, value in event.headers}
@@ -1197,17 +1199,23 @@ class WebTransportSession(WebTransportSessionBase):
             self._teardown_connection()
             return
 
+        # The connection itself goes only after the drain, but an unanswered handshake must not wait
+        # with it: this session rejects writes from here on, so a caller awaiting `ready` learns at
+        # once instead of after the drain's bound on a peer that stopped acknowledging.
+        self._reject_ready(None)
         super().close(close_code, reason)
 
-    def _finish(self, error: BaseException | None) -> None:
-        # Every way the session can end (a local close, the QUIC connection terminating, a peer close
-        # capsule) runs through here, so a handshake still waiting on the CONNECT response fails now
-        # instead of hanging until the caller's connect deadline.
+    def _reject_ready(self, error: BaseException | None) -> None:
         if not self.ready.done():
             self.ready.set_exception(
                 error if error is not None else WebTransportError("closed before the session was established")
             )
 
+    def _finish(self, error: BaseException | None) -> None:
+        # Every way the session can end (a local close, the QUIC connection terminating, a peer close
+        # capsule) runs through here, so a handshake still waiting on the CONNECT response fails now
+        # instead of hanging until the caller's connect deadline.
+        self._reject_ready(error)
         super()._finish(error)
 
     def _transport_protocol(self) -> WebTransportProtocol | None:

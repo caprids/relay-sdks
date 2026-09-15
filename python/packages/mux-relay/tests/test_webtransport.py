@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.h3.connection import H3Connection, H3Stream
-from aioquic.h3.events import WebTransportStreamDataReceived
+from aioquic.h3.events import HeadersReceived, WebTransportStreamDataReceived
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet_builder import QuicDeliveryState
@@ -32,6 +32,7 @@ from mux_relay import Closed, ConnectingTransport, connect_relay, connect_relay_
 from mux_relay.webtransport import (
     CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
     WebTransportError,
+    WebTransportSession,
     WebTransportSessionBase,
     _open_socket,
     _parse_url,
@@ -295,6 +296,48 @@ class TestLoopback:
                 await asyncio.wait_for(created.ready, 2)
 
             await asyncio.wait_for(created.transport.wait_closed(), 2)
+        finally:
+            server.close()
+
+    async def test_closing_an_unanswered_connect_rejects_ready_before_the_drain(self) -> None:
+        requests: list[dict[bytes, bytes]] = []
+        server = await start_webtransport_server(
+            lambda session: None, respond_to_connect=False, on_request=requests.append
+        )
+
+        try:
+            created = connect_webtransport(
+                server.url_for("/hung"), ["moqt-20"], configuration=server.client_configuration()
+            )
+            await wait_for(lambda: len(requests) == 1, timeout=5)  # the CONNECT reached the server; no answer yet
+
+            session = created.transport
+            assert isinstance(session, WebTransportSession)
+            session.close()
+
+            # In the same turn as close(), not once the connection drains: a peer that stopped
+            # acknowledging would otherwise hold the handshake for the whole drain bound.
+            assert session.ready.done()
+
+            with pytest.raises(WebTransportError, match="closed before the session was established"):
+                session.ready.result()
+
+            # A 2xx that crossed with the close must not revive a session that already rejects writes.
+            session._on_connect_headers(
+                HeadersReceived(
+                    headers=[(b":status", b"200"), (b"sec-webtransport-http3-draft", b"draft02")],
+                    stream_id=session.session_id,
+                    stream_ended=False,
+                )
+            )
+
+            with pytest.raises(WebTransportError, match="closed before the session was established"):
+                session.ready.result()
+
+            with pytest.raises(WebTransportError, match="WebTransport session closed"):
+                await session.create_unidirectional_stream()
+
+            await asyncio.wait_for(session.wait_closed(), 5)
         finally:
             server.close()
 
