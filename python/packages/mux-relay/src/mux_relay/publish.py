@@ -293,7 +293,8 @@ class RelayTrackWriter:
         self._registered.end()
         self._notify_watchers(None)
 
-    def _begin(self, kind: Literal["write", "group"]) -> _Operation:
+    def _assert_writable(self) -> None:
+        """What a new write or group needs: an open connection, a live track, and a free slot."""
         self._lifetime.assert_open()
 
         if self._ended or self._publisher._closing:
@@ -302,6 +303,8 @@ class RelayTrackWriter:
         if self._active is not None:
             raise RelayWritePendingError("A write or group is already pending; await it before writing another object")
 
+    def _begin(self, kind: Literal["write", "group"]) -> _Operation:
+        self._assert_writable()
         loop = asyncio.get_running_loop()
         operation = _Operation(kind=kind, demand=loop.create_future(), interrupted=loop.create_future())
         observe(operation.interrupted)
@@ -324,22 +327,17 @@ class RelayTrackWriter:
         writing again. Bytes are copied. A failed bound write ends this track; a timeout waiting for
         demand permits another write.
         """
+        self._assert_writable()
+
         if len(payload) > MAX_OBJECT_PAYLOAD_LENGTH:
-            self._lifetime.assert_open()
-
-            if self._ended or self._publisher._closing:
-                raise RelayClosedError("Published track is closed")
-
-            if self._active is not None:
-                raise RelayWritePendingError(
-                    "A write or group is already pending; await it before writing another object"
-                )
-
             raise ValueError("Payload exceeds the 16 MiB object limit")
 
-        operation = self._begin("write")
+        # Copy the arguments before taking the track's single in-flight slot: a payload or property
+        # that cannot be converted must not leave the slot held for the life of the connection.
         data = bytes(payload)
         object_properties = _copy_properties(properties)
+
+        operation = self._begin("write")
         timer = self._arm_timeout(operation)
 
         try:

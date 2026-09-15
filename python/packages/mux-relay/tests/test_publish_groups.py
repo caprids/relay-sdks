@@ -2,6 +2,7 @@
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from typing import Any
 
 import pytest
 from core_helpers.waiting import settle, wait_for
@@ -189,6 +190,23 @@ class TestOpenGroup:
         assert not isinstance(raised.value, RelayClosedError)
         objects = receive(subscriber, "video")
         await video.write(b"y")
+        await wait_for(lambda: len(objects) == 1)
+
+    async def test_a_payload_that_cannot_be_converted_leaves_the_group_open(self, cleanup: Cleanup) -> None:
+        _, publisher, subscriber = await connect_hub(cleanup)
+        video = publisher.publish("video")
+        objects = receive(subscriber, "video")
+        group = await video.open_group()
+        text: Any = "not bytes"
+
+        with pytest.raises(TypeError):
+            await group.write(text)
+
+        # Nothing left the process, so the group keeps its object numbering and stays usable.
+        assert not group.closed
+        assert group.object_count == 0
+        await group.write(b"key")
+        await group.close()
         await wait_for(lambda: len(objects) == 1)
 
     async def test_rejects_oversized_objects(self, cleanup: Cleanup) -> None:
