@@ -237,7 +237,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
 | `relay.closed` resolves `{ error? }` | `await relay.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
-| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayTrackEndedError` |
+| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayTrackEndedError`, `WebTransportError` |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
 | Single-object groups only | also `open_group()` multi-object groups and `bindings()` demand observation, plus `writer.closed` and `RelayTrackEndedError`, which report the track end those watchers stop on (see `spec/behavior.md`) |
 | Browser `WebTransport` | aioquic WebTransport client (`connect_webtransport`) |
@@ -270,3 +270,8 @@ the SDK are absolute: include the token's root prefix when required by the relay
 The live test passed against `sjc.relay.mux.global` on 2026-09-11 over the aioquic WebTransport
 transport: three objects on `events` and two on `status`, with the second status object delivered
 after the events track closed, and both connections closed cleanly.
+
+`RelayError` is the base class for Relay connection and publishing failures, including
+`WebTransportError` for QUIC, WebTransport session, and stream failures. Transport errors preserve
+their message and optional `code` and `reason` details; catch `RelayError` to handle these together
+with the SDK's deadline and closed errors.

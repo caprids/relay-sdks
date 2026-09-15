@@ -28,7 +28,7 @@ from relay_helpers.wt_server import (
 
 from moq_core import MoqtObject, SubscriptionHandlers
 from moq_core.transport import ReceiveStream, SendStream
-from mux_relay import Closed, ConnectingTransport, connect_relay, connect_relay_publisher
+from mux_relay import Closed, ConnectingTransport, RelayError, connect_relay, connect_relay_publisher
 from mux_relay.webtransport import (
     CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
     WebTransportError,
@@ -49,6 +49,19 @@ NAMESPACE = ["loopback", "data"]
 
 
 class TestWireHelpers:
+    async def test_transport_failures_are_relay_errors_and_keep_their_details(self) -> None:
+        session = WebTransportSessionBase()
+        error = WebTransportError("QUIC connection terminated", code=1, reason="Idle timeout")
+        session._finish(error)
+
+        with pytest.raises(RelayError) as failure:
+            await session.wait_closed()
+
+        assert failure.value is error
+        assert str(error) == "QUIC connection terminated"
+        assert error.code == 1
+        assert error.reason == "Idle timeout"
+
     def test_error_codes_round_trip_through_the_reserved_h3_range(self) -> None:
         for code in (0, 1, 0x1D, 0x1E, 0x1F, 12345, 0xFFFFFFFF):
             mapped = webtransport_to_h3_error_code(code)

@@ -34,6 +34,7 @@ from moq_core._tasks import observe, spawn
 from moq_core.transport import BidirectionalStream, ReceiveStream, SendStream
 
 from .connect_session import ConnectingTransport
+from .errors import RelayError
 
 # ---------------------------------------------------------------------------------------------------
 # Wire constants
@@ -138,7 +139,7 @@ def parse_sf_list_of_strings(value: bytes) -> list[str]:
 # ---------------------------------------------------------------------------------------------------
 
 
-class WebTransportError(Exception):
+class WebTransportError(RelayError):
     """A WebTransport session or stream failure. ``code`` is the peer's application error code when known."""
 
     def __init__(self, message: str, *, code: int | None = None, reason: str = "") -> None:
