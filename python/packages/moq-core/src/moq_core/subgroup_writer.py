@@ -103,7 +103,15 @@ def _encode_object(
 class SubgroupWriter:
     """Writer for one subgroup stream. Create one with :func:`create_subgroup_writer`."""
 
-    __slots__ = ("_finished", "_has_properties", "_header_write", "_previous_object_id", "_stream", "group_id")
+    __slots__ = (
+        "_finished",
+        "_finishing",
+        "_has_properties",
+        "_header_write",
+        "_previous_object_id",
+        "_stream",
+        "group_id",
+    )
 
     def __init__(
         self,
@@ -120,6 +128,7 @@ class SubgroupWriter:
         self._has_properties = has_properties
         self._previous_object_id: int | None = None
         self._finished = False
+        self._finishing = False
         # Header errors surface on the first awaited write/fin: an errored stream rejects
         # everything queued after it.
         header = _encode_subgroup_header(track_alias, group_id, priority, has_properties, end_of_group)
@@ -139,7 +148,7 @@ class SubgroupWriter:
         ``object_id`` is absolute and must increase monotonically within the stream. ``status`` is
         only meaningful for zero-length payloads (§11.2.1.1).
         """
-        if self._finished:
+        if self._finished or self._finishing:
             raise MoqtProtocolError("subgroup stream already finished")
 
         encoded = _encode_object(object_id, payload, properties, status, self._previous_object_id, self._has_properties)
@@ -148,20 +157,36 @@ class SubgroupWriter:
         await self._stream.write(encoded)
 
     async def fin(self) -> None:
-        """FIN the stream: the group is complete."""
-        if self._finished:
+        """FIN the stream: the group is complete.
+
+        The FIN counts as final only once the transport has taken it. Under real backpressure it can
+        stay queued for a long time, and the stream has to remain abortable for as long as it does:
+        otherwise a group whose operation was cancelled meanwhile is still delivered complete, and
+        the caller waiting here is never released.
+        """
+        if self._finished or self._finishing:
             return
 
-        self._finished = True
-        await self._header_write
-        await self._stream.close()
+        self._finishing = True
+
+        try:
+            await self._header_write
+            await self._stream.close()
+        finally:
+            self._finishing = False
+            self._finished = True
 
     def abort(self, reason: object = None) -> None:
-        """Reset the stream; delivered objects may be incomplete (drop path)."""
+        """Reset the stream; delivered objects may be incomplete (drop path).
+
+        A FIN the transport has not taken yet is reset too, and the pending :meth:`fin` raises
+        ``reason``: the send half turns a closed-but-untransmitted stream into a RESET_STREAM.
+        """
         if self._finished:
             return
 
         self._finished = True
+        self._finishing = False
         self._stream.abort(reason)
 
 

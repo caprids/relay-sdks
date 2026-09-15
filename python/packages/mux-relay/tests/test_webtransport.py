@@ -512,12 +512,19 @@ class TestSendBackpressure:
                 await track.write(b"x" * 4096)
 
             await wait_for(lambda: received == count, timeout=30)
-            # A handful of streams may still be settling their FIN acks; the point is the maps do not
+
+            # A handful of streams may still be settling their FIN acks after the peer has read
+            # everything, and pruning only follows the acknowledgement; the point is the maps do not
             # grow with the number of groups ever sent, so they stay near the pre-write baseline.
-            await wait_for(lambda: len(session._sends) <= baseline_sends + 3, timeout=10)
-            assert len(protocol.stream_owners) <= baseline_owners + 3
-            assert len(protocol._quic._streams) <= baseline_quic + 3
-            assert len(protocol.h3._stream) <= baseline_h3 + 3
+            def maps_are_back_at_baseline() -> bool:
+                return (
+                    len(session._sends) <= baseline_sends + 3
+                    and len(protocol.stream_owners) <= baseline_owners + 3
+                    and len(protocol._quic._streams) <= baseline_quic + 3
+                    and len(protocol.h3._stream) <= baseline_h3 + 3
+                )
+
+            await wait_for(maps_are_back_at_baseline, timeout=10)
         finally:
             await asyncio.wait_for(publisher.close(), 10)
             subscriber.close()
@@ -554,8 +561,9 @@ class TestSendBackpressure:
         impairment.jitter = 0.0
         await asyncio.wait_for(asyncio.gather(*writes), 20)
         await wait_for(lambda: len(received) == count, timeout=20)
-        # Nothing is stranded in the client's send buffers once the link is clean.
-        assert sum(len(s.sender._buffer) for s in quic._streams.values()) == 0
+        # Nothing is stranded in the client's send buffers once the link is clean. aioquic holds a
+        # stream's bytes until they are acknowledged, so this lags the peer having read them all.
+        await wait_for(lambda: sum(len(s.sender._buffer) for s in quic._streams.values()) == 0, timeout=5)
 
         transport.close()
         await asyncio.wait_for(transport.wait_closed(), 5)
