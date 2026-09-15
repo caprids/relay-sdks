@@ -20,7 +20,7 @@ import os
 import sys
 import uuid
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from getpass import getpass
 from typing import Any
 from urllib.parse import urlsplit
@@ -34,6 +34,8 @@ from mux_relay import (
     RelayPublisher,
     RelayTimeoutError,
     RelayTrackWriter,
+    RequestError,
+    SubscribeOk,
     SubscriptionHandlers,
     connect_relay,
     connect_relay_publisher,
@@ -61,6 +63,7 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
         config.timeout, lambda: lifetime.cancel(RelayTimeoutError(f"Run exceeded {config.timeout:.0f} s"))
     )
     connections: list[RelayPublisher | RelayConnection] = []
+    background_tasks: list[asyncio.Task[None]] = []
     problems: list[str] = []
     received = 0
     closing = False
@@ -120,29 +123,36 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                 received += 1
                 log({"event": "received", "group": obj.group_id, "bytes": len(obj.payload), **inspect(obj.payload)})
 
-            subscriber.subscribe(
-                config.namespace,
-                config.track,
-                SubscriptionHandlers(
-                    on_ok=lambda ok: log(
-                        {
-                            "event": "subscribed",
-                            "namespace": "/".join(config.namespace),
-                            "track": config.track,
-                            "alias": ok.track_alias,
-                        }
-                    ),
-                    on_object=on_object,
-                    on_error=lambda error: problems.append(
-                        f"subscribe rejected: code {error.error_code} {error.reason}"
-                    ),
-                    on_subgroup_reset=lambda reset: problems.append(
-                        f"group {reset.group_id} reset: {describe(reset.error)}"
-                    ),
-                    on_done=lambda done: log(
-                        {"event": "publisher done", "status": done.status_code, "reason": done.reason}
-                    ),
-                ),
+            background_tasks.append(
+                asyncio.ensure_future(
+                    subscribe_with_retry(
+                        subscriber,
+                        config.namespace,
+                        config.track,
+                        SubscriptionHandlers(
+                            on_ok=lambda ok: log(
+                                {
+                                    "event": "subscribed",
+                                    "namespace": "/".join(config.namespace),
+                                    "track": config.track,
+                                    "alias": ok.track_alias,
+                                }
+                            ),
+                            on_object=on_object,
+                            on_error=lambda error: problems.append(
+                                f"subscribe rejected: code {error.error_code} {error.reason}"
+                            ),
+                            on_subgroup_reset=lambda reset: problems.append(
+                                f"group {reset.group_id} reset: {describe(reset.error)}"
+                            ),
+                            on_done=lambda done: log(
+                                {"event": "publisher done", "status": done.status_code, "reason": done.reason}
+                            ),
+                        ),
+                        lifetime,
+                        log,
+                    )
+                )
             )
 
         if writer is not None:
@@ -170,6 +180,9 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
         closing = True
         deadline.cancel()
 
+        for task in background_tasks:
+            task.cancel()
+
         # publisher.close() retracts the namespace and awaits shutdown; subscriber.close() is synchronous.
         for connection in connections:
             result = connection.close()
@@ -189,6 +202,57 @@ async def write_when_demanded(
         except RelayTimeoutError:
             fail_if_broken()
             log({"event": "waiting", "detail": "no subscriber has requested the track yet; retrying the write"})
+
+
+async def subscribe_with_retry(
+    subscriber: RelayConnection,
+    namespace: list[str],
+    track: str,
+    handlers: SubscriptionHandlers,
+    lifetime: CancellationToken,
+    log: Log,
+) -> None:
+    """A subscribe issued before the relay has processed the publisher's announce is rejected with 404
+    Broadcast not found; that is expected on a fresh namespace, not fatal, so retry with bounded backoff
+    until it is accepted, another error arrives, or the run deadline cancels `lifetime`. Every other
+    rejection is forwarded to ``handlers.on_error`` unchanged.
+    """
+    backoff = 0.5
+
+    while True:
+        outcome: asyncio.Future[RequestError | None] = asyncio.get_running_loop().create_future()
+
+        def on_ok(ok: SubscribeOk, outcome: asyncio.Future[RequestError | None] = outcome) -> None:
+            if handlers.on_ok is not None:
+                handlers.on_ok(ok)
+
+            if not outcome.done():
+                outcome.set_result(None)
+
+        def on_error(error: RequestError, outcome: asyncio.Future[RequestError | None] = outcome) -> None:
+            if not outcome.done():
+                outcome.set_result(error)
+
+        subscriber.subscribe(namespace, track, replace(handlers, on_ok=on_ok, on_error=on_error))
+        rejection = await outcome
+
+        if rejection is None:
+            return
+
+        if rejection.error_code != 404:
+            if handlers.on_error is not None:
+                handlers.on_error(rejection)
+
+            return
+
+        log({"event": "waiting", "detail": "namespace not announced yet; retrying the subscribe"})
+
+        try:
+            await sleep(backoff, lifetime)
+        except Exception:
+            return  # Run deadline or shutdown; the main loop already reports it.
+
+        backoff = min(backoff * 2, 2.0)
 
 
 def inspect(payload: bytes) -> dict[str, Any]:
