@@ -19,6 +19,7 @@ from relay_helpers.wt_server import (
 )
 
 from moq_core import MoqtObject, SubscriptionHandlers
+from moq_core.transport import ReceiveStream, SendStream
 from mux_relay import Closed, ConnectingTransport, connect_relay, connect_relay_publisher
 from mux_relay.webtransport import (
     CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
@@ -146,6 +147,16 @@ async def loopback() -> AsyncIterator[tuple[LoopbackWebTransportServer, RelayHub
         hub.destroy()
         server.close()
         await asyncio.sleep(0.05)
+
+
+def _hub_on_session(hub: RelayHub):
+    def on_session(session: WebTransportServerSession) -> None:
+        if session.path.startswith("/publish"):
+            hub.serve_publisher(session)
+        else:
+            hub.serve_subscriber(session)
+
+    return on_session
 
 
 def factory_for(server: LoopbackWebTransportServer):
@@ -302,3 +313,200 @@ class TestLoopback:
         with pytest.raises(WebTransportError, match="closed before the session was established"):
             created.transport.close()
             await created.ready
+
+
+async def _drain_uni_streams(session: Any, into: list[int]) -> None:
+    """Read every incoming unidirectional stream to its end, recording the byte count of each."""
+    readers: list[asyncio.Task[None]] = []
+
+    async def read_all(stream: ReceiveStream) -> None:
+        total = 0
+        while (chunk := await stream.read()) is not None:
+            total += len(chunk)
+        into.append(total)
+
+    async for stream in session.incoming_unidirectional_streams():
+        readers.append(asyncio.ensure_future(read_all(stream)))
+
+
+class TestSendBackpressure:
+    """The send half applies real transport backpressure: #3, #30, #5, #4.
+
+    Each test drives the real aioquic stream code over a loopback QUIC connection, the offline
+    counterpart of the live checks in the issues.
+    """
+
+    async def _connect(self, server: LoopbackWebTransportServer) -> Any:
+        created = connect_webtransport(
+            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        return created.transport
+
+    async def test_write_suspends_and_the_deadline_fires_when_the_link_is_slow(self) -> None:
+        # Behind a slow uplink the send half must block (the congestion window fills and the write
+        # cannot drain), so a deadline around the write fires instead of it returning at once (#3, #30).
+        # (aioquic's own receiver keeps growing the flow-control window as data arrives whether or not
+        # the application reads it, so a slow *link*, not a slow reader, is what models backpressure.)
+        received: list[int] = []
+        sessions: list[Any] = []
+        drainers: list[asyncio.Task[None]] = []
+
+        def on_session(session: Any) -> None:
+            sessions.append(session)
+            drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+        sessions[0].impair(rate=64_000)  # 64 kB/s: about 15 s per MiB, far past the deadline below
+
+        try:
+            stream: SendStream = await transport.create_unidirectional_stream()
+
+            with pytest.raises(TimeoutError):
+                for _ in range(8):
+                    await asyncio.wait_for(stream.write(b"\0" * (1024 * 1024)), 0.3)
+
+            # The bytes are still queued in the client: nothing was lost, the write is simply not done.
+            quic = transport._protocol._quic
+            assert sum(len(s.sender._buffer) for s in quic._streams.values()) > 0
+        finally:
+            transport.close()
+            await asyncio.wait_for(transport.wait_closed(), 5)
+            server.close()
+            await asyncio.sleep(0.05)
+
+    async def test_a_write_to_a_reading_peer_completes_promptly(self) -> None:
+        # The positive control: when the peer reads, the same write settles quickly.
+        received: list[int] = []
+        drainers: list[asyncio.Task[None]] = []
+
+        def on_session(session: Any) -> None:
+            drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+
+        try:
+            stream = await transport.create_unidirectional_stream()
+            await asyncio.wait_for(stream.write(b"\0" * (1024 * 1024)), 5)
+            await asyncio.wait_for(stream.close(), 5)
+            await wait_for(lambda: received == [1024 * 1024], timeout=5)
+        finally:
+            transport.close()
+            await asyncio.wait_for(transport.wait_closed(), 5)
+            server.close()
+            await asyncio.sleep(0.05)
+
+    async def test_close_drains_queued_data_before_the_connection_goes(self) -> None:
+        # A slow uplink: before the fix, write() returned at once and close() tore the connection down
+        # with the bytes still queued, so the peer saw a reset. Now write() paces to the link and
+        # close() drains what it accepted, so every byte reaches the peer (#30).
+        received: list[int] = []
+        sessions: list[Any] = []
+        drainers: list[asyncio.Task[None]] = []
+
+        def on_session(session: Any) -> None:
+            sessions.append(session)
+            drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+        sessions[0].impair(rate=200_000)  # 200 kB/s: 512 KiB takes ~2.5 s, past the old drain window
+
+        payload = 512 * 1024
+        stream = await transport.create_unidirectional_stream()
+        await asyncio.wait_for(stream.write(b"\7" * payload), 20)
+        await asyncio.wait_for(stream.close(), 20)
+        transport.close()
+        await asyncio.wait_for(transport.wait_closed(), 20)
+        await wait_for(lambda: received == [payload], timeout=20)
+        server.close()
+        await asyncio.sleep(0.05)
+
+    async def test_per_stream_state_is_pruned_as_streams_finish(self) -> None:
+        # Every single-object write is one stream; finished streams must leave no permanent per-stream
+        # state in the adapter's maps or in aioquic's live stream table (#4).
+        hub = create_relay_hub()
+        server = await start_webtransport_server(_hub_on_session(hub))
+        create_transport = factory_for(server)
+        publisher = await connect_relay_publisher(
+            server.url_for("/publish"), namespace=NAMESPACE, create_transport=create_transport
+        )
+        subscriber = await connect_relay(server.url_for("/subscribe"), create_transport=create_transport)
+
+        try:
+            track = publisher.publish("events", write_timeout=10)
+            received = 0
+
+            def on_object(_: MoqtObject) -> None:
+                nonlocal received
+                received += 1
+
+            subscriber.subscribe(NAMESPACE, "events", SubscriptionHandlers(on_object=on_object))
+            await wait_for(lambda: track.bound, timeout=10)
+
+            session: Any = publisher._lifetime._transport
+            protocol = session._protocol
+            baseline_sends = len(session._sends)
+            baseline_owners = len(protocol.stream_owners)
+            baseline_quic = len(protocol._quic._streams)
+            baseline_h3 = len(protocol.h3._stream)
+
+            count = 200
+
+            for _ in range(count):
+                await track.write(b"x" * 4096)
+
+            await wait_for(lambda: received == count, timeout=30)
+            # A handful of streams may still be settling their FIN acks; the point is the maps do not
+            # grow with the number of groups ever sent, so they stay near the pre-write baseline.
+            await wait_for(lambda: len(session._sends) <= baseline_sends + 3, timeout=10)
+            assert len(protocol.stream_owners) <= baseline_owners + 3
+            assert len(protocol._quic._streams) <= baseline_quic + 3
+            assert len(protocol.h3._stream) <= baseline_h3 + 3
+        finally:
+            await asyncio.wait_for(publisher.close(), 10)
+            subscriber.close()
+            hub.destroy()
+            server.close()
+            await asyncio.sleep(0.05)
+
+    async def test_many_concurrent_slow_streams_drain_after_the_link_heals(self) -> None:
+        # Hundreds of blocked single-object streams at once used to strand some forever; when the link
+        # heals the whole queue must drain (#5).
+        received: list[int] = []
+        sessions: list[Any] = []
+        drainers: list[asyncio.Task[None]] = []
+
+        def on_session(session: Any) -> None:
+            sessions.append(session)
+            drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+        impairment = sessions[0].impair(delay=0.05, jitter=0.02)
+        quic = transport._protocol._quic
+
+        async def one(index: int) -> None:
+            stream = await transport.create_unidirectional_stream()
+            await stream.write(index.to_bytes(4, "big") + b"\0" * 4092)
+            await stream.close()
+
+        count = 80
+        writes = [asyncio.ensure_future(one(index)) for index in range(count)]
+        await asyncio.sleep(0.5)  # let many streams pile up behind the delay
+        impairment.delay = 0.0
+        impairment.jitter = 0.0
+        await asyncio.wait_for(asyncio.gather(*writes), 20)
+        await wait_for(lambda: len(received) == count, timeout=20)
+        # Nothing is stranded in the client's send buffers once the link is clean.
+        assert sum(len(s.sender._buffer) for s in quic._streams.values()) == 0
+
+        transport.close()
+        await asyncio.wait_for(transport.wait_closed(), 5)
+        server.close()
+        await asyncio.sleep(0.05)
