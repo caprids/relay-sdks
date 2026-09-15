@@ -6,6 +6,7 @@ real WebTransport sessions on 127.0.0.1, so the transport adapter is exercised e
 """
 
 import asyncio
+import gc
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -13,6 +14,7 @@ import pytest
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.h3.connection import H3Connection, H3Stream
 from aioquic.h3.events import HeadersReceived, WebTransportStreamDataReceived
+from aioquic.quic import events as quic_events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet_builder import QuicDeliveryState
@@ -32,6 +34,7 @@ from mux_relay import Closed, ConnectingTransport, RelayError, connect_relay, co
 from mux_relay.webtransport import (
     CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
     WebTransportError,
+    WebTransportProtocol,
     WebTransportSession,
     WebTransportSessionBase,
     _open_socket,
@@ -678,6 +681,36 @@ class TestSendBackpressure:
         await asyncio.sleep(0.05)
 
 
+class TestCancelledHandshake:
+    async def test_cancelled_handshake_observes_aioquic_teardown_error(self) -> None:
+        loop = asyncio.get_running_loop()
+        errors: list[dict[str, Any]] = []
+        previous_handler = loop.get_exception_handler()
+        loop.set_exception_handler(lambda _loop, context: errors.append(context))
+        try:
+            connection = QuicConnection(configuration=QuicConfiguration(is_client=True))
+            protocol = WebTransportProtocol(connection)
+            waiting = asyncio.create_task(protocol.wait_connected())
+            await asyncio.sleep(0)
+            assert protocol._connected_waiter is not None
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
+
+            # No network: drive the real aioquic event path that fails its shielded waiter
+            # after connect_timeout or CancellationToken already cancelled the calling task.
+            connection._events.append(quic_events.ConnectionTerminated(error_code=0, frame_type=None, reason_phrase=""))
+            protocol._process_events()
+            assert protocol._connected_waiter is None
+            await asyncio.sleep(0)
+            del waiting, protocol, connection
+            gc.collect()
+            await asyncio.sleep(0)
+            assert errors == []
+        finally:
+            loop.set_exception_handler(previous_handler)
+
+
 class TestAioquicInternals:
     """Pins the aioquic internals the adapter reaches into.
 
@@ -764,6 +797,7 @@ class TestAioquicInternals:
         protocol = QuicConnectionProtocol(connection)
         assert protocol._quic is connection
         assert callable(protocol._transmit_soon)
+        assert protocol._connected_waiter is None
         assert protocol._transport is None
         assert protocol._loop is asyncio.get_running_loop()
 
