@@ -4,6 +4,7 @@ import {
   connectRelay,
   connectRelayPublisher,
   type MoqtObject,
+  type PublishProperty,
   type RelayConnection,
   type RelayTransportFactory,
 } from '../src/index.js';
@@ -304,5 +305,46 @@ describe('connectRelayPublisher', () => {
     await vi.waitFor(() => expect(received.objects).toHaveLength(2));
     expect(received.objects.find((object) => object.groupId === 0)?.payload).toEqual(new Uint8Array([1, 2, 3]));
     expect(received.objects.find((object) => object.groupId === 1)?.payload).toEqual(new Uint8Array([1, 2, 3]));
+  });
+
+  it.each([
+    { type: 3, value: 'abc' },
+    { type: 3, value: new ArrayBuffer(1) },
+    { type: -1, value: 0 },
+    { type: 0.5, value: 0 },
+    { type: Number.MAX_SAFE_INTEGER + 1, value: 0 },
+    { type: 2, value: -1 },
+    { type: 2, value: 1.5 },
+    { type: 2, value: Number.NaN },
+    { type: 2, value: Number.MAX_SAFE_INTEGER + 1 },
+    { type: 2, value: new Uint8Array([1]) },
+    { type: 3, value: 1 },
+  ])('rejects invalid property $type/$value before registering or taking the write slot', async (property) => {
+    const { publisher, subscriber } = await connectHub();
+    const properties = [property] as PublishProperty[];
+    expect(() => publisher.publish({ track: 'events', trackProperties: properties })).toThrow(/Property 0/);
+    const events = publisher.publish({ track: 'events' });
+    const received = receive(subscriber, 'events');
+    const rejected = events.write(new Uint8Array([1]), { properties });
+    const writing = events.write(new Uint8Array([9]));
+    await expect(rejected).rejects.toThrow(TypeError);
+    await expect(rejected).rejects.toThrow(/Property 0/);
+    await writing;
+    await vi.waitFor(() => expect(received.objects).toHaveLength(1));
+    expect(received.objects[0]?.groupId).toBe(0);
+  });
+
+  it('copies the bytes spanned by property views before waiting for demand', async () => {
+    const { publisher, subscriber } = await connectHub();
+    const events = publisher.publish({ track: 'events' });
+    const bytes = new Uint8Array([9, 1, 2, 9]);
+    const writing = events.write(new Uint8Array([3]), {
+      properties: [{ type: 3, value: new DataView(bytes.buffer, 1, 2) }],
+    });
+    bytes.fill(0);
+    const received = receive(subscriber, 'events');
+    await writing;
+    await vi.waitFor(() => expect(received.objects).toHaveLength(1));
+    expect(received.objects[0]?.properties).toEqual([{ type: 3, value: new Uint8Array([1, 2]) }]);
   });
 });

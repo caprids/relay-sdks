@@ -12,10 +12,16 @@ export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
   namespace: readonly string[];
 }
 
+export interface PublishProperty {
+  /** Non-negative safe integer: even types encode an integer, odd types encode bytes. */
+  type: number;
+  value: number | ArrayBufferView;
+}
+
 export interface PublishTrackOptions {
   track: string;
   /** Explicit track metadata; raw data has no implied timestamp unit. */
-  trackProperties?: readonly KeyValuePair[];
+  trackProperties?: readonly PublishProperty[];
   /** Deadline for relay demand and stream writes. Default 10 seconds, maximum 2147483647. */
   writeTimeoutMs?: number;
 }
@@ -28,7 +34,7 @@ export interface RelayTrackWriter {
    * copied as its raw bytes; anything else is a TypeError that leaves the track usable.
    * A failed bound write ends this track; a timeout waiting for demand permits another write.
    */
-  write(payload: ArrayBufferView, options?: { properties?: readonly KeyValuePair[] }): Promise<void>;
+  write(payload: ArrayBufferView, options?: { properties?: readonly PublishProperty[] }): Promise<void>;
   /** End the track and cancel an outstanding write. The publisher connection stays open. */
   close(): void;
 }
@@ -42,8 +48,20 @@ export interface RelayPublisher {
   close(): Promise<void>;
 }
 
-function copyProperties(properties: readonly KeyValuePair[] = []): KeyValuePair[] {
-  return properties.map(({ type, value }) => ({ type, value: typeof value === 'number' ? value : value.slice() }));
+function copyProperties(properties: readonly PublishProperty[] = []): KeyValuePair[] {
+  return properties.map((property, index) => {
+    const { type, value } = property ?? {};
+    if (!Number.isSafeInteger(type) || type < 0)
+      throw new TypeError(`Property ${index} type must be a non-negative safe integer`);
+    if (type % 2 === 0) {
+      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
+        throw new TypeError(`Property ${index} value must be a non-negative safe integer for an even type`);
+      return { type, value };
+    }
+    if (!ArrayBuffer.isView(value))
+      throw new TypeError(`Property ${index} value must be an ArrayBufferView for an odd type`);
+    return { type, value: new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice() };
+  });
 }
 
 /**

@@ -127,7 +127,9 @@ or retention after an object is sent. Late-subscriber behavior also depends on r
 subscription filters. A failed write may have delivered partial data; there is no automatic retry.
 
 Optional `trackProperties` on `publish()` and `properties` on `write()` carry explicit protocol
-metadata. Raw tracks have no default timescale or LOC framing. Objects are limited to 16 MiB.
+metadata. Property types and even-type integer values must be non-negative safe integers; odd-type
+values must be `ArrayBufferView`s and are copied as their raw bytes. Invalid properties raise a
+`TypeError` naming the property index before registering a track or starting a write. Raw tracks have no default timescale or LOC framing. Objects are limited to 16 MiB.
 `events.close()` cancels an outstanding write and ends that track; other tracks keep running.
 `publisher.close()` ends all tracks, retracts the namespace, and waits for transport shutdown.
 Track names cannot be reused within a publisher connection, including after their writer closes.
