@@ -36,6 +36,7 @@ Options:
 | `--width`, `--height`, `--fps`, `--bitrate`, `--gop` | Test-pattern size and encoder settings (defaults 640x360, 30 fps, 1.5 Mbit/s, 2 s GOP) |
 | `--audio auto\|tone\|off` | `auto`: the file's audio, none for the pattern; `tone`: a 440 Hz sine; `off`: video only |
 | `--duration SECONDS` | Stop after a while (default: until Ctrl-C) |
+| `--on-track-end stop\|continue` | What to do if the relay retires a track mid-run: `stop` (default) fails the run; `continue` keeps publishing the surviving tracks |
 | `--verify` | Also subscribe in-process and report the catalog, groups, keyframes, and timestamps received |
 | `--show-token` | Print the player URL with the token filled in |
 
@@ -52,6 +53,40 @@ Video is written only while the relay has a live subscription for the track; eac
 starts at the next keyframe, and a subscription that changes mid-GOP resets that group and resumes
 at the next keyframe. The encoder runs `libx264` `veryfast` / `zerolatency` with a fixed GOP and no
 B-frames so timestamps are monotonic.
+
+## When a track ends under you
+
+A failed publish comes in two shapes, and the example keeps them apart because they mean opposite
+things. A write that never reached a relay subscription — demand that came and went, or a deadline
+spent waiting for it — costs one object; the track is still open and the next sample tries again.
+A write that had bound to a subscription and then failed ends that track, and the name cannot be
+reused on this connection, so nothing on this publisher will ever carry it again. `RelayError` alone
+does not say which happened, so the example classifies the failure and then confirms it with the
+writer's own `bindings()`, which stops once a track is closed (`bound` cannot say it: `False` is
+equally what "nobody is subscribed" looks like).
+
+An ended track is reported once, with the error, on its own `audio track ended` / `video track ended`
+/ `catalog track ended` line, and the run then **fails with a non-zero exit**. That is the default
+because the catalog still advertises the track: carrying on would serve viewers a stream that
+silently no longer matches its own catalog — video with no audio, and no error anywhere. Pass
+`--on-track-end continue` to keep publishing the tracks that survived instead. Re-registering the
+track on a fresh publisher connection is what a real application should do; the example does not.
+
+The `finished` summary accounts for every sample the encoder produced, and it is printed even when
+the run fails:
+
+```
+finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skippedAudio=11 droppedVideo=0 droppedAudio=0 discardedVideo=0 discardedAudio=0 catalogSends=1 catalogFailures=0
+```
+
+| Counter | Meaning |
+| --- | --- |
+| `videoObjects`, `audioObjects` | Sent to the relay |
+| `skippedVideo`, `skippedAudio` | Not sent because the relay had no subscription for the track, because a write failed before it bound, or because the group they belonged to was reset — the track is fine and publishing resumes at the next sample or keyframe |
+| `droppedVideo`, `droppedAudio` | Not sent because the track had ended; these samples are gone for good |
+| `discardedVideo`, `discardedAudio` | Encoded but still queued when the run stopped, so never attempted — a stop mid-stream can leave seconds of media here |
+| `catalogSends`, `catalogFailures` | Catalog documents accepted, and retryable catalog write failures |
+| `endedTracks` | Present only when a track ended, listing which |
 
 `--verify` runs an in-process subscriber on the same tracks and prints what a player would see, which
 is how the example is checked without a browser. Expect `keyframesWithConfig=0`: the relay drops the
