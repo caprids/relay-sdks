@@ -172,9 +172,16 @@ class SubgroupWriter:
         try:
             await self._header_write
             await self._stream.close()
-        finally:
+        except BaseException as error:
+            # The close suspends until the transport takes the FIN, and a caller that gives up here
+            # (a deadline, a cancelled task) does not withdraw it. Reset the stream, or the group is
+            # delivered complete after the caller was told its close failed.
             self._finishing = False
-            self._finished = True
+            self.abort(error)
+            raise
+
+        self._finishing = False
+        self._finished = True
 
     def abort(self, reason: object = None) -> None:
         """Reset the stream; delivered objects may be incomplete (drop path).

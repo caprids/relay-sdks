@@ -47,6 +47,12 @@ def receive(subscriber: RelayConnection, track: str) -> list[MoqtObject]:
     return objects
 
 
+def _retrieve(task: asyncio.Task[None]) -> None:
+    """Read a background FIN's outcome so an abandoned one is not reported as unretrieved."""
+    if not task.cancelled():
+        task.exception()
+
+
 class _CongestedSendStream:
     """A send half whose FIN stays queued until the link moves, the way a full window holds it.
 
@@ -57,16 +63,30 @@ class _CongestedSendStream:
     def __init__(self, inner: SendStream) -> None:
         self._inner = inner
         self._transmitted: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._fin: asyncio.Task[None] | None = None
         self.finned = False
         self.reset_with: object = None
 
     async def write(self, data: bytes) -> None:
         await self._inner.write(data)
 
-    async def close(self) -> None:
+    async def _deliver_fin(self) -> None:
         await self._transmitted
         await self._inner.close()
         self.finned = True
+
+    async def close(self) -> None:
+        if self._fin is None:
+            self._fin = asyncio.ensure_future(self._deliver_fin())
+            self._fin.add_done_callback(_retrieve)
+
+        # Shielded like ``_SendHalf._send``: a caller that gives up does not withdraw the queued FIN.
+        await asyncio.shield(self._fin)
+
+    def release(self) -> None:
+        """The link moves again: a FIN still queued is transmitted."""
+        if not self._transmitted.done():
+            self._transmitted.set_result(None)
 
     def abort(self, reason: object = None) -> None:
         self.reset_with = reason
@@ -148,4 +168,44 @@ class TestCancellingAStuckGroup:
 
         await settle()
         assert len(objects) == 1  # and nothing is delivered after the cancel
+        assert hub.object_count("video") == 1
+
+    async def test_a_cancelled_close_resets_the_group_instead_of_leaving_the_fin_queued(self, cleanup: Cleanup) -> None:
+        # Giving up on a blocked close (a deadline, a cancelled task) does not withdraw the FIN: the
+        # transport holds it behind a shielded waiter. So the writer must reset the stream on its way
+        # out, or the group turns up complete once the link heals, after the caller was told it failed.
+        hub = create_relay_hub()
+        cleanup.append(hub.destroy)
+        transports: list[_CongestedTransport] = []
+
+        def connect_publisher(url: str = "", protocols: Sequence[str] = ()) -> ConnectingTransport:
+            created = hub.connect_publisher(url, protocols)
+            transport = _CongestedTransport(created.transport)
+            transports.append(transport)
+            return ConnectingTransport(transport=transport, ready=created.ready)
+
+        publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
+        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        cleanup.append(subscriber.close)
+        cleanup.append(publisher.close)
+
+        video = publisher.publish("video")
+        objects = receive(subscriber, "video")
+        group = await video.open_group()
+        await group.write(b"key")
+        await wait_for(lambda: len(objects) == 1)
+
+        stream = transports[0].streams[-1]
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(group.close(), 0.05)
+
+        assert isinstance(stream.reset_with, asyncio.CancelledError)  # reset on the way out
+        assert not stream.finned
+
+        # The link heals: the abandoned FIN must not turn up as a complete group.
+        stream.release()
+        await settle()
+        assert not stream.finned
+        assert len(objects) == 1
         assert hub.object_count("video") == 1
