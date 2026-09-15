@@ -51,7 +51,23 @@ MAX_WRITE_TIMEOUT = 2_147_483.647
 
 
 def _copy_properties(properties: Sequence[KeyValuePair] | None) -> list[KeyValuePair]:
-    return [KeyValuePair(p.type, p.value if isinstance(p.value, int) else bytes(p.value)) for p in properties or ()]
+    copied: list[KeyValuePair] = []
+    for index, prop in enumerate(properties or ()):
+        if not isinstance(prop.type, int) or isinstance(prop.type, bool) or not 0 <= prop.type <= 2**53 - 1:
+            raise TypeError(f"Property {index} type must be a non-negative safe integer")
+        if prop.type % 2 == 0:
+            if not isinstance(prop.value, int) or isinstance(prop.value, bool) or not 0 <= prop.value <= 2**53 - 1:
+                raise TypeError(f"Property {index} value must be a non-negative safe integer for an even type")
+            value = prop.value
+        else:
+            if isinstance(prop.value, int):
+                raise TypeError(f"Property {index} value must be bytes-like for an odd type")
+            try:
+                value = memoryview(prop.value).tobytes()
+            except TypeError as error:
+                raise TypeError(f"Property {index} value must be bytes-like for an odd type") from error
+        copied.append(KeyValuePair(prop.type, value))
+    return copied
 
 
 @dataclass(slots=True)

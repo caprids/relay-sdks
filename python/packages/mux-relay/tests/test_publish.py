@@ -68,6 +68,59 @@ class Received:
 
 
 class TestConnectRelayPublisher:
+    @pytest.mark.parametrize(
+        "values",
+        [
+            (-1, 0),
+            (1.5, 0),
+            (True, b"x"),
+            (2**53, 0),
+            (2, -1),
+            (2, 1.5),
+            (2, True),
+            (2, 2**53),
+            (2, b"x"),
+            (3, "abc"),
+            (3, [1, 2]),
+            (3, 3),
+        ],
+    )
+    async def test_rejects_invalid_properties_before_registering_or_taking_the_write_slot(
+        self, cleanup: Cleanup, values: tuple[Any, Any]
+    ) -> None:
+        prop = KeyValuePair(*values)
+        _, publisher, subscriber = await connect_hub(cleanup)
+        with pytest.raises(TypeError, match="Property 0"):
+            publisher.publish("events", track_properties=[prop])
+        events = publisher.publish("events")
+        received = Received(subscriber, "events")
+        await wait_for(lambda: events.bound)
+        with pytest.raises(TypeError, match="Property 0"):
+            await events.write(b"bad", properties=[prop])
+        assert not events.closed
+        group = await events.open_group()
+        with pytest.raises(TypeError, match="Property 0"):
+            await group.write(b"bad", properties=[prop])
+        assert not group.closed
+        await group.write(b"good", properties=[KeyValuePair(2, 2**53 - 1)])
+        await group.close()
+        await events.write(b"after")
+        await wait_for(lambda: len(received.objects) == 2)
+        assert [obj.payload for obj in received.objects] == [b"good", b"after"]
+
+    async def test_copies_only_the_property_buffer_view_and_keeps_numeric_boundaries(self, cleanup: Cleanup) -> None:
+        _, publisher, subscriber = await connect_hub(cleanup)
+        events = publisher.publish("events")
+        backing = bytearray(b"abcd")
+        view: Any = memoryview(backing)[1:3]
+        writing = asyncio.create_task(events.write(b"data", properties=[KeyValuePair(2**53 - 1, view)]))
+        await asyncio.sleep(0)
+        backing[:] = b"xxxx"
+        received = Received(subscriber, "events")
+        await writing
+        await wait_for(lambda: len(received.objects) == 1)
+        assert received.objects[0].properties == [KeyValuePair(2**53 - 1, b"bc")]
+
     async def test_publishes_raw_binary_data_through_a_soliciting_relay_into_the_sdk_subscriber(
         self, cleanup: Cleanup
     ) -> None:
