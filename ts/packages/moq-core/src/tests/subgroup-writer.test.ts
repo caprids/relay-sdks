@@ -217,4 +217,54 @@ describe('createSubgroupWriter', () => {
     });
     expect(sink.abortReason()).toBe(reason);
   });
+
+  it('aborts fin while the subgroup header is stalled on reader backpressure', async () => {
+    const pipe = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = createSubgroupWriter(pipe.writable, { trackAlias: 1, groupId: 0 });
+    const finishing = writer.fin();
+    const reason = new Error('deadline');
+    const rejected = expect(finishing).rejects.toBe(reason);
+    await expect(writer.writeObject({ objectId: 0, payload: new Uint8Array([1]) })).rejects.toThrow(/finished/);
+    writer.abort(reason);
+    const reader = pipe.readable.getReader();
+    // A TransformStream releases its pending write once the peer reads.
+    await expect(reader.read()).rejects.toBe(reason);
+    await rejected;
+    await expect(reader.read()).rejects.toBe(reason);
+  });
+
+  it('interrupts an in-flight transport close through the controller abort signal', async () => {
+    let rejectClose!: (reason: unknown) => void;
+    let closeStarted = false;
+    const abort = vi.fn();
+    // WebTransport uses controller.signal to reject its pending operation. An arbitrary
+    // sink that ignores that signal cannot interrupt an already in-flight close.
+    const stream = new WritableStream<Uint8Array>({
+      start(controller) {
+        controller.signal.addEventListener('abort', () => {
+          // The WebTransport abort-signal algorithm resets the transport itself,
+          // then rejects the close; Streams does not call sink.abort after close fails.
+          abort(controller.signal.reason);
+          rejectClose(controller.signal.reason);
+        });
+      },
+      close() {
+        closeStarted = true;
+        return new Promise<void>((_, reject) => {
+          rejectClose = reject;
+        });
+      },
+      abort,
+    });
+    const writer = createSubgroupWriter(stream, { trackAlias: 1, groupId: 0 });
+    await writer.writeObject({ objectId: 0, payload: new Uint8Array([1]) });
+    const finishing = writer.fin();
+    expect(writer.fin()).toBe(finishing);
+    await vi.waitFor(() => expect(closeStarted).toBe(true));
+    const reason = new Error('deadline while closing');
+    const rejected = expect(finishing).rejects.toBe(reason);
+    writer.abort(reason);
+    await rejected;
+    await vi.waitFor(() => expect(abort).toHaveBeenCalledWith(reason));
+  });
 });

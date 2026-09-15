@@ -13,5 +13,12 @@ export type {
 } from '@mux/moq-core';
 export type { ConnectRelayOptions, RelayConnection, RelayTrackOptions, RelayTransportFactory } from './connect.js';
 export { connectRelay } from './connect.js';
-export type { ConnectRelayPublisherOptions, PublishTrackOptions, RelayPublisher, RelayTrackWriter } from './publish.js';
+export type {
+  ConnectRelayPublisherOptions,
+  PublishProperty,
+  PublishTrackOptions,
+  RelayGroupWriter,
+  RelayPublisher,
+  RelayTrackWriter,
+} from './publish.js';
 export { connectRelayPublisher } from './publish.js';

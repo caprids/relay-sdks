@@ -127,10 +127,62 @@ or retention after an object is sent. Late-subscriber behavior also depends on r
 subscription filters. A failed write may have delivered partial data; there is no automatic retry.
 
 Optional `trackProperties` on `publish()` and `properties` on `write()` carry explicit protocol
-metadata. Raw tracks have no default timescale or LOC framing. Objects are limited to 16 MiB.
+metadata. Property types and even-type integer values must be non-negative safe integers; odd-type
+values must be `ArrayBufferView`s and are copied as their raw bytes. Invalid properties raise a
+`TypeError` naming the property index before registering a track or starting a write. Raw tracks have no default timescale or LOC framing. Objects are limited to 16 MiB.
 `events.close()` cancels an outstanding write and ends that track; other tracks keep running.
 `publisher.close()` ends all tracks, retracts the namespace, and waits for transport shutdown.
 Track names cannot be reused within a publisher connection, including after their writer closes.
+
+### Multi-object groups and relay demand
+
+For media, use `openGroup()` to put multiple objects on one stream. Each object gets the next ID,
+starting at 0; `group.close()` sends the group's FIN. This amortizes stream creation and completion
+across a group, such as a video GOP, instead of waiting for a FIN for every frame.
+
+```ts
+const video = publisher.publish({ track: 'video', writeTimeoutMs: 10_000 });
+const lifetime = new AbortController();
+const group = await video.openGroup({ signal: lifetime.signal });
+try {
+  for (const frame of encodedGop) {
+    await group.write(frame.bytes, { properties: frame.properties });
+  }
+  await group.close();
+} catch (error) {
+  group.abort(error);
+  throw error;
+}
+```
+
+Only one write or open group may occupy a track, and group writes/close must be awaited serially.
+The deadline applies separately to opening the group (including demand), each object write, and
+closing it. Idle time between group operations is unrestricted. `group.abort(reason)`, its optional
+`AbortSignal`, a relay re-subscription, or an operation failure resets the group and releases the
+track for another group. Start the next group at a random-access point. Local payload/property
+validation errors leave the group usable. `group.closed`, `group.groupId`, and `group.objectCount`
+report its state; the count includes only successfully accepted objects. Empty payloads may carry
+`status: 'end-of-group'` or `'end-of-track'`. Application queues and frame dropping remain the
+application's responsibility.
+
+`track.bound` reports current relay demand. `track.closed` distinguishes a retired track from a
+track waiting for demand. `track.bindings()` yields the current demand state followed by changes,
+including `true` again for replacement subscriptions, and ends when the track ends. For example,
+a catalog can be re-sent on each relay subscription:
+
+```ts
+for await (const bound of catalog.bindings()) {
+  if (bound) await catalog.write(catalogBytes);
+}
+```
+
+Breaking the loop releases its observer. Explicit iterator consumers can call `return()` to release
+an observer, including a pending `next()`. Demand is the relay's upstream subscription; it does not
+represent each individual downstream viewer.
+
+Custom transports with asynchronous sink writes or closes must honor the writable controller's
+abort signal to interrupt them and reset their underlying stream, as browser WebTransport does.
+A generic `WritableStream` sink that ignores the signal can finish its in-flight close after an abort.
 
 Run the data-only publishing/subscribing integration test without a live relay:
 

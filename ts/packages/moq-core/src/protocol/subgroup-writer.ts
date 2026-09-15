@@ -146,6 +146,7 @@ export function createSubgroupWriter(
   const writer = stream.getWriter();
   let previousObjectId: number | undefined;
   let finished = false;
+  let finishing: Promise<void> | undefined;
 
   // Header errors surface on the first awaited write/fin — an errored
   // stream rejects everything queued after it.
@@ -157,7 +158,7 @@ export function createSubgroupWriter(
     groupId: options.groupId,
 
     async writeObject(object: SubgroupObjectInput): Promise<void> {
-      if (finished) throw new MoqtProtocolError('subgroup stream already finished');
+      if (finished || finishing) throw new MoqtProtocolError('subgroup stream already finished');
 
       const bytes = encodeObject(object, previousObjectId, hasProperties);
 
@@ -166,12 +167,19 @@ export function createSubgroupWriter(
       await writer.write(bytes);
     },
 
-    async fin(): Promise<void> {
-      if (finished) return;
+    fin(): Promise<void> {
+      if (finishing) return finishing;
+      if (finished) return Promise.resolve();
 
-      finished = true;
-      await headerWrite;
-      await writer.close();
+      finishing = (async () => {
+        try {
+          await headerWrite;
+          await writer.close();
+        } finally {
+          finished = true;
+        }
+      })();
+      return finishing;
     },
 
     abort(reason?: unknown): void {

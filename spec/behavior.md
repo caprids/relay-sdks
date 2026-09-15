@@ -81,10 +81,13 @@ against that file.
   on one stream, and closing the group FINs the stream. Object 0 is the group's random-access point,
   which is how LOC/MSF media (one GOP per group) is published. A group that fails part-way is reset
   rather than completed, and the track stays open for the next group; only one write or group may
-  be pending per track. Implemented in `python/`; not yet in `ts/`.
+  be pending per track. The write deadline applies separately to opening a group (including demand),
+  each object write, and closing the group. Idle time between operations is unrestricted.
+  Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
   observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
-  Implemented in `python/`; not yet in `ts/`.
+  Demand observers emit the current state first, include replacement subscriptions, and finish when
+  the track ends. A closed track reports no demand. Implemented in both SDKs.
 
 ## Package boundaries
 
