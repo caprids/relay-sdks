@@ -57,8 +57,8 @@ _FIN_RETRY_INTERVAL = 0.25
 # The send half's backpressure, the close drain, stream pruning and the FIN retry read aioquic state
 # its public API does not expose: QuicStreamSender._pending, _pending_eof, _buffer, _buffer_fin,
 # _acked_fin and _reset_error_code (with buffer_is_empty and is_finished), QuicStreamReceiver.is_finished,
-# QuicConnection._streams, H3Connection._stream, and the asyncio protocol's _transmit_soon and _connected_waiter. A rename in
-# a later aioquic 1.x (the package pins ``aioquic>=1.2,<2``) would fail silently and only under load, as
+# QuicConnection._streams, H3Connection._stream, and the asyncio protocol's _transmit_soon and _connected_waiter.
+# A rename in a later aioquic 1.x (the package pins ``aioquic>=1.2,<2``) would fail silently and only under load, as
 # a write that never settles or a FIN that is never re-armed, so
 # tests/test_webtransport.py::TestAioquicInternals pins every one of them. Revisit both with any bump.
 
