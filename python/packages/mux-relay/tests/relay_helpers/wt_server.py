@@ -9,7 +9,9 @@ from __future__ import annotations
 import asyncio
 import datetime
 import ipaddress
+import random
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
@@ -57,6 +59,28 @@ def generate_self_signed_certificate() -> tuple[x509.Certificate, ec.EllipticCur
     return certificate, key, certificate.public_bytes(serialization.Encoding.PEM)
 
 
+@dataclass
+class Impairment:
+    """Shapes the client-to-server direction of one connection, the publisher's uplink in a test.
+
+    aioquic's receiver grants flow-control credit as data arrives whether or not the application
+    reads it, so "a peer that reads slowly" has to be modelled at the packet level: ``paused`` drops
+    every inbound datagram (a blackout), ``delay``/``jitter`` add latency, and ``rate`` caps
+    throughput with a bounded queue that tail-drops, the way a saturated bottleneck link does.
+    """
+
+    paused: bool = False
+    delay: float = 0.0
+    """Seconds added to every inbound datagram."""
+    jitter: float = 0.0
+    """Uniform +/- seconds around ``delay``; datagrams may reorder."""
+    rate: int | None = None
+    """Bytes per second of inbound capacity, or ``None`` for unlimited."""
+    queue_seconds: float = 0.2
+    """How far behind the rate cap's queue may fall before it drops the datagram."""
+    _next_free_at: float = 0.0
+
+
 class WebTransportServerSession(WebTransportSessionBase):
     """The server end of one accepted session: a ``MoqtTransport`` for the relay hub to serve."""
 
@@ -65,6 +89,14 @@ class WebTransportServerSession(WebTransportSessionBase):
         self.path = path
         self.protocol_id = protocol_id
         self._attach(protocol, session_id)
+
+    def impair(self, **settings: Any) -> Impairment:
+        """Replace the inbound impairment of this session's connection; ``impair()`` clears it."""
+        protocol = self._protocol
+        assert isinstance(protocol, WebTransportServerProtocol)
+        impairment = Impairment(**settings) if settings else None
+        protocol.impairment = impairment
+        return impairment or Impairment()
 
 
 SessionHandler = Callable[[WebTransportServerSession], None]
@@ -87,6 +119,35 @@ class WebTransportServerProtocol(WebTransportProtocol):
         self._on_request = on_request
         self.on_request_headers = self._handle_request
         self.requests: list[dict[bytes, bytes]] = []
+        self.impairment: Impairment | None = None
+
+    def datagram_received(self, data: bytes | str, addr: Any) -> None:
+        impairment = self.impairment
+
+        if impairment is None:
+            super().datagram_received(data, addr)
+            return
+
+        if impairment.paused:
+            return
+
+        delay = impairment.delay + random.uniform(-impairment.jitter, impairment.jitter)
+        now = self._loop.time()
+
+        if impairment.rate:
+            free_at = max(impairment._next_free_at, now)
+            queued = free_at - now
+
+            if queued > impairment.queue_seconds:
+                return  # the bottleneck queue is full: tail drop
+
+            impairment._next_free_at = free_at + len(data) / impairment.rate
+            delay += queued
+
+        if delay <= 0:
+            super().datagram_received(data, addr)
+        else:
+            self._loop.call_later(delay, super().datagram_received, data, addr)
 
     def _handle_request(self, event: HeadersReceived) -> None:
         headers = {key.lower(): value for key, value in event.headers}
