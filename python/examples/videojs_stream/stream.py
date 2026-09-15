@@ -498,6 +498,8 @@ class Stats:
     skipped_audio: int = 0
     dropped_video: int = 0
     dropped_audio: int = 0
+    discarded_video: int = 0
+    discarded_audio: int = 0
     catalog_sends: int = 0
     catalog_failures: int = 0
     ended_tracks: dict[str, str] = field(default_factory=dict)
@@ -505,6 +507,23 @@ class Stats:
 
 # Called once per track that the relay retired under us, with the failure that ended it.
 TrackEndHandler = Callable[[str, RelayError], None]
+
+
+def discard_sample(sample: EncodedSample, stats: Stats) -> None:
+    """Count a sample the run abandoned: not skipped for want of demand, not lost with a track."""
+    if sample.kind == "audio":
+        stats.discarded_audio += 1
+    else:
+        stats.discarded_video += 1
+
+
+def discard_queue(queue: asyncio.Queue[EncodedSample | None], stats: Stats) -> None:
+    """Count everything the encoder handed over that a stopping run will never publish."""
+    while not queue.empty():
+        sample = queue.get_nowait()
+
+        if sample is not None:
+            discard_sample(sample, stats)
 
 
 def make_track_end_handler(
@@ -630,12 +649,20 @@ async def publish_media(
             if error is not lifetime.reason:
                 raise
 
+    # The sample in hand that has not landed in a counter yet. Nothing awaits between counting a
+    # sample and the next reset, so whatever is here when the run is torn down really did go
+    # nowhere, whether the lifetime's cancel reason arrived or the task itself was cancelled.
+    pending: EncodedSample | None = None
+
     try:
         while True:
+            pending = None
             sample = await queue.get()
 
             if sample is None:
                 break
+
+            pending = sample
 
             if sample.kind == "audio":
                 if audio is None:
@@ -711,6 +738,11 @@ async def publish_media(
                 else:
                     stats.skipped_video += 1
                     log("group interrupted", {"group": group_id, "error": describe(error)})
+    except BaseException:
+        if pending is not None:
+            discard_sample(pending, stats)
+
+        raise
     finally:
         await end_group()
 
@@ -905,6 +937,10 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
         await asyncio.gather(*tasks, return_exceptions=True)
 
+        # A run that stops mid-stream leaves encoded media queued -- seconds of it, if a write was
+        # blocked on a deadline. It was produced, so the summary owes an account of it.
+        discard_queue(queue, stats)
+
         if verified is not None:
             report_verification(verified, log)
 
@@ -930,6 +966,8 @@ def summarize(stats: Stats) -> dict[str, Any]:
         "skippedAudio": stats.skipped_audio,
         "droppedVideo": stats.dropped_video,
         "droppedAudio": stats.dropped_audio,
+        "discardedVideo": stats.discarded_video,
+        "discardedAudio": stats.discarded_audio,
         "catalogSends": stats.catalog_sends,
         "catalogFailures": stats.catalog_failures,
         "endedTracks": ",".join(stats.ended_tracks) or None,

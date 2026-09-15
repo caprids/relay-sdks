@@ -76,7 +76,7 @@ The `finished` summary accounts for every sample the encoder produced, and it is
 the run fails:
 
 ```
-finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skippedAudio=11 droppedVideo=0 droppedAudio=0 catalogSends=1 catalogFailures=0
+finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skippedAudio=11 droppedVideo=0 droppedAudio=0 discardedVideo=0 discardedAudio=0 catalogSends=1 catalogFailures=0
 ```
 
 | Counter | Meaning |
@@ -84,6 +84,7 @@ finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skip
 | `videoObjects`, `audioObjects` | Sent to the relay |
 | `skippedVideo`, `skippedAudio` | Not sent because the relay had no subscription for the track, because a write failed before it bound, or because the group they belonged to was reset — the track is fine and publishing resumes at the next sample or keyframe |
 | `droppedVideo`, `droppedAudio` | Not sent because the track had ended; these samples are gone for good |
+| `discardedVideo`, `discardedAudio` | Encoded but still queued when the run stopped, so never attempted — a stop mid-stream can leave seconds of media here |
 | `catalogSends`, `catalogFailures` | Catalog documents accepted, and retryable catalog write failures |
 | `endedTracks` | Present only when a track ended, listing which |
 

@@ -26,6 +26,7 @@ from videojs_stream.stream import (
     EncodedSample,
     Stats,
     TrackEnded,
+    discard_queue,
     failure_ends_track,
     make_track_end_handler,
     publish_media,
@@ -474,10 +475,11 @@ async def drive_until_stopped(
 
     on_track_end = make_track_end_handler("stop", stats, cast(Any, lambda event, fields: None), stop)
     media_failure: BaseException | None = None
+    queue = queue_of(samples)
 
     try:
         await publish_media(
-            queue_of(samples),
+            queue,
             cast(Any, video),
             cast(Any, audio),
             cast(Any, SimpleNamespace(avcc=b"\x01\x42")),
@@ -489,6 +491,8 @@ async def drive_until_stopped(
     except BaseException as error:
         media_failure = error
 
+    # What `run`'s shutdown does once the publish loop is over.
+    discard_queue(queue, stats)
     return stats, media_failure, reasons[0] if reasons else None
 
 
@@ -524,6 +528,31 @@ class TestStopPolicyReporting:
         # Not `RuntimeError: publishing failed: TrackEnded: ...`, which says nothing about the track.
         assert failure is track_end_reason
         assert "the audio track ended mid-run" in str(failure)
+
+    async def test_every_sample_is_accounted_for_when_the_run_stops(self) -> None:
+        # Stopping abandons the sample in flight and everything still queued behind it. Both are
+        # exactly what the summary exists to report, so neither may vanish from the counters.
+        lifetime = CancellationToken()
+        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        samples = [
+            EncodedSample(kind="video", timestamp_us=0, payload=b"\x00", key=True),
+            EncodedSample(kind="audio", timestamp_us=0, payload=b"\xfc\xff", key=True),
+            # Never reached: the write of the first of these raises the cancellation, and the rest
+            # are still sitting in the queue when the run tears down.
+            *[EncodedSample(kind="video", timestamp_us=i * 33_333, payload=b"\x00", key=False) for i in range(1, 5)],
+            *[EncodedSample(kind="audio", timestamp_us=i * 20_000, payload=b"\xfc\xff", key=True) for i in range(1, 3)],
+        ]
+        stats, _, _ = await drive_until_stopped(
+            samples, lifetime, CancellingTrack(lifetime), FakeTrack(fail_on=0, error=rebind)
+        )
+
+        video_total = stats.video_objects + stats.skipped_video + stats.dropped_video + stats.discarded_video
+        audio_total = stats.audio_objects + stats.skipped_audio + stats.dropped_audio + stats.discarded_audio
+
+        assert (video_total, audio_total) == (5, 3)
+        assert stats.discarded_video == 4  # the one whose write was cancelled, plus three queued
+        assert stats.discarded_audio == 2
+        assert summarize(stats)["discardedVideo"] == 4
 
     async def test_abandoning_a_group_does_not_re_raise_the_cancellation(self) -> None:
         # `end_group` runs in the publish loop's finally; raising the cancellation again there would
