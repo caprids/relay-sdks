@@ -1,7 +1,11 @@
-"""The Video.js streaming example's media helpers, checked against the Video.js v10 parser rules."""
+"""The Video.js streaming example's helpers: the media formats, and how it reads a publish failure."""
 
+import asyncio
 import base64
 import json
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from videojs_stream.moq_media import (
@@ -18,6 +22,19 @@ from videojs_stream.moq_media import (
     iter_annexb_nal_units,
     loc_properties,
 )
+from videojs_stream.stream import (
+    EncodedSample,
+    Stats,
+    failure_ends_track,
+    make_track_end_handler,
+    publish_media,
+    serve_catalog,
+    summarize,
+    track_has_ended,
+    write_ended_track,
+)
+
+from mux_relay import RelayClosedError, RelayError, RelayTimeoutError
 
 
 class TestAnnexB:
@@ -142,3 +159,282 @@ class TestPlayerUrl:
 
         with pytest.raises(ValueError):
             compose_player_url("https://relay.example.com", [])
+
+
+class TestFailureEndsTrack:
+    """The example's read of the SDK contract: which publish failures retire the track."""
+
+    def test_a_timeout_waiting_for_demand_is_retryable(self) -> None:
+        timeout = RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
+
+        assert failure_ends_track(timeout, operation="write", bound=False) is False
+
+    def test_a_timeout_on_a_bound_write_is_terminal(self) -> None:
+        # One deadline covers the wait for demand and the transport write (#19), and the SDK retires
+        # the track when it fires on a bound one. Until #31 exposes `closed`, the only way to see
+        # that is the writer state `track_has_ended` reads, not the exception class.
+        timeout = RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
+
+        assert failure_ends_track(timeout, operation="write", bound=True) is True
+
+    def test_a_closed_track_is_always_terminal(self) -> None:
+        closed = RelayClosedError("Published track is closed")
+
+        assert failure_ends_track(closed, operation="write", bound=False) is True
+        assert failure_ends_track(closed, operation="group", bound=True) is True
+
+    def test_a_bare_relay_error_on_a_bound_write_is_terminal(self) -> None:
+        # What a relay re-bind during a bound write raises today (#31); the dedicated subclass of
+        # RelayClosedError that lands with it is covered by the isinstance check above.
+        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+
+        assert failure_ends_track(rebind, operation="write", bound=True) is True
+
+    def test_a_bare_relay_error_on_an_unbound_write_is_retryable(self) -> None:
+        vanished = RelayError("Relay subscription ended before the write started")
+
+        assert failure_ends_track(vanished, operation="write", bound=False) is False
+
+    def test_a_group_that_fails_part_way_keeps_its_track(self) -> None:
+        # The SDK resets the group's stream and leaves the track open for the next keyframe.
+        interrupted = RelayError("Relay subscription changed during the group; it may be incomplete")
+
+        assert failure_ends_track(interrupted, operation="group", bound=True) is False
+
+
+class FakeGroup:
+    """Enough of RelayGroupWriter for the example's publish loop."""
+
+    def __init__(self, group_id: int) -> None:
+        self.group_id = group_id
+        self.objects = 0
+
+    async def write(self, payload: bytes, *, properties: object = None) -> None:
+        self.objects += 1
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeTrack:
+    """A track writer whose nth operation fails the way a relay re-bind does, taking `bound` with it.
+
+    Moving a relay subscription during a bound write is not reproducible on demand (it happened in
+    one of three long campaign runs), so the terminal path is injected here rather than waited for.
+    `bindings()` mirrors RelayTrackWriter: the current demand state first, and nothing at all once
+    the track is retired.
+    """
+
+    def __init__(
+        self,
+        *,
+        bound: bool = True,
+        fail_on: int | None = None,
+        error: RelayError | None = None,
+        retires: bool = True,
+    ) -> None:
+        self.bound = bound
+        self.ended = False
+        self.writes = 0
+        self.groups = 0
+        self._fail_on = fail_on
+        self._error = error
+        self._retires = retires
+
+    def _maybe_fail(self) -> None:
+        if self._fail_on is not None and self.writes + self.groups == self._fail_on:
+            assert self._error is not None
+            self._fail_on = None
+            self.bound = False
+            self.ended = self._retires
+            raise self._error
+
+    async def write(self, payload: bytes, *, properties: object = None) -> None:
+        self._maybe_fail()
+        self.writes += 1
+
+    async def open_group(self) -> FakeGroup:
+        self._maybe_fail()
+        group = FakeGroup(self.groups)
+        self.groups += 1
+        return group
+
+    async def _bindings(self) -> AsyncIterator[bool]:
+        if self.ended:
+            return
+
+        yield self.bound
+
+    def bindings(self) -> AsyncIterator[bool]:
+        return self._bindings()
+
+
+class TestTrackHasEnded:
+    async def test_reads_the_end_of_track_out_of_the_bindings_iterator(self) -> None:
+        assert await track_has_ended(cast(Any, FakeTrack(bound=True))) is False
+        assert await track_has_ended(cast(Any, FakeTrack(bound=False))) is False
+
+        retired = FakeTrack()
+        retired.ended = True
+
+        assert await track_has_ended(cast(Any, retired)) is True
+
+    async def test_prefers_the_closed_property_that_31_adds(self) -> None:
+        # #31 gives RelayTrackWriter a `closed` property; the example uses it as soon as it exists
+        # and falls back to `bindings()` against today's SDK.
+        alive = SimpleNamespace(closed=False, bindings=lambda: pytest.fail("bindings() was consulted"))
+        gone = SimpleNamespace(closed=True, bindings=lambda: pytest.fail("bindings() was consulted"))
+
+        assert await track_has_ended(cast(Any, alive)) is False
+        assert await track_has_ended(cast(Any, gone)) is True
+
+
+class TestWriteEndedTrack:
+    async def test_confirms_a_terminal_classification_against_the_writer(self) -> None:
+        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        retired = FakeTrack()
+        retired.ended = True
+
+        assert await write_ended_track(cast(Any, retired), rebind, bound=True) is True
+        assert await write_ended_track(cast(Any, FakeTrack()), rebind, bound=True) is False
+        assert await write_ended_track(cast(Any, retired), rebind, bound=False) is False
+
+    async def test_a_closed_track_needs_no_confirmation(self) -> None:
+        # A connection that went away leaves the writer un-retired while every write still fails.
+        closed = RelayClosedError("Published track is closed")
+
+        assert await write_ended_track(cast(Any, FakeTrack()), closed, bound=True) is True
+
+
+def audio_samples(count: int) -> list[EncodedSample]:
+    return [EncodedSample(kind="audio", timestamp_us=i * 20_000, payload=b"\xfc\xff", key=True) for i in range(count)]
+
+
+async def drive(
+    samples: list[EncodedSample], *, video: FakeTrack, audio: FakeTrack | None
+) -> tuple[Stats, list[tuple[str, RelayError]]]:
+    """Run the example's publish loop over a scripted sample list and report what it counted."""
+    queue: asyncio.Queue[EncodedSample | None] = asyncio.Queue()
+
+    for sample in samples:
+        queue.put_nowait(sample)
+
+    queue.put_nowait(None)
+    stats = Stats()
+    ended: list[tuple[str, RelayError]] = []
+    encoder = cast(Any, SimpleNamespace(avcc=b"\x01\x42"))
+    await publish_media(
+        queue,
+        cast(Any, video),
+        cast(Any, audio),
+        encoder,
+        stats,
+        cast(Any, lambda event, fields: None),
+        lambda track, error: ended.append((track, error)),
+    )
+    return stats, ended
+
+
+class TestPublishMediaTrackEnd:
+    async def test_a_bound_audio_write_failure_ends_the_track_once_and_counts_the_rest(self) -> None:
+        # #32: a 30-minute run reported skippedAudio=0 while ~74,700 frames were never sent.
+        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        audio = FakeTrack(fail_on=3, error=rebind)
+        stats, ended = await drive(audio_samples(10), video=FakeTrack(bound=False), audio=audio)
+
+        assert stats.audio_objects == 3
+        assert stats.dropped_audio == 7
+        assert stats.skipped_audio == 0
+        assert [(track, str(error)) for track, error in ended] == [("audio", str(rebind))]
+        assert audio.writes == 3
+        assert summarize(stats)["droppedAudio"] == 7
+
+    async def test_frames_with_no_subscription_stay_skipped_not_dropped(self) -> None:
+        stats, ended = await drive(audio_samples(4), video=FakeTrack(bound=False), audio=FakeTrack(bound=False))
+
+        assert (stats.audio_objects, stats.skipped_audio, stats.dropped_audio) == (0, 4, 0)
+        assert ended == []
+        assert summarize(stats)["endedTracks"] is None
+
+    async def test_a_vanished_subscription_only_skips_the_frame(self) -> None:
+        # `bound` was True when the write started but demand disappeared before it bound, so the
+        # writer is still open; the example must confirm that instead of ending the run.
+        vanished = RelayError("Relay subscription ended before the write started")
+        audio = FakeTrack(fail_on=2, error=vanished, retires=False)
+        stats, ended = await drive(audio_samples(3), video=FakeTrack(bound=False), audio=audio)
+
+        # The third frame then finds `bound` False, the way it does while nobody is subscribed.
+        assert (stats.audio_objects, stats.skipped_audio, stats.dropped_audio) == (2, 1, 0)
+        assert ended == []
+
+    async def test_a_closed_video_track_is_reported_and_its_frames_counted_as_dropped(self) -> None:
+        closed = RelayClosedError("Published track is closed")
+        video = FakeTrack(fail_on=0, error=closed)
+        keyframes = [EncodedSample(kind="video", timestamp_us=i * 33_333, payload=b"\x00", key=True) for i in range(3)]
+        stats, ended = await drive(keyframes, video=video, audio=None)
+
+        assert (stats.video_groups, stats.video_objects, stats.dropped_video, stats.skipped_video) == (0, 0, 3, 0)
+        assert [track for track, _ in ended] == ["video"]
+
+
+class TestTrackEndHandler:
+    def test_logs_once_records_the_track_and_stops_the_run(self) -> None:
+        stats = Stats()
+        logged: list[str] = []
+        stopped: list[BaseException] = []
+        handler = make_track_end_handler(
+            "stop", stats, cast(Any, lambda event, fields: logged.append(event)), stopped.append
+        )
+        error = RelayError("Relay subscription changed during a write; the object may be incomplete")
+
+        handler("audio", error)
+        handler("audio", error)
+
+        assert logged == ["audio track ended"]
+        assert stats.ended_tracks == {"audio": f"RelayError: {error}"}
+        assert [type(reason).__name__ for reason in stopped] == ["TrackEnded"]
+        assert summarize(stats)["endedTracks"] == "audio"
+
+    def test_continue_keeps_the_run_going(self) -> None:
+        stats = Stats()
+        stopped: list[BaseException] = []
+        handler = make_track_end_handler("continue", stats, cast(Any, lambda event, fields: None), stopped.append)
+
+        handler("audio", RelayError("gone"))
+
+        assert stopped == []
+        assert stats.ended_tracks == {"audio": "RelayError: gone"}
+
+
+class TestServeCatalog:
+    async def test_a_retired_catalog_track_stops_the_resend_loop(self) -> None:
+        class FakeCatalog:
+            """A catalog writer the relay subscribes to twice, whose write fails the terminal way."""
+
+            def __init__(self) -> None:
+                self.writes = 0
+
+            async def _bindings(self) -> AsyncIterator[bool]:
+                yield True
+                yield True
+
+            def bindings(self) -> AsyncIterator[bool]:
+                return self._bindings()
+
+            async def write(self, payload: bytes, *, properties: object = None) -> None:
+                self.writes += 1
+                raise RelayClosedError("Published track is closed")
+
+        catalog = FakeCatalog()
+        stats = Stats()
+        ended: list[str] = []
+        await serve_catalog(
+            cast(Any, catalog),
+            b"{}",
+            stats,
+            cast(Any, lambda event, fields: None),
+            lambda track, error: ended.append(track),
+        )
+
+        assert (catalog.writes, stats.catalog_sends, stats.catalog_failures) == (1, 0, 0)
+        assert ended == ["catalog"]
