@@ -1,5 +1,15 @@
 import { MOQT_PROTOCOL_ID, type MoqtSessionCallbacks, type MoqtTransport } from '@mux/moq-core';
 
+/** setTimeout stores its delay in a signed 32-bit integer; a larger one wraps and fires at once. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
+/** Reject a deadline a timer cannot hold, so a larger number never means a shorter wait. */
+export function assertTimeoutMs(name: string, value: number): void {
+  if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMEOUT_MS) {
+    throw new RangeError(`${name} must be between 0 (exclusive) and ${MAX_TIMEOUT_MS}`);
+  }
+}
+
 /** Supply a browser transport or a compatible implementation in another runtime. */
 export type RelayTransportFactory = (
   url: string,
@@ -16,9 +26,9 @@ export interface ConnectRelayOptions {
   getToken?: () => string | undefined | Promise<string | undefined>;
   /** Aborting closes the connection, including after connectRelay has resolved. */
   signal?: AbortSignal;
-  /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds. */
+  /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
   connectTimeoutMs?: number;
-  /** Deadline for an initial subscription response, not for silence on an accepted track. Default 10 seconds. */
+  /** Deadline for an initial subscription response, not for silence on an accepted track. Default 10 seconds, maximum 2147483647. */
   requestTimeoutMs?: number;
   createTransport?: RelayTransportFactory;
 }
@@ -61,12 +71,8 @@ export async function openRelaySession<T extends Session>(
     throw new TypeError('Relay endpoints cannot contain fragments or userinfo');
 
   const timeoutMs = options.connectTimeoutMs ?? 10_000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0)
-    throw new RangeError('connectTimeoutMs must be a positive finite number');
-
-  const requestTimeoutMs = options.requestTimeoutMs ?? 10_000;
-  if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0)
-    throw new RangeError('requestTimeoutMs must be a positive finite number');
+  assertTimeoutMs('connectTimeoutMs', timeoutMs);
+  assertTimeoutMs('requestTimeoutMs', options.requestTimeoutMs ?? 10_000);
 
   options.signal?.throwIfAborted();
 

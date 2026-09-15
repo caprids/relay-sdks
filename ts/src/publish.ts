@@ -5,7 +5,7 @@ import {
   MAX_OBJECT_PAYLOAD_LENGTH,
   type SubgroupWriter,
 } from '@mux/moq-core';
-import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
   /** One namespace per publisher connection. Register any number of tracks within it. */
@@ -16,7 +16,7 @@ export interface PublishTrackOptions {
   track: string;
   /** Explicit track metadata; raw data has no implied timestamp unit. */
   trackProperties?: readonly KeyValuePair[];
-  /** Deadline for relay demand and stream writes. Default 10 seconds. */
+  /** Deadline for relay demand and stream writes. Default 10 seconds, maximum 2147483647. */
   writeTimeoutMs?: number;
 }
 
@@ -24,10 +24,11 @@ export interface RelayTrackWriter {
   /**
    * Write one independent object/group. Waits for relay demand. Resolves when the
    * transport accepts the complete group, not when a downstream viewer acknowledges it.
-   * Only one write may be pending; await it before writing again. Bytes are copied.
+   * Only one write may be pending; await it before writing again. Any ArrayBufferView is
+   * copied as its raw bytes; anything else is a TypeError that leaves the track usable.
    * A failed bound write ends this track; a timeout waiting for demand permits another write.
    */
-  write(payload: Uint8Array, options?: { properties?: readonly KeyValuePair[] }): Promise<void>;
+  write(payload: ArrayBufferView, options?: { properties?: readonly KeyValuePair[] }): Promise<void>;
   /** End the track and cancel an outstanding write. The publisher connection stays open. */
   close(): void;
 }
@@ -88,9 +89,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       if (closing) throw new Error('Relay publisher is closed');
       if (typeof track !== 'string' || track.length === 0) throw new TypeError('Track name must be non-empty');
       if (tracks.has(track)) throw new Error('Track name is already registered on this publisher connection');
-      if (!Number.isFinite(writeTimeoutMs) || writeTimeoutMs <= 0 || writeTimeoutMs > 2_147_483_647) {
-        throw new RangeError('writeTimeoutMs must be between 0 (exclusive) and 2147483647');
-      }
+      assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
 
       const registered = session.registerTrack({
         trackNamespace: namespace,
@@ -125,10 +124,15 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           lifetime.assertOpen();
           if (ended || closing) throw new Error('Published track is closed');
           if (active) throw new Error('A write is already pending; await it before writing another object');
+          // Check the payload before the write slot and alias are taken, so a caller's type error
+          // stays local and leaves the track usable instead of retiring it.
+          if (!ArrayBuffer.isView(payload))
+            throw new TypeError('Payload must be a Uint8Array or other ArrayBufferView; wrap an ArrayBuffer in one');
           if (payload.byteLength > MAX_OBJECT_PAYLOAD_LENGTH)
             throw new RangeError('Payload exceeds the 16 MiB object limit');
 
-          const bytes = payload.slice();
+          // Any view is published as the bytes it spans, which is what Python's bytes-like payloads do.
+          const bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength).slice();
           const properties = copyProperties(writeOptions.properties);
           let writer: SubgroupWriter | undefined;
           let cancelled = false;
