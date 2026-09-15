@@ -31,14 +31,19 @@ subscribed           namespace=mattypoo/relay-sdk-example track=ticker alias=0
 published            seq=1 bytes=84
 received             group=0 bytes=84 seq=1 ageMs=38
 ...
+publisher done       status=0 reason=internal error
 finished             published=5 received=5
 ```
 
+The `publisher done` line's `status=0 reason=internal error` is the relay's report of the
+publisher's own clean close, not a failure; the same clean close can also read as `status=2
+reason=track ended` on another run (relay behavior, see #25).
+
 ## Two processes
 
-Run the subscriber and the publisher in separate terminals on a fixed namespace. Start the
-subscriber first; a publisher `write()` waits for relay demand and retries after a timeout until a
-subscriber appears.
+Run the subscriber and the publisher in separate terminals on a fixed namespace, in either order.
+Subscribing to a namespace nobody has announced yet is rejected immediately with 404 Broadcast not
+found; the demo retries that specific rejection with backoff until the publisher's announce lands.
 
 ```sh
 RELAY_TOKEN=... mise run python:example:mux-global -- --mode subscribe --namespace mattypoo/relay-sdk-example/room

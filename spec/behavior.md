@@ -34,6 +34,9 @@ against that file.
   ordering across streams, no payload decoding, no clock synchronization, and no media scheduling.
 - The request timeout bounds only the subscription's initial response. An accepted subscription
   may then stay quiet indefinitely.
+- A subscribe for a namespace the relay has not seen announced is rejected with request error 404,
+  not parked; a namespace freshly announced can still answer 404 for about a second, so applications
+  retry that rejection rather than treat it as fatal.
 - Subgroup resets and connection closure are surfaced explicitly. There is no exactly-once or
   gap-free delivery promise.
 - The publisher's done notification is a control message and may arrive before trailing objects

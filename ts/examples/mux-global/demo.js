@@ -69,7 +69,12 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         connectRelay({ url, getToken: () => token, signal: lifetime.signal }),
       );
       log({ event: 'subscriber connected', url });
-      subscriber.subscribe(
+      // subscribeWithRetry runs in the background (nothing below depends on its result), but
+      // subscribe() can itself throw synchronously (e.g. a namespace too long to encode); catch that
+      // here instead of leaving it an unhandled rejection, so the run fails promptly on the real
+      // error rather than idling until the deadline.
+      void subscribeWithRetry(
+        subscriber,
         { namespace, track },
         {
           onOk: (ok) => log({ event: 'subscribed', namespace: namespace.join('/'), track, alias: ok.trackAlias }),
@@ -88,7 +93,12 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
           onSubgroupReset: ({ groupId, error }) => problems.push(`group ${groupId} reset: ${describe(error)}`),
           onDone: (done) => log({ event: 'publisher done', status: done.statusCode, reason: done.reason }),
         },
-      );
+        lifetime.signal,
+        log,
+      ).catch((error) => {
+        problems.push(`subscribe failed: ${describe(error)}`);
+        lifetime.abort(error);
+      });
     }
 
     if (writer) {
@@ -127,6 +137,40 @@ async function writeWhenDemanded(writer, bytes, failIfBroken, log) {
       if (!/timed out/.test(describe(error))) throw error;
       log({ event: 'waiting', detail: 'no subscriber has requested the track yet; retrying the write' });
     }
+  }
+}
+
+/**
+ * A subscribe issued before the relay has processed the publisher's announce is rejected with 404
+ * Broadcast not found; that is expected on a fresh namespace, not fatal, so retry with bounded
+ * backoff until it is accepted, another error arrives, or the run deadline aborts `signal`. Every
+ * other rejection is forwarded to `handlers.onError` unchanged.
+ */
+async function subscribeWithRetry(subscriber, options, handlers, signal, log) {
+  let backoffMs = 500;
+  for (;;) {
+    const rejection = await new Promise((resolve) => {
+      subscriber.subscribe(options, {
+        ...handlers,
+        onOk: (ok) => {
+          handlers.onOk?.(ok);
+          resolve(undefined);
+        },
+        onError: (error) => resolve(error),
+      });
+    });
+    if (!rejection) return;
+    if (rejection.errorCode !== 404) {
+      handlers.onError?.(rejection);
+      return;
+    }
+    log({ event: 'waiting', detail: 'namespace not announced yet; retrying the subscribe' });
+    try {
+      await sleep(backoffMs, signal);
+    } catch {
+      return; // Run deadline or shutdown; the main loop already reports it.
+    }
+    backoffMs = Math.min(backoffMs * 2, 2000);
   }
 }
 
