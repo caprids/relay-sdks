@@ -10,7 +10,7 @@ where a group is one GOP whose object 0 is the keyframe.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Awaitable, Sequence
 from dataclasses import dataclass
 from types import TracebackType
 from typing import Literal, Self
@@ -114,7 +114,8 @@ class RelayGroupWriter:
     ) -> None:
         """Append one object. Returns when the transport accepts it. Bytes are copied.
 
-        ``status`` is only meaningful for an empty payload (an end-of-group or end-of-track marker).
+        Each call has its own ``write_timeout`` deadline; expiry resets the group and leaves the
+        track open. ``status`` is only meaningful for an empty payload (an end-of-group or end-of-track marker).
         """
         self._check()
 
@@ -125,20 +126,16 @@ class RelayGroupWriter:
         data = bytes(payload)
         object_properties = _copy_properties(properties)
 
-        try:
-            await self._writer.write_object(
-                object_id=object_id, payload=data, properties=object_properties, status=status
-            )
-        except BaseException as error:
-            self._track._cancel_operation(self._operation, error)
-            raise
+        await self._await_transport(
+            self._writer.write_object(object_id=object_id, payload=data, properties=object_properties, status=status)
+        )
 
         # The binding may have moved while the write was in flight; the object may then be lost.
         self._check()
         self._next_object_id += 1
 
     async def close(self) -> None:
-        """FIN the group: the complete-group signal. Idempotent once closed cleanly."""
+        """FIN within ``write_timeout``; expiry resets the group. Idempotent once closed cleanly."""
         if self._operation.cancelled:
             assert self._operation.failure is not None
             raise self._operation.failure
@@ -147,13 +144,27 @@ class RelayGroupWriter:
             return
 
         try:
-            await self._writer.fin()
+            await self._await_transport(self._writer.fin())
+        finally:
+            if self._track._active is self._operation:
+                self._track._active = None
+
+    async def _await_transport(self, action: Awaitable[None]) -> None:
+        timer = self._track._arm_timeout(self._operation)
+        sending = asyncio.ensure_future(action)
+        observe(sending)
+        try:
+            await asyncio.wait({sending, self._operation.interrupted}, return_when=asyncio.FIRST_COMPLETED)
+            # Preserve the cancellation/re-bind/deadline reason even if abort also woke the send.
+            self._check()
+            sending.result()
         except BaseException as error:
             self._track._cancel_operation(self._operation, error)
             raise
         finally:
-            if self._track._active is self._operation:
-                self._track._active = None
+            timer.cancel()
+            if not sending.done():
+                sending.cancel()
 
     def abort(self, reason: BaseException | None = None) -> None:
         """Reset the group's stream; objects already sent may be incomplete at the peer."""

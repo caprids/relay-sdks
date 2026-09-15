@@ -19,6 +19,7 @@ from mux_relay import (
     ConnectingTransport,
     RelayClosedError,
     RelayConnection,
+    RelayTimeoutError,
     connect_relay,
     connect_relay_publisher,
 )
@@ -65,9 +66,12 @@ class _CongestedSendStream:
         self._transmitted: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._fin: asyncio.Task[None] | None = None
         self.finned = False
+        self.hold_writes = False
         self.reset_with: object = None
 
     async def write(self, data: bytes) -> None:
+        if self.hold_writes:
+            await asyncio.shield(self._transmitted)
         await self._inner.write(data)
 
     async def _deliver_fin(self) -> None:
@@ -128,6 +132,56 @@ class _CongestedTransport:
 
 
 class TestCancellingAStuckGroup:
+    @pytest.mark.parametrize("operation", ["write", "close"])
+    async def test_each_group_operation_has_a_deadline_and_releases_the_track(
+        self, cleanup: Cleanup, operation: str
+    ) -> None:
+        hub = create_relay_hub()
+        cleanup.append(hub.destroy)
+        transports: list[_CongestedTransport] = []
+
+        def connect_publisher(url: str = "", protocols: Sequence[str] = ()) -> ConnectingTransport:
+            created = hub.connect_publisher(url, protocols)
+            transport = _CongestedTransport(created.transport)
+            transports.append(transport)
+            return ConnectingTransport(transport=transport, ready=created.ready)
+
+        publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
+        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        cleanup.extend([subscriber.close, publisher.close])
+        video = publisher.publish("video", write_timeout=0.05)
+        objects = receive(subscriber, "video")
+        group = await video.open_group()
+        await group.write(b"key")
+        # The deadline applies per operation, not to the total open group lifetime or idle time.
+        await asyncio.sleep(0.075)
+        assert not group.closed
+        await group.write(b"delta")
+        stream = transports[0].streams[-1]
+        stream.hold_writes = True
+
+        with pytest.raises(RelayTimeoutError, match="timed out") as failure:
+            await asyncio.wait_for(group.write(b"stalled") if operation == "write" else group.close(), 1)
+
+        assert stream.reset_with is failure.value
+        assert group.closed
+        assert not video.closed
+        assert video.bound
+        assert group.object_count == 2
+        stream.release()
+        await settle()
+        assert not stream.finned
+
+        # A new group can use the released slot and cannot be cancelled by the previous timer.
+        next_group = await video.open_group()
+        next_stream = transports[0].streams[-1]
+        next_stream.release()
+        await next_group.write(b"next key")
+        await next_group.close()
+        await wait_for(lambda: len(objects) == 3)
+        assert [obj.payload for obj in objects] == [b"key", b"delta", b"next key"]
+        assert next_stream.finned
+
     async def test_closing_the_track_resets_a_group_whose_fin_is_still_queued(self, cleanup: Cleanup) -> None:
         # A FIN blocked by transport backpressure used to be unreachable: the writer marked itself
         # finished before awaiting the close, so the cancel could not reset the stream. The group was

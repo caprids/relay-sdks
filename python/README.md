@@ -142,7 +142,11 @@ their writer closes.
 
 For media, a track needs more than one object per group: LOC/MSF maps one GOP to one MOQT group
 whose object 0 is the keyframe. `open_group()` waits for relay demand like `write()`, then returns a
-`RelayGroupWriter` that appends objects with increasing IDs and FINs the group on `close()`:
+`RelayGroupWriter` that appends objects with increasing IDs and FINs the group on `close()`.
+Opening the group, each `group.write()`, and `group.close()` get a separate `write_timeout`
+deadline. Time between calls does not count toward a deadline. A timeout resets that group and
+raises `RelayTimeoutError`; the track stays open for a new group at the next keyframe:
+
 
 ```python
 video = publisher.publish("video", track_properties=[KeyValuePair(0x08, 1_000_000)])
