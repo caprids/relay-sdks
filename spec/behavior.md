@@ -54,6 +54,10 @@ against that file.
   publisher connection serves one namespace and any number of tracks.
 - Publishing follows the relay's announce-and-serve flow. Registering a track announces it. A write
   waits for the relay to subscribe upstream before sending bytes; a subscriber creates that demand.
+  If namespace solicitations have arrived but none currently covers the publisher namespace when
+  the demand deadline expires, the write reports a namespace coverage error instead of an ordinary
+  demand timeout. Check the token and namespace before retrying. This does not prove authorization
+  was denied: solicitations can arrive independently, and a later matching prefix permits writes.
 - The default write deadline is 10 seconds and covers both waiting for demand and the transport
   write.
 - A timeout while waiting for demand is retryable. A failure after the write is bound to a relay

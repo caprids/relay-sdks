@@ -46,7 +46,7 @@ function deferred<T>() {
 }
 
 describe('connectRelay', () => {
-  it.each([[], ['live', ''], ['live', 7], 'live', null])(
+  it.each([[], ['live', ''], ['live', 7], new Array(1), 'live', null])(
     'rejects invalid subscription namespace %j before sending',
     async (namespace) => {
       const fake = await connectFake();

@@ -79,7 +79,7 @@ function validateNamespace(namespace: readonly string[]): void {
   if (
     !Array.isArray(namespace) ||
     namespace.length === 0 ||
-    namespace.some((field) => typeof field !== 'string' || field.length === 0)
+    Array.from(namespace).some((field) => typeof field !== 'string' || field.length === 0)
   ) {
     throw new TypeError('A subscription namespace must contain non-empty string fields');
   }
