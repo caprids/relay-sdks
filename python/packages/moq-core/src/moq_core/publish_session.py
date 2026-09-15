@@ -270,6 +270,7 @@ class MoqtPublishSession:
         self._peer_request_ids: set[int] = set()
         self._desired_namespace: TrackNamespace | None = None
         self._announced_fired = False
+        self._received_namespace_solicitation = False
 
         loop = asyncio.get_running_loop()
         self.ready: asyncio.Future[None] = loop.create_future()
@@ -285,6 +286,14 @@ class MoqtPublishSession:
         self._destroyed = False
 
         spawn(self._start())
+
+    @property
+    def namespace_solicited(self) -> bool | None:
+        """Whether a current solicitation covers our namespace; None before any is accepted."""
+        namespace = self._desired_namespace
+        if namespace is None or not self._received_namespace_solicitation:
+            return None
+        return any(_is_namespace_prefix(stream.prefix, namespace) for stream in self._namespace_streams)
 
     # ---------------------------------------------------------------------------
     # Session lifecycle
@@ -749,6 +758,7 @@ class MoqtPublishSession:
             return
 
         record = _NamespaceStream(prefix=prefix, writer=writer)
+        self._received_namespace_solicitation = True
         self._namespace_streams.append(record)
         self._reconcile_announce(record)
 

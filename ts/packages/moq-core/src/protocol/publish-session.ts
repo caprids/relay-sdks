@@ -118,6 +118,8 @@ export interface RegisteredTrack {
 export interface MoqtPublishSession {
   /** Resolves when the server's SETUP has been received. */
   readonly ready: Promise<void>;
+  /** Whether a current solicitation covers the desired namespace; undefined before any is accepted. */
+  readonly namespaceSolicited: boolean | undefined;
   /**
    * Announce the namespace on every matching solicitation — current and future. The wire write additionally waits for
    * the first `registerTrack()`: an announce invites immediate SUBSCRIBEs, and an empty registry would answer them with
@@ -223,6 +225,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   #peerRequestIds = new Set<number>();
   #desiredNamespace: TrackNamespace | undefined;
   #announcedFired = false;
+  #receivedNamespaceSolicitation = false;
 
   #resolveReady!: () => void;
   #rejectReady!: (error: unknown) => void;
@@ -245,6 +248,12 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.ready.catch(() => {});
 
     void this.#start();
+  }
+
+  get namespaceSolicited(): boolean | undefined {
+    const namespace = this.#desiredNamespace;
+    if (namespace === undefined || !this.#receivedNamespaceSolicitation) return undefined;
+    return [...this.#namespaceStreams].some((stream) => isNamespacePrefix(stream.prefix, namespace));
   }
 
   // ---------------------------------------------------------------------------
@@ -784,6 +793,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       announced: [],
     };
 
+    this.#receivedNamespaceSolicitation = true;
     this.#namespaceStreams.add(record);
     this.#reconcileAnnounce(record);
 
