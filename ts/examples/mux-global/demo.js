@@ -69,6 +69,10 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         connectRelay({ url, getToken: () => token, signal: lifetime.signal }),
       );
       log({ event: 'subscriber connected', url });
+      // subscribeWithRetry runs in the background (nothing below depends on its result), but
+      // subscribe() can itself throw synchronously (e.g. a namespace too long to encode); catch that
+      // here instead of leaving it an unhandled rejection, so the run fails promptly on the real
+      // error rather than idling until the deadline.
       void subscribeWithRetry(
         subscriber,
         { namespace, track },
@@ -91,7 +95,10 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         },
         lifetime.signal,
         log,
-      );
+      ).catch((error) => {
+        problems.push(`subscribe failed: ${describe(error)}`);
+        lifetime.abort(error);
+      });
     }
 
     if (writer) {

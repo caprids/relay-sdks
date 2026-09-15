@@ -76,6 +76,22 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
 
         closed.add_done_callback(done)
 
+    # subscribe_with_retry runs in the background; it can itself raise synchronously (e.g. a namespace
+    # too long to encode). Without this the exception went unobserved and the run just idled until its
+    # deadline. A task cancelled by our own shutdown (below) is not a failure.
+    def watch_background(task: asyncio.Task[None]) -> None:
+        def done(finished: asyncio.Task[None]) -> None:
+            if finished.cancelled():
+                return
+
+            error = finished.exception()
+
+            if error is not None:
+                problems.append(f"subscribe failed: {describe(error)}")
+                lifetime.cancel(error)
+
+        task.add_done_callback(done)
+
     def fail_if_broken() -> None:
         if problems:
             raise RuntimeError("; ".join(problems))
@@ -123,37 +139,37 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                 received += 1
                 log({"event": "received", "group": obj.group_id, "bytes": len(obj.payload), **inspect(obj.payload)})
 
-            background_tasks.append(
-                asyncio.ensure_future(
-                    subscribe_with_retry(
-                        subscriber,
-                        config.namespace,
-                        config.track,
-                        SubscriptionHandlers(
-                            on_ok=lambda ok: log(
-                                {
-                                    "event": "subscribed",
-                                    "namespace": "/".join(config.namespace),
-                                    "track": config.track,
-                                    "alias": ok.track_alias,
-                                }
-                            ),
-                            on_object=on_object,
-                            on_error=lambda error: problems.append(
-                                f"subscribe rejected: code {error.error_code} {error.reason}"
-                            ),
-                            on_subgroup_reset=lambda reset: problems.append(
-                                f"group {reset.group_id} reset: {describe(reset.error)}"
-                            ),
-                            on_done=lambda done: log(
-                                {"event": "publisher done", "status": done.status_code, "reason": done.reason}
-                            ),
+            subscribe_task = asyncio.ensure_future(
+                subscribe_with_retry(
+                    subscriber,
+                    config.namespace,
+                    config.track,
+                    SubscriptionHandlers(
+                        on_ok=lambda ok: log(
+                            {
+                                "event": "subscribed",
+                                "namespace": "/".join(config.namespace),
+                                "track": config.track,
+                                "alias": ok.track_alias,
+                            }
                         ),
-                        lifetime,
-                        log,
-                    )
+                        on_object=on_object,
+                        on_error=lambda error: problems.append(
+                            f"subscribe rejected: code {error.error_code} {error.reason}"
+                        ),
+                        on_subgroup_reset=lambda reset: problems.append(
+                            f"group {reset.group_id} reset: {describe(reset.error)}"
+                        ),
+                        on_done=lambda done: log(
+                            {"event": "publisher done", "status": done.status_code, "reason": done.reason}
+                        ),
+                    ),
+                    lifetime,
+                    log,
                 )
             )
+            background_tasks.append(subscribe_task)
+            watch_background(subscribe_task)
 
         if writer is not None:
             for seq in range(1, config.count + 1):
