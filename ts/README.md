@@ -23,6 +23,20 @@ mise run ts:fix       # apply Biome's safe formatting and lint fixes
 Formatting and linting are configured in `biome.jsonc`, and every package extends the strict compiler
 options in `tsconfig.base.json`. `pnpm lint` fails on warnings, so a clean check prints nothing.
 
+## Browser token exposure
+
+Relay currently authenticates with `?jwt=<token>` on the WebTransport URL. On a failed handshake,
+Chromium can log that full URL, including the token, to its own console. The SDK cannot suppress
+those browser-generated messages. This can expose a live token to console collectors and error
+reporting services even when the error returned by `connectRelay` contains no token.
+
+Before forwarding browser diagnostics, remove `jwt` query values and token strings from console
+breadcrumbs, network URLs, traces, and error reports, or disable collection of those fields. Use
+short-lived tokens scoped to the namespaces and operations the application needs. The repository's
+CLI tools redact the supplied token from their own output; that does not sanitize the browser's
+console or third-party collectors. Moving authentication off the URL requires a relay protocol
+change and is not supported by this SDK today.
+
 ## Subscribe to a track
 
 ```ts

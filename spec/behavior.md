@@ -14,7 +14,11 @@ against that file.
 - Authentication is a JWT supplied by the application. The SDK sends it as the `jwt` query
   parameter on the endpoint URL. An explicit `jwt` parameter already present on the URL takes
   precedence over a token callback.
-- SDKs and their tooling never write the token to disk and never include it in logs or error text.
+- SDK-generated logs and error text do not include the token, and SDK tooling does not persist it
+  to disk. Tooling redacts the supplied token from browser diagnostics it forwards. The browser
+  itself is outside that guarantee: Chromium can log the full authenticated WebTransport URL on
+  handshake failure. Applications must sanitize captured diagnostics before storing or forwarding
+  them; see `ts/README.md`, "Browser token exposure".
 - Connecting has one deadline that covers token resolution and both handshakes, transport and
   MOQT setup.
 - The application can give the SDK a cancellation primitive, such as an abort signal or a
