@@ -17,6 +17,7 @@ export type {
   ConnectRelayPublisherOptions,
   PublishProperty,
   PublishTrackOptions,
+  RelayGroupWriter,
   RelayPublisher,
   RelayTrackWriter,
 } from './publish.js';

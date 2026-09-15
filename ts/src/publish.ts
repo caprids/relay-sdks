@@ -3,6 +3,7 @@ import {
   createSubgroupWriter,
   type KeyValuePair,
   MAX_OBJECT_PAYLOAD_LENGTH,
+  type ObjectStatus,
   type SubgroupWriter,
 } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
@@ -26,7 +27,28 @@ export interface PublishTrackOptions {
   writeTimeoutMs?: number;
 }
 
+export interface RelayGroupWriter {
+  readonly groupId: number;
+  readonly objectCount: number;
+  readonly closed: boolean;
+  /** Append one object, starting at ID 0. Each write has its own writeTimeoutMs deadline. */
+  write(
+    payload: ArrayBufferView,
+    options?: { properties?: readonly PublishProperty[]; status?: ObjectStatus },
+  ): Promise<void>;
+  /** FIN the group within writeTimeoutMs. Idempotent after successful completion. */
+  close(): Promise<void>;
+  /** Reset this group and free the track for the next random-access point. */
+  abort(reason?: unknown): void;
+}
+
 export interface RelayTrackWriter {
+  readonly bound: boolean;
+  readonly closed: boolean;
+  /** Current demand first, then each change/replacement; completes when the track ends. */
+  bindings(): AsyncIterableIterator<boolean>;
+  /** Hold the track's single write slot until the group closes or aborts. */
+  openGroup(options?: { signal?: AbortSignal }): Promise<RelayGroupWriter>;
   /**
    * Write one independent object/group. Waits for relay demand. Resolves when the
    * transport accepts the complete group, not when a downstream viewer acknowledges it.
@@ -34,7 +56,10 @@ export interface RelayTrackWriter {
    * copied as its raw bytes; anything else is a TypeError that leaves the track usable.
    * A failed bound write ends this track; a timeout waiting for demand permits another write.
    */
-  write(payload: ArrayBufferView, options?: { properties?: readonly PublishProperty[] }): Promise<void>;
+  write(
+    payload: ArrayBufferView,
+    options?: { properties?: readonly PublishProperty[]; signal?: AbortSignal },
+  ): Promise<void>;
   /** End the track and cancel an outstanding write. The publisher connection stays open. */
   close(): void;
 }
@@ -49,7 +74,7 @@ export interface RelayPublisher {
 }
 
 function copyProperties(properties: readonly PublishProperty[] = []): KeyValuePair[] {
-  return properties.map((property, index) => {
+  return Array.from(properties, (property, index) => {
     const { type, value } = property ?? {};
     if (!Number.isSafeInteger(type) || type < 0)
       throw new TypeError(`Property ${index} type must be a non-negative safe integer`);
@@ -117,113 +142,265 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       let alias: number | undefined;
       let ended = false;
       let nextGroupId = 0;
-      let active: { alias?: number | undefined; wake(): void; cancel(error: unknown): void } | undefined;
-
-      const close = (error: unknown = new Error('Published track is closed')): void => {
+      interface Operation {
+        kind: 'write' | 'group';
+        alias: number | undefined;
+        writer: SubgroupWriter | undefined;
+        cancelled: boolean;
+        failure: unknown;
+        demand: Promise<void>;
+        interrupted: Promise<never>;
+        wake(): void;
+        cancel(error: unknown): void;
+        cleanup(): void;
+      }
+      let active: Operation | undefined;
+      const watchers = new Set<(value: boolean | undefined) => void>();
+      const notify = (value: boolean | undefined) => {
+        for (const watcher of watchers) watcher(value);
+      };
+      const end = () => {
         if (ended) return;
         ended = true;
-        active?.cancel(error);
         registered.end();
+        notify(undefined);
+        watchers.clear();
+      };
+      const close = (error: unknown = new Error('Published track is closed')): void => {
+        if (ended) return;
+        active?.cancel(error);
+        end();
+      };
+      const assertWritable = () => {
+        lifetime.assertOpen();
+        if (ended || closing) throw new Error('Published track is closed');
+        if (active) throw new Error('A write or group is already pending; await it before writing another object');
+      };
+      const copyPayload = (payload: ArrayBufferView) => {
+        if (!ArrayBuffer.isView(payload))
+          throw new TypeError('Payload must be a Uint8Array or other ArrayBufferView; wrap an ArrayBuffer in one');
+        if (payload.byteLength > MAX_OBJECT_PAYLOAD_LENGTH)
+          throw new RangeError('Payload exceeds the 16 MiB object limit');
+        return new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength).slice();
+      };
+      const begin = (kind: Operation['kind'], signal?: AbortSignal): Operation => {
+        let wake!: () => void;
+        let reject!: (error: unknown) => void;
+        const demand = new Promise<void>((resolve) => {
+          wake = resolve;
+        });
+        const interrupted = new Promise<never>((_, rejectPromise) => {
+          reject = rejectPromise;
+        });
+        // An open group can be aborted between calls, when nobody is awaiting this promise.
+        void interrupted.catch(() => {});
+        const abort = () => operation.cancel(signal?.reason ?? new Error('Publish operation aborted'));
+        const operation: Operation = {
+          kind,
+          alias: undefined,
+          writer: undefined,
+          cancelled: false,
+          failure: undefined,
+          demand,
+          interrupted,
+          wake,
+          cleanup() {
+            signal?.removeEventListener('abort', abort);
+          },
+          cancel(error) {
+            if (operation.cancelled) return;
+            operation.cancelled = true;
+            operation.failure = error;
+            operation.writer?.abort(error);
+            if (kind === 'write' && operation.alias !== undefined) end();
+            if (active === operation) active = undefined;
+            operation.cleanup();
+            wake();
+            reject(error);
+          },
+        };
+        active = operation;
+        signal?.addEventListener('abort', abort, { once: true });
+        if (signal?.aborted) abort();
+        return operation;
+      };
+      const check = (operation: Operation) => {
+        if (operation.cancelled) throw operation.failure;
+        lifetime.assertOpen();
+      };
+      const run = async <T>(operation: Operation, send: () => Promise<T>): Promise<T> => {
+        const timer = setTimeout(
+          () =>
+            operation.cancel(
+              new Error(
+                operation.alias === undefined && session.namespaceSolicited === false
+                  ? 'Publisher namespace is not covered by the relay namespace solicitations; check the token and namespace'
+                  : 'Publish write timed out waiting for relay demand or transport',
+              ),
+            ),
+          writeTimeoutMs,
+        );
+        try {
+          check(operation);
+          const result = await Promise.race([send(), operation.interrupted]);
+          check(operation);
+          return result;
+        } catch (error) {
+          operation.cancel(error);
+          throw error;
+        } finally {
+          clearTimeout(timer);
+        }
+      };
+      const openStream = async (operation: Operation) => {
+        if (alias === undefined) {
+          await operation.demand;
+          check(operation);
+          if (alias === undefined) throw new Error('Relay subscription ended before the write started');
+        }
+        check(operation);
+        operation.alias = alias;
+        const groupId = nextGroupId++;
+        const stream = await session.openUniStream();
+        if (operation.cancelled) {
+          void stream.abort(operation.failure).catch(() => {});
+          check(operation);
+        }
+        const writer = createSubgroupWriter(stream, { trackAlias: operation.alias, groupId, hasProperties: true });
+        operation.writer = writer;
+        return writer;
+      };
+      const release = (operation: Operation) => {
+        if (active === operation) active = undefined;
+        operation.cleanup();
       };
       tracks.set(track, {
         close,
         bind(nextAlias) {
           if (active?.alias !== undefined && active.alias !== nextAlias) {
-            active.cancel(new Error('Relay subscription changed during a write; the object may be incomplete'));
+            active.cancel(new Error('Relay subscription changed during a write or group; objects may be incomplete'));
           }
+          const changed = alias !== nextAlias;
           alias = nextAlias;
           if (alias !== undefined) active?.wake();
+          if (changed && !ended) notify(alias !== undefined);
         },
       });
 
       return {
-        close: () => close(),
-        async write(payload, writeOptions = {}) {
-          lifetime.assertOpen();
-          if (ended || closing) throw new Error('Published track is closed');
-          if (active) throw new Error('A write is already pending; await it before writing another object');
-          // Check the payload before the write slot and alias are taken, so a caller's type error
-          // stays local and leaves the track usable instead of retiring it.
-          if (!ArrayBuffer.isView(payload))
-            throw new TypeError('Payload must be a Uint8Array or other ArrayBufferView; wrap an ArrayBuffer in one');
-          if (payload.byteLength > MAX_OBJECT_PAYLOAD_LENGTH)
-            throw new RangeError('Payload exceeds the 16 MiB object limit');
-
-          // Any view is published as the bytes it spans, which is what Python's bytes-like payloads do.
-          const bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength).slice();
-          const properties = copyProperties(writeOptions.properties);
-          let writer: SubgroupWriter | undefined;
-          let cancelled = false;
-          let failure: unknown;
-          let rejectWrite!: (error: unknown) => void;
-          let wake!: () => void;
-          const interrupted = new Promise<never>((_, reject) => {
-            rejectWrite = reject;
-          });
-          const demand = new Promise<void>((resolve) => {
-            wake = resolve;
-          });
-          const operation = {
-            alias: undefined as number | undefined,
-            wake,
-            cancel(error: unknown) {
-              if (cancelled) return;
-              cancelled = true;
-              failure = error;
-              writer?.abort(error);
-              // A failed bound write may leave an incomplete group. Retire this track
-              // so retries cannot build up abandoned streams behind a stalled transport.
-              if (operation.alias !== undefined) {
-                ended = true;
-                registered.end();
-              }
-              // Release an outstanding wait for relay demand as well as the public promise.
-              wake();
-              rejectWrite(error);
+        get bound() {
+          return alias !== undefined && !ended;
+        },
+        get closed() {
+          return ended;
+        },
+        bindings() {
+          const queue: boolean[] = ended ? [] : [alias !== undefined];
+          const waiting: ((result: IteratorResult<boolean>) => void)[] = [];
+          let done = ended;
+          const push = (value: boolean | undefined) => {
+            if (done) return;
+            if (value === undefined) {
+              done = true;
+              for (const resolve of waiting.splice(0)) resolve({ done: true, value: undefined });
+              watchers.delete(push);
+            } else {
+              const resolve = waiting.shift();
+              if (resolve) resolve({ done: false, value });
+              else queue.push(value);
+            }
+          };
+          if (!done) watchers.add(push);
+          const iterator: AsyncIterableIterator<boolean> = {
+            [Symbol.asyncIterator]() {
+              return iterator;
+            },
+            next() {
+              const value = queue.shift();
+              if (value !== undefined) return Promise.resolve({ done: false, value });
+              if (done) return Promise.resolve({ done: true, value: undefined });
+              return new Promise((resolve) => {
+                waiting.push(resolve);
+              });
+            },
+            return() {
+              queue.length = 0;
+              push(undefined);
+              return Promise.resolve({ done: true, value: undefined });
             },
           };
-          active = operation;
-          const timer = setTimeout(
-            () => operation.cancel(new Error('Publish write timed out waiting for relay demand or transport')),
-            writeTimeoutMs,
-          );
-
-          const check = () => {
-            if (cancelled) throw failure;
-            lifetime.assertOpen();
-          };
-          const send = async () => {
-            // Demand can disappear between its notification and this continuation.
-            while (alias === undefined) {
-              await demand;
-              check();
-              if (alias === undefined) throw new Error('Relay subscription ended before the write started');
-            }
-            check();
-            operation.alias = alias;
-            const groupId = nextGroupId++;
-            const stream = await session.openUniStream();
-
-            if (cancelled) {
-              void stream.abort(failure).catch(() => {});
-              check();
-            }
-            writer = createSubgroupWriter(stream, { trackAlias: operation.alias, groupId, hasProperties: true });
-            await writer.writeObject({ objectId: 0, properties, payload: bytes });
-            check();
-            await writer.fin();
-            check();
-          };
-
+          return iterator;
+        },
+        close: () => close(),
+        async write(payload, writeOptions = {}) {
+          assertWritable();
+          const bytes = copyPayload(payload);
+          const properties = copyProperties(writeOptions.properties);
+          const operation = begin('write', writeOptions.signal);
           try {
-            await Promise.race([send(), interrupted]);
-          } catch (error) {
-            operation.cancel(error);
-            throw error;
+            await run(operation, async () => {
+              const writer = await openStream(operation);
+              await writer.writeObject({ objectId: 0, properties, payload: bytes });
+              check(operation);
+              await writer.fin();
+            });
           } finally {
-            clearTimeout(timer);
-            if (active === operation) active = undefined;
+            release(operation);
           }
+        },
+        async openGroup(groupOptions = {}) {
+          assertWritable();
+          const operation = begin('group', groupOptions.signal);
+          const writer = await run(operation, () => openStream(operation));
+          let objectCount = 0;
+          let pending = false;
+          let complete = false;
+          const assertGroup = () => {
+            check(operation);
+            if (complete) throw new Error('Group is closed');
+            if (pending) throw new Error('A group write or close is already pending');
+          };
+          return {
+            groupId: writer.groupId,
+            get objectCount() {
+              return objectCount;
+            },
+            get closed() {
+              return complete || operation.cancelled;
+            },
+            async write(payload, writeOptions = {}) {
+              assertGroup();
+              const bytes = copyPayload(payload);
+              const properties = copyProperties(writeOptions.properties);
+              const status = writeOptions.status ?? 'normal';
+              if (!['normal', 'end-of-group', 'end-of-track'].includes(status))
+                throw new TypeError('Unknown object status');
+              pending = true;
+              try {
+                await run(operation, () =>
+                  writer.writeObject({ objectId: objectCount, properties, payload: bytes, status }),
+                );
+                objectCount++;
+              } finally {
+                pending = false;
+              }
+            },
+            async close() {
+              if (complete) return;
+              assertGroup();
+              pending = true;
+              try {
+                await run(operation, () => writer.fin());
+                complete = true;
+                release(operation);
+              } finally {
+                pending = false;
+              }
+            },
+            abort(reason = new Error('Group was aborted')) {
+              if (!complete) operation.cancel(reason);
+            },
+          };
         },
       };
     },

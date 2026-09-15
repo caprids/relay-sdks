@@ -347,4 +347,210 @@ describe('connectRelayPublisher', () => {
     await vi.waitFor(() => expect(received.objects).toHaveLength(1));
     expect(received.objects[0]?.properties).toEqual([{ type: 3, value: new Uint8Array([1, 2]) }]);
   });
+
+  it('publishes multiple objects on one group stream and preserves increasing group IDs', async () => {
+    const { publisher, subscriber } = await connectHub();
+    const track = publisher.publish({ track: 'events' });
+    const received = receive(subscriber, 'events');
+    const group = await track.openGroup();
+    expect(group.groupId).toBe(0);
+    expect(group.objectCount).toBe(0);
+    await group.write(new Uint8Array([1]));
+    await group.write(new Uint8Array([2]), { properties: [{ type: 2, value: 7 }] });
+    await group.write(new Uint8Array());
+    expect(group.objectCount).toBe(3);
+    await group.close();
+    await group.close();
+    expect(group.closed).toBe(true);
+    await expect(group.write(new Uint8Array([9]))).rejects.toThrow(/closed/);
+    await track.write(new Uint8Array([4]));
+    await vi.waitFor(() => expect(received.objects).toHaveLength(4));
+    expect(received.objects.map(({ groupId, objectId }) => [groupId, objectId])).toEqual([
+      [0, 0],
+      [0, 1],
+      [0, 2],
+      [1, 0],
+    ]);
+  });
+
+  it('reserves one track slot for a group and keeps it open after local argument errors', async () => {
+    const { publisher, hub } = await connectHub();
+    const track = publisher.publish({ track: 'events' });
+    hub.subscribeUpstream('events');
+    const group = await track.openGroup();
+    await expect(track.write(new Uint8Array([1]))).rejects.toThrow(/already pending/);
+    await expect(track.openGroup()).rejects.toThrow(/already pending/);
+    await expect(group.write('bad' as unknown as ArrayBufferView)).rejects.toThrow(TypeError);
+    await expect(group.write(new Uint8Array([1]), { properties: [{ type: 3, value: 2 }] })).rejects.toThrow(TypeError);
+    await expect(group.write(new Uint8Array([1]), { properties: new Array<PublishProperty>(1) })).rejects.toThrow(
+      TypeError,
+    );
+    await group.write(new Uint8Array([2]));
+    expect(group.objectCount).toBe(1);
+    await group.close();
+    expect(track.closed).toBe(false);
+  });
+
+  it('bounds group demand and releases its slot after timeout or an already-aborted signal', async () => {
+    const { publisher, hub } = await connectHub();
+    const track = publisher.publish({ track: 'events', writeTimeoutMs: 50 });
+    await expect(track.openGroup()).rejects.toThrow(/timed out/);
+    const owner = new AbortController();
+    const reason = new Error('cancelled before opening');
+    owner.abort(reason);
+    await expect(track.openGroup({ signal: owner.signal })).rejects.toBe(reason);
+    expect(track.closed).toBe(false);
+    hub.subscribeUpstream('events');
+    const group = await track.openGroup();
+    await group.write(new Uint8Array([1]));
+    await group.close();
+  });
+
+  it.each(['write', 'close'] as const)(
+    'bounds a stalled group %s, resets it, and permits the next group',
+    async (mode) => {
+      const hub = createRelayHub();
+      cleanup.push(() => hub.destroy());
+      const reset = vi.fn();
+      let rejectPending: ((reason: unknown) => void) | undefined;
+      let stalled = false;
+      const publisher = await connectRelayPublisher({
+        url,
+        namespace,
+        createTransport: (...args) => {
+          const created = hub.connectPublisher(...args);
+          const open = created.transport.createUnidirectionalStream.bind(created.transport);
+          let streams = 0;
+          created.transport.createUnidirectionalStream = async () => {
+            if (++streams !== 2) return open();
+            let writes = 0;
+            return new WritableStream<Uint8Array>({
+              start(controller) {
+                controller.signal.addEventListener('abort', () => {
+                  reset(controller.signal.reason);
+                  rejectPending?.(controller.signal.reason);
+                });
+              },
+              write() {
+                if (++writes === 2 && mode === 'write') {
+                  stalled = true;
+                  return new Promise<void>((_, reject) => {
+                    rejectPending = reject;
+                  });
+                }
+                return undefined;
+              },
+              close() {
+                if (mode === 'close') {
+                  stalled = true;
+                  return new Promise<void>((_, reject) => {
+                    rejectPending = reject;
+                  });
+                }
+                return undefined;
+              },
+            });
+          };
+          return created;
+        },
+      });
+      cleanup.push(() => publisher.close());
+      const track = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
+      hub.subscribeUpstream('events');
+      const group = await track.openGroup();
+      if (mode === 'close') await group.write(new Uint8Array([1]));
+      const pending = mode === 'write' ? group.write(new Uint8Array([1])) : group.close();
+      const rejected = expect(pending).rejects.toThrow(/timed out/);
+      await vi.waitFor(() => expect(stalled).toBe(true));
+      await expect(group.write(new Uint8Array([2]))).rejects.toThrow(/already pending/);
+      await expect(group.close()).rejects.toThrow(/already pending/);
+      await rejected;
+      expect(reset).toHaveBeenCalledOnce();
+      expect(group.closed).toBe(true);
+      expect(track.closed).toBe(false);
+      const next = await track.openGroup();
+      expect(next.groupId).toBe(1);
+      await next.write(new Uint8Array([3]));
+      await next.close();
+      await vi.waitFor(() => expect(hub.objectCount('events')).toBe(1));
+    },
+  );
+
+  it('aborts idle groups explicitly or through their signal and permits another group', async () => {
+    const { publisher, hub } = await connectHub();
+    const track = publisher.publish({ track: 'events' });
+    hub.subscribeUpstream('events');
+    const owner = new AbortController();
+    const first = await track.openGroup({ signal: owner.signal });
+    await first.write(new Uint8Array([1]));
+    const reason = new Error('drop incomplete GOP');
+    owner.abort(reason);
+    await expect(first.write(new Uint8Array([2]))).rejects.toBe(reason);
+    await expect(first.close()).rejects.toBe(reason);
+    expect(first.closed).toBe(true);
+    const second = await track.openGroup();
+    second.abort(reason);
+    expect(second.closed).toBe(true);
+    const third = await track.openGroup();
+    await third.write(new Uint8Array([3]));
+    await third.close();
+  });
+
+  it('observes demand, cancellation, resubscription, and track end without hanging iterator return', async () => {
+    const pair = createTransportPair();
+    const [publisher, subscriber] = await Promise.all([
+      connectRelayPublisher({
+        url,
+        namespace,
+        createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
+      }),
+      connectRelay({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
+    ]);
+    cleanup.push(() => subscriber.close());
+    cleanup.push(() => publisher.close());
+    const track = publisher.publish({ track: 'events' });
+    const bindings = track.bindings();
+    expect(await bindings.next()).toEqual({ done: false, value: false });
+    expect(track.bound).toBe(false);
+    const subscription = subscriber.subscribe({ namespace, track: 'events' }, {});
+    expect(await bindings.next()).toEqual({ done: false, value: true });
+    expect(track.bound).toBe(true);
+    const group = await track.openGroup();
+    await group.write(new Uint8Array([1]));
+    subscription.cancel();
+    expect(await bindings.next()).toEqual({ done: false, value: false });
+    expect(group.closed).toBe(true);
+    expect(track.closed).toBe(false);
+    await expect(group.close()).rejects.toThrow(/subscription changed/);
+    subscriber.subscribe({ namespace, track: 'events' }, {});
+    expect(await bindings.next()).toEqual({ done: false, value: true });
+    const next = await track.openGroup();
+    await next.write(new Uint8Array([2]));
+    await next.close();
+    const other = track.bindings();
+    await other.next();
+    const pending = other.next();
+    await other.return?.();
+    expect(await pending).toEqual({ done: true, value: undefined });
+    track.close();
+    expect(track.closed).toBe(true);
+    expect(track.bound).toBe(false);
+    expect(await bindings.next()).toEqual({ done: true, value: undefined });
+    expect(await track.bindings().next()).toEqual({ done: true, value: undefined });
+  });
+
+  it('ends demand iterators and cancels an open group when the publisher closes', async () => {
+    const { publisher, hub } = await connectHub();
+    const track = publisher.publish({ track: 'events' });
+    hub.subscribeUpstream('events');
+    const group = await track.openGroup();
+    const bindings = track.bindings();
+    await bindings.next();
+    await group.write(new Uint8Array([1]));
+    await publisher.close();
+    await expect(group.close()).rejects.toThrow(/closed/);
+    expect(track.closed).toBe(true);
+    expect(track.bound).toBe(false);
+    expect(await bindings.next()).toEqual({ done: true, value: undefined });
+  });
 });
