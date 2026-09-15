@@ -52,7 +52,14 @@ from .connect_session import (
     RelayTransportFactory,
     TokenProvider,
 )
-from .errors import RelayClosedError, RelayError, RelayGoawayError, RelayTimeoutError, RelayWritePendingError
+from .errors import (
+    RelayClosedError,
+    RelayError,
+    RelayGoawayError,
+    RelayTimeoutError,
+    RelayTrackEndedError,
+    RelayWritePendingError,
+)
 from .publish import (
     DEFAULT_WRITE_TIMEOUT,
     RelayGroupWriter,
@@ -107,6 +114,7 @@ __all__ = [
     "RelayGroupWriter",
     "RelayPublisher",
     "RelayTimeoutError",
+    "RelayTrackEndedError",
     "RelayTrackWriter",
     "RelayTransportFactory",
     "RelayWritePendingError",

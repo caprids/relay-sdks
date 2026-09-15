@@ -147,6 +147,8 @@ class TestConnectRelayPublisher:
         with pytest.raises(RelayTimeoutError, match="timed out"):
             await events.write(bytes([1]))
 
+        # Nothing was bound, so the track is still live and the next write can wait for demand again.
+        assert not events.closed
         received = Received(subscriber, "events")
         await events.write(bytes([2]))
         await wait_for(lambda: len(received.objects) == 1)
