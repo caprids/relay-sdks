@@ -28,6 +28,7 @@ from aioquic.quic import events as quic_events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection, stream_is_client_initiated, stream_is_unidirectional
 from aioquic.quic.packet import QuicErrorCode
+from aioquic.quic.stream import QuicStream
 
 from moq_core._tasks import observe, spawn
 from moq_core.transport import BidirectionalStream, ReceiveStream, SendStream
@@ -47,7 +48,10 @@ _WT_LAST_H3_ERROR_CODE = 0x52E5AC983162
 H3_ALPN = "h3"
 _DEFAULT_PORT = 443
 _MAX_DATAGRAM_FRAME_SIZE = 65536
-_CLOSE_FLUSH_TIMEOUT = 0.5
+_CLOSE_DRAIN_TIMEOUT = 5.0
+"""Seconds ``close()`` waits for the peer to acknowledge what is still in flight before the connection goes."""
+_FIN_RETRY_INTERVAL = 0.25
+"""Seconds between sweeps that re-queue a FIN aioquic dropped under a full congestion window."""
 
 
 def webtransport_to_h3_error_code(code: int) -> int:
@@ -216,9 +220,15 @@ class _ReceiveHalf:
 
 
 class _SendHalf:
-    """The sending side of a WebTransport stream; satisfies :class:`SendStream`."""
+    """The sending side of a WebTransport stream; satisfies :class:`SendStream`.
 
-    __slots__ = ("_aborted", "_closed", "_error", "_session", "_stopped", "_stream_id")
+    aioquic queues written bytes without limit and transmits them as congestion and flow control
+    allow, so ``write()`` and ``close()`` settle only once everything queued on the stream so far
+    has been handed to the network. That is the backpressure a browser ``WritableStream`` applies:
+    a slow link is felt as a slow write, and a caller's deadline covers the transport write.
+    """
+
+    __slots__ = ("_aborted", "_closed", "_error", "_session", "_stopped", "_stream_id", "_transmitted")
 
     def __init__(self, session: WebTransportSessionBase, stream_id: int) -> None:
         self._session = session
@@ -227,6 +237,8 @@ class _SendHalf:
         self._aborted = False
         self._stopped: int | None = None
         self._error: BaseException | None = None
+        self._transmitted: asyncio.Future[None] | None = None
+        """Pending while queued bytes (or the FIN) await transmission; ``None`` when nothing is waiting."""
 
     def _check_writable(self) -> None:
         if self._error is not None:
@@ -247,27 +259,55 @@ class _SendHalf:
         self._check_writable()
 
         if data:
-            self._session._send_stream_data(self._stream_id, bytes(data), False)
+            await self._session._send(self, bytes(data), False)
 
     async def close(self) -> None:
         self._check_writable()
         self._closed = True
-        self._session._send_stream_data(self._stream_id, b"", True)
+        await self._session._send(self, b"", True)
 
     def abort(self, reason: object = None) -> None:
-        if self._closed or self._aborted or self._error is not None:
+        # A FIN that already went out is a complete stream at the peer; a reset now would only destroy it.
+        if self._aborted or self._error is not None or (self._closed and self._transmitted is None):
             return
 
         self._aborted = True
+        # Fail a pending write with the caller's reason before resetting: `_reset_stream` transmits,
+        # and the reset branch of `_settle_stream` would otherwise settle the waiter first with a
+        # generic "stream was aborted", masking a `write_timeout`'s RelayTimeoutError.
+        self._fail_transmit(reason if isinstance(reason, BaseException) else WebTransportError("stream was aborted"))
         self._session._reset_stream(self._stream_id, _error_code_of(reason))
 
     def stopped(self, code: int) -> None:
         if self._stopped is None:
             self._stopped = code
+            # aioquic answers STOP_SENDING with a reset of its own, so queued bytes will never go out.
+            self._fail_transmit(WebTransportError("peer stopped the stream", code=code))
 
     def fail(self, error: BaseException) -> None:
         if self._error is None and not self._closed and not self._aborted:
             self._error = error
+
+        self._fail_transmit(error)
+
+    def _transmit_waiter(self) -> asyncio.Future[None]:
+        if self._transmitted is None:
+            self._transmitted = asyncio.get_running_loop().create_future()
+            observe(self._transmitted)
+
+        return self._transmitted
+
+    def _settle_transmit(self) -> None:
+        waiter, self._transmitted = self._transmitted, None
+
+        if waiter is not None and not waiter.done():
+            waiter.set_result(None)
+
+    def _fail_transmit(self, error: BaseException) -> None:
+        waiter, self._transmitted = self._transmitted, None
+
+        if waiter is not None and not waiter.done():
+            waiter.set_exception(error)
 
 
 class _StreamQueue:
@@ -323,7 +363,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
     ``on_request_headers``.
     """
 
-    def __init__(self, quic: QuicConnection, stream_handler: Any = None) -> None:
+    def __init__(self, quic: QuicConnection, stream_handler: Any = None, *, owns_transport: bool = False) -> None:
         super().__init__(quic, stream_handler)
         self.h3 = H3Connection(quic, enable_webtransport=True)
         self.sessions: dict[int, WebTransportSessionBase] = {}
@@ -331,7 +371,15 @@ class WebTransportProtocol(QuicConnectionProtocol):
         self.on_request_headers: Callable[[HeadersReceived], None] | None = None
         self.terminated: quic_events.ConnectionTerminated | None = None
         self.terminated_event: asyncio.Event = asyncio.Event()
+        self.owns_transport = owns_transport
+        """Whether the UDP transport is this connection's own (a client) or a listener's shared socket (a server)."""
+        self.transport_closed: asyncio.Event = asyncio.Event()
+        """Set once the connection is over and its UDP socket is released (or was never ours to release)."""
         self._orphans: dict[int, list[WebTransportStreamDataReceived]] = {}
+        self._settling: dict[int, WebTransportSessionBase] = {}
+        """Streams whose owner waits on a transmission or acknowledgement (a write, a FIN, a reset)."""
+        self._draining: list[WebTransportSessionBase] = []
+        self._fin_retry_handle: asyncio.TimerHandle | None = None
 
     def register_session(self, session: WebTransportSessionBase) -> None:
         self.sessions[session.session_id] = session
@@ -339,6 +387,71 @@ class WebTransportProtocol(QuicConnectionProtocol):
 
         for event in self._orphans.pop(session.session_id, []):
             session._on_stream_data(event)
+
+    def watch_stream(self, stream_id: int, session: WebTransportSessionBase) -> None:
+        self._settling[stream_id] = session
+        self._schedule_fin_retry()
+
+    def watch_drain(self, session: WebTransportSessionBase) -> None:
+        if session not in self._draining:
+            self._draining.append(session)
+
+    def _schedule_fin_retry(self) -> None:
+        if self._fin_retry_handle is None and self._settling and self.terminated is None:
+            self._fin_retry_handle = self._loop.call_later(_FIN_RETRY_INTERVAL, self._retry_dropped_fins)
+
+    def _retry_dropped_fins(self) -> None:
+        """Periodically re-queue FINs aioquic dropped under a full window (see ``_rearm_fin``).
+
+        A time-based sweep, not a per-transmit one: a FIN can be dropped and the window then open
+        before the next transmit, so a congestion-gated retry would miss it, while re-queuing on every
+        transmit would resend a healthy in-flight FIN each round. On a healthy link a FIN is acknowledged
+        within the interval and is never re-queued; a genuinely dropped one is retried until it lands.
+        """
+        self._fin_retry_handle = None
+
+        if self.terminated is not None:
+            return
+
+        streams = self._quic._streams
+        rearmed = False
+
+        for stream_id, session in list(self._settling.items()):
+            if session._rearm_fin(stream_id, streams.get(stream_id)):
+                rearmed = True
+
+        if rearmed:
+            self.transmit()
+
+        self._schedule_fin_retry()
+
+    def transmit(self) -> None:
+        super().transmit()
+
+        # Everything that moves a stream along (a flight sent, an ACK or STOP_SENDING processed, a
+        # timer) ends in a transmit, so this is the one place to settle waiting writers and drains.
+        if self._settling or self._draining:
+            self._settle()
+
+    def _settle(self) -> None:
+        streams = self._quic._streams
+
+        for stream_id, session in list(self._settling.items()):
+            if not session._settle_stream(stream_id, streams.get(stream_id)):
+                self._settling.pop(stream_id, None)
+
+        for session in list(self._draining):
+            if session._check_drained():
+                self._draining.remove(session)
+
+    def connection_lost(self, exc: Exception | None) -> None:
+        self._cancel_fin_retry()
+        self.transport_closed.set()
+
+    def _cancel_fin_retry(self) -> None:
+        if self._fin_retry_handle is not None:
+            self._fin_retry_handle.cancel()
+            self._fin_retry_handle = None
 
     def quic_event_received(self, event: quic_events.QuicEvent) -> None:
         if isinstance(event, quic_events.StreamReset):
@@ -361,6 +474,9 @@ class WebTransportProtocol(QuicConnectionProtocol):
             self.terminated = event
             self.terminated_event.set()
             self._orphans.clear()
+            self._settling.clear()
+            self._draining.clear()
+            self._cancel_fin_retry()
 
             for session in list(self.sessions.values()):
                 session._on_terminated(event)
@@ -402,18 +518,34 @@ class WebTransportProtocol(QuicConnectionProtocol):
     def _close_transport_soon(self) -> None:
         transport = self._transport
 
-        if transport is not None:
+        if self.owns_transport and transport is not None:
             self._loop.call_soon(transport.close)
+        else:
+            # A server connection shares its listener's socket; there is nothing of ours to release.
+            self.transport_closed.set()
 
     def close_after_drain(self, error_code: int = ErrorCode.H3_NO_ERROR, reason_phrase: str = "") -> None:
         """Close the QUIC connection, and make sure the UDP socket is released even if the peer never answers."""
         self.close(error_code=error_code, reason_phrase=reason_phrase)
 
         def release() -> None:
-            if self._transport is not None and not self.terminated_event.is_set():
+            if self.owns_transport and self._transport is not None and not self.terminated_event.is_set():
                 self._transport.close()
 
         self._loop.call_later(3.0, release)
+
+
+def _finish_receiving_half(quic: QuicConnection, stream_id: int) -> None:
+    """Mark a locally opened unidirectional stream's receiving half done so aioquic can discard the stream.
+
+    aioquic 1.3 leaves that half unfinished although nothing can ever arrive on it, so the stream
+    would otherwise stay in ``QuicConnection._streams`` (and in the per-packet scheduling loop) for
+    the life of the connection after its FIN or reset was acknowledged.
+    """
+    stream = quic._streams.get(stream_id)
+
+    if stream is not None:
+        stream.receiver.is_finished = True
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -435,6 +567,7 @@ class WebTransportSessionBase:
         self._closed: asyncio.Future[None] = loop.create_future()
         observe(self._closed)
         self._closing = False
+        self._drained: asyncio.Future[None] | None = None
         self._connect_buffer = b""
         self.close_info: tuple[int, str] | None = None
         """``(code, reason)`` from the peer's CLOSE_WEBTRANSPORT_SESSION capsule, once received."""
@@ -450,6 +583,7 @@ class WebTransportSessionBase:
     async def create_unidirectional_stream(self) -> SendStream:
         protocol = self._require_live()
         stream_id = protocol.h3.create_webtransport_stream(self.session_id, is_unidirectional=True)
+        _finish_receiving_half(protocol._quic, stream_id)
         send = _SendHalf(self, stream_id)
         self._sends[stream_id] = send
         protocol.stream_owners[stream_id] = self
@@ -474,7 +608,10 @@ class WebTransportSessionBase:
         return BidirectionalStream(readable=receive, writable=send)
 
     def close(self, close_code: int = 0, reason: str = "") -> None:
-        """Send CLOSE_WEBTRANSPORT_SESSION, give queued data a moment to drain, then close the connection."""
+        """Send CLOSE_WEBTRANSPORT_SESSION, wait for in-flight data to be acknowledged, then close the connection.
+
+        Writes fail from here on; the session reports itself closed once the connection is gone.
+        """
         if self._closing:
             return
 
@@ -492,12 +629,27 @@ class WebTransportSessionBase:
             pass
 
         spawn(self._drain_then_close(protocol))
-        self._finish(None)
 
     async def wait_closed(self) -> None:
-        await self._closed
+        """Return once the session ended and its UDP socket is released, so a process may exit right after.
+
+        Raises the error that ended the session, if any.
+        """
+        if not self._closed.done():
+            await asyncio.wait({self._closed})
+
+        protocol = self._transport_protocol()
+
+        if protocol is not None:
+            await protocol.transport_closed.wait()
+
+        self._closed.result()
 
     # ------------------------------------------------------------------ role hooks
+
+    def _transport_protocol(self) -> WebTransportProtocol | None:
+        """The connection whose shutdown ``wait_closed`` also waits for."""
+        return self._protocol
 
     def _attach(self, protocol: WebTransportProtocol, session_id: int) -> None:
         self._protocol = protocol
@@ -550,16 +702,58 @@ class WebTransportSessionBase:
             protocol.close_after_drain()
 
     async def _drain_then_close(self, protocol: WebTransportProtocol) -> None:
-        # Closing a QUIC connection discards queued stream data, so give the capsule and any final
-        # FINs a round trip to land: a PING acknowledgement means everything queued before it was
-        # received.
+        # Closing a QUIC connection discards queued stream data, and whatever the peer has not
+        # acknowledged is lost with it. So wait until every send stream, the close capsule included,
+        # has been acknowledged, within a bound so a peer that went silent cannot hold the close.
         try:
-            await asyncio.wait_for(protocol.ping(), _CLOSE_FLUSH_TIMEOUT)
-        except Exception:
-            pass
+            await asyncio.wait({self._wait_drained(protocol)}, timeout=_CLOSE_DRAIN_TIMEOUT)
+        finally:
+            if protocol.terminated is None:
+                protocol.close_after_drain()
 
-        if protocol.terminated is None:
-            protocol.close_after_drain()
+    def _wait_drained(self, protocol: WebTransportProtocol) -> asyncio.Future[None]:
+        if self._drained is None:
+            self._drained = asyncio.get_running_loop().create_future()
+            observe(self._drained)
+            protocol.watch_drain(self)
+            self._check_drained()
+
+        return self._drained
+
+    def _check_drained(self) -> bool:
+        """After a transmit while closing: settle ``_drained`` once the peer acknowledged everything we sent.
+
+        Returns ``True`` when there is nothing left to watch.
+        """
+        drained = self._drained
+
+        if drained is None or drained.done():
+            return True
+
+        protocol = self._protocol
+
+        if protocol is None or protocol.terminated is not None:
+            drained.set_result(None)
+            return True
+
+        streams = protocol._quic._streams
+
+        for stream_id in (*self._sends, self.session_id):
+            stream = streams.get(stream_id)
+
+            if stream is None or stream.sender.is_finished:
+                continue
+
+            sender = stream.sender
+
+            if sender._reset_error_code is not None:
+                return False  # the reset is not acknowledged yet
+
+            if sender._buffer or sender._pending_eof or (sender._buffer_fin is not None and not sender._acked_fin):
+                return False  # data or the FIN is not acknowledged yet
+
+        drained.set_result(None)
+        return True
 
     # ------------------------------------------------------------------ event routing
 
@@ -590,18 +784,121 @@ class WebTransportSessionBase:
 
         receive.feed(event.data, event.stream_ended)
 
+        if event.stream_ended:
+            self._forget_receive(event.stream_id)
+
     def _on_stream_reset(self, stream_id: int, error_code: int) -> None:
         receive = self._receives.get(stream_id)
 
         if receive is not None:
             code = h3_to_webtransport_error_code(error_code)
             receive.fail(WebTransportError(f"peer reset the stream (code {code})", code=code))
+            self._forget_receive(stream_id)
 
     def _on_stop_sending(self, stream_id: int, error_code: int) -> None:
         send = self._sends.get(stream_id)
 
         if send is not None:
             send.stopped(h3_to_webtransport_error_code(error_code) or 0)
+
+            # aioquic resets the stream on our behalf; forget it once that reset is acknowledged.
+            if self._protocol is not None:
+                self._protocol.watch_stream(stream_id, self)
+
+    # ------------------------------------------------------------------ per-stream bookkeeping
+
+    def _settle_stream(self, stream_id: int, stream: QuicStream | None) -> bool:
+        """After a transmit, for a stream with a pending write, FIN or reset: ``True`` while it needs watching.
+
+        A write and the FIN both settle once their bytes have been handed to the wire (nothing left
+        pending on the stream), so a caller is not held for a full round trip on a healthy link. A
+        closed send half stays watched until its FIN is acknowledged, though: aioquic can silently
+        drop a FIN-only frame under a full congestion window, and :meth:`_recover_dropped_fin` re-queues
+        it until it truly lands, so the FIN reaches the peer even when the write it settled has returned.
+        ``close()`` on the session waits for that acknowledgement before tearing the connection down.
+        """
+        send = self._sends.get(stream_id)
+
+        if send is None:
+            return False
+
+        sender = None if stream is None else stream.sender
+
+        if sender is None or sender.is_finished:
+            # aioquic discards a stream once its FIN (or reset) is acknowledged. For a closed send
+            # half that is success: the peer has the whole stream. Otherwise the stream is simply gone.
+            if send._closed:
+                send._settle_transmit()
+            else:
+                send._fail_transmit(WebTransportError("stream is closed"))
+
+            self._forget_send(stream_id)
+            return False
+
+        if sender._reset_error_code is not None:
+            send._fail_transmit(WebTransportError("stream was aborted"))
+            return True  # until the reset is acknowledged
+
+        if len(sender._pending) == 0 and not sender._pending_eof:
+            send._settle_transmit()
+
+        # A closed send half stays watched until its FIN is acknowledged, even after the write that
+        # queued it has settled, so the retry sweep keeps re-queuing a dropped FIN in the background.
+        return send._closed or send._transmitted is not None
+
+    def _rearm_fin(self, stream_id: int, stream: QuicStream | None) -> bool:
+        """Re-queue a FIN that aioquic consumed but never put on the wire (the retry sweep's per-stream step).
+
+        ``get_frame`` hands back a FIN-only frame even when there is no flight space for it, so the
+        following ``start_frame`` rejects it (``QuicPacketBuilderStop``) and the FIN is lost with
+        nothing to reschedule it: the peer never sees the stream end and the group is never marked
+        complete. Re-arm a closed send half's buffered, unacknowledged FIN that is not currently
+        queued. A duplicate FIN, if the frame did leave, is harmless: the peer's final size is
+        unchanged. Returns whether it re-queued anything.
+        """
+        send = self._sends.get(stream_id)
+
+        if stream is None or send is None or not send._closed:
+            return False
+
+        sender = stream.sender
+
+        if (
+            sender._buffer_fin is not None
+            and not sender._acked_fin
+            and not sender._pending_eof
+            and sender._reset_error_code is None
+            and not sender.is_finished
+        ):
+            sender._pending_eof = True
+            sender.buffer_is_empty = False
+            return True
+
+        return False
+
+    def _forget_send(self, stream_id: int) -> None:
+        self._sends.pop(stream_id, None)
+
+        if stream_id not in self._receives:
+            self._forget_stream(stream_id)
+
+    def _forget_receive(self, stream_id: int) -> None:
+        self._receives.pop(stream_id, None)
+
+        if stream_id not in self._sends:
+            self._forget_stream(stream_id)
+
+    def _forget_stream(self, stream_id: int) -> None:
+        """Both halves are done: drop the routing entry and the HTTP/3 record the stream leaves behind."""
+        protocol = self._protocol
+
+        if protocol is None or stream_id == self.session_id:
+            return
+
+        protocol.stream_owners.pop(stream_id, None)
+        # aioquic's HTTP/3 layer forgets a stream only once both halves ended, which it never learns
+        # for WebTransport streams whose bytes bypass it: every incoming one, and our bidirectional ones.
+        protocol.h3._stream.pop(stream_id, None)
 
     def _on_terminated(self, event: quic_events.ConnectionTerminated) -> None:
         clean = self._closing or event.error_code in (QuicErrorCode.NO_ERROR, ErrorCode.H3_NO_ERROR)
@@ -636,6 +933,9 @@ class WebTransportSessionBase:
         self._incoming_uni.close()
         self._incoming_bidi.close()
 
+        if self._drained is not None and not self._drained.done():
+            self._drained.set_result(None)
+
     # ------------------------------------------------------------------ QUIC plumbing for the halves
 
     def _require_live(self) -> WebTransportProtocol:
@@ -651,10 +951,19 @@ class WebTransportSessionBase:
             error = self._closed.exception() if not self._closed.cancelled() else None
             raise error if error is not None else WebTransportError("WebTransport session closed")
 
-    def _send_stream_data(self, stream_id: int, data: bytes, end_stream: bool) -> None:
+        if self._closing:
+            raise WebTransportError("WebTransport session closed")
+
+    async def _send(self, send: _SendHalf, data: bytes, end_stream: bool) -> None:
         protocol = self._require_live()
-        protocol._quic.send_stream_data(stream_id, data, end_stream)
-        protocol.transmit()
+        protocol._quic.send_stream_data(send._stream_id, data, end_stream)
+        waiter = send._transmit_waiter()
+        protocol.watch_stream(send._stream_id, self)
+        # Coalesce concurrent writes into one transmit per loop turn, the way aioquic's own stream
+        # adapter does. Transmitting per write instead packs packets so tightly that a following
+        # FIN-only frame can be dropped (aioquic consumes it even when the packet is already full).
+        protocol._transmit_soon()
+        await waiter
 
     def _reset_stream(self, stream_id: int, code: int) -> None:
         protocol = self._protocol
@@ -662,8 +971,13 @@ class WebTransportSessionBase:
         if protocol is None or protocol.terminated is not None:
             return
 
+        # A stream aioquic already discarded must not be recreated by the reset.
+        if stream_id not in protocol._quic._streams:
+            return
+
         try:
             protocol._quic.reset_stream(stream_id, webtransport_to_h3_error_code(code))
+            protocol.watch_stream(stream_id, self)
             protocol.transmit()
         except (ValueError, AssertionError):
             pass
@@ -752,7 +1066,7 @@ class WebTransportSession(WebTransportSessionBase):
             connection = QuicConnection(configuration=configuration)
             sock, addr = _open_socket([info[4] for info in infos])
             udp_transport, protocol = await loop.create_datagram_endpoint(
-                lambda: WebTransportProtocol(connection), sock=sock
+                lambda: WebTransportProtocol(connection, owns_transport=True), sock=sock
             )
             assert isinstance(protocol, WebTransportProtocol)
             self._pending_protocol = protocol
@@ -866,6 +1180,9 @@ class WebTransportSession(WebTransportSessionBase):
             )
 
         super()._finish(error)
+
+    def _transport_protocol(self) -> WebTransportProtocol | None:
+        return self._protocol or self._pending_protocol
 
     def _teardown_connection(self) -> None:
         protocol = self._protocol or self._pending_protocol
