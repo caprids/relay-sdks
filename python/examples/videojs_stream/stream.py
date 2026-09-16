@@ -967,7 +967,16 @@ async def publish_live_media(
     finally:
         for task in [*writers, reporter]:
             task.cancel()
-        await asyncio.gather(*writers, reporter, return_exceptions=True)
+        outcomes = await asyncio.gather(*writers, reporter, return_exceptions=True)
+        # gather raises the first failure. A normal deadline may win that race while the
+        # other track has already failed independently; retain that failure after draining.
+        for outcome in outcomes:
+            if (
+                isinstance(outcome, BaseException)
+                and not isinstance(outcome, asyncio.CancelledError)
+                and outcome is not lifetime.reason
+            ):
+                raise outcome
 
 
 # ---------------------------------------------------------------------------------------------------

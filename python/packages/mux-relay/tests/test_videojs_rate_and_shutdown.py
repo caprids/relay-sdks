@@ -2,7 +2,7 @@
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from videojs_stream import stream
@@ -119,3 +119,26 @@ async def test_duration_drains_before_classifying_failures(
             await stream.run(config, stats, lambda *_: None)
         assert caught.value.__cause__ is problem
     assert stats.finished is not None
+
+
+async def test_deadline_on_one_track_does_not_hide_other_track_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    lifetime = CancellationToken()
+    lifetime.cancel()
+    problem = RuntimeError("audio encoder failed")
+    stats = stream.Stats()
+    queues = {
+        kind: stream.LiveQueue(cast(Any, kind), stats, max_samples=1, max_bytes=10, max_lag=1)
+        for kind in ("video", "audio")
+    }
+
+    async def publish(queue: stream.LiveQueue, *_: Any) -> None:
+        if queue.kind == "video":
+            lifetime.throw_if_cancelled()
+        raise problem
+
+    monkeypatch.setattr(stream, "publish_media", publish)
+    with pytest.raises(RuntimeError) as caught:
+        await stream.publish_live_media(
+            queues, cast(Any, None), None, cast(Any, None), stats, lambda *_: None, lambda *_: None, lifetime
+        )
+    assert caught.value is problem
