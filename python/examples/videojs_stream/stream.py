@@ -967,16 +967,16 @@ async def publish_live_media(
     finally:
         for task in [*writers, reporter]:
             task.cancel()
-        outcomes = await asyncio.gather(*writers, reporter, return_exceptions=True)
-        # gather raises the first failure. A normal deadline may win that race while the
-        # other track has already failed independently; retain that failure after draining.
-        for outcome in outcomes:
-            if (
-                isinstance(outcome, BaseException)
-                and not isinstance(outcome, asyncio.CancelledError)
-                and outcome is not lifetime.reason
-            ):
-                raise outcome
+        try:
+            await asyncio.gather(*writers, reporter, return_exceptions=True)
+        finally:
+            # gather raises the first failure. A normal deadline may win that race while
+            # another track has failed independently. Inspect the tasks even if run() also
+            # cancels this parent during its drain, so that failure cannot disappear.
+            for task in [*writers, reporter]:
+                error = task.exception() if task.done() and not task.cancelled() else None
+                if error is not None and error is not lifetime.reason:
+                    raise error
 
 
 # ---------------------------------------------------------------------------------------------------

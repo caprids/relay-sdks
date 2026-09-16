@@ -121,7 +121,10 @@ async def test_duration_drains_before_classifying_failures(
     assert stats.finished is not None
 
 
-async def test_deadline_on_one_track_does_not_hide_other_track_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("cancel_after_turns", [None, 2, 3, 4, 5, 6, 7, 8])
+async def test_deadline_on_one_track_does_not_hide_other_track_failure(
+    monkeypatch: pytest.MonkeyPatch, cancel_after_turns: int | None
+) -> None:
     lifetime = CancellationToken()
     lifetime.cancel()
     problem = RuntimeError("audio encoder failed")
@@ -137,8 +140,16 @@ async def test_deadline_on_one_track_does_not_hide_other_track_failure(monkeypat
         raise problem
 
     monkeypatch.setattr(stream, "publish_media", publish)
-    with pytest.raises(RuntimeError) as caught:
-        await stream.publish_live_media(
+    task = asyncio.create_task(
+        stream.publish_live_media(
             queues, cast(Any, None), None, cast(Any, None), stats, lambda *_: None, lambda *_: None, lifetime
         )
+    )
+    if cancel_after_turns is not None:
+        # Both writers have failed by turn two; later turns enter the parent's drain.
+        for _ in range(cancel_after_turns):
+            await asyncio.sleep(0)
+        task.cancel()
+    with pytest.raises(RuntimeError) as caught:
+        await task
     assert caught.value is problem
