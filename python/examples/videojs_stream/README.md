@@ -36,7 +36,7 @@ Options:
 | `--width`, `--height`, `--fps`, `--bitrate`, `--gop` | Test-pattern size and encoder settings (defaults 640x360, 30 fps, 1.5 Mbit/s, 2 s GOP) |
 | `--audio auto\|tone\|off` | `auto`: the file's audio, none for the pattern; `tone`: a 440 Hz sine; `off`: video only |
 | `--duration SECONDS` | Stop after a while (default: until Ctrl-C) |
-| `--on-track-end stop\|continue` | What to do if the relay retires a track mid-run: `stop` (default) fails the run; `continue` keeps publishing the surviving tracks |
+| `--on-track-end stop\|continue` | What to do if a track closes mid-run: `stop` (default) fails the run; `continue` keeps publishing the surviving tracks |
 | `--verify` | Also subscribe in-process and report the catalog, groups, keyframes, and timestamps received |
 | `--show-token` | Print the player URL with the token filled in |
 
@@ -85,7 +85,9 @@ The shutdown path joins the producer and drains both queues so its final encoded
 
 The catalog uses a single-object write. Failed writes and media groups reset their stream and keep
 the track open while the publisher connection remains open. The example drops failed media and
-retries catalog state explicitly; data that already reached the relay cannot be withdrawn.
+retries current catalog state after a one-second pause while demand remains; it keeps only one
+pending catalog document. Shutdown cancels the pause. Data that already reached the relay cannot
+be withdrawn.
 A closed track or connection is terminal. The example checks the writer's `closed` state after a
 write failure (`bound` cannot distinguish a closed track from one with no current subscribers).
 

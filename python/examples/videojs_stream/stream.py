@@ -80,6 +80,7 @@ Log = Callable[[str, dict[str, Any]], None]
 MICROSECOND = Fraction(1, MICROSECONDS_PER_SECOND)
 OPUS_RATE = 48_000
 OPUS_FRAME_SAMPLES = 960  # 20 ms
+CATALOG_RETRY_DELAY = 1.0  # seconds between failed attempts while demand remains
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -687,24 +688,32 @@ def _caused_by(error: BaseException, cause: BaseException) -> BaseException:
 async def serve_catalog(
     catalog: RelayTrackWriter, document: bytes, stats: Stats, log: Log, on_track_end: TrackEndHandler
 ) -> None:
-    """Send the catalog as a fresh group every time the relay (re)subscribes: catalog frames flow on change."""
+    """Send current catalog state on each subscription, retrying transient failures while demanded."""
     async for bound in catalog.bindings():
         if not bound:
             continue
 
-        try:
-            await catalog.write(document)
-            stats.catalog_sends += 1
-            log("catalog sent", {"bytes": len(document)})
-        except RelayError as error:
-            # A retired catalog track is not recoverable on this connection: stop re-sending rather
-            # than spin on a writer that can only keep failing.
-            if await write_ended_track(catalog, error, bound=True):
-                on_track_end(CATALOG_TRACK, error)
-                return
+        while True:
+            try:
+                await catalog.write(document)
+                stats.catalog_sends += 1
+                log("catalog sent", {"bytes": len(document)})
+                break
+            except RelayError as error:
+                if await write_ended_track(catalog, error, bound=True):
+                    on_track_end(CATALOG_TRACK, error)
+                    return
 
-            stats.catalog_failures += 1
-            log("catalog write failed", {"error": describe(error)})
+                stats.catalog_failures += 1
+                log("catalog write failed", {"error": describe(error)})
+                # Catalog state must eventually arrive even if the relay keeps its subscription.
+                # Retain only this document and pause between attempts; task cancellation interrupts
+                # the pause during shutdown. Losing demand returns to the binding iterator.
+                if not catalog.bound:
+                    break
+                await asyncio.sleep(CATALOG_RETRY_DELAY)
+                if not catalog.bound:
+                    break
 
 
 async def publish_media(
@@ -1244,7 +1253,7 @@ def parse_args(argv: list[str]) -> Config:
         "--on-track-end",
         choices=["stop", "continue"],
         default="stop",
-        help="What to do when the relay retires a track mid-run: stop: fail the run (default); "
+        help="What to do when a track closes mid-run: stop: fail the run (default); "
         "continue: keep publishing the surviving tracks and count the lost samples",
     )
     parser.add_argument("--verify", action="store_true", help="Also subscribe in-process and report what arrives")
