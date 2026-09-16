@@ -88,7 +88,7 @@ describe('connectRelay', () => {
     expect(objects[0]).toMatchObject({ groupId: 8, objectId: 0, properties: [], payload });
   });
 
-  it('fails pending subscriptions once when GOAWAY ends the connection', async () => {
+  it.each([false, true])('settles GOAWAY with a pending callback that throws: %s', async (throws) => {
     const fake = createFakeTransport();
     const control = fake.openControlledDataStream();
     const connecting = connectRelay({
@@ -98,7 +98,9 @@ describe('connectRelay', () => {
     await control.write(encodeSetup([]));
     const connection = await connecting;
     connections.push(connection);
-    const pendingError = vi.fn();
+    const pendingError = vi.fn(() => {
+      if (throws) throw new Error('application callback failed');
+    });
     const acceptedError = vi.fn();
     const cancelledError = vi.fn();
     const onOk = vi.fn();
@@ -115,6 +117,7 @@ describe('connectRelay', () => {
     const { error } = await connection.closed;
     expect(error).toBeInstanceOf(Error);
     expect((error as Error).message).toContain('migration');
+    expect(fake.getCloseInfo()).toMatchObject({ closeCode: 0, reason: '' });
     connection.close();
     await Promise.resolve();
     expect(pendingError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: (error as Error).message }));

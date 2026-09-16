@@ -97,6 +97,10 @@ export async function openRelaySession<T extends Session>(
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', onAbort);
 
+    // Settle before synchronous user callbacks run during session teardown.
+    resolveClosed(info);
+    rejectConnect(stopError);
+
     if (session) {
       session.destroy(info.error);
     } else {
@@ -106,9 +110,6 @@ export async function openRelaySession<T extends Session>(
         // A failed handshake may leave a transport that already refuses close().
       }
     }
-
-    resolveClosed(info);
-    rejectConnect(stopError);
   };
 
   const onAbort = (): void => finish({ error: options.signal?.reason });

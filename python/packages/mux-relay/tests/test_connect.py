@@ -105,8 +105,9 @@ class TestConnectRelay:
             payload,
         )
 
+    @pytest.mark.parametrize("throws", [False, True])
     async def test_fails_pending_subscriptions_once_when_goaway_ends_the_connection(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelayConnection], throws: bool
     ) -> None:
         fake = create_fake_transport()
         control = fake.open_controlled_data_stream()
@@ -118,9 +119,13 @@ class TestConnectRelay:
         accepted_errors: list[Any] = []
         cancelled_errors: list[Any] = []
         answers: list[Any] = []
-        connection.subscribe(
-            ["live"], "pending", SubscriptionHandlers(on_error=pending_errors.append, on_ok=answers.append)
-        )
+
+        def on_error(error: Any) -> None:
+            pending_errors.append(error)
+            if throws:
+                raise RuntimeError("application callback failed")
+
+        connection.subscribe(["live"], "pending", SubscriptionHandlers(on_error=on_error, on_ok=answers.append))
         await (await fake.next_request_stream()).first_message
         connection.subscribe(["live"], "accepted", SubscriptionHandlers(on_error=accepted_errors.append))
         accepted = await fake.next_request_stream()
@@ -132,6 +137,9 @@ class TestConnectRelay:
         await control.write(encode_goaway(1000))
         closed = await connection.closed
         assert isinstance(closed.error, RelayGoawayError)
+        assert fake.close_info is not None
+        assert fake.close_info.close_code == 0
+        assert fake.close_info.reason == ""
         connection.close()
         await settle()
         assert len(pending_errors) == 1

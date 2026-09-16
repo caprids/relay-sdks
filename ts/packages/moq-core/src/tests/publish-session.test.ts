@@ -942,7 +942,7 @@ describe('createMoqtPublishSession', () => {
     subscriber.destroy();
   });
 
-  it('close() drains the FINs and NAMESPACE_DONE to the wire without a GOAWAY', async () => {
+  it.each([false, true])('drains FINs and NAMESPACE_DONE, including destroy with an error: %s', async (withError) => {
     const pair = createTransportPair();
     // A fully raw peer: complete SETUP and record every frame on the
     // publisher's control stream — it must carry SETUP and nothing else
@@ -966,7 +966,8 @@ describe('createMoqtPublishSession', () => {
         for (const frame of deframer.push(value!)) controlFrames.push(decodeControlMessage(frame));
       }
     })();
-    const session = createMoqtPublishSession(pair.client);
+    const onClosed = vi.fn();
+    const session = createMoqtPublishSession(pair.client, { callbacks: { onClosed } });
 
     await session.ready;
     session.announce(NAMESPACE);
@@ -981,7 +982,9 @@ describe('createMoqtPublishSession', () => {
       expect(subscribe.received).toHaveLength(1);
     });
 
-    session.close();
+    const error = new Error('migration requested');
+    if (withError) session.destroy(error);
+    else session.close();
     await vi.waitFor(() => {
       // The announce is retracted and the subscription FINed cleanly
       // before the transport goes away.
@@ -990,6 +993,8 @@ describe('createMoqtPublishSession', () => {
     });
     expect(subscribe.received.map((m) => m.kind)).toEqual(['subscribe-ok']);
     expect(controlFrames.map((m) => m.kind)).toEqual(['setup']);
+    await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
+    expect(onClosed).toHaveBeenCalledExactlyOnceWith(withError ? { error } : {});
   });
 
   it('close() leaves no timer running', async () => {

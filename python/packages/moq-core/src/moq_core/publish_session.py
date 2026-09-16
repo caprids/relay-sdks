@@ -375,13 +375,16 @@ class MoqtPublishSession:
         close the transport. Returns immediately; the transport closes within roughly
         :data:`CLOSE_FLUSH_TIMEOUT`.
         """
+        self._close(close_code, reason)
+
+    def _close(self, close_code: int, reason: str, error: BaseException | None = None) -> None:
         if self._destroyed or self._closing:
             return
 
         self._closing = True
-        spawn(self._drain_and_close(close_code, reason))
+        spawn(self._drain_and_close(close_code, reason, error))
 
-    async def _drain_and_close(self, close_code: int, reason: str) -> None:
+    async def _drain_and_close(self, close_code: int, reason: str, error: BaseException | None = None) -> None:
         # Orderly close: closing the transport discards queued data, so the subscription FINs and
         # NAMESPACE_DONE retractions must be given a bounded window to land first. A peer should
         # observe every track ending cleanly, not an abrupt transport end. Neither GOAWAY nor
@@ -419,14 +422,11 @@ class MoqtPublishSession:
         except Exception:  # transport already gone
             pass
 
-        self._handle_closed(None, expected=True)
+        self._handle_closed(error, expected=error is None)
 
     def destroy(self, error: BaseException | None = None) -> None:
-        """End locally; an error also fails requests awaiting their first response."""
-        if error is not None:
-            self._fatal(error)
-        else:
-            self.close()
+        """Drain outgoing streams, preserving an optional local closure error."""
+        self._close(SESSION_ERROR.NO_ERROR, "", error)
 
     # ---------------------------------------------------------------------------
     # Announcing and the track registry

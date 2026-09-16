@@ -136,7 +136,7 @@ export interface MoqtPublishSession {
    * Synchronous callers return immediately; the transport closes within roughly {@link CLOSE_FLUSH_TIMEOUT_MS}.
    */
   close(closeCode?: number, reason?: string): void;
-  /** End locally; an error also fails requests still awaiting their first response. */
+  /** Drain outgoing streams, preserving an optional local closure error. */
   destroy(error?: unknown): void;
 }
 
@@ -336,10 +336,14 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   close(closeCode = SESSION_ERROR.NO_ERROR, reason = ''): void {
+    this.#close(closeCode, reason);
+  }
+
+  #close(closeCode: number, reason: string, error?: unknown): void {
     if (this.#destroyed || this.#closing) return;
 
     this.#closing = true;
-    void this.#drainAndClose(closeCode, reason);
+    void this.#drainAndClose(closeCode, reason, error);
   }
 
   /**
@@ -349,7 +353,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    * client GOAWAY, and treats any post-SUBSCRIBE_OK byte on a subscribe stream as an error that aborts the track (see
    * the module doc).
    */
-  async #drainAndClose(closeCode: number, reason: string): Promise<void> {
+  async #drainAndClose(closeCode: number, reason: string, error?: unknown): Promise<void> {
     // One macrotask beat before the last-resort sweep below: track owners
     // tearing down in the same reactive flush (`setupTrackPublishers`'s
     // cleanup runs on a microtask after ours on the unpublish path) get to
@@ -393,12 +397,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       // transport already gone
     }
 
-    this.#handleClosed(undefined, { expected: true });
+    this.#handleClosed(error, { expected: error === undefined });
   }
 
   destroy(error?: unknown): void {
-    if (error !== undefined) this.#fatal(error);
-    else this.close();
+    this.#close(SESSION_ERROR.NO_ERROR, '', error);
   }
 
   // ---------------------------------------------------------------------------

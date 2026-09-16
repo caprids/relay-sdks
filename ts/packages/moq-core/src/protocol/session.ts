@@ -417,6 +417,10 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   close(closeCode = SESSION_ERROR.NO_ERROR, reason = ''): void {
+    this.#close(closeCode, reason);
+  }
+
+  #close(closeCode: number, reason: string, error?: unknown): void {
     if (this.#destroyed) return;
 
     // Best-effort GOAWAY so the peer can stop routing to us first.
@@ -428,12 +432,11 @@ class MoqtSessionImpl implements MoqtSession {
       // transport already gone
     }
 
-    this.#handleClosed(undefined, { expected: true });
+    this.#handleClosed(error, { expected: error === undefined });
   }
 
   destroy(error?: unknown): void {
-    if (error !== undefined) this.#fatal(error);
-    else this.close();
+    this.#close(SESSION_ERROR.NO_ERROR, '', error);
   }
 
   // --------------------------------------------------------------------------

@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any
 
+import pytest
 from core_helpers.raw_peer import RawRequest, open_raw_request, solicit_namespace
 from core_helpers.raw_peer import raw_subscribe as raw_subscribe_to
 from core_helpers.transport_pair import PairTransport, TransportPair, create_transport_pair
@@ -781,7 +782,10 @@ class TestCreateMoqtPublishSession:
         await wait_for(lambda: bindings == [41, None] and subscribe.ended())
         harness.destroy()
 
-    async def test_close_drains_the_fins_and_namespace_done_to_the_wire_without_a_goaway(self) -> None:
+    @pytest.mark.parametrize("with_error", [False, True])
+    async def test_close_drains_the_fins_and_namespace_done_to_the_wire_without_a_goaway(
+        self, with_error: bool
+    ) -> None:
         pair = create_transport_pair()
         # A fully raw peer: complete SETUP and record every frame on the publisher's control stream.
         # It must carry SETUP and nothing else (a client GOAWAY closes a moq-lite-rs session, code 17).
@@ -805,7 +809,10 @@ class TestCreateMoqtPublishSession:
                 pass
 
         asyncio.get_running_loop().create_task(raw_server())
-        session = create_moqt_publish_session(pair.client)
+        closed: list[Any] = []
+        session = create_moqt_publish_session(
+            pair.client, MoqtPublishSessionConfig(callbacks=MoqtPublishSessionCallbacks(on_closed=closed.append))
+        )
 
         await session.ready
         session.announce(NAMESPACE)
@@ -817,13 +824,24 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: len(solicitation.received) == 2 and len(subscribe.received) == 1)
 
-        session.close()
+        error = RuntimeError("migration requested")
+        if with_error:
+            session.destroy(error)
+        else:
+            session.close()
         # The announce is retracted and the subscription FINed cleanly before the transport goes away.
         await wait_for(
             lambda: solicitation.kinds() == ["request-ok", "namespace", "namespace-done"] and subscribe.ended()
         )
         assert subscribe.kinds() == ["subscribe-ok"]
         assert [frame.kind for frame in control_frames] == ["setup"]
+
+        await pair.client.wait_closed()
+        assert pair.client._shared.close_info is not None
+        assert pair.client._shared.close_info.close_code == 0
+        assert pair.client._shared.close_info.reason == ""
+        assert len(closed) == 1
+        assert closed[0].error is (error if with_error else None)
 
     async def test_close_leaves_no_background_work_running(self) -> None:
         pair = create_transport_pair()
