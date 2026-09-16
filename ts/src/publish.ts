@@ -2,6 +2,7 @@ import {
   createMoqtPublishSession,
   createSubgroupWriter,
   type KeyValuePair,
+  MAX_NAMESPACE_FIELDS,
   MAX_OBJECT_PAYLOAD_LENGTH,
   type ObjectStatus,
   type SubgroupWriter,
@@ -99,6 +100,9 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   if (namespace.length === 0 || namespace.some((part) => typeof part !== 'string' || part.length === 0)) {
     throw new TypeError('A publisher namespace must contain non-empty string fields');
   }
+  if (namespace.length > MAX_NAMESPACE_FIELDS) {
+    throw new RangeError(`A publisher namespace must contain at most ${MAX_NAMESPACE_FIELDS} fields`);
+  }
 
   const tracks = new Map<string, { bind(alias: number | undefined): void; close(error?: unknown): void }>();
   const lifetime = await openRelaySession(options, (transport, callbacks) =>
@@ -130,7 +134,8 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
     publish({ track, trackProperties, writeTimeoutMs = 10_000 }) {
       lifetime.assertOpen();
       if (closing) throw new Error('Relay publisher is closed');
-      if (typeof track !== 'string' || track.length === 0) throw new TypeError('Track name must be non-empty');
+      if (typeof track !== 'string') throw new TypeError('Track name must be a string');
+      if (track.length === 0) throw new TypeError('Track name must be non-empty');
       if (tracks.has(track)) throw new Error('Track name is already registered on this publisher connection');
       assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
 

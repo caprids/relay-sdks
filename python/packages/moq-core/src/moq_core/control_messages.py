@@ -228,7 +228,7 @@ def is_retryable_publish_done_status(status_code: int) -> bool:
 MAX_CONTROL_MESSAGE_LENGTH = 0xFFFF
 """Maximum body size: the frame length field is 16 bits."""
 
-_MAX_NAMESPACE_FIELDS = 32
+MAX_NAMESPACE_FIELDS = 32
 _MAX_FULL_TRACK_NAME_LENGTH = 4096
 _MAX_REASON_PHRASE_LENGTH = 1024
 _MAX_NEW_SESSION_URI_LENGTH = 8192
@@ -258,8 +258,8 @@ TrackNamespace: TypeAlias = list[str]
 
 
 def _write_track_namespace(writer: ByteWriter, namespace: Sequence[str]) -> None:
-    if len(namespace) > _MAX_NAMESPACE_FIELDS:
-        raise MoqtProtocolError(f"track namespace has more than {_MAX_NAMESPACE_FIELDS} fields")
+    if len(namespace) > MAX_NAMESPACE_FIELDS:
+        raise MoqtProtocolError(f"track namespace has more than {MAX_NAMESPACE_FIELDS} fields")
 
     writer.write_varint(len(namespace))
 
@@ -274,8 +274,8 @@ def _write_track_namespace(writer: ByteWriter, namespace: Sequence[str]) -> None
 def _read_track_namespace(reader: ByteReader) -> TrackNamespace:
     field_count = reader.read_varint()
 
-    if field_count > _MAX_NAMESPACE_FIELDS:
-        raise MoqtProtocolError(f"track namespace has more than {_MAX_NAMESPACE_FIELDS} fields")
+    if field_count > MAX_NAMESPACE_FIELDS:
+        raise MoqtProtocolError(f"track namespace has more than {MAX_NAMESPACE_FIELDS} fields")
 
     namespace: TrackNamespace = []
     total_length = 0

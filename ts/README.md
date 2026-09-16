@@ -84,6 +84,11 @@ over `getToken`, matching the current Relay connection authentication convention
 2147483647 milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError`
 rather than a deadline that fires immediately.
 
+Namespaces contain 1–32 non-empty string fields, sent verbatim without splitting on `/`.
+The 32-field protocol limit is pinned in `spec/protocol.json`. Oversized namespaces are
+rejected before opening a publisher connection or sending a subscription; track names must
+be non-empty strings.
+
 ## Publish data for testing
 
 Use a dedicated publisher connection with a token authorized to publish the namespace:

@@ -32,7 +32,9 @@ against that file.
 - Namespaces are ordered tuples of fields sent verbatim. The SDK adds no prefix and performs no
   normalization. Fields are absolute: the token's root prefix is part of the namespace the
   application supplies. Subscription namespaces must contain non-empty string fields; invalid
-  namespaces are rejected locally before sending a request.
+  namespaces are rejected locally before sending a request. Publishing and subscription namespaces
+  contain at most 32 fields (pinned in `protocol.json`); oversized namespaces are rejected locally,
+  before connecting a publisher or sending a subscription. Track names must be non-empty strings.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The SDK adds no application queue, no

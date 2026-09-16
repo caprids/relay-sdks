@@ -87,6 +87,11 @@ it closes an established connection, and the `closed` future carries the reason.
 query parameter takes precedence over `get_token`, matching the current Relay connection
 authentication convention. `RelayConnection` is also an async context manager that closes on exit.
 
+Namespaces contain 1–32 non-empty string fields, sent verbatim without splitting on `/`.
+The 32-field protocol limit is pinned in `spec/protocol.json`. Oversized namespaces are
+rejected before opening a publisher connection or sending a subscription; track names must
+be non-empty strings.
+
 ## Publish data for testing
 
 Use a dedicated publisher connection with a token authorized to publish the namespace:

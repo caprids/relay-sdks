@@ -1,5 +1,6 @@
 import {
   createMoqtSession,
+  MAX_NAMESPACE_FIELDS,
   type MessageParameters,
   type MoqTrackSource,
   type MoqtSession,
@@ -82,5 +83,8 @@ function validateNamespace(namespace: readonly string[]): void {
     Array.from(namespace).some((field) => typeof field !== 'string' || field.length === 0)
   ) {
     throw new TypeError('A subscription namespace must contain non-empty string fields');
+  }
+  if (namespace.length > MAX_NAMESPACE_FIELDS) {
+    throw new RangeError(`A subscription namespace must contain at most ${MAX_NAMESPACE_FIELDS} fields`);
   }
 }

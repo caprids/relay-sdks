@@ -7,6 +7,7 @@ truth and ``tests/test_spec_protocol.py`` checks the two agree.
 """
 
 from .control_messages import (
+    MAX_NAMESPACE_FIELDS,
     MOQT_PROTOCOL_ID,
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
@@ -70,6 +71,7 @@ from .track_source import MoqTrackSource
 from .transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
 
 __all__ = [
+    "MAX_NAMESPACE_FIELDS",
     "MAX_OBJECT_PAYLOAD_LENGTH",
     "MOQT_PROTOCOL_ID",
     "PUBLISH_DONE_STATUS",

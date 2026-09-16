@@ -211,7 +211,7 @@ export const STREAM_RESET_CODE = {
 /** Maximum body size — the frame length field is 16 bits. */
 export const MAX_CONTROL_MESSAGE_LENGTH = 0xffff;
 
-const MAX_NAMESPACE_FIELDS = 32;
+export const MAX_NAMESPACE_FIELDS = 32;
 const MAX_FULL_TRACK_NAME_LENGTH = 4096;
 const MAX_REASON_PHRASE_LENGTH = 1024;
 const MAX_NEW_SESSION_URI_LENGTH = 8192;
