@@ -17,6 +17,7 @@ from moq_core.control_messages import (
     ControlMessage,
     ControlMessageDeframer,
     MessageParameters,
+    NextObjectFilter,
     RelativeGroupFilter,
     Subscribe,
     SubscribeNamespace,
@@ -116,9 +117,9 @@ def solicit_namespace(server: MoqtTransport, prefix: Sequence[str], request_id: 
 def raw_subscribe(
     server: MoqtTransport, track_namespace: Sequence[str], track_name: str, request_id: int
 ) -> asyncio.Future[RawRequest]:
-    """The relay's per-track pull, with the parameters moq-relay 0.14.14 sends on draft-20.
+    """The relay's per-track pull, with the parameters moq-relay 0.14.17 sends on draft-20.
 
-    A ``relative-group 1`` join: the current group from object 0, then live.
+    Next Object plus a current-group fill; our publisher advertises no cached content.
     """
     return asyncio.ensure_future(
         open_raw_request(
@@ -131,7 +132,8 @@ def raw_subscribe(
                     parameters=MessageParameters(
                         forward=1,
                         subscriber_priority=0,
-                        location_filter=RelativeGroupFilter(groups_before_next=1),
+                        location_filter=NextObjectFilter(),
+                        fill_parameters=MessageParameters(location_filter=RelativeGroupFilter(groups_before_next=1)),
                         group_order="descending",
                     ),
                 )

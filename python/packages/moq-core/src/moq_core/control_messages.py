@@ -321,24 +321,12 @@ def _read_location(reader: ByteReader) -> Location:
 
 
 def _write_location_parameter(writer: ByteWriter, location: Location) -> None:
-    # LARGEST_OBJECT rides inside a length prefix. §10.2 defines a Location parameter as two bare
-    # varints, but moq-relay, the peer this SDK is deployed against, applies the Key-Value-Pair
-    # parity rule to the odd type 0x09 and frames it with a Length on every draft (moq-dev/moq#3255
-    # records it as a spec conflict). The two forms are indistinguishable on the wire, so the codec
-    # follows the relay.
-    value = ByteWriter()
-    _write_location(value, location)
-    writer.write_length_prefixed(value.to_bytes())
+    # Draft-17 onward (§10.2): two bare varints, matching moq-relay 0.14.17 (moq-dev/moq#3561).
+    _write_location(writer, location)
 
 
 def _read_location_parameter(reader: ByteReader) -> Location:
-    value = ByteReader(reader.read_bytes(reader.read_varint()))
-    location = _read_location(value)
-
-    if value.remaining != 0:
-        raise MoqtProtocolError("Location parameter has trailing bytes")
-
-    return location
+    return _read_location(reader)
 
 
 # ============================================================================
@@ -748,7 +736,7 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
             parameters.track_namespace_prefix = _read_track_namespace(reader)
         elif parameter_type == PARAMETER_TYPE.INCLUDE_PROPERTIES:
             # §10.2.21 calls the value a uint8; moq-relay frames it length-prefixed by the odd-type
-            # parity rule (moq-dev/moq#3255), and the codec follows the relay, as for LARGEST_OBJECT.
+            # parity rule (moq-dev/moq#3255). This remains length-prefixed in moq-relay 0.14.17.
             value_bytes = reader.read_bytes(reader.read_varint())
 
             if len(value_bytes) != 1 or value_bytes[0] > 1:

@@ -305,26 +305,13 @@ function readLocation(reader: ByteReader): Location {
   return { group: reader.readVarint(), object: reader.readVarint() };
 }
 
-/**
- * LARGEST_OBJECT rides inside a length prefix. §10.2 defines a Location parameter as two bare varints, but moq-relay —
- * the peer this engine is deployed against — applies the Key-Value-Pair parity rule to the odd type 0x09 and frames it
- * with a Length on every draft (moq-dev/moq#3255 records it as a spec conflict). The two forms are indistinguishable on
- * the wire, so the codec follows the relay.
- */
+/** LARGEST_OBJECT is two bare varints in draft-17 onward (§10.2), matching moq-relay 0.14.17 (moq-dev/moq#3561). */
 function writeLocationParameter(writer: ByteWriter, location: Location): void {
-  const value = new ByteWriter(16);
-
-  writeLocation(value, location);
-  writer.writeLengthPrefixed(value.toBytes());
+  writeLocation(writer, location);
 }
 
 function readLocationParameter(reader: ByteReader): Location {
-  const value = new ByteReader(reader.readBytes(reader.readVarint()));
-  const location = readLocation(value);
-
-  if (value.remaining !== 0) throw new MoqtProtocolError('Location parameter has trailing bytes');
-
-  return location;
+  return readLocation(reader);
 }
 
 // ============================================================================
@@ -746,7 +733,7 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
       case PARAMETER_TYPE.INCLUDE_PROPERTIES: {
         // §10.2.21 calls the value a uint8; moq-relay frames it
         // length-prefixed by the odd-type parity rule (moq-dev/moq#3255),
-        // and the codec follows the relay — see `writeLocationParameter`.
+        // and the codec follows the relay. This remains length-prefixed in moq-relay 0.14.17.
         const value = reader.readBytes(reader.readVarint());
 
         if (value.length !== 1 || value[0]! > 1) {

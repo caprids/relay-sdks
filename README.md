@@ -52,6 +52,9 @@ which SDK versions speak which draft:
 | `@mux/relay` (`ts/`) | unreleased | `moqt-20` |
 | `mux-relay` (`python/`) | unreleased | `moqt-20` |
 
+For the moq-relay 0.14.17 compatibility boundary and a reproducible local test, see
+[relay interoperability](spec/relay-interop.md). SDK adoption and the relay upgrade must be coordinated.
+
 ## Package boundaries
 
 The same shape applies in every language:

@@ -347,27 +347,49 @@ describe('encodeMessageParameters', () => {
     expect(() => decodeMessageParameters(new ByteReader(writer.toBytes()))).toThrow(MoqtProtocolError);
   });
 
-  // §10.2 calls LARGEST_OBJECT a bare Location; moq-relay frames it with a
-  // length by the odd-type parity rule, and the codec follows the relay.
-  // Vector from moq-dev/moq `test_param_location_wire_vectors`.
-  it('frames LARGEST_OBJECT length-prefixed, byte-for-byte with moq-relay', () => {
-    const bytes = encodeParameters({ largestObject: { group: 255, object: 128 } });
+  // Upstream draft-20 vector from moq-dev/moq#3561, independent of our encoder.
+  it('frames LARGEST_OBJECT as two bare varints, byte-for-byte with moq-relay 0.14.17', () => {
+    const bytes = Uint8Array.of(0x01, 0x09, 0x80, 0xff, 0x80, 0x80);
+    const parameters = { largestObject: { group: 255, object: 128 } };
 
-    expect(Array.from(bytes)).toEqual([0x01, 0x09, 0x04, 0x80, 0xff, 0x80, 0x80]);
-    expect(decodeMessageParameters(new ByteReader(bytes))).toEqual({ largestObject: { group: 255, object: 128 } });
+    expect(encodeParameters(parameters)).toEqual(bytes);
+    expect(decodeMessageParameters(new ByteReader(bytes))).toEqual(parameters);
   });
 
-  it('rejects a LARGEST_OBJECT value with trailing bytes', () => {
-    const writer = new ByteWriter();
-
-    writer.writeVarint(1);
-    writer.writeVarint(PARAMETER_TYPE.LARGEST_OBJECT);
-    writer.writeVarint(3); // length: two varints plus a stray byte
-    writer.writeVarint(1);
-    writer.writeVarint(2);
-    writer.writeUint8(0);
-    expect(() => decodeMessageParameters(new ByteReader(writer.toBytes()))).toThrow(/trailing bytes/);
+  it.each([
+    [0x01, 0x09],
+    [0x01, 0x09, 0x80],
+    [0x01, 0x09, 0x01],
+    [0x01, 0x09, 0x01, 0x80],
+  ])('rejects a truncated LARGEST_OBJECT: %j', (...bytes) => {
+    expect(() => decodeControlMessage({ type: MESSAGE_TYPE.SUBSCRIBE_OK, body: Uint8Array.of(7, ...bytes) })).toThrow(
+      MoqtProtocolError
+    );
   });
+
+  it.each([
+    { group: 0, object: 0, locationBytes: [0, 0] },
+    { group: 1, object: 2, locationBytes: [1, 2] },
+    { group: 255, object: 128, locationBytes: [0x80, 0xff, 0x80, 0x80] },
+  ])(
+    'decodes SUBSCRIBE_OK with Largest Object $group/$object and following fields',
+    ({ group, object, locationBytes }) => {
+      // Alias 7; two parameters: Largest Object, then delta 1 => Fill Timeout (0x0a);
+      // one track property: type 2, value 1. The frame length is a big-endian uint16.
+      const body = [7, 2, 9, ...locationBytes, 1, 5, 2, 1];
+      const bytes = Uint8Array.of(4, 0, body.length, ...body);
+      const parameters = { largestObject: { group, object }, fillTimeout: 5 };
+
+      expect(decodeAll(bytes)).toEqual([
+        { kind: 'subscribe-ok', trackAlias: 7, parameters, trackProperties: [{ type: 2, value: 1 }] },
+      ]);
+      expect(encodeSubscribeOk(7, parameters, [{ type: 2, value: 1 }])).toEqual(bytes);
+      const trailing = Uint8Array.of(...body, 0);
+      expect(() => decodeControlMessage({ type: MESSAGE_TYPE.SUBSCRIBE_OK, body: trailing })).toThrow(
+        MoqtProtocolError
+      );
+    }
+  );
 
   it('frames INCLUDE_PROPERTIES as a length-prefixed byte and rejects values other than 0 and 1', () => {
     expect(Array.from(encodeParameters({ includeProperties: 1 }))).toEqual([0x01, 0x35, 0x01, 0x01]);
