@@ -98,6 +98,7 @@ class Config:
     height: int
     fps: int
     bitrate: int
+    rate_control: Literal["abr", "cbr"] = "abr"
     gop_seconds: float
     audio: Literal["auto", "tone", "off"]
     duration: float | None
@@ -145,6 +146,10 @@ class LiveQueue(asyncio.Queue[EncodedSample | None]):
                 self._source_finished = True
                 super().put_nowait(None)
             return
+        if item.kind == "video":
+            self.stats.encoded_video_bytes += len(item.payload)
+        else:
+            self.stats.encoded_audio_bytes += len(item.payload)
         if self._source_finished:
             discard_sample(item, self.stats)
             return
@@ -199,7 +204,9 @@ class LiveQueue(asyncio.Queue[EncodedSample | None]):
 class VideoEncoder:
     """libx264 configured for LOC: no B-frames, fixed GOP, parameter sets out of band (avcC)."""
 
-    def __init__(self, width: int, height: int, fps: int, bitrate: int, gop_seconds: float) -> None:
+    def __init__(
+        self, width: int, height: int, fps: int, bitrate: int, gop_seconds: float, rate_control: str = "abr"
+    ) -> None:
         keyint = max(1, round(fps * gop_seconds))
         context = av.CodecContext.create("libx264", "w")
         context.width = width
@@ -214,6 +221,12 @@ class VideoEncoder:
             "profile": "baseline",
             "x264-params": f"keyint={keyint}:min-keyint={keyint}:scenecut=0:bframes=0",
         }
+        if rate_control == "cbr":
+            # x264's VBV units are kbit/s and kbit. HRD CBR includes filler NALs even for
+            # simple color bars; the AVCC conversion preserves these bytes on the wire.
+            rate_kbps = max(1, bitrate // 1000)
+            context.bit_rate = rate_kbps * 1000
+            context.options["x264-params"] += f":vbv-maxrate={rate_kbps}:vbv-bufsize={rate_kbps}:nal-hrd=cbr:filler=1"
         context.flags |= Flags.global_header
         context.open()
         sps, pps = extract_parameter_sets(bytes(context.extradata or b""))
@@ -424,7 +437,9 @@ class Producer:
         self._loop = loop
         self._queues = queues
         self._stop = threading.Event()
-        self.video = VideoEncoder(config.width, config.height, config.fps, config.bitrate, config.gop_seconds)
+        self.video = VideoEncoder(
+            config.width, config.height, config.fps, config.bitrate, config.gop_seconds, config.rate_control
+        )
         self.audio: AudioEncoder | None = None
         self.error: BaseException | None = None
         self._thread = threading.Thread(target=self._run, name="media-producer", daemon=True)
@@ -593,6 +608,12 @@ async def write_ended_track(track: RelayTrackWriter, error: RelayError, *, bound
 
 @dataclass(slots=True)
 class Stats:
+    started: float | None = None
+    finished: float | None = None
+    encoded_video_bytes: int = 0
+    encoded_audio_bytes: int = 0
+    published_video_bytes: int = 0
+    published_audio_bytes: int = 0
     video_groups: int = 0
     video_objects: int = 0
     audio_objects: int = 0
@@ -680,15 +701,16 @@ def run_failure(
 
     Cancelling the lifetime for a retired track makes the SDK re-raise that very object out of
     every write in flight, so the media task usually fails with it too. Reporting that as a separate
-    publishing failure would bury the track that ended, so the cancellation wins -- matched by
-    identity, which leaves a ``--duration`` deadline reporting exactly what it reports today.
+    publishing failure would bury the track that ended. Likewise, a normal deadline's own
+    cancellation is a clean stop. Match by identity so an unrelated failure still fails the run.
     """
     if producer_error is not None:
         return _caused_by(RuntimeError(f"media pipeline failed: {describe(producer_error)}"), producer_error)
 
     # The media loop ending on its own is either the source running out (a file without --loop) or
     # a failure; a failure must not read as a clean finish.
-    if media_failure is not None and media_failure is not track_end_reason:
+    normal_stop = isinstance(cancel_reason, Cancelled) and media_failure is cancel_reason
+    if media_failure is not None and media_failure is not track_end_reason and not normal_stop:
         return _caused_by(RuntimeError(f"publishing failed: {describe(media_failure)}"), media_failure)
 
     # A deadline cancels with the default reason; anything else (a connection loss, a retired track)
@@ -816,6 +838,7 @@ async def publish_media(
                         audio_group.abort()
                         raise
                     stats.audio_objects += 1
+                    stats.published_audio_bytes += len(sample.payload)
                 except RelayError as error:
                     if not await write_ended_track(audio, error, bound=bound):
                         # Demand came and went before the write started: the track is still open, so
@@ -885,6 +908,7 @@ async def publish_media(
                     properties=loc_properties(sample.timestamp_us, video_config=encoder.avcc if sample.key else None),
                 )
                 stats.video_objects += 1
+                stats.published_video_bytes += len(sample.payload)
             except RelayError as error:
                 # This sample went nowhere either, so it belongs in a counter like every other one.
                 group_id, group = group.group_id, None
@@ -944,7 +968,16 @@ async def publish_live_media(
     finally:
         for task in [*writers, reporter]:
             task.cancel()
-        await asyncio.gather(*writers, reporter, return_exceptions=True)
+        try:
+            await asyncio.gather(*writers, reporter, return_exceptions=True)
+        finally:
+            # gather raises the first failure. A normal deadline may win that race while
+            # another track has failed independently. Inspect the tasks even if run() also
+            # cancels this parent during its drain, so that failure cannot disappear.
+            for task in writers:
+                error = task.exception() if task.done() and not task.cancelled() else None
+                if error is not None and error is not lifetime.reason:
+                    raise error
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1114,21 +1147,13 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     if config.verify:
         verifier, verified = await verify(config, lifetime, log)
 
+    stats.started = time.monotonic()
     producer.start()
     deadline = loop.call_later(config.duration, lambda: lifetime.cancel()) if config.duration else None
     media_task = tasks[1]
 
     try:
         await asyncio.wait([stopped, media_task], return_when=asyncio.FIRST_COMPLETED)
-        failure = run_failure(
-            producer_error=producer.error,
-            media_failure=media_task.exception() if media_task.done() and not media_task.cancelled() else None,
-            cancel_reason=lifetime.reason,
-            track_end_reason=track_end_reason,
-        )
-
-        if failure is not None:
-            raise failure
     finally:
         closing = True
 
@@ -1160,11 +1185,32 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
             audio.close()
 
         await publisher.close()
+        stats.finished = time.monotonic()
+
+    # Inspect after joining/draining: failures that arrive in the same turn as a deadline
+    # must not depend on which callback woke asyncio.wait first.
+    failure = run_failure(
+        producer_error=producer.error,
+        media_failure=media_task.exception() if not media_task.cancelled() else None,
+        cancel_reason=lifetime.reason,
+        track_end_reason=track_end_reason,
+    )
+    if failure is not None:
+        raise failure
 
 
 def summarize(stats: Stats) -> dict[str, Any]:
     """The `finished` line: every sample the run produced is in exactly one of these counters."""
+    elapsed = (stats.finished or time.monotonic()) - stats.started if stats.started is not None else 0
+
+    def kbps(size: int) -> float:
+        return round(size * 8 / elapsed / 1000, 1) if elapsed > 0 else 0.0
+
     return {
+        "encodedVideoKbps": kbps(stats.encoded_video_bytes),
+        "encodedAudioKbps": kbps(stats.encoded_audio_bytes),
+        "publishedVideoKbps": kbps(stats.published_video_bytes),
+        "publishedAudioKbps": kbps(stats.published_audio_bytes),
         "videoGroups": stats.video_groups,
         "videoObjects": stats.video_objects,
         "audioObjects": stats.audio_objects,
@@ -1252,7 +1298,18 @@ def parse_args(argv: list[str]) -> Config:
     parser.add_argument("--width", type=int, default=640)
     parser.add_argument("--height", type=int, default=360)
     parser.add_argument("--fps", type=int, default=30, help="Frame rate of the test pattern (default 30)")
-    parser.add_argument("--bitrate", type=int, default=1_500_000, help="Video bitrate in bits/s (default 1500000)")
+    parser.add_argument(
+        "--bitrate",
+        type=int,
+        default=1_500_000,
+        help="Video bitrate target in bits/s (default 1500000; ABR can undershoot)",
+    )
+    parser.add_argument(
+        "--rate-control",
+        choices=["abr", "cbr"],
+        default="abr",
+        help="abr: content-dependent target (default); cbr: pad toward --bitrate for bandwidth tests",
+    )
     parser.add_argument("--gop", type=float, default=2.0, help="Keyframe interval in seconds (default 2)")
     parser.add_argument(
         "--audio",
@@ -1312,6 +1369,7 @@ def parse_args(argv: list[str]) -> Config:
         height=args.height,
         fps=args.fps,
         bitrate=args.bitrate,
+        rate_control=args.rate_control,
         gop_seconds=args.gop,
         audio=args.audio,
         duration=args.duration,
@@ -1333,7 +1391,13 @@ def main(argv: list[str] | None = None) -> int:
 
     log(
         "starting",
-        {"namespace": "/".join(config.namespace), "input": config.input or "test pattern", "audio": config.audio},
+        {
+            "namespace": "/".join(config.namespace),
+            "input": config.input or "test pattern",
+            "audio": config.audio,
+            "bitrate": config.bitrate,
+            "rateControl": config.rate_control,
+        },
     )
 
     # Stats live out here so the counters are reported even when the run ends in a failure: a track

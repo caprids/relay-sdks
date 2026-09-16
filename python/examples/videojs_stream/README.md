@@ -33,12 +33,39 @@ Options:
 | --- | --- |
 | `--input FILE` | Transcode a media file (video scaled to `--width`/`--height`; its audio as Opus with `--audio auto`) |
 | `--loop` | Loop the input file |
-| `--width`, `--height`, `--fps`, `--bitrate`, `--gop` | Test-pattern size and encoder settings (defaults 640x360, 30 fps, 1.5 Mbit/s, 2 s GOP) |
+| `--width`, `--height`, `--fps`, `--bitrate`, `--gop` | Test-pattern size and encoder settings (defaults 640x360, 30 fps, 1.5 Mbit/s target, 2 s GOP) |
+| `--rate-control abr\|cbr` | `abr` (default): content-dependent bitrate target; `cbr`: add filler to approach the requested video bitrate for bandwidth tests |
 | `--audio auto\|tone\|off` | `auto`: the file's audio, none for the pattern; `tone`: a 440 Hz sine; `off`: video only |
 | `--duration SECONDS` | Stop after a while (default: until Ctrl-C) |
 | `--on-track-end stop\|continue` | What to do if the relay retires a track mid-run: `stop` (default) fails the run; `continue` keeps publishing the surviving tracks |
 | `--verify` | Also subscribe in-process and report the catalog, groups, keyframes, and timestamps received |
 | `--show-token` | Print the player URL with the token filled in |
+
+## Bitrate and bandwidth tests
+
+The default `--rate-control abr` asks x264 for an average bitrate. Simple content can use far less:
+color bars at the 1.5 Mbit/s target may encode to roughly 130 kbit/s. The target is not a guaranteed
+rate or a strict peak limit. Use `--rate-control cbr` for bandwidth/congestion tests:
+
+```sh
+RELAY_TOKEN=... mise run python:example:videojs -- --namespace mattypoo/relay-sdk-example/tv \
+  --rate-control cbr --bitrate 1500000 --audio off --duration 30
+```
+
+CBR enables a one-second VBV buffer and H.264 HRD/filler NALs. Encoded video approaches the target
+over several seconds; startup and individual frames can vary. Audio and transport overhead are
+additional. A viewer must subscribe before the example publishes media, and backpressure or skipped
+frames can still reduce the delivered rate. `--input` keeps the file's frame timing, so a source with
+irregular timing can differ from the encoder's configured `--fps` rate.
+
+`media progress` and `finished` print `encodedVideoKbps` / `encodedAudioKbps` and
+`publishedVideoKbps` / `publishedAudioKbps`. These are cumulative payload kilobits per wall-clock
+second since the producer started (including startup, skipped frames, and shutdown). Published rates
+count completed writes; they exclude protocol overhead and do not prove receiver delivery. Compare
+encoded and published rates to distinguish a compressible source from absent demand or a slow link.
+
+`--duration` ends successfully after a normal deadline, including cancellation of a write in flight.
+An unrelated encoder or publishing error still fails the run even if it coincides with the deadline.
 
 ## What goes on the wire
 

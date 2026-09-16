@@ -577,20 +577,29 @@ class TestRunFailure:
     def test_a_clean_finish_reports_nothing(self) -> None:
         assert run_failure(producer_error=None, media_failure=None, cancel_reason=None, track_end_reason=None) is None
 
-    def test_a_deadline_is_reported_exactly_as_it_is_on_main(self) -> None:
-        # #27: a `--duration` run whose media task catches the deadline still reports it as a
-        # publishing failure. That is a separate issue; this branch must not change it.
+    @pytest.mark.parametrize("noticed", [True, False])
+    def test_a_deadline_is_a_clean_finish(self, noticed: bool) -> None:
         deadline = Cancelled("cancelled")
-        wrapped = run_failure(
-            producer_error=None, media_failure=deadline, cancel_reason=deadline, track_end_reason=None
+        assert (
+            run_failure(
+                producer_error=None,
+                media_failure=deadline if noticed else None,
+                cancel_reason=deadline,
+                track_end_reason=None,
+            )
+            is None
         )
 
-        assert isinstance(wrapped, RuntimeError)
-        assert str(wrapped) == "publishing failed: Cancelled: cancelled"
-        # And a deadline the media task did not notice is still a clean finish.
-        assert (
-            run_failure(producer_error=None, media_failure=None, cancel_reason=deadline, track_end_reason=None) is None
+    @pytest.mark.parametrize("other", [RuntimeError("write failed"), Cancelled("cancelled")])
+    def test_a_deadline_does_not_hide_an_unrelated_failure(self, other: BaseException) -> None:
+        failure = run_failure(
+            producer_error=None,
+            media_failure=other,
+            cancel_reason=Cancelled("cancelled"),
+            track_end_reason=None,
         )
+        assert isinstance(failure, RuntimeError)
+        assert failure.__cause__ is other
 
     def test_the_media_pipeline_wins_over_everything_else(self) -> None:
         broken = RuntimeError("no frames")
