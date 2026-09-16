@@ -843,6 +843,26 @@ class TestCreateMoqtPublishSession:
         assert len(closed) == 1
         assert closed[0].error is (error if with_error else None)
 
+    async def test_preserves_local_error_when_peer_closes_during_drain(self) -> None:
+        pair = create_transport_pair()
+
+        async def setup() -> None:
+            control = await pair.server.create_unidirectional_stream()
+            await control.write(encode_setup([]))
+
+        setup_task = asyncio.create_task(setup())
+        closed: list[Any] = []
+        session = create_moqt_publish_session(
+            pair.client, MoqtPublishSessionConfig(callbacks=MoqtPublishSessionCallbacks(on_closed=closed.append))
+        )
+        await session.ready
+        await setup_task
+        error = RuntimeError("migration requested")
+        session.destroy(error)
+        pair.server.close()
+        await wait_for(lambda: len(closed) == 1)
+        assert closed[0].error is error
+
     async def test_close_leaves_no_background_work_running(self) -> None:
         pair = create_transport_pair()
 

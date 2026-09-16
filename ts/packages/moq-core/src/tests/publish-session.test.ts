@@ -997,6 +997,21 @@ describe('createMoqtPublishSession', () => {
     expect(onClosed).toHaveBeenCalledExactlyOnceWith(withError ? { error } : {});
   });
 
+  it('preserves a local destruction error when the peer closes during the drain', async () => {
+    const pair = createTransportPair();
+    void (async () => {
+      const control = await pair.server.createUnidirectionalStream();
+      await control.getWriter().write(encodeSetup([]));
+    })();
+    const onClosed = vi.fn();
+    const session = createMoqtPublishSession(pair.client, { callbacks: { onClosed } });
+    await session.ready;
+    const error = new Error('migration requested');
+    session.destroy(error);
+    pair.server.close();
+    await vi.waitFor(() => expect(onClosed).toHaveBeenCalledExactlyOnceWith({ error }));
+  });
+
   it('close() leaves no timer running', async () => {
     vi.useFakeTimers();
 

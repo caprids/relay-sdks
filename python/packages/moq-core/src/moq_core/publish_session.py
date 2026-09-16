@@ -283,6 +283,7 @@ class MoqtPublishSession:
         self._received_goaway = False
         """Any GOAWAY (control or request stream): the peer is migrating."""
         self._closing = False
+        self._close_error: BaseException | None = None
         self._destroyed = False
 
         spawn(self._start())
@@ -345,6 +346,8 @@ class MoqtPublishSession:
             return
 
         self._destroyed = True
+        if error is None:
+            error = self._close_error
 
         if not self._received_server_setup and not self.ready.done():
             self.ready.set_exception(
@@ -382,6 +385,7 @@ class MoqtPublishSession:
             return
 
         self._closing = True
+        self._close_error = error
         spawn(self._drain_and_close(close_code, reason, error))
 
     async def _drain_and_close(self, close_code: int, reason: str, error: BaseException | None = None) -> None:

@@ -236,6 +236,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   /** Any GOAWAY (control or request stream) — the peer is migrating. */
   #receivedGoaway = false;
   #closing = false;
+  #closeError: unknown;
   #destroyed = false;
 
   constructor(transport: MoqtTransport, config: MoqtPublishSessionConfig = {}) {
@@ -309,10 +310,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#handleClosed(error);
   }
 
-  #handleClosed(error: unknown, { expected = false }: { expected?: boolean } = {}): void {
+  #handleClosed(receivedError: unknown, { expected = false }: { expected?: boolean } = {}): void {
     if (this.#destroyed) return;
 
     this.#destroyed = true;
+    const error = receivedError ?? this.#closeError;
 
     if (!this.#receivedServerSetup) {
       this.#rejectReady(error ?? new MoqtProtocolError('session closed before server SETUP'));
@@ -343,6 +345,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     if (this.#destroyed || this.#closing) return;
 
     this.#closing = true;
+    this.#closeError = error;
     void this.#drainAndClose(closeCode, reason, error);
   }
 
