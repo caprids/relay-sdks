@@ -12,6 +12,7 @@ import {
   REQUEST_ERROR_CODE,
   type TrackNamespace,
 } from '../protocol/control-messages.js';
+import { SESSION_ERROR } from '../protocol/errors.js';
 import type { MoqtObject } from '../protocol/object-stream.js';
 import {
   createMoqtPublishSession,
@@ -995,6 +996,64 @@ describe('createMoqtPublishSession', () => {
     expect(controlFrames.map((m) => m.kind)).toEqual(['setup']);
     await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
     expect(onClosed).toHaveBeenCalledExactlyOnceWith(withError ? { error } : {});
+  });
+
+  it.each([false, true])(
+    'finishes the publisher drain after GOAWAY and control EOF (local error: %s)',
+    async (withError) => {
+      const pair = createTransportPair();
+      const control = await pair.server.createUnidirectionalStream();
+      const writer = control.getWriter();
+      const error = new Error('migration requested');
+      const onClosed = vi.fn();
+      const session = createMoqtPublishSession(pair.client, {
+        callbacks: {
+          onClosed,
+          onGoaway: () => (withError ? session.destroy(error) : session.close()),
+        },
+      });
+      await writer.write(encodeSetup([]));
+      await session.ready;
+      session.announce(NAMESPACE);
+      session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+      const solicitation = await solicitNamespace(pair.server, []);
+      const subscribe = await rawSubscribe(pair.server, 'video', 51);
+      await vi.waitFor(() => {
+        expect(solicitation.received).toHaveLength(2);
+        expect(subscribe.received).toHaveLength(1);
+      });
+
+      await writer.write(encodeGoaway(1500));
+      await writer.close();
+
+      await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
+      await vi.waitFor(() => {
+        expect(onClosed).toHaveBeenCalledExactlyOnceWith(withError ? { error } : {});
+        expect(solicitation.received.map((message) => message.kind)).toEqual([
+          'request-ok',
+          'namespace',
+          'namespace-done',
+        ]);
+        expect(subscribe.ended()).toBe(true);
+      });
+      expect(subscribe.failure()).toBeUndefined();
+    }
+  );
+
+  it('still treats control EOF as fatal before a local close starts', async () => {
+    const pair = createTransportPair();
+    const control = await pair.server.createUnidirectionalStream();
+    const writer = control.getWriter();
+    const onClosed = vi.fn();
+    const session = createMoqtPublishSession(pair.client, { callbacks: { onClosed } });
+    await writer.write(encodeSetup([]));
+    await session.ready;
+    await writer.close();
+    const info = await pair.client.closed;
+    expect(info).toEqual({ closeCode: SESSION_ERROR.PROTOCOL_VIOLATION, reason: 'peer closed its control stream' });
+    expect(onClosed).toHaveBeenCalledExactlyOnceWith({
+      error: expect.objectContaining({ message: 'peer closed its control stream' }),
+    });
   });
 
   it('preserves a local destruction error when the peer closes during the drain', async () => {

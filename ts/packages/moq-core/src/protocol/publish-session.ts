@@ -297,7 +297,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   #fatal(error: unknown): void {
-    if (this.#destroyed) return;
+    // Once an orderly close starts, late control-stream failures must not
+    // replace its reason/code or interrupt the bounded FIN/retraction drain.
+    if (this.#destroyed || this.#closing) return;
 
     const closeCode = isMoqtProtocolError(error) ? error.code : SESSION_ERROR.INTERNAL_ERROR;
 

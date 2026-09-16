@@ -27,6 +27,7 @@ from moq_core.control_messages import (
     encode_setup,
     encode_subscribe,
 )
+from moq_core.errors import SESSION_ERROR
 from moq_core.object_stream import MoqtObject
 from moq_core.publish_session import (
     MoqtPublishSession,
@@ -842,6 +843,59 @@ class TestCreateMoqtPublishSession:
         assert pair.client._shared.close_info.reason == ""
         assert len(closed) == 1
         assert closed[0].error is (error if with_error else None)
+
+    @pytest.mark.parametrize("with_error", [False, True])
+    async def test_finishes_publisher_drain_after_goaway_and_control_eof(self, with_error: bool) -> None:
+        pair = create_transport_pair()
+        control = await pair.server.create_unidirectional_stream()
+        error = RuntimeError("migration requested")
+        closed: list[Any] = []
+        session = create_moqt_publish_session(
+            pair.client,
+            MoqtPublishSessionConfig(
+                callbacks=MoqtPublishSessionCallbacks(
+                    on_closed=closed.append,
+                    on_goaway=lambda _: session.destroy(error) if with_error else session.close(),
+                )
+            ),
+        )
+        await control.write(encode_setup([]))
+        await session.ready
+        session.announce(NAMESPACE)
+        register(session, "video")
+        solicitation = await solicit_namespace(pair.server, [])
+        subscribe = await raw_subscribe(pair.server, "video", 51)
+        await wait_for(lambda: len(solicitation.received) == 2 and len(subscribe.received) == 1)
+
+        await control.write(encode_goaway(1500))
+        await control.close()
+
+        await pair.client.wait_closed()
+        assert pair.client._shared.close_info is not None
+        assert pair.client._shared.close_info.close_code == 0
+        assert pair.client._shared.close_info.reason == ""
+        await wait_for(
+            lambda: solicitation.kinds() == ["request-ok", "namespace", "namespace-done"] and subscribe.ended()
+        )
+        assert subscribe.failure() is None
+        assert len(closed) == 1
+        assert closed[0].error is (error if with_error else None)
+
+    async def test_control_eof_is_still_fatal_before_local_close(self) -> None:
+        pair = create_transport_pair()
+        control = await pair.server.create_unidirectional_stream()
+        closed: list[Any] = []
+        session = create_moqt_publish_session(
+            pair.client, MoqtPublishSessionConfig(callbacks=MoqtPublishSessionCallbacks(on_closed=closed.append))
+        )
+        await control.write(encode_setup([]))
+        await session.ready
+        await control.close()
+        await pair.client.wait_closed()
+        assert pair.client._shared.close_info is not None
+        assert pair.client._shared.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+        assert len(closed) == 1
+        assert str(closed[0].error) == "peer closed its control stream"
 
     async def test_preserves_local_error_when_peer_closes_during_drain(self) -> None:
         pair = create_transport_pair()

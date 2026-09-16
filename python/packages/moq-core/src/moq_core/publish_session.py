@@ -325,7 +325,9 @@ class MoqtPublishSession:
             self._handle_closed(None)
 
     def _fatal(self, error: BaseException) -> None:
-        if self._destroyed:
+        # Once an orderly close starts, late control-stream failures must not replace its
+        # reason/code or interrupt the bounded FIN/retraction drain.
+        if self._destroyed or self._closing:
             return
 
         close_code = error.code if isinstance(error, MoqtProtocolError) else SESSION_ERROR.INTERNAL_ERROR
