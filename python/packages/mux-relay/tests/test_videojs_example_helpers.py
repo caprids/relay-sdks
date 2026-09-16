@@ -172,13 +172,11 @@ class TestFailureEndsTrack:
 
         assert failure_ends_track(timeout, operation="write", bound=False) is False
 
-    def test_a_timeout_on_a_bound_write_is_terminal(self) -> None:
-        # One deadline covers the wait for demand and the transport write (#19), and the SDK retires
-        # the track when it fires on a bound one. Until #31 exposes `closed`, the only way to see
-        # that is the writer state `track_has_ended` reads, not the exception class.
+    def test_a_timeout_on_a_bound_write_is_retryable(self) -> None:
+        # A bound write resets only its stream, just like a multi-object group.
         timeout = RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
 
-        assert failure_ends_track(timeout, operation="write", bound=True) is True
+        assert failure_ends_track(timeout, operation="write", bound=True) is False
 
     def test_a_closed_track_is_always_terminal(self) -> None:
         closed = RelayClosedError("Published track is closed")
@@ -186,12 +184,11 @@ class TestFailureEndsTrack:
         assert failure_ends_track(closed, operation="write", bound=False) is True
         assert failure_ends_track(closed, operation="group", bound=True) is True
 
-    def test_a_bare_relay_error_on_a_bound_write_is_terminal(self) -> None:
-        # What a relay re-bind during a bound write raises today (#31); the dedicated subclass of
-        # RelayClosedError that lands with it is covered by the isinstance check above.
+    def test_a_bare_relay_error_on_a_bound_write_is_retryable(self) -> None:
+        # A changed relay subscription cancels the operation, leaving the track open.
         rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
 
-        assert failure_ends_track(rebind, operation="write", bound=True) is True
+        assert failure_ends_track(rebind, operation="write", bound=True) is False
 
     def test_a_bare_relay_error_on_an_unbound_write_is_retryable(self) -> None:
         vanished = RelayError("Relay subscription ended before the write started")
@@ -227,12 +224,10 @@ class FakeGroup:
 
 
 class FakeTrack:
-    """A track writer whose nth operation fails the way a relay re-bind does, taking `bound` with it.
+    """A track writer with injected operation failures and optional terminal closure.
 
-    Moving a relay subscription during a bound write is not reproducible on demand (it happened in
-    one of three long campaign runs), so the terminal path is injected here rather than waited for.
-    `bindings()` mirrors RelayTrackWriter: the current demand state first, and nothing at all once
-    the track is retired.
+    `bindings()` mirrors RelayTrackWriter: current demand first, and no values after closure.
+    A relay re-bind is now transient; terminal injections model an explicitly closed track.
     """
 
     def __init__(
@@ -311,7 +306,7 @@ class TestWriteEndedTrack:
 
         assert await write_ended_track(cast(Any, retired), rebind, bound=True) is True
         assert await write_ended_track(cast(Any, FakeTrack()), rebind, bound=True) is False
-        assert await write_ended_track(cast(Any, retired), rebind, bound=False) is False
+        assert await write_ended_track(cast(Any, retired), rebind, bound=False) is True
 
     async def test_a_closed_track_needs_no_confirmation(self) -> None:
         # A connection that went away leaves the writer un-retired while every write still fails.
@@ -651,6 +646,82 @@ class TestTrackEndHandler:
 
 
 class TestServeCatalog:
+    async def test_retries_a_transient_bound_failure_without_resubscription(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("videojs_stream.stream.CATALOG_RETRY_DELAY", 0.01)
+        attempts: list[float] = []
+        delivered: list[bytes] = []
+
+        class FakeCatalog:
+            bound = True
+            closed = False
+
+            async def bindings(self) -> AsyncIterator[bool]:
+                yield True  # No second subscription event is needed for recovery.
+
+            async def write(self, payload: bytes) -> None:
+                attempts.append(asyncio.get_running_loop().time())
+                if len(attempts) == 1:
+                    raise RelayTimeoutError("bound write timed out")
+                delivered.append(payload)
+
+        stats = Stats()
+        await asyncio.wait_for(
+            serve_catalog(
+                cast(Any, FakeCatalog()),
+                b"current catalog",
+                stats,
+                lambda event, fields: None,
+                lambda track, error: pytest.fail("transient write ended catalog"),
+            ),
+            1,
+        )
+        assert delivered == [b"current catalog"]
+        assert len(attempts) == 2
+        assert attempts[1] - attempts[0] >= 0.01
+        assert (stats.catalog_sends, stats.catalog_failures) == (1, 1)
+
+    @pytest.mark.parametrize("stop", ["cancel", "no_demand"])
+    async def test_retry_pause_stops_on_cancellation_or_lost_demand(
+        self, monkeypatch: pytest.MonkeyPatch, stop: str
+    ) -> None:
+        monkeypatch.setattr("videojs_stream.stream.CATALOG_RETRY_DELAY", 0.05)
+        failed = asyncio.Event()
+
+        class FakeCatalog:
+            bound = True
+            closed = False
+            attempts = 0
+
+            async def bindings(self) -> AsyncIterator[bool]:
+                yield True
+
+            async def write(self, payload: bytes) -> None:
+                self.attempts += 1
+                failed.set()
+                raise RelayTimeoutError("bound write timed out")
+
+        catalog = FakeCatalog()
+        serving = asyncio.create_task(
+            serve_catalog(
+                cast(Any, catalog),
+                b"{}",
+                Stats(),
+                lambda event, fields: None,
+                lambda track, error: pytest.fail("transient write ended catalog"),
+            )
+        )
+        await failed.wait()
+        if stop == "cancel":
+            serving.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await serving
+        else:
+            catalog.bound = False
+            await asyncio.wait_for(serving, 1)
+        assert catalog.attempts == 1
+
     async def test_a_retired_catalog_track_stops_the_resend_loop(self) -> None:
         class FakeCatalog:
             """A catalog writer the relay subscribes to twice, whose write fails the terminal way."""

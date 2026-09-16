@@ -50,7 +50,6 @@ from .errors import (
     RelayError,
     RelayNamespaceError,
     RelayTimeoutError,
-    RelayTrackEndedError,
     RelayWritePendingError,
 )
 
@@ -249,10 +248,9 @@ class RelayTrackWriter:
 
     @property
     def closed(self) -> bool:
-        """True once the track has ended: the application closed it, or a bound write failed.
+        """True once the application closed the track or the publisher connection ended.
 
-        A timeout waiting for relay demand leaves this ``False``, which is how a caller tells the
-        retryable failure apart from the terminal one even where both raise ``RelayTimeoutError``.
+        Individual write failures reset their stream and leave the track open.
         """
         return self._ended
 
@@ -289,13 +287,7 @@ class RelayTrackWriter:
         active = self._active
 
         if active is not None and active.alias is not None and active.alias != next_alias:
-            # A bound write is about to retire the track, so it raises a terminal error; a group is
-            # only reset, and its failure stays retryable.
-            error = (
-                RelayTrackEndedError("Relay subscription changed during a write; the object may be incomplete")
-                if active.kind == "write"
-                else RelayError("Relay subscription changed during the group; it may be incomplete")
-            )
+            error = RelayError("Relay subscription changed during a write or group; objects may be incomplete")
             self._cancel_operation(active, error)
 
         changed = self._alias != next_alias
@@ -317,12 +309,8 @@ class RelayTrackWriter:
         if operation.writer is not None:
             operation.writer.abort(error)
 
-        # A failed bound write may leave an incomplete group. Retire this track so retries cannot
-        # build up abandoned streams behind a stalled transport. A group is different: its stream
-        # was reset explicitly, the peer knows the group is incomplete, and the next group starts at
-        # the caller's next random-access point, so the track stays open.
-        if operation.kind == "write" and operation.alias is not None:
-            self._end_track()
+        # Reset only this group's stream. The next explicit write uses a fresh group ID;
+        # bytes already delivered are not withdrawn and the SDK never retries them.
 
         # Release an outstanding wait for relay demand as well as the public future.
         operation.wake()
@@ -330,14 +318,14 @@ class RelayTrackWriter:
         if not operation.interrupted.done():
             operation.interrupted.set_exception(error)
 
-        if operation.kind == "group" and self._active is operation:
+        if self._active is operation:
             self._active = None
 
     def _end_track(self) -> None:
         """Retire the track once: refuse later writes, end the registration, and tell the watchers.
 
         Every path that ends a track goes through here, so a ``bindings()`` consumer always learns
-        the track is over whether the application closed it or a bound write retired it.
+        the track is over whether the application closed it or the publisher connection ended.
         """
         if self._ended:
             return
@@ -356,7 +344,6 @@ class RelayTrackWriter:
         if self._active is not None:
             self._cancel_operation(self._active, error or RelayClosedError("Published track is closed"))
 
-        # Cancelling a bound write retires the track itself; ending it again is a no-op.
         self._end_track()
 
     def _assert_writable(self) -> None:
@@ -396,8 +383,9 @@ class RelayTrackWriter:
 
         Waits for relay demand. Returns when the transport accepts the complete group, not when a
         downstream viewer acknowledges it. Only one write or group may be pending; await it before
-        writing again. Bytes are copied. A failed bound write ends this track, which ``closed``
-        reports; a timeout waiting for demand permits another write.
+        writing again. Bytes are copied. Failure resets this group and leaves the track usable
+        while the connection is open. Data may already have reached the relay; choose the next
+        object explicitly (no automatic retry).
         """
         self._assert_writable()
 
@@ -416,10 +404,9 @@ class RelayTrackWriter:
             sending = spawn(self._send(operation, data, object_properties))
             await asyncio.wait({sending, operation.interrupted}, return_when=asyncio.FIRST_COMPLETED)
 
-            if sending.done():
-                sending.result()
-            else:
-                operation.interrupted.result()
+            # Cancellation wins even when the transport finishes in the same event-loop turn.
+            self._check(operation)
+            sending.result()
         except BaseException as error:
             self._cancel_operation(operation, error)
             raise

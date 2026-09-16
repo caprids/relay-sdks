@@ -8,6 +8,7 @@ import pytest
 from core_helpers.transport_pair import create_transport_pair
 from core_helpers.waiting import wait_for
 from relay_helpers.relay_hub import ObservedNamespaceDone, ObservedSubscribeFin, RelayHub, create_relay_hub
+from videojs_stream.stream import Stats, serve_catalog
 
 from moq_core import KeyValuePair, MoqtObject, SubscriptionHandlers
 from moq_core.transport import SendStream
@@ -324,7 +325,7 @@ class TestConnectRelayPublisher:
         assert on_timed[0].track_properties == track_properties
         assert on_raw[0].track_properties == []
 
-    async def test_reports_a_transport_write_failure_and_ends_that_track_without_silently_retrying(
+    async def test_reports_a_stream_open_failure_and_allows_a_fresh_write_without_silently_retrying(
         self, cleanup: Cleanup
     ) -> None:
         hub = create_relay_hub()
@@ -360,10 +361,58 @@ class TestConnectRelayPublisher:
 
         assert raised.value is failure
 
-        with pytest.raises(RelayClosedError, match="closed"):
-            await events.write(bytes([2]))
-
+        assert not events.closed
         assert hub.object_count("events") == 0
+        await events.write(bytes([2]))
+        await wait_for(lambda: hub.object_count("events") == 1)
+
+    async def test_catalog_retries_after_a_bound_timeout_without_another_subscription(
+        self, cleanup: Cleanup, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("videojs_stream.stream.CATALOG_RETRY_DELAY", 0.01)
+        hub = create_relay_hub()
+        cleanup.append(hub.destroy)
+
+        def connect_publisher(url: str, protocols: Sequence[str]) -> ConnectingTransport:
+            created = hub.connect_publisher(url, protocols)
+            transport: Any = created.transport
+            open_stream = transport.create_unidirectional_stream
+            streams = 0
+
+            async def fail_once() -> SendStream:
+                nonlocal streams
+                streams += 1
+                if streams == 2:
+                    raise RelayTimeoutError("bound write timed out")
+                return await open_stream()
+
+            transport.create_unidirectional_stream = fail_once
+            return created
+
+        publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
+        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        cleanup.extend([subscriber.close, publisher.close])
+        catalog = publisher.publish("catalog")
+        received = Received(subscriber, "catalog")
+        stats = Stats()
+        serving = asyncio.create_task(
+            serve_catalog(
+                catalog,
+                b"latest catalog",
+                stats,
+                lambda event, fields: None,
+                lambda track, error: pytest.fail("transient write ended catalog"),
+            )
+        )
+        try:
+            await wait_for(lambda: len(received.objects) == 1)
+            assert hub.subscribes == ["catalog"]
+            assert (received.objects[0].group_id, received.objects[0].payload) == (1, b"latest catalog")
+            assert (stats.catalog_sends, stats.catalog_failures) == (1, 1)
+            assert not catalog.closed
+        finally:
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
 
     async def test_times_out_a_stalled_stream_open_and_aborts_a_late_stream_without_sending_payload_bytes(
         self, cleanup: Cleanup
@@ -381,7 +430,7 @@ class TestConnectRelayPublisher:
             async def stalling_open() -> SendStream:
                 streams[0] += 1
 
-                if streams[0] == 1:
+                if streams[0] != 2:
                     return await open_stream()
 
                 return await late_stream
@@ -399,8 +448,9 @@ class TestConnectRelayPublisher:
         with pytest.raises(RelayTimeoutError, match="timed out"):
             await events.write(bytes([1]))
 
-        with pytest.raises(RelayClosedError, match="closed"):
-            await events.write(bytes([2]))
+        assert not events.closed
+        await events.write(bytes([2]))
+        await wait_for(lambda: hub.object_count("events") == 1)
 
         class RecordingStream:
             def __init__(self) -> None:

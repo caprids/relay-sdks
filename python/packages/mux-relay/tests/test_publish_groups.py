@@ -17,7 +17,6 @@ from mux_relay import (
     RelayError,
     RelayPublisher,
     RelayTimeoutError,
-    RelayTrackEndedError,
     RelayTrackWriter,
     RelayWritePendingError,
     connect_relay,
@@ -328,7 +327,7 @@ class TestBindings:
         await wait_for(lambda: seen == [False, True, True])
         watcher.cancel()
 
-    async def test_a_relay_re_bind_during_a_bound_write_ends_the_track_and_stops_its_watchers(
+    async def test_a_relay_re_bind_during_a_bound_write_resets_it_and_preserves_its_watchers(
         self, cleanup: Cleanup
     ) -> None:
         streams, publisher, subscriber = await connect_held_hub(cleanup)
@@ -347,43 +346,43 @@ class TestBindings:
         assert alias is not None
         publisher._on_track_binding(TrackBinding(track_name="audio", track_alias=alias + 1))
 
-        with pytest.raises(RelayTrackEndedError, match="subscription changed") as raised:
+        with pytest.raises(RelayError, match="subscription changed") as raised:
             await writing
 
-        # The track is retired, and the failure is terminal rather than the retryable timeout.
-        assert isinstance(raised.value, RelayClosedError)
-        assert not isinstance(raised.value, RelayTimeoutError)
-        assert audio.closed
-        assert not audio.bound
+        assert not isinstance(raised.value, RelayClosedError)
+        assert not audio.closed
+        assert audio.bound
+        await wait_for(lambda: seen == [False, True, True])
+        assert not watcher.done()
+        # Restore the alias understood by the hub, then send fresh data on the same track.
+        audio._bind(alias)
+        streams.holding = False
+        await audio.write(b"y")
+        audio.close()
+        await watcher
 
-        # Every watcher hears the end, including one that arrives after it.
-        await wait_for(lambda: watcher.done())
-        assert seen == [False, True]
-        assert [bound async for bound in audio.bindings()] == []
-
-        with pytest.raises(RelayClosedError, match="closed"):
-            await audio.write(b"y")
-
-    async def test_a_bound_write_that_times_out_reports_a_closed_track_and_stops_its_watchers(
-        self, cleanup: Cleanup
-    ) -> None:
-        # A bound write that times out on the transport keeps raising RelayTimeoutError, as the spec
-        # says, so `closed` is what tells this terminal case from the retryable wait for demand.
+    async def test_a_bound_write_timeout_leaves_the_track_and_its_watchers_open(self, cleanup: Cleanup) -> None:
         streams, publisher, subscriber = await connect_held_hub(cleanup)
         audio = publisher.publish("audio", write_timeout=0.05)
         seen: list[bool] = []
         watcher = watch_bindings(audio, seen)
-        receive(subscriber, "audio")
+        objects = receive(subscriber, "audio")
         await wait_for(lambda: audio.bound)
         streams.holding = True
 
         with pytest.raises(RelayTimeoutError, match="timed out"):
             await audio.write(b"x")
 
-        assert audio.closed
-        assert not audio.bound
-        await wait_for(lambda: watcher.done())
+        assert not audio.closed
+        assert audio.bound
+        assert not watcher.done()
         assert seen == [False, True]
+        streams.holding = False
+        await audio.write(b"y")
+        await wait_for(lambda: len(objects) == 1)
+        assert (objects[0].group_id, objects[0].payload) == (1, b"y")
+        audio.close()
+        await watcher
 
     async def test_replays_state_on_every_subscribe(self, cleanup: Cleanup) -> None:
         # The catalog pattern: a fresh subscription must not wait for the next change.

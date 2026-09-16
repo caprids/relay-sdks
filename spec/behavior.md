@@ -66,8 +66,12 @@ against that file.
   was denied: solicitations can arrive independently, and a later matching prefix permits writes.
 - The default write deadline is 10 seconds and covers both waiting for demand and the transport
   write.
-- A timeout while waiting for demand is retryable. A failure after the write is bound to a relay
-  subscription ends that track, because an incomplete group may have reached the relay.
+- A timeout, cancellation, transport write failure, or relay subscription change resets the
+  affected write's stream and leaves the track open while the publisher connection remains open.
+  A stream that opens after cancellation is reset without sending payload bytes. The next explicit
+  write uses a new group ID; failed groups are never reused. After demand disappears, later writes
+  wait for a new relay subscription. Applications choose fresh data or the next random-access point
+  after a failure; already delivered bytes cannot be withdrawn. There is no automatic retry.
 - A write's payload must be a byte sequence in the language's own terms. Any other type is rejected
   before the write starts, which is a local argument error and leaves the track usable.
 - Each write copies its bytes and sends one independent group containing one object. Only one

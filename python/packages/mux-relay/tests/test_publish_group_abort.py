@@ -131,6 +131,59 @@ class _CongestedTransport:
         await self._inner.wait_closed()
 
 
+class TestRecoveringSingleWrites:
+    @pytest.mark.parametrize("stage", ["write", "fin"])
+    @pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
+    async def test_resets_the_stream_and_keeps_the_track_for_fresh_data(
+        self, cleanup: Cleanup, stage: str, interrupt: str
+    ) -> None:
+        hub = create_relay_hub()
+        cleanup.append(hub.destroy)
+        transports: list[_CongestedTransport] = []
+
+        class HoldDataTransport(_CongestedTransport):
+            async def create_unidirectional_stream(self) -> SendStream:
+                stream = await super().create_unidirectional_stream()
+                if len(self.streams) == 2 and stage == "write":
+                    self.streams[-1].hold_writes = True
+                elif len(self.streams) > 2:
+                    self.streams[-1].release()
+                return stream
+
+        def connect_publisher(url: str = "", protocols: Sequence[str] = ()) -> ConnectingTransport:
+            created = hub.connect_publisher(url, protocols)
+            transport = HoldDataTransport(created.transport)
+            transports.append(transport)
+            return ConnectingTransport(transport=transport, ready=created.ready)
+
+        publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
+        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        cleanup.extend([subscriber.close, publisher.close])
+        audio = publisher.publish("audio", write_timeout=0.1)
+        objects = receive(subscriber, "audio")
+        writing = asyncio.create_task(audio.write(b"stale"))
+        await wait_for(lambda: len(transports[0].streams) == 2)
+        stream = transports[0].streams[-1]
+        if stage == "fin":
+            await wait_for(lambda: stream._fin is not None)
+        if interrupt == "cancel":
+            writing.cancel()
+        with pytest.raises(asyncio.CancelledError if interrupt == "cancel" else RelayTimeoutError) as failure:
+            await writing
+        assert stream.reset_with is failure.value
+        assert not audio.closed
+        assert audio.bound
+        stream.release()
+        await settle()
+        assert not stream.finned
+        await audio.write(b"fresh")
+        await wait_for(lambda: any(obj.payload == b"fresh" for obj in objects))
+        assert [(obj.group_id, obj.payload) for obj in objects] == (
+            [(0, b"stale"), (1, b"fresh")] if stage == "fin" else [(1, b"fresh")]
+        )
+        assert not hub.track_ends
+
+
 class TestCancellingAStuckGroup:
     @pytest.mark.parametrize("operation", ["write", "close"])
     async def test_each_group_operation_has_a_deadline_and_releases_the_track(

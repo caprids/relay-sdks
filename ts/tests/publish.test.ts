@@ -233,7 +233,7 @@ describe('connectRelayPublisher', () => {
     expect(onRaw).toHaveBeenCalledWith(expect.objectContaining({ trackProperties: [] }));
   });
 
-  it('reports a transport write failure and ends that track without silently retrying', async () => {
+  it('reports a stream open failure and allows a fresh write without silently retrying', async () => {
     const hub = createRelayHub();
     cleanup.push(() => hub.destroy());
     const failure = new Error('data stream failed');
@@ -255,9 +255,79 @@ describe('connectRelayPublisher', () => {
     receive(subscriber, 'events');
 
     await expect(events.write(new Uint8Array([1]))).rejects.toBe(failure);
-    await expect(events.write(new Uint8Array([2]))).rejects.toThrow(/closed/);
+    expect(events.closed).toBe(false);
     expect(hub.objectCount('events')).toBe(0);
+    await events.write(new Uint8Array([2]));
+    await vi.waitFor(() => expect(hub.objectCount('events')).toBe(1));
   });
+
+  it.each(['header', 'payload', 'fin'] as const)(
+    'recovers after a bound %s timeout or cancellation without closing the track',
+    async (stage) => {
+      const hub = createRelayHub();
+      cleanup.push(() => hub.destroy());
+      let stalled = false;
+      let resetCount = 0;
+      const publisher = await connectRelayPublisher({
+        url,
+        namespace,
+        createTransport: (...args) => {
+          const created = hub.connectPublisher(...args);
+          const open = created.transport.createUnidirectionalStream.bind(created.transport);
+          let streams = 0;
+          created.transport.createUnidirectionalStream = async () => {
+            if (++streams !== 2 && streams !== 4) return open();
+            let writes = 0;
+            let rejectPending: (error: unknown) => void;
+            const stall = () => {
+              stalled = true;
+              return new Promise<void>((_, reject) => {
+                rejectPending = reject;
+              });
+            };
+            return new WritableStream<Uint8Array>({
+              start(controller) {
+                controller.signal.addEventListener('abort', () => {
+                  resetCount++;
+                  rejectPending(controller.signal.reason);
+                });
+              },
+              write() {
+                writes++;
+                if ((stage === 'header' && writes === 1) || (stage === 'payload' && writes === 2)) return stall();
+                return undefined;
+              },
+              close() {
+                if (stage === 'fin') return stall();
+                return undefined;
+              },
+            });
+          };
+          return created;
+        },
+      });
+      cleanup.push(() => publisher.close());
+      const track = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
+      hub.subscribeUpstream('events');
+      for (const mode of ['timeout', 'cancel'] as const) {
+        stalled = false;
+        const owner = new AbortController();
+        const failure = new Error('discard stale object');
+        const writing = track.write(new Uint8Array([1]), { signal: owner.signal });
+        const rejected = expect(writing).rejects.toThrow(mode === 'timeout' ? /timed out/ : failure);
+        await vi.waitFor(() => expect(stalled).toBe(true), { interval: 1 });
+        await expect(track.write(new Uint8Array([2]))).rejects.toThrow(/already pending/);
+        if (mode === 'cancel') owner.abort(failure);
+        await rejected;
+        expect(track.closed).toBe(false);
+        expect(track.bound).toBe(true);
+        await track.write(new Uint8Array([3]));
+      }
+      expect(resetCount).toBe(2);
+      await vi.waitFor(() => expect(hub.objectCount('events')).toBe(2));
+      expect(hub.trackEnds).toEqual([]);
+    },
+  );
 
   it('times out a stalled stream open and aborts a late stream without sending payload bytes', async () => {
     const hub = createRelayHub();
@@ -271,7 +341,7 @@ describe('connectRelayPublisher', () => {
         const open = created.transport.createUnidirectionalStream.bind(created.transport);
         let streams = 0;
         created.transport.createUnidirectionalStream = () =>
-          ++streams === 1
+          ++streams !== 2
             ? open()
             : new Promise((resolve) => {
                 resolveStream = resolve;
@@ -285,7 +355,9 @@ describe('connectRelayPublisher', () => {
     const events = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
     receive(subscriber, 'events');
     await expect(events.write(new Uint8Array([1]))).rejects.toThrow(/timed out/);
-    await expect(events.write(new Uint8Array([2]))).rejects.toThrow(/closed/);
+    expect(events.closed).toBe(false);
+    await events.write(new Uint8Array([2]));
+    await vi.waitFor(() => expect(hub.objectCount('events')).toBe(1));
     const abort = vi.fn();
     const write = vi.fn();
 
@@ -521,6 +593,61 @@ describe('connectRelayPublisher', () => {
     const third = await track.openGroup();
     await third.write(new Uint8Array([3]));
     await third.close();
+  });
+
+  it('resets a bound write when demand disappears and publishes again after resubscription', async () => {
+    const pair = createTransportPair();
+    const open = pair.client.createUnidirectionalStream.bind(pair.client);
+    let streams = 0;
+    let stalled = false;
+    const reset = vi.fn();
+    pair.client.createUnidirectionalStream = async () => {
+      if (++streams !== 2) return open();
+      let rejectPending: (error: unknown) => void;
+      return new WritableStream<Uint8Array>({
+        start(controller) {
+          controller.signal.addEventListener('abort', () => {
+            reset();
+            rejectPending(controller.signal.reason);
+          });
+        },
+        write() {
+          stalled = true;
+          return new Promise<void>((_, reject) => {
+            rejectPending = reject;
+          });
+        },
+      });
+    };
+    const [publisher, subscriber] = await Promise.all([
+      connectRelayPublisher({
+        url,
+        namespace,
+        createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
+      }),
+      connectRelay({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
+    ]);
+    cleanup.push(() => subscriber.close());
+    cleanup.push(() => publisher.close());
+    const track = publisher.publish({ track: 'events' });
+    const bindings = track.bindings();
+    expect(await bindings.next()).toEqual({ done: false, value: false });
+    const first = subscriber.subscribe({ namespace, track: 'events' }, {});
+    expect(await bindings.next()).toEqual({ done: false, value: true });
+    const writing = track.write(new Uint8Array([1]));
+    const rejected = expect(writing).rejects.toThrow(/subscription changed/);
+    await vi.waitFor(() => expect(stalled).toBe(true));
+    first.cancel();
+    expect(await bindings.next()).toEqual({ done: false, value: false });
+    await rejected;
+    expect(reset).toHaveBeenCalledOnce();
+    expect(track.closed).toBe(false);
+    const received = receive(subscriber, 'events');
+    expect(await bindings.next()).toEqual({ done: false, value: true });
+    await track.write(new Uint8Array([2]));
+    await vi.waitFor(() => expect(received.objects).toHaveLength(1));
+    expect(received.objects[0]).toMatchObject({ groupId: 1, payload: new Uint8Array([2]) });
+    await bindings.return?.();
   });
 
   it('observes demand, cancellation, resubscription, and track end without hanging iterator return', async () => {

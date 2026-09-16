@@ -12,11 +12,10 @@ class RelayClosedError(RelayError):
 
 
 class RelayTrackEndedError(RelayClosedError):
-    """A failure while a write was bound to a relay subscription retired that track.
+    """Legacy terminal-track error, retained for import compatibility.
 
-    A :class:`RelayClosedError`, because the track is terminally closed and its name cannot be
-    reused on this connection, which is what tells it apart from a retryable :class:`RelayTimeoutError`
-    waiting for demand.
+    Individual write failures now reset their stream and keep the track open. Subscription
+    changes raise :class:`RelayError`; explicitly closed tracks raise :class:`RelayClosedError`.
     """
 
 

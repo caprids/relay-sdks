@@ -136,10 +136,12 @@ transport writes. A `RelayTimeoutError` waiting for demand can be retried. If th
 namespace prefixes but none covers this publisher's namespace, the demand deadline instead raises
 `RelayNamespaceError`: check the token and namespace instead of blindly retrying. The track stays
 open, and a later matching solicitation can let it proceed. An ordinary absence of subscriber
-demand still raises `RelayTimeoutError`. A failure once a write is
-bound to a relay subscription ends that track, since an incomplete group may have reached the relay:
-a relay re-bind raises `RelayTrackEndedError`, a transport timeout keeps its `RelayTimeoutError`, and
-either way `track.closed` turns `True`, `bound` turns `False`, and `bindings()` terminates.
+demand still raises `RelayTimeoutError`. A failed or cancelled write resets its stream and leaves
+`track.closed` false while the publisher connection remains open. A relay subscription change
+raises `RelayError`; a transport deadline raises `RelayTimeoutError`. The next explicit write uses
+a new group ID. Choose fresh data or the next random-access point; already delivered bytes cannot
+be withdrawn. If demand disappeared, the next write waits for a new relay subscription, and
+`bindings()` continues reporting changes.
 
 Each write copies its bytes and sends one independent group containing one object. Await each
 write; a concurrent call raises `RelayWritePendingError` rather than growing a queue. Completion
@@ -259,9 +261,9 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
 | `relay.closed` resolves `{ error? }` | `await relay.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
-| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayTrackEndedError`, `RelayNamespaceError`, `WebTransportError` |
+| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayNamespaceError`, `WebTransportError` |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
-| Single-object groups only | also `open_group()` multi-object groups and `bindings()` demand observation, plus `writer.closed` and `RelayTrackEndedError`, which report the track end those watchers stop on (see `spec/behavior.md`) |
+| `openGroup()`, `bindings()`, `writer.closed` | `open_group()`, `bindings()`, `writer.closed` (see `spec/behavior.md`) |
 | Browser `WebTransport` | aioquic WebTransport client (`connect_webtransport`) |
 
 ## Initial scope
