@@ -136,7 +136,8 @@ export interface MoqtPublishSession {
    * Synchronous callers return immediately; the transport closes within roughly {@link CLOSE_FLUSH_TIMEOUT_MS}.
    */
   close(closeCode?: number, reason?: string): void;
-  destroy(): void;
+  /** End locally; an error also fails requests still awaiting their first response. */
+  destroy(error?: unknown): void;
 }
 
 const DEFAULT_IMPLEMENTATION_NAME = '@mux/moq-core publisher';
@@ -395,8 +396,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#handleClosed(undefined, { expected: true });
   }
 
-  destroy(): void {
-    this.close();
+  destroy(error?: unknown): void {
+    if (error !== undefined) this.#fatal(error);
+    else this.close();
   }
 
   // ---------------------------------------------------------------------------

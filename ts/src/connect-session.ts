@@ -35,7 +35,7 @@ export interface ConnectRelayOptions {
 
 interface Session {
   ready: Promise<void>;
-  destroy(): void;
+  destroy(error?: unknown): void;
 }
 
 /** A connected session together with the connection lifetime its public handle exposes. */
@@ -98,7 +98,7 @@ export async function openRelaySession<T extends Session>(
     options.signal?.removeEventListener('abort', onAbort);
 
     if (session) {
-      session.destroy();
+      session.destroy(info.error);
     } else {
       try {
         transport?.close();

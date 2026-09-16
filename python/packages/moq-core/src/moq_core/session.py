@@ -502,8 +502,12 @@ class MoqtSession:
 
         self._handle_closed(None, expected=True)
 
-    def destroy(self) -> None:
-        self.close()
+    def destroy(self, error: BaseException | None = None) -> None:
+        """End locally; an error also fails requests awaiting their first response."""
+        if error is not None:
+            self._fatal(error)
+        else:
+            self.close()
 
     # --------------------------------------------------------------------------
     # Requests

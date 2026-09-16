@@ -65,7 +65,7 @@ class _Session(Protocol):
     @property
     def ready(self) -> asyncio.Future[None]: ...
 
-    def destroy(self) -> None: ...
+    def destroy(self, error: BaseException | None = None) -> None: ...
 
 
 T = TypeVar("T", bound=_Session)
@@ -192,7 +192,7 @@ async def open_relay_session(
             cancellation.remove_callback(on_cancel)
 
         if state.session is not None:
-            state.session.destroy()
+            state.session.destroy(info.error)
         elif state.transport is not None:
             try:
                 state.transport.close()

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  encodeGoaway,
   encodeRequestError,
+  encodeSetup,
   encodeSubscribeOk,
   REQUEST_ERROR_CODE,
 } from '../packages/moq-core/src/protocol/control-messages.js';
@@ -84,6 +86,41 @@ describe('connectRelay', () => {
     fake.openDataStream(encodeSubgroup(11, 8, payload));
     await vi.waitFor(() => expect(objects).toHaveLength(1));
     expect(objects[0]).toMatchObject({ groupId: 8, objectId: 0, properties: [], payload });
+  });
+
+  it('fails pending subscriptions once when GOAWAY ends the connection', async () => {
+    const fake = createFakeTransport();
+    const control = fake.openControlledDataStream();
+    const connecting = connectRelay({
+      url: endpoint,
+      createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
+    });
+    await control.write(encodeSetup([]));
+    const connection = await connecting;
+    connections.push(connection);
+    const pendingError = vi.fn();
+    const acceptedError = vi.fn();
+    const cancelledError = vi.fn();
+    const onOk = vi.fn();
+    connection.subscribe({ namespace: ['live'], track: 'pending' }, { onError: pendingError, onOk });
+    await (await fake.nextRequestStream()).firstMessage;
+    connection.subscribe({ namespace: ['live'], track: 'accepted' }, { onError: acceptedError });
+    const accepted = await fake.nextRequestStream();
+    await accepted.firstMessage;
+    await accepted.send(encodeSubscribeOk(11));
+    const cancelled = connection.subscribe({ namespace: ['live'], track: 'cancelled' }, { onError: cancelledError });
+    await (await fake.nextRequestStream()).firstMessage;
+    cancelled.cancel();
+    await control.write(encodeGoaway(1000));
+    const { error } = await connection.closed;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toContain('migration');
+    connection.close();
+    await Promise.resolve();
+    expect(pendingError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: (error as Error).message }));
+    expect(onOk).not.toHaveBeenCalled();
+    expect(acceptedError).not.toHaveBeenCalled();
+    expect(cancelledError).not.toHaveBeenCalled();
   });
 
   it('keeps quiet data tracks alive after their subscription is accepted', async () => {

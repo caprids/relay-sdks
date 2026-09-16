@@ -25,6 +25,8 @@ against that file.
   cancellation token, that governs the connection's entire lifetime rather than only setup.
 - Every connection exposes a way to observe its closure and the error that caused it, if any.
 - A GOAWAY from the relay ends the connection with an error. The application opens a replacement.
+  Requests still awaiting their first response receive their error callback once; accepted or
+  cancelled requests do not receive a second initial response.
   Automatic reconnection and token refresh on a live session are not yet part of this contract.
 
 ## Subscribing
@@ -38,7 +40,9 @@ against that file.
 - Object callbacks run as the stream layer delivers objects. The SDK adds no application queue, no
   ordering across streams, no payload decoding, no clock synchronization, and no media scheduling.
 - The request timeout bounds only the subscription's initial response. An accepted subscription
-  may then stay quiet indefinitely.
+  has no application inactivity deadline. Keeping an idle transport connected depends on peer
+  traffic or transport-provided keepalive; the SDK does not schedule its own keepalive. The Python
+  transport uses aioquic's default 60-second local idle timeout, subject to peer negotiation.
 - A subscribe for a namespace the relay has not seen announced is rejected with request error 404,
   not parked; a namespace freshly announced can still answer 404 for about a second, so applications
   retry that rejection rather than treat it as fatal.
@@ -125,3 +129,15 @@ Adding an assertion here means adding it to every SDK's smoke test.
 Automatic reconnection, token refresh on a live session, datagram reception, product resource
 discovery, typed payload helpers, and player adapters are not implemented in any SDK and have no
 contract yet. Add them here when the first SDK gains them.
+
+## Draft-20 protocol boundaries
+
+- `MAX_REQUEST_ID` and `REQUESTS_BLOCKED` were removed after draft-16
+  ([draft-20 Appendix A.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#appendix-A.4)).
+  They are not draft-20 request-budget messages. Unknown control messages terminate the session,
+  as required by [Section 10](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10).
+- An unrecognized wire Object Status terminates the session with `PROTOCOL_VIOLATION`, following
+  [Section 11.2.1.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.2.1.1).
+  The `UNKNOWN_OBJECT_STATUS` stream-reset code has a different meaning: a FETCH publisher cannot
+  determine whether an object exists ([Section 3.3.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-3.3.4)).
+  Ordinary subgroup transport resets remain per-stream delivery events.
