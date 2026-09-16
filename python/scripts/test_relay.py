@@ -8,11 +8,14 @@ asserts the list in ``spec/behavior.md``:
 2. Subscriptions to two tracks on the namespace are accepted.
 3. Binary payloads, an empty payload, and a text payload all arrive intact.
 4. Closing one track writer does not affect delivery on another track.
-5. Both connections close cleanly once the test closes them.
+5. A late subscriber decodes LARGEST_OBJECT and receives the next live object.
+6. All connections close cleanly once the test closes them.
 
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
 (https, without the token), ``RELAY_NAMESPACE_PREFIX`` (a random field is appended). The token is
-never written to disk and is redacted from output.
+never written to disk and is redacted from output. For anonymous local relays, set
+``RELAY_ANONYMOUS=1``; ``RELAY_CA_FILE`` supplies a local certificate trust root.
+See ``spec/relay-interop.md`` for the moq-relay 0.14.17 reproduction.
 
     RELAY_NAMESPACE_PREFIX=mattypoo/relay-sdk-smoke mise run python:test:relay
 """
@@ -33,7 +36,9 @@ from mux_relay import (
     DEFAULT_ENDPOINT,
     CancellationToken,
     Closed,
+    MessageParameters,
     MoqtObject,
+    NextObjectFilter,
     RelayConnection,
     RelayPublisher,
     RelayTimeoutError,
@@ -46,7 +51,10 @@ RUN_DEADLINE = 45.0
 RECEIVE_DEADLINE = 10.0
 
 
-def read_token() -> str:
+def read_token() -> str | None:
+    if os.environ.get("RELAY_ANONYMOUS") == "1":
+        return os.environ.get("RELAY_TOKEN") or None
+
     token = os.environ.get("RELAY_TOKEN")
 
     if not token and sys.stdin.isatty():
@@ -60,22 +68,32 @@ def read_token() -> str:
     return token
 
 
-def redact(value: str, token: str) -> str:
-    return value.replace(token, "[redacted]")
+def redact(value: str, token: str | None) -> str:
+    return value.replace(token, "[redacted]") if token else value
 
 
-async def run(endpoint: str, token: str, namespace: list[str], report: Any) -> dict[str, Any]:
+async def run(endpoint: str, token: str | None, namespace: list[str], report: Any) -> dict[str, Any]:
+    from aioquic.quic.configuration import QuicConfiguration
+
+    from mux_relay.webtransport import connect_webtransport
+
+    def create_transport(url: str, protocols: Any) -> Any:
+        configuration = QuicConfiguration(is_client=True, cafile=os.environ.get("RELAY_CA_FILE"))
+        return connect_webtransport(url, protocols, configuration=configuration)
+
     lifetime = CancellationToken()
     loop = asyncio.get_running_loop()
     deadline = loop.call_later(
         RUN_DEADLINE, lambda: lifetime.cancel(RelayTimeoutError(f"Live relay test exceeded {RUN_DEADLINE:.0f} seconds"))
     )
-    received: dict[str, list[bytes]] = {"events": [], "status": []}
+    received: dict[str, list[bytes]] = {"events": [], "status": [], "lateStatus": []}
     errors: list[str] = []
     expected_events = [bytes([0, 255, 128, 1]), b"hello from Relay SDK", b""]
     closing = False
     publisher: RelayPublisher | None = None
     subscriber: RelayConnection | None = None
+    late_subscriber: RelayConnection | None = None
+    late_largest_object = None
 
     def observe_closed(label: str, closed: asyncio.Future[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
@@ -84,29 +102,38 @@ async def run(endpoint: str, token: str, namespace: list[str], report: Any) -> d
 
         closed.add_done_callback(done)
 
-    async def wait_for_count(track: str, count: int) -> None:
+    async def wait_for(predicate: Any, label: str) -> None:
         until = time.monotonic() + RECEIVE_DEADLINE
 
-        while len(received[track]) < count:
+        while not predicate():
             if errors:
                 raise RuntimeError("; ".join(errors))
 
             lifetime.throw_if_cancelled()
 
             if time.monotonic() >= until:
-                raise TimeoutError(f"Timed out receiving {track}: {len(received[track])}/{count}")
+                raise TimeoutError(f"Timed out waiting for {label}")
 
             await asyncio.sleep(0.02)
 
+    async def wait_for_count(track: str, count: int) -> None:
+        await wait_for(lambda: len(received[track]) >= count, f"{track}: {count} objects")
+
     try:
         publisher = await connect_relay_publisher(
-            endpoint, namespace=namespace, get_token=lambda: token, cancellation=lifetime
+            endpoint,
+            namespace=namespace,
+            get_token=lambda: token,
+            cancellation=lifetime,
+            create_transport=create_transport,
         )
         observe_closed("publisher", publisher.closed)
         report({"phase": "publisher connected", "namespace": namespace})
         events = publisher.publish("events", write_timeout=20)
         status = publisher.publish("status", write_timeout=20)
-        subscriber = await connect_relay(endpoint, get_token=lambda: token, cancellation=lifetime)
+        subscriber = await connect_relay(
+            endpoint, get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
+        )
         observe_closed("subscriber", subscriber.closed)
         report({"phase": "subscriber connected"})
 
@@ -136,9 +163,39 @@ async def run(endpoint: str, token: str, namespace: list[str], report: Any) -> d
         report(
             {"phase": "received initial payloads", "events": len(received["events"]), "status": len(received["status"])}
         )
+        # Make the relay send LARGEST_OBJECT by joining after content has arrived.
+        late_subscriber = await connect_relay(
+            endpoint, get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
+        )
+        observe_closed("late subscriber", late_subscriber.closed)
+
+        def on_late_ok(ok: Any) -> None:
+            nonlocal late_largest_object
+            late_largest_object = ok.parameters.largest_object
+            if late_largest_object is None:
+                errors.append("late SUBSCRIBE_OK omitted LARGEST_OBJECT")
+
+        def on_late_object(obj: MoqtObject) -> None:
+            if obj.status == "normal":
+                received["lateStatus"].append(obj.payload)
+
+        late_subscriber.subscribe(
+            namespace,
+            "status",
+            SubscriptionHandlers(
+                on_ok=on_late_ok,
+                on_object=on_late_object,
+                on_error=lambda error: errors.append(f"late status: {error.error_code} {error.reason}"),
+            ),
+            parameters=MessageParameters(location_filter=NextObjectFilter()),
+        )
+        await wait_for(lambda: late_largest_object is not None, "late SUBSCRIBE_OK with LARGEST_OBJECT")
         events.close()
         await status.write(bytes([43]))
         await wait_for_count("status", 2)
+        await wait_for_count("lateStatus", 1)
+        if received["lateStatus"] != [bytes([43])]:
+            raise RuntimeError("Late subscriber payload mismatch")
 
         if sorted(received["events"]) != sorted(expected_events) or received["status"] != [bytes([42]), bytes([43])]:
             raise RuntimeError(f"Payload mismatch: {received!r}")
@@ -153,6 +210,12 @@ async def run(endpoint: str, token: str, namespace: list[str], report: Any) -> d
             "status": len(received["status"]),
             "binaryAndEmptyPayloads": "passed",
             "independentTrackClose": "passed",
+            "lateSubscriberLargestObject": {
+                "group": late_largest_object.group,
+                "object": late_largest_object.object,
+            }
+            if late_largest_object is not None
+            else None,
         }
     finally:
         closing = True
@@ -164,6 +227,8 @@ async def run(endpoint: str, token: str, namespace: list[str], report: Any) -> d
         finally:
             if subscriber is not None:
                 subscriber.close()
+            if late_subscriber is not None:
+                late_subscriber.close()
 
 
 def main() -> int:

@@ -82,7 +82,7 @@ export function solicitNamespace(server: MoqtTransport, prefix: TrackNamespace, 
   return openRawRequest(server, encodeSubscribeNamespace({ requestId, trackNamespacePrefix: prefix }));
 }
 
-/** The relay's per-track pull, with the parameters moq-relay 0.14.14 sends on draft-20 (a `relative-group 1` join). */
+/** The relay's per-track pull, with the parameters moq-relay 0.14.17 sends on draft-20 (Next Object plus current-group fill). */
 export function rawSubscribe(
   server: MoqtTransport,
   trackNamespace: TrackNamespace,
@@ -98,7 +98,8 @@ export function rawSubscribe(
       parameters: {
         forward: 1,
         subscriberPriority: 0,
-        locationFilter: { type: 'relative-group', groupsBeforeNext: 1 },
+        locationFilter: { type: 'next-object' },
+        fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
         groupOrder: 'descending',
       },
     })

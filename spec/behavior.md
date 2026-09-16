@@ -126,9 +126,11 @@ and subscribes on the same random namespace, then asserts:
 2. Subscriptions to two tracks on the namespace are accepted.
 3. Binary payloads, an empty payload, and a text payload all arrive intact.
 4. Closing one track writer does not affect delivery on another track.
-5. Both connections close cleanly once the test closes them.
+5. A late subscriber decodes `LARGEST_OBJECT` from a populated track's `SUBSCRIBE_OK` and receives the next live object.
+6. All connections close cleanly once the test closes them.
 
 Adding an assertion here means adding it to every SDK's smoke test.
+See [relay interoperability](relay-interop.md) for a local moq-relay 0.14.17 test.
 
 ## Not yet specified
 

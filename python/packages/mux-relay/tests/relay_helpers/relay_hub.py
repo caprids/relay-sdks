@@ -6,7 +6,7 @@ middle. The hub is transport-agnostic: :meth:`RelayHub.serve_publisher` and
 :meth:`RelayHub.connect_publisher` / :meth:`RelayHub.connect_subscriber` wrap them in in-memory pairs
 shaped like a ``RelayTransportFactory``.
 
-Publisher side mirrors moq-relay 0.14.14's announce-and-serve ingest. After the SETUP exchange the
+Publisher side mirrors moq-relay 0.14.17's announce-and-serve ingest. After the SETUP exchange the
 hub opens a bidi stream and solicits announces (SUBSCRIBE_NAMESPACE, empty prefix, odd server-side
 request ids) and reads NAMESPACE / NAMESPACE_DONE entries off that stream for the session's lifetime.
 Tracks are pulled on demand: one upstream SUBSCRIBE per track (downstream demand dedupes onto it),
@@ -17,7 +17,7 @@ retracts a namespace with NAMESPACE_DONE; both land in ``track_ends``.
 
 Subscriber side answers SUBSCRIBE with SUBSCRIBE_OK (carrying LARGEST_OBJECT once the track has
 content) and forwards objects one-per-subgroup-stream, resolving the request's Location Filter
-(draft-20 §5.1.2) the way moq-relay 0.14.14 does. FETCH is answered with REQUEST_ERROR. An upstream
+using the draft-20 §5.1.2 rules. FETCH is answered with REQUEST_ERROR. An upstream
 FIN ends the track's downstream subscriptions with PUBLISH_DONE, the way a real relay ends the track
 for every viewer.
 
@@ -149,7 +149,7 @@ def is_at_or_after(a: Location, b: Location) -> bool:
 
 
 def resolve_start(location_filter: LocationFilter | None, largest: Location | None) -> Location:
-    """Where a new subscription starts, resolved the way moq-relay 0.14.14 resolves a draft-20 Location Filter."""
+    """Where a new subscription starts, resolved using the draft-20 Location Filter rules."""
     if isinstance(location_filter, NextObjectFilter):
         return Location(largest.group, largest.object + 1) if largest else Location(0, 0)
 
@@ -336,11 +336,14 @@ class RelayHub:
                                 request_id=request_id,
                                 track_namespace=track_namespace,
                                 track_name=track_name,
-                                # The exact parameter set moq-relay 0.14.14 sends upstream on draft-20.
+                                # The exact parameter set moq-relay 0.14.17 sends upstream on draft-20.
                                 parameters=MessageParameters(
                                     forward=1,
                                     subscriber_priority=0,
-                                    location_filter=RelativeGroupFilter(groups_before_next=1),
+                                    location_filter=NextObjectFilter(),
+                                    fill_parameters=MessageParameters(
+                                        location_filter=RelativeGroupFilter(groups_before_next=1)
+                                    ),
                                     group_order="descending",
                                 ),
                             )
@@ -539,7 +542,7 @@ class RelayHub:
                         self._next_subscriber_alias += 1
 
                         # Like the relay on draft-20, SUBSCRIBE_OK reports the Largest Object once the
-                        # track has content (length-prefixed, §10.2.17).
+                        # track has content (two bare varints, §10.2.17).
                         await stream.writable.write(
                             encode_subscribe_ok(
                                 track_alias,

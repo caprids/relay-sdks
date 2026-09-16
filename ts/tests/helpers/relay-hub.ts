@@ -3,7 +3,7 @@
  * In-memory MoQ relay hub for cross-engine tests: real publish engine on one side, real playback engine(s) on the
  * other, draft-20 bytes in the middle over `createTransportPair` transports.
  *
- * Publisher side (`connectPublisher`) mirrors moq-relay 0.14.14's announce-and-serve ingest. After the SETUP exchange
+ * Publisher side (`connectPublisher`) mirrors moq-relay 0.14.17's announce-and-serve ingest. After the SETUP exchange
  * the hub opens a bidi stream and solicits announces (SUBSCRIBE_NAMESPACE, empty prefix, odd server-side request ids)
  * and reads NAMESPACE / NAMESPACE_DONE entries off that stream for the session's lifetime. Tracks are pulled on demand:
  * one upstream SUBSCRIBE per track (downstream demand dedupes onto it), with the publisher's SUBSCRIBE_OK assigning the
@@ -14,7 +14,7 @@
  *
  * Subscriber side (`connectSubscriber`): answers SUBSCRIBE with SUBSCRIBE_OK (carrying LARGEST_OBJECT once the track
  * has content) and forwards objects one-per-subgroup-stream, resolving the request's Location Filter (draft-20 §5.1.2)
- * the way moq-relay 0.14.14 does — `relative-group 1` replays the current group from object 0 then follows live
+ * using the draft-20 Location Filter rules — `relative-group 1` replays the current group from object 0 then follows live
  * (catalog joins), `relative-group 0` forwards only groups that start after the subscribe (video joins), and
  * `next-object` is strict: nothing already published is replayed (audio joins). FETCH is answered with REQUEST_ERROR;
  * the draft-20 player never sends one. A downstream subscribe registers standing upstream demand for its track; an
@@ -150,8 +150,8 @@ function isAtOrAfter(a: Location, b: Location): boolean {
 }
 
 /**
- * Where a new subscription starts, resolved against the track's Largest Object the way moq-relay 0.14.14 resolves a
- * draft-20 Location Filter (§5.1.2): `next-object` is strict (nothing already published is replayed), `relative-group`
+ * Where a new subscription starts, resolved against the track's Largest Object using the
+ * draft-20 Location Filter rules (§5.1.2): `next-object` is strict (nothing already published is replayed), `relative-group`
  * counts back from the next group (`0` = the next group, `1` = the current group from object 0), an absolute start is
  * honored as given (the hub never sees an end), and an unfiltered request starts at the current group like moq-lite.
  */
@@ -229,7 +229,7 @@ export function createRelayHub(): RelayHub {
   };
 
   // ---------------------------------------------------------------------------
-  // Publisher side — announce-and-serve, mirroring moq-relay 0.14.14
+  // Publisher side — announce-and-serve, mirroring moq-relay 0.14.17
   // ---------------------------------------------------------------------------
 
   const connectPublisher: ConnectPublishTransport = () => {
@@ -311,14 +311,13 @@ export function createRelayHub(): RelayHub {
               requestId,
               trackNamespace,
               trackName,
-              // The exact parameter set moq-relay 0.14.14 sends upstream on
-              // draft-20: a `relative-group 1` join asks for the current
-              // group from object 0, then live (draft-20's strict Next
-              // Object would skip the in-progress group).
+              // moq-relay 0.14.17 requests Next Object plus a current-group fill.
+              // Our publisher advertises no cached content, so the fill settles immediately.
               parameters: {
                 forward: 1,
                 subscriberPriority: 0,
-                locationFilter: { type: 'relative-group', groupsBeforeNext: 1 },
+                locationFilter: { type: 'next-object' },
+                fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
                 groupOrder: 'descending',
               },
             }),
@@ -560,7 +559,7 @@ export function createRelayHub(): RelayHub {
             const trackAlias = nextSubscriberAlias++;
 
             // Like the relay on draft-20, SUBSCRIBE_OK reports the Largest
-            // Object once the track has content (length-prefixed, §10.2.17).
+            // Object once the track has content (two bare varints, §10.2.17).
             await writer.write(encodeSubscribeOk(trackAlias, track.largest ? { largestObject: track.largest } : {}));
             subscription = {
               trackAlias,

@@ -287,26 +287,34 @@ class TestEncodeMessageParameters:
         with pytest.raises(MoqtProtocolError):
             decode_message_parameters(ByteReader(writer.to_bytes()))
 
-    def test_frames_largest_object_length_prefixed_byte_for_byte_with_moq_relay(self) -> None:
-        # §10.2 calls LARGEST_OBJECT a bare Location; moq-relay frames it with a length by the
-        # odd-type parity rule, and the codec follows the relay. Vector from moq-dev/moq
-        # `test_param_location_wire_vectors`.
-        encoded = encode_parameters(MessageParameters(largest_object=Location(255, 128)))
+    def test_frames_largest_object_as_bare_varints_with_moq_relay_0_14_17(self) -> None:
+        # Upstream draft-20 vector from moq-dev/moq#3561, independent of our encoder.
+        wire = bytes([0x01, 0x09, 0x80, 0xFF, 0x80, 0x80])
+        parameters = MessageParameters(largest_object=Location(255, 128))
+        assert encode_parameters(parameters) == wire
+        assert decode_message_parameters(ByteReader(wire)) == parameters
 
-        assert list(encoded) == [0x01, 0x09, 0x04, 0x80, 0xFF, 0x80, 0x80]
-        assert decode_message_parameters(ByteReader(encoded)) == MessageParameters(largest_object=Location(255, 128))
+    @pytest.mark.parametrize("wire", [b"\x01\x09", b"\x01\x09\x80", b"\x01\x09\x01", b"\x01\x09\x01\x80"])
+    def test_rejects_truncated_largest_object(self, wire: bytes) -> None:
+        with pytest.raises(MoqtProtocolError):
+            decode_control_message(ControlMessageFrame(type=MESSAGE_TYPE.SUBSCRIBE_OK, body=b"\x07" + wire))
 
-    def test_rejects_a_largest_object_value_with_trailing_bytes(self) -> None:
-        writer = ByteWriter()
-        writer.write_varint(1)
-        writer.write_varint(PARAMETER_TYPE.LARGEST_OBJECT)
-        writer.write_varint(3)  # length: two varints plus a stray byte
-        writer.write_varint(1)
-        writer.write_varint(2)
-        writer.write_uint8(0)
-
-        with pytest.raises(MoqtProtocolError, match="trailing bytes"):
-            decode_message_parameters(ByteReader(writer.to_bytes()))
+    @pytest.mark.parametrize(
+        ("group", "object_id", "location_bytes"),
+        [(0, 0, [0, 0]), (1, 2, [1, 2]), (255, 128, [0x80, 0xFF, 0x80, 0x80])],
+    )
+    def test_subscribe_ok_largest_object_with_following_fields(
+        self, group: int, object_id: int, location_bytes: list[int]
+    ) -> None:
+        # Alias 7; Largest Object, delta 1 => Fill Timeout (0x0a); track property type 2, value 1.
+        body = bytes([7, 2, 9, *location_bytes, 1, 5, 2, 1])
+        wire = bytes([4, 0, len(body)]) + body
+        parameters = MessageParameters(largest_object=Location(group, object_id), fill_timeout=5)
+        properties = [KeyValuePair(2, 1)]
+        assert decode_all(wire) == [SubscribeOk(track_alias=7, parameters=parameters, track_properties=properties)]
+        assert encode_subscribe_ok(7, parameters, properties) == wire
+        with pytest.raises(MoqtProtocolError):
+            decode_control_message(ControlMessageFrame(type=MESSAGE_TYPE.SUBSCRIBE_OK, body=body + b"\x00"))
 
     def test_frames_include_properties_as_a_length_prefixed_byte_and_rejects_other_values(self) -> None:
         assert list(encode_parameters(MessageParameters(include_properties=1))) == [0x01, 0x35, 0x01, 0x01]
