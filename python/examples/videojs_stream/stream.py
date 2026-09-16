@@ -224,7 +224,8 @@ class VideoEncoder:
         if rate_control == "cbr":
             # x264's VBV units are kbit/s and kbit. HRD CBR includes filler NALs even for
             # simple color bars; the AVCC conversion preserves these bytes on the wire.
-            rate_kbps = max(1, round(bitrate / 1000))
+            rate_kbps = max(1, bitrate // 1000)
+            context.bit_rate = rate_kbps * 1000
             context.options["x264-params"] += f":vbv-maxrate={rate_kbps}:vbv-bufsize={rate_kbps}:nal-hrd=cbr:filler=1"
         context.flags |= Flags.global_header
         context.open()
@@ -973,7 +974,7 @@ async def publish_live_media(
             # gather raises the first failure. A normal deadline may win that race while
             # another track has failed independently. Inspect the tasks even if run() also
             # cancels this parent during its drain, so that failure cannot disappear.
-            for task in [*writers, reporter]:
+            for task in writers:
                 error = task.exception() if task.done() and not task.cancelled() else None
                 if error is not None and error is not lifetime.reason:
                     raise error

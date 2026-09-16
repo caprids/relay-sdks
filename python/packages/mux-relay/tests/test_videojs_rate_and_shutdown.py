@@ -10,9 +10,15 @@ from videojs_stream import stream
 from mux_relay import CancellationToken, Cancelled
 
 
-@pytest.mark.parametrize("width,height,bitrate", [(640, 360, 1_500_000), (1280, 720, 4_000_000)])
+@pytest.mark.parametrize("width,height,bitrate", [(640, 360, 1_500_000), (640, 360, 1_500_600), (1280, 720, 4_000_000)])
 def test_cbr_payload_reaches_target_on_the_actual_test_pattern(width: int, height: int, bitrate: int) -> None:
-    encoder = stream.VideoEncoder(width, height, 30, bitrate, 2, "cbr")
+    import av
+
+    # libavcodec truncates the target to kbit/s. VBV and HRD must use that same
+    # value or x264 warns and silently downgrades constant-rate signalling.
+    with av.logging.Capture() as encoder_logs:
+        encoder = stream.VideoEncoder(width, height, 30, bitrate, 2, "cbr")
+    assert not any("CBR HRD requires constant bitrate" in message for _, _, message in encoder_logs)
     frames = stream.pattern_frames(width, height, 30)
     samples = []
     for _ in range(180):
