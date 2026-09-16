@@ -283,6 +283,7 @@ class MoqtPublishSession:
         self._received_goaway = False
         """Any GOAWAY (control or request stream): the peer is migrating."""
         self._closing = False
+        self._close_error: BaseException | None = None
         self._destroyed = False
 
         spawn(self._start())
@@ -324,7 +325,9 @@ class MoqtPublishSession:
             self._handle_closed(None)
 
     def _fatal(self, error: BaseException) -> None:
-        if self._destroyed:
+        # Once an orderly close starts, late control-stream failures must not replace its
+        # reason/code or interrupt the bounded FIN/retraction drain.
+        if self._destroyed or self._closing:
             return
 
         close_code = error.code if isinstance(error, MoqtProtocolError) else SESSION_ERROR.INTERNAL_ERROR
@@ -345,6 +348,8 @@ class MoqtPublishSession:
             return
 
         self._destroyed = True
+        if error is None:
+            error = self._close_error
 
         if not self._received_server_setup and not self.ready.done():
             self.ready.set_exception(
@@ -375,13 +380,17 @@ class MoqtPublishSession:
         close the transport. Returns immediately; the transport closes within roughly
         :data:`CLOSE_FLUSH_TIMEOUT`.
         """
+        self._close(close_code, reason)
+
+    def _close(self, close_code: int, reason: str, error: BaseException | None = None) -> None:
         if self._destroyed or self._closing:
             return
 
         self._closing = True
-        spawn(self._drain_and_close(close_code, reason))
+        self._close_error = error
+        spawn(self._drain_and_close(close_code, reason, error))
 
-    async def _drain_and_close(self, close_code: int, reason: str) -> None:
+    async def _drain_and_close(self, close_code: int, reason: str, error: BaseException | None = None) -> None:
         # Orderly close: closing the transport discards queued data, so the subscription FINs and
         # NAMESPACE_DONE retractions must be given a bounded window to land first. A peer should
         # observe every track ending cleanly, not an abrupt transport end. Neither GOAWAY nor
@@ -419,10 +428,11 @@ class MoqtPublishSession:
         except Exception:  # transport already gone
             pass
 
-        self._handle_closed(None, expected=True)
+        self._handle_closed(error, expected=error is None)
 
-    def destroy(self) -> None:
-        self.close()
+    def destroy(self, error: BaseException | None = None) -> None:
+        """Drain outgoing streams, preserving an optional local closure error."""
+        self._close(SESSION_ERROR.NO_ERROR, "", error)
 
     # ---------------------------------------------------------------------------
     # Announcing and the track registry

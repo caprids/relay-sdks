@@ -69,8 +69,9 @@ void relay.closed.then(({ error }) => console.log('Connection ended', error));
 
 Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK
 neither interprets the payload nor assumes that a track contains audio, video, or timestamps.
-An accepted data subscription can stay quiet indefinitely. The request timeout only bounds its
-initial response. Subscriptions have independent cancellation; the application owns connection shutdown.
+An accepted data subscription has no application inactivity deadline. The request timeout only
+bounds its initial response. An idle connection still depends on peer traffic or transport-provided
+keepalive; the SDK does not schedule its own keepalive. Subscriptions have independent cancellation; the application owns connection shutdown.
 
 Object callbacks run synchronously as streams deliver objects. The SDK adds no application queue,
 ordering across streams, JSON decoding, clock synchronization, or media scheduling. Handle subgroup
@@ -228,7 +229,8 @@ The protocol is pinned to `moqt-20`, matching the extracted implementation.
 
 Automatic reconnection, token refresh on a live session, datagram reception, product
 resource discovery, typed payload helpers, and a Video.js adapter are not implemented yet. A GOAWAY
-ends the connection with an error; callers can open a replacement. A custom `createTransport`
+ends the connection with an error and fails requests still awaiting their first response via `onError`;
+callers can open a replacement. A custom `createTransport`
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
 
 ## Live Relay smoke test

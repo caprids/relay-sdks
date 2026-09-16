@@ -488,6 +488,9 @@ class MoqtSession:
 
     def close(self, close_code: int = SESSION_ERROR.NO_ERROR, reason: str = "") -> None:
         """Send GOAWAY then close the transport session."""
+        self._close(close_code, reason)
+
+    def _close(self, close_code: int, reason: str, error: BaseException | None = None) -> None:
         if self._destroyed:
             return
 
@@ -500,10 +503,11 @@ class MoqtSession:
         except Exception:  # transport already gone
             pass
 
-        self._handle_closed(None, expected=True)
+        self._handle_closed(error, expected=error is None)
 
-    def destroy(self) -> None:
-        self.close()
+    def destroy(self, error: BaseException | None = None) -> None:
+        """End locally; an error also fails requests awaiting their first response."""
+        self._close(SESSION_ERROR.NO_ERROR, "", error)
 
     # --------------------------------------------------------------------------
     # Requests

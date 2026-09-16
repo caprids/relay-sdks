@@ -65,7 +65,7 @@ class _Session(Protocol):
     @property
     def ready(self) -> asyncio.Future[None]: ...
 
-    def destroy(self) -> None: ...
+    def destroy(self, error: BaseException | None = None) -> None: ...
 
 
 T = TypeVar("T", bound=_Session)
@@ -191,20 +191,21 @@ async def open_relay_session(
         if cancellation is not None:
             cancellation.remove_callback(on_cancel)
 
+        # Settle before synchronous user callbacks run during session teardown.
+        if not closed.done():
+            closed.set_result(info)
+
+        if not interrupted.done():
+            interrupted.set_exception(stop_error)
+
         if state.session is not None:
-            state.session.destroy()
+            state.session.destroy(info.error)
         elif state.transport is not None:
             try:
                 state.transport.close()
             except Exception:
                 # A failed handshake may leave a transport that already refuses close().
                 pass
-
-        if not closed.done():
-            closed.set_result(info)
-
-        if not interrupted.done():
-            interrupted.set_exception(stop_error)
 
     def on_cancel(reason: BaseException) -> None:
         finish(Closed(reason))

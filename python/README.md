@@ -71,7 +71,10 @@ asyncio.run(main())
 
 Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK neither
 interprets the payload nor assumes that a track contains audio, video, or timestamps. An accepted
-data subscription can stay quiet indefinitely. The request timeout only bounds its initial response.
+data subscription has no application inactivity deadline. The request timeout only bounds its
+initial response. An idle connection still depends on peer traffic or transport-provided keepalive;
+the SDK does not schedule its own keepalive. The Python transport uses aioquic's default 60-second
+local idle timeout, subject to peer negotiation.
 Subscriptions have independent cancellation; the application owns connection shutdown.
 
 Object callbacks are plain synchronous callables invoked as streams deliver objects. The SDK adds no
@@ -269,7 +272,8 @@ also exposes FETCH and TRACK_STATUS. The protocol is pinned to `moqt-20`.
 
 Automatic reconnection, token refresh on a live session, datagram reception, product resource
 discovery, and typed payload helpers are not implemented yet. A GOAWAY ends the connection with a
-`RelayGoawayError`; callers can open a replacement.
+`RelayGoawayError` and fails requests still awaiting their first response via `on_error`; callers
+can open a replacement.
 
 ## Live Relay smoke test
 

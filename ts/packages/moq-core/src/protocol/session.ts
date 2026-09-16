@@ -221,7 +221,8 @@ export interface MoqtSession {
   trackStatus(options: MoqtSubscribeOptions, handlers?: TrackStatusHandlers): void;
   /** Send GOAWAY then close the transport session. */
   close(closeCode?: number, reason?: string): void;
-  destroy(): void;
+  /** End locally; an error also fails requests still awaiting their first response. */
+  destroy(error?: unknown): void;
 }
 
 const DEFAULT_UNKNOWN_ALIAS_TIMEOUT_MS = 2000;
@@ -416,6 +417,10 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   close(closeCode = SESSION_ERROR.NO_ERROR, reason = ''): void {
+    this.#close(closeCode, reason);
+  }
+
+  #close(closeCode: number, reason: string, error?: unknown): void {
     if (this.#destroyed) return;
 
     // Best-effort GOAWAY so the peer can stop routing to us first.
@@ -427,11 +432,11 @@ class MoqtSessionImpl implements MoqtSession {
       // transport already gone
     }
 
-    this.#handleClosed(undefined, { expected: true });
+    this.#handleClosed(error, { expected: error === undefined });
   }
 
-  destroy(): void {
-    this.close();
+  destroy(error?: unknown): void {
+    this.#close(SESSION_ERROR.NO_ERROR, '', error);
   }
 
   // --------------------------------------------------------------------------

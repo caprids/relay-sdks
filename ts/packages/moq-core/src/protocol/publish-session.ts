@@ -136,7 +136,8 @@ export interface MoqtPublishSession {
    * Synchronous callers return immediately; the transport closes within roughly {@link CLOSE_FLUSH_TIMEOUT_MS}.
    */
   close(closeCode?: number, reason?: string): void;
-  destroy(): void;
+  /** Drain outgoing streams, preserving an optional local closure error. */
+  destroy(error?: unknown): void;
 }
 
 const DEFAULT_IMPLEMENTATION_NAME = '@mux/moq-core publisher';
@@ -235,6 +236,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   /** Any GOAWAY (control or request stream) — the peer is migrating. */
   #receivedGoaway = false;
   #closing = false;
+  #closeError: unknown;
   #destroyed = false;
 
   constructor(transport: MoqtTransport, config: MoqtPublishSessionConfig = {}) {
@@ -295,7 +297,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   #fatal(error: unknown): void {
-    if (this.#destroyed) return;
+    // Once an orderly close starts, late control-stream failures must not
+    // replace its reason/code or interrupt the bounded FIN/retraction drain.
+    if (this.#destroyed || this.#closing) return;
 
     const closeCode = isMoqtProtocolError(error) ? error.code : SESSION_ERROR.INTERNAL_ERROR;
 
@@ -308,10 +312,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     this.#handleClosed(error);
   }
 
-  #handleClosed(error: unknown, { expected = false }: { expected?: boolean } = {}): void {
+  #handleClosed(receivedError: unknown, { expected = false }: { expected?: boolean } = {}): void {
     if (this.#destroyed) return;
 
     this.#destroyed = true;
+    const error = receivedError ?? this.#closeError;
 
     if (!this.#receivedServerSetup) {
       this.#rejectReady(error ?? new MoqtProtocolError('session closed before server SETUP'));
@@ -335,10 +340,15 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   close(closeCode = SESSION_ERROR.NO_ERROR, reason = ''): void {
+    this.#close(closeCode, reason);
+  }
+
+  #close(closeCode: number, reason: string, error?: unknown): void {
     if (this.#destroyed || this.#closing) return;
 
     this.#closing = true;
-    void this.#drainAndClose(closeCode, reason);
+    this.#closeError = error;
+    void this.#drainAndClose(closeCode, reason, error);
   }
 
   /**
@@ -348,7 +358,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    * client GOAWAY, and treats any post-SUBSCRIBE_OK byte on a subscribe stream as an error that aborts the track (see
    * the module doc).
    */
-  async #drainAndClose(closeCode: number, reason: string): Promise<void> {
+  async #drainAndClose(closeCode: number, reason: string, error?: unknown): Promise<void> {
     // One macrotask beat before the last-resort sweep below: track owners
     // tearing down in the same reactive flush (`setupTrackPublishers`'s
     // cleanup runs on a microtask after ours on the unpublish path) get to
@@ -392,11 +402,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       // transport already gone
     }
 
-    this.#handleClosed(undefined, { expected: true });
+    this.#handleClosed(error, { expected: error === undefined });
   }
 
-  destroy(): void {
-    this.close();
+  destroy(error?: unknown): void {
+    this.#close(SESSION_ERROR.NO_ERROR, '', error);
   }
 
   // ---------------------------------------------------------------------------

@@ -11,12 +11,13 @@ from core_helpers.fake_transport import FakeTransport, create_fake_transport, en
 from core_helpers.waiting import settle, wait_for
 
 from moq_core import REQUEST_ERROR_CODE, Closed, MoqtObject, MoqtSubscribeOptions, SubscriptionHandlers
-from moq_core.control_messages import Subscribe, encode_request_error, encode_subscribe_ok
+from moq_core.control_messages import Subscribe, encode_goaway, encode_request_error, encode_setup, encode_subscribe_ok
 from mux_relay import (
     CancellationToken,
     ConnectingTransport,
     RelayClosedError,
     RelayConnection,
+    RelayGoawayError,
     RelayTimeoutError,
     connect_relay,
 )
@@ -118,6 +119,47 @@ class TestConnectRelay:
             [],
             payload,
         )
+
+    @pytest.mark.parametrize("throws", [False, True])
+    async def test_fails_pending_subscriptions_once_when_goaway_ends_the_connection(
+        self, connections: list[RelayConnection], throws: bool
+    ) -> None:
+        fake = create_fake_transport()
+        control = fake.open_controlled_data_stream()
+        connecting = asyncio.create_task(connect_relay(ENDPOINT, create_transport=Factory(fake)))
+        await control.write(encode_setup([]))
+        connection = await connecting
+        connections.append(connection)
+        pending_errors: list[Any] = []
+        accepted_errors: list[Any] = []
+        cancelled_errors: list[Any] = []
+        answers: list[Any] = []
+
+        def on_error(error: Any) -> None:
+            pending_errors.append(error)
+            if throws:
+                raise RuntimeError("application callback failed")
+
+        connection.subscribe(["live"], "pending", SubscriptionHandlers(on_error=on_error, on_ok=answers.append))
+        await (await fake.next_request_stream()).first_message
+        connection.subscribe(["live"], "accepted", SubscriptionHandlers(on_error=accepted_errors.append))
+        accepted = await fake.next_request_stream()
+        await accepted.first_message
+        await accepted.send(encode_subscribe_ok(11))
+        cancelled = connection.subscribe(["live"], "cancelled", SubscriptionHandlers(on_error=cancelled_errors.append))
+        await (await fake.next_request_stream()).first_message
+        cancelled.cancel()
+        await control.write(encode_goaway(1000))
+        closed = await connection.closed
+        assert isinstance(closed.error, RelayGoawayError)
+        assert fake.close_info is not None
+        assert fake.close_info.close_code == 0
+        assert fake.close_info.reason == ""
+        connection.close()
+        await settle()
+        assert len(pending_errors) == 1
+        assert pending_errors[0].reason == str(closed.error)
+        assert answers == accepted_errors == cancelled_errors == []
 
     async def test_keeps_quiet_data_tracks_alive_after_their_subscription_is_accepted(
         self, connections: list[RelayConnection]

@@ -3,6 +3,7 @@
 import asyncio
 from typing import Any
 
+import pytest
 from core_helpers.raw_peer import RawRequest, open_raw_request, solicit_namespace
 from core_helpers.raw_peer import raw_subscribe as raw_subscribe_to
 from core_helpers.transport_pair import PairTransport, TransportPair, create_transport_pair
@@ -26,6 +27,7 @@ from moq_core.control_messages import (
     encode_setup,
     encode_subscribe,
 )
+from moq_core.errors import SESSION_ERROR
 from moq_core.object_stream import MoqtObject
 from moq_core.publish_session import (
     MoqtPublishSession,
@@ -781,7 +783,10 @@ class TestCreateMoqtPublishSession:
         await wait_for(lambda: bindings == [41, None] and subscribe.ended())
         harness.destroy()
 
-    async def test_close_drains_the_fins_and_namespace_done_to_the_wire_without_a_goaway(self) -> None:
+    @pytest.mark.parametrize("with_error", [False, True])
+    async def test_close_drains_the_fins_and_namespace_done_to_the_wire_without_a_goaway(
+        self, with_error: bool
+    ) -> None:
         pair = create_transport_pair()
         # A fully raw peer: complete SETUP and record every frame on the publisher's control stream.
         # It must carry SETUP and nothing else (a client GOAWAY closes a moq-lite-rs session, code 17).
@@ -805,7 +810,10 @@ class TestCreateMoqtPublishSession:
                 pass
 
         asyncio.get_running_loop().create_task(raw_server())
-        session = create_moqt_publish_session(pair.client)
+        closed: list[Any] = []
+        session = create_moqt_publish_session(
+            pair.client, MoqtPublishSessionConfig(callbacks=MoqtPublishSessionCallbacks(on_closed=closed.append))
+        )
 
         await session.ready
         session.announce(NAMESPACE)
@@ -817,13 +825,97 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: len(solicitation.received) == 2 and len(subscribe.received) == 1)
 
-        session.close()
+        error = RuntimeError("migration requested")
+        if with_error:
+            session.destroy(error)
+        else:
+            session.close()
         # The announce is retracted and the subscription FINed cleanly before the transport goes away.
         await wait_for(
             lambda: solicitation.kinds() == ["request-ok", "namespace", "namespace-done"] and subscribe.ended()
         )
         assert subscribe.kinds() == ["subscribe-ok"]
         assert [frame.kind for frame in control_frames] == ["setup"]
+
+        await pair.client.wait_closed()
+        assert pair.client._shared.close_info is not None
+        assert pair.client._shared.close_info.close_code == 0
+        assert pair.client._shared.close_info.reason == ""
+        assert len(closed) == 1
+        assert closed[0].error is (error if with_error else None)
+
+    @pytest.mark.parametrize("with_error", [False, True])
+    async def test_finishes_publisher_drain_after_goaway_and_control_eof(self, with_error: bool) -> None:
+        pair = create_transport_pair()
+        control = await pair.server.create_unidirectional_stream()
+        error = RuntimeError("migration requested")
+        closed: list[Any] = []
+        session = create_moqt_publish_session(
+            pair.client,
+            MoqtPublishSessionConfig(
+                callbacks=MoqtPublishSessionCallbacks(
+                    on_closed=closed.append,
+                    on_goaway=lambda _: session.destroy(error) if with_error else session.close(),
+                )
+            ),
+        )
+        await control.write(encode_setup([]))
+        await session.ready
+        session.announce(NAMESPACE)
+        register(session, "video")
+        solicitation = await solicit_namespace(pair.server, [])
+        subscribe = await raw_subscribe(pair.server, "video", 51)
+        await wait_for(lambda: len(solicitation.received) == 2 and len(subscribe.received) == 1)
+
+        await control.write(encode_goaway(1500))
+        await control.close()
+
+        await pair.client.wait_closed()
+        assert pair.client._shared.close_info is not None
+        assert pair.client._shared.close_info.close_code == 0
+        assert pair.client._shared.close_info.reason == ""
+        await wait_for(
+            lambda: solicitation.kinds() == ["request-ok", "namespace", "namespace-done"] and subscribe.ended()
+        )
+        assert subscribe.failure() is None
+        assert len(closed) == 1
+        assert closed[0].error is (error if with_error else None)
+
+    async def test_control_eof_is_still_fatal_before_local_close(self) -> None:
+        pair = create_transport_pair()
+        control = await pair.server.create_unidirectional_stream()
+        closed: list[Any] = []
+        session = create_moqt_publish_session(
+            pair.client, MoqtPublishSessionConfig(callbacks=MoqtPublishSessionCallbacks(on_closed=closed.append))
+        )
+        await control.write(encode_setup([]))
+        await session.ready
+        await control.close()
+        await pair.client.wait_closed()
+        assert pair.client._shared.close_info is not None
+        assert pair.client._shared.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+        assert len(closed) == 1
+        assert str(closed[0].error) == "peer closed its control stream"
+
+    async def test_preserves_local_error_when_peer_closes_during_drain(self) -> None:
+        pair = create_transport_pair()
+
+        async def setup() -> None:
+            control = await pair.server.create_unidirectional_stream()
+            await control.write(encode_setup([]))
+
+        setup_task = asyncio.create_task(setup())
+        closed: list[Any] = []
+        session = create_moqt_publish_session(
+            pair.client, MoqtPublishSessionConfig(callbacks=MoqtPublishSessionCallbacks(on_closed=closed.append))
+        )
+        await session.ready
+        await setup_task
+        error = RuntimeError("migration requested")
+        session.destroy(error)
+        pair.server.close()
+        await wait_for(lambda: len(closed) == 1)
+        assert closed[0].error is error
 
     async def test_close_leaves_no_background_work_running(self) -> None:
         pair = create_transport_pair()
