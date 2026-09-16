@@ -85,7 +85,10 @@ trailing objects in transit.
 handshakes. The optional `CancellationToken` controls the connection's entire lifetime: cancelling
 it closes an established connection, and the `closed` future carries the reason. An explicit `jwt`
 query parameter takes precedence over `get_token`, matching the current Relay connection
-authentication convention. `RelayConnection` is also an async context manager that closes on exit.
+authentication convention. In-flight operations re-raise the application's exact cancellation reason;
+with `cancel()` this is `Cancelled`, which is not a `RelayError`. Handle lifetime cancellation
+separately from SDK errors (compare the exception to `lifetime.reason` when stopping normally).
+`RelayConnection` is also an async context manager that closes on exit.
 
 ## Publish data for testing
 

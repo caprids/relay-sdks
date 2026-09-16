@@ -241,7 +241,9 @@ async def test_stopping_producer_joins_handoff_and_flushes_both_eofs(monkeypatch
 
     stats = Stats()
     buffers = queues(stats, capacity=1)
-    config = SimpleNamespace(width=64, height=64, fps=30, bitrate=100_000, gop_seconds=1.0, audio="tone", input=None)
+    config = SimpleNamespace(
+        width=64, height=64, fps=30, bitrate=100_000, rate_control="abr", gop_seconds=1.0, audio="tone", input=None
+    )
     producer = Producer(cast(Any, config), asyncio.get_running_loop(), buffers)
     stopped = asyncio.Event()
     original_put = buffers["audio"].put_nowait
