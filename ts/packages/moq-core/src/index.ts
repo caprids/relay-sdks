@@ -1,5 +1,10 @@
 export type { KeyValuePair, LocationFilter, MessageParameters, TrackNamespace } from './protocol/control-messages.js';
-export { MOQT_PROTOCOL_ID, PUBLISH_DONE_STATUS, REQUEST_ERROR_CODE } from './protocol/control-messages.js';
+export {
+  MAX_NAMESPACE_FIELDS,
+  MOQT_PROTOCOL_ID,
+  PUBLISH_DONE_STATUS,
+  REQUEST_ERROR_CODE,
+} from './protocol/control-messages.js';
 export { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './protocol/errors.js';
 export type { FetchStreamEntry, MoqtObject, ObjectStatus } from './protocol/object-stream.js';
 export { MAX_OBJECT_PAYLOAD_LENGTH } from './protocol/object-stream.js';

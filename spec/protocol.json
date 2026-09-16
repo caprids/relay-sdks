@@ -13,6 +13,7 @@
     }
   },
   "limits": {
-    "maxObjectPayloadBytes": 16777216
+    "maxObjectPayloadBytes": 16777216,
+    "maxNamespaceFields": 32
   }
 }

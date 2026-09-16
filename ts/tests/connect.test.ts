@@ -61,6 +61,20 @@ describe('connectRelay', () => {
     },
   );
 
+  it('rejects oversized namespaces without consuming a request ID and accepts 32 fields', async () => {
+    const fake = await connectFake();
+    const namespace = Array.from({ length: 32 }, (_, index) => `field-${index}`);
+    expect(() => fake.connection.subscribe({ namespace: [...namespace, 'extra'], track: 'events' })).toThrow(
+      /at most 32/,
+    );
+    expect(() =>
+      fake.connection.tracks.subscribe({ trackNamespace: [...namespace, 'extra'], trackName: 'events' }),
+    ).toThrow(/at most 32/);
+    fake.connection.subscribe({ namespace, track: 'events' });
+    const request = await fake.nextRequestStream();
+    expect(await request.firstMessage).toMatchObject({ requestId: 0, trackNamespace: namespace });
+  });
+
   it('subscribes to arbitrary binary tracks without WebTransport globals, a catalog, or media timestamps', async () => {
     vi.stubGlobal('WebTransport', undefined);
     const fake = await connectFake();

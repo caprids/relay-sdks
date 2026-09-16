@@ -39,6 +39,33 @@ function receive(subscriber: RelayConnection, track: string) {
 }
 
 describe('connectRelayPublisher', () => {
+  it('rejects oversized namespaces before resolving credentials or opening transport', async () => {
+    const getToken = vi.fn();
+    const createTransport = vi.fn();
+    await expect(
+      connectRelayPublisher({ url, namespace: new Array(33).fill('field'), getToken, createTransport }),
+    ).rejects.toThrow(/at most 32/);
+    expect(getToken).not.toHaveBeenCalled();
+    expect(createTransport).not.toHaveBeenCalled();
+  });
+
+  it('publishes with 32 namespace fields and diagnoses track-name type separately from emptiness', async () => {
+    const hub = createRelayHub();
+    cleanup.push(() => hub.destroy());
+    const namespace = Array.from({ length: 32 }, (_, index) => `field-${index}`);
+    const publisher = await connectRelayPublisher({ url, namespace, createTransport: hub.connectPublisher });
+    cleanup.push(() => publisher.close());
+    expect(() => publisher.publish({ track: 7 as unknown as string })).toThrow('Track name must be a string');
+    expect(() => publisher.publish({ track: '' })).toThrow('Track name must be non-empty');
+    const events = publisher.publish({ track: 'events' });
+    const subscriber = await connectRelay({ url, createTransport: hub.connectSubscriber });
+    cleanup.push(() => subscriber.close());
+    const objects: MoqtObject[] = [];
+    subscriber.subscribe({ namespace, track: 'events' }, { onObject: (object) => objects.push(object) });
+    await events.write(new Uint8Array([1]));
+    await vi.waitFor(() => expect(objects).toHaveLength(1));
+  });
+
   it('publishes raw binary data through a soliciting relay into the SDK subscriber without a catalog or media', async () => {
     const { publisher, subscriber, hub } = await connectHub();
     const events = publisher.publish({ track: 'events' });

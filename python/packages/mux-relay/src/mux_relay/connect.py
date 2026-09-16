@@ -8,6 +8,7 @@ from types import TracebackType
 from typing import Self
 
 from moq_core import (
+    MAX_NAMESPACE_FIELDS,
     Closed,
     FetchHandle,
     FetchHandlers,
@@ -47,6 +48,8 @@ def _validate_namespace(namespace: Sequence[str]) -> None:
         or any(not isinstance(field, str) or not field for field in namespace)
     ):
         raise TypeError("A subscription namespace must contain non-empty string fields")
+    if len(namespace) > MAX_NAMESPACE_FIELDS:
+        raise ValueError(f"A subscription namespace must contain at most {MAX_NAMESPACE_FIELDS} fields")
 
 
 class _BorrowedTracks:

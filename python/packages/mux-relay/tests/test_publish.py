@@ -448,6 +448,34 @@ class TestConnectRelayPublisher:
         with pytest.raises(RelayTimeoutError, match="timed out"):
             await events.write(bytes([2]))
 
+    async def test_rejects_oversized_namespace_before_token_or_transport(self) -> None:
+        def forbidden(*args: Any) -> Any:
+            pytest.fail("oversized namespace must fail before token or transport")
+
+        with pytest.raises(ValueError, match="at most 32"):
+            await connect_relay_publisher(
+                URL, namespace=["field"] * 33, get_token=forbidden, create_transport=forbidden
+            )
+
+    async def test_publishes_32_fields_after_invalid_track_names(self, cleanup: Cleanup) -> None:
+        hub = create_relay_hub()
+        cleanup.append(hub.destroy)
+        namespace = [f"field-{index}" for index in range(32)]
+        publisher = await connect_relay_publisher(URL, namespace=namespace, create_transport=hub.connect_publisher)
+        cleanup.append(publisher.close)
+        invalid: Any = 7
+        with pytest.raises(TypeError, match="must be a string"):
+            publisher.publish(invalid)
+        with pytest.raises(TypeError, match="must be non-empty"):
+            publisher.publish("")
+        events = publisher.publish("events")
+        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        cleanup.append(subscriber.close)
+        objects: list[MoqtObject] = []
+        subscriber.subscribe(namespace, "events", SubscriptionHandlers(on_object=objects.append))
+        await events.write(bytes([1]))
+        await wait_for(lambda: len(objects) == 1)
+
     async def test_rejects_an_empty_namespace_and_track_name(self, cleanup: Cleanup) -> None:
         hub = create_relay_hub()
         cleanup.append(hub.destroy)

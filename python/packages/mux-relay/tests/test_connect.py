@@ -80,6 +80,21 @@ class TestConnectRelay:
             request_id=0, track_namespace=["live", "room/42"], track_name="events"
         )
 
+    async def test_namespace_limit_rejects_before_request_id_and_accepts_32_fields(
+        self, connections: list[RelayConnection]
+    ) -> None:
+        fake, connection, _ = await connect_fake(connections)
+        namespace = [f"field-{index}" for index in range(32)]
+        with pytest.raises(ValueError, match="at most 32"):
+            connection.subscribe([*namespace, "extra"], "events")
+        with pytest.raises(ValueError, match="at most 32"):
+            connection.tracks.subscribe(
+                MoqtSubscribeOptions(track_namespace=[*namespace, "extra"], track_name="events")
+            )
+        connection.subscribe(namespace, "events")
+        request = await fake.next_request_stream()
+        assert await request.first_message == Subscribe(request_id=0, track_namespace=namespace, track_name="events")
+
     async def test_subscribes_to_arbitrary_binary_tracks_without_a_catalog_or_media_timestamps(
         self, connections: list[RelayConnection]
     ) -> None:

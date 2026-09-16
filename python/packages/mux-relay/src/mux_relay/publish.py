@@ -16,6 +16,7 @@ from types import TracebackType
 from typing import Literal, Self
 
 from moq_core import (
+    MAX_NAMESPACE_FIELDS,
     MAX_OBJECT_PAYLOAD_LENGTH,
     Closed,
     KeyValuePair,
@@ -578,7 +579,9 @@ class RelayPublisher:
         if self._closing:
             raise RelayClosedError("Relay publisher is closed")
 
-        if not isinstance(track, str) or len(track) == 0:
+        if not isinstance(track, str):
+            raise TypeError("Track name must be a string")
+        if len(track) == 0:
             raise TypeError("Track name must be non-empty")
 
         if track in self._tracks:
@@ -640,6 +643,8 @@ async def connect_relay_publisher(
 
     if len(fields) == 0 or any(not isinstance(part, str) or len(part) == 0 for part in fields):
         raise TypeError("A publisher namespace must contain non-empty string fields")
+    if len(fields) > MAX_NAMESPACE_FIELDS:
+        raise ValueError(f"A publisher namespace must contain at most {MAX_NAMESPACE_FIELDS} fields")
 
     options = ConnectRelayOptions(
         url=url,
