@@ -172,13 +172,11 @@ class TestFailureEndsTrack:
 
         assert failure_ends_track(timeout, operation="write", bound=False) is False
 
-    def test_a_timeout_on_a_bound_write_is_terminal(self) -> None:
-        # One deadline covers the wait for demand and the transport write (#19), and the SDK retires
-        # the track when it fires on a bound one. Until #31 exposes `closed`, the only way to see
-        # that is the writer state `track_has_ended` reads, not the exception class.
+    def test_a_timeout_on_a_bound_write_is_retryable(self) -> None:
+        # A bound write resets only its stream, just like a multi-object group.
         timeout = RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
 
-        assert failure_ends_track(timeout, operation="write", bound=True) is True
+        assert failure_ends_track(timeout, operation="write", bound=True) is False
 
     def test_a_closed_track_is_always_terminal(self) -> None:
         closed = RelayClosedError("Published track is closed")
@@ -186,12 +184,11 @@ class TestFailureEndsTrack:
         assert failure_ends_track(closed, operation="write", bound=False) is True
         assert failure_ends_track(closed, operation="group", bound=True) is True
 
-    def test_a_bare_relay_error_on_a_bound_write_is_terminal(self) -> None:
-        # What a relay re-bind during a bound write raises today (#31); the dedicated subclass of
-        # RelayClosedError that lands with it is covered by the isinstance check above.
+    def test_a_bare_relay_error_on_a_bound_write_is_retryable(self) -> None:
+        # A changed relay subscription cancels the operation, leaving the track open.
         rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
 
-        assert failure_ends_track(rebind, operation="write", bound=True) is True
+        assert failure_ends_track(rebind, operation="write", bound=True) is False
 
     def test_a_bare_relay_error_on_an_unbound_write_is_retryable(self) -> None:
         vanished = RelayError("Relay subscription ended before the write started")
@@ -311,7 +308,7 @@ class TestWriteEndedTrack:
 
         assert await write_ended_track(cast(Any, retired), rebind, bound=True) is True
         assert await write_ended_track(cast(Any, FakeTrack()), rebind, bound=True) is False
-        assert await write_ended_track(cast(Any, retired), rebind, bound=False) is False
+        assert await write_ended_track(cast(Any, retired), rebind, bound=False) is True
 
     async def test_a_closed_track_needs_no_confirmation(self) -> None:
         # A connection that went away leaves the writer un-retired while every write still fails.

@@ -324,7 +324,7 @@ class TestConnectRelayPublisher:
         assert on_timed[0].track_properties == track_properties
         assert on_raw[0].track_properties == []
 
-    async def test_reports_a_transport_write_failure_and_ends_that_track_without_silently_retrying(
+    async def test_reports_a_stream_open_failure_and_allows_a_fresh_write_without_silently_retrying(
         self, cleanup: Cleanup
     ) -> None:
         hub = create_relay_hub()
@@ -360,10 +360,10 @@ class TestConnectRelayPublisher:
 
         assert raised.value is failure
 
-        with pytest.raises(RelayClosedError, match="closed"):
-            await events.write(bytes([2]))
-
+        assert not events.closed
         assert hub.object_count("events") == 0
+        await events.write(bytes([2]))
+        await wait_for(lambda: hub.object_count("events") == 1)
 
     async def test_times_out_a_stalled_stream_open_and_aborts_a_late_stream_without_sending_payload_bytes(
         self, cleanup: Cleanup
@@ -381,7 +381,7 @@ class TestConnectRelayPublisher:
             async def stalling_open() -> SendStream:
                 streams[0] += 1
 
-                if streams[0] == 1:
+                if streams[0] != 2:
                     return await open_stream()
 
                 return await late_stream
@@ -399,8 +399,9 @@ class TestConnectRelayPublisher:
         with pytest.raises(RelayTimeoutError, match="timed out"):
             await events.write(bytes([1]))
 
-        with pytest.raises(RelayClosedError, match="closed"):
-            await events.write(bytes([2]))
+        assert not events.closed
+        await events.write(bytes([2]))
+        await wait_for(lambda: hub.object_count("events") == 1)
 
         class RecordingStream:
             def __init__(self) -> None:

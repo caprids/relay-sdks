@@ -125,10 +125,12 @@ transport writes. A `RelayTimeoutError` waiting for demand can be retried. If th
 namespace prefixes but none covers this publisher's namespace, the demand deadline instead raises
 `RelayNamespaceError`: check the token and namespace instead of blindly retrying. The track stays
 open, and a later matching solicitation can let it proceed. An ordinary absence of subscriber
-demand still raises `RelayTimeoutError`. A failure once a write is
-bound to a relay subscription ends that track, since an incomplete group may have reached the relay:
-a relay re-bind raises `RelayTrackEndedError`, a transport timeout keeps its `RelayTimeoutError`, and
-either way `track.closed` turns `True`, `bound` turns `False`, and `bindings()` terminates.
+demand still raises `RelayTimeoutError`. A failed or cancelled write resets its stream and leaves
+`track.closed` false while the publisher connection remains open. A relay subscription change
+raises `RelayError`; a transport deadline raises `RelayTimeoutError`. The next explicit write uses
+a new group ID. Choose fresh data or the next random-access point; already delivered bytes cannot
+be withdrawn. If demand disappeared, the next write waits for a new relay subscription, and
+`bindings()` continues reporting changes.
 
 Each write copies its bytes and sends one independent group containing one object. Await each
 write; a concurrent call raises `RelayWritePendingError` rather than growing a queue. Completion

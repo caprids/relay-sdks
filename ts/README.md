@@ -115,8 +115,10 @@ and connection-lifetime implementation. No camera, microphone, catalog, or times
 Publishing follows Relay's announce-and-serve ingest flow. `publish()` registers the track;
 `write()` waits for the relay to subscribe upstream before sending bytes. Start a subscriber to
 create that demand. The default 10-second write deadline covers both demand and transport writes.
-A timeout waiting for demand can be retried. A failure once a write is bound to a relay subscription
-ends that track, since an incomplete group may have reached the relay.
+A failed or cancelled write resets its stream and leaves the track open while the publisher
+connection remains open. The next explicit write uses a new group ID. After a timeout or relay
+subscription change, choose fresh data or the next random-access point; already delivered bytes
+cannot be withdrawn. If demand disappeared, the next write waits for a new relay subscription.
 
 Each write copies its bytes and sends one independent group containing one object. The payload is a
 `Uint8Array`; any other `ArrayBufferView` is accepted and copied as the raw bytes it spans, while a

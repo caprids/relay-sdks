@@ -83,15 +83,11 @@ The shutdown path joins the producer and drains both queues so its final encoded
 
 ## When a track ends under you
 
-The catalog uses a single-object write. A catalog write that never reached a relay subscription — demand that came and went, or a deadline
-spent waiting for it — costs one object; the track is still open and the next sample tries again.
-A catalog write that had bound to a subscription and then failed ends that track, and the name cannot be
-reused on this connection, so nothing on this publisher will ever carry it again. Media groups instead
-reset after an interrupted write and keep the track open. A closed media track or connection is still
-terminal. `RelayError` alone
-does not say which happened, so the example classifies the failure and then confirms it with the
-writer's own `bindings()`, which stops once a track is closed (`bound` cannot say it: `False` is
-equally what "nobody is subscribed" looks like).
+The catalog uses a single-object write. Failed writes and media groups reset their stream and keep
+the track open while the publisher connection remains open. The example drops failed media and
+retries catalog state explicitly; data that already reached the relay cannot be withdrawn.
+A closed track or connection is terminal. The example checks the writer's `closed` state after a
+write failure (`bound` cannot distinguish a closed track from one with no current subscribers).
 
 An ended track is reported once, with the error, on its own `audio track ended` / `video track ended`
 / `catalog track ended` line, and the run then **fails with a non-zero exit**. That is the default

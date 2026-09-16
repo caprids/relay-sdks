@@ -540,23 +540,12 @@ class TrackEnded(RuntimeError):
 
 
 def failure_ends_track(error: RelayError, *, operation: Literal["write", "group"], bound: bool) -> bool:
-    """Decide whether a failed publish left the track retired or only cost this one object.
+    """Only a closed track or connection makes a publish error terminal.
 
-    `python/README.md` states the rule the SDK implements: "A `RelayTimeoutError` waiting for demand
-    can be retried. A failure once a write is bound to a relay subscription ends that track". So a
-    single-object `write()` that had reached a relay subscription is terminal whatever it raised --
-    a timeout included, which is the case #19 describes -- while an unbound one, demand that came
-    and went or a deadline spent waiting for it, is not. A group is different: the SDK resets its
-    stream and keeps the track open for the next random-access point, so only a closed track ends it.
-
-    `RelayClosedError` is always terminal: it is what the next write raises once the track is
-    retired, which is the backstop for a write that bound after `bound` was sampled. #31 adds a
-    dedicated track-ended error as a subclass of it, so this check keeps working unchanged.
+    Single-object writes and groups both reset their stream after failure; demand before the
+    operation does not distinguish a transient failure from a closed track.
     """
-    if isinstance(error, RelayClosedError):
-        return True
-
-    return operation == "write" and bound
+    return isinstance(error, RelayClosedError)
 
 
 async def track_has_ended(track: RelayTrackWriter) -> bool:
@@ -577,17 +566,7 @@ async def track_has_ended(track: RelayTrackWriter) -> bool:
 
 
 async def write_ended_track(track: RelayTrackWriter, error: RelayError, *, bound: bool) -> bool:
-    """Whether a failed `write()` left this track retired, confirmed against the writer itself.
-
-    `bound` is sampled before the write, so it can be stale by one turn of the loop: demand that
-    disappears in that window makes a retryable failure look terminal. Confirming with the writer
-    keeps a viewer leaving at the wrong moment from ending an otherwise healthy run.
-    """
-    if not failure_ends_track(error, operation="write", bound=bound):
-        return False
-
-    # A closed track, publisher, or connection needs no confirmation, and its writer may never have
-    # been retired in the first place -- the connection under it went away instead.
+    """Check the writer after failure; sampled demand does not indicate whether it ended."""
     return isinstance(error, RelayClosedError) or await track_has_ended(track)
 
 

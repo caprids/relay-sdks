@@ -54,7 +54,8 @@ export interface RelayTrackWriter {
    * transport accepts the complete group, not when a downstream viewer acknowledges it.
    * Only one write may be pending; await it before writing again. Any ArrayBufferView is
    * copied as its raw bytes; anything else is a TypeError that leaves the track usable.
-   * A failed bound write ends this track; a timeout waiting for demand permits another write.
+   * Failure resets this group and leaves the track usable while the connection is open.
+   * Data may already have reached the relay; choose the next object explicitly (no automatic retry).
    */
   write(
     payload: ArrayBufferView,
@@ -212,7 +213,6 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
             operation.cancelled = true;
             operation.failure = error;
             operation.writer?.abort(error);
-            if (kind === 'write' && operation.alias !== undefined) end();
             if (active === operation) active = undefined;
             operation.cleanup();
             wake();
