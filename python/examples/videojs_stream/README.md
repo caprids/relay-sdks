@@ -3,7 +3,9 @@
 `stream.py` publishes a live H.264 stream (and optional Opus audio) to a Relay namespace in the
 exact shape the Video.js v10 MoQ engine consumes, then prints the `moqt://` source URL to hand the
 player. By default it generates a test pattern (color bars, a bouncing square, and a clock so you can
-read the glass-to-glass delay); with `--input` it transcodes a media file instead.
+read the glass-to-glass delay), with a short beep whenever the square hits a wall so you can check
+audio/video sync manually. Unmute the player and compare each beep with the square's bounce; the
+first beep is at two seconds. With `--input` it transcodes a media file instead.
 
 Media encoding uses PyAV's bundled FFmpeg (libx264, libopus), installed by the workspace's
 `examples` dependency group. No system ffmpeg is needed.
@@ -35,7 +37,7 @@ Options:
 | `--loop` | Loop the input file |
 | `--width`, `--height`, `--fps`, `--bitrate`, `--gop` | Test-pattern size and encoder settings (defaults 640x360, 30 fps, 1.5 Mbit/s target, 2 s GOP) |
 | `--rate-control abr\|cbr` | `abr` (default): content-dependent bitrate target; `cbr`: add filler to approach the requested video bitrate for bandwidth tests |
-| `--audio auto\|tone\|off` | `auto`: the file's audio, none for the pattern; `tone`: a 440 Hz sine; `off`: video only |
+| `--audio auto\|tone\|off` | `auto` (default): the file's audio, or wall-hit beeps for the pattern; `tone`: a 440 Hz sine; `off`: video only |
 | `--duration SECONDS` | Stop after a while (default: until Ctrl-C) |
 | `--on-track-end stop\|continue` | What to do if a track closes mid-run: `stop` (default) fails the run; `continue` keeps publishing the surviving tracks |
 | `--verify` | Also subscribe in-process and report the catalog, groups, keyframes, and timestamps received |

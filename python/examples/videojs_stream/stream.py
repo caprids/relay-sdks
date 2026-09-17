@@ -80,6 +80,7 @@ Log = Callable[[str, dict[str, Any]], None]
 MICROSECOND = Fraction(1, MICROSECONDS_PER_SECOND)
 OPUS_RATE = 48_000
 OPUS_FRAME_SAMPLES = 960  # 20 ms
+BOUNCE_RATES = (Fraction(7, 20), Fraction(1, 2))  # Wall-to-wall trips per second (x, y).
 CATALOG_RETRY_DELAY = 1.0  # seconds between failed attempts while demand remains
 
 
@@ -346,8 +347,7 @@ def pattern_frames(width: int, height: int, fps: int) -> Iterator[tuple[av.Video
         # A bouncing square makes motion (and dropped frames) obvious.
         travel_x = width - square
         travel_y = height - square
-        phase_x = (seconds * 0.35) % 2.0
-        phase_y = (seconds * 0.5) % 2.0
+        phase_x, phase_y = (float(Fraction(index, fps) * rate % 2) for rate in BOUNCE_RATES)
         x = int(travel_x * (phase_x if phase_x <= 1 else 2 - phase_x))
         y = int(travel_y * (phase_y if phase_y <= 1 else 2 - phase_y))
         canvas[y : y + square, x : x + square] = (255, 255, 255)
@@ -381,6 +381,33 @@ def tone_frames(frequency: float = 440.0, level: float = 0.1) -> Iterator[tuple[
         frame.sample_rate = OPUS_RATE
         yield frame, offset * MICROSECONDS_PER_SECOND // OPUS_RATE
         index += 1
+
+
+def bounce_frames() -> Iterator[tuple[av.AudioFrame, int]]:
+    """An 80 ms beep at each wall hit, with silence between hits, on the pattern's timeline."""
+    offset = 0
+
+    while True:
+        positions = np.arange(OPUS_FRAME_SAMPLES) + offset
+        # Integer phase arithmetic keeps even fractional collision times aligned indefinitely.
+        # The initial corner is a starting position, not a collision. At a corner hit, play once.
+        age = np.full(OPUS_FRAME_SAMPLES, np.inf)
+        for rate in BOUNCE_RATES:
+            phase = positions * rate.numerator
+            period = OPUS_RATE * rate.denominator
+            since_hit = (phase % period) / (OPUS_RATE * rate.numerator)
+            age = np.minimum(age, np.where(phase >= period, since_hit, np.inf))
+
+        active = age < 0.08
+        t = np.where(active, age, 0.0)
+        # Short attack/release ramps avoid clicks while preserving a clear onset.
+        envelope = np.minimum(np.clip(t / 0.003, 0, 1), np.clip((0.08 - t) / 0.005, 0, 1))
+        mono = (np.sin(2 * math.pi * 880 * t) * envelope * active * 0.2 * 32767).astype(np.int16)
+        interleaved = np.repeat(mono, 2).reshape(1, -1)
+        frame = av.AudioFrame.from_ndarray(interleaved, format="s16", layout="stereo")
+        frame.sample_rate = OPUS_RATE
+        yield frame, offset * MICROSECONDS_PER_SECOND // OPUS_RATE
+        offset += OPUS_FRAME_SAMPLES
 
 
 def file_frames(
@@ -445,7 +472,7 @@ class Producer:
         self.error: BaseException | None = None
         self._thread = threading.Thread(target=self._run, name="media-producer", daemon=True)
 
-        if config.audio == "tone" or (config.audio == "auto" and config.input is not None and self._input_has_audio()):
+        if config.audio == "tone" or (config.audio == "auto" and (config.input is None or self._input_has_audio())):
             self.audio = AudioEncoder()
 
     def _input_has_audio(self) -> bool:
@@ -500,7 +527,9 @@ class Producer:
                 )
             else:
                 video = pattern_frames(config.width, config.height, config.fps)
-                audio = tone_frames() if self.audio is not None else None
+                audio = None
+                if self.audio is not None:
+                    audio = tone_frames() if config.audio == "tone" else bounce_frames()
                 frames = _interleave(video, audio)
 
             for frame, timestamp_us in frames:
@@ -1303,7 +1332,8 @@ def parse_args(argv: list[str]) -> Config:
         "--audio",
         choices=["auto", "tone", "off"],
         default="auto",
-        help="auto: the input file's audio as Opus, none for the pattern; tone: a 440 Hz sine; off: video only",
+        help="auto: the input file's audio as Opus, wall-hit beeps for the pattern; "
+        "tone: a 440 Hz sine; off: video only",
     )
     parser.add_argument("--duration", type=float, help="Stop after this many seconds (default: run until Ctrl-C)")
     parser.add_argument(
