@@ -142,6 +142,7 @@ class RelayGroupWriter:
     ) -> None:
         """Append one object. Returns when the transport accepts it. Bytes are copied.
 
+        Properties are encoded as supplied; the relay may transform them before delivery.
         Each call has its own ``write_timeout`` deadline; expiry resets the group and leaves the
         track open. ``status`` is only meaningful for an empty payload (an end-of-group or end-of-track marker).
         """
@@ -386,6 +387,7 @@ class RelayTrackWriter:
         writing again. Bytes are copied. Failure resets this group and leaves the track usable
         while the connection is open. Data may already have reached the relay; choose the next
         object explicitly (no automatic retry).
+        Properties are encoded as supplied; the relay may transform them before delivery.
         """
         self._assert_writable()
 
@@ -558,7 +560,8 @@ class RelayPublisher:
     ) -> RelayTrackWriter:
         """Register a data track without starting capture or publishing a media catalog.
 
-        ``track_properties`` carries explicit track metadata; raw data has no implied timestamp unit.
+        ``track_properties`` is encoded as supplied; the SDK adds no default timescale.
+        The relay may add, drop, or rewrite properties before delivery to subscribers; see README.
         ``write_timeout`` (seconds) bounds relay demand and the transport write together.
         """
         self._lifetime.assert_open()

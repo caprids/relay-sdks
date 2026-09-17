@@ -159,9 +159,19 @@ automatic retry.
 Optional `track_properties` on `publish()` and `properties` on `write()` carry explicit protocol
 metadata as `KeyValuePair` values. Property types and even-type values must be non-negative 64-bit
 integers (excluding `bool`); odd-type values must expose a bytes-like buffer. Invalid properties
-raise `TypeError` before a write starts or a track is registered. Raw tracks have no default timescale
-or LOC framing. Objects are
-limited to 16 MiB. `events.close()` cancels an outstanding write and ends that track; other tracks
+raise `TypeError` before a write starts or a track is registered. The SDK adds no default timescale,
+timestamp, or LOC media packaging. Objects are limited to 16 MiB.
+
+Properties are encoded as supplied, but subscribers see the relay's output. With relay 0.14.17,
+tracks without a declared Timescale (`0x08`) received relay-generated timestamps and a microsecond
+timescale. Declaring `track_properties=[KeyValuePair(0x08, 1_000_000)]` preserved supplied Timestamp
+(`0x10`) values in the tests; other tested object properties, including Video Config, were dropped.
+Missing timestamps were synthesized even on declared tracks. Keep application metadata that must
+arrive intact in payloads, and read the received track timescale when interpreting timestamps. See
+[Relay property handling](../spec/behavior.md#relay-property-handling) for the version-specific
+observations and media guidance.
+
+`events.close()` cancels an outstanding write and ends that track; other tracks
 keep running. `await publisher.close()` ends all tracks, retracts the namespace, and waits for
 transport shutdown. Track names cannot be reused within a publisher connection, including after
 their writer closes.

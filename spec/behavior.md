@@ -85,8 +85,10 @@ against that file.
 - There is no publisher-side retention or replay. Late-subscriber behavior depends on relay caching
   and subscription filters.
 - A failed write may have delivered partial data. There is no automatic retry.
-- Track properties on registration and object properties on a write carry explicit protocol
-  metadata. Raw tracks have no default timescale or LOC framing.
+- The publisher encodes supplied track and object properties as protocol metadata. The SDK adds no
+  default timescale, timestamp, or LOC media packaging. Subscribers expose the properties received
+  from the relay, which may differ from those sent by the publisher; end-to-end preservation of
+  arbitrary properties is not guaranteed. See [Relay property handling](#relay-property-handling).
 - Object payloads are limited to the size in `protocol.json`.
 - Closing a track writer cancels an outstanding write and ends that track; other tracks continue.
   Closing the publisher ends all tracks, retracts the namespace, and waits for transport shutdown.
@@ -102,6 +104,34 @@ against that file.
   observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
   Demand observers emit the current state first, include replacement subscriptions, and finish when
   the track ends. A closed track reports no demand. Implemented in both SDKs.
+
+### Relay property handling
+
+These are deployment observations, separate from the SDK guarantees above. Tests against
+`sjc.relay.mux.global` running relay 0.14.17 on 2026-09-16 reproduced the following:
+
+- A track without declared Timescale (`0x08`) arrived with Timescale = 1,000,000 and
+  Default Publisher Group Order (`0x22`, decimal 34) = 2 (descending). The relay stamped its own
+  timestamps on objects, including objects with a publisher-supplied Timestamp (`0x10`).
+- With track Timescale = 1,000,000 declared, supplied Timestamp values were preserved. Objects
+  without a Timestamp still received a relay-generated one. The relay still included Default
+  Publisher Group Order in the track properties.
+- Of the object properties tested, Timestamp was the only type received. Object-level Timescale
+  (`0x08`), Video Config (`0x0D`), and the tested values of types `0x02` and `0x05` were dropped.
+  This is not an exhaustive registry compatibility test or a promise about future relay versions.
+  Object payloads and IDs in these tests were preserved.
+
+For publisher-defined media timing, declare a track timescale and put timestamps in that unit on
+objects. Interpret received timestamps using the received track timescale; a timestamp's presence
+alone does not establish that the publisher supplied it. Do not treat a relay-generated timestamp
+as the application's event time or a synchronized wall clock. Put application metadata that must
+arrive intact in the payload (or a separate metadata track's payload). For the Video.js media
+example, codec configuration is also carried in the catalog's `initDataList`, so decoding does not
+depend on Video Config object-property forwarding.
+
+Evidence and protocol naming: [issue #23](https://github.com/muxinc/relay-sdks/issues/23) and the
+relay release's
+[track property implementation](https://github.com/moq-dev/moq/blob/b2f26b920f617c033ef7a393bcc894f0bb9b350b/rs/moq-net/src/ietf/properties.rs).
 
 ## Package boundaries
 
