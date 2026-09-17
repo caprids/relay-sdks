@@ -20,18 +20,13 @@ backfill is a separate feature. The test fixtures now send the 0.14.17 pull para
 Against moq-relay 0.14.17, re-subscribing to the same namespace and track after
 `on_done` / `onDone` can replay cached objects and immediately receive another
 `PUBLISH_DONE`. An application that re-subscribes from every done callback can
-therefore generate a request loop while the publisher is absent. This is still
-reproducible; successful delivery after a restart does not clear
-[issue #21](https://github.com/muxinc/relay-sdks/issues/21).
+therefore generate a request loop while the publisher is absent. See
+[issue #21](https://github.com/muxinc/relay-sdks/issues/21) for reproduction evidence
+and relay follow-up.
 
 Each `subscribe()` creates an independent request, including its starting location.
-It does not resume the preceding subscription. In a captured restart run, the relay
-sent each terminal response on a distinct request, with a distinct track alias;
-repeated payloads crossed subscription boundaries. The loop also occurred without
-cancelling the preceding subscription, so a cancellation/reset race is not necessary
-to trigger it. The SDK does not retry automatically or suppress objects received by
-new subscriptions. See the [investigation](investigations/issue-21.md) for the scope
-and limits of this evidence.
+It does not resume the preceding subscription. The SDK does not retry automatically
+or suppress objects received by new subscriptions.
 
 Applications that follow a restarting publisher should apply these policies:
 
