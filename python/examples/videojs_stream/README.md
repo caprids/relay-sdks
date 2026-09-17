@@ -113,8 +113,8 @@ The shutdown path joins the producer and drains both queues so its final encoded
 ## Publisher replacement
 
 A stopped or killed publisher can leave an attached viewer silent while its subscriber connection
-stays open. In the mux.global 0.14.17 tests, publisher-death notification took about 37 seconds after
-SIGKILL; this is an observation, not a deadline. Starting this script again on the same namespace
+stays open, and relay publisher-death notification can be delayed. Starting this script again on
+the same namespace
 does not guarantee immediate recovery for attached viewers. Subscribing soon after an orderly
 retract/re-announce can also fail transiently.
 

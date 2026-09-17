@@ -19,20 +19,12 @@ The SDKs do not automatically reconnect or resubscribe.
 `SUBSCRIBE_OK` arrives, this timer is disarmed. It is not a time-to-first-object deadline or an
 inactivity detector. Transport keepalive likewise does not prove the publisher is alive.
 
-In the mux.global 0.14.17 campaign on 2026-09-16, a TypeScript subscriber received `PUBLISH_DONE`
-about **37 seconds after a Python publisher was SIGKILLed**, without a subgroup reset. Restarting
-that publisher caused roughly 30 stalled player samples before playback recovered. The earlier
-2026-09-15 reproduction also observed fresh subscribers receiving the replacement while attached
-subscribers stayed silent, and `404 dropped` or initial-response timeouts for **5–8 seconds** after
-an orderly retract/re-announce. These are observations, not timeout settings, guaranteed upper
-bounds, or reasons to treat the `internal error` text as a stable error classifier.
-
-A 2026-09-17 Python check using this SDK revision reproduced a **39.9-second** delay from SIGKILL
-to `PUBLISH_DONE`. A fresh subscriber connected while the relay still retained the dead source
-received only that source's final cached object, not fresh replacement data. Both subscriber
-connections stayed open. A successful subscribe on a new connection is therefore insufficient
-as a recovery check. In a second run, a new subscription after the delayed `PUBLISH_DONE`
-received 40 objects from the replacement; the original subscriptions received none from it.
+With mux.global relay 0.14.17, publisher-death notifications can be delayed while the
+subscriber connection stays open. New subscriptions during this interval may receive only the
+old publisher's cached objects. After an orderly retract/re-announce, new subscriptions may
+also encounter transient 404s or initial-response timeouts. See
+[issue #34](https://github.com/muxinc/relay-sdks/issues/34) for measured delays and reproduction
+evidence; these observations do not define a recovery deadline.
 
 An orderly publisher close helps the relay learn about shutdown sooner, but neither graceful
 closure nor successful replacement writes promise transparent handoff. Write completion only
@@ -85,4 +77,4 @@ provide this discovery channel.
 For a fixed namespace, keep the recovery policy above and budget for relay convergence. SDK-side
 retry can mitigate a stall, but cannot rebind an existing subscription at the relay or guarantee a
 handoff latency. Prompt upstream-death notification, replacement-source routing, and stale state
-after retract remain relay-side work; this guidance does not close #34.
+after retract depend on the relay.
