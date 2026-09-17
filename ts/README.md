@@ -78,6 +78,12 @@ ordering across streams, JSON decoding, clock synchronization, or media scheduli
 resets and connection closure explicitly; this API makes no exactly-once or gap-free delivery promise.
 `onDone` is the publisher's control notification, and may precede trailing objects in transit.
 
+Re-subscribing after `onDone` creates a new request and can replay cached objects followed
+by another done notification while the publisher is absent. Apply retry backoff to done callbacks
+as well as retryable request errors, and define any continuity policy in the application. See
+[publisher restarts and resubscription](../spec/relay-interop.md#publisher-restarts-and-resubscription)
+for retry, trailing-object, and publisher-generation guidance.
+
 `connectRelay` has a deadline covering token resolution and both handshakes. Its optional abort
 signal controls the connection's entire lifetime. An explicit `jwt` query parameter takes precedence
 over `getToken`, matching the current Relay connection authentication convention. Every deadline
