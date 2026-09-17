@@ -15,6 +15,53 @@ Next Object + current-group `FILL_PARAMETERS` pull therefore has no cached publi
 content to fill; the publisher serves subsequent writes. Adding publisher retention and
 backfill is a separate feature. The test fixtures now send the 0.14.17 pull parameters.
 
+## Publisher restarts and resubscription
+
+Against moq-relay 0.14.17, re-subscribing to the same namespace and track after
+`on_done` / `onDone` can replay cached objects and immediately receive another
+`PUBLISH_DONE`. An application that re-subscribes from every done callback can
+therefore generate a request loop while the publisher is absent. This is still
+reproducible; successful delivery after a restart does not clear
+[issue #21](https://github.com/muxinc/relay-sdks/issues/21).
+
+Each `subscribe()` creates an independent request, including its starting location.
+It does not resume the preceding subscription. In a captured restart run, the relay
+sent each terminal response on a distinct request, with a distinct track alias;
+repeated payloads crossed subscription boundaries. The loop also occurred without
+cancelling the preceding subscription, so a cancellation/reset race is not necessary
+to trigger it. The SDK does not retry automatically or suppress objects received by
+new subscriptions. See the [investigation](investigations/issue-21.md) for the scope
+and limits of this evidence.
+
+Applications that follow a restarting publisher should apply these policies:
+
+- Keep at most one pending retry per logical track. Schedule retries for done
+  notifications as well as retryable request errors; a delay used only for 404
+  responses does not bound an accepted-subscription/done loop. Cancel pending retries
+  when the application stops, changes source, or closes the connection.
+- Use capped exponential backoff with jitter and an application retry budget. For
+  example, start around 500 ms and grow to a 5 s cap. Do not reset backoff solely on
+  `SUBSCRIBE_OK` or a cached object: neither proves that a new publisher is live.
+  Reset only on application-defined progress, such as advancing sequence numbers
+  from the expected publisher generation. Backoff limits request load; it does not
+  eliminate replay or guarantee recovery.
+- Treat done as a control notification, not a data-drained signal. Trailing objects
+  may arrive afterward. Define how long to drain a retired subscription before
+  cancelling it, or explicitly accept losing trailing objects when cancelling
+  immediately. Bound the number and lifetime of retired subscriptions.
+- If continuity or duplicate suppression matters, put a publisher generation and
+  sequence number in the payload and define the application's replay policy.
+  Group/object IDs alone are insufficient across restarts because a new publisher
+  can restart its counters. Do not discard all lower group IDs as stale.
+- Choose subscription location filters to match the application's history needs.
+  A new subscription's filter is not an exactly-once resume token across publisher
+  generations, and opening another connection is not a cache invalidation guarantee.
+
+Record done status and reason for diagnosis. Both `track ended` (2) and `internal
+error` (0) have been observed around publisher shutdown; neither identifies a new
+publisher generation. Preserve actual errors rather than interpreting all status-0
+responses as harmless shutdowns.
+
 ## Reproduce against a local relay
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium

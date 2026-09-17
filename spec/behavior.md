@@ -41,6 +41,10 @@ against that file.
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The SDK adds no application queue, no
   ordering across streams, no payload decoding, no clock synchronization, and no media scheduling.
+- Each new subscription is independent; re-subscribing does not resume the preceding request.
+  Relay caching and location filters can deliver the same object again across subscriptions,
+  including after a publisher restart. Applications own retry backoff and any cross-subscription
+  continuity policy; see [publisher restarts and resubscription](relay-interop.md#publisher-restarts-and-resubscription).
 - The request timeout bounds only the subscription's initial response. An accepted subscription
   has no application inactivity deadline. Keeping an idle transport connected depends on peer
   traffic or transport-provided keepalive; the SDK does not schedule its own keepalive. The Python

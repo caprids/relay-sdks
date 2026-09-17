@@ -84,6 +84,12 @@ delivery. Handle subgroup resets and connection closure explicitly; this API mak
 or gap-free delivery promise. `on_done` is the publisher's control notification, and may precede
 trailing objects in transit.
 
+Re-subscribing after `on_done` creates a new request and can replay cached objects followed
+by another done notification while the publisher is absent. Apply retry backoff to done callbacks
+as well as retryable request errors, and define any continuity policy in the application. See
+[publisher restarts and resubscription](../spec/relay-interop.md#publisher-restarts-and-resubscription)
+for retry, trailing-object, and publisher-generation guidance.
+
 `connect_relay` has one deadline (`connect_timeout`, seconds) covering token resolution and both
 handshakes. The optional `CancellationToken` controls the connection's entire lifetime: cancelling
 it closes an established connection, and the `closed` future carries the reason. An explicit `jwt`
