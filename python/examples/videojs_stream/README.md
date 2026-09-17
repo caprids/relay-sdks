@@ -75,6 +75,12 @@ An unrelated encoder or publishing error still fails the run even if it coincide
 | `video` | LOC-packaged H.264 in AVCC form (length-prefixed NAL units, parameter sets out of band). One MOQT group per GOP: object 0 is the keyframe, later objects the P-frames. Object properties: Timestamp (0x10, microseconds), Timescale (0x08), and Video Config (0x0D, the avcC) on keyframes. |
 | `audio` | LOC-packaged Opus at 48 kHz stereo, one 20 ms frame per group (every audio frame is a random-access point). |
 
+The table describes what this publisher sends. Relay 0.14.17 preserved the declared track timescale
+and object timestamps in the tested media flow, but dropped the object-level Timescale and Video
+Config properties. The example retains those properties for consumers that support them; playback
+through this relay relies on the catalog's `initDataList` for decoder configuration. See
+[Relay property handling](../../../spec/behavior.md#relay-property-handling).
+
 All three tracks declare Timescale = 1,000,000 as a track property, matching the Video.js publisher.
 Video is written only while the relay has a live subscription for the track; each new subscription
 starts at the next keyframe, and a subscription that changes mid-GOP resets that group and resumes
@@ -144,9 +150,10 @@ finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skip
 | `endedTracks` | Present only when a track ended, listing which |
 
 `--verify` runs an in-process subscriber on the same tracks and prints what a player would see, which
-is how the example is checked without a browser. Expect `keyframesWithConfig=0`: the relay drops the
-odd-typed Video Config object property on its way through, so players configure their decoder from
-the avcC in the catalog's `initDataList` (which is why the catalog carries it).
+is how the example is checked without a browser. With relay 0.14.17, expect
+`keyframesWithConfig=0`: its output omits the Video Config object property, so players configure
+their decoder from the avcC in the catalog's `initDataList`. This counter does not indicate a missing
+publisher configuration or a decoder failure; another relay may forward the property.
 
 Verified against `sjc.relay.mux.global` on 2026-09-11: the catalog, one video group per GOP with a
 keyframe at object 0, and 50 Opus objects per second all arrived at the in-process subscriber for

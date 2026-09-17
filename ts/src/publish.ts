@@ -22,7 +22,10 @@ export interface PublishProperty {
 
 export interface PublishTrackOptions {
   track: string;
-  /** Explicit track metadata; raw data has no implied timestamp unit. */
+  /**
+   * Track metadata sent to the relay. The SDK adds no default timescale; the relay may
+   * add, drop, or rewrite properties before delivery to subscribers. See README.
+   */
   trackProperties?: readonly PublishProperty[];
   /** Deadline for relay demand and stream writes. Default 10 seconds, maximum 2147483647. */
   writeTimeoutMs?: number;
@@ -32,7 +35,10 @@ export interface RelayGroupWriter {
   readonly groupId: number;
   readonly objectCount: number;
   readonly closed: boolean;
-  /** Append one object, starting at ID 0. Each write has its own writeTimeoutMs deadline. */
+  /**
+   * Append one object, starting at ID 0. Each write has its own writeTimeoutMs deadline.
+   * Properties are encoded as supplied; the relay may transform them before delivery.
+   */
   write(
     payload: ArrayBufferView,
     options?: { properties?: readonly PublishProperty[]; status?: ObjectStatus },
@@ -55,6 +61,7 @@ export interface RelayTrackWriter {
    * transport accepts the complete group, not when a downstream viewer acknowledges it.
    * Only one write may be pending; await it before writing again. Any ArrayBufferView is
    * copied as its raw bytes; anything else is a TypeError that leaves the track usable.
+   * Properties are encoded as supplied; the relay may transform them before delivery.
    * Failure resets this group and leaves the track usable while the connection is open.
    * Data may already have reached the relay; choose the next object explicitly (no automatic retry).
    */

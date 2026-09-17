@@ -45,7 +45,11 @@ TRACK_TIMESCALE_PROPERTIES = [KeyValuePair(LOC_TIMESCALE, MICROSECONDS_PER_SECON
 def loc_properties(
     timestamp_us: int, *, video_config: bytes | None = None, audio_config: bytes | None = None
 ) -> list[KeyValuePair]:
-    """Object properties for one LOC-packaged frame. Pass the codec config only on keyframes."""
+    """Object properties to send for one LOC frame; pass the codec config only on keyframes.
+
+    Relay 0.14.17 drops the object Timescale and Video Config properties. The example also
+    declares the track timescale and carries decoder configuration in the MSF catalog.
+    """
     properties = [KeyValuePair(LOC_TIMESTAMP, timestamp_us), KeyValuePair(LOC_TIMESCALE, MICROSECONDS_PER_SECOND)]
 
     if video_config is not None:
