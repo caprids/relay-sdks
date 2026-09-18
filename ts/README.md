@@ -74,8 +74,8 @@ bounds its initial response. An idle connection still depends on peer traffic or
 keepalive; the SDK does not schedule its own keepalive. Subscriptions have independent cancellation; the application owns connection shutdown.
 
 Object callbacks run synchronously as streams deliver objects. The SDK adds no application queue,
-ordering across streams, JSON decoding, clock synchronization, or media scheduling. Handle subgroup
-resets and connection closure explicitly; this API makes no exactly-once or gap-free delivery promise.
+ordering across streams, automatic JSON decoding, clock synchronization, or media scheduling. Handle
+subgroup resets and connection closure explicitly; this API makes no exactly-once or gap-free delivery promise.
 `onDone` is the publisher's control notification, and may precede trailing objects in transit.
 
 Re-subscribing after `onDone` creates a new request and can replay cached objects followed
@@ -112,7 +112,7 @@ const publisher = await connectRelayPublisher({
 const events = publisher.publish({ track: 'events' });
 
 try {
-  await events.write(new TextEncoder().encode(JSON.stringify({ message: 'hello' })));
+  await events.writeJSON({ message: 'hello' });
 } finally {
   events.close();
   await publisher.close();
@@ -158,6 +158,36 @@ version-specific observations and media guidance.
 `events.close()` cancels an outstanding write and ends that track; other tracks keep running.
 `publisher.close()` ends all tracks, retracts the namespace, and waits for transport shutdown.
 Track names cannot be reused within a publisher connection, including after their writer closes.
+
+### Text and JSON
+
+Track and group writers provide `writeText(text, options?)` and `writeJSON(value, options?)`.
+They encode one complete object as UTF-8 and accept the same options as `write()`, including
+properties and the track write's abort signal. Group helpers also accept object status.
+Await each call. The existing demand, deadline, cancellation, and encoded byte-size limits apply;
+encoding or serialization errors leave the writer usable.
+
+Use the exported readers explicitly in an object callback:
+
+```ts
+import { type MoqtObject, readJSON, readText } from '@mux/relay';
+
+// For a text track:
+const onTextObject = (object: MoqtObject) => console.log(readText(object));
+// For a JSON track:
+const onJSONObject = (object: MoqtObject) => console.log(readJSON(object));
+```
+
+`readText(object)` returns a string, preserving a leading U+FEFF, and throws on malformed UTF-8.
+`readJSON(object)` returns `unknown` and throws on invalid UTF-8 or JSON; validate its shape in
+application code. Catch decoding errors in the callback if malformed objects should be skipped.
+Empty text is valid; an empty JSON payload is not. Neither reader changes the object or its metadata.
+
+JSON writing uses `JSON.stringify`, including its usual omission and numeric conversion rules.
+A top-level value that produces no JSON (`undefined`, a function, or a symbol) is a `TypeError`,
+as are unsupported values such as cyclic objects or bigint. Reading uses `JSON.parse`; no schema
+validation or content-type properties are added. Text writing uses `TextEncoder` (unpaired UTF-16
+surrogates become replacement characters). Raw byte `write()` and subscriptions remain available.
 
 ### Multi-object groups and relay demand
 
@@ -247,8 +277,7 @@ updates and cancellation, plus data-only publication on a dedicated connection. 
 The protocol is pinned to `moqt-20`, matching the extracted implementation.
 
 Automatic reconnection, token refresh on a live session, datagram reception, product
-resource discovery, typed payload helpers, and a Video.js adapter are not implemented yet. A GOAWAY
-ends the connection with an error and fails requests still awaiting their first response via `onError`;
+resource discovery, and a Video.js adapter are not implemented yet. A GOAWAY ends the connection with an error and fails requests still awaiting their first response via `onError`;
 callers can open a replacement. A custom `createTransport`
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
 

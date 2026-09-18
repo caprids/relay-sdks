@@ -18,11 +18,14 @@ from mux_relay import (
     ConnectingTransport,
     RelayClosedError,
     RelayConnection,
+    RelayGroupWriter,
     RelayPublisher,
     RelayTimeoutError,
     RelayWritePendingError,
     connect_relay,
     connect_relay_publisher,
+    read_json,
+    read_text,
 )
 
 NAMESPACE = ["testing", "data"]
@@ -551,3 +554,74 @@ class TestConnectRelayPublisher:
             publisher.publish("events")
 
         assert await publisher.closed == Closed()
+
+
+async def test_text_and_json_round_trip_on_tracks_and_groups(cleanup: Cleanup) -> None:
+    _, publisher, subscriber = await connect_hub(cleanup)
+    track = publisher.publish("helpers")
+    received = Received(subscriber, "helpers")
+    text = "\ufeffHello, 世界 🌍\n\0"
+    value = {"text": text, "nested": [None, True, 42, {"empty": ""}]}
+    properties = [KeyValuePair(2, 7)]
+    await track.write_text(text, properties=properties)
+    await track.write_json(value, properties=properties)
+    group = await track.open_group()
+    await group.write_text("")
+    await group.write_json(value, properties=properties)
+    await group.write_json(None)
+    await group.write_text("", status="end-of-group")
+    assert group.object_count == 4
+    await group.close()
+    # The relay fixture consumes the end-of-group marker instead of forwarding it.
+    await wait_for(lambda: len(received.objects) == 5)
+    objects = sorted(received.objects, key=lambda obj: (obj.group_id, obj.object_id))
+    assert read_text(objects[0]) == text
+    assert read_json(objects[1]) == value
+    assert read_text(objects[2]) == ""
+    assert read_json(objects[3]) == value
+    assert read_json(objects[4]) is None
+    assert [(obj.group_id, obj.object_id) for obj in objects] == [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2)]
+    assert all(objects[index].properties == properties for index in (0, 1, 3))
+
+
+async def test_encoding_errors_leave_writers_usable(cleanup: Cleanup) -> None:
+    _, publisher, subscriber = await connect_hub(cleanup)
+    track = publisher.publish("helpers")
+    received = Received(subscriber, "helpers")
+    circular: list[object] = []
+    circular.append(circular)
+    for grouped in (False, True):
+        writer = await track.open_group() if grouped else track
+        for value in (object(), circular, float("nan"), float("inf")):
+            with pytest.raises((TypeError, ValueError)):
+                await writer.write_json(value)
+        invalid: Any = 42
+        with pytest.raises(TypeError, match="string"):
+            await writer.write_text(invalid)
+        with pytest.raises(ValueError, match="16 MiB"):
+            await writer.write_text("é" * (8 * 1024 * 1024 + 1))
+        await writer.write_json(False)
+        assert not writer.closed
+        if isinstance(writer, RelayGroupWriter):
+            await writer.close()
+    await track.write_text("after")
+    await wait_for(lambda: len(received.objects) == 3)
+    assert [read_text(obj) for obj in received.objects] == ["false", "false", "after"]
+
+
+async def test_helpers_keep_deadlines_concurrency_and_task_cancellation(cleanup: Cleanup) -> None:
+    _, publisher, subscriber = await connect_hub(cleanup)
+    track = publisher.publish("helpers", write_timeout=0.05)
+    with pytest.raises(RelayTimeoutError):
+        await track.write_text("no demand")
+    writing = asyncio.create_task(track.write_json({"waiting": True}))
+    await asyncio.sleep(0)
+    with pytest.raises(RelayWritePendingError):
+        await track.write_text("concurrent")
+    writing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await writing
+    received = Received(subscriber, "helpers")
+    await track.write_json(0)
+    await wait_for(lambda: len(received.objects) == 1)
+    assert read_json(received.objects[0]) == 0

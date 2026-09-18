@@ -40,7 +40,8 @@ against that file.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The SDK adds no application queue, no
-  ordering across streams, no payload decoding, no clock synchronization, and no media scheduling.
+  ordering across streams, no automatic payload decoding, no clock synchronization, and no media
+  scheduling.
 - Each new subscription is independent; re-subscribing does not resume the preceding request.
   Relay caching and location filters can deliver the same object again across subscriptions,
   including after a publisher restart. Applications own retry backoff and any cross-subscription
@@ -137,6 +138,23 @@ Evidence and protocol naming: [issue #23](https://github.com/muxinc/relay-sdks/i
 relay release's
 [track property implementation](https://github.com/moq-dev/moq/blob/b2f26b920f617c033ef7a393bcc894f0bb9b350b/rs/moq-net/src/ietf/properties.rs).
 
+## Text and JSON helpers
+
+- Both product SDKs provide opt-in text and JSON writes on track and group writers and standalone
+  readers for received objects. The protocol core remains payload-agnostic.
+- Each helper encodes or decodes one complete UTF-8 object. Text readers preserve a leading U+FEFF
+  and reject malformed UTF-8; JSON readers additionally reject invalid JSON, including non-standard
+  `NaN` and `Infinity` tokens. Empty text is valid, but an empty payload is not JSON.
+- Writes delegate to the byte writer, retaining its options, metadata, grouping, demand,
+  concurrency, cancellation, deadlines, and size limit (measured in encoded bytes). Serialization
+  failures occur before starting a write and leave the writer usable.
+- JSON uses the language's standard serializer and parser, with no schema validation or automatic
+  content-type properties. Unsupported values fail locally; JavaScript also rejects top-level
+  values for which `JSON.stringify` returns undefined. Runtime-specific number, Unicode, and
+  serialization conversion rules are documented in each SDK's README; this is not canonical JSON.
+- Readers do not mutate payloads or metadata. Decode failures propagate to the caller; applications
+  catch them inside object callbacks when they want to skip malformed objects.
+
 ## Package boundaries
 
 - Each language has a product package that owns the Relay API and the authentication convention,
@@ -173,8 +191,8 @@ See [relay interoperability](relay-interop.md) for a local moq-relay 0.14.17 tes
 ## Not yet specified
 
 Automatic reconnection, token refresh on a live session, datagram reception, product resource
-discovery, typed payload helpers, and player adapters are not implemented in any SDK and have no
-contract yet. Add them here when the first SDK gains them.
+discovery, and player adapters are not implemented in any SDK and have no contract yet. Add them
+here when the first SDK gains them.
 
 ## Draft-20 protocol boundaries
 

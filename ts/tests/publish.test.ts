@@ -7,6 +7,8 @@ import {
   type PublishProperty,
   type RelayConnection,
   type RelayTransportFactory,
+  readJSON,
+  readText,
 } from '../src/index.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
@@ -706,5 +708,79 @@ describe('connectRelayPublisher', () => {
     expect(track.closed).toBe(true);
     expect(track.bound).toBe(false);
     expect(await bindings.next()).toEqual({ done: true, value: undefined });
+  });
+});
+
+describe('text and JSON helpers', () => {
+  it('round-trips Unicode, empty text, and JSON on tracks and groups with metadata', async () => {
+    const { publisher, subscriber } = await connectHub();
+    const track = publisher.publish({ track: 'helpers' });
+    const { objects } = receive(subscriber, 'helpers');
+    const text = '\uFEFFHello, 世界 🌍\n\0';
+    const value = { text, nested: [null, true, 42, { empty: '' }] };
+    const properties = [{ type: 2, value: 7 }];
+    await track.writeText(text, { properties });
+    await track.writeJSON(value, { properties });
+    const group = await track.openGroup();
+    await group.writeText('');
+    await group.writeJSON(value, { properties });
+    await group.writeJSON(null);
+    await group.writeText('', { status: 'end-of-group' });
+    expect(group.objectCount).toBe(4);
+    await group.close();
+    // The relay fixture consumes the end-of-group marker instead of forwarding it.
+    await vi.waitFor(() => expect(objects).toHaveLength(5));
+    objects.sort((a, b) => a.groupId - b.groupId || a.objectId - b.objectId);
+    expect(readText(objects[0]!)).toBe(text);
+    expect(readJSON(objects[1]!)).toEqual(value);
+    expect(readText(objects[2]!)).toBe('');
+    expect(readJSON(objects[3]!)).toEqual(value);
+    expect(readJSON(objects[4]!)).toBeNull();
+    expect(objects.map(({ groupId, objectId }) => [groupId, objectId])).toEqual([
+      [0, 0],
+      [1, 0],
+      [2, 0],
+      [2, 1],
+      [2, 2],
+    ]);
+    for (const index of [0, 1, 3]) expect(objects[index]?.properties).toEqual(properties);
+  });
+
+  it('leaves tracks and open groups usable after encoding or size errors', async () => {
+    const { publisher, subscriber } = await connectHub();
+    const track = publisher.publish({ track: 'helpers' });
+    const { objects } = receive(subscriber, 'helpers');
+    const circular: { self?: unknown } = {};
+    circular.self = circular;
+    for (const grouped of [false, true]) {
+      const writer = grouped ? await track.openGroup() : track;
+      for (const value of [undefined, () => {}, Symbol('bad'), 1n, circular]) {
+        await expect(writer.writeJSON(value)).rejects.toBeInstanceOf(TypeError);
+      }
+      await expect(writer.writeText(42 as unknown as string)).rejects.toBeInstanceOf(TypeError);
+      await expect(writer.writeText('é'.repeat(8 * 1024 * 1024 + 1))).rejects.toThrow(/16 MiB/);
+      await writer.writeJSON(false);
+      expect(writer.closed).toBe(false);
+      if (grouped) await writer.close();
+    }
+    await track.writeText('after');
+    await vi.waitFor(() => expect(objects).toHaveLength(3));
+    expect(objects.map(readText)).toEqual(['false', 'false', 'after']);
+  });
+
+  it('retains demand deadlines, concurrency rejection, and write cancellation', async () => {
+    const { publisher, subscriber } = await connectHub();
+    const track = publisher.publish({ track: 'helpers', writeTimeoutMs: 50 });
+    await expect(track.writeText('no demand')).rejects.toThrow(/timed out/);
+    const controller = new AbortController();
+    const writing = track.writeJSON({ waiting: true }, { signal: controller.signal });
+    const rejected = expect(writing).rejects.toThrow('stop');
+    await expect(track.writeText('concurrent')).rejects.toThrow(/already pending/);
+    controller.abort(new Error('stop'));
+    await rejected;
+    const { objects } = receive(subscriber, 'helpers');
+    await track.writeJSON(0);
+    await vi.waitFor(() => expect(objects).toHaveLength(1));
+    expect(readJSON(objects[0]!)).toBe(0);
   });
 });

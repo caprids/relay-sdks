@@ -52,6 +52,7 @@ from .errors import (
     RelayTimeoutError,
     RelayWritePendingError,
 )
+from .payload import _encode_json, _encode_text
 
 IMPLEMENTATION_NAME = "mux-relay (Python) publisher"
 DEFAULT_WRITE_TIMEOUT = 10.0
@@ -136,6 +137,18 @@ class RelayGroupWriter:
             raise RelayClosedError("Group is closed")
 
         self._track._lifetime.assert_open()
+
+    async def write_text(
+        self, text: str, *, properties: Sequence[KeyValuePair] | None = None, status: ObjectStatus = "normal"
+    ) -> None:
+        """Encode UTF-8 text and write one object with the same semantics as ``write``."""
+        await self.write(_encode_text(text), properties=properties, status=status)
+
+    async def write_json(
+        self, value: object, *, properties: Sequence[KeyValuePair] | None = None, status: ObjectStatus = "normal"
+    ) -> None:
+        """Serialize JSON and write one object; serialization errors leave the writer usable."""
+        await self.write(_encode_json(value), properties=properties, status=status)
 
     async def write(
         self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None, status: ObjectStatus = "normal"
@@ -378,6 +391,14 @@ class RelayTrackWriter:
             self._cancel_operation(operation, error)
 
         return call_later(self._write_timeout, expire)
+
+    async def write_text(self, text: str, *, properties: Sequence[KeyValuePair] | None = None) -> None:
+        """Encode UTF-8 text and write one object with the same semantics as ``write``."""
+        await self.write(_encode_text(text), properties=properties)
+
+    async def write_json(self, value: object, *, properties: Sequence[KeyValuePair] | None = None) -> None:
+        """Serialize JSON and write one object; serialization errors leave the writer usable."""
+        await self.write(_encode_json(value), properties=properties)
 
     async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
         """Write one independent object/group.
