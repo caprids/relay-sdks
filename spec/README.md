@@ -8,6 +8,7 @@ lockstep.
 | `protocol.json` | Machine-readable pins: the MOQT draft (`draft-ietf-moq-transport-20`, wire identifier `moqt-20`), default Relay endpoint, authentication convention, object size limit | Every SDK has a test asserting its constants equal these values |
 | `behavior.md` | The observable semantics every SDK must exhibit, in language-neutral terms | Review, plus the live smoke test assertion list it defines |
 | [publisher-recovery.md](publisher-recovery.md) | Observed publisher replacement limits and application recovery guidance | Relay limitations and application policy, not an automatic SDK guarantee |
+| [media-layer.md](media-layer.md) | Proposal: the LOC packaging, MSF catalog, source URL, and decoder-configuration work the SDKs would take over from media publishers, measured against the Python Video.js example | Design record; nothing in it is implemented yet |
 | `vectors/` | Encoding test vectors every protocol layer must pass | Each SDK's test suite loads the JSON and checks its encoder and decoder |
 
 ## Changing a pin
