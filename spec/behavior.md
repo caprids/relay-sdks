@@ -55,7 +55,11 @@ against that file.
 - Subgroup resets and connection closure are surfaced explicitly. There is no exactly-once or
   gap-free delivery promise.
 - The publisher's done notification is a control message and may arrive before trailing objects
-  still in transit.
+  still in transit. It is not a prompt publisher-death detector; the SDK reports it when the relay
+  sends it.
+- Replacing a publisher on the same namespace does not guarantee handoff of existing subscriptions.
+  New subscriptions may also see transient 404s or initial-response timeouts after retract/re-announce.
+  Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
 
 ## Publishing
