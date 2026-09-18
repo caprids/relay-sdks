@@ -2,7 +2,8 @@
 
 Every Relay SDK, in any language, implements the same protocol pin and the same observable
 semantics. This document states those semantics without reference to any one language. The
-language READMEs describe how each API spells them; this file says what must be true.
+language READMEs describe how each API spells them; this file says what must be true; and
+`vocabulary.md` fixes the public names every SDK uses for the concepts named here.
 
 `protocol.json` holds the machine-readable pins. Each SDK has a test that checks its constants
 against that file.
@@ -55,15 +56,18 @@ against that file.
 - Subgroup resets and connection closure are surfaced explicitly. There is no exactly-once or
   gap-free delivery promise.
 - The publisher's done notification is a control message and may arrive before trailing objects
-  still in transit.
+  still in transit. It does not end the subscription: the request stays open until the application
+  cancels it or the connection ends, and the SDK does not resubscribe on its own.
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
 
 ## Publishing
 
 - Publishing uses a dedicated connection with a token authorized to publish the namespace. One
   publisher connection serves one namespace and any number of tracks.
-- Publishing follows the relay's announce-and-serve flow. Registering a track announces it. A write
-  waits for the relay to subscribe upstream before sending bytes; a subscriber creates that demand.
+- Publishing follows the relay's announce-and-serve flow. Connecting a publisher announces its
+  namespace. Registering a track makes it servable and sends nothing; the relay learns of the track
+  when a subscriber asks for it. A write waits for the relay to subscribe upstream before sending
+  bytes; a subscriber creates that demand.
   If namespace solicitations have arrived but none currently covers the publisher namespace when
   the demand deadline expires, the write reports a namespace coverage error instead of an ordinary
   demand timeout. Check the token and namespace before retrying. This does not prove authorization
@@ -102,8 +106,12 @@ against that file.
   Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
   observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
-  Demand observers emit the current state first, include replacement subscriptions, and finish when
-  the track ends. A closed track reports no demand. Implemented in both SDKs.
+  Demand observers emit the current state first, include replacement subscriptions (a repeated
+  "demanded" value), and finish when the track ends. A closed track reports no demand. Demand is
+  the relay's single upstream subscription for the track: the relay shares it across every
+  downstream viewer, so additional viewers produce no further notification, and it may keep the
+  subscription for a period after the last viewer leaves. Demand is therefore neither a viewer
+  count nor a liveness signal. Implemented in both SDKs.
 
 ### Relay property handling
 

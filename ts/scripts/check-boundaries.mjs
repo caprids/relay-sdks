@@ -34,6 +34,6 @@ async function inspect(directory, permittedPackage) {
 
 await inspect(resolve(root, 'packages/moq-core/dist'));
 await inspect(resolve(root, 'dist'), core.name);
-const { connectRelay } = await import('../dist/index.js');
-assert.equal(typeof connectRelay, 'function');
+const sdkExports = await import('../dist/index.js');
+assert.deepEqual(Object.keys(sdkExports).sort(), ['connectRelayPublisher', 'connectRelaySubscriber']);
 console.log('Built SDK imports only the generic core; core has no runtime package imports.');

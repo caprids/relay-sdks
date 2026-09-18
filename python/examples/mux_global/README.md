@@ -1,7 +1,7 @@
 # Relay example: publish and subscribe on mux.global (Python)
 
 `demo.py` is the SDK usage. It connects a publisher with `connect_relay_publisher`, registers a
-`ticker` track, connects a subscriber with `connect_relay` to the same track, publishes JSON objects
+`ticker` track, connects a subscriber with `connect_relay_subscriber` to the same track, publishes JSON objects
 one second apart, and prints each object as it comes back through the relay. It decodes the JSON
 itself; the SDK only delivers bytes.
 

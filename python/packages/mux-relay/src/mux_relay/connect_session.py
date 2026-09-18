@@ -53,7 +53,7 @@ class ConnectRelayOptions:
     An explicit ``jwt`` in the URL wins, and the provider is not called in that case.
     """
     cancellation: CancellationToken | None = None
-    """Cancelling closes the connection, including after ``connect_relay`` has returned."""
+    """Cancelling closes the connection, including after the connect call has returned."""
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
     """Seconds for token resolution, transport connection, and protocol SETUP together."""
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT

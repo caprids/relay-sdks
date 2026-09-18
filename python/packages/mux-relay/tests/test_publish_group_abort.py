@@ -13,15 +13,16 @@ import pytest
 from core_helpers.waiting import settle, wait_for
 from relay_helpers.relay_hub import create_relay_hub
 
-from moq_core import MoqtObject, SubscriptionHandlers
+from moq_core import MoqtObject
 from moq_core.transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
 from mux_relay import (
     ConnectingTransport,
     RelayClosedError,
-    RelayConnection,
+    RelaySubscriber,
+    RelaySubscriptionHandlers,
     RelayTimeoutError,
-    connect_relay,
     connect_relay_publisher,
+    connect_relay_subscriber,
 )
 
 NAMESPACE = ["testing", "video"]
@@ -42,9 +43,9 @@ async def cleanup() -> AsyncIterator[Cleanup]:
             await result
 
 
-def receive(subscriber: RelayConnection, track: str) -> list[MoqtObject]:
+def receive(subscriber: RelaySubscriber, track: str) -> list[MoqtObject]:
     objects: list[MoqtObject] = []
-    subscriber.subscribe(NAMESPACE, track, SubscriptionHandlers(on_object=objects.append))
+    subscriber.subscribe(NAMESPACE, track, RelaySubscriptionHandlers(on_object=objects.append))
     return objects
 
 
@@ -157,9 +158,9 @@ class TestRecoveringSingleWrites:
             return ConnectingTransport(transport=transport, ready=created.ready)
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.extend([subscriber.close, publisher.close])
-        audio = publisher.publish("audio", write_timeout=0.1)
+        audio = publisher.register_track("audio", write_timeout=0.1)
         objects = receive(subscriber, "audio")
         writing = asyncio.create_task(audio.write(b"stale"))
         await wait_for(lambda: len(transports[0].streams) == 2)
@@ -172,7 +173,7 @@ class TestRecoveringSingleWrites:
             await writing
         assert stream.reset_with is failure.value
         assert not audio.closed
-        assert audio.bound
+        assert audio.has_demand
         stream.release()
         await settle()
         assert not stream.finned
@@ -200,9 +201,9 @@ class TestCancellingAStuckGroup:
             return ConnectingTransport(transport=transport, ready=created.ready)
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.extend([subscriber.close, publisher.close])
-        video = publisher.publish("video", write_timeout=0.05)
+        video = publisher.register_track("video", write_timeout=0.05)
         objects = receive(subscriber, "video")
         group = await video.open_group()
         await group.write(b"key")
@@ -219,7 +220,7 @@ class TestCancellingAStuckGroup:
         assert stream.reset_with is failure.value
         assert group.closed
         assert not video.closed
-        assert video.bound
+        assert video.has_demand
         assert group.object_count == 2
         stream.release()
         await settle()
@@ -250,11 +251,11 @@ class TestCancellingAStuckGroup:
             return ConnectingTransport(transport=transport, ready=created.ready)
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.append(subscriber.close)
         cleanup.append(publisher.close)
 
-        video = publisher.publish("video")
+        video = publisher.register_track("video")
         objects = receive(subscriber, "video")
         group = await video.open_group()
         await group.write(b"key")
@@ -292,11 +293,11 @@ class TestCancellingAStuckGroup:
             return ConnectingTransport(transport=transport, ready=created.ready)
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.append(subscriber.close)
         cleanup.append(publisher.close)
 
-        video = publisher.publish("video")
+        video = publisher.register_track("video")
         objects = receive(subscriber, "video")
         group = await video.open_group()
         await group.write(b"key")

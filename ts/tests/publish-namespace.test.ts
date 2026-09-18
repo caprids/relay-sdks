@@ -21,7 +21,7 @@ async function connectPublisher() {
     createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
   });
   cleanup.push(() => publisher.close());
-  const track = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
+  const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
   return { pair, subscriber, track };
 }
 

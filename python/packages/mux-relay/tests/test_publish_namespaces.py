@@ -9,7 +9,12 @@ from core_helpers.waiting import wait_for
 
 from moq_core import MoqtObject, SubscriptionHandlers
 from moq_core.session import MoqtSessionConfig, MoqtSubscribeOptions, create_moqt_session
-from mux_relay import ConnectingTransport, RelayNamespaceError, RelayTimeoutError, connect_relay_publisher
+from mux_relay import (
+    ConnectingTransport,
+    RelayNamespaceError,
+    RelayTimeoutError,
+    connect_relay_publisher,
+)
 
 
 @pytest.mark.parametrize("prefix", [None, [], ["other"]])
@@ -25,7 +30,7 @@ async def test_namespace_demand_deadline_and_recovery(prefix: list[str] | None, 
         create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=ready),
     )
     try:
-        track = publisher.publish("events", write_timeout=0.05)
+        track = publisher.register_track("events", write_timeout=0.05)
         if prefix is not None:
             request = await solicit_namespace(pair.server, prefix)
             await wait_for(lambda: "request-ok" in request.kinds())

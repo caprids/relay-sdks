@@ -1,4 +1,4 @@
-"""``connect_relay`` behavior over a scripted fake transport, ported from the TypeScript SDK tests."""
+"""``connect_relay_subscriber`` behavior over a scripted fake transport, ported from the TypeScript SDK tests."""
 
 import asyncio
 import math
@@ -10,16 +10,33 @@ import pytest
 from core_helpers.fake_transport import FakeTransport, create_fake_transport, encode_subgroup
 from core_helpers.waiting import settle, wait_for
 
-from moq_core import REQUEST_ERROR_CODE, Closed, MoqtObject, MoqtSubscribeOptions, SubscriptionHandlers
-from moq_core.control_messages import Subscribe, encode_goaway, encode_request_error, encode_setup, encode_subscribe_ok
+from moq_core import (
+    PUBLISH_DONE_STATUS,
+    REQUEST_ERROR_CODE,
+    Closed,
+    MoqtObject,
+    MoqtSubscribeOptions,
+    PublishDone,
+    SubscribeOk,
+    SubscriptionHandlers,
+)
+from moq_core.control_messages import (
+    Subscribe,
+    encode_goaway,
+    encode_publish_done,
+    encode_request_error,
+    encode_setup,
+    encode_subscribe_ok,
+)
 from mux_relay import (
     CancellationToken,
     ConnectingTransport,
     RelayClosedError,
-    RelayConnection,
     RelayGoawayError,
+    RelaySubscriber,
+    RelaySubscriptionHandlers,
     RelayTimeoutError,
-    connect_relay,
+    connect_relay_subscriber,
 )
 
 ENDPOINT = "https://relay.example.com/moq"
@@ -45,8 +62,8 @@ class Factory:
 
 
 @pytest.fixture
-async def connections() -> AsyncIterator[list[RelayConnection]]:
-    opened: list[RelayConnection] = []
+async def connections() -> AsyncIterator[list[RelaySubscriber]]:
+    opened: list[RelaySubscriber] = []
     yield opened
 
     for connection in opened:
@@ -54,11 +71,11 @@ async def connections() -> AsyncIterator[list[RelayConnection]]:
 
 
 async def connect_fake(
-    connections: list[RelayConnection], url: str = ENDPOINT, **options: Any
-) -> tuple[FakeTransport, RelayConnection, Factory]:
+    connections: list[RelaySubscriber], url: str = ENDPOINT, **options: Any
+) -> tuple[FakeTransport, RelaySubscriber, Factory]:
     fake = create_fake_transport()
     factory = Factory(fake)
-    connecting = asyncio.ensure_future(connect_relay(url, create_transport=factory, **options))
+    connecting = asyncio.ensure_future(connect_relay_subscriber(url, create_transport=factory, **options))
     fake.send_server_setup()
     connection = await connecting
     connections.append(connection)
@@ -68,13 +85,13 @@ async def connect_fake(
 class TestConnectRelay:
     @pytest.mark.parametrize("namespace", [[], ["live", ""], ["live", 7], "live", None])
     async def test_rejects_invalid_namespace_before_sending(
-        self, connections: list[RelayConnection], namespace: Any
+        self, connections: list[RelaySubscriber], namespace: Any
     ) -> None:
         fake, connection, _ = await connect_fake(connections)
         with pytest.raises(TypeError, match="non-empty string fields"):
             connection.subscribe(namespace, "events")
         with pytest.raises(TypeError, match="non-empty string fields"):
-            connection.tracks.subscribe(MoqtSubscribeOptions(track_namespace=namespace, track_name="events"))
+            connection.track_source.subscribe(MoqtSubscribeOptions(track_namespace=namespace, track_name="events"))
         connection.subscribe(["live", "room/42"], "events")
         request = await fake.next_request_stream()
         assert await request.first_message == Subscribe(
@@ -82,14 +99,14 @@ class TestConnectRelay:
         )
 
     async def test_namespace_limit_rejects_before_request_id_and_accepts_32_fields(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         fake, connection, _ = await connect_fake(connections)
         namespace = [f"field-{index}" for index in range(32)]
         with pytest.raises(ValueError, match="at most 32"):
             connection.subscribe([*namespace, "extra"], "events")
         with pytest.raises(ValueError, match="at most 32"):
-            connection.tracks.subscribe(
+            connection.track_source.subscribe(
                 MoqtSubscribeOptions(track_namespace=[*namespace, "extra"], track_name="events")
             )
         connection.subscribe(namespace, "events")
@@ -97,12 +114,12 @@ class TestConnectRelay:
         assert await request.first_message == Subscribe(request_id=0, track_namespace=namespace, track_name="events")
 
     async def test_subscribes_to_arbitrary_binary_tracks_without_a_catalog_or_media_timestamps(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         fake, connection, _ = await connect_fake(connections)
         objects: list[MoqtObject] = []
 
-        connection.subscribe(["sensors", "room/42"], "readings", SubscriptionHandlers(on_object=objects.append))
+        connection.subscribe(["sensors", "room/42"], "readings", RelaySubscriptionHandlers(on_object=objects.append))
         request = await fake.next_request_stream()
 
         assert await request.first_message == Subscribe(
@@ -122,11 +139,11 @@ class TestConnectRelay:
 
     @pytest.mark.parametrize("throws", [False, True])
     async def test_fails_pending_subscriptions_once_when_goaway_ends_the_connection(
-        self, connections: list[RelayConnection], throws: bool
+        self, connections: list[RelaySubscriber], throws: bool
     ) -> None:
         fake = create_fake_transport()
         control = fake.open_controlled_data_stream()
-        connecting = asyncio.create_task(connect_relay(ENDPOINT, create_transport=Factory(fake)))
+        connecting = asyncio.create_task(connect_relay_subscriber(ENDPOINT, create_transport=Factory(fake)))
         await control.write(encode_setup([]))
         connection = await connecting
         connections.append(connection)
@@ -140,13 +157,17 @@ class TestConnectRelay:
             if throws:
                 raise RuntimeError("application callback failed")
 
-        connection.subscribe(["live"], "pending", SubscriptionHandlers(on_error=on_error, on_ok=answers.append))
+        connection.subscribe(
+            ["live"], "pending", RelaySubscriptionHandlers(on_error=on_error, on_subscribed=answers.append)
+        )
         await (await fake.next_request_stream()).first_message
-        connection.subscribe(["live"], "accepted", SubscriptionHandlers(on_error=accepted_errors.append))
+        connection.subscribe(["live"], "accepted", RelaySubscriptionHandlers(on_error=accepted_errors.append))
         accepted = await fake.next_request_stream()
         await accepted.first_message
         await accepted.send(encode_subscribe_ok(11))
-        cancelled = connection.subscribe(["live"], "cancelled", SubscriptionHandlers(on_error=cancelled_errors.append))
+        cancelled = connection.subscribe(
+            ["live"], "cancelled", RelaySubscriptionHandlers(on_error=cancelled_errors.append)
+        )
         await (await fake.next_request_stream()).first_message
         cancelled.cancel()
         await control.write(encode_goaway(1000))
@@ -162,14 +183,14 @@ class TestConnectRelay:
         assert answers == accepted_errors == cancelled_errors == []
 
     async def test_keeps_quiet_data_tracks_alive_after_their_subscription_is_accepted(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         fake, connection, _ = await connect_fake(connections, request_timeout=0.05)
         errors: list[object] = []
         objects: list[MoqtObject] = []
 
         connection.subscribe(
-            ["scores"], "current", SubscriptionHandlers(on_error=errors.append, on_object=objects.append)
+            ["scores"], "current", RelaySubscriptionHandlers(on_error=errors.append, on_object=objects.append)
         )
         request = await fake.next_request_stream()
 
@@ -186,7 +207,7 @@ class TestConnectRelay:
         assert objects[0].payload == payload
 
     async def test_cancels_one_subscription_while_another_consumer_keeps_receiving(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         fake, connection, factory = await connect_fake(connections)
         first = connection.subscribe(["room"], "one")
@@ -196,7 +217,7 @@ class TestConnectRelay:
         await first_request.send(encode_subscribe_ok(11))
 
         objects: list[MoqtObject] = []
-        second = connection.tracks.subscribe(
+        second = connection.track_source.subscribe(
             MoqtSubscribeOptions(track_namespace=["room"], track_name="two"),
             SubscriptionHandlers(on_object=objects.append),
         )
@@ -213,27 +234,57 @@ class TestConnectRelay:
         assert first.request_id != second.request_id
         assert len(factory.calls) == 1
 
+    async def test_maps_product_handler_names_onto_the_core_and_keeps_protocol_names_on_track_source(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        fake, connection, _ = await connect_fake(connections)
+        accepted: list[SubscribeOk] = []
+        done: list[PublishDone] = []
+        connection.subscribe(
+            ["live"], "events", RelaySubscriptionHandlers(on_subscribed=accepted.append, on_publisher_done=done.append)
+        )
+        request = await fake.next_request_stream()
+        await request.first_message
+        await request.send(encode_subscribe_ok(11))
+        await request.send(encode_publish_done(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, "track ended"))
+        await wait_for(lambda: len(accepted) == 1 and len(done) == 1)
+        assert accepted[0].track_alias == 11
+        assert (done[0].status_code, done[0].reason) == (PUBLISH_DONE_STATUS.TRACK_ENDED, "track ended")
+
+        core_accepted: list[SubscribeOk] = []
+        core_done: list[PublishDone] = []
+        connection.track_source.subscribe(
+            MoqtSubscribeOptions(track_namespace=["live"], track_name="raw"),
+            SubscriptionHandlers(on_ok=core_accepted.append, on_done=core_done.append),
+        )
+        second = await fake.next_request_stream()
+        await second.first_message
+        await second.send(encode_subscribe_ok(12))
+        await second.send(encode_publish_done(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, "track ended"))
+        await wait_for(lambda: len(core_accepted) == 1 and len(core_done) == 1)
+        assert core_accepted[0].track_alias == 12
+
     async def test_provides_a_borrowed_generic_track_interface_without_connection_shutdown(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         _, connection, _ = await connect_fake(connections)
 
-        assert not hasattr(connection.tracks, "close")
-        assert not hasattr(connection.tracks, "destroy")
-        assert connection.tracks.closed is connection.closed
+        assert not hasattr(connection.track_source, "close")
+        assert not hasattr(connection.track_source, "destroy")
+        assert connection.track_source.closed is connection.closed
         connection.close()
         assert await connection.closed == Closed()
 
         with pytest.raises(RelayClosedError, match="closed"):
-            connection.tracks.subscribe(MoqtSubscribeOptions(track_namespace=["room"], track_name="events"))
+            connection.track_source.subscribe(MoqtSubscribeOptions(track_namespace=["room"], track_name="events"))
 
     async def test_preserves_request_error_codes_without_closing_unrelated_consumers(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         fake, connection, _ = await connect_fake(connections)
         errors: list[Any] = []
 
-        connection.subscribe(["room"], "missing", SubscriptionHandlers(on_error=errors.append))
+        connection.subscribe(["room"], "missing", RelaySubscriptionHandlers(on_error=errors.append))
         request = await fake.next_request_stream()
 
         await request.first_message
@@ -244,7 +295,7 @@ class TestConnectRelay:
         assert fake.close_calls == 0
 
     async def test_adds_relay_authentication_to_the_url_and_negotiates_the_pinned_protocol(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         calls = 0
 
@@ -264,7 +315,7 @@ class TestConnectRelay:
         assert calls == 1
 
     async def test_does_not_mint_a_token_when_the_endpoint_already_contains_an_explicit_jwt(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         def get_token() -> str:
             raise AssertionError("must not run")
@@ -274,7 +325,7 @@ class TestConnectRelay:
         assert factory.calls == [(f"{ENDPOINT}?jwt=explicit", ["moqt-20"])]
 
     async def test_closes_an_established_connection_when_the_owner_cancels_and_closes_the_transport_once(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         owner = CancellationToken()
         fake, connection, _ = await connect_fake(connections, cancellation=owner)
@@ -286,7 +337,7 @@ class TestConnectRelay:
         assert fake.close_calls == 1
 
     async def test_observes_peer_closure_and_prevents_new_requests_on_the_dead_connection(
-        self, connections: list[RelayConnection]
+        self, connections: list[RelaySubscriber]
     ) -> None:
         fake, connection, _ = await connect_fake(connections)
 
@@ -301,7 +352,7 @@ class TestConnectRelay:
         token: asyncio.Future[str] = asyncio.get_running_loop().create_future()
         factory = Factory(create_fake_transport())
         connecting = asyncio.ensure_future(
-            connect_relay(ENDPOINT, cancellation=owner, get_token=lambda: token, create_transport=factory)
+            connect_relay_subscriber(ENDPOINT, cancellation=owner, get_token=lambda: token, create_transport=factory)
         )
         await settle()
 
@@ -321,7 +372,7 @@ class TestConnectRelay:
         fake = create_fake_transport()
         ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         connecting = asyncio.ensure_future(
-            connect_relay(ENDPOINT, cancellation=owner, create_transport=Factory(fake, ready))
+            connect_relay_subscriber(ENDPOINT, cancellation=owner, create_transport=Factory(fake, ready))
         )
         await settle()
 
@@ -344,7 +395,7 @@ class TestConnectRelay:
             return ConnectingTransport(transport=fake, ready=completed())
 
         with pytest.raises(RuntimeError, match="factory cancelled"):
-            await connect_relay(ENDPOINT, cancellation=owner, create_transport=create_transport)
+            await connect_relay_subscriber(ENDPOINT, cancellation=owner, create_transport=create_transport)
 
         assert fake.close_calls == 1
 
@@ -353,7 +404,7 @@ class TestConnectRelay:
         never: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
         with pytest.raises(RelayTimeoutError, match="timed out"):
-            await connect_relay(ENDPOINT, connect_timeout=0.02, create_transport=Factory(fake, never))
+            await connect_relay_subscriber(ENDPOINT, connect_timeout=0.02, create_transport=Factory(fake, never))
 
         assert fake.close_calls == 1
 
@@ -361,7 +412,7 @@ class TestConnectRelay:
         fake = create_fake_transport()
 
         with pytest.raises(RelayTimeoutError, match="timed out"):
-            await connect_relay(ENDPOINT, connect_timeout=0.02, create_transport=Factory(fake))
+            await connect_relay_subscriber(ENDPOINT, connect_timeout=0.02, create_transport=Factory(fake))
 
         assert fake.close_calls == 1
 
@@ -371,7 +422,7 @@ class TestConnectRelay:
         failed.set_exception(ConnectionError("handshake failed"))
 
         with pytest.raises(ConnectionError, match="handshake failed"):
-            await connect_relay(ENDPOINT, create_transport=Factory(fake, failed))
+            await connect_relay_subscriber(ENDPOINT, create_transport=Factory(fake, failed))
 
         assert fake.close_calls == 1
 
@@ -383,7 +434,7 @@ class TestConnectRelay:
         owner.cancel(RuntimeError("already cancelled"))
 
         with pytest.raises(RuntimeError, match="already cancelled"):
-            await connect_relay(
+            await connect_relay_subscriber(
                 ENDPOINT, cancellation=owner, get_token=lambda: token_calls.append(1), create_transport=factory
             )
 
@@ -394,12 +445,12 @@ class TestConnectRelay:
         # Nothing listens here, so the default transport's handshake never completes and the
         # connection deadline is what ends the attempt.
         with pytest.raises(RelayTimeoutError, match="timed out"):
-            await connect_relay("https://127.0.0.1:9/moq", connect_timeout=0.3)
+            await connect_relay_subscriber("https://127.0.0.1:9/moq", connect_timeout=0.3)
 
     @pytest.mark.parametrize("connect_timeout", [0, -1, math.nan, math.inf])
     async def test_rejects_invalid_connection_deadlines(self, connect_timeout: float) -> None:
         with pytest.raises(ValueError, match="positive finite"):
-            await connect_relay(ENDPOINT, connect_timeout=connect_timeout)
+            await connect_relay_subscriber(ENDPOINT, connect_timeout=connect_timeout)
 
     @pytest.mark.parametrize(
         "url",
@@ -407,9 +458,9 @@ class TestConnectRelay:
     )
     async def test_rejects_endpoints_that_are_not_plain_https(self, url: str) -> None:
         with pytest.raises(TypeError, match="Relay endpoints"):
-            await connect_relay(url)
+            await connect_relay_subscriber(url)
 
-    async def test_is_an_async_context_manager_that_closes_on_exit(self, connections: list[RelayConnection]) -> None:
+    async def test_is_an_async_context_manager_that_closes_on_exit(self, connections: list[RelaySubscriber]) -> None:
         _, connection, _ = await connect_fake(connections)
 
         async with connection:

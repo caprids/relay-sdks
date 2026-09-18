@@ -20,7 +20,12 @@ export interface PublishProperty {
   value: number | ArrayBufferView;
 }
 
-export interface PublishTrackOptions {
+/**
+ * What {@link RelayPublisher.registerTrack} needs. The namespace is the publisher connection's;
+ * the generic core's type of the same name spells it out as a field one level down.
+ */
+export interface RegisterTrackOptions {
+  /** Track name, unique within this publisher connection, including after its writer closes. */
   track: string;
   /**
    * Track metadata sent to the relay. The SDK adds no default timescale; the relay may
@@ -49,15 +54,31 @@ export interface RelayGroupWriter {
   abort(reason?: unknown): void;
 }
 
+/**
+ * One registered track on a publisher connection, from {@link RelayPublisher.registerTrack}.
+ * Registration sends nothing; `write()` and `openGroup()` send, after waiting for relay demand.
+ */
 export interface RelayTrackWriter {
-  readonly bound: boolean;
+  /**
+   * Whether the relay currently has an upstream subscription for this track, so a write would
+   * proceed at once. Demand is the relay's own subscription, shared by every downstream viewer
+   * and kept for a while after the last viewer leaves: it is neither a viewer count nor a
+   * liveness signal. Always false once the track is closed.
+   */
+  readonly hasDemand: boolean;
+  /** True once the application closed the track or the publisher connection ended. */
   readonly closed: boolean;
-  /** Current demand first, then each change/replacement; completes when the track ends. */
-  bindings(): AsyncIterableIterator<boolean>;
+  /**
+   * The current demand state first, then one value per relay subscription change: `true` when the
+   * relay subscribes or replaces its subscription (so `true` can repeat), `false` when its
+   * subscription ends. Ends when the track ends. This is how a catalog re-sends its document on
+   * every relay subscription. Values are per relay subscription, never per downstream viewer.
+   */
+  demandChanges(): AsyncIterableIterator<boolean>;
   /** Hold the track's single write slot until the group closes or aborts. */
   openGroup(options?: { signal?: AbortSignal }): Promise<RelayGroupWriter>;
   /**
-   * Write one independent object/group. Waits for relay demand. Resolves when the
+   * Send one independent object/group. Waits for relay demand (see hasDemand). Resolves when the
    * transport accepts the complete group, not when a downstream viewer acknowledges it.
    * Only one write may be pending; await it before writing again. Any ArrayBufferView is
    * copied as its raw bytes; anything else is a TypeError that leaves the track usable.
@@ -73,9 +94,19 @@ export interface RelayTrackWriter {
   close(): void;
 }
 
+/**
+ * A connection that can only publish, serving one namespace. Create one with
+ * {@link connectRelayPublisher}. Subscribing uses a separate connection; see `connectRelaySubscriber`.
+ */
 export interface RelayPublisher {
-  /** Register a data track without starting capture or publishing a media catalog. */
-  publish(options: PublishTrackOptions): RelayTrackWriter;
+  /**
+   * Register a track this publisher will serve and return its writer. Nothing is sent: the relay
+   * learns of the track when a subscriber asks for it, and bytes move when the writer's `write()`
+   * or `openGroup()` runs, after waiting for that relay demand. No capture starts and no media
+   * catalog is published. Track names are unique per publisher connection, including after their
+   * writer closes.
+   */
+  registerTrack(options: RegisterTrackOptions): RelayTrackWriter;
   /** Ends when the connection shuts down. Errors are returned as data; this never rejects. */
   readonly closed: Promise<{ error?: unknown }>;
   /** End all tracks, retract the namespace, and wait for transport shutdown. Idempotent. */
@@ -99,9 +130,9 @@ function copyProperties(properties: readonly PublishProperty[] = []): KeyValuePa
 }
 
 /**
- * Open a dedicated Relay publisher connection. Subscribe clients use connectRelay;
- * this initial publishing API does not share their physical transport. A relay must
- * solicit the namespace and subscribe upstream before data can flow.
+ * Open a dedicated Relay publisher connection. Subscribers use connectRelaySubscriber; this
+ * initial publishing API does not share their physical transport. A relay must solicit the
+ * namespace and subscribe upstream before data can flow.
  */
 export async function connectRelayPublisher(options: ConnectRelayPublisherOptions): Promise<RelayPublisher> {
   const namespace = [...options.namespace];
@@ -139,7 +170,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
 
   return {
     closed,
-    publish({ track, trackProperties, writeTimeoutMs = 10_000 }) {
+    registerTrack({ track, trackProperties, writeTimeoutMs = 10_000 }) {
       lifetime.assertOpen();
       if (closing) throw new Error('Relay publisher is closed');
       if (typeof track !== 'string') throw new TypeError('Track name must be a string');
@@ -300,13 +331,13 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       });
 
       return {
-        get bound() {
+        get hasDemand() {
           return alias !== undefined && !ended;
         },
         get closed() {
           return ended;
         },
-        bindings() {
+        demandChanges() {
           const queue: boolean[] = ended ? [] : [alias !== undefined];
           const waiting: ((result: IteratorResult<boolean>) => void)[] = [];
           let done = ended;

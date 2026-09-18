@@ -1,7 +1,7 @@
 # Relay example: publish and subscribe on mux.global
 
 `demo.js` is the SDK usage. It connects a publisher with `connectRelayPublisher`, registers a
-`ticker` track, connects a subscriber with `connectRelay` to the same track, publishes JSON objects
+`ticker` track, connects a subscriber with `connectRelaySubscriber` to the same track, publishes JSON objects
 one second apart, and prints each object as it comes back through the relay. It decodes the JSON
 itself; the SDK only delivers bytes.
 

@@ -7,6 +7,7 @@ lockstep.
 | --- | --- | --- |
 | `protocol.json` | Machine-readable pins: the MOQT draft (`draft-ietf-moq-transport-20`, wire identifier `moqt-20`), default Relay endpoint, authentication convention, object size limit | Every SDK has a test asserting its constants equal these values |
 | `behavior.md` | The observable semantics every SDK must exhibit, in language-neutral terms | Review, plus the live smoke test assertion list it defines |
+| `vocabulary.md` | The public names every SDK uses for each concept, with the rationale for each | Each SDK has an export-surface test pinning its spelling of the names |
 | `vectors/` | Encoding test vectors every protocol layer must pass | Each SDK's test suite loads the JSON and checks its encoder and decoder |
 
 ## Changing a pin

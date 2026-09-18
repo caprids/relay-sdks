@@ -1,11 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createTransportPair } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
 import {
-  connectRelay,
   connectRelayPublisher,
+  connectRelaySubscriber,
   type MoqtObject,
   type PublishProperty,
-  type RelayConnection,
+  type RelaySubscriber,
   type RelayTransportFactory,
 } from '../src/index.js';
 import { createRelayHub } from './helpers/relay-hub.js';
@@ -22,20 +22,20 @@ async function connectHub() {
   const hub = createRelayHub();
   cleanup.push(() => hub.destroy());
   const publisher = await connectRelayPublisher({ url, namespace, createTransport: hub.connectPublisher });
-  const subscriber = await connectRelay({ url, createTransport: hub.connectSubscriber });
+  const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
   cleanup.push(() => subscriber.close());
   cleanup.push(() => publisher.close());
   return { hub, publisher, subscriber };
 }
 
-function receive(subscriber: RelayConnection, track: string) {
+function receive(subscriber: RelaySubscriber, track: string) {
   const objects: MoqtObject[] = [];
-  const onDone = vi.fn();
+  const onPublisherDone = vi.fn();
   const subscription = subscriber.subscribe(
     { namespace, track },
-    { onObject: (object) => objects.push(object), onDone },
+    { onObject: (object) => objects.push(object), onPublisherDone },
   );
-  return { objects, onDone, subscription };
+  return { objects, onPublisherDone, subscription };
 }
 
 describe('connectRelayPublisher', () => {
@@ -55,10 +55,10 @@ describe('connectRelayPublisher', () => {
     const namespace = Array.from({ length: 32 }, (_, index) => `field-${index}`);
     const publisher = await connectRelayPublisher({ url, namespace, createTransport: hub.connectPublisher });
     cleanup.push(() => publisher.close());
-    expect(() => publisher.publish({ track: 7 as unknown as string })).toThrow('Track name must be a string');
-    expect(() => publisher.publish({ track: '' })).toThrow('Track name must be non-empty');
-    const events = publisher.publish({ track: 'events' });
-    const subscriber = await connectRelay({ url, createTransport: hub.connectSubscriber });
+    expect(() => publisher.registerTrack({ track: 7 as unknown as string })).toThrow('Track name must be a string');
+    expect(() => publisher.registerTrack({ track: '' })).toThrow('Track name must be non-empty');
+    const events = publisher.registerTrack({ track: 'events' });
+    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
     cleanup.push(() => subscriber.close());
     const objects: MoqtObject[] = [];
     subscriber.subscribe({ namespace, track: 'events' }, { onObject: (object) => objects.push(object) });
@@ -68,7 +68,7 @@ describe('connectRelayPublisher', () => {
 
   it('publishes raw binary data through a soliciting relay into the SDK subscriber without a catalog or media', async () => {
     const { publisher, subscriber, hub } = await connectHub();
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
     const received = receive(subscriber, 'events');
     const payload = new Uint8Array([0xff, 0, 0x80, 1]);
 
@@ -81,7 +81,7 @@ describe('connectRelayPublisher', () => {
 
   it('publishes sequential objects and an empty payload with explicit object properties', async () => {
     const { publisher, subscriber } = await connectHub();
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
     const received = receive(subscriber, 'events');
     const properties = [
       { type: 2, value: 7 },
@@ -99,7 +99,7 @@ describe('connectRelayPublisher', () => {
 
   it('copies payload and property bytes while a write waits for relay demand', async () => {
     const { publisher, subscriber } = await connectHub();
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
     const payload = new Uint8Array([7]);
     const property = new Uint8Array([8]);
     const writing = events.write(payload, { properties: [{ type: 3, value: property }] });
@@ -115,8 +115,8 @@ describe('connectRelayPublisher', () => {
 
   it('ends one track with a clean FIN while another published track keeps working', async () => {
     const { publisher, subscriber, hub } = await connectHub();
-    const one = publisher.publish({ track: 'one' });
-    const two = publisher.publish({ track: 'two' });
+    const one = publisher.registerTrack({ track: 'one' });
+    const two = publisher.registerTrack({ track: 'two' });
     const receivedOne = receive(subscriber, 'one');
     const receivedTwo = receive(subscriber, 'two');
 
@@ -124,7 +124,7 @@ describe('connectRelayPublisher', () => {
     await two.write(new Uint8Array([2]));
     one.close();
     one.close();
-    await vi.waitFor(() => expect(receivedOne.onDone).toHaveBeenCalled());
+    await vi.waitFor(() => expect(receivedOne.onPublisherDone).toHaveBeenCalled());
     await two.write(new Uint8Array([3]));
     await vi.waitFor(() => expect(receivedTwo.objects).toHaveLength(2));
     expect(hub.trackEnds).toContainEqual({ kind: 'subscribe-fin', trackName: 'one' });
@@ -133,7 +133,7 @@ describe('connectRelayPublisher', () => {
 
   it('bounds a write waiting for demand and can publish a later write after the timeout', async () => {
     const { publisher, subscriber } = await connectHub();
-    const events = publisher.publish({ track: 'events', writeTimeoutMs: 50 });
+    const events = publisher.registerTrack({ track: 'events', writeTimeoutMs: 50 });
 
     await expect(events.write(new Uint8Array([1]))).rejects.toThrow(/timed out/);
     const received = receive(subscriber, 'events');
@@ -144,7 +144,7 @@ describe('connectRelayPublisher', () => {
 
   it('rejects concurrent writes instead of accumulating an unbounded queue', async () => {
     const { publisher } = await connectHub();
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
     const writing = events.write(new Uint8Array([1]));
     const rejected = expect(writing).rejects.toThrow(/closed/);
 
@@ -155,10 +155,10 @@ describe('connectRelayPublisher', () => {
 
   it('cancels pending writes and retracts the namespace when the publisher closes', async () => {
     const { publisher, subscriber, hub } = await connectHub();
-    const live = publisher.publish({ track: 'live' });
+    const live = publisher.registerTrack({ track: 'live' });
     receive(subscriber, 'live');
     await live.write(new Uint8Array([1]));
-    const pending = publisher.publish({ track: 'pending' }).write(new Uint8Array([2]));
+    const pending = publisher.registerTrack({ track: 'pending' }).write(new Uint8Array([2]));
     const rejected = expect(pending).rejects.toThrow(/closed/);
 
     await publisher.close();
@@ -166,16 +166,16 @@ describe('connectRelayPublisher', () => {
     await publisher.close();
     expect(hub.trackEnds).toContainEqual({ kind: 'namespace-done', namespace });
     await expect(publisher.closed).resolves.toEqual({});
-    expect(() => publisher.publish({ track: 'late' })).toThrow(/closed/);
+    expect(() => publisher.registerTrack({ track: 'late' })).toThrow(/closed/);
   });
 
   it('does not re-register a track name or silently restart its group numbering', async () => {
     const { publisher } = await connectHub();
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
 
-    expect(() => publisher.publish({ track: 'events' })).toThrow(/already registered/);
+    expect(() => publisher.registerTrack({ track: 'events' })).toThrow(/already registered/);
     events.close();
-    expect(() => publisher.publish({ track: 'events' })).toThrow(/already registered/);
+    expect(() => publisher.registerTrack({ track: 'events' })).toThrow(/already registered/);
   });
 
   it('cancels a pending write when the owning AbortSignal is aborted', async () => {
@@ -189,7 +189,7 @@ describe('connectRelayPublisher', () => {
       createTransport: hub.connectPublisher,
     });
     cleanup.push(() => publisher.close());
-    const writing = publisher.publish({ track: 'events' }).write(new Uint8Array([1]));
+    const writing = publisher.registerTrack({ track: 'events' }).write(new Uint8Array([1]));
     const error = new Error('owner aborted');
     const rejected = expect(writing).rejects.toBe(error);
 
@@ -216,17 +216,17 @@ describe('connectRelayPublisher', () => {
         namespace,
         createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
       }),
-      connectRelay({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
+      connectRelaySubscriber({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
     ]);
     cleanup.push(() => subscriber.close());
     cleanup.push(() => publisher.close());
     const trackProperties = [{ type: 2, value: 90_000 }];
-    publisher.publish({ track: 'timed', trackProperties });
-    publisher.publish({ track: 'raw' });
+    publisher.registerTrack({ track: 'timed', trackProperties });
+    publisher.registerTrack({ track: 'raw' });
     const onTimed = vi.fn();
     const onRaw = vi.fn();
-    subscriber.subscribe({ namespace, track: 'timed' }, { onOk: onTimed });
-    subscriber.subscribe({ namespace, track: 'raw' }, { onOk: onRaw });
+    subscriber.subscribe({ namespace, track: 'timed' }, { onSubscribed: onTimed });
+    subscriber.subscribe({ namespace, track: 'raw' }, { onSubscribed: onRaw });
 
     await vi.waitFor(() => expect(onRaw).toHaveBeenCalled());
     expect(onTimed).toHaveBeenCalledWith(expect.objectContaining({ trackProperties }));
@@ -248,10 +248,10 @@ describe('connectRelayPublisher', () => {
         return created;
       },
     });
-    const subscriber = await connectRelay({ url, createTransport: hub.connectSubscriber });
+    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
     cleanup.push(() => subscriber.close());
     cleanup.push(() => publisher.close());
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
     receive(subscriber, 'events');
 
     await expect(events.write(new Uint8Array([1]))).rejects.toBe(failure);
@@ -307,7 +307,7 @@ describe('connectRelayPublisher', () => {
         },
       });
       cleanup.push(() => publisher.close());
-      const track = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
+      const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
       hub.subscribeUpstream('events');
       for (const mode of ['timeout', 'cancel'] as const) {
         stalled = false;
@@ -320,7 +320,7 @@ describe('connectRelayPublisher', () => {
         if (mode === 'cancel') owner.abort(failure);
         await rejected;
         expect(track.closed).toBe(false);
-        expect(track.bound).toBe(true);
+        expect(track.hasDemand).toBe(true);
         await track.write(new Uint8Array([3]));
       }
       expect(resetCount).toBe(2);
@@ -349,10 +349,10 @@ describe('connectRelayPublisher', () => {
         return created;
       },
     });
-    const subscriber = await connectRelay({ url, createTransport: hub.connectSubscriber });
+    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
     cleanup.push(() => subscriber.close());
     cleanup.push(() => publisher.close());
-    const events = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
+    const events = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
     receive(subscriber, 'events');
     await expect(events.write(new Uint8Array([1]))).rejects.toThrow(/timed out/);
     expect(events.closed).toBe(false);
@@ -368,7 +368,7 @@ describe('connectRelayPublisher', () => {
 
   it('rejects oversized objects before waiting for demand', async () => {
     const { publisher } = await connectHub();
-    const track = publisher.publish({ track: 'events' });
+    const track = publisher.registerTrack({ track: 'events' });
 
     await expect(track.write(new Uint8Array(16 * 1024 * 1024 + 1))).rejects.toThrow(/16 MiB/);
   });
@@ -380,7 +380,7 @@ describe('connectRelayPublisher', () => {
     ['null', null],
   ])('rejects %s payload without taking the write slot or ending the track', async (_label, payload) => {
     const { publisher, subscriber } = await connectHub();
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
     const received = receive(subscriber, 'events');
     const rejected = events.write(payload as ArrayBufferView);
     // Issued in the same tick: the rejected write must not have claimed the single write slot.
@@ -395,7 +395,7 @@ describe('connectRelayPublisher', () => {
 
   it('publishes the bytes a view spans rather than its whole buffer, for any ArrayBufferView', async () => {
     const { publisher, subscriber } = await connectHub();
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
     const received = receive(subscriber, 'events');
     const buffer = new Uint8Array([9, 9, 9, 1, 2, 3, 9, 9]).buffer;
 
@@ -421,8 +421,8 @@ describe('connectRelayPublisher', () => {
   ])('rejects invalid property $type/$value before registering or taking the write slot', async (property) => {
     const { publisher, subscriber } = await connectHub();
     const properties = [property] as PublishProperty[];
-    expect(() => publisher.publish({ track: 'events', trackProperties: properties })).toThrow(/Property 0/);
-    const events = publisher.publish({ track: 'events' });
+    expect(() => publisher.registerTrack({ track: 'events', trackProperties: properties })).toThrow(/Property 0/);
+    const events = publisher.registerTrack({ track: 'events' });
     const received = receive(subscriber, 'events');
     const rejected = events.write(new Uint8Array([1]), { properties });
     const writing = events.write(new Uint8Array([9]));
@@ -435,7 +435,7 @@ describe('connectRelayPublisher', () => {
 
   it('copies the bytes spanned by property views before waiting for demand', async () => {
     const { publisher, subscriber } = await connectHub();
-    const events = publisher.publish({ track: 'events' });
+    const events = publisher.registerTrack({ track: 'events' });
     const bytes = new Uint8Array([9, 1, 2, 9]);
     const writing = events.write(new Uint8Array([3]), {
       properties: [{ type: 3, value: new DataView(bytes.buffer, 1, 2) }],
@@ -449,7 +449,7 @@ describe('connectRelayPublisher', () => {
 
   it('publishes multiple objects on one group stream and preserves increasing group IDs', async () => {
     const { publisher, subscriber } = await connectHub();
-    const track = publisher.publish({ track: 'events' });
+    const track = publisher.registerTrack({ track: 'events' });
     const received = receive(subscriber, 'events');
     const group = await track.openGroup();
     expect(group.groupId).toBe(0);
@@ -474,7 +474,7 @@ describe('connectRelayPublisher', () => {
 
   it('reserves one track slot for a group and keeps it open after local argument errors', async () => {
     const { publisher, hub } = await connectHub();
-    const track = publisher.publish({ track: 'events' });
+    const track = publisher.registerTrack({ track: 'events' });
     hub.subscribeUpstream('events');
     const group = await track.openGroup();
     await expect(track.write(new Uint8Array([1]))).rejects.toThrow(/already pending/);
@@ -492,7 +492,7 @@ describe('connectRelayPublisher', () => {
 
   it('bounds group demand and releases its slot after timeout or an already-aborted signal', async () => {
     const { publisher, hub } = await connectHub();
-    const track = publisher.publish({ track: 'events', writeTimeoutMs: 50 });
+    const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 50 });
     await expect(track.openGroup()).rejects.toThrow(/timed out/);
     const owner = new AbortController();
     const reason = new Error('cancelled before opening');
@@ -554,7 +554,7 @@ describe('connectRelayPublisher', () => {
         },
       });
       cleanup.push(() => publisher.close());
-      const track = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
+      const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
       hub.subscribeUpstream('events');
       const group = await track.openGroup();
       if (mode === 'close') await group.write(new Uint8Array([1]));
@@ -577,7 +577,7 @@ describe('connectRelayPublisher', () => {
 
   it('aborts idle groups explicitly or through their signal and permits another group', async () => {
     const { publisher, hub } = await connectHub();
-    const track = publisher.publish({ track: 'events' });
+    const track = publisher.registerTrack({ track: 'events' });
     hub.subscribeUpstream('events');
     const owner = new AbortController();
     const first = await track.openGroup({ signal: owner.signal });
@@ -625,29 +625,29 @@ describe('connectRelayPublisher', () => {
         namespace,
         createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
       }),
-      connectRelay({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
+      connectRelaySubscriber({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
     ]);
     cleanup.push(() => subscriber.close());
     cleanup.push(() => publisher.close());
-    const track = publisher.publish({ track: 'events' });
-    const bindings = track.bindings();
-    expect(await bindings.next()).toEqual({ done: false, value: false });
+    const track = publisher.registerTrack({ track: 'events' });
+    const demand = track.demandChanges();
+    expect(await demand.next()).toEqual({ done: false, value: false });
     const first = subscriber.subscribe({ namespace, track: 'events' }, {});
-    expect(await bindings.next()).toEqual({ done: false, value: true });
+    expect(await demand.next()).toEqual({ done: false, value: true });
     const writing = track.write(new Uint8Array([1]));
     const rejected = expect(writing).rejects.toThrow(/subscription changed/);
     await vi.waitFor(() => expect(stalled).toBe(true));
     first.cancel();
-    expect(await bindings.next()).toEqual({ done: false, value: false });
+    expect(await demand.next()).toEqual({ done: false, value: false });
     await rejected;
     expect(reset).toHaveBeenCalledOnce();
     expect(track.closed).toBe(false);
     const received = receive(subscriber, 'events');
-    expect(await bindings.next()).toEqual({ done: false, value: true });
+    expect(await demand.next()).toEqual({ done: false, value: true });
     await track.write(new Uint8Array([2]));
     await vi.waitFor(() => expect(received.objects).toHaveLength(1));
     expect(received.objects[0]).toMatchObject({ groupId: 1, payload: new Uint8Array([2]) });
-    await bindings.return?.();
+    await demand.return?.();
   });
 
   it('observes demand, cancellation, resubscription, and track end without hanging iterator return', async () => {
@@ -658,53 +658,53 @@ describe('connectRelayPublisher', () => {
         namespace,
         createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
       }),
-      connectRelay({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
+      connectRelaySubscriber({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
     ]);
     cleanup.push(() => subscriber.close());
     cleanup.push(() => publisher.close());
-    const track = publisher.publish({ track: 'events' });
-    const bindings = track.bindings();
-    expect(await bindings.next()).toEqual({ done: false, value: false });
-    expect(track.bound).toBe(false);
+    const track = publisher.registerTrack({ track: 'events' });
+    const demand = track.demandChanges();
+    expect(await demand.next()).toEqual({ done: false, value: false });
+    expect(track.hasDemand).toBe(false);
     const subscription = subscriber.subscribe({ namespace, track: 'events' }, {});
-    expect(await bindings.next()).toEqual({ done: false, value: true });
-    expect(track.bound).toBe(true);
+    expect(await demand.next()).toEqual({ done: false, value: true });
+    expect(track.hasDemand).toBe(true);
     const group = await track.openGroup();
     await group.write(new Uint8Array([1]));
     subscription.cancel();
-    expect(await bindings.next()).toEqual({ done: false, value: false });
+    expect(await demand.next()).toEqual({ done: false, value: false });
     expect(group.closed).toBe(true);
     expect(track.closed).toBe(false);
     await expect(group.close()).rejects.toThrow(/subscription changed/);
     subscriber.subscribe({ namespace, track: 'events' }, {});
-    expect(await bindings.next()).toEqual({ done: false, value: true });
+    expect(await demand.next()).toEqual({ done: false, value: true });
     const next = await track.openGroup();
     await next.write(new Uint8Array([2]));
     await next.close();
-    const other = track.bindings();
+    const other = track.demandChanges();
     await other.next();
     const pending = other.next();
     await other.return?.();
     expect(await pending).toEqual({ done: true, value: undefined });
     track.close();
     expect(track.closed).toBe(true);
-    expect(track.bound).toBe(false);
-    expect(await bindings.next()).toEqual({ done: true, value: undefined });
-    expect(await track.bindings().next()).toEqual({ done: true, value: undefined });
+    expect(track.hasDemand).toBe(false);
+    expect(await demand.next()).toEqual({ done: true, value: undefined });
+    expect(await track.demandChanges().next()).toEqual({ done: true, value: undefined });
   });
 
   it('ends demand iterators and cancels an open group when the publisher closes', async () => {
     const { publisher, hub } = await connectHub();
-    const track = publisher.publish({ track: 'events' });
+    const track = publisher.registerTrack({ track: 'events' });
     hub.subscribeUpstream('events');
     const group = await track.openGroup();
-    const bindings = track.bindings();
-    await bindings.next();
+    const demand = track.demandChanges();
+    await demand.next();
     await group.write(new Uint8Array([1]));
     await publisher.close();
     await expect(group.close()).rejects.toThrow(/closed/);
     expect(track.closed).toBe(true);
-    expect(track.bound).toBe(false);
-    expect(await bindings.next()).toEqual({ done: true, value: undefined });
+    expect(track.hasDemand).toBe(false);
+    expect(await demand.next()).toEqual({ done: true, value: undefined });
   });
 });
