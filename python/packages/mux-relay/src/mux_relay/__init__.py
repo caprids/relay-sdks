@@ -61,6 +61,7 @@ from .errors import (
     RelayTrackEndedError,
     RelayWritePendingError,
 )
+from .payload import read_json, read_text
 from .publish import (
     DEFAULT_WRITE_TIMEOUT,
     RelayGroupWriter,
@@ -134,4 +135,6 @@ __all__ = [
     "connect_relay",
     "connect_relay_publisher",
     "connect_webtransport",
+    "read_json",
+    "read_text",
 ]

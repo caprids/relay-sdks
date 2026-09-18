@@ -78,7 +78,7 @@ local idle timeout, subject to peer negotiation.
 Subscriptions have independent cancellation; the application owns connection shutdown.
 
 Object callbacks are plain synchronous callables invoked as streams deliver objects. The SDK adds no
-application queue, ordering across streams, JSON decoding, clock synchronization, or media
+application queue, ordering across streams, automatic JSON decoding, clock synchronization, or media
 scheduling. Hand work to your own `asyncio.Queue` or task from the callback if it must not block
 delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
 or gap-free delivery promise. `on_done` is the publisher's control notification, and may precede
@@ -109,8 +109,6 @@ be non-empty strings.
 Use a dedicated publisher connection with a token authorized to publish the namespace:
 
 ```python
-import json
-
 from mux_relay import connect_relay_publisher
 
 
@@ -124,7 +122,7 @@ async def publish() -> None:
     events = publisher.publish("events")
 
     try:
-        await events.write(json.dumps({"message": "hello"}).encode())
+        await events.write_json({"message": "hello"})
     finally:
         events.close()
         await publisher.close()
@@ -206,6 +204,33 @@ Run the data-only publishing/subscribing integration tests without a live relay:
 cd python && mise exec -- uv run pytest packages/mux-relay/tests/test_publish.py
 ```
 
+### Text and JSON
+
+Track and group writers provide `await writer.write_text(text, properties=...)` and
+`await writer.write_json(value, properties=...)`. Each call writes one UTF-8 object using the same
+demand, deadline, cancellation, and encoded byte-size limits as `write()`. Group helpers also accept
+`status`. Serialization errors leave the writer usable.
+
+Use the exported readers explicitly in subscription callbacks:
+
+```python
+from mux_relay import SubscriptionHandlers, read_json, read_text
+
+text_handlers = SubscriptionHandlers(on_object=lambda obj: print(read_text(obj)))
+json_handlers = SubscriptionHandlers(on_object=lambda obj: print(read_json(obj)))
+```
+
+`read_text(obj)` preserves a leading U+FEFF and raises `UnicodeDecodeError` on malformed UTF-8.
+`read_json(obj)` parses UTF-8 JSON without schema validation and raises `ValueError` on invalid
+input (including `UnicodeDecodeError` and `JSONDecodeError`). Catch decoding errors inside the
+callback if malformed objects should be skipped. Empty text is valid; empty JSON is not. Readers
+leave payload bytes and metadata unchanged, and the SDK adds no content-type properties.
+
+JSON writing uses compact `json.dumps` with `ensure_ascii=False` and `allow_nan=False`; unsupported
+values, cycles, non-finite numbers, and unpaired surrogates fail locally. Reading also rejects
+`NaN` and `Infinity`. Other conversion rules are Python's standard JSON behavior. Text writing uses
+strict UTF-8 encoding. Raw byte `write()` and subscriptions remain available.
+
 ## Transport
 
 `connect_relay` and `connect_relay_publisher` default to `mux_relay.connect_webtransport`, a
@@ -280,6 +305,8 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayNamespaceError`, `WebTransportError` |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
 | `openGroup()`, `bindings()`, `writer.closed` | `open_group()`, `bindings()`, `writer.closed` (see `spec/behavior.md`) |
+| `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
+| `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
 | Browser `WebTransport` | aioquic WebTransport client (`connect_webtransport`) |
 
 ## Initial scope
@@ -288,10 +315,9 @@ This slice supports one connection, arbitrary reliable-stream track subscription
 updates and cancellation, plus data-only publication on a dedicated connection. The generic core
 also exposes FETCH and TRACK_STATUS. The protocol is pinned to `moqt-20`.
 
-Automatic reconnection, token refresh on a live session, datagram reception, product resource
-discovery, and typed payload helpers are not implemented yet. A GOAWAY ends the connection with a
-`RelayGoawayError` and fails requests still awaiting their first response via `on_error`; callers
-can open a replacement.
+Automatic reconnection, token refresh on a live session, datagram reception, and product resource
+discovery are not implemented yet. A GOAWAY ends the connection with a `RelayGoawayError` and fails
+requests still awaiting their first response via `on_error`; callers can open a replacement.
 
 ## Live Relay smoke test
 

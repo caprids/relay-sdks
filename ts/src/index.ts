@@ -13,6 +13,7 @@ export type {
 } from '@mux/moq-core';
 export type { ConnectRelayOptions, RelayConnection, RelayTrackOptions, RelayTransportFactory } from './connect.js';
 export { connectRelay } from './connect.js';
+export { readJSON, readText } from './payload.js';
 export type {
   ConnectRelayPublisherOptions,
   PublishProperty,

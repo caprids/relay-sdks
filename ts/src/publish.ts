@@ -8,6 +8,7 @@ import {
   type SubgroupWriter,
 } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import { encodeJSON, encodeText } from './payload.js';
 
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
   /** One namespace per publisher connection. Register any number of tracks within it. */
@@ -47,6 +48,13 @@ export interface RelayGroupWriter {
   close(): Promise<void>;
   /** Reset this group and free the track for the next random-access point. */
   abort(reason?: unknown): void;
+  /** Encode UTF-8 text and write one object with the same options and semantics as write(). */
+  writeText(text: string, options?: { properties?: readonly PublishProperty[]; status?: ObjectStatus }): Promise<void>;
+  /** Serialize with JSON.stringify and write one object. Serialization errors leave the writer usable. */
+  writeJSON(
+    value: unknown,
+    options?: { properties?: readonly PublishProperty[]; status?: ObjectStatus },
+  ): Promise<void>;
 }
 
 export interface RelayTrackWriter {
@@ -71,6 +79,10 @@ export interface RelayTrackWriter {
   ): Promise<void>;
   /** End the track and cancel an outstanding write. The publisher connection stays open. */
   close(): void;
+  /** Encode UTF-8 text and write one object with the same options and semantics as write(). */
+  writeText(text: string, options?: { properties?: readonly PublishProperty[]; signal?: AbortSignal }): Promise<void>;
+  /** Serialize with JSON.stringify and write one object. Serialization errors leave the writer usable. */
+  writeJSON(value: unknown, options?: { properties?: readonly PublishProperty[]; signal?: AbortSignal }): Promise<void>;
 }
 
 export interface RelayPublisher {
@@ -299,7 +311,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         },
       });
 
-      return {
+      const trackWriter: RelayTrackWriter = {
         get bound() {
           return alias !== undefined && !ended;
         },
@@ -344,6 +356,12 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           return iterator;
         },
         close: () => close(),
+        async writeText(text, writeOptions) {
+          await trackWriter.write(encodeText(text), writeOptions);
+        },
+        async writeJSON(value, writeOptions) {
+          await trackWriter.write(encodeJSON(value), writeOptions);
+        },
         async write(payload, writeOptions = {}) {
           assertWritable();
           const bytes = copyPayload(payload);
@@ -372,13 +390,19 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
             if (complete) throw new Error('Group is closed');
             if (pending) throw new Error('A group write or close is already pending');
           };
-          return {
+          const groupWriter: RelayGroupWriter = {
             groupId: writer.groupId,
             get objectCount() {
               return objectCount;
             },
             get closed() {
               return complete || operation.cancelled;
+            },
+            async writeText(text, writeOptions) {
+              await groupWriter.write(encodeText(text), writeOptions);
+            },
+            async writeJSON(value, writeOptions) {
+              await groupWriter.write(encodeJSON(value), writeOptions);
             },
             async write(payload, writeOptions = {}) {
               assertGroup();
@@ -413,8 +437,10 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
               if (!complete) operation.cancel(reason);
             },
           };
+          return groupWriter;
         },
       };
+      return trackWriter;
     },
     async close() {
       closing = true;
