@@ -36,6 +36,7 @@ from .connect_session import (
     TokenProvider,
     open_relay_session,
 )
+from .subscription_events import SubscriptionEvents
 
 IMPLEMENTATION_NAME = "mux-relay (Python)"
 
@@ -118,6 +119,28 @@ class RelayConnection:
         _validate_namespace(namespace)
         return self._tracks.subscribe(
             MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters), handlers
+        )
+
+    def subscribe_events(
+        self,
+        namespace: Sequence[str],
+        track: str,
+        *,
+        parameters: MessageParameters | None = None,
+        capacity: int = 64,
+        cancellation: CancellationToken | None = None,
+    ) -> SubscriptionEvents:
+        """Create a bounded event iterator. Use ``async with`` around ``async for``.
+
+        Owns only this request. ``publisher_done`` permits trailing objects; it is not EOF.
+        """
+        self._lifetime.assert_open()
+        _validate_namespace(namespace)
+        return SubscriptionEvents(
+            lambda handlers: self.subscribe(namespace, track, handlers, parameters=parameters),
+            self.closed,
+            capacity=capacity,
+            cancellation=cancellation,
         )
 
     def close(self) -> None:

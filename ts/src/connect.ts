@@ -8,6 +8,12 @@ import {
   type SubscriptionHandlers,
 } from '@mux/moq-core';
 import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import {
+  closureObservers,
+  createSubscriptionEvents,
+  type SubscriptionEventOptions,
+  type SubscriptionEvents,
+} from './subscription-events.js';
 
 export type { ConnectRelayOptions, RelayTransportFactory } from './connect-session.js';
 
@@ -22,6 +28,8 @@ export interface RelayTrackOptions {
 export interface RelayConnection {
   /** Subscribe to any track payload format without discovering or loading a catalog. */
   subscribe(options: RelayTrackOptions, handlers?: SubscriptionHandlers): Subscription;
+  /** Bounded async events. Owns its subscription; break/return cancels it. */
+  subscribeEvents(options: RelayTrackOptions, buffer?: SubscriptionEventOptions): SubscriptionEvents;
   /**
    * Generic borrowed track access for integrations. This object exposes no connection
    * shutdown operation and has no dependency on Relay resource identifiers or Video.js.
@@ -65,12 +73,23 @@ export async function connectRelay(options: ConnectRelayOptions): Promise<RelayC
     },
   });
 
+  const observeClosed = closureObservers(closed);
+
   return {
     closed,
     tracks,
     subscribe: ({ namespace, track, parameters }, handlers) => {
       validateNamespace(namespace);
       return tracks.subscribe({ trackNamespace: [...namespace], trackName: track, parameters }, handlers);
+    },
+    subscribeEvents: ({ namespace, track, parameters }, buffer) => {
+      assertOpen();
+      validateNamespace(namespace);
+      return createSubscriptionEvents(
+        (handlers) => tracks.subscribe({ trackNamespace: [...namespace], trackName: track, parameters }, handlers),
+        observeClosed,
+        buffer,
+      );
     },
     close,
   };

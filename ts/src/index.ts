@@ -23,3 +23,10 @@ export type {
   RelayTrackWriter,
 } from './publish.js';
 export { connectRelayPublisher } from './publish.js';
+
+export type { SubscriptionEvent, SubscriptionEventOptions, SubscriptionEvents } from './subscription-events.js';
+export {
+  SubscriptionConnectionClosedError,
+  SubscriptionOverflowError,
+  SubscriptionRequestError,
+} from './subscription-events.js';

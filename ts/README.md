@@ -96,6 +96,50 @@ The 32-field protocol limit is pinned in `spec/protocol.json`. Oversized namespa
 rejected before opening a publisher connection or sending a subscription; track names must
 be non-empty strings.
 
+## Consume asynchronously
+
+`subscribeEvents` creates a subscription owned by a single async iterator. Await work directly in
+the loop; the existing `subscribe` API remains available for synchronous callbacks.
+
+```ts
+const events = relay.subscribeEvents(
+  { namespace: ['sensors', 'lab'], track: 'readings' },
+  { capacity: 32, signal: consumerLifetime.signal }, // a separate AbortController for this consumer
+);
+try {
+  for await (const event of events) {
+    if (event.type === 'object') await processReading(event.value.payload);
+    if (event.type === 'subgroupReset') console.warn('Objects may be missing', event.value);
+    if (event.type === 'publisherDone') console.log('Publisher finished; trailing objects may arrive', event.value);
+    // break is safe: for-await cancels this subscription. Consumer exceptions propagate too.
+  }
+} finally {
+  events.close(); // also safe before iteration or while the loop body is awaiting other work
+}
+```
+
+The default capacity is **64 events**, including lifecycle events; it is a count limit, not a byte
+budget. Objects may be up to 16 MiB plus properties. Overflow discards queued events, cancels the
+subscription and throws `SubscriptionOverflowError`. Request failures throw
+`SubscriptionRequestError`; connection closure throws `SubscriptionConnectionClosedError`, even
+for a clean connection close, because closure does not prove all objects arrived. Before
+acceptance, a connection failure can instead arrive first as `SubscriptionRequestError`; consult
+`relay.closed` for the connection-level cause. Errors propagate out of the loop for the caller to
+handle. `publisherDone` is an event, never EOF. Arrival order is preserved without ordering across
+streams or transport-wide backpressure. Early exit releases the owned subscription and observers
+without closing `relay` or other consumers. Only one pending `next()` is supported. `Promise.race`
+with a timeout leaves the losing `next()` pending: use the iterator's abort signal to end
+consumption, or retain and await that same read before starting another. Python's
+`asyncio.timeout`/`wait_for` instead cancels the read and its subscription when the deadline
+expires. See the [complete event and ownership
+contract](../spec/behavior.md#async-subscription-consumption).
+
+Passing an `async` subscription callback throws `TypeError` before sending. A synchronous callback
+returning a promise is diagnosed once per handler per subscription via `console.error`; every
+rejection is observed but its work cannot be cancelled. Callbacks are never awaited. Use
+`subscribeEvents` for async consumers. Handlers are snapshotted at subscription creation; later
+assignments do not change that subscription.
+
 ## Publish data for testing
 
 Use a dedicated publisher connection with a token authorized to publish the namespace:

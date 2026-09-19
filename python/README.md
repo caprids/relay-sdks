@@ -79,8 +79,7 @@ Subscriptions have independent cancellation; the application owns connection shu
 
 Object callbacks are plain synchronous callables invoked as streams deliver objects. The SDK adds no
 application queue, ordering across streams, automatic JSON decoding, clock synchronization, or media
-scheduling. Hand work to your own `asyncio.Queue` or task from the callback if it must not block
-delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
+scheduling. Use `subscribe_events` below to await work without blocking delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
 or gap-free delivery promise. `on_done` is the publisher's control notification, and may precede
 trailing objects in transit.
 
@@ -103,6 +102,50 @@ Namespaces contain 1–32 non-empty string fields, sent verbatim without splitti
 The 32-field protocol limit is pinned in `spec/protocol.json`. Oversized namespaces are
 rejected before opening a publisher connection or sending a subscription; track names must
 be non-empty strings.
+
+## Consume asynchronously
+
+`subscribe_events` creates a subscription owned by a single async iterator. Always use its async
+context manager around the loop so a `break`, consumer exception, or task cancellation releases it:
+
+```python
+async with relay.subscribe_events(["sensors", "lab"], "readings", capacity=32) as events:
+    async for event in events:
+        if event.type == "object":
+            await process_reading(event.value.payload)
+        elif event.type == "subgroup_reset":
+            print("Objects may be missing", event.value)
+        elif event.type == "publisher_done":
+            print("Publisher finished; trailing objects may arrive", event.value)
+        # break is safe inside async with; consumer exceptions propagate after cleanup.
+```
+
+Python's `async for` alone does **not** close an iterator on `break`. Alternatively use
+`try/finally: events.close()` or `contextlib.aclosing(events)`. Cancelling a task awaiting `anext()`
+closes this subscription too. This includes expiry of `asyncio.timeout()` or
+`asyncio.wait_for(anext(events), ...)`: the caller receives `TimeoutError`, the subscription is
+cancelled, and subsequent reads return EOF. Use these deadlines to end consumption, not to skip an
+idle interval and resume it. Optional `cancellation=consumer_token` accepts a separate
+`CancellationToken` for this iterator without affecting the connection. The loop propagates the
+cancellation reason and consumer exceptions to its caller.
+
+The default capacity is **64 events**, including lifecycle events; it is a count limit, not a byte
+budget. Objects may be up to 16 MiB plus properties. Overflow discards queued events, cancels the
+subscription and raises `SubscriptionOverflowError`. Request failures raise
+`SubscriptionRequestError`; connection closure raises `SubscriptionConnectionClosedError`, even
+for a clean connection close, because closure does not prove all objects arrived. Before
+acceptance, a connection failure can instead arrive first as `SubscriptionRequestError`; consult
+`relay.closed` for the connection-level cause. Errors propagate out of the loop for the caller to
+handle. `publisher_done` is an event, never EOF. Arrival order is preserved without ordering
+across streams or transport-wide backpressure. Early exit releases the owned subscription and
+observers without closing `relay` or other consumers. Only one pending `anext()` is supported. See
+the [complete event and ownership contract](../spec/behavior.md#async-subscription-consumption).
+
+Passing an `async def` subscription callback raises `TypeError` before sending. A synchronous
+callback returning an awaitable emits `RuntimeWarning`; returned coroutines are closed and returned
+Futures/Tasks are cancelled with their exceptions observed. Callbacks are never awaited. Use
+`subscribe_events` for async consumers. Handlers are snapshotted at subscription creation; later
+assignments to the handler object do not change that subscription.
 
 ## Publish data for testing
 
@@ -296,6 +339,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | TypeScript | Python |
 | --- | --- |
 | `connectRelay({ url, getToken, signal, connectTimeoutMs })` | `connect_relay(url, get_token=..., cancellation=CancellationToken(), connect_timeout=seconds)` |
+| `relay.subscribeEvents(options, { capacity, signal })` | `relay.subscribe_events(namespace, track, capacity=..., cancellation=...)` |
 | `relay.subscribe({ namespace, track, parameters }, handlers)` | `relay.subscribe(namespace, track, SubscriptionHandlers(...), parameters=...)` |
 | `publisher.publish({ track, trackProperties, writeTimeoutMs })` | `publisher.publish(track, track_properties=..., write_timeout=seconds)` |
 | `writer.write(bytes, { properties })` | `await writer.write(payload, properties=...)` |
