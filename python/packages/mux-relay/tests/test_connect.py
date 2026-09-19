@@ -17,8 +17,10 @@ from mux_relay import (
     ConnectingTransport,
     RelayClosedError,
     RelayConnection,
+    RelayError,
     RelayGoawayError,
     RelayTimeoutError,
+    WebTransportError,
     connect_relay,
 )
 
@@ -66,6 +68,44 @@ async def connect_fake(
 
 
 class TestConnectRelay:
+    async def test_task_cancellation_wins_over_simultaneous_owner_cancellation(self) -> None:
+        owner = CancellationToken()
+        ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        connecting = asyncio.create_task(
+            connect_relay(ENDPOINT, cancellation=owner, create_transport=Factory(create_fake_transport(), ready))
+        )
+        await asyncio.sleep(0)
+        connecting.cancel("caller cancelled task")
+        owner.cancel()
+        with pytest.raises(asyncio.CancelledError, match="caller cancelled task"):
+            await connecting
+        assert connecting.cancelled()
+
+    async def test_shares_a_wrapped_transport_failure_with_rejected_operations(
+        self, connections: list[RelayConnection]
+    ) -> None:
+        fake, connection, _ = await connect_fake(connections)
+        cause = ConnectionError("transport failed")
+        fake._closed.set_exception(cause)
+        closed = await asyncio.wait_for(connection.closed, 1)
+        assert isinstance(closed.error, RelayError)
+        assert closed.error.code == "TRANSPORT_ERROR"
+        assert closed.error.phase == "connection"
+        assert closed.error.__cause__ is cause
+        with pytest.raises(RelayError) as failure:
+            connection.subscribe(["room"], "events")
+        assert failure.value is closed.error
+
+    async def test_preserves_token_provider_exceptions(self) -> None:
+        cause = TypeError("token provider failed")
+
+        def get_token() -> str:
+            raise cause
+
+        with pytest.raises(TypeError) as failure:
+            await connect_relay(ENDPOINT, get_token=get_token)
+        assert failure.value is cause
+
     @pytest.mark.parametrize("namespace", [[], ["live", ""], ["live", 7], "live", None])
     async def test_rejects_invalid_namespace_before_sending(
         self, connections: list[RelayConnection], namespace: Any
@@ -152,6 +192,8 @@ class TestConnectRelay:
         await control.write(encode_goaway(1000))
         closed = await connection.closed
         assert isinstance(closed.error, RelayGoawayError)
+        assert closed.error.code == "GOAWAY"
+        assert closed.error.phase == "connection"
         assert fake.close_info is not None
         assert fake.close_info.close_code == 0
         assert fake.close_info.reason == ""
@@ -352,8 +394,10 @@ class TestConnectRelay:
         fake = create_fake_transport()
         never: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
-        with pytest.raises(RelayTimeoutError, match="timed out"):
+        with pytest.raises(RelayTimeoutError) as failure:
             await connect_relay(ENDPOINT, connect_timeout=0.02, create_transport=Factory(fake, never))
+        assert failure.value.code == "CONNECTION_TIMEOUT"
+        assert failure.value.phase == "connecting"
 
         assert fake.close_calls == 1
 
@@ -368,10 +412,16 @@ class TestConnectRelay:
     async def test_closes_a_transport_whose_handshake_fails(self) -> None:
         fake = create_fake_transport()
         failed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        failed.set_exception(ConnectionError("handshake failed"))
+        cause = WebTransportError("handshake failed", code=42, reason="peer detail")
+        failed.set_exception(cause)
 
-        with pytest.raises(ConnectionError, match="handshake failed"):
+        with pytest.raises(RelayError, match="handshake failed") as failure:
             await connect_relay(ENDPOINT, create_transport=Factory(fake, failed))
+        assert failure.value.code == "TRANSPORT_ERROR"
+        assert failure.value.phase == "connecting"
+        assert failure.value.__cause__ is cause
+        assert cause.code == 42
+        assert cause.reason == "peer detail"
 
         assert fake.close_calls == 1
 

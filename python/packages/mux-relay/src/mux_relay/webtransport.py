@@ -142,6 +142,8 @@ def parse_sf_list_of_strings(value: bytes) -> list[str]:
 class WebTransportError(RelayError):
     """A WebTransport session or stream failure. ``code`` is the peer's application error code when known."""
 
+    code: int | None
+
     def __init__(self, message: str, *, code: int | None = None, reason: str = "") -> None:
         super().__init__(message)
         self.code = code

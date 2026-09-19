@@ -18,6 +18,7 @@ from mux_relay import (
     ConnectingTransport,
     RelayClosedError,
     RelayConnection,
+    RelayError,
     RelayGroupWriter,
     RelayPublisher,
     RelayTimeoutError,
@@ -192,8 +193,10 @@ class TestConnectRelayPublisher:
         await wait_for(lambda: len(received_two.objects) == 2)
         assert ObservedSubscribeFin("one") in hub.track_ends
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayClosedError) as failure:
             await one.write(bytes([4]))
+        assert failure.value.code == "CLOSED"
+        assert failure.value.phase == "writing"
 
     async def test_bounds_a_write_waiting_for_demand_and_can_publish_a_later_write_after_the_timeout(
         self, cleanup: Cleanup
@@ -201,8 +204,10 @@ class TestConnectRelayPublisher:
         _, publisher, subscriber = await connect_hub(cleanup)
         events = publisher.publish("events", write_timeout=0.05)
 
-        with pytest.raises(RelayTimeoutError, match="timed out"):
+        with pytest.raises(RelayTimeoutError) as failure:
             await events.write(bytes([1]))
+        assert failure.value.code == "WRITE_TIMEOUT"
+        assert failure.value.phase == "waiting-for-demand"
 
         # Nothing was bound, so the track is still live and the next write can wait for demand again.
         assert not events.closed
@@ -217,8 +222,10 @@ class TestConnectRelayPublisher:
         writing = asyncio.ensure_future(events.write(bytes([1])))
         await asyncio.sleep(0)
 
-        with pytest.raises(RelayWritePendingError, match="already pending"):
+        with pytest.raises(RelayWritePendingError) as failure:
             await events.write(bytes([2]))
+        assert failure.value.code == "WRITE_PENDING"
+        assert failure.value.phase == "writing"
 
         events.close()
 
@@ -359,10 +366,12 @@ class TestConnectRelayPublisher:
         events = publisher.publish("events")
         Received(subscriber, "events")
 
-        with pytest.raises(ConnectionError) as raised:
+        with pytest.raises(RelayError) as raised:
             await events.write(bytes([1]))
 
-        assert raised.value is failure
+        assert raised.value.__cause__ is failure
+        assert raised.value.code == "TRANSPORT_ERROR"
+        assert raised.value.phase == "opening-stream"
 
         assert not events.closed
         assert hub.object_count("events") == 0
@@ -448,8 +457,10 @@ class TestConnectRelayPublisher:
         events = publisher.publish("events", write_timeout=0.1)
         Received(subscriber, "events")
 
-        with pytest.raises(RelayTimeoutError, match="timed out"):
+        with pytest.raises(RelayTimeoutError) as failure:
             await events.write(bytes([1]))
+        assert failure.value.code == "WRITE_TIMEOUT"
+        assert failure.value.phase == "opening-stream"
 
         assert not events.closed
         await events.write(bytes([2]))

@@ -136,7 +136,8 @@ connection-lifetime implementation. No camera, microphone, catalog, or timestamp
 Publishing follows Relay's announce-and-serve ingest flow. `publish()` registers the track;
 `write()` waits for the relay to subscribe upstream before sending bytes. Start a subscriber to
 create that demand. The default 10-second write deadline (`write_timeout`) covers both demand and
-transport writes. A `RelayTimeoutError` waiting for demand can be retried. If the relay has solicited
+transport writes. A `RelayTimeoutError` with `phase == "waiting-for-demand"` means this attempt sent
+no object bytes; choose the next write using application freshness and deduplication policy. If the relay has solicited
 namespace prefixes but none covers this publisher's namespace, the demand deadline instead raises
 `RelayNamespaceError`: check the token and namespace instead of blindly retrying. The track stays
 open, and a later matching solicitation can let it proceed. An ordinary absence of subscriber
@@ -231,6 +232,67 @@ values, cycles, non-finite numbers, and unpaired surrogates fail locally. Readin
 `NaN` and `Infinity`. Other conversion rules are Python's standard JSON behavior. Text writing uses
 strict UTF-8 encoding. Raw byte `write()` and subscriptions remain available.
 
+## Errors and recovery
+
+Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:
+
+| Code | Application response |
+| --- | --- |
+| `CONNECTION_TIMEOUT` | Connecting exceeded its deadline; consider a new connection with backoff. |
+| `WRITE_TIMEOUT` | Inspect the phase below, then choose the next object or group explicitly. |
+| `CLOSED` | The handle is closed; use an open connection, track, or group. |
+| `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
+| `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
+| `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
+| `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
+| `GOAWAY` | The relay requested migration; open a replacement connection. |
+| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
+
+`connecting` covers token resolution and connection setup. `connection` marks a connection-wide
+failure; it makes no claim about individual writes that were in flight. Publishing records
+`waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
+A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
+phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
+sent. Opening a group can start sending its header before the first object write. A phase records
+the failure's origin, and a later call on the failed handle can report that same error.
+
+For `WRITE_PENDING` and calls rejected because a handle is already closed, phase describes the
+refused operation; that call sends nothing. `CLOSED` can also interrupt an operation already in
+flight, so the code alone does not rule out partial delivery.
+
+No code or phase promises safe replay. Account for previous attempts, data freshness, and your
+application's deduplication policy. Successful writes mean transport acceptance, not viewer
+acknowledgment. The SDK does not automatically retry or reconnect. Neither a connection failure nor
+an uncovered namespace proves authentication was denied.
+
+Clean connection shutdown still resolves `closed` without an error; subsequent operations fail
+with `CLOSED`. After a failed connection, `closed` and subsequent connection operations expose the
+same failure. Caller cancellation reasons and token-provider exceptions retain their identity.
+Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
+`on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
+
+Python exports `RelayErrorCode` and `RelayErrorPhase` type aliases and preserves the existing
+exception hierarchy: `RelayTimeoutError`, `RelayClosedError` (including legacy `RelayTrackEndedError`),
+`RelayWritePendingError`, `RelayNamespaceError`, and `RelayGoawayError` remain catchable subclasses
+of `RelayError`. Other lifecycle categories use `RelayError` with the code above. Manually constructed
+base `RelayError` instances default to `RELAY_ERROR` for compatibility.
+
+Wrapped transport/session failures preserve the original exception in `__cause__`. The lower-level
+WebTransport API's `WebTransportError` keeps its numeric `code` and `reason`; a failure surfaced
+through the Relay connection/publishing API wraps it with `code == "TRANSPORT_ERROR"`. Explicit
+caller cancellation, including `asyncio.CancelledError`, is passed through unchanged.
+
+```python
+from mux_relay import RelayTimeoutError
+
+try:
+    await track.write_text("current state")
+except RelayTimeoutError as error:
+    print("Write deadline expired during", error.phase)
+    # Choose what to publish next using phase and application freshness/deduplication policy.
+```
+
 ## Transport
 
 `connect_relay` and `connect_relay_publisher` default to `mux_relay.connect_webtransport`, a
@@ -302,7 +364,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
 | `relay.closed` resolves `{ error? }` | `await relay.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
-| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayNamespaceError`, `WebTransportError` |
+| `RelayError` with `code` and `phase` | `RelayError` with `code` and `phase`, preserving typed subclasses |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
 | `openGroup()`, `bindings()`, `writer.closed` | `open_group()`, `bindings()`, `writer.closed` (see `spec/behavior.md`) |
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
@@ -338,7 +400,5 @@ The live test passed against `sjc.relay.mux.global` on 2026-09-11 over the aioqu
 transport: three objects on `events` and two on `status`, with the second status object delivered
 after the events track closed, and both connections closed cleanly.
 
-`RelayError` is the base class for Relay connection and publishing failures, including
-`WebTransportError` for QUIC, WebTransport session, and stream failures. Transport errors preserve
-their message and optional `code` and `reason` details; catch `RelayError` to handle these together
-with the SDK's deadline and closed errors.
+See [Errors and recovery](#errors-and-recovery) for stable SDK error codes, phases, and preserved
+transport causes.

@@ -8,6 +8,7 @@ import {
   type SubgroupWriter,
 } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import { RelayError, type RelayErrorPhase, transportError } from './errors.js';
 import { encodeJSON, encodeText } from './payload.js';
 
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
@@ -132,7 +133,9 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         ...callbacks,
         onTrackBinding: ({ trackName, trackAlias }) => tracks.get(trackName)?.bind(trackAlias),
         onAnnounceEnded: ({ error }) =>
-          callbacks.onClosed?.({ error: error ?? new Error('Relay withdrew the namespace') }),
+          callbacks.onClosed?.({
+            error: new RelayError('NAMESPACE_ENDED', 'Relay withdrew the namespace', 'connection', { cause: error }),
+          }),
       },
     }),
   );
@@ -153,10 +156,10 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
     closed,
     publish({ track, trackProperties, writeTimeoutMs = 10_000 }) {
       lifetime.assertOpen();
-      if (closing) throw new Error('Relay publisher is closed');
+      if (closing) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');
       if (typeof track !== 'string') throw new TypeError('Track name must be a string');
       if (track.length === 0) throw new TypeError('Track name must be non-empty');
-      if (tracks.has(track)) throw new Error('Track name is already registered on this publisher connection');
+      if (tracks.has(track)) throw new TypeError('Track name is already registered on this publisher connection');
       assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
 
       const registered = session.registerTrack({
@@ -173,6 +176,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         writer: SubgroupWriter | undefined;
         cancelled: boolean;
         failure: unknown;
+        phase: RelayErrorPhase;
         demand: Promise<void>;
         interrupted: Promise<never>;
         wake(): void;
@@ -191,15 +195,22 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         notify(undefined);
         watchers.clear();
       };
-      const close = (error: unknown = new Error('Published track is closed')): void => {
+      const close = (
+        error: unknown = new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'writing'),
+      ): void => {
         if (ended) return;
         active?.cancel(error);
         end();
       };
       const assertWritable = () => {
         lifetime.assertOpen();
-        if (ended || closing) throw new Error('Published track is closed');
-        if (active) throw new Error('A write or group is already pending; await it before writing another object');
+        if (ended || closing) throw new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'writing');
+        if (active)
+          throw new RelayError(
+            'WRITE_PENDING',
+            'A write or group is already pending; await it before writing another object',
+            'writing',
+          );
       };
       const copyPayload = (payload: ArrayBufferView) => {
         if (!ArrayBuffer.isView(payload))
@@ -219,9 +230,15 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         });
         // An open group can be aborted between calls, when nobody is awaiting this promise.
         void interrupted.catch(() => {});
-        const abort = () => operation.cancel(signal?.reason ?? new Error('Publish operation aborted'));
+        const abort = () => {
+          const reason = signal?.reason;
+          operation.cancel(
+            reason === undefined ? new RelayError('CLOSED', 'Publish operation aborted', operation.phase) : reason,
+          );
+        };
         const operation: Operation = {
           kind,
+          phase: 'waiting-for-demand',
           alias: undefined,
           writer: undefined,
           cancelled: false,
@@ -256,10 +273,14 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         const timer = setTimeout(
           () =>
             operation.cancel(
-              new Error(
-                operation.alias === undefined && session.namespaceSolicited === false
+              new RelayError(
+                operation.phase === 'waiting-for-demand' && session.namespaceSolicited === false
+                  ? 'NAMESPACE_NOT_SOLICITED'
+                  : 'WRITE_TIMEOUT',
+                operation.phase === 'waiting-for-demand' && session.namespaceSolicited === false
                   ? 'Publisher namespace is not covered by the relay namespace solicitations; check the token and namespace'
                   : 'Publish write timed out waiting for relay demand or transport',
+                operation.phase,
               ),
             ),
           writeTimeoutMs,
@@ -270,8 +291,17 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           check(operation);
           return result;
         } catch (error) {
-          operation.cancel(error);
-          throw error;
+          let failure: unknown;
+          try {
+            // Closure can precede the callback that cancels this track. Preserve its reason
+            // even when the send continuation runs before that callback.
+            check(operation);
+            failure = transportError(error, operation.phase);
+          } catch (interrupted) {
+            failure = interrupted;
+          }
+          operation.cancel(failure);
+          throw failure;
         } finally {
           clearTimeout(timer);
         }
@@ -280,11 +310,17 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         if (alias === undefined) {
           await operation.demand;
           check(operation);
-          if (alias === undefined) throw new Error('Relay subscription ended before the write started');
+          if (alias === undefined)
+            throw new RelayError(
+              'SUBSCRIPTION_CHANGED',
+              'Relay subscription ended before the write started',
+              operation.phase,
+            );
         }
         check(operation);
         operation.alias = alias;
         const groupId = nextGroupId++;
+        operation.phase = 'opening-stream';
         const stream = await session.openUniStream();
         if (operation.cancelled) {
           void stream.abort(operation.failure).catch(() => {});
@@ -302,7 +338,13 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         close,
         bind(nextAlias) {
           if (active?.alias !== undefined && active.alias !== nextAlias) {
-            active.cancel(new Error('Relay subscription changed during a write or group; objects may be incomplete'));
+            active.cancel(
+              new RelayError(
+                'SUBSCRIPTION_CHANGED',
+                'Relay subscription changed during a write or group; objects may be incomplete',
+                active.phase,
+              ),
+            );
           }
           const changed = alias !== nextAlias;
           alias = nextAlias;
@@ -370,8 +412,10 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           try {
             await run(operation, async () => {
               const writer = await openStream(operation);
+              operation.phase = 'writing';
               await writer.writeObject({ objectId: 0, properties, payload: bytes });
               check(operation);
+              operation.phase = 'closing';
               await writer.fin();
             });
           } finally {
@@ -387,8 +431,8 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           let complete = false;
           const assertGroup = () => {
             check(operation);
-            if (complete) throw new Error('Group is closed');
-            if (pending) throw new Error('A group write or close is already pending');
+            if (complete) throw new RelayError('CLOSED', 'Group is closed', 'writing');
+            if (pending) throw new RelayError('WRITE_PENDING', 'A group write or close is already pending', 'writing');
           };
           const groupWriter: RelayGroupWriter = {
             groupId: writer.groupId,
@@ -413,6 +457,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
                 throw new TypeError('Unknown object status');
               pending = true;
               try {
+                operation.phase = 'writing';
                 await run(operation, () =>
                   writer.writeObject({ objectId: objectCount, properties, payload: bytes, status }),
                 );
@@ -426,6 +471,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
               assertGroup();
               pending = true;
               try {
+                operation.phase = 'closing';
                 await run(operation, () => writer.fin());
                 complete = true;
                 release(operation);
@@ -433,7 +479,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
                 pending = false;
               }
             },
-            abort(reason = new Error('Group was aborted')) {
+            abort(reason = new RelayError('CLOSED', 'Group was aborted', operation.phase)) {
               if (!complete) operation.cancel(reason);
             },
           };
