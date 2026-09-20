@@ -55,6 +55,8 @@ from .connect_session import (
 from .errors import (
     RelayClosedError,
     RelayError,
+    RelayErrorCode,
+    RelayErrorPhase,
     RelayGoawayError,
     RelayNamespaceError,
     RelayTimeoutError,
@@ -112,6 +114,8 @@ __all__ = [
     "RelayClosedError",
     "RelayConnection",
     "RelayError",
+    "RelayErrorCode",
+    "RelayErrorPhase",
     "RelayGoawayError",
     "RelayGroupWriter",
     "RelayNamespaceError",

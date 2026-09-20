@@ -29,6 +29,59 @@ against that file.
   cancelled requests do not receive a second initial response.
   Automatic reconnection and token refresh on a live session are not yet part of this contract.
 
+## Error identities and operation phases
+
+Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:
+
+| Code | Application response |
+| --- | --- |
+| `CONNECTION_TIMEOUT` | Connecting exceeded its deadline; consider a new connection with backoff. |
+| `WRITE_TIMEOUT` | Inspect the phase below, then choose the next object or group explicitly. |
+| `CLOSED` | The handle is closed; use an open connection, track, or group. |
+| `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
+| `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
+| `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
+| `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
+| `GOAWAY` | The relay requested migration; open a replacement connection. |
+| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
+
+`connecting` covers token resolution and connection setup. `connection` marks a connection-wide
+failure; it makes no claim about individual writes that were in flight. Publishing records
+`waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
+A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
+phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
+sent. Opening a group can start sending its header before the first object write. A phase records
+the failure's origin, and a later call on the failed handle can report that same error.
+
+For `WRITE_PENDING` and calls rejected because a handle is already closed, phase describes the
+refused operation; that call sends nothing. `CLOSED` can also interrupt an operation already in
+flight, so the code alone does not rule out partial delivery.
+
+No code or phase promises safe replay. Account for previous attempts, data freshness, and your
+application's deduplication policy. Successful writes mean transport acceptance, not viewer
+acknowledgment. The SDK does not automatically retry or reconnect. Neither a connection failure nor
+an uncovered namespace proves authentication was denied.
+
+Clean connection shutdown still resolves `closed` without an error; subsequent operations fail
+with `CLOSED`. After a failed connection, `closed` and subsequent connection operations expose the
+same failure. Caller cancellation reasons and token-provider exceptions retain their identity.
+Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
+`on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
+
+Implementations export a Relay error type with a stable `code` discriminant and `phase` field.
+Human-readable messages are not a compatibility contract. Wrapped transport/session failures retain
+the original cause. TypeScript uses `RelayError.cause`; Python uses exception chaining and preserves
+its existing Relay exception subclasses. Python's low-level `WebTransportError` retains its numeric
+application code; Relay API failures wrap it with `TRANSPORT_ERROR`. Manually constructed Python base
+`RelayError` instances retain the fallback `RELAY_ERROR` code.
+
+Local argument errors remain `TypeError`/`RangeError` in TypeScript and `TypeError`/`ValueError` in
+Python as appropriate. A refused concurrent operation uses `WRITE_PENDING` and does not cancel the
+active operation. Caller-provided cancellation reasons bypass wrapping, including non-Error
+JavaScript values and Python task cancellation. Connection failures are shared with pending
+publishing operations; their connection phase does not establish whether those writes sent bytes.
+
 ## Subscribing
 
 - Namespaces are ordered tuples of fields sent verbatim. The SDK adds no prefix and performs no

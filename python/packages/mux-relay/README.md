@@ -9,3 +9,7 @@ packages as described in the [local consumption guide](../../README.md#use-the-l
 
 The [shared specification](../../../spec/README.md) contains the protocol pins, behavior contract,
 and test vectors used by every Relay SDK.
+
+For stable `RelayError.code` / `phase` values, preserved exception subclasses and transport causes,
+and recovery without assuming delivery acknowledgment or safe replay, see
+[Errors and recovery](../../README.md#errors-and-recovery).
