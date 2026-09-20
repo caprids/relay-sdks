@@ -6,7 +6,8 @@
  * Chromium through Playwright, and prints the page's log entries. The SDK calls live in demo.js.
  *
  *   cd ts && pnpm build
- *   RELAY_TOKEN=... node examples/mux-global/run.mjs --namespace mattypoo/relay-sdk-example
+ *   # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
+ *   node examples/mux-global/run.mjs --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE"
  */
 import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
