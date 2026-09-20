@@ -27,7 +27,9 @@ The second line is the complete source URL including your token; give it to a Vi
 as its source (the `moqt://` scheme selects the MoQ engine). The player moves the `c4m` token onto
 the relay connect URL's `jwt` parameter, subscribes to the `catalog` track, then to the media tracks
 it lists. Press play in the player once `video flowing` appears in the script's output; a viewer
-joining later starts at the current GOP.
+joining an active publisher later starts at the current GOP. Restarting a publisher on the same
+namespace does not guarantee that attached viewers switch to the replacement; see
+[Publisher replacement](#publisher-replacement).
 
 Options:
 
@@ -116,6 +118,21 @@ write), cumulative sent/skipped/dropped/stale counts, and the maximum observed l
 `staleAudio` include buffer overflow and frames discarded while waiting for a recovery keyframe.
 The shutdown path joins the producer and drains both queues so its final encoded frames are counted.
 
+## Publisher replacement
+
+A stopped or killed publisher can leave an attached viewer silent while its subscriber connection
+stays open, and relay publisher-death notification can be delayed. Starting this script again on
+the same namespace
+does not guarantee immediate recovery for attached viewers. Subscribing soon after an orderly
+retract/re-announce can also fail transiently.
+
+A player should report stalls using its own media-progress check, retire the old subscription under
+an explicit trailing-data policy, and retry with backoff and a total recovery deadline. After a
+publisher generation changes, it should reload the catalog and resume at a usable keyframe. A
+`ready` connection alone does not establish that media is advancing. See the shared
+[publisher recovery guide](../../../spec/publisher-recovery.md) for the callback semantics, retry
+policy, and the option of switching viewers to a fresh generation-specific namespace.
+
 ## When a track ends under you
 
 The catalog uses a single-object write. Failed writes and media groups reset their stream and keep
@@ -131,7 +148,8 @@ An ended track is reported once, with the error, on its own `audio track ended` 
 because the catalog still advertises the track: carrying on would serve viewers a stream that
 silently no longer matches its own catalog — video with no audio, and no error anywhere. Pass
 `--on-track-end continue` to keep publishing the tracks that survived instead. Re-registering the
-track on a fresh publisher connection is what a real application should do; the example does not.
+track on a fresh publisher connection can restore publishing; it does not guarantee that existing
+viewers switch to the replacement. The example does not reconnect.
 
 The `finished` summary accounts for every sample the encoder produced, and it is printed even when
 the run fails:

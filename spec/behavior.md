@@ -30,6 +30,59 @@ against that file.
   cancelled requests do not receive a second initial response.
   Automatic reconnection and token refresh on a live session are not yet part of this contract.
 
+## Error identities and operation phases
+
+Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:
+
+| Code | Application response |
+| --- | --- |
+| `CONNECTION_TIMEOUT` | Connecting exceeded its deadline; consider a new connection with backoff. |
+| `WRITE_TIMEOUT` | Inspect the phase below, then choose the next object or group explicitly. |
+| `CLOSED` | The handle is closed; use an open connection, track, or group. |
+| `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
+| `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
+| `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
+| `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
+| `GOAWAY` | The relay requested migration; open a replacement connection. |
+| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
+
+`connecting` covers token resolution and connection setup. `connection` marks a connection-wide
+failure; it makes no claim about individual writes that were in flight. Publishing records
+`waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
+A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
+phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
+sent. Opening a group can start sending its header before the first object write. A phase records
+the failure's origin, and a later call on the failed handle can report that same error.
+
+For `WRITE_PENDING` and calls rejected because a handle is already closed, phase describes the
+refused operation; that call sends nothing. `CLOSED` can also interrupt an operation already in
+flight, so the code alone does not rule out partial delivery.
+
+No code or phase promises safe replay. Account for previous attempts, data freshness, and your
+application's deduplication policy. Successful writes mean transport acceptance, not viewer
+acknowledgment. The SDK does not automatically retry or reconnect. Neither a connection failure nor
+an uncovered namespace proves authentication was denied.
+
+Clean connection shutdown still resolves `closed` without an error; subsequent operations fail
+with `CLOSED`. After a failed connection, `closed` and subsequent connection operations expose the
+same failure. Caller cancellation reasons and token-provider exceptions retain their identity.
+Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
+`on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
+
+Implementations export a Relay error type with a stable `code` discriminant and `phase` field.
+Human-readable messages are not a compatibility contract. Wrapped transport/session failures retain
+the original cause. TypeScript uses `RelayError.cause`; Python uses exception chaining and preserves
+its existing Relay exception subclasses. Python's low-level `WebTransportError` retains its numeric
+application code; Relay API failures wrap it with `TRANSPORT_ERROR`. Manually constructed Python base
+`RelayError` instances retain the fallback `RELAY_ERROR` code.
+
+Local argument errors remain `TypeError`/`RangeError` in TypeScript and `TypeError`/`ValueError` in
+Python as appropriate. A refused concurrent operation uses `WRITE_PENDING` and does not cancel the
+active operation. Caller-provided cancellation reasons bypass wrapping, including non-Error
+JavaScript values and Python task cancellation. Connection failures are shared with pending
+publishing operations; their connection phase does not establish whether those writes sent bytes.
+
 ## Subscribing
 
 - Namespaces are ordered tuples of fields sent verbatim. The SDK adds no prefix and performs no
@@ -41,7 +94,8 @@ against that file.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The SDK adds no application queue, no
-  ordering across streams, no payload decoding, no clock synchronization, and no media scheduling.
+  ordering across streams, no automatic payload decoding, no clock synchronization, and no media
+  scheduling.
 - Each new subscription is independent; re-subscribing does not resume the preceding request.
   Relay caching and location filters can deliver the same object again across subscriptions,
   including after a publisher restart. Applications own retry backoff and any cross-subscription
@@ -58,6 +112,10 @@ against that file.
 - The publisher's done notification is a control message and may arrive before trailing objects
   still in transit. It does not end the subscription: the request stays open until the application
   cancels it or the connection ends, and the SDK does not resubscribe on its own.
+  It is not a prompt publisher-death detector; the SDK reports it when the relay sends it.
+- Replacing a publisher on the same namespace does not guarantee handoff of existing subscriptions.
+  New subscriptions may also see transient 404s or initial-response timeouts after retract/re-announce.
+  Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
 
 ## Publishing
@@ -141,6 +199,23 @@ Evidence and protocol naming: [issue #23](https://github.com/muxinc/relay-sdks/i
 relay release's
 [track property implementation](https://github.com/moq-dev/moq/blob/b2f26b920f617c033ef7a393bcc894f0bb9b350b/rs/moq-net/src/ietf/properties.rs).
 
+## Text and JSON helpers
+
+- Both product SDKs provide opt-in text and JSON writes on track and group writers and standalone
+  readers for received objects. The protocol core remains payload-agnostic.
+- Each helper encodes or decodes one complete UTF-8 object. Text readers preserve a leading U+FEFF
+  and reject malformed UTF-8; JSON readers additionally reject invalid JSON, including non-standard
+  `NaN` and `Infinity` tokens. Empty text is valid, but an empty payload is not JSON.
+- Writes delegate to the byte writer, retaining its options, metadata, grouping, demand,
+  concurrency, cancellation, deadlines, and size limit (measured in encoded bytes). Serialization
+  failures occur before starting a write and leave the writer usable.
+- JSON uses the language's standard serializer and parser, with no schema validation or automatic
+  content-type properties. Unsupported values fail locally; JavaScript also rejects top-level
+  values for which `JSON.stringify` returns undefined. Runtime-specific number, Unicode, and
+  serialization conversion rules are documented in each SDK's README; this is not canonical JSON.
+- Readers do not mutate payloads or metadata. Decode failures propagate to the caller; applications
+  catch them inside object callbacks when they want to skip malformed objects.
+
 ## Package boundaries
 
 - Each language has a product package that owns the Relay API and the authentication convention,
@@ -177,8 +252,8 @@ See [relay interoperability](relay-interop.md) for a local moq-relay 0.14.17 tes
 ## Not yet specified
 
 Automatic reconnection, token refresh on a live session, datagram reception, product resource
-discovery, typed payload helpers, and player adapters are not implemented in any SDK and have no
-contract yet. Add them here when the first SDK gains them.
+discovery, and player adapters are not implemented in any SDK and have no contract yet. Add them
+here when the first SDK gains them.
 
 ## Draft-20 protocol boundaries
 

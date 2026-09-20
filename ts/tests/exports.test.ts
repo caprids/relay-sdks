@@ -8,7 +8,13 @@ import * as relay from '../src/index.js';
  */
 describe('public vocabulary', () => {
   it('exports one entry point per connection role and nothing under the old names', () => {
-    expect(Object.keys(relay).sort()).toEqual(['connectRelayPublisher', 'connectRelaySubscriber']);
+    expect(Object.keys(relay).sort()).toEqual([
+      'RelayError',
+      'connectRelayPublisher',
+      'connectRelaySubscriber',
+      'readJSON',
+      'readText',
+    ]);
     expect(relay).not.toHaveProperty('connectRelay');
   });
 
@@ -40,6 +46,8 @@ describe('public vocabulary', () => {
       demandChanges: true,
       openGroup: true,
       write: true,
+      writeText: true,
+      writeJSON: true,
       close: true,
     } satisfies Record<keyof RelayTrackWriter, true>;
     expect(subscriber).not.toHaveProperty('tracks');

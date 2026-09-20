@@ -55,12 +55,15 @@ from .connect_session import (
 from .errors import (
     RelayClosedError,
     RelayError,
+    RelayErrorCode,
+    RelayErrorPhase,
     RelayGoawayError,
     RelayNamespaceError,
     RelayTimeoutError,
     RelayTrackEndedError,
     RelayWritePendingError,
 )
+from .payload import read_json, read_text
 from .publish import (
     DEFAULT_WRITE_TIMEOUT,
     RelayGroupWriter,
@@ -110,6 +113,8 @@ __all__ = [
     "RelativeGroupFilter",
     "RelayClosedError",
     "RelayError",
+    "RelayErrorCode",
+    "RelayErrorPhase",
     "RelayGoawayError",
     "RelayGroupWriter",
     "RelayNamespaceError",
@@ -135,4 +140,6 @@ __all__ = [
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_webtransport",
+    "read_json",
+    "read_text",
 ]

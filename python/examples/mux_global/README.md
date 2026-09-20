@@ -1,53 +1,86 @@
 # Relay example: publish and subscribe on mux.global (Python)
 
-`demo.py` is the SDK usage. It connects a publisher with `connect_relay_publisher`, registers a
-`ticker` track, connects a subscriber with `connect_relay_subscriber` to the same track, publishes JSON objects
-one second apart, and prints each object as it comes back through the relay. It decodes the JSON
-itself; the SDK only delivers bytes.
+Start with the [Python quickstart](../../README.md#first-round-trip) for a fresh checkout,
+runtime requirements, local package installation, endpoint and credential setup, and a one-object
+round trip. These packages are unpublished. The default endpoint is `https://sjc.relay.mux.global`;
+use `--url` or `RELAY_URL` for another deployment. Both operations require an authorized Relay JWT.
 
-Nothing else is needed: the SDK's aioquic WebTransport transport runs natively, so there is no
-browser in the loop. The token is read from `RELAY_TOKEN` or a hidden prompt and is redacted from
-output.
+[demo.py](demo.py) is the complete SDK example with imports, matching namespace and track,
+byte encoding/decoding, error handling, and cleanup. It runs natively in asyncio using aioquic
+WebTransport. `asyncio.timeout` bounds the run; `AsyncExitStack` enters the SDK connection context
+managers and closes them on success or failure, and background tasks are cancelled and awaited.
+
+The token comes from `RELAY_TOKEN` or a hidden prompt. The CLI never writes it to a file and redacts
+it from output. Read the [credential and token exposure guidance](../../README.md#endpoint-and-credentials)
+before collecting diagnostics.
+
+## Startup and retry policy
+
+A publisher registers a track, then **waits for a matching subscriber** to create relay demand
+before calling `write()`. In combined mode (`both`, the default), the demo starts both sides.
+In separate processes, the namespace fields and track must match exactly. A subscriber started
+before the namespace announcement is visible can receive `404 Broadcast not found`; the demo
+retries that rejection with backoff starting at 500 ms and capped at 2 seconds. Other rejections
+fail the run. The overall `--timeout` bounds waiting, retries, and reception.
+
+Once a write starts, any failure ends the run: transport writes and closes can time out after
+partial delivery. The demo does not infer the phase from error text or resend the same payload.
+Demand can disappear between the initial check and the write; that failure also propagates.
+The broader structured error/phase policy is tracked in [#67](https://github.com/muxinc/relay-sdks/issues/67).
+A successful write means transport acceptance, not viewer acknowledgment. The combined run waits
+for the requested object count to come back through the subscriber before reporting success.
+
+Publisher completion (`onPublisherDone` / `on_publisher_done`) is logged independently: trailing objects can still
+arrive afterward. The demo observes connection closure, does not treat publisher completion as
+all data received, and does not automatically resubscribe on completion. Additional readiness and
+termination APIs are tracked in [#68](https://github.com/muxinc/relay-sdks/issues/68).
 
 ## Run it
 
+After the quickstart's setup, run from the repository root. These prompts request actual deployment
+values, not example credentials:
+
 ```sh
-RELAY_TOKEN=... mise run python:example:mux-global -- --namespace mattypoo/relay-sdk-example
+read -r -p 'Relay HTTPS endpoint: ' RELAY_URL
+read -r -p 'Authorized namespace (slash-separated): ' RELAY_NAMESPACE
+mise run python:example:mux-global -- --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE" --track ticker --count 1 --timeout 30
 ```
 
-The task runs from `python/`; `cd python && mise exec -- uv run python examples/mux_global/demo.py ...`
-is equivalent. Use the namespace prefix your token authorizes; the SDK sends namespace fields
-verbatim. Without `--namespace`, the run uses `RELAY_NAMESPACE_PREFIX` (or `relay-sdk-example`)
-plus a random field, so repeated runs never share relay state. The default endpoint is
-`https://sjc.relay.mux.global`; override it with `--url` or `RELAY_URL`.
-
-Expected output:
-
-```
-starting             mode=both namespace=mattypoo/relay-sdk-example track=ticker count=5
-publisher connected  url=https://sjc.relay.mux.global namespace=mattypoo/relay-sdk-example
-subscriber connected url=https://sjc.relay.mux.global
-subscribed           namespace=mattypoo/relay-sdk-example track=ticker alias=0
-published            seq=1 bytes=84
-received             group=0 bytes=84 seq=1 ageMs=38
-...
-publisher done       status=0 reason=internal error
-finished             published=5 received=5
-```
-
-The `publisher done` line's `status=0 reason=internal error` is the relay's report of the
-publisher's own clean close, not a failure; the same clean close can also read as `status=2
-reason=track ended` on another run (relay behavior, see #25).
+Expected output includes `published seq=1`, `received ... seq=1`, and
+`finished published=1 received=1` (spacing and ordering vary). A redacted `failed` line and nonzero
+exit status mean failure. `publisher done` may report different status codes/reasons across relay
+versions; do not use it as the round-trip success signal.
 
 ## Two processes
 
-Run the subscriber and the publisher in separate terminals on a fixed namespace, in either order.
-Subscribing to a namespace nobody has announced yet is rejected immediately with 404 Broadcast not
-found; the demo retries that specific rejection with backoff until the publisher's announce lands.
+Set the same `RELAY_URL` and `RELAY_NAMESPACE` in both terminals and start these within 60 seconds
+of each other, in either order. Each process prompts for its token. A publisher alone waits for
+demand; a subscriber alone retries a missing namespace until its deadline.
 
 ```sh
-RELAY_TOKEN=... mise run python:example:mux-global -- --mode subscribe --namespace mattypoo/relay-sdk-example/room
-RELAY_TOKEN=... mise run python:example:mux-global -- --mode publish   --namespace mattypoo/relay-sdk-example/room
+mise run python:example:mux-global -- --mode subscribe --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE" --track ticker --count 1 --timeout 60
+mise run python:example:mux-global -- --mode publish --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE" --track ticker --count 1 --timeout 60
 ```
 
-Options: `--track`, `--count`, `--interval` (ms), `--timeout` (s). `--help` lists them.
+Success is `finished published=0 received=1` for the subscriber and
+`finished published=1 received=0` for the publisher.
+
+## Options
+
+`--help` lists all options without requesting credentials or connecting:
+
+```sh
+mise run python:example:mux-global -- --help
+```
+
+- `--mode`: `both` (default), `publish`, or `subscribe`.
+- `--url`: defaults to `RELAY_URL` or `https://sjc.relay.mux.global`.
+- `--namespace`: slash-separated fields, including the token's root prefix. Without it, the CLI
+  appends a random field to `RELAY_NAMESPACE_PREFIX` (or `relay-sdk-example`). That generated
+  namespace must still be authorized by the token. Use a fixed matching namespace for two processes.
+- `--track`: `ticker` by default.
+- `--count`: objects to publish/receive (default 5).
+- `--interval`: milliseconds between objects (default 1000).
+- `--timeout`: overall run deadline in seconds (default 60).
+
+Use a fresh authorized namespace for independent runs to avoid cached objects from prior publishers.

@@ -24,6 +24,10 @@ without a row here is a bug.
 | Protocol notifications on the request stream | `onUpdateOk()`, `onStateNotify(parameters)`, `onGoaway(goaway)` | `on_update_ok()`, `on_state_notify(parameters)`, `on_goaway(goaway)` |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
 | Send one object as its own group | `writer.write(bytes, options)` | `await writer.write(payload, properties=...)` |
+| Send one UTF-8 text object | `writer.writeText(text, options)` | `await writer.write_text(text, properties=...)` |
+| Send one JSON object | `writer.writeJSON(value, options)` | `await writer.write_json(value, properties=...)` |
+| Read an object as UTF-8 text or JSON | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
+| SDK failure with a stable code and operation phase | `RelayError`, `RelayErrorCode`, `RelayErrorPhase` | `RelayError`, `RelayErrorCode`, `RelayErrorPhase` |
 | Send several objects in one group | `writer.openGroup()` returns `RelayGroupWriter` | `await writer.open_group()` returns `RelayGroupWriter` |
 | Does the relay currently want this track | `writer.hasDemand` | `writer.has_demand` |
 | Follow every change in relay demand | `writer.demandChanges()` | `writer.demand_changes()` |

@@ -21,3 +21,5 @@ not implement application timing, decoding, datagram reception, or automatic ses
 
 The implementation is a port of `ts/packages/moq-core`, which is itself an attributed snapshot of the
 Video.js protocol modules under Apache-2.0. See `NOTICE` and `UPSTREAM.json`.
+
+For Relay application usage and local installation, start with the [Python quickstart](../../README.md#first-round-trip).

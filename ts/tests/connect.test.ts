@@ -12,6 +12,7 @@ import {
   type ConnectRelayOptions,
   connectRelaySubscriber,
   type MoqtObject,
+  RelayError,
   type RelaySubscriber,
   type RelayTransportFactory,
 } from '../src/index.js';
@@ -50,6 +51,56 @@ function deferred<T>() {
 }
 
 describe('connectRelaySubscriber', () => {
+  it.each([new Error('owner stopped'), 'stop', null])('preserves cancellation identity: %s', async (reason) => {
+    const owner = new AbortController();
+    const { connection } = await connectFake({ signal: owner.signal });
+    owner.abort(reason);
+    expect((await connection.closed).error).toBe(reason);
+    let caught: unknown = Symbol('not thrown');
+    try {
+      connection.subscribe({ namespace: ['room'], track: 'events' });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBe(reason);
+  });
+
+  it('preserves token-provider exceptions', async () => {
+    const cause = new TypeError('token provider failed');
+    await expect(
+      connectRelaySubscriber({
+        url: endpoint,
+        getToken: () => {
+          throw cause;
+        },
+      }),
+    ).rejects.toBe(cause);
+  });
+
+  it('shares a wrapped transport failure between closure and rejected operations', async () => {
+    const fake = createFakeTransport();
+    const failure = deferred<never>();
+    const connecting = connectRelaySubscriber({
+      url: endpoint,
+      createTransport: () => ({ transport: { ...fake.transport, closed: failure.promise }, ready: Promise.resolve() }),
+    });
+    fake.sendServerSetup();
+    const connection = await connecting;
+    connections.push(connection);
+    const cause = new Error('transport failed');
+    failure.reject(cause);
+    const { error } = await connection.closed;
+    expect(error).toBeInstanceOf(RelayError);
+    expect(error).toMatchObject({ code: 'TRANSPORT_ERROR', phase: 'connection', cause });
+    let rejected: unknown;
+    try {
+      connection.subscribe({ namespace: ['room'], track: 'events' });
+    } catch (failure) {
+      rejected = failure;
+    }
+    expect(rejected).toBe(error);
+  });
+
   it.each([[], ['live', ''], ['live', 7], new Array(1), 'live', null].map((namespace) => ({ namespace })))(
     'rejects invalid subscription namespace %j before sending',
     async ({ namespace }) => {
@@ -131,7 +182,8 @@ describe('connectRelaySubscriber', () => {
     cancelled.cancel();
     await control.write(encodeGoaway(1000));
     const { error } = await connection.closed;
-    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(RelayError);
+    expect(error).toMatchObject({ code: 'GOAWAY', phase: 'connection' });
     expect((error as Error).message).toContain('migration');
     expect(fake.getCloseInfo()).toMatchObject({ closeCode: 0, reason: '' });
     connection.close();
@@ -280,7 +332,9 @@ describe('connectRelaySubscriber', () => {
 
     fake.dropTransport();
     await fake.connection.closed;
-    expect(() => fake.connection.subscribe({ namespace: ['room'], track: 'events' })).toThrow(/closed/);
+    expect(() => fake.connection.subscribe({ namespace: ['room'], track: 'events' })).toThrow(
+      expect.objectContaining({ code: 'CLOSED', phase: 'connection' }),
+    );
   });
 
   it('aborts while a token provider is pending without opening a late transport', async () => {
@@ -349,7 +403,7 @@ describe('connectRelaySubscriber', () => {
       connectTimeoutMs: 20,
       createTransport: () => ({ transport: fake.transport, ready: new Promise(() => {}) }),
     });
-    const rejected = expect(connecting).rejects.toThrow(/timed out/);
+    const rejected = expect(connecting).rejects.toMatchObject({ code: 'CONNECTION_TIMEOUT', phase: 'connecting' });
 
     await vi.advanceTimersByTimeAsync(20);
     await rejected;
@@ -365,7 +419,7 @@ describe('connectRelaySubscriber', () => {
       connectTimeoutMs: 20,
       createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
     });
-    const rejected = expect(connecting).rejects.toThrow(/timed out/);
+    const rejected = expect(connecting).rejects.toMatchObject({ code: 'CONNECTION_TIMEOUT', phase: 'connecting' });
 
     await vi.advanceTimersByTimeAsync(20);
     await rejected;
@@ -373,15 +427,16 @@ describe('connectRelaySubscriber', () => {
   });
 
   it('closes a transport whose handshake rejects', async () => {
+    const cause = new Error('handshake failed');
     const fake = createFakeTransport();
     const close = vi.spyOn(fake.transport, 'close');
 
     await expect(
       connectRelaySubscriber({
         url: endpoint,
-        createTransport: () => ({ transport: fake.transport, ready: Promise.reject(new Error('handshake failed')) }),
+        createTransport: () => ({ transport: fake.transport, ready: Promise.reject(cause) }),
       }),
-    ).rejects.toThrow('handshake failed');
+    ).rejects.toMatchObject({ code: 'TRANSPORT_ERROR', phase: 'connecting', cause });
     expect(close).toHaveBeenCalledOnce();
   });
 
@@ -400,7 +455,10 @@ describe('connectRelaySubscriber', () => {
 
   it('reports missing browser transport support', async () => {
     vi.stubGlobal('WebTransport', undefined);
-    await expect(connectRelaySubscriber({ url: endpoint })).rejects.toThrow(/createTransport/);
+    await expect(connectRelaySubscriber({ url: endpoint })).rejects.toMatchObject({
+      code: 'TRANSPORT_UNAVAILABLE',
+      phase: 'connecting',
+    });
   });
 
   // Fake timers never advance here, so a rejection can only come from validating the argument.
