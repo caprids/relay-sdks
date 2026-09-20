@@ -90,8 +90,8 @@ against that file.
 - There is no publisher-side retention or replay. Late-subscriber behavior depends on relay caching
   and subscription filters.
 - A failed write may have delivered partial data. There is no automatic retry.
-- The publisher encodes supplied track and object properties as protocol metadata. The SDK adds no
-  default timescale, timestamp, or LOC media packaging. Subscribers expose the properties received
+- The publisher encodes supplied track and object properties as protocol metadata. The raw transport
+  API adds no default timescale, timestamp, or LOC media packaging. Subscribers expose the properties received
   from the relay, which may differ from those sent by the publisher; end-to-end preservation of
   arbitrary properties is not guaranteed. See [Relay property handling](#relay-property-handling).
 - Object payloads are limited to the size in `protocol.json`.
@@ -155,7 +155,54 @@ relay release's
 - Readers do not mutate payloads or metadata. Decode failures propagate to the caller; applications
   catch them inside object callbacks when they want to skip malformed objects.
 
+## Media helpers
+
+The optional `@mux/moq-media` / `moq-media` packages implement pure format helpers. Raw Relay
+writers keep their existing byte/group behavior; no automatic media packaging is added to them.
+The media pins in `protocol.json` and exact bytes in `vectors/media.json` apply to both languages.
+
+- LOC track properties declare a timescale (default 1,000,000). Object properties carry Timestamp
+  (0x10), Timescale (0x08), and explicitly supplied Video Config (0x0D) / Audio Config (0x0F).
+  Callers supply configs only on keyframes. Timestamps arrive in microseconds; other timescales
+  round to the nearest integer tick, ties upward. Inputs and the resulting tick count must be
+  nonnegative safe integers (at most 2^53−1); the timescale must be positive.
+- The independent MSF catalog is compact UTF-8 JSON with `version: "draft-01"`, `isComplete: true`,
+  and explicit per-track namespace, LOC packaging, and live status. Absent optional fields are
+  omitted, as is empty init data. Catalog strings must be valid Unicode, with no lone surrogates.
+  Entries are ordered video, audio, then data in caller order. Init-data entries have
+  `<track-name>-init` IDs and inline base64 data. Numbers must be finite; integral values must be safe integers and have no decimal suffix.
+  Fractional values use ECMAScript JSON number spelling, including its exponent threshold.
+- `avc1` and `avc3` video entries are withheld without non-empty init data. With avcC, the codec
+  suffix comes from the record's profile/constraints/level; the `avc1`/`avc3` prefix is retained.
+  Header inspection rejects truncated/wrong-version headers; it does not decode SPS semantics.
+- Opus always declares 48,000 Hz and defaults to channel configuration `"2"`. Data entries have
+  only name and optional role beyond the common fields, and reject the media roles `video`,
+  `signlanguage`, `audio`, `audiodescription`, `caption`, and `subtitle`. Track names must be
+  non-empty and unique, including tracks temporarily withheld pending init data.
+- Namespace inputs are sequences of fields, never bare strings. Catalog namespace fields must be
+  non-empty and cannot contain `/`: the supported Video.js
+  catalog dialect joins/splits namespace fields using that separator. Source URL components
+  support arbitrary valid UTF-8 and escape every byte outside `[A-Za-z0-9_]` as lowercase `.xx`.
+  Source composition accepts explicit `https://` or `moqt://` URLs without a fragment or credentials,
+  preserves authority/path/query, supplies `/` for an absent path, defaults to the `catalog` track,
+  and percent-escapes an optional `c4m` token using RFC 3986 unreserved characters.
+- H.264 helpers accept three- or four-byte Annex B start codes, omit Annex B padding zeros,
+  extract SPS/PPS, construct a four-byte-length avcC, and convert access units to four-byte NAL
+  lengths. SPS/PPS/AUD are dropped by default; retaining them is an explicit option. avcC creation
+  rejects missing/wrong-kind parameter sets, more than 31 SPS or 255 PPS, and NALs over 65,535 bytes.
+  Construction supports Baseline, Main, and Extended profiles (66, 77, 88); other profiles are
+  rejected until their SPS-derived chroma/bit-depth extension fields are implemented. Encoder-generated
+  avcC records of other profiles can still be passed to the catalog builder. The extension requirement
+  is reflected in [FFmpeg's avcC writer](https://patches.ffmpeg.org/doxygen/4.4/avc_8c_source.html).
+- Encoding, demand handling, catalog serving, GOP grouping, recovery, pacing, and time-based frame
+  dropping remain application responsibilities in stage 1. Publishing handles and public readers
+  are not implemented. The TypeScript package keeps an internal independent Video.js catalog
+  parser extraction for builder compatibility tests.
+
 ## Package boundaries
+
+- The generic media format package depends only on the core, imports no product or transport
+  library, and owns no encoder. The core imports nothing from the media package.
 
 - Each language has a product package that owns the Relay API and the authentication convention,
   and a generic MOQT core package that is protocol-only.

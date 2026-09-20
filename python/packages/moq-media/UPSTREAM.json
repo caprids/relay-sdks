@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/videojs/v10",
+  "revision": "dafbe32d615892fe2be9f9c893e04171b30cedc5",
+  "files": {
+    "packages/spf/src/media/moq/build-catalog.ts": "9d0c8f232704c579294f09682dd89be18dd6f66b0e8ebbe34edea501e738f799",
+    "packages/spf/src/media/moq/parse-source.ts": "ccda828ac59dbc7b85246bfcfd9ff7d5f1575f172ba2afff07e7e60acc461938",
+    "packages/spf/src/media/moq/avc-codec.ts": "2c7b296d298838f1dc6356618211f92488985d989c548a4a90bc16cc2e8a7712",
+    "packages/spf/src/media/moq/parse-catalog.ts": "b291eadeb3b93206df118df1be68d226ccba2f06683d5e36b8c8b7a23545f508"
+  },
+  "adaptations": [
+    "Python format implementation extracted from python/examples/videojs_stream/moq_media.py at relay-sdks c67293ed7e5ea7fe4c58f294dfc245ea90cf0c86.",
+    "Catalog validation, Opus defaults, URL validation and H.264 bounds match @mux/moq-media through shared spec vectors.",
+    "The Video.js file hashes identify the TypeScript reference; this package is a Python port, not a verbatim snapshot."
+  ],
+  "migration": "Attributed extraction for reuse by Video.js. Changes to format behavior should migrate upstream."
+}

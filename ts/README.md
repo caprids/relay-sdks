@@ -299,3 +299,7 @@ the SDK are absolute: include the token's root prefix when required by the relay
 
 The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
 on `status`, with the second status object delivered after the events track closed.
+
+The optional [@mux/moq-media format package](packages/moq-media/README.md) provides LOC properties,
+independent MSF catalogs, source URLs, and H.264 decoder configuration helpers. It depends only on
+`@mux/moq-core`; install it alongside `@mux/relay` when publishing media.

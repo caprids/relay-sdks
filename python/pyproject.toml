@@ -1,12 +1,12 @@
 # Workspace root for the Relay Python SDK. It is not published; it exists so that `uv sync` builds
-# one environment holding both packages and the development tools, mirroring the pnpm workspace
+# one environment holding all packages and the development tools, mirroring the pnpm workspace
 # under ts/. Run `uv lock` after changing any dependency and commit uv.lock.
 [project]
 name = "relay-sdks-python"
 version = "0.0.0"
 description = "Development workspace for the Relay Python SDK"
 requires-python = ">=3.11"
-dependencies = ["moq-core", "mux-relay"]
+dependencies = ["moq-core", "moq-media", "mux-relay"]
 
 [dependency-groups]
 dev = [
@@ -32,6 +32,7 @@ members = ["packages/*"]
 
 [tool.uv.sources]
 moq-core = { workspace = true }
+moq-media = { workspace = true }
 mux-relay = { workspace = true }
 
 # ---------------------------------------------------------------------------------------------------
@@ -41,7 +42,7 @@ mux-relay = { workspace = true }
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-src = ["packages/moq-core/src", "packages/mux-relay/src"]
+src = ["packages/moq-media/src", "packages/moq-core/src", "packages/mux-relay/src"]
 
 [tool.ruff.lint]
 select = [
@@ -77,6 +78,7 @@ quote-style = "double"
 python = ".venv"
 python-version = "3.11"
 root = [
+  "packages/moq-media/src",
   "packages/moq-core/src",
   "packages/mux-relay/src",
   "packages/moq-core/tests",
@@ -88,7 +90,7 @@ root = [
 include = ["packages", "scripts", "examples"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages/moq-core/tests", "packages/mux-relay/tests"]
+testpaths = ["packages/moq-media/tests", "packages/moq-core/tests", "packages/mux-relay/tests"]
 pythonpath = ["packages/moq-core/tests", "packages/mux-relay/tests", "examples"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
@@ -97,17 +99,23 @@ filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 # The Python counterpart of ts/scripts/check-boundaries.mjs: the generic core must not know about
 # Relay or any transport library. `include_external_packages` lets the second contract see aioquic.
 [tool.importlinter]
-root_packages = ["moq_core", "mux_relay"]
+root_packages = ["moq_core", "moq_media", "mux_relay"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
-name = "moq_core is protocol-only and imports nothing from mux_relay"
+name = "moq_core imports neither Relay nor media formats"
 type = "forbidden"
 source_modules = ["moq_core"]
-forbidden_modules = ["mux_relay"]
+forbidden_modules = ["mux_relay", "moq_media"]
 
 [[tool.importlinter.contracts]]
 name = "moq_core has no runtime dependencies; the transport lives in mux_relay"
 type = "forbidden"
 source_modules = ["moq_core"]
 forbidden_modules = ["aioquic", "cryptography", "certifi"]
+
+[[tool.importlinter.contracts]]
+name = "moq_media imports neither Relay nor transport libraries"
+type = "forbidden"
+source_modules = ["moq_media"]
+forbidden_modules = ["mux_relay", "aioquic", "cryptography", "certifi"]

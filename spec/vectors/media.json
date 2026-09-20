@@ -1,0 +1,715 @@
+{
+  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document.",
+  "catalogs": [
+    {
+      "name": "h264-opus",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "avc1.FFFFFF",
+          "width": "640",
+          "height": "360",
+          "framerate": "30.0",
+          "bitrate": "1500000",
+          "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
+        },
+        "audio": {
+          "samplerate": "44100",
+          "bitrate": "96000"
+        },
+        "generatedAt": "1700000000000"
+      },
+      "json": "{\"version\":\"draft-01\",\"generatedAt\":1700000000000,\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc1.42C014\",\"width\":640,\"height\":360,\"framerate\":30,\"bitrate\":1500000},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\",\"bitrate\":96000}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}"
+    },
+    {
+      "name": "h264-awaiting-init",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "avc1.42E01F",
+          "width": "640",
+          "height": "360"
+        },
+        "audio": {}
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}"
+    },
+    {
+      "name": "avc3-awaiting-init",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "avc3.42E01F",
+          "initData": ""
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}"
+    },
+    {
+      "name": "avc3-preserves-contract",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "avc3.FFFFFF",
+          "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc3.42C014\"}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}"
+    },
+    {
+      "name": "vp8-minimal",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "vp8"
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"}]}"
+    },
+    {
+      "name": "fractional-framerate",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "vp8",
+          "framerate": "29.97"
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":29.97}]}"
+    },
+    {
+      "name": "data-and-unicode",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "data": [
+          {
+            "name": "métadata",
+            "role": "metadata"
+          },
+          {
+            "name": "chat"
+          }
+        ]
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"métadata\",\"role\":\"metadata\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}]}"
+    },
+    {
+      "name": "audio-init",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {
+          "codec": "mp4a.40.2",
+          "samplerate": "44100",
+          "channelConfig": "1",
+          "initData": "1210"
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"audio-init\",\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"mp4a.40.2\",\"samplerate\":44100,\"channelConfig\":\"1\"}],\"initDataList\":[{\"id\":\"audio-init\",\"type\":\"inline\",\"data\":\"EhA=\"}]}"
+    },
+    {
+      "name": "empty",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ]
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}"
+    },
+    {
+      "name": "small-framerate",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "vp8",
+          "framerate": "0.000001"
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":0.000001}]}"
+    },
+    {
+      "name": "exponential-framerate",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "vp8",
+          "framerate": "0.0000001"
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":1e-7}]}"
+    },
+    {
+      "name": "empty-init-is-absent",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "video": {
+          "codec": "vp8",
+          "initData": ""
+        },
+        "audio": {
+          "codec": "opus",
+          "initData": ""
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}"
+    },
+    {
+      "name": "non-bmp-unicode",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": "📽️",
+            "role": "metadata"
+          }
+        ]
+      },
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"📽️\",\"role\":\"metadata\"}]}"
+    }
+  ],
+  "catalogErrors": [
+    {
+      "name": "data-media-role-audio",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": "oops",
+            "role": "audio"
+          }
+        ]
+      }
+    },
+    {
+      "name": "data-media-role-video",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": "oops",
+            "role": "video"
+          }
+        ]
+      }
+    },
+    {
+      "name": "data-media-role-caption",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": "oops",
+            "role": "caption"
+          }
+        ]
+      }
+    },
+    {
+      "name": "data-media-role-subtitle",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": "oops",
+            "role": "subtitle"
+          }
+        ]
+      }
+    },
+    {
+      "name": "data-media-role-audiodescription",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": "oops",
+            "role": "audiodescription"
+          }
+        ]
+      }
+    },
+    {
+      "name": "data-media-role-signlanguage",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": "oops",
+            "role": "signlanguage"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-name",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "video": {
+          "codec": "vp8",
+          "name": "same"
+        },
+        "audio": {
+          "name": "same"
+        }
+      }
+    },
+    {
+      "name": "invalid-avcc",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "video": {
+          "codec": "avc1.42E01F",
+          "initData": "0042c014"
+        }
+      }
+    },
+    {
+      "name": "empty-name",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": ""
+          }
+        ]
+      }
+    },
+    {
+      "name": "ambiguous-namespace",
+      "input": {
+        "namespace": [
+          "room/live"
+        ]
+      }
+    },
+    {
+      "name": "empty-namespace-field",
+      "input": {
+        "namespace": [
+          "room",
+          ""
+        ]
+      }
+    },
+    {
+      "name": "unsafe-integer",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "generatedAt": "9007199254740992"
+      }
+    },
+    {
+      "name": "lone-surrogate",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "data": [
+          {
+            "name": "\ud800"
+          }
+        ]
+      }
+    }
+  ],
+  "loc": [
+    {
+      "name": "delta",
+      "timestampUs": "1033333",
+      "properties": [
+        [
+          16,
+          "1033333"
+        ],
+        [
+          8,
+          "1000000"
+        ]
+      ]
+    },
+    {
+      "name": "video-key",
+      "timestampUs": "1000000",
+      "videoConfig": "0142",
+      "properties": [
+        [
+          16,
+          "1000000"
+        ],
+        [
+          8,
+          "1000000"
+        ],
+        [
+          13,
+          "0142"
+        ]
+      ]
+    },
+    {
+      "name": "audio-key",
+      "timestampUs": "0",
+      "audioConfig": "1210",
+      "properties": [
+        [
+          16,
+          "0"
+        ],
+        [
+          8,
+          "1000000"
+        ],
+        [
+          15,
+          "1210"
+        ]
+      ]
+    },
+    {
+      "name": "90khz",
+      "timestampUs": "1033333",
+      "timescale": "90000",
+      "properties": [
+        [
+          16,
+          "93000"
+        ],
+        [
+          8,
+          "90000"
+        ]
+      ]
+    },
+    {
+      "name": "round-half-up",
+      "timestampUs": "500000",
+      "timescale": "3",
+      "properties": [
+        [
+          16,
+          "2"
+        ],
+        [
+          8,
+          "3"
+        ]
+      ]
+    },
+    {
+      "name": "max-safe",
+      "timestampUs": "9007199254740991",
+      "properties": [
+        [
+          16,
+          "9007199254740991"
+        ],
+        [
+          8,
+          "1000000"
+        ]
+      ]
+    }
+  ],
+  "urls": [
+    {
+      "name": "token",
+      "origin": "https://relay.example",
+      "namespace": [
+        "room",
+        "relay-sdk"
+      ],
+      "token": "a b/c!()*'~",
+      "url": "moqt://relay.example/#msf:room-relay.2dsdk--catalog&c4m=a%20b%2Fc%21%28%29%2A%27~"
+    },
+    {
+      "name": "path-query",
+      "origin": "moqt://relay.example/moq?x=1",
+      "namespace": [
+        "ns"
+      ],
+      "url": "moqt://relay.example/moq?x=1#msf:ns--catalog"
+    },
+    {
+      "name": "unicode-and-delimiters",
+      "origin": "https://relay.example",
+      "namespace": [
+        "é",
+        "a/b",
+        "x.y-z"
+      ],
+      "trackName": "my-catalog",
+      "url": "moqt://relay.example/#msf:.c3.a9-a.2fb-x.2ey.2dz--my.2dcatalog"
+    },
+    {
+      "name": "port-and-query",
+      "origin": "https://relay.example:444?x=1",
+      "namespace": [
+        "ns"
+      ],
+      "url": "moqt://relay.example:444/?x=1#msf:ns--catalog"
+    },
+    {
+      "name": "case-insensitive-scheme",
+      "origin": "HTTPS://relay.example",
+      "namespace": [
+        "ns"
+      ],
+      "url": "moqt://relay.example/#msf:ns--catalog"
+    },
+    {
+      "name": "query-value-question",
+      "origin": "https://relay.example/moq?x=?",
+      "namespace": [
+        "room"
+      ],
+      "url": "moqt://relay.example/moq?x=?#msf:room--catalog"
+    },
+    {
+      "name": "query-question-only",
+      "origin": "https://relay.example/moq??",
+      "namespace": [
+        "room"
+      ],
+      "url": "moqt://relay.example/moq??#msf:room--catalog"
+    },
+    {
+      "name": "empty-query",
+      "origin": "https://relay.example/moq?",
+      "namespace": [
+        "room"
+      ],
+      "url": "moqt://relay.example/moq#msf:room--catalog"
+    }
+  ],
+  "urlErrors": [
+    {
+      "origin": "http://relay.example",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https://relay.example/#x",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https://relay.example/#",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https:///",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https://user:pass@relay.example",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https://relay.example",
+      "namespace": []
+    },
+    {
+      "origin": "https://relay.example",
+      "namespace": [
+        "a",
+        ""
+      ]
+    },
+    {
+      "origin": "https:///relay.example",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https://relay.example:abc",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https://@relay.example",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https://relay.example/path with spaces",
+      "namespace": [
+        "ns"
+      ]
+    },
+    {
+      "origin": "https://relay.example",
+      "namespace": [
+        "\ud800"
+      ]
+    }
+  ],
+  "h264": [
+    {
+      "name": "sps-pps",
+      "annexb": "000000016742c014da05067e784000000168ce3c80",
+      "sps": [
+        "6742c014da05067e7840"
+      ],
+      "pps": [
+        "68ce3c80"
+      ],
+      "avcc": "0142c014ffe1000a6742c014da05067e784001000468ce3c80",
+      "codec": "avc1.42C014"
+    },
+    {
+      "name": "multiple-parameter-sets",
+      "annexb": "000000016742c014da05067e784000000168ce3c8000000168ce3c80",
+      "sps": [
+        "6742c014da05067e7840"
+      ],
+      "pps": [
+        "68ce3c80",
+        "68ce3c80"
+      ],
+      "avcc": "0142c014ffe1000a6742c014da05067e784002000468ce3c80000468ce3c80",
+      "codec": "avc1.42C014"
+    }
+  ],
+  "accessUnits": [
+    {
+      "name": "strip-parameters-and-aud",
+      "annexb": "0000000167aa0000000168bb0000000109f0000000010605ff000001658884",
+      "avcc": "000000030605ff00000003658884",
+      "allAvcc": "0000000267aa0000000268bb0000000209f0000000030605ff00000003658884"
+    },
+    {
+      "name": "trailing-zeros",
+      "annexb": "00000001651100000000000141220000",
+      "avcc": "000000026511000000024122",
+      "allAvcc": "000000026511000000024122"
+    },
+    {
+      "name": "empty",
+      "annexb": "",
+      "avcc": "",
+      "allAvcc": ""
+    }
+  ],
+  "h264Errors": [
+    {
+      "name": "unsupported-profile-100",
+      "sps": [
+        "6764001f"
+      ],
+      "pps": [
+        "68ce3c80"
+      ]
+    },
+    {
+      "name": "unsupported-profile-110",
+      "sps": [
+        "676e001f"
+      ],
+      "pps": [
+        "68ce3c80"
+      ]
+    },
+    {
+      "name": "unsupported-profile-122",
+      "sps": [
+        "677a001f"
+      ],
+      "pps": [
+        "68ce3c80"
+      ]
+    },
+    {
+      "name": "unsupported-profile-144",
+      "sps": [
+        "6790001f"
+      ],
+      "pps": [
+        "68ce3c80"
+      ]
+    },
+    {
+      "name": "unsupported-profile-244",
+      "sps": [
+        "67f4001f"
+      ],
+      "pps": [
+        "68ce3c80"
+      ]
+    },
+    {
+      "name": "unsupported-secondary-sps",
+      "sps": [
+        "6742c014",
+        "6764001f"
+      ],
+      "pps": [
+        "68ce3c80"
+      ]
+    }
+  ]
+}

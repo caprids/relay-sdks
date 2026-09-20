@@ -66,7 +66,10 @@ async def test_duration_drains_before_classifying_failures(
 
     class Producer:
         def __init__(self, *_: Any) -> None:
-            self.video = SimpleNamespace(codec="avc1.42C014", avcc=b"config")
+            # The catalog builder derives the declared codec from a real avcC header.
+            self.video = SimpleNamespace(
+                codec="avc1.42C014", avcc=bytes.fromhex("0142c014ffe1000a6742c014da05067e784001000468ce3c80")
+            )
             self.audio = None
             self.error: BaseException | None = None
 

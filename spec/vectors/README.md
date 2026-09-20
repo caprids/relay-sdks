@@ -12,7 +12,11 @@ Conventions:
 
 | File | Covers |
 | --- | --- |
+| `media.json` | Exact MSF catalog UTF-8 JSON, LOC properties, MSF source URLs, H.264 avcC and access units, and rejected inputs |
 | `varint.json` | MOQT variable-length integers, draft-ietf-moq-transport-20 §1.4.1 |
 
 Planned: control message framing and parameters, subgroup and fetch stream headers, object status
 markers. The regression tests under `ts/packages/moq-core/src/tests` are the seed for those.
+
+Media vectors use decimal strings for numeric inputs and hex for binary data; `json` is the exact
+expected UTF-8 catalog text. Property type IDs are small JSON integers. Both SDKs consume every case.

@@ -183,7 +183,9 @@ raises `RelayTimeoutError`; the track stays open for a new group at the next key
 
 
 ```python
-video = publisher.publish("video", track_properties=[KeyValuePair(0x08, 1_000_000)])
+from moq_media import loc_properties, loc_track_properties
+
+video = publisher.publish("video", track_properties=loc_track_properties())
 
 if video.bound:  # the relay currently has a subscription for the track
     group = await video.open_group()
@@ -342,3 +344,7 @@ after the events track closed, and both connections closed cleanly.
 `WebTransportError` for QUIC, WebTransport session, and stream failures. Transport errors preserve
 their message and optional `code` and `reason` details; catch `RelayError` to handle these together
 with the SDK's deadline and closed errors.
+
+The optional [moq-media format package](packages/moq-media/README.md) provides the LOC properties,
+MSF catalog builder, source URLs, and H.264 configuration helpers used by the Video.js example.
+Install `moq-media` alongside `mux-relay` when publishing media (the development workspace includes it).

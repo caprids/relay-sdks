@@ -16,9 +16,9 @@
     }
   },
   "scripts": {
-    "build": "pnpm --filter @mux/moq-core build && tsc -p tsconfig.build.json",
-    "test": "pnpm --filter @mux/moq-core build && vitest run",
-    "typecheck": "pnpm --filter @mux/moq-core build && tsc --noEmit -p tsconfig.json",
+    "build": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && tsc -p tsconfig.build.json",
+    "test": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && vitest run",
+    "typecheck": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && tsc --noEmit -p tsconfig.json",
     "lint": "biome check --error-on-warnings .",
     "fix": "biome check --write .",
     "format": "biome format --write .",
@@ -32,6 +32,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
+    "@mux/moq-media": "workspace:*",
     "@types/node": "24.12.2",
     "playwright": "1.59.1",
     "typescript": "6.0.2",

@@ -181,8 +181,9 @@ both the test pattern and a transcoded MP4 with AAC audio.
 
 The format details come from the Video.js v10 sources (`packages/spf/src/media/moq`: `loc.ts`,
 `build-catalog.ts`, `parse-catalog.ts`, `parse-source.ts`) at the revision pinned in
-`python/packages/moq-core/UPSTREAM.json`.
+[moq-media/UPSTREAM.json](../../packages/moq-media/UPSTREAM.json).
 
-Most of `moq_media.py`, and the catalog serving and group mapping in `stream.py`, is format work
-that any LOC/MSF publisher repeats. [The media layer proposal](../../../spec/media-layer.md) records
-what it would look like for the SDKs to take that over, using this example as the measure.
+The format helpers now come from the workspace's [moq-media package](../../packages/moq-media/README.md).
+The example retains its encoder, pacing, queues, catalog service, and group recovery logic. Stage 1
+of the [media proposal](../../../spec/media-layer.md) is implemented; stages 2 and 3 describe the
+remaining catalog service, frame writers, and reader helpers.

@@ -9,8 +9,8 @@ This is an initial development workspace. Package names are provisional and publ
 | Directory | Contents | Status |
 | --- | --- | --- |
 | `spec/` | Protocol pins, the behavior contract every SDK implements, and language-neutral test vectors | Source of truth |
-| `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol package, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
-| `python/` | Python SDK `mux-relay` and the generic `moq-core` package, as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
+| `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol and `@mux/moq-media` format packages, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
+| `python/` | Python SDK `mux-relay` and the generic `moq-core` and `moq-media` packages, as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
 
 ## Development
 
@@ -59,6 +59,8 @@ For the moq-relay 0.14.17 compatibility boundary and a reproducible local test, 
 
 The same shape applies in every language:
 
+- The optional media format packages (`@mux/moq-media`, `moq-media`) own pure LOC/MSF and H.264
+  helpers and depend only on the core. They have no transport or encoder dependencies.
 - The product package (`@mux/relay`, `mux-relay`) owns the Relay API and the authentication
   convention.
 - The generic MoQ core (`@mux/moq-core`, `moq-core`) is protocol-only: an abstract transport, no

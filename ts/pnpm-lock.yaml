@@ -15,6 +15,9 @@ importers:
       '@biomejs/biome':
         specifier: 2.5.13
         version: 2.5.13
+      '@mux/moq-media':
+        specifier: workspace:*
+        version: link:packages/moq-media
       '@types/node':
         specifier: 24.12.2
         version: 24.12.2
@@ -29,6 +32,12 @@ importers:
         version: 4.1.10(@types/node@24.12.2)(vite@8.2.2(@types/node@24.12.2))
 
   packages/moq-core: {}
+
+  packages/moq-media:
+    dependencies:
+      '@mux/moq-core':
+        specifier: workspace:*
+        version: link:../moq-core
 
 packages:
 

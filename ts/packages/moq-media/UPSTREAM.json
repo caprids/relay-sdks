@@ -1,0 +1,18 @@
+{
+  "repository": "https://github.com/videojs/v10",
+  "revision": "dafbe32d615892fe2be9f9c893e04171b30cedc5",
+  "files": {
+    "packages/spf/src/media/moq/build-catalog.ts": "9d0c8f232704c579294f09682dd89be18dd6f66b0e8ebbe34edea501e738f799",
+    "packages/spf/src/media/moq/parse-source.ts": "ccda828ac59dbc7b85246bfcfd9ff7d5f1575f172ba2afff07e7e60acc461938",
+    "packages/spf/src/media/moq/avc-codec.ts": "2c7b296d298838f1dc6356618211f92488985d989c548a4a90bc16cc2e8a7712",
+    "packages/spf/src/media/moq/parse-catalog.ts": "b291eadeb3b93206df118df1be68d226ccba2f06683d5e36b8c8b7a23545f508"
+  },
+  "adaptations": [
+    "Relative imports use .js suffixes.",
+    "Catalog building has one video track, default names and Opus defaults, validation, and avcC-derived H.264 codec strings. It emits UTF-8 bytes.",
+    "Source composition accepts explicit https/moqt URLs and namespace tuples, with RFC 3986 token escaping.",
+    "The internal catalog parser retains the independent-catalog path for builder round-trip tests; player presentation types, variable substitution, and delta updates are omitted. It is not a public reader API.",
+    "H.264 Annex B helpers and LOC properties are ported from the Relay Python example, with validation shared through spec vectors."
+  ],
+  "migration": "Attributed extraction for reuse by Video.js. Changes to format behavior should migrate upstream."
+}

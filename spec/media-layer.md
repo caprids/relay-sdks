@@ -1,9 +1,15 @@
 # Media layer proposal: LOC packaging and MSF catalogs
 
-Status: proposal, written 2026-09-18. Nothing in this document is implemented. It records what the
-SDKs would take over from an application that publishes live media, measured against
-`python/examples/videojs_stream`, so the shape can be agreed before any API lands. Every name below
-is provisional until it has a row in `vocabulary.md`.
+Status: stage 1 implemented. The format packages (`@mux/moq-media`, `moq-media`), shared vectors,
+protocol pins, and Python example migration are present. Public names for this stage are recorded
+in [vocabulary.md](vocabulary.md); [behavior.md](behavior.md#media-helpers) is the implemented contract.
+The publishing handles and public readers below remain proposals (stages 2 and 3).
+
+This design was written 2026-09-18. Its before/after sketches describe the eventual API; they are
+not runnable stage 1 examples. See the format packages' READMEs for current usage. Stage 1 retains
+`VideoTrackInfo` / `AudioTrackInfo`, adds `DataTrackInfo`, and uses `build_msf_catalog` /
+`buildMsfCatalog` for UTF-8 bytes. The internal TypeScript parser supports builder round-trip tests;
+player presentation projection and delta updates are not part of this extraction.
 
 ## What a media publisher has to know today
 

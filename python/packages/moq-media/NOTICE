@@ -1,0 +1,6 @@
+Media format helpers are derived from Video.js media/moq modules and the Relay SDKs
+Python Video.js example. The Python package ports the same format behavior.
+Copyright 2025-present Video.js contributors.
+Licensed under the Apache License, Version 2.0. See LICENSE.
+
+See UPSTREAM.json for the source revision, original file hashes, and adaptations.

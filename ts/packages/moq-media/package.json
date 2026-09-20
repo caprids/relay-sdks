@@ -1,0 +1,30 @@
+{
+  "name": "@mux/moq-media",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Transport-independent LOC and MSF media format helpers",
+  "license": "Apache-2.0",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE",
+    "NOTICE",
+    "UPSTREAM.json"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@mux/moq-core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

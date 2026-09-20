@@ -28,7 +28,7 @@ dir = "ts"
 run = "pnpm install --frozen-lockfile"
 
 [tasks."ts:build"]
-description = "Build @mux/moq-core and @mux/relay"
+description = "Build @mux/moq-core, @mux/moq-media, and @mux/relay"
 dir = "ts"
 run = "pnpm build"
 
