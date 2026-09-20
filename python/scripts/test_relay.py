@@ -17,7 +17,8 @@ never written to disk and is redacted from output. For anonymous local relays, s
 ``RELAY_ANONYMOUS=1``; ``RELAY_CA_FILE`` supplies a local certificate trust root.
 See ``spec/relay-interop.md`` for the moq-relay 0.14.17 reproduction.
 
-    RELAY_NAMESPACE_PREFIX=mattypoo/relay-sdk-smoke mise run python:test:relay
+    # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
+    RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python:test:relay
 """
 
 from __future__ import annotations

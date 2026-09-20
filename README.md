@@ -12,6 +12,10 @@ This is an initial development workspace. Package names are provisional and publ
 | `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol package, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
 | `python/` | Python SDK `mux-relay` and the generic `moq-core` package, as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
 
+Start with the [JavaScript quickstart](ts/README.md#first-round-trip) (browser WebTransport) or
+[Python quickstart](python/README.md#first-round-trip) (native asyncio). Both use local packages
+and include credential setup and a bounded publish/subscribe round trip.
+
 ## Development
 
 Tool versions for every language are pinned in `mise.toml`, and the mise tasks are the entry points:
