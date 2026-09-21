@@ -38,6 +38,12 @@ export async function publishVideoFile(
   void publisher.closed.then(({ error }) => lifetime.abort(error ?? new Error('Publisher closed')));
   let tasks: Promise<void>[] = [];
   let closeTracks = () => {};
+  const abort = () => {
+    closeTracks();
+    // Dispose before awaiting the tasks: a task may be blocked reading metadata or the next packet.
+    input.dispose();
+  };
+  signal.addEventListener('abort', abort, { once: true });
   try {
     signal.throwIfAborted();
     const track = await input.getPrimaryVideoTrack();
@@ -52,52 +58,66 @@ export async function publishVideoFile(
       catalogWriter.close();
       videoWriter.close();
     };
-    signal.addEventListener('abort', closeTracks, { once: true });
     signal.throwIfAborted();
 
+    let videoDone = false;
+    let catalogWrite: Promise<void> | undefined;
     const serveCatalog = async () => {
       for await (const demanded of catalogWriter.demandChanges()) {
-        if (demanded) await catalogWriter.write(document, { properties: locProperties(0), signal });
+        if (videoDone) break;
+        if (demanded) {
+          catalogWrite = catalogWriter.write(document, { properties: locProperties(0), signal });
+          await catalogWrite;
+          catalogWrite = undefined;
+        }
       }
     };
     const sendVideo = async () => {
       let group: RelayGroupWriter | undefined;
       let startedAt: number | undefined;
-      let firstTimestamp = 0;
+      let decodeTimeMs = 0;
       try {
         // Mediabunny yields decode order. Preserve it even when B-frame presentation timestamps differ.
         for await (const packet of new EncodedPacketSink(track).packets()) {
           signal.throwIfAborted();
           const frame = packetToLocFrame(packet, video.initData ? { videoConfig: video.initData } : {});
           if (startedAt !== undefined) {
-            await wait(startedAt + (frame.timestampUs - firstTimestamp) / 1000 - performance.now(), signal);
+            await wait(startedAt + decodeTimeMs - performance.now(), signal);
           }
-          if (frame.key) {
+          if (startedAt !== undefined && !videoWriter.hasDemand) {
+            // After startup keep the clock moving without waiting for replacement demand.
+            group?.abort();
+            group = undefined;
+          } else if (frame.key) {
             await group?.close();
             group = await videoWriter.openGroup({ signal });
             if (startedAt === undefined) {
               startedAt = performance.now();
-              firstTimestamp = frame.timestampUs;
             }
-          } else if (!videoWriter.hasDemand) {
-            group?.abort();
-            group = undefined;
           }
           if (group) await group.write(frame.payload, { properties: frame.properties });
+          // PTS can run backwards for B-frames. Pace decode order by durations; preserve PTS in LOC.
+          if (startedAt !== undefined) decodeTimeMs += packet.duration * 1000;
         }
         await group?.close();
+        // Stop accepting demand before draining the current write; closing a track cancels writes.
+        videoDone = true;
+        await catalogWrite;
+        catalogWriter.close();
       } finally {
         group?.abort();
-        catalogWriter.close();
       }
     };
     tasks = [serveCatalog(), sendVideo()];
     await Promise.all(tasks);
+  } catch (error) {
+    // Input disposal is how reads are interrupted; preserve the caller's cancellation reason.
+    signal.throwIfAborted();
+    throw error;
   } finally {
     lifetime.abort(new Error('File publishing finished'));
-    closeTracks();
-    signal.removeEventListener('abort', closeTracks);
+    abort();
+    signal.removeEventListener('abort', abort);
     await Promise.allSettled(tasks);
-    input.dispose();
   }
 }

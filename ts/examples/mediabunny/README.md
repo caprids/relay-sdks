@@ -31,11 +31,19 @@ see the [existing browser launcher](../mux-global/README.md) for the repository'
 
 The file must contain AVC video with decoder configuration and four-byte NAL lengths. The example
 publishes its primary video track once and ignores audio. Timestamps must be nonnegative. Each
-keyframe opens a group; deltas append to it. It waits for initial demand (the SDK's default 10-second
+keyframe opens a group; deltas append to it. Packets stay in decode order and are paced by their
+durations; LOC properties retain presentation timestamps, including B-frame reordering. It waits
+for initial demand (the SDK's default 10-second
 write deadline applies), starts pacing when the first keyframe can be sent, and re-sends the catalog
-on every relay subscription. After loss of demand it discards deltas until a keyframe. Writes are
-serial and any write failure stops the run; there is no reconnect or retry policy. Abort closes the
-tracks, cancels pacing, and disposes the file input. It does not close the caller's connection.
+on every relay subscription. At EOF it stops accepting catalog demand and drains any active catalog
+write before closing that track; genuine catalog failures still fail the run. After loss of demand
+it keeps pacing and skips packets, including keyframes, until demand returns;
+publication resumes at the next keyframe. Writes are
+serial and any write failure stops the run. Demand can disappear between a notification and a
+write, so even an EOF catalog drain can wait for the SDK write deadline and fail; this remains a
+reported write failure. There is no reconnect or retry policy. Abort closes the
+tracks, cancels pacing, and immediately disposes the file input, including during metadata and packet
+reads. It does not close the caller's connection.
 
 The reusable adapter also supports Opus and explicit shared timestamp offsets. This example keeps
 multi-track scheduling, codec changes, and live encoder queues out of its scope; those are application
