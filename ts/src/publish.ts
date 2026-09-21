@@ -1,15 +1,8 @@
-import {
-  createMoqtPublishSession,
-  createSubgroupWriter,
-  type KeyValuePair,
-  MAX_NAMESPACE_FIELDS,
-  MAX_OBJECT_PAYLOAD_LENGTH,
-  type ObjectStatus,
-  type SubgroupWriter,
-} from '@mux/moq-core';
+import { createMoqtPublishSession, createSubgroupWriter, MAX_NAMESPACE_FIELDS, type ObjectStatus } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
-import { RelayError, type RelayErrorPhase, transportError } from './errors.js';
-import { encodeJSON, encodeText } from './payload.js';
+import { RelayError } from './errors.js';
+import { copyProperties } from './payload.js';
+import { createWriteSlot, type WriteSlot } from './write-slot.js';
 
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
   /** One namespace per publisher connection. Register any number of tracks within it. */
@@ -52,7 +45,10 @@ export interface RelayGroupWriter {
   ): Promise<void>;
   /** FIN the group within writeTimeoutMs. Idempotent after successful completion. */
   close(): Promise<void>;
-  /** Reset this group and free the track for the next random-access point. */
+  /**
+   * Reset this group and free the track for the next random-access point. After a clean `close()`
+   * this has no effect: the FIN already ended the stream (draft-20 §11.4.3).
+   */
   abort(reason?: unknown): void;
   /** Encode UTF-8 text and write one object with the same options and semantics as write(). */
   writeText(text: string, options?: { properties?: readonly PublishProperty[]; status?: ObjectStatus }): Promise<void>;
@@ -66,6 +62,8 @@ export interface RelayGroupWriter {
 /**
  * One registered track on a publisher connection, from {@link RelayPublisher.registerTrack}.
  * Registration sends nothing; `write()` and `openGroup()` send, after waiting for relay demand.
+ * The behaviour behind this interface is the track's write slot (see CONTEXT.md and the
+ * "Write phases and interruptions" table in spec/behavior.md).
  */
 export interface RelayTrackWriter {
   /**
@@ -126,22 +124,6 @@ export interface RelayPublisher {
   close(): Promise<void>;
 }
 
-function copyProperties(properties: readonly PublishProperty[] = []): KeyValuePair[] {
-  return Array.from(properties, (property, index) => {
-    const { type, value } = property ?? {};
-    if (!Number.isSafeInteger(type) || type < 0)
-      throw new TypeError(`Property ${index} type must be a non-negative safe integer`);
-    if (type % 2 === 0) {
-      if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0)
-        throw new TypeError(`Property ${index} value must be a non-negative safe integer for an even type`);
-      return { type, value };
-    }
-    if (!ArrayBuffer.isView(value))
-      throw new TypeError(`Property ${index} value must be an ArrayBufferView for an odd type`);
-    return { type, value: new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice() };
-  });
-}
-
 /**
  * Open a dedicated Relay publisher connection. Subscribers use connectRelaySubscriber; this
  * initial publishing API does not share their physical transport. A relay must solicit the
@@ -156,7 +138,9 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
     throw new RangeError(`A publisher namespace must contain at most ${MAX_NAMESPACE_FIELDS} fields`);
   }
 
-  const tracks = new Map<string, { bind(alias: number | undefined): void; close(error?: unknown): void }>();
+  // One write slot per registered track; the session's binding callback and the connection's end
+  // reach the slots through here.
+  const tracks = new Map<string, WriteSlot>();
   const lifetime = await openRelaySession(options, (transport, callbacks) =>
     createMoqtPublishSession(transport, {
       implementationName: '@mux/relay publisher',
@@ -176,7 +160,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   session.announce(namespace);
   void lifetime.closed.then(({ error }) => {
     closing = true;
-    for (const track of tracks.values()) track.close(error);
+    for (const slot of tracks.values()) slot.disconnect(error);
   });
   const closed = lifetime.transportClosed.then(
     () => lifetime.closed,
@@ -198,330 +182,20 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         trackName: track,
         trackProperties: copyProperties(trackProperties),
       });
-      let alias: number | undefined;
-      let ended = false;
-      let nextGroupId = 0;
-      interface Operation {
-        kind: 'write' | 'group';
-        alias: number | undefined;
-        writer: SubgroupWriter | undefined;
-        cancelled: boolean;
-        failure: unknown;
-        phase: RelayErrorPhase;
-        demand: Promise<void>;
-        interrupted: Promise<never>;
-        wake(): void;
-        cancel(error: unknown): void;
-        cleanup(): void;
-      }
-      let active: Operation | undefined;
-      const watchers = new Set<(value: boolean | undefined) => void>();
-      const notify = (value: boolean | undefined) => {
-        for (const watcher of watchers) watcher(value);
-      };
-      const end = () => {
-        if (ended) return;
-        ended = true;
-        registered.end();
-        notify(undefined);
-        watchers.clear();
-      };
-      const close = (
-        error: unknown = new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'writing'),
-      ): void => {
-        if (ended) return;
-        active?.cancel(error);
-        end();
-      };
-      const assertWritable = () => {
-        lifetime.assertOpen();
-        if (ended || closing) throw new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'writing');
-        if (active)
-          throw new RelayError(
-            'WRITE_PENDING',
-            'A write or group is already pending; await it before writing another object',
-            'writing',
-          );
-      };
-      const copyPayload = (payload: ArrayBufferView) => {
-        if (!ArrayBuffer.isView(payload))
-          throw new TypeError('Payload must be a Uint8Array or other ArrayBufferView; wrap an ArrayBuffer in one');
-        if (payload.byteLength > MAX_OBJECT_PAYLOAD_LENGTH)
-          throw new RangeError('Payload exceeds the 16 MiB object limit');
-        return new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength).slice();
-      };
-      const begin = (kind: Operation['kind'], signal?: AbortSignal): Operation => {
-        let wake!: () => void;
-        let reject!: (error: unknown) => void;
-        const demand = new Promise<void>((resolve) => {
-          wake = resolve;
-        });
-        const interrupted = new Promise<never>((_, rejectPromise) => {
-          reject = rejectPromise;
-        });
-        // An open group can be aborted between calls, when nobody is awaiting this promise.
-        void interrupted.catch(() => {});
-        const abort = () => {
-          const reason = signal?.reason;
-          operation.cancel(
-            reason === undefined ? new RelayError('CLOSED', 'Publish operation aborted', operation.phase) : reason,
-          );
-        };
-        const operation: Operation = {
-          kind,
-          phase: 'waiting-for-demand',
-          alias: undefined,
-          writer: undefined,
-          cancelled: false,
-          failure: undefined,
-          demand,
-          interrupted,
-          wake,
-          cleanup() {
-            signal?.removeEventListener('abort', abort);
-          },
-          cancel(error) {
-            if (operation.cancelled) return;
-            operation.cancelled = true;
-            operation.failure = error;
-            operation.writer?.abort(error);
-            if (active === operation) active = undefined;
-            operation.cleanup();
-            wake();
-            reject(error);
-          },
-        };
-        active = operation;
-        signal?.addEventListener('abort', abort, { once: true });
-        if (signal?.aborted) abort();
-        return operation;
-      };
-      const check = (operation: Operation) => {
-        if (operation.cancelled) throw operation.failure;
-        lifetime.assertOpen();
-      };
-      const run = async <T>(operation: Operation, send: () => Promise<T>): Promise<T> => {
-        const timer = setTimeout(
-          () =>
-            operation.cancel(
-              new RelayError(
-                operation.phase === 'waiting-for-demand' && session.namespaceSolicited === false
-                  ? 'NAMESPACE_NOT_SOLICITED'
-                  : 'WRITE_TIMEOUT',
-                operation.phase === 'waiting-for-demand' && session.namespaceSolicited === false
-                  ? 'Publisher namespace is not covered by the relay namespace solicitations; check the token and namespace'
-                  : 'Publish write timed out waiting for relay demand or transport',
-                operation.phase,
-              ),
-            ),
-          writeTimeoutMs,
-        );
-        try {
-          check(operation);
-          const result = await Promise.race([send(), operation.interrupted]);
-          check(operation);
-          return result;
-        } catch (error) {
-          let failure: unknown;
-          try {
-            // Closure can precede the callback that cancels this track. Preserve its reason
-            // even when the send continuation runs before that callback.
-            check(operation);
-            failure = transportError(error, operation.phase);
-          } catch (interrupted) {
-            failure = interrupted;
-          }
-          operation.cancel(failure);
-          throw failure;
-        } finally {
-          clearTimeout(timer);
-        }
-      };
-      const openStream = async (operation: Operation) => {
-        if (alias === undefined) {
-          await operation.demand;
-          check(operation);
-          if (alias === undefined)
-            throw new RelayError(
-              'SUBSCRIPTION_CHANGED',
-              'Relay subscription ended before the write started',
-              operation.phase,
-            );
-        }
-        check(operation);
-        operation.alias = alias;
-        const groupId = nextGroupId++;
-        operation.phase = 'opening-stream';
-        const stream = await session.openUniStream();
-        if (operation.cancelled) {
-          void stream.abort(operation.failure).catch(() => {});
-          check(operation);
-        }
-        const writer = createSubgroupWriter(stream, { trackAlias: operation.alias, groupId, hasProperties: true });
-        operation.writer = writer;
-        return writer;
-      };
-      const release = (operation: Operation) => {
-        if (active === operation) active = undefined;
-        operation.cleanup();
-      };
-      tracks.set(track, {
-        close,
-        bind(nextAlias) {
-          if (active?.alias !== undefined && active.alias !== nextAlias) {
-            active.cancel(
-              new RelayError(
-                'SUBSCRIPTION_CHANGED',
-                'Relay subscription changed during a write or group; objects may be incomplete',
-                active.phase,
-              ),
-            );
-          }
-          const changed = alias !== nextAlias;
-          alias = nextAlias;
-          if (alias !== undefined) active?.wake();
-          if (changed && !ended) notify(alias !== undefined);
-        },
+      const slot = createWriteSlot({
+        openSubgroup: async (trackAlias, groupId) =>
+          createSubgroupWriter(await session.openUniStream(), { trackAlias, groupId, hasProperties: true }),
+        namespaceSolicited: () => session.namespaceSolicited,
+        assertOpen: lifetime.assertOpen,
+        endTrack: () => registered.end(),
+        writeTimeoutMs,
       });
-
-      const trackWriter: RelayTrackWriter = {
-        get hasDemand() {
-          return alias !== undefined && !ended;
-        },
-        get closed() {
-          return ended;
-        },
-        demandChanges() {
-          const queue: boolean[] = ended ? [] : [alias !== undefined];
-          const waiting: ((result: IteratorResult<boolean>) => void)[] = [];
-          let done = ended;
-          const push = (value: boolean | undefined) => {
-            if (done) return;
-            if (value === undefined) {
-              done = true;
-              for (const resolve of waiting.splice(0)) resolve({ done: true, value: undefined });
-              watchers.delete(push);
-            } else {
-              const resolve = waiting.shift();
-              if (resolve) resolve({ done: false, value });
-              else queue.push(value);
-            }
-          };
-          if (!done) watchers.add(push);
-          const iterator: AsyncIterableIterator<boolean> = {
-            [Symbol.asyncIterator]() {
-              return iterator;
-            },
-            next() {
-              const value = queue.shift();
-              if (value !== undefined) return Promise.resolve({ done: false, value });
-              if (done) return Promise.resolve({ done: true, value: undefined });
-              return new Promise((resolve) => {
-                waiting.push(resolve);
-              });
-            },
-            return() {
-              queue.length = 0;
-              push(undefined);
-              return Promise.resolve({ done: true, value: undefined });
-            },
-          };
-          return iterator;
-        },
-        close: () => close(),
-        async writeText(text, writeOptions) {
-          await trackWriter.write(encodeText(text), writeOptions);
-        },
-        async writeJSON(value, writeOptions) {
-          await trackWriter.write(encodeJSON(value), writeOptions);
-        },
-        async write(payload, writeOptions = {}) {
-          assertWritable();
-          const bytes = copyPayload(payload);
-          const properties = copyProperties(writeOptions.properties);
-          const operation = begin('write', writeOptions.signal);
-          try {
-            await run(operation, async () => {
-              const writer = await openStream(operation);
-              operation.phase = 'writing';
-              await writer.writeObject({ objectId: 0, properties, payload: bytes });
-              check(operation);
-              operation.phase = 'closing';
-              await writer.fin();
-            });
-          } finally {
-            release(operation);
-          }
-        },
-        async openGroup(groupOptions = {}) {
-          assertWritable();
-          const operation = begin('group', groupOptions.signal);
-          const writer = await run(operation, () => openStream(operation));
-          let objectCount = 0;
-          let pending = false;
-          let complete = false;
-          const assertGroup = () => {
-            check(operation);
-            if (complete) throw new RelayError('CLOSED', 'Group is closed', 'writing');
-            if (pending) throw new RelayError('WRITE_PENDING', 'A group write or close is already pending', 'writing');
-          };
-          const groupWriter: RelayGroupWriter = {
-            groupId: writer.groupId,
-            get objectCount() {
-              return objectCount;
-            },
-            get closed() {
-              return complete || operation.cancelled;
-            },
-            async writeText(text, writeOptions) {
-              await groupWriter.write(encodeText(text), writeOptions);
-            },
-            async writeJSON(value, writeOptions) {
-              await groupWriter.write(encodeJSON(value), writeOptions);
-            },
-            async write(payload, writeOptions = {}) {
-              assertGroup();
-              const bytes = copyPayload(payload);
-              const properties = copyProperties(writeOptions.properties);
-              const status = writeOptions.status ?? 'normal';
-              if (!['normal', 'end-of-group', 'end-of-track'].includes(status))
-                throw new TypeError('Unknown object status');
-              pending = true;
-              try {
-                operation.phase = 'writing';
-                await run(operation, () =>
-                  writer.writeObject({ objectId: objectCount, properties, payload: bytes, status }),
-                );
-                objectCount++;
-              } finally {
-                pending = false;
-              }
-            },
-            async close() {
-              if (complete) return;
-              assertGroup();
-              pending = true;
-              try {
-                operation.phase = 'closing';
-                await run(operation, () => writer.fin());
-                complete = true;
-                release(operation);
-              } finally {
-                pending = false;
-              }
-            },
-            abort(reason = new RelayError('CLOSED', 'Group was aborted', operation.phase)) {
-              if (!complete) operation.cancel(reason);
-            },
-          };
-          return groupWriter;
-        },
-      };
-      return trackWriter;
+      tracks.set(track, slot);
+      return slot.writer;
     },
     async close() {
       closing = true;
-      for (const track of tracks.values()) track.close();
+      for (const slot of tracks.values()) slot.writer.close();
       lifetime.close();
       await closed;
     },
