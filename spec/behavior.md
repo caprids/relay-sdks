@@ -42,13 +42,16 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
 | `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
 | `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
+| `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
+| `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
-failure; it makes no claim about individual writes that were in flight. Publishing records
+failure; it makes no claim about individual writes that were in flight. `subscription` marks an
+async subscription request failure or local event-buffer overflow. Publishing records
 `waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
 A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
 phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
@@ -93,7 +96,7 @@ publishing operations; their connection phase does not establish whether those w
   before connecting a publisher or sending a subscription. Track names must be non-empty strings.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
-- Object callbacks run as the stream layer delivers objects. The SDK adds no application queue, no
+- Object callbacks run as the stream layer delivers objects. The callback path adds no application queue, no
   ordering across streams, no automatic payload decoding, no clock synchronization, and no media
   scheduling.
 - Each new subscription is independent; re-subscribing does not resume the preceding request.
@@ -117,6 +120,101 @@ publishing operations; their connection phase does not establish whether those w
   New subscriptions may also see transient 404s or initial-response timeouts after retract/re-announce.
   Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
+
+## Async subscription consumption
+
+The Relay product API provides `subscriber.subscribeEvents(options, { capacity, signal })` in TS and
+`subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` in Python. These create
+and own a new subscription immediately. They yield typed data and lifecycle events, using the same
+payload objects as callbacks. The generic `MoqTrackSource` and existing `subscribe` callbacks remain
+available and retain their synchronous delivery model. This additive API does not implement the
+separate readiness/termination handle proposal (#68). It follows the product vocabulary from #63;
+its explicit `publisherDone` / `publisher_done` event distinguishes publisher completion from final delivery.
+
+- `capacity` defaults to **64 events** and must be a positive integer (a safe integer in TS).
+  Every queued object **and lifecycle event** consumes one slot. This is an event-count limit,
+  not a byte budget: an object may contain up to 16 MiB of payload and 1 MiB of encoded properties,
+  plus decoded metadata overhead. Choose a smaller capacity for large objects. Protocol decoding
+  limits also bound individual control events. The queue owns at most `capacity` event references;
+  objects retained by application code and transport buffers are outside this limit. An event
+  handed directly to a waiting reader is delivered and no longer counts against queue capacity,
+  even before that reader resumes. Later teardown cannot retract that handoff.
+- Overflow fails immediately with `SubscriptionOverflowError`, discards the whole queue, cancels
+  only the owned request and its active subgroup readers, and detaches observers. It does not
+  silently drop objects and continue. Buffered data is also discarded on any other termination.
+  These limits provide local buffering, **not transport-wide backpressure**.
+- Events preserve callback arrival order. They do not sort groups or invent an order across streams.
+  No exactly-once, gap-free, or fully drained delivery guarantee is implied.
+
+| Event / condition | Iterator result |
+| --- | --- |
+| Subscription accepted | `subscribed`, with `SubscribeOk` |
+| Object (including protocol object status) | `object`, with `MoqtObject` |
+| Publisher control completion | `publisherDone` / `publisher_done`, with `PublishDone`, including status, stream count and reason; **iteration stays open for trailing objects** |
+| Subgroup FIN | `subgroupEnd` / `subgroup_end`; only that subgroup ended |
+| Subgroup reset | `subgroupReset` / `subgroup_reset`; a gap may have occurred; iteration continues |
+| Publisher state change | `stateNotify` / `state_notify`, with changed parameters |
+| Update acknowledged | `updateOk` / `update_ok` |
+| Request GOAWAY | `goaway`, with relocation details; informational, no automatic retry |
+| Request rejection, initial-response timeout, or initial request failure | Raises `SubscriptionRequestError`, preserving `requestError` / `request_error` |
+| Connection ends after acceptance, or local clean connection close at any point | Raises `SubscriptionConnectionClosedError`, preserving the connection error as `cause` / `__cause__` if available; never a claim of drained EOF |
+| Iterator `close()` / TS `return()` / Python `aclose()` | Discards buffered events, cancels the owned subscription, pending reads settle as clean EOF |
+| Per-iterator abort signal / cancellation token | Discards buffered events and raises the supplied reason (or the platform's default cancellation reason) |
+
+Before acceptance, a connection failure may reach the core's request-error callback before the
+connection observer. In that case the iterator raises `SubscriptionRequestError` with the core's
+reason string, just like an initial request-stream failure; it does not preserve the underlying
+connection exception. Check `subscriber.closed` for the connection-level cause when distinguishing a
+request rejection from a lost connection. Once accepted, connection loss instead raises
+`SubscriptionConnectionClosedError`. This preserves the core's existing first-failure ordering.
+
+The iterator errors are `RelayError` subclasses with stable codes: `SubscriptionRequestError`
+uses `SUBSCRIPTION_REQUEST_FAILED`, and `SubscriptionOverflowError` uses `SUBSCRIPTION_OVERFLOW`,
+both in the `subscription` phase. `SubscriptionConnectionClosedError` uses `CLOSED` in the
+`connection` phase and retains the underlying connection failure as its cause when present.
+The callback API still receives unwrapped MOQT `RequestError` values.
+
+A failure remains observable on subsequent reads. The first termination wins. Do not close the
+shared connection merely to stop this consumer. Publisher completion never auto-cancels or
+resubscribes; choose a timeout or explicit application policy if no more data is expected.
+
+Only one pending iterator read is supported; a concurrent read fails without disrupting the first.
+There is no background consumer task. TS `for await` calls `return()` on `break` or a
+consumer-body exception. Use a `finally { events.close(); }` if cancelling while the body awaits
+other work. A per-iterator `signal` can also interrupt a pending read. Python **requires `async
+with events:`** (or `try/finally: events.close()`) around `async for` for deterministic cleanup on
+early `break`, consumer exception, or task cancellation in the loop body: Python's loop alone does
+not call `aclose()`. Cancelling a Python task blocked in `anext()` also closes the iterator.
+Consequently, `asyncio.timeout()` or `asyncio.wait_for(anext(events), ...)` expiring cancels the
+subscription; the caller receives `TimeoutError` and subsequent reads return EOF. Use those
+deadlines to **end** consumption, not to skip an idle interval and resume the same subscription.
+In TS, `Promise.race` does not cancel the losing read: use the iterator's abort signal to end
+consumption, or retain and await that same pending read before requesting another. Consumer
+exceptions propagate to the caller; the SDK never retries or swallows them. Stop using abandoned
+iterators explicitly; garbage collection is not the ownership policy. Connection observation and
+cancellation listeners are removed on teardown, and pending reads settle.
+
+### Synchronous callback policy
+
+Subscription callbacks must be synchronous in both APIs, including the generic core. A declared
+async callback is rejected with `TypeError` during `subscribe`, before allocating a request ID.
+For a synchronous function that returns an awaitable dynamically, Python emits `RuntimeWarning`,
+closes a returned coroutine, or cancels a returned Future/Task and observes its eventual
+exception. Other custom awaitables are diagnosed and discarded without running them. TS reports a
+`TypeError` to `console.error` once per handler per subscription and observes every returned
+promise's rejection; JS promises cannot be cancelled, so already-started work may continue.
+Delivery never awaits these results, and such callbacks are unsupported. Ordinary synchronous
+return values remain ignored, and ordinary synchronous callback exceptions retain the existing
+callback error behavior. Use the iterator for awaited work. If starting independent work
+deliberately, use a synchronous callback that returns nothing and arrange its task lifetime and
+error handling explicitly.
+
+Handlers are validated and snapshotted when `subscribe` is called; set them all before subscribing.
+Later assignments to the original handler object do not change an existing subscription. Request
+rejection and local/session teardown now cancel the request stream and active subgroup readers.
+Teardown suppresses subsequent end/reset callbacks and protocol errors from those cancelled readers;
+it does not report cancellation as a network gap. An actual reset while the subscription is active
+still invokes the gap callback. Publisher completion leaves readers active for trailing objects.
 
 ## Publishing
 

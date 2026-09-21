@@ -44,6 +44,7 @@ from .connect_session import (
     TokenProvider,
     open_relay_session,
 )
+from .subscription_events import SubscriptionEvents
 
 IMPLEMENTATION_NAME = "mux-relay (Python)"
 
@@ -58,11 +59,6 @@ def _validate_namespace(namespace: Sequence[str]) -> None:
         raise TypeError("A subscription namespace must contain non-empty string fields")
     if len(namespace) > MAX_NAMESPACE_FIELDS:
         raise ValueError(f"A subscription namespace must contain at most {MAX_NAMESPACE_FIELDS} fields")
-
-
-def _forward(callback: Callable[..., None] | None, *args: object) -> None:
-    if callback is not None:
-        callback(*args)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -115,17 +111,17 @@ class RelaySubscriptionHandlers:
     """
 
     def _to_core(self) -> SubscriptionHandlers:
-        """The core's protocol-named handlers, forwarding to these callbacks as set when each event fires."""
+        """Snapshot callbacks without hiding async functions or their return values from the core."""
         return SubscriptionHandlers(
-            on_ok=lambda info: _forward(self.on_subscribed, info),
-            on_error=lambda error: _forward(self.on_error, error),
-            on_object=lambda obj: _forward(self.on_object, obj),
-            on_subgroup_end=lambda info: _forward(self.on_subgroup_end, info),
-            on_subgroup_reset=lambda info: _forward(self.on_subgroup_reset, info),
-            on_done=lambda info: _forward(self.on_publisher_done, info),
-            on_update_ok=lambda: _forward(self.on_update_ok),
-            on_state_notify=lambda parameters: _forward(self.on_state_notify, parameters),
-            on_goaway=lambda goaway: _forward(self.on_goaway, goaway),
+            on_ok=self.on_subscribed,
+            on_error=self.on_error,
+            on_object=self.on_object,
+            on_subgroup_end=self.on_subgroup_end,
+            on_subgroup_reset=self.on_subgroup_reset,
+            on_done=self.on_publisher_done,
+            on_update_ok=self.on_update_ok,
+            on_state_notify=self.on_state_notify,
+            on_goaway=self.on_goaway,
         )
 
 
@@ -205,6 +201,30 @@ class RelaySubscriber:
         return self._track_source.subscribe(
             MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters),
             None if handlers is None else handlers._to_core(),
+        )
+
+    def subscribe_events(
+        self,
+        namespace: Sequence[str],
+        track: str,
+        *,
+        parameters: MessageParameters | None = None,
+        capacity: int = 64,
+        cancellation: CancellationToken | None = None,
+    ) -> SubscriptionEvents:
+        """Create a bounded event iterator. Use ``async with`` around ``async for``.
+
+        Owns only this request. ``publisher_done`` permits trailing objects; it is not EOF.
+        """
+        self._lifetime.assert_open()
+        _validate_namespace(namespace)
+        return SubscriptionEvents(
+            lambda handlers: self._track_source.subscribe(
+                MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters), handlers
+            ),
+            self.closed,
+            capacity=capacity,
+            cancellation=cancellation,
         )
 
     def close(self) -> None:

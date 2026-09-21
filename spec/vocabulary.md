@@ -170,6 +170,15 @@ repository (examples, live smoke tests, the Video.js streaming example) moved in
 Once a package is published, a rename of this kind needs a deprecation cycle; record that policy
 here when the first release happens.
 
+## Async subscription consumption
+
+`subscriber.subscribeEvents()` / `subscriber.subscribe_events()` creates a bounded iterator of
+object and lifecycle events. The `subscribed` and `publisherDone` / `publisher_done` events use the
+same vocabulary as the product callbacks. It owns its subscription, never the connection. See the
+[async consumption contract](behavior.md#async-subscription-consumption) for capacity, cancellation,
+and termination semantics. Product and core callback objects are validated and snapshotted when
+subscribing; callbacks remain synchronous, and async consumers use this iterator.
+
 ## Names considered and left alone
 
 - `RelayTrackOptions`, the subscribe request shape (`namespace`, `track`, `parameters`), and

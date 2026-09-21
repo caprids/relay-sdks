@@ -37,6 +37,9 @@ await inspect(resolve(root, 'dist'), core.name);
 const sdkExports = await import('../dist/index.js');
 assert.deepEqual(Object.keys(sdkExports).sort(), [
   'RelayError',
+  'SubscriptionConnectionClosedError',
+  'SubscriptionOverflowError',
+  'SubscriptionRequestError',
   'connectRelayPublisher',
   'connectRelaySubscriber',
   'readJSON',

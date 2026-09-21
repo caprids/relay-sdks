@@ -13,6 +13,12 @@ import {
   type SubscriptionHandlers,
 } from '@mux/moq-core';
 import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import {
+  closureObservers,
+  createSubscriptionEvents,
+  type SubscriptionEventOptions,
+  type SubscriptionEvents,
+} from './subscription-events.js';
 
 export type { ConnectRelayOptions, RelayTransportFactory } from './connect-session.js';
 
@@ -82,6 +88,8 @@ export interface RelaySubscriber {
    * `handlers.onError` reports the relay's answer.
    */
   subscribe(options: RelayTrackOptions, handlers?: RelaySubscriptionHandlers): Subscription;
+  /** Bounded async events. Owns its subscription; break/return cancels it. */
+  subscribeEvents(options: RelayTrackOptions, buffer?: SubscriptionEventOptions): SubscriptionEvents;
   /**
    * This connection seen through the generic `MoqTrackSource` contract, for integrations such as
    * players: `subscribe`, `fetch`, and `trackStatus` in protocol terms, plus `closed`. It lists no
@@ -127,6 +135,8 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
     },
   });
 
+  const observeClosed = closureObservers(closed);
+
   return {
     closed,
     trackSource,
@@ -137,26 +147,38 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
         handlers && toSubscriptionHandlers(handlers),
       );
     },
+    subscribeEvents: ({ namespace, track, parameters }, buffer) => {
+      assertOpen();
+      validateNamespace(namespace);
+      return createSubscriptionEvents(
+        (handlers) => trackSource.subscribe({ trackNamespace: [...namespace], trackName: track, parameters }, handlers),
+        observeClosed,
+        buffer,
+      );
+    },
     close,
   };
 }
 
-/**
- * The core's protocol-named handlers, forwarding to the product handlers as they are set when each
- * event fires, so the application's object is called the same way the core would call it directly.
- */
+/** Snapshot product callbacks without hiding async functions or their return values from the core. */
 function toSubscriptionHandlers(handlers: RelaySubscriptionHandlers): SubscriptionHandlers {
-  return {
-    onOk: (info) => handlers.onSubscribed?.(info),
-    onError: (error) => handlers.onError?.(error),
-    onObject: (object) => handlers.onObject?.(object),
-    onSubgroupEnd: (info) => handlers.onSubgroupEnd?.(info),
-    onSubgroupReset: (info) => handlers.onSubgroupReset?.(info),
-    onDone: (info) => handlers.onPublisherDone?.(info),
-    onUpdateOk: () => handlers.onUpdateOk?.(),
-    onStateNotify: (parameters) => handlers.onStateNotify?.(parameters),
-    onGoaway: (goaway) => handlers.onGoaway?.(goaway),
-  };
+  const result: SubscriptionHandlers = {};
+  const names = [
+    ['onOk', 'onSubscribed'],
+    ['onError', 'onError'],
+    ['onObject', 'onObject'],
+    ['onSubgroupEnd', 'onSubgroupEnd'],
+    ['onSubgroupReset', 'onSubgroupReset'],
+    ['onDone', 'onPublisherDone'],
+    ['onUpdateOk', 'onUpdateOk'],
+    ['onStateNotify', 'onStateNotify'],
+    ['onGoaway', 'onGoaway'],
+  ] as const;
+  for (const [coreName, productName] of names) {
+    const callback = handlers[productName];
+    if (callback) Object.assign(result, { [coreName]: callback.bind(handlers) });
+  }
+  return result;
 }
 
 function validateNamespace(namespace: readonly string[]): void {

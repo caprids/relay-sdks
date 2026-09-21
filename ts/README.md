@@ -194,6 +194,50 @@ The 32-field protocol limit is pinned in [protocol.json](../spec/protocol.json).
 rejected before opening a publisher connection or sending a subscription; track names must
 be non-empty strings.
 
+## Consume asynchronously
+
+`subscribeEvents` creates a subscription owned by a single async iterator. Await work directly in
+the loop; the existing `subscribe` API remains available for synchronous callbacks.
+
+```ts
+const events = subscriber.subscribeEvents(
+  { namespace: ['sensors', 'lab'], track: 'readings' },
+  { capacity: 32, signal: consumerLifetime.signal }, // a separate AbortController for this consumer
+);
+try {
+  for await (const event of events) {
+    if (event.type === 'object') await processReading(event.value.payload);
+    if (event.type === 'subgroupReset') console.warn('Objects may be missing', event.value);
+    if (event.type === 'publisherDone') console.log('Publisher finished; trailing objects may arrive', event.value);
+    // break is safe: for-await cancels this subscription. Consumer exceptions propagate too.
+  }
+} finally {
+  events.close(); // also safe before iteration or while the loop body is awaiting other work
+}
+```
+
+The default capacity is **64 events**, including lifecycle events; it is a count limit, not a byte
+budget. Objects may be up to 16 MiB plus properties. Overflow discards queued events, cancels the
+subscription and throws `SubscriptionOverflowError`. Request failures throw
+`SubscriptionRequestError`; connection closure throws `SubscriptionConnectionClosedError`, even
+for a clean connection close, because closure does not prove all objects arrived. Before
+acceptance, a connection failure can instead arrive first as `SubscriptionRequestError`; consult
+`subscriber.closed` for the connection-level cause. Errors propagate out of the loop for the caller to
+handle. `publisherDone` is an event, never EOF. Arrival order is preserved without ordering across
+streams or transport-wide backpressure. Early exit releases the owned subscription and observers
+without closing `subscriber` or other consumers. Only one pending `next()` is supported. `Promise.race`
+with a timeout leaves the losing `next()` pending: use the iterator's abort signal to end
+consumption, or retain and await that same read before starting another. Python's
+`asyncio.timeout`/`wait_for` instead cancels the read and its subscription when the deadline
+expires. See the [complete event and ownership
+contract](../spec/behavior.md#async-subscription-consumption).
+
+Passing an `async` subscription callback throws `TypeError` before sending. A synchronous callback
+returning a promise is diagnosed once per handler per subscription via `console.error`; every
+rejection is observed but its work cannot be cancelled. Callbacks are never awaited. Use
+`subscribeEvents` for async consumers. Handlers are snapshotted at subscription creation; later
+assignments do not change that subscription.
+
 ## Publishing lifecycle
 
 A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate
@@ -340,13 +384,16 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
 | `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
 | `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
+| `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
+| `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
-failure; it makes no claim about individual writes that were in flight. Publishing records
+failure; it makes no claim about individual writes that were in flight. `subscription` marks an
+async subscription request failure or local event-buffer overflow. Publishing records
 `waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
 A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
 phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were

@@ -13,6 +13,8 @@ RelayErrorCode = Literal[
     "NAMESPACE_NOT_SOLICITED",
     "NAMESPACE_ENDED",
     "SUBSCRIPTION_CHANGED",
+    "SUBSCRIPTION_REQUEST_FAILED",
+    "SUBSCRIPTION_OVERFLOW",
     "GOAWAY",
     "TRANSPORT_ERROR",
     "TRANSPORT_UNAVAILABLE",
@@ -20,6 +22,7 @@ RelayErrorCode = Literal[
 RelayErrorPhase = Literal[
     "connecting",
     "connection",
+    "subscription",
     "waiting-for-demand",
     "opening-stream",
     "writing",

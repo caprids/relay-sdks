@@ -7,6 +7,8 @@ export type RelayErrorCode =
   | 'NAMESPACE_NOT_SOLICITED'
   | 'NAMESPACE_ENDED'
   | 'SUBSCRIPTION_CHANGED'
+  | 'SUBSCRIPTION_REQUEST_FAILED'
+  | 'SUBSCRIPTION_OVERFLOW'
   | 'GOAWAY'
   | 'TRANSPORT_ERROR'
   | 'TRANSPORT_UNAVAILABLE';
@@ -15,6 +17,7 @@ export type RelayErrorCode =
 export type RelayErrorPhase =
   | 'connecting'
   | 'connection'
+  | 'subscription'
   | 'waiting-for-demand'
   | 'opening-stream'
   | 'writing'
@@ -22,7 +25,7 @@ export type RelayErrorPhase =
 
 /** Caller cancellation reasons and argument errors are not converted to RelayError. */
 export class RelayError extends Error {
-  override readonly name = 'RelayError';
+  override readonly name: string = 'RelayError';
   readonly code: RelayErrorCode;
   readonly phase: RelayErrorPhase;
 

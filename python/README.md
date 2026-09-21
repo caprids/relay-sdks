@@ -161,8 +161,7 @@ Subscriptions have independent cancellation; the application owns connection shu
 
 Object callbacks are plain synchronous callables invoked as streams deliver objects. The SDK adds no
 application queue, ordering across streams, automatic JSON decoding, clock synchronization, or media
-scheduling. Hand work to your own `asyncio.Queue` or task from the callback if it must not block
-delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
+scheduling. Use `subscribe_events` below to await work without blocking delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
 or gap-free delivery promise. `on_publisher_done` is the publisher's control notification: it may
 precede trailing objects in transit, and it does not end the subscription. Cancel the subscription
 when you are finished with it.
@@ -189,6 +188,50 @@ Namespaces contain 1–32 non-empty string fields, sent verbatim without splitti
 The 32-field protocol limit is pinned in [protocol.json](../spec/protocol.json). Oversized namespaces are
 rejected before opening a publisher connection or sending a subscription; track names must
 be non-empty strings.
+
+## Consume asynchronously
+
+`subscribe_events` creates a subscription owned by a single async iterator. Always use its async
+context manager around the loop so a `break`, consumer exception, or task cancellation releases it:
+
+```python
+async with subscriber.subscribe_events(["sensors", "lab"], "readings", capacity=32) as events:
+    async for event in events:
+        if event.type == "object":
+            await process_reading(event.value.payload)
+        elif event.type == "subgroup_reset":
+            print("Objects may be missing", event.value)
+        elif event.type == "publisher_done":
+            print("Publisher finished; trailing objects may arrive", event.value)
+        # break is safe inside async with; consumer exceptions propagate after cleanup.
+```
+
+Python's `async for` alone does **not** close an iterator on `break`. Alternatively use
+`try/finally: events.close()` or `contextlib.aclosing(events)`. Cancelling a task awaiting `anext()`
+closes this subscription too. This includes expiry of `asyncio.timeout()` or
+`asyncio.wait_for(anext(events), ...)`: the caller receives `TimeoutError`, the subscription is
+cancelled, and subsequent reads return EOF. Use these deadlines to end consumption, not to skip an
+idle interval and resume it. Optional `cancellation=consumer_token` accepts a separate
+`CancellationToken` for this iterator without affecting the connection. The loop propagates the
+cancellation reason and consumer exceptions to its caller.
+
+The default capacity is **64 events**, including lifecycle events; it is a count limit, not a byte
+budget. Objects may be up to 16 MiB plus properties. Overflow discards queued events, cancels the
+subscription and raises `SubscriptionOverflowError`. Request failures raise
+`SubscriptionRequestError`; connection closure raises `SubscriptionConnectionClosedError`, even
+for a clean connection close, because closure does not prove all objects arrived. Before
+acceptance, a connection failure can instead arrive first as `SubscriptionRequestError`; consult
+`subscriber.closed` for the connection-level cause. Errors propagate out of the loop for the caller to
+handle. `publisher_done` is an event, never EOF. Arrival order is preserved without ordering
+across streams or transport-wide backpressure. Early exit releases the owned subscription and
+observers without closing `subscriber` or other consumers. Only one pending `anext()` is supported. See
+the [complete event and ownership contract](../spec/behavior.md#async-subscription-consumption).
+
+Passing an `async def` subscription callback raises `TypeError` before sending. A synchronous
+callback returning an awaitable emits `RuntimeWarning`; returned coroutines are closed and returned
+Futures/Tasks are cancelled with their exceptions observed. Callbacks are never awaited. Use
+`subscribe_events` for async consumers. Handlers are snapshotted at subscription creation; later
+assignments to the handler object do not change that subscription.
 
 ## Publishing lifecycle
 
@@ -326,13 +369,16 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
 | `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
 | `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
+| `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
+| `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
-failure; it makes no claim about individual writes that were in flight. Publishing records
+failure; it makes no claim about individual writes that were in flight. `subscription` marks an
+async subscription request failure or local event-buffer overflow. Publishing records
 `waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
 A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
 phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
@@ -429,6 +475,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | TypeScript | Python |
 | --- | --- |
 | `connectRelaySubscriber({ url, getToken, signal, connectTimeoutMs })` | `connect_relay_subscriber(url, get_token=..., cancellation=CancellationToken(), connect_timeout=seconds)` |
+| `subscriber.subscribeEvents(options, { capacity, signal })` | `subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` |
 | `subscriber.subscribe({ namespace, track, parameters }, handlers)` | `subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(...), parameters=...)` |
 | `onSubscribed`, `onPublisherDone` | `on_subscribed`, `on_publisher_done` |
 | `publisher.registerTrack({ track, trackProperties, writeTimeoutMs })` | `publisher.register_track(track, track_properties=..., write_timeout=seconds)` |

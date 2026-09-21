@@ -10,6 +10,9 @@ describe('public vocabulary', () => {
   it('exports one entry point per connection role and nothing under the old names', () => {
     expect(Object.keys(relay).sort()).toEqual([
       'RelayError',
+      'SubscriptionConnectionClosedError',
+      'SubscriptionOverflowError',
+      'SubscriptionRequestError',
       'connectRelayPublisher',
       'connectRelaySubscriber',
       'readJSON',
@@ -35,10 +38,13 @@ describe('public vocabulary', () => {
   });
 
   it('names the subscriber, the publisher, and the track writer by role and by demand', () => {
-    const subscriber = { subscribe: true, trackSource: true, closed: true, close: true } satisfies Record<
-      keyof RelaySubscriber,
-      true
-    >;
+    const subscriber = {
+      subscribeEvents: true,
+      subscribe: true,
+      trackSource: true,
+      closed: true,
+      close: true,
+    } satisfies Record<keyof RelaySubscriber, true>;
     const publisher = { registerTrack: true, closed: true, close: true } satisfies Record<keyof RelayPublisher, true>;
     const writer = {
       hasDemand: true,
