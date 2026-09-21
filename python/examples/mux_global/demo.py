@@ -2,12 +2,13 @@
 """Publish JSON ticks to a Relay namespace and subscribe to them again.
 
 The SDK usage lives in :func:`run_demo`. It connects a publisher with ``connect_relay_publisher``,
-registers a track, connects a subscriber with ``connect_relay`` to the same track, publishes JSON
+registers a track, connects a subscriber with ``connect_relay_subscriber`` to the same track, publishes JSON
 objects one second apart, and prints each object as it comes back through the relay. It decodes the
 JSON itself; the SDK only delivers bytes. Unlike the TypeScript example, no browser is involved: the
 aioquic WebTransport transport runs natively.
 
-    RELAY_TOKEN=... mise run python:example:mux-global -- --namespace mattypoo/relay-sdk-example
+    # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
+    mise run python:example:mux-global -- --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE"
 """
 
 from __future__ import annotations
@@ -20,6 +21,7 @@ import os
 import sys
 import uuid
 from collections.abc import Callable
+from contextlib import AsyncExitStack
 from dataclasses import dataclass, replace
 from getpass import getpass
 from typing import Any
@@ -27,18 +29,15 @@ from urllib.parse import urlsplit
 
 from mux_relay import (
     DEFAULT_ENDPOINT,
-    CancellationToken,
     Closed,
     MoqtObject,
-    RelayConnection,
-    RelayPublisher,
-    RelayTimeoutError,
+    RelaySubscriber,
+    RelaySubscriptionHandlers,
     RelayTrackWriter,
     RequestError,
     SubscribeOk,
-    SubscriptionHandlers,
-    connect_relay,
     connect_relay_publisher,
+    connect_relay_subscriber,
 )
 
 Log = Callable[[dict[str, Any]], None]
@@ -57,12 +56,6 @@ class Config:
 
 
 async def run_demo(config: Config, log: Log) -> dict[str, int]:
-    lifetime = CancellationToken()
-    loop = asyncio.get_running_loop()
-    deadline = loop.call_later(
-        config.timeout, lambda: lifetime.cancel(RelayTimeoutError(f"Run exceeded {config.timeout:.0f} s"))
-    )
-    connections: list[RelayPublisher | RelayConnection] = []
     background_tasks: list[asyncio.Task[None]] = []
     problems: list[str] = []
     received = 0
@@ -88,7 +81,6 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
 
             if error is not None:
                 problems.append(f"subscribe failed: {describe(error)}")
-                lifetime.cancel(error)
 
         task.add_done_callback(done)
 
@@ -96,141 +88,147 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
         if problems:
             raise RuntimeError("; ".join(problems))
 
-        lifetime.throw_if_cancelled()
-
+    # The standard timeout cancels pending work; context managers close every acquired connection.
+    deadline = asyncio.timeout(config.timeout)
     try:
-        writer: RelayTrackWriter | None = None
-
-        if config.mode != "subscribe":
-            # One publisher connection serves one namespace; register as many tracks on it as needed.
+        async with deadline, AsyncExitStack() as connections:
             try:
-                publisher = await connect_relay_publisher(
-                    config.url, namespace=config.namespace, get_token=lambda: config.token, cancellation=lifetime
-                )
-            except Exception as error:
-                raise RuntimeError(
-                    f"publisher failed to connect (check the token and endpoint): {describe(error)}"
-                ) from error
+                writer: RelayTrackWriter | None = None
 
-            connections.append(publisher)
-            watch("publisher", publisher.closed)
-            log({"event": "publisher connected", "url": config.url, "namespace": "/".join(config.namespace)})
-            writer = publisher.publish(config.track, write_timeout=15)
+                if config.mode != "subscribe":
+                    # One publisher connection serves one namespace; register as many tracks on it as needed.
+                    try:
+                        publisher = await connect_relay_publisher(
+                            config.url, namespace=config.namespace, get_token=lambda: config.token
+                        )
+                    except Exception as error:
+                        raise RuntimeError(
+                            f"publisher failed to connect (check the token and endpoint): {describe(error)}"
+                        ) from error
 
-        if config.mode != "publish":
-            try:
-                subscriber = await connect_relay(config.url, get_token=lambda: config.token, cancellation=lifetime)
-            except Exception as error:
-                raise RuntimeError(
-                    f"subscriber failed to connect (check the token and endpoint): {describe(error)}"
-                ) from error
+                    await connections.enter_async_context(publisher)
+                    watch("publisher", publisher.closed)
+                    log({"event": "publisher connected", "url": config.url, "namespace": "/".join(config.namespace)})
+                    writer = publisher.register_track(config.track, write_timeout=15)
 
-            connections.append(subscriber)
-            watch("subscriber", subscriber.closed)
-            log({"event": "subscriber connected", "url": config.url})
+                if config.mode != "publish":
+                    try:
+                        subscriber = await connect_relay_subscriber(config.url, get_token=lambda: config.token)
+                    except Exception as error:
+                        raise RuntimeError(
+                            f"subscriber failed to connect (check the token and endpoint): {describe(error)}"
+                        ) from error
 
-            def on_object(obj: MoqtObject) -> None:
-                nonlocal received
+                    await connections.enter_async_context(subscriber)
+                    watch("subscriber", subscriber.closed)
+                    log({"event": "subscriber connected", "url": config.url})
 
-                # Status-only objects (end-of-group and end-of-track markers) carry no payload.
-                if obj.status != "normal":
-                    return
+                    def on_object(obj: MoqtObject) -> None:
+                        nonlocal received
 
-                received += 1
-                log({"event": "received", "group": obj.group_id, "bytes": len(obj.payload), **inspect(obj.payload)})
+                        # Status-only objects (end-of-group and end-of-track markers) carry no payload.
+                        if obj.status != "normal":
+                            return
 
-            subscribe_task = asyncio.ensure_future(
-                subscribe_with_retry(
-                    subscriber,
-                    config.namespace,
-                    config.track,
-                    SubscriptionHandlers(
-                        on_ok=lambda ok: log(
+                        received += 1
+                        log(
                             {
-                                "event": "subscribed",
-                                "namespace": "/".join(config.namespace),
-                                "track": config.track,
-                                "alias": ok.track_alias,
+                                "event": "received",
+                                "group": obj.group_id,
+                                "bytes": len(obj.payload),
+                                **inspect(obj.payload),
                             }
-                        ),
-                        on_object=on_object,
-                        on_error=lambda error: problems.append(
-                            f"subscribe rejected: code {error.error_code} {error.reason}"
-                        ),
-                        on_subgroup_reset=lambda reset: problems.append(
-                            f"group {reset.group_id} reset: {describe(reset.error)}"
-                        ),
-                        on_done=lambda done: log(
-                            {"event": "publisher done", "status": done.status_code, "reason": done.reason}
-                        ),
-                    ),
-                    lifetime,
-                    log,
-                )
-            )
-            background_tasks.append(subscribe_task)
-            watch_background(subscribe_task)
+                        )
 
-        if writer is not None:
-            for seq in range(1, config.count + 1):
-                payload = json.dumps(
-                    {
-                        "seq": seq,
-                        "sentAt": datetime.datetime.now(datetime.UTC).isoformat(),
-                        "message": f"tick {seq} from the mux-relay example",
-                    }
-                ).encode("utf-8")
-                await write_when_demanded(writer, payload, fail_if_broken, log)
-                log({"event": "published", "seq": seq, "bytes": len(payload)})
+                    subscribe_task = asyncio.ensure_future(
+                        subscribe_with_retry(
+                            subscriber,
+                            config.namespace,
+                            config.track,
+                            RelaySubscriptionHandlers(
+                                on_subscribed=lambda ok: log(
+                                    {
+                                        "event": "subscribed",
+                                        "namespace": "/".join(config.namespace),
+                                        "track": config.track,
+                                        "alias": ok.track_alias,
+                                    }
+                                ),
+                                on_object=on_object,
+                                on_error=lambda error: problems.append(
+                                    f"subscribe rejected: code {error.error_code} {error.reason}"
+                                ),
+                                on_subgroup_reset=lambda reset: problems.append(
+                                    f"group {reset.group_id} reset: {describe(reset.error)}"
+                                ),
+                                on_publisher_done=lambda done: log(
+                                    {"event": "publisher done", "status": done.status_code, "reason": done.reason}
+                                ),
+                            ),
+                            log,
+                        )
+                    )
+                    background_tasks.append(subscribe_task)
+                    watch_background(subscribe_task)
 
-                if seq < config.count:
-                    await sleep(config.interval, lifetime)
+                if writer is not None:
+                    for seq in range(1, config.count + 1):
+                        payload = json.dumps(
+                            {
+                                "seq": seq,
+                                "sentAt": datetime.datetime.now(datetime.UTC).isoformat(),
+                                "message": f"tick {seq} from the mux-relay example",
+                            }
+                        ).encode("utf-8")
+                        await write_when_demanded(writer, payload, fail_if_broken, log)
+                        log({"event": "published", "seq": seq, "bytes": len(payload)})
 
-        while config.mode != "publish" and received < config.count:
-            fail_if_broken()
-            await sleep(0.1, lifetime)
+                        if seq < config.count:
+                            await asyncio.sleep(config.interval)
 
-        fail_if_broken()
-        return {"published": config.count if writer is not None else 0, "received": received}
-    finally:
-        closing = True
-        deadline.cancel()
+                while config.mode != "publish" and received < config.count:
+                    fail_if_broken()
+                    await asyncio.sleep(0.1)
 
-        for task in background_tasks:
-            task.cancel()
-
-        # publisher.close() retracts the namespace and awaits shutdown; subscriber.close() is synchronous.
-        for connection in connections:
-            result = connection.close()
-
-            if result is not None:
-                await result
+                fail_if_broken()
+                return {"published": config.count if writer is not None else 0, "received": received}
+            finally:
+                closing = True
+                for task in background_tasks:
+                    task.cancel()
+                await asyncio.gather(*background_tasks, return_exceptions=True)
+    except TimeoutError as error:
+        if deadline.expired():
+            raise TimeoutError(f"Run exceeded {config.timeout:g} s") from error
+        raise
 
 
 async def write_when_demanded(
     writer: RelayTrackWriter, payload: bytes, fail_if_broken: Callable[[], None], log: Log
 ) -> None:
-    """write() waits until the relay wants the track. Timing out there means no subscriber yet; it is retryable."""
-    while True:
-        try:
-            await writer.write(payload)
-            return
-        except RelayTimeoutError:
-            fail_if_broken()
-            log({"event": "waiting", "detail": "no subscriber has requested the track yet; retrying the write"})
+    """Wait without sending; once write() starts, failure may mean partial delivery. Never replay it."""
+    if not writer.has_demand:
+        log({"event": "waiting", "detail": "no relay demand yet; waiting before writing"})
+    while not writer.has_demand:
+        fail_if_broken()
+        if writer.closed:
+            raise RuntimeError("Published track closed while waiting for demand")
+        await asyncio.sleep(0.1)
+    fail_if_broken()
+    # Demand can disappear after the check; let the SDK's write deadline bound that race.
+    await writer.write(payload)
 
 
 async def subscribe_with_retry(
-    subscriber: RelayConnection,
+    subscriber: RelaySubscriber,
     namespace: list[str],
     track: str,
-    handlers: SubscriptionHandlers,
-    lifetime: CancellationToken,
+    handlers: RelaySubscriptionHandlers,
     log: Log,
 ) -> None:
     """A subscribe issued before the relay has processed the publisher's announce is rejected with 404
     Broadcast not found; that is expected on a fresh namespace, not fatal, so retry with bounded backoff
-    until it is accepted, another error arrives, or the run deadline cancels `lifetime`. Every other
+    until it is accepted, another error arrives, or the run deadline cancels the task. Every other
     rejection is forwarded to ``handlers.on_error`` unchanged.
     """
     backoff = 0.5
@@ -238,9 +236,9 @@ async def subscribe_with_retry(
     while True:
         outcome: asyncio.Future[RequestError | None] = asyncio.get_running_loop().create_future()
 
-        def on_ok(ok: SubscribeOk, outcome: asyncio.Future[RequestError | None] = outcome) -> None:
-            if handlers.on_ok is not None:
-                handlers.on_ok(ok)
+        def on_subscribed(ok: SubscribeOk, outcome: asyncio.Future[RequestError | None] = outcome) -> None:
+            if handlers.on_subscribed is not None:
+                handlers.on_subscribed(ok)
 
             if not outcome.done():
                 outcome.set_result(None)
@@ -249,7 +247,7 @@ async def subscribe_with_retry(
             if not outcome.done():
                 outcome.set_result(error)
 
-        subscriber.subscribe(namespace, track, replace(handlers, on_ok=on_ok, on_error=on_error))
+        subscriber.subscribe(namespace, track, replace(handlers, on_subscribed=on_subscribed, on_error=on_error))
         rejection = await outcome
 
         if rejection is None:
@@ -263,10 +261,7 @@ async def subscribe_with_retry(
 
         log({"event": "waiting", "detail": "namespace not announced yet; retrying the subscribe"})
 
-        try:
-            await sleep(backoff, lifetime)
-        except Exception:
-            return  # Run deadline or shutdown; the main loop already reports it.
+        await asyncio.sleep(backoff)
 
         backoff = min(backoff * 2, 2.0)
 
@@ -296,24 +291,6 @@ def describe(error: BaseException | None) -> str:
 
     name = type(error).__name__
     return f"{name}: {error}" if str(error) else name
-
-
-async def sleep(seconds: float, lifetime: CancellationToken) -> None:
-    lifetime.throw_if_cancelled()
-    woken: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-
-    def cancelled(reason: BaseException) -> None:
-        if not woken.done():
-            woken.set_exception(reason)
-
-    lifetime.add_callback(cancelled)
-
-    try:
-        await asyncio.wait_for(asyncio.shield(woken), seconds)
-    except TimeoutError:
-        return
-    finally:
-        lifetime.remove_callback(cancelled)
 
 
 def read_token() -> str:

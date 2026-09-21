@@ -10,20 +10,22 @@ from core_helpers.waiting import wait_for
 from relay_helpers.relay_hub import ObservedNamespaceDone, ObservedSubscribeFin, RelayHub, create_relay_hub
 from videojs_stream.stream import Stats, serve_catalog
 
-from moq_core import KeyValuePair, MoqtObject, SubscriptionHandlers
+from moq_core import KeyValuePair, MoqtObject
 from moq_core.transport import SendStream
 from mux_relay import (
     CancellationToken,
     Closed,
     ConnectingTransport,
     RelayClosedError,
-    RelayConnection,
+    RelayError,
     RelayGroupWriter,
     RelayPublisher,
+    RelaySubscriber,
+    RelaySubscriptionHandlers,
     RelayTimeoutError,
     RelayWritePendingError,
-    connect_relay,
     connect_relay_publisher,
+    connect_relay_subscriber,
     read_json,
     read_text,
 )
@@ -52,22 +54,24 @@ def completed() -> asyncio.Future[None]:
     return future
 
 
-async def connect_hub(cleanup: Cleanup) -> tuple[RelayHub, RelayPublisher, RelayConnection]:
+async def connect_hub(cleanup: Cleanup) -> tuple[RelayHub, RelayPublisher, RelaySubscriber]:
     hub = create_relay_hub()
     cleanup.append(hub.destroy)
     publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=hub.connect_publisher)
-    subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+    subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
     cleanup.append(subscriber.close)
     cleanup.append(publisher.close)
     return hub, publisher, subscriber
 
 
 class Received:
-    def __init__(self, subscriber: RelayConnection, track: str) -> None:
+    def __init__(self, subscriber: RelaySubscriber, track: str) -> None:
         self.objects: list[MoqtObject] = []
         self.done: list[Any] = []
         self.subscription = subscriber.subscribe(
-            NAMESPACE, track, SubscriptionHandlers(on_object=self.objects.append, on_done=self.done.append)
+            NAMESPACE,
+            track,
+            RelaySubscriptionHandlers(on_object=self.objects.append, on_publisher_done=self.done.append),
         )
 
 
@@ -95,10 +99,10 @@ class TestConnectRelayPublisher:
         prop = KeyValuePair(*values)
         _, publisher, subscriber = await connect_hub(cleanup)
         with pytest.raises(TypeError, match="Property 0"):
-            publisher.publish("events", track_properties=[prop])
-        events = publisher.publish("events")
+            publisher.register_track("events", track_properties=[prop])
+        events = publisher.register_track("events")
         received = Received(subscriber, "events")
-        await wait_for(lambda: events.bound)
+        await wait_for(lambda: events.has_demand)
         with pytest.raises(TypeError, match="Property 0"):
             await events.write(b"bad", properties=[prop])
         assert not events.closed
@@ -114,7 +118,7 @@ class TestConnectRelayPublisher:
 
     async def test_copies_only_the_property_buffer_view_and_keeps_numeric_boundaries(self, cleanup: Cleanup) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
-        events = publisher.publish("events")
+        events = publisher.register_track("events")
         backing = bytearray(b"abcd")
         view: Any = memoryview(backing)[1:3]
         writing = asyncio.create_task(events.write(b"data", properties=[KeyValuePair(2**64 - 1, view)]))
@@ -129,7 +133,7 @@ class TestConnectRelayPublisher:
         self, cleanup: Cleanup
     ) -> None:
         hub, publisher, subscriber = await connect_hub(cleanup)
-        events = publisher.publish("events")
+        events = publisher.register_track("events")
         received = Received(subscriber, "events")
         payload = bytes([0xFF, 0, 0x80, 1])
 
@@ -144,7 +148,7 @@ class TestConnectRelayPublisher:
         self, cleanup: Cleanup
     ) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
-        events = publisher.publish("events")
+        events = publisher.register_track("events")
         received = Received(subscriber, "events")
         properties = [KeyValuePair(2, 7), KeyValuePair(3, bytes([0xFF, 2]))]
 
@@ -160,7 +164,7 @@ class TestConnectRelayPublisher:
         self, cleanup: Cleanup
     ) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
-        events = publisher.publish("events")
+        events = publisher.register_track("events")
         payload = bytearray([7])
         prop = bytearray([8])
         writing = asyncio.ensure_future(events.write(bytes(payload), properties=[KeyValuePair(3, bytes(prop))]))
@@ -178,8 +182,8 @@ class TestConnectRelayPublisher:
         self, cleanup: Cleanup
     ) -> None:
         hub, publisher, subscriber = await connect_hub(cleanup)
-        one = publisher.publish("one")
-        two = publisher.publish("two")
+        one = publisher.register_track("one")
+        two = publisher.register_track("two")
         received_one = Received(subscriber, "one")
         received_two = Received(subscriber, "two")
 
@@ -192,17 +196,21 @@ class TestConnectRelayPublisher:
         await wait_for(lambda: len(received_two.objects) == 2)
         assert ObservedSubscribeFin("one") in hub.track_ends
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayClosedError) as failure:
             await one.write(bytes([4]))
+        assert failure.value.code == "CLOSED"
+        assert failure.value.phase == "writing"
 
     async def test_bounds_a_write_waiting_for_demand_and_can_publish_a_later_write_after_the_timeout(
         self, cleanup: Cleanup
     ) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
-        events = publisher.publish("events", write_timeout=0.05)
+        events = publisher.register_track("events", write_timeout=0.05)
 
-        with pytest.raises(RelayTimeoutError, match="timed out"):
+        with pytest.raises(RelayTimeoutError) as failure:
             await events.write(bytes([1]))
+        assert failure.value.code == "WRITE_TIMEOUT"
+        assert failure.value.phase == "waiting-for-demand"
 
         # Nothing was bound, so the track is still live and the next write can wait for demand again.
         assert not events.closed
@@ -213,12 +221,14 @@ class TestConnectRelayPublisher:
 
     async def test_rejects_concurrent_writes_instead_of_accumulating_an_unbounded_queue(self, cleanup: Cleanup) -> None:
         _, publisher, _ = await connect_hub(cleanup)
-        events = publisher.publish("events")
+        events = publisher.register_track("events")
         writing = asyncio.ensure_future(events.write(bytes([1])))
         await asyncio.sleep(0)
 
-        with pytest.raises(RelayWritePendingError, match="already pending"):
+        with pytest.raises(RelayWritePendingError) as failure:
             await events.write(bytes([2]))
+        assert failure.value.code == "WRITE_PENDING"
+        assert failure.value.phase == "writing"
 
         events.close()
 
@@ -229,10 +239,10 @@ class TestConnectRelayPublisher:
         self, cleanup: Cleanup
     ) -> None:
         hub, publisher, subscriber = await connect_hub(cleanup)
-        live = publisher.publish("live")
+        live = publisher.register_track("live")
         Received(subscriber, "live")
         await live.write(bytes([1]))
-        pending = asyncio.ensure_future(publisher.publish("pending").write(bytes([2])))
+        pending = asyncio.ensure_future(publisher.register_track("pending").write(bytes([2])))
         await asyncio.sleep(0)
 
         await publisher.close()
@@ -245,21 +255,21 @@ class TestConnectRelayPublisher:
         assert await publisher.closed == Closed()
 
         with pytest.raises(RelayClosedError, match="closed"):
-            publisher.publish("late")
+            publisher.register_track("late")
 
     async def test_does_not_re_register_a_track_name_or_silently_restart_its_group_numbering(
         self, cleanup: Cleanup
     ) -> None:
         _, publisher, _ = await connect_hub(cleanup)
-        events = publisher.publish("events")
+        events = publisher.register_track("events")
 
         with pytest.raises(ValueError, match="already registered"):
-            publisher.publish("events")
+            publisher.register_track("events")
 
         events.close()
 
         with pytest.raises(ValueError, match="already registered"):
-            publisher.publish("events")
+            publisher.register_track("events")
 
     async def test_cancels_a_pending_write_when_the_owning_token_is_cancelled(self, cleanup: Cleanup) -> None:
         hub = create_relay_hub()
@@ -269,7 +279,7 @@ class TestConnectRelayPublisher:
             URL, namespace=NAMESPACE, cancellation=owner, create_transport=hub.connect_publisher
         )
         cleanup.append(publisher.close)
-        writing = asyncio.ensure_future(publisher.publish("events").write(bytes([1])))
+        writing = asyncio.ensure_future(publisher.register_track("events").write(bytes([1])))
         await asyncio.sleep(0)
         error = RuntimeError("owner cancelled")
 
@@ -309,7 +319,7 @@ class TestConnectRelayPublisher:
                 namespace=NAMESPACE,
                 create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=completed()),
             ),
-            connect_relay(
+            connect_relay_subscriber(
                 URL,
                 create_transport=lambda url, protocols: ConnectingTransport(transport=pair.server, ready=completed()),
             ),
@@ -317,12 +327,12 @@ class TestConnectRelayPublisher:
         cleanup.append(subscriber.close)
         cleanup.append(publisher.close)
         track_properties = [KeyValuePair(2, 90_000)]
-        publisher.publish("timed", track_properties=track_properties)
-        publisher.publish("raw")
+        publisher.register_track("timed", track_properties=track_properties)
+        publisher.register_track("raw")
         on_timed: list[Any] = []
         on_raw: list[Any] = []
-        subscriber.subscribe(NAMESPACE, "timed", SubscriptionHandlers(on_ok=on_timed.append))
-        subscriber.subscribe(NAMESPACE, "raw", SubscriptionHandlers(on_ok=on_raw.append))
+        subscriber.subscribe(NAMESPACE, "timed", RelaySubscriptionHandlers(on_subscribed=on_timed.append))
+        subscriber.subscribe(NAMESPACE, "raw", RelaySubscriptionHandlers(on_subscribed=on_raw.append))
 
         await wait_for(lambda: len(on_raw) == 1 and len(on_timed) == 1)
         assert on_timed[0].track_properties == track_properties
@@ -353,16 +363,18 @@ class TestConnectRelayPublisher:
             return created
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=create_transport)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.append(subscriber.close)
         cleanup.append(publisher.close)
-        events = publisher.publish("events")
+        events = publisher.register_track("events")
         Received(subscriber, "events")
 
-        with pytest.raises(ConnectionError) as raised:
+        with pytest.raises(RelayError) as raised:
             await events.write(bytes([1]))
 
-        assert raised.value is failure
+        assert raised.value.__cause__ is failure
+        assert raised.value.code == "TRANSPORT_ERROR"
+        assert raised.value.phase == "opening-stream"
 
         assert not events.closed
         assert hub.object_count("events") == 0
@@ -393,9 +405,9 @@ class TestConnectRelayPublisher:
             return created
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.extend([subscriber.close, publisher.close])
-        catalog = publisher.publish("catalog")
+        catalog = publisher.register_track("catalog")
         received = Received(subscriber, "catalog")
         stats = Stats()
         serving = asyncio.create_task(
@@ -442,14 +454,16 @@ class TestConnectRelayPublisher:
             return created
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=create_transport)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.append(subscriber.close)
         cleanup.append(publisher.close)
-        events = publisher.publish("events", write_timeout=0.1)
+        events = publisher.register_track("events", write_timeout=0.1)
         Received(subscriber, "events")
 
-        with pytest.raises(RelayTimeoutError, match="timed out"):
+        with pytest.raises(RelayTimeoutError) as failure:
             await events.write(bytes([1]))
+        assert failure.value.code == "WRITE_TIMEOUT"
+        assert failure.value.phase == "opening-stream"
 
         assert not events.closed
         await events.write(bytes([2]))
@@ -476,7 +490,7 @@ class TestConnectRelayPublisher:
 
     async def test_rejects_oversized_objects_before_waiting_for_demand(self, cleanup: Cleanup) -> None:
         _, publisher, _ = await connect_hub(cleanup)
-        track = publisher.publish("events")
+        track = publisher.register_track("events")
 
         with pytest.raises(ValueError, match="16 MiB"):
             await track.write(bytes(16 * 1024 * 1024 + 1))
@@ -485,7 +499,7 @@ class TestConnectRelayPublisher:
         self, cleanup: Cleanup
     ) -> None:
         _, publisher, _ = await connect_hub(cleanup)
-        events = publisher.publish("events", write_timeout=0.05)
+        events = publisher.register_track("events", write_timeout=0.05)
         text: Any = "not bytes"
         unconvertible: Any = object()
 
@@ -518,14 +532,14 @@ class TestConnectRelayPublisher:
         cleanup.append(publisher.close)
         invalid: Any = 7
         with pytest.raises(TypeError, match="must be a string"):
-            publisher.publish(invalid)
+            publisher.register_track(invalid)
         with pytest.raises(TypeError, match="must be non-empty"):
-            publisher.publish("")
-        events = publisher.publish("events")
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+            publisher.register_track("")
+        events = publisher.register_track("events")
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.append(subscriber.close)
         objects: list[MoqtObject] = []
-        subscriber.subscribe(namespace, "events", SubscriptionHandlers(on_object=objects.append))
+        subscriber.subscribe(namespace, "events", RelaySubscriptionHandlers(on_object=objects.append))
         await events.write(bytes([1]))
         await wait_for(lambda: len(objects) == 1)
 
@@ -540,10 +554,10 @@ class TestConnectRelayPublisher:
         cleanup.append(publisher.close)
 
         with pytest.raises(TypeError, match="non-empty"):
-            publisher.publish("")
+            publisher.register_track("")
 
         with pytest.raises(ValueError, match="write_timeout"):
-            publisher.publish("events", write_timeout=0)
+            publisher.register_track("events", write_timeout=0)
 
     async def test_is_an_async_context_manager_that_closes_on_exit(self, cleanup: Cleanup) -> None:
         hub = create_relay_hub()
@@ -551,14 +565,14 @@ class TestConnectRelayPublisher:
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=hub.connect_publisher)
 
         async with publisher:
-            publisher.publish("events")
+            publisher.register_track("events")
 
         assert await publisher.closed == Closed()
 
 
 async def test_text_and_json_round_trip_on_tracks_and_groups(cleanup: Cleanup) -> None:
     _, publisher, subscriber = await connect_hub(cleanup)
-    track = publisher.publish("helpers")
+    track = publisher.register_track("helpers")
     received = Received(subscriber, "helpers")
     text = "\ufeffHello, 世界 🌍\n\0"
     value = {"text": text, "nested": [None, True, 42, {"empty": ""}]}
@@ -586,7 +600,7 @@ async def test_text_and_json_round_trip_on_tracks_and_groups(cleanup: Cleanup) -
 
 async def test_encoding_errors_leave_writers_usable(cleanup: Cleanup) -> None:
     _, publisher, subscriber = await connect_hub(cleanup)
-    track = publisher.publish("helpers")
+    track = publisher.register_track("helpers")
     received = Received(subscriber, "helpers")
     circular: list[object] = []
     circular.append(circular)
@@ -611,7 +625,7 @@ async def test_encoding_errors_leave_writers_usable(cleanup: Cleanup) -> None:
 
 async def test_helpers_keep_deadlines_concurrency_and_task_cancellation(cleanup: Cleanup) -> None:
     _, publisher, subscriber = await connect_hub(cleanup)
-    track = publisher.publish("helpers", write_timeout=0.05)
+    track = publisher.register_track("helpers", write_timeout=0.05)
     with pytest.raises(RelayTimeoutError):
         await track.write_text("no demand")
     writing = asyncio.create_task(track.write_json({"waiting": True}))

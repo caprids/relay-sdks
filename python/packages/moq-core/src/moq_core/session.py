@@ -21,9 +21,11 @@ The driver must be created inside a running asyncio event loop.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import warnings
 from collections.abc import Callable, Sequence
 from contextlib import aclosing
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import TypeAlias
 
 from ._tasks import call_later, observe, spawn
@@ -257,6 +259,41 @@ def _call(callback: Callable[..., None] | None, *args: object) -> None:
         callback(*args)
 
 
+def _synchronous_subscription_handlers(handlers: SubscriptionHandlers) -> SubscriptionHandlers:
+    def wrap(callback: Callable[..., None], name: str) -> Callable[..., None]:
+        if inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(callback.__call__):
+            raise TypeError(f"{name} must be synchronous; use Relay subscribe_events() for async consumption")
+
+        def invoke(*args: object) -> None:
+            result = callback(*args)
+            if inspect.isawaitable(result):
+                if inspect.iscoroutine(result):
+                    result.close()
+                elif isinstance(result, asyncio.Future):
+                    result.cancel()
+
+                    # Observe an already-failed task as well as a pending task's eventual failure.
+                    def consume(future: asyncio.Future[object]) -> None:
+                        if not future.cancelled():
+                            future.exception()
+
+                    result.add_done_callback(consume)
+                warnings.warn(
+                    f"{name} returned an awaitable; callbacks must be synchronous; use Relay subscribe_events()",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+
+        return invoke
+
+    result = SubscriptionHandlers()
+    for handler_field in fields(handlers):
+        callback = getattr(handlers, handler_field.name)
+        if callback is not None:
+            setattr(result, handler_field.name, wrap(callback, handler_field.name))
+    return result
+
+
 # ============================================================================
 # Internal records
 # ============================================================================
@@ -281,6 +318,7 @@ class _RequestRecord:
 
 @dataclass(slots=True, kw_only=True)
 class _SubscriptionRecord(_RequestRecord):
+    readers: set[StreamReader] = field(default_factory=set)
     handlers: SubscriptionHandlers
     track_alias: int | None = None
 
@@ -465,6 +503,8 @@ class MoqtSession:
             if record.stream is not None:
                 record.stream.cancel(error)
 
+        for record in list(self._subscriptions.values()):
+            self._remove_subscription(record)
         self._subscriptions.clear()
         self._fetches.clear()
         self._track_statuses.clear()
@@ -519,7 +559,7 @@ class MoqtSession:
         return request_id
 
     def subscribe(self, options: MoqtSubscribeOptions, handlers: SubscriptionHandlers | None = None) -> Subscription:
-        handlers = handlers or SubscriptionHandlers()
+        handlers = _synchronous_subscription_handlers(handlers or SubscriptionHandlers())
         request_id = self._allocate_request_id()
         message = encode_subscribe(
             Subscribe(
@@ -687,6 +727,8 @@ class MoqtSession:
             record.response_timer = None
 
     def _handle_subscription_message(self, record: _SubscriptionRecord, message: ControlMessage) -> None:
+        if record.cancelled:
+            return
         match message:
             case SubscribeOk(track_alias=track_alias):
                 if record.track_alias is not None and record.track_alias != track_alias:
@@ -765,6 +807,12 @@ class MoqtSession:
         self._remove_subscription(record)
 
     def _remove_subscription(self, record: _SubscriptionRecord) -> None:
+        record.cancelled = True
+        if record.stream is not None:
+            record.stream.cancel(record.pending_cancel_reason)
+        for reader in record.readers:
+            reader.cancel(record.pending_cancel_reason)
+        record.readers.clear()
         self._subscriptions.pop(record.request_id, None)
 
         if record.track_alias is not None and self._alias_routes.get(record.track_alias) is record:
@@ -887,6 +935,7 @@ class MoqtSession:
             reader.cancel()
             return
 
+        record.readers.add(reader)
         last_subgroup_id = header.subgroup_id if header.subgroup_id_mode == "explicit" and header.subgroup_id else 0
 
         try:
@@ -899,14 +948,20 @@ class MoqtSession:
                     last_subgroup_id = obj.subgroup_id
                     _call(record.handlers.on_object, obj)
 
+            if record.cancelled:
+                return
             _call(
                 record.handlers.on_subgroup_end,
                 SubgroupEnd(group_id=header.group_id, subgroup_id=last_subgroup_id, end_of_group=header.end_of_group),
             )
         except MoqtProtocolError:
-            raise
+            if not record.cancelled:
+                raise
         except Exception as error:  # a reset stream is a delivery event, not a session error
-            _call(record.handlers.on_subgroup_reset, SubgroupReset(group_id=header.group_id, error=error))
+            if not record.cancelled:
+                _call(record.handlers.on_subgroup_reset, SubgroupReset(group_id=header.group_id, error=error))
+        finally:
+            record.readers.discard(reader)
 
     async def _run_fetch_stream(self, reader: StreamReader, request_id: int) -> None:
         record = self._fetches.get(request_id)

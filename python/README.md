@@ -5,69 +5,151 @@ objects, or publish data, from any Python 3.11+ asyncio program. No browser is i
 speaks WebTransport over HTTP/3 through aioquic.
 
 This is the Python SDK in the Relay SDKs repository. The shared protocol pins, behavior contract, and
-test vectors live in `../spec`; the root README describes the suite. Package names are provisional
+test vectors live in [spec](../spec/README.md); the [root README](../README.md) describes the suite. Package names are provisional
 and publication is disabled.
 
-## Layout
+## First round trip
 
-- `packages/moq-core` (module `moq_core`): transport-independent MOQT primitives. Zero runtime
-  dependencies and no knowledge of Relay, a port of `ts/packages/moq-core`.
-- `packages/mux-relay` (module `mux_relay`): the Relay product API, authentication convention, and
-  the aioquic WebTransport transport. Depends on `moq_core` and `aioquic`.
+The packages are **unpublished**. Use the local uv workspace below; there is no registry install
+step. You need Git and [mise](https://mise.jdx.dev/getting-started.html) on PATH. The SDK requires
+Python 3.11+; mise installs the repository's pinned Python and uv. Commands below run in Bash from
+the repository root. The default transport is native aioquic WebTransport over HTTP/3, not a browser
+or a WebSocket. The endpoint and network must allow QUIC/UDP traffic.
 
-## Development
+### Endpoint and credentials
 
-Tool versions come from the repository's root `mise.toml`. The Python toolchain is the Astral stack:
-uv for the workspace and lockfile, ruff for linting and formatting, ty for type checking.
+Ask the team operating your Relay deployment (or your application's backend owner) for an HTTPS
+WebTransport endpoint, the exact authorized namespace fields including any root prefix, and a
+short-lived Relay JWT authorized to **publish and subscribe** there. The SDK consumes tokens; it
+does not issue them or provide a public token signup flow. A Mux API access token is not a Relay JWT.
+The hosted demo defaults to `https://sjc.relay.mux.global`, which still requires authorized credentials.
+For another deployment, use the endpoint supplied by its operator.
+
+The demo reads `RELAY_TOKEN` when set, otherwise prompts with hidden input. Prefer the prompt for
+manual runs; automation can inject the environment variable through its secret manager. Do not put
+tokens in commands, source files, URLs, or committed `.env` files. The demo passes the token to
+`get_token` and redacts it from output. Authentication currently uses `?jwt=<token>` on the transport
+URL: scrub query values and token strings before collecting network URLs, traces, or exception
+reports. Browser consumers have an additional [console exposure risk](../ts/README.md#browser-token-exposure).
+
+### Install and run
 
 ```sh
-mise install              # once
-mise run python:check     # uv sync, ruff check, ruff format --check, lint-imports, ty check, pytest
-mise run python:test      # pytest only
+git clone https://github.com/muxinc/relay-sdks.git
+cd relay-sdks
+mise install
+mise run python:install
 ```
 
-From this directory under `mise exec`, the native commands are `uv sync`, `uv run pytest`,
-`uv run ruff check .`, `uv run ruff format .`, `uv run ty check`, and `uv run lint-imports`. Run
-`uv lock` after changing a dependency and commit `uv.lock`.
+A publisher's `write()` waits for relay demand: a matching subscriber must be running. Even when
+publishing connects first, a fresh namespace can briefly reject subscriptions with `404 Broadcast
+not found` while its announcement propagates. The combined demo starts both sides, retries only
+that subscription rejection with capped backoff, and waits for demand before writing. Once a write
+starts, a failure stops the run; it never automatically replays potentially delivered bytes.
 
-## Subscribe to a track
+Enter the endpoint and a **fresh namespace authorized by your token** when prompted below. The CLI
+splits `team/quickstart/unique-run` into `["team", "quickstart", "unique-run"]`; the SDK itself sends
+fields verbatim. Both connections use those same fields and track `ticker`. If your token authorizes
+only one exact namespace, use that and avoid overlapping publishers or stale cached objects.
 
-```python
-import asyncio
-
-from mux_relay import CancellationToken, SubscriptionHandlers, connect_relay
-
-
-async def main() -> None:
-    lifetime = CancellationToken()
-    relay = await connect_relay(
-        "https://relay.example.com/moq",
-        # Obtain this token from your application backend.
-        get_token=lambda: playback_token,
-        cancellation=lifetime,
-    )
-
-    readings = relay.subscribe(
-        ["sensors", "lab"],
-        "readings",
-        SubscriptionHandlers(
-            on_ok=lambda info: print("Subscribed", info.track_properties),
-            on_object=lambda obj: consume_bytes(obj.payload, obj.properties),
-            on_error=lambda error: print("Subscription rejected", error),
-            on_subgroup_reset=lambda gap: print("Objects may be missing", gap),
-            on_done=lambda info: print("Publisher finished; trailing objects may still arrive", info),
-        ),
-    )
-
-    closed = await relay.closed
-    print("Connection ended", closed.error)
-
-    # When this consumer finishes: readings.cancel()
-    # When the application finishes: relay.close(), or lifetime.cancel()
-
-
-asyncio.run(main())
+```sh
+read -r -p 'Relay HTTPS endpoint: ' RELAY_URL
+read -r -p 'Authorized namespace (slash-separated): ' RELAY_NAMESPACE
+mise run python:example:mux-global -- --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE" --track ticker --count 1 --timeout 30
+# Enter the Relay token at the hidden prompt.
 ```
+
+The complete example is [demo.py](examples/mux_global/demo.py), including imports, explicit token
+configuration, and byte decoding. It uses `asyncio.timeout` and the SDK's existing async context
+managers (through `AsyncExitStack` to support either or both modes). Each connection is closed when
+the context exits, including if the second connection fails. Ordinary cleanup needs no custom
+`CancellationToken`. In a fixed-mode application, the same lifecycle can be written as
+`async with await connect_relay_subscriber(...) as relay:` and
+`async with await connect_relay_publisher(...) as publisher:`.
+
+Output includes the following (byte counts, timings, and ordering can vary):
+
+```text
+starting             mode=both namespace=... track=ticker count=1
+publisher connected  ...
+subscriber connected ...
+subscribed           ...
+published            seq=1 bytes=...
+received             group=0 bytes=... seq=1 ageMs=...
+finished             published=1 received=1
+```
+
+`finished published=1 received=1` is success. The 30-second run deadline bounds connection setup,
+waiting for demand, retries, and reception. Errors print a redacted `failed` line and exit nonzero;
+background tasks are cancelled and awaited, and connection contexts exit on success or failure.
+A write completing only means the transport accepted it; the `received` line establishes this
+demo's round trip.
+
+### Use the local packages in your application
+
+The workspace installs both packages as editable sources. Put a script in `python/` and run it
+with `mise exec -- uv run --project python python python/your_script.py` from the repository root;
+`from mux_relay import connect_relay_subscriber, connect_relay_publisher` resolves the local packages.
+For a separate virtual environment, install **both** local packages together (from the repository root):
+
+```sh
+mise exec -- uv venv /tmp/relay-quickstart-venv
+mise exec -- uv pip install --python /tmp/relay-quickstart-venv/bin/python -e ./python/packages/moq-core -e ./python/packages/mux-relay
+/tmp/relay-quickstart-venv/bin/python -c 'import mux_relay; print("Local Relay SDK ready")'
+```
+
+Choose your application's environment path in place of the temporary path when adopting the SDK.
+Installing only `mux-relay` would leave its unpublished `moq-core` dependency unresolved.
+
+## Subscribe and publish separately
+
+Use two terminals in the same checkout. Set `RELAY_URL` and `RELAY_NAMESPACE` in **each** terminal
+using the prompts above, with the exact same values. Each process prompts for its own token; the
+subscriber needs subscribe permission and the publisher needs publish permission. Start them within
+60 seconds of each other, in either order. A subscriber started first retries fresh-namespace 404s;
+a publisher started alone waits for demand and then fails at the overall deadline.
+
+Subscribe to one object:
+
+```sh
+mise run python:example:mux-global -- --mode subscribe --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE" --track ticker --count 1 --timeout 60
+```
+
+Publish one object from the other terminal:
+
+```sh
+mise run python:example:mux-global -- --mode publish --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE" --track ticker --count 1 --timeout 60
+```
+
+Success is `finished published=0 received=1` in the subscriber and `finished published=1 received=0`
+in the publisher. Both modes use the same bounded error handling and cleanup as the combined run.
+See [demo options](examples/mux_global/README.md) for multiple objects and intervals.
+
+## If the run fails
+
+- A connection or handshake failure: check the endpoint, Relay JWT expiry/permissions, TLS trust,
+  and QUIC/UDP reachability. The CLI redacts tokens; keep them out of diagnostic reports.
+- Repeated `404 Broadcast not found`: check that the publisher is still running and both sides
+  use the exact same authorized namespace and track. The demo's backoff stops at the run deadline.
+- `waiting ... no relay demand yet` until the deadline: start the matching subscriber, and verify
+  the token's namespace prefix and publish/subscribe permissions.
+- A write failure after demand: delivery may be partial. The demo stops without resending. Decide
+  on fresh data or an explicit application replay policy before trying again.
+
+## Subscription lifecycle
+
+A subscriber connection can only subscribe; publishing uses a separate publisher connection. The
+names both SDKs use for each concept, and why, are recorded in
+[SDK vocabulary](../spec/vocabulary.md).
+
+`subscribe` returns a cancellable handle immediately; acceptance is reported by
+`on_subscribed` and rejection by `on_error`. Observe the connection's `closed`
+future as well: an accepted subscription is no longer usable once the connection closes.
+Cancelling a subscription stops that consumer (including trailing objects after `on_publisher_done`),
+while closing the connection stops all of its subscriptions. `on_publisher_done` alone neither closes the
+connection nor proves delivery has drained. The demo waits for its object count or the deadline.
+Separate readiness/termination awaitables are proposed in
+[#68](https://github.com/muxinc/relay-sdks/issues/68); they are not APIs in this checkout.
 
 Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK neither
 interprets the payload nor assumes that a track contains audio, video, or timestamps. An accepted
@@ -79,64 +161,89 @@ Subscriptions have independent cancellation; the application owns connection shu
 
 Object callbacks are plain synchronous callables invoked as streams deliver objects. The SDK adds no
 application queue, ordering across streams, automatic JSON decoding, clock synchronization, or media
-scheduling. Hand work to your own `asyncio.Queue` or task from the callback if it must not block
-delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
-or gap-free delivery promise. `on_done` is the publisher's control notification, and may precede
-trailing objects in transit.
+scheduling. Use `subscribe_events` below to await work without blocking delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
+or gap-free delivery promise. `on_publisher_done` is the publisher's control notification: it may
+precede trailing objects in transit, and it does not end the subscription. Cancel the subscription
+when you are finished with it.
 
-Re-subscribing after `on_done` creates a new request and can replay cached objects followed
+Re-subscribing after `on_publisher_done` creates a new request and can replay cached objects followed
 by another done notification while the publisher is absent. Apply retry backoff to done callbacks
 as well as retryable request errors, and define any continuity policy in the application. See
 [publisher restarts and resubscription](../spec/relay-interop.md#publisher-restarts-and-resubscription)
 for retry, trailing-object, and publisher-generation guidance.
 
-`connect_relay` has one deadline (`connect_timeout`, seconds) covering token resolution and both
+`connect_relay_subscriber` has one deadline (`connect_timeout`, seconds) covering token resolution and both
 handshakes. The optional `CancellationToken` controls the connection's entire lifetime: cancelling
 it closes an established connection, and the `closed` future carries the reason. An explicit `jwt`
 query parameter takes precedence over `get_token`, matching the current Relay connection
 authentication convention. In-flight operations re-raise the application's exact cancellation reason;
 with `cancel()` this is `Cancelled`, which is not a `RelayError`. Handle lifetime cancellation
-separately from SDK errors (compare the exception to `lifetime.reason` when stopping normally).
-`RelayConnection` is also an async context manager that closes on exit.
+separately from SDK errors (compare the exception to your application's `CancellationToken.reason` when stopping normally).
+`RelaySubscriber` is also an async context manager that closes on exit.
+
+See [Errors and recovery](#errors-and-recovery) for stable SDK error codes, phases, and preserved
+transport causes.
 
 Namespaces contain 1–32 non-empty string fields, sent verbatim without splitting on `/`.
-The 32-field protocol limit is pinned in `spec/protocol.json`. Oversized namespaces are
+The 32-field protocol limit is pinned in [protocol.json](../spec/protocol.json). Oversized namespaces are
 rejected before opening a publisher connection or sending a subscription; track names must
 be non-empty strings.
 
-## Publish data for testing
+## Consume asynchronously
 
-Use a dedicated publisher connection with a token authorized to publish the namespace:
+`subscribe_events` creates a subscription owned by a single async iterator. Always use its async
+context manager around the loop so a `break`, consumer exception, or task cancellation releases it:
 
 ```python
-from mux_relay import connect_relay_publisher
-
-
-async def publish() -> None:
-    publisher = await connect_relay_publisher(
-        "https://relay.example.com/moq",
-        namespace=["testing", "data"],
-        get_token=lambda: publish_token,
-    )
-
-    events = publisher.publish("events")
-
-    try:
-        await events.write_json({"message": "hello"})
-    finally:
-        events.close()
-        await publisher.close()
+async with subscriber.subscribe_events(["sensors", "lab"], "readings", capacity=32) as events:
+    async for event in events:
+        if event.type == "object":
+            await process_reading(event.value.payload)
+        elif event.type == "subgroup_reset":
+            print("Objects may be missing", event.value)
+        elif event.type == "publisher_done":
+            print("Publisher finished; trailing objects may arrive", event.value)
+        # break is safe inside async with; consumer exceptions propagate after cleanup.
 ```
 
-In another client, use `connect_relay` to subscribe to namespace `["testing", "data"]`, track
-`"events"`. The publisher connection currently serves one namespace with multiple tracks. It uses a
-separate transport from subscriber connections; both directions share the authentication and
-connection-lifetime implementation. No camera, microphone, catalog, or timestamps are required.
+Python's `async for` alone does **not** close an iterator on `break`. Alternatively use
+`try/finally: events.close()` or `contextlib.aclosing(events)`. Cancelling a task awaiting `anext()`
+closes this subscription too. This includes expiry of `asyncio.timeout()` or
+`asyncio.wait_for(anext(events), ...)`: the caller receives `TimeoutError`, the subscription is
+cancelled, and subsequent reads return EOF. Use these deadlines to end consumption, not to skip an
+idle interval and resume it. Optional `cancellation=consumer_token` accepts a separate
+`CancellationToken` for this iterator without affecting the connection. The loop propagates the
+cancellation reason and consumer exceptions to its caller.
 
-Publishing follows Relay's announce-and-serve ingest flow. `publish()` registers the track;
-`write()` waits for the relay to subscribe upstream before sending bytes. Start a subscriber to
-create that demand. The default 10-second write deadline (`write_timeout`) covers both demand and
-transport writes. A `RelayTimeoutError` waiting for demand can be retried. If the relay has solicited
+The default capacity is **64 events**, including lifecycle events; it is a count limit, not a byte
+budget. Objects may be up to 16 MiB plus properties. Overflow discards queued events, cancels the
+subscription and raises `SubscriptionOverflowError`. Request failures raise
+`SubscriptionRequestError`; connection closure raises `SubscriptionConnectionClosedError`, even
+for a clean connection close, because closure does not prove all objects arrived. Before
+acceptance, a connection failure can instead arrive first as `SubscriptionRequestError`; consult
+`subscriber.closed` for the connection-level cause. Errors propagate out of the loop for the caller to
+handle. `publisher_done` is an event, never EOF. Arrival order is preserved without ordering
+across streams or transport-wide backpressure. Early exit releases the owned subscription and
+observers without closing `subscriber` or other consumers. Only one pending `anext()` is supported. See
+the [complete event and ownership contract](../spec/behavior.md#async-subscription-consumption).
+
+Passing an `async def` subscription callback raises `TypeError` before sending. A synchronous
+callback returning an awaitable emits `RuntimeWarning`; returned coroutines are closed and returned
+Futures/Tasks are cancelled with their exceptions observed. Callbacks are never awaited. Use
+`subscribe_events` for async consumers. Handlers are snapshotted at subscription creation; later
+assignments to the handler object do not change that subscription.
+
+## Publishing lifecycle
+
+A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate
+transport from subscriber connections. No camera, microphone, catalog, or timestamps are required.
+
+Publishing follows Relay's announce-and-serve ingest flow. `register_track()` registers the track
+and sends nothing; `write()` waits for the relay to subscribe upstream (demand) before sending
+bytes. Start a subscriber to create that demand. The default 10-second write deadline (`write_timeout`) covers both demand and
+transport writes. A `RelayTimeoutError` with `phase == "waiting-for-demand"` means this attempt sent
+no object bytes; choose the next write using application freshness and deduplication policy.
+The exception type alone does not prove replay is safe. If the relay has solicited
 namespace prefixes but none covers this publisher's namespace, the demand deadline instead raises
 `RelayNamespaceError`: check the token and namespace instead of blindly retrying. The track stays
 open, and a later matching solicitation can let it proceed. An ordinary absence of subscriber
@@ -145,7 +252,7 @@ demand still raises `RelayTimeoutError`. A failed or cancelled write resets its 
 raises `RelayError`; a transport deadline raises `RelayTimeoutError`. The next explicit write uses
 a new group ID. Choose fresh data or the next random-access point; already delivered bytes cannot
 be withdrawn. If demand disappeared, the next write waits for a new relay subscription, and
-`bindings()` continues reporting changes.
+`demand_changes()` continues reporting changes.
 
 Each write copies its bytes and sends one independent group containing one object. Await each
 write; a concurrent call raises `RelayWritePendingError` rather than growing a queue. Completion
@@ -154,7 +261,7 @@ publisher-side replay or retention after an object is sent. Late-subscriber beha
 relay caching and subscription filters. A failed write may have delivered partial data; there is no
 automatic retry.
 
-Optional `track_properties` on `publish()` and `properties` on `write()` carry explicit protocol
+Optional `track_properties` on `register_track()` and `properties` on `write()` carry explicit protocol
 metadata as `KeyValuePair` values. Property types and even-type values must be non-negative 64-bit
 integers (excluding `bool`); odd-type values must expose a bytes-like buffer. Invalid properties
 raise `TypeError` before a write starts or a track is registered. The SDK adds no default timescale,
@@ -174,6 +281,8 @@ keep running. `await publisher.close()` ends all tracks, retracts the namespace,
 transport shutdown. Track names cannot be reused within a publisher connection, including after
 their writer closes.
 
+### Advanced media groups
+
 For media, a track needs more than one object per group: LOC/MSF maps one GOP to one MOQT group
 whose object 0 is the keyframe. `open_group()` waits for relay demand like `write()`, then returns a
 `RelayGroupWriter` that appends objects with increasing IDs and FINs the group on `close()`.
@@ -181,13 +290,19 @@ Opening the group, each `group.write()`, and `group.close()` get a separate `wri
 deadline. Time between calls does not count toward a deadline. A timeout resets that group and
 raises `RelayTimeoutError`; the track stays open for a new group at the next keyframe:
 
+The following is an application sketch, not the data quickstart. The optional
+[moq-media format package](packages/moq-media/README.md) supplies `loc_properties` and
+`loc_track_properties`; the encoded frames, timestamps, and codec configuration come from your
+encoder. Install `moq-media` alongside `mux-relay` when publishing media (the development workspace
+includes it). It also provides the MSF catalog builder, source URLs, and H.264 configuration helpers
+used by the Video.js example.
 
 ```python
 from moq_media import loc_properties, loc_track_properties
 
-video = publisher.publish("video", track_properties=loc_track_properties())
+video = publisher.register_track("video", track_properties=loc_track_properties())
 
-if video.bound:  # the relay currently has a subscription for the track
+if video.has_demand:  # the relay currently has an upstream subscription for the track
     group = await video.open_group()
     await group.write(keyframe_bytes, properties=loc_properties(timestamp_us, video_config=avcc))
     await group.write(delta_bytes, properties=loc_properties(next_timestamp_us))
@@ -195,10 +310,23 @@ if video.bound:  # the relay currently has a subscription for the track
 ```
 
 A group that fails part-way (the relay's subscription changed or ended) is reset rather than
-completed, and the track stays open; start the next group at the next keyframe. `bindings()` iterates
-the track's demand (`True` on every subscribe, `False` on unsubscribe), which is how a catalog track
-re-sends its document to each new relay subscription. `examples/videojs_stream` puts all of this
-together for a Video.js player.
+completed, and the track stays open; start the next group at the next keyframe. `demand_changes()`
+iterates relay demand: the current state first, then `True` when the relay subscribes or replaces
+its subscription (so `True` can repeat) and `False` when its subscription ends, which is how a
+catalog track re-sends its document on each relay subscription:
+
+```python
+async for demanded in catalog.demand_changes():
+    if demanded:
+        await catalog.write(catalog_document)
+```
+
+Demand is the relay's own subscription, not a viewer count and not a liveness signal. The relay
+fans one upstream subscription out to every downstream viewer, so a second viewer produces no new
+`True` and is served from the relay's cache; and it keeps the subscription for a while after the
+last viewer leaves (about 30 seconds on the tested relay), so `has_demand` lags the last viewer and
+`True` does not prove anyone is watching. `examples/videojs_stream` puts all of this together for a
+Video.js player.
 
 Run the data-only publishing/subscribing integration tests without a live relay:
 
@@ -216,10 +344,10 @@ demand, deadline, cancellation, and encoded byte-size limits as `write()`. Group
 Use the exported readers explicitly in subscription callbacks:
 
 ```python
-from mux_relay import SubscriptionHandlers, read_json, read_text
+from mux_relay import RelaySubscriptionHandlers, read_json, read_text
 
-text_handlers = SubscriptionHandlers(on_object=lambda obj: print(read_text(obj)))
-json_handlers = SubscriptionHandlers(on_object=lambda obj: print(read_json(obj)))
+text_handlers = RelaySubscriptionHandlers(on_object=lambda obj: print(read_text(obj)))
+json_handlers = RelaySubscriptionHandlers(on_object=lambda obj: print(read_json(obj)))
 ```
 
 `read_text(obj)` preserves a leading U+FEFF and raises `UnicodeDecodeError` on malformed UTF-8.
@@ -233,9 +361,73 @@ values, cycles, non-finite numbers, and unpaired surrogates fail locally. Readin
 `NaN` and `Infinity`. Other conversion rules are Python's standard JSON behavior. Text writing uses
 strict UTF-8 encoding. Raw byte `write()` and subscriptions remain available.
 
+## Errors and recovery
+
+Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:
+
+| Code | Application response |
+| --- | --- |
+| `CONNECTION_TIMEOUT` | Connecting exceeded its deadline; consider a new connection with backoff. |
+| `WRITE_TIMEOUT` | Inspect the phase below, then choose the next object or group explicitly. |
+| `CLOSED` | The handle is closed; use an open connection, track, or group. |
+| `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
+| `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
+| `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
+| `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
+| `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
+| `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
+| `GOAWAY` | The relay requested migration; open a replacement connection. |
+| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
+
+`connecting` covers token resolution and connection setup. `connection` marks a connection-wide
+failure; it makes no claim about individual writes that were in flight. `subscription` marks an
+async subscription request failure or local event-buffer overflow. Publishing records
+`waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
+A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
+phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
+sent. Opening a group can start sending its header before the first object write. A phase records
+the failure's origin, and a later call on the failed handle can report that same error.
+
+For `WRITE_PENDING` and calls rejected because a handle is already closed, phase describes the
+refused operation; that call sends nothing. `CLOSED` can also interrupt an operation already in
+flight, so the code alone does not rule out partial delivery.
+
+No code or phase promises safe replay. Account for previous attempts, data freshness, and your
+application's deduplication policy. Successful writes mean transport acceptance, not viewer
+acknowledgment. The SDK does not automatically retry or reconnect. Neither a connection failure nor
+an uncovered namespace proves authentication was denied.
+
+Clean connection shutdown still resolves `closed` without an error; subsequent operations fail
+with `CLOSED`. After a failed connection, `closed` and subsequent connection operations expose the
+same failure. Caller cancellation reasons and token-provider exceptions retain their identity.
+Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
+`on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
+
+Python exports `RelayErrorCode` and `RelayErrorPhase` type aliases and preserves the existing
+exception hierarchy: `RelayTimeoutError`, `RelayClosedError` (including legacy `RelayTrackEndedError`),
+`RelayWritePendingError`, `RelayNamespaceError`, and `RelayGoawayError` remain catchable subclasses
+of `RelayError`. Other lifecycle categories use `RelayError` with the code above. Manually constructed
+base `RelayError` instances default to `RELAY_ERROR` for compatibility.
+
+Wrapped transport/session failures preserve the original exception in `__cause__`. The lower-level
+WebTransport API's `WebTransportError` keeps its numeric `code` and `reason`; a failure surfaced
+through the Relay connection/publishing API wraps it with `code == "TRANSPORT_ERROR"`. Explicit
+caller cancellation, including `asyncio.CancelledError`, is passed through unchanged.
+
+```python
+from mux_relay import RelayTimeoutError
+
+try:
+    await track.write_text("current state")
+except RelayTimeoutError as error:
+    print("Write deadline expired during", error.phase)
+    # Choose what to publish next using phase and application freshness/deduplication policy.
+```
+
 ## Transport
 
-`connect_relay` and `connect_relay_publisher` default to `mux_relay.connect_webtransport`, a
+`connect_relay_subscriber` and `connect_relay_publisher` default to `mux_relay.connect_webtransport`, a
 WebTransport-over-HTTP/3 client on aioquic: extended CONNECT with `WT-Available-Protocols: "moqt-20"`,
 session-bound streams, CLOSE_WEBTRANSPORT_SESSION on shutdown. TLS verification uses the system CA
 bundle that ships with `certifi`. Pass `create_transport` to supply a `QuicConfiguration` (custom
@@ -243,10 +435,10 @@ CAs, QUIC parameters) or any other implementation of the `moq_core.MoqtTransport
 
 ```python
 from aioquic.quic.configuration import QuicConfiguration
-from mux_relay import connect_relay, connect_webtransport
+from mux_relay import connect_relay_subscriber, connect_webtransport
 
 configuration = QuicConfiguration(is_client=True, cafile="/path/to/ca.pem")
-relay = await connect_relay(
+subscriber = await connect_relay_subscriber(
     url, create_transport=lambda url, protocols: connect_webtransport(url, protocols, configuration=configuration)
 )
 ```
@@ -255,24 +447,12 @@ relay = await connect_relay(
 QUIC loopback: a WebTransport server on `127.0.0.1` (aioquic, self-signed certificate) fronting the
 in-memory relay hub, so the transport adapter is exercised end to end in `python:check`.
 
-## Examples against a live Relay
+## Video.js media example
 
-`examples/mux_global` publishes JSON ticks to `sjc.relay.mux.global` and subscribes to them again,
-either in one process or split across a publisher process and a subscriber process. See
-`examples/mux_global/README.md`.
-
-```sh
-RELAY_TOKEN=... mise run python:example:mux-global -- --namespace mattypoo/relay-sdk-example
-```
-
-`examples/videojs_stream` streams live H.264 (a generated test pattern or a transcoded file, with
-optional Opus audio) in the MSF/LOC shape the Video.js v10 MoQ player consumes and prints the
-`moqt://` source URL to give the player. It needs the `examples` dependency group (PyAV, numpy), which
-`uv sync` installs by default. See `examples/videojs_stream/README.md`.
-
-```sh
-RELAY_TOKEN=... mise run python:example:videojs -- --namespace mattypoo/relay-sdk-example/tv --show-token
-```
+[videojs_stream](examples/videojs_stream/README.md) streams live H.264 (a generated test pattern or
+transcoded file, with optional Opus audio) in the MSF/LOC shape consumed by Video.js. It needs the
+`examples` dependency group (PyAV, numpy), which `uv sync` installs by default. Follow that example's
+setup after completing the data quickstart; media helpers and player integration are separate topics.
 
 ## Package boundaries
 
@@ -281,8 +461,9 @@ RELAY_TOKEN=... mise run python:example:videojs -- --namespace mattypoo/relay-sd
 - `packages/moq-core`, `moq_core`, is an independently buildable, Apache-2.0 generic protocol
   package. It declares no dependencies and imports no transport, player, UI, or media engine. It
   works over the abstract `moq_core.transport.MoqtTransport` seam that `mux_relay` supplies.
-- `relay.tracks` exposes the generic `MoqTrackSource` contract for future integrations. It offers
-  track requests and closure observation, with no operation to close the shared connection.
+- `subscriber.track_source` exposes the generic `MoqTrackSource` contract for future integrations:
+  track requests in protocol terms (with the core's `on_ok`/`on_done` handler names) and closure
+  observation, with no track listing and no operation to close the shared connection.
 - import-linter forbids `moq_core` from importing `mux_relay` or any transport library; the
   contracts are in `pyproject.toml`. `tests/test_boundaries.py` pins the declared dependency lists.
 - `packages/moq-core/tests/test_spec_protocol.py` and `test_spec_vectors.py` check the core against
@@ -297,16 +478,19 @@ The observable behavior is the same; the spelling follows Python conventions:
 
 | TypeScript | Python |
 | --- | --- |
-| `connectRelay({ url, getToken, signal, connectTimeoutMs })` | `connect_relay(url, get_token=..., cancellation=CancellationToken(), connect_timeout=seconds)` |
-| `relay.subscribe({ namespace, track, parameters }, handlers)` | `relay.subscribe(namespace, track, SubscriptionHandlers(...), parameters=...)` |
-| `publisher.publish({ track, trackProperties, writeTimeoutMs })` | `publisher.publish(track, track_properties=..., write_timeout=seconds)` |
+| `connectRelaySubscriber({ url, getToken, signal, connectTimeoutMs })` | `connect_relay_subscriber(url, get_token=..., cancellation=CancellationToken(), connect_timeout=seconds)` |
+| `subscriber.subscribeEvents(options, { capacity, signal })` | `subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` |
+| `subscriber.subscribe({ namespace, track, parameters }, handlers)` | `subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(...), parameters=...)` |
+| `onSubscribed`, `onPublisherDone` | `on_subscribed`, `on_publisher_done` |
+| `publisher.registerTrack({ track, trackProperties, writeTimeoutMs })` | `publisher.register_track(track, track_properties=..., write_timeout=seconds)` |
 | `writer.write(bytes, { properties })` | `await writer.write(payload, properties=...)` |
 | `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
-| `relay.closed` resolves `{ error? }` | `await relay.closed` returns `Closed(error=...)` |
+| `subscriber.closed` resolves `{ error? }` | `await subscriber.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
-| `Error` messages | typed exceptions: `RelayClosedError`, `RelayTimeoutError`, `RelayGoawayError`, `RelayWritePendingError`, `RelayNamespaceError`, `WebTransportError` |
+| `RelayError` with `code` and `phase` | `RelayError` with `code` and `phase`, preserving typed subclasses |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
-| `openGroup()`, `bindings()`, `writer.closed` | `open_group()`, `bindings()`, `writer.closed` (see `spec/behavior.md`) |
+| `openGroup()`, `hasDemand`, `demandChanges()`, `writer.closed` | `open_group()`, `has_demand`, `demand_changes()`, `writer.closed` (see `spec/behavior.md`) |
+| `subscriber.trackSource` | `subscriber.track_source` |
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
 | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
 | Browser `WebTransport` | aioquic WebTransport client (`connect_webtransport`) |
@@ -327,11 +511,15 @@ This opt-in test publishes and subscribes against a real relay. It is excluded f
 and needs a token authorized for both operations. The token can be supplied through a hidden prompt
 or the `RELAY_TOKEN` environment variable; it is never written to a file and is redacted from output.
 
+Set `RELAY_URL` and `RELAY_NAMESPACE` using the quickstart prompts first. Your token must
+authorize both operations under that namespace prefix, including children: the test appends a
+random UUID. Running this command explicitly opts into contacting that endpoint.
+
 ```sh
-RELAY_NAMESPACE_PREFIX=mattypoo/relay-sdk-smoke mise run python:test:relay
+RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python:test:relay
 ```
 
-Use the namespace prefix authorized by your token. The test appends a random UUID, checks binary,
+The test checks binary,
 empty, and text payloads plus independent track closure, then closes both connections. It defaults to
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
 the SDK are absolute: include the token's root prefix when required by the relay.
@@ -340,11 +528,17 @@ The live test passed against `sjc.relay.mux.global` on 2026-09-11 over the aioqu
 transport: three objects on `events` and two on `status`, with the second status object delivered
 after the events track closed, and both connections closed cleanly.
 
-`RelayError` is the base class for Relay connection and publishing failures, including
-`WebTransportError` for QUIC, WebTransport session, and stream failures. Transport errors preserve
-their message and optional `code` and `reason` details; catch `RelayError` to handle these together
-with the SDK's deadline and closed errors.
+## Development
 
-The optional [moq-media format package](packages/moq-media/README.md) provides the LOC properties,
-MSF catalog builder, source URLs, and H.264 configuration helpers used by the Video.js example.
-Install `moq-media` alongside `mux-relay` when publishing media (the development workspace includes it).
+Tool versions come from the repository's root `mise.toml`. The Python toolchain is the Astral stack:
+uv for the workspace and lockfile, ruff for linting and formatting, ty for type checking.
+
+```sh
+mise install              # once
+mise run python:check     # uv sync, ruff check, ruff format --check, lint-imports, ty check, pytest
+mise run python:test      # pytest only
+```
+
+From this directory under `mise exec`, the native commands are `uv sync`, `uv run pytest`,
+`uv run ruff check .`, `uv run ruff format .`, `uv run ty check`, and `uv run lint-imports`. Run
+`uv lock` after changing a dependency and commit `uv.lock`.

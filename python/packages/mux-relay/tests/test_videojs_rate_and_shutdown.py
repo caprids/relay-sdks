@@ -92,7 +92,7 @@ async def test_duration_drains_before_classifying_failures(
     class Publisher:
         closed = loop.create_future()
 
-        def publish(self, *_: Any, **__: Any) -> Track:
+        def register_track(self, *_: Any, **__: Any) -> Track:
             return Track()
 
         async def close(self) -> None:

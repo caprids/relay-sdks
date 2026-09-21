@@ -40,6 +40,15 @@ await inspect(resolve(root, 'packages/moq-media/dist'), core.name);
 await inspect(resolve(root, 'dist'), core.name);
 const { buildMsfCatalog } = await import('../packages/moq-media/dist/index.js');
 assert.equal(typeof buildMsfCatalog, 'function');
-const { connectRelay } = await import('../dist/index.js');
-assert.equal(typeof connectRelay, 'function');
+const sdkExports = await import('../dist/index.js');
+assert.deepEqual(Object.keys(sdkExports).sort(), [
+  'RelayError',
+  'SubscriptionConnectionClosedError',
+  'SubscriptionOverflowError',
+  'SubscriptionRequestError',
+  'connectRelayPublisher',
+  'connectRelaySubscriber',
+  'readJSON',
+  'readText',
+]);
 console.log('Built SDK and media formats import only the generic core; core has no runtime package imports.');

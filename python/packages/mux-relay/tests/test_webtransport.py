@@ -28,9 +28,16 @@ from relay_helpers.wt_server import (
     start_webtransport_server,
 )
 
-from moq_core import MoqtObject, SubscriptionHandlers
+from moq_core import MoqtObject
 from moq_core.transport import ReceiveStream, SendStream
-from mux_relay import Closed, ConnectingTransport, RelayError, connect_relay, connect_relay_publisher
+from mux_relay import (
+    Closed,
+    ConnectingTransport,
+    RelayError,
+    RelaySubscriptionHandlers,
+    connect_relay_publisher,
+    connect_relay_subscriber,
+)
 from mux_relay.webtransport import (
     CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
     WebTransportError,
@@ -225,7 +232,7 @@ class TestLoopback:
             10,
         )
         subscriber = await asyncio.wait_for(
-            connect_relay(server.url_for("/subscribe"), create_transport=create_transport), 10
+            connect_relay_subscriber(server.url_for("/subscribe"), create_transport=create_transport), 10
         )
         closing = False
         problems: list[str] = []
@@ -241,8 +248,8 @@ class TestLoopback:
         observe("subscriber", subscriber.closed)
 
         try:
-            events = publisher.publish("events", write_timeout=5)
-            status = publisher.publish("status", write_timeout=5)
+            events = publisher.register_track("events", write_timeout=5)
+            status = publisher.register_track("status", write_timeout=5)
             received: dict[str, list[bytes]] = {"events": [], "status": []}
             accepted: list[str] = []
 
@@ -254,8 +261,8 @@ class TestLoopback:
                 subscriber.subscribe(
                     NAMESPACE,
                     track,
-                    SubscriptionHandlers(
-                        on_ok=lambda ok: accepted.append(track),
+                    RelaySubscriptionHandlers(
+                        on_subscribed=lambda ok: accepted.append(track),
                         on_object=on_object,
                         on_error=lambda error: problems.append(f"{track}: {error.error_code} {error.reason}"),
                         on_subgroup_reset=lambda reset: problems.append(f"{track} reset: {reset.error!r}"),
@@ -502,18 +509,18 @@ class TestSendBackpressure:
         publisher = await connect_relay_publisher(
             server.url_for("/publish"), namespace=NAMESPACE, create_transport=create_transport
         )
-        subscriber = await connect_relay(server.url_for("/subscribe"), create_transport=create_transport)
+        subscriber = await connect_relay_subscriber(server.url_for("/subscribe"), create_transport=create_transport)
 
         try:
-            track = publisher.publish("events", write_timeout=10)
+            track = publisher.register_track("events", write_timeout=10)
             received = 0
 
             def on_object(_: MoqtObject) -> None:
                 nonlocal received
                 received += 1
 
-            subscriber.subscribe(NAMESPACE, "events", SubscriptionHandlers(on_object=on_object))
-            await wait_for(lambda: track.bound, timeout=10)
+            subscriber.subscribe(NAMESPACE, "events", RelaySubscriptionHandlers(on_object=on_object))
+            await wait_for(lambda: track.has_demand, timeout=10)
 
             session: Any = publisher._lifetime._transport
             protocol = session._protocol

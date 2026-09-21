@@ -13,15 +13,18 @@ import pytest
 from core_helpers.waiting import settle, wait_for
 from relay_helpers.relay_hub import create_relay_hub
 
-from moq_core import MoqtObject, SubscriptionHandlers
+from moq_core import MoqtObject
 from moq_core.transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
 from mux_relay import (
+    CancellationToken,
     ConnectingTransport,
     RelayClosedError,
-    RelayConnection,
+    RelaySubscriber,
+    RelaySubscriptionHandlers,
     RelayTimeoutError,
-    connect_relay,
+    RelayWritePendingError,
     connect_relay_publisher,
+    connect_relay_subscriber,
 )
 
 NAMESPACE = ["testing", "video"]
@@ -42,9 +45,9 @@ async def cleanup() -> AsyncIterator[Cleanup]:
             await result
 
 
-def receive(subscriber: RelayConnection, track: str) -> list[MoqtObject]:
+def receive(subscriber: RelaySubscriber, track: str) -> list[MoqtObject]:
     objects: list[MoqtObject] = []
-    subscriber.subscribe(NAMESPACE, track, SubscriptionHandlers(on_object=objects.append))
+    subscriber.subscribe(NAMESPACE, track, RelaySubscriptionHandlers(on_object=objects.append))
     return objects
 
 
@@ -157,9 +160,9 @@ class TestRecoveringSingleWrites:
             return ConnectingTransport(transport=transport, ready=created.ready)
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.extend([subscriber.close, publisher.close])
-        audio = publisher.publish("audio", write_timeout=0.1)
+        audio = publisher.register_track("audio", write_timeout=0.1)
         objects = receive(subscriber, "audio")
         writing = asyncio.create_task(audio.write(b"stale"))
         await wait_for(lambda: len(transports[0].streams) == 2)
@@ -170,9 +173,13 @@ class TestRecoveringSingleWrites:
             writing.cancel()
         with pytest.raises(asyncio.CancelledError if interrupt == "cancel" else RelayTimeoutError) as failure:
             await writing
+        if interrupt == "timeout":
+            assert isinstance(failure.value, RelayTimeoutError)
+            assert failure.value.code == "WRITE_TIMEOUT"
+            assert failure.value.phase == ("closing" if stage == "fin" else "writing")
         assert stream.reset_with is failure.value
         assert not audio.closed
-        assert audio.bound
+        assert audio.has_demand
         stream.release()
         await settle()
         assert not stream.finned
@@ -200,9 +207,9 @@ class TestCancellingAStuckGroup:
             return ConnectingTransport(transport=transport, ready=created.ready)
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.extend([subscriber.close, publisher.close])
-        video = publisher.publish("video", write_timeout=0.05)
+        video = publisher.register_track("video", write_timeout=0.05)
         objects = receive(subscriber, "video")
         group = await video.open_group()
         await group.write(b"key")
@@ -213,13 +220,22 @@ class TestCancellingAStuckGroup:
         stream = transports[0].streams[-1]
         stream.hold_writes = True
 
-        with pytest.raises(RelayTimeoutError, match="timed out") as failure:
-            await asyncio.wait_for(group.write(b"stalled") if operation == "write" else group.close(), 1)
+        pending = asyncio.create_task(group.write(b"stalled") if operation == "write" else group.close())
+        await settle()
+        with pytest.raises(RelayWritePendingError) as concurrent:
+            await group.write(b"concurrent")
+        assert concurrent.value.code == "WRITE_PENDING"
+        with pytest.raises(RelayWritePendingError):
+            await group.close()
+        with pytest.raises(RelayTimeoutError) as failure:
+            await asyncio.wait_for(pending, 1)
+        assert failure.value.code == "WRITE_TIMEOUT"
+        assert failure.value.phase == ("writing" if operation == "write" else "closing")
 
         assert stream.reset_with is failure.value
         assert group.closed
         assert not video.closed
-        assert video.bound
+        assert video.has_demand
         assert group.object_count == 2
         stream.release()
         await settle()
@@ -250,11 +266,11 @@ class TestCancellingAStuckGroup:
             return ConnectingTransport(transport=transport, ready=created.ready)
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.append(subscriber.close)
         cleanup.append(publisher.close)
 
-        video = publisher.publish("video")
+        video = publisher.register_track("video")
         objects = receive(subscriber, "video")
         group = await video.open_group()
         await group.write(b"key")
@@ -292,11 +308,11 @@ class TestCancellingAStuckGroup:
             return ConnectingTransport(transport=transport, ready=created.ready)
 
         publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay(URL, create_transport=hub.connect_subscriber)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
         cleanup.append(subscriber.close)
         cleanup.append(publisher.close)
 
-        video = publisher.publish("video")
+        video = publisher.register_track("video")
         objects = receive(subscriber, "video")
         group = await video.open_group()
         await group.write(b"key")
@@ -316,3 +332,99 @@ class TestCancellingAStuckGroup:
         assert not stream.finned
         assert len(objects) == 1
         assert hub.object_count("video") == 1
+
+
+@pytest.mark.parametrize("operation", ["write", "open_group", "group_write", "group_close"])
+@pytest.mark.parametrize("default_reason", [False, True])
+async def test_owner_cancellation_after_send_completion_keeps_identity(
+    cleanup: Cleanup, operation: str, default_reason: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub = create_relay_hub()
+    cleanup.append(hub.destroy)
+    owner = CancellationToken()
+    reason = None if default_reason else RuntimeError("owner finished")
+
+    def cancel_when_task_completes() -> None:
+        # The task's wait callback was registered before the transport was called. It wakes the
+        # public operation before this callback schedules the publisher's track-close callback.
+        task = asyncio.current_task()
+        assert task is not None
+        task.add_done_callback(lambda _: owner.cancel(reason))
+
+    class CancelOnCompletionStream:
+        def __init__(self, inner: SendStream) -> None:
+            self.inner = inner
+            self.writes = 0
+
+        async def write(self, data: bytes) -> None:
+            await self.inner.write(data)
+            self.writes += 1
+            if operation == "group_write" and self.writes == 2:
+                cancel_when_task_completes()
+
+        async def close(self) -> None:
+            await self.inner.close()
+            if operation in ("write", "group_close"):
+                cancel_when_task_completes()
+
+        def abort(self, reason: object = None) -> None:
+            self.inner.abort(reason)
+
+    def create_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
+        created = hub.connect_publisher(url, protocols)
+        transport = created.transport
+        open_stream = transport.create_unidirectional_stream
+        streams = 0
+
+        async def open_wrapped() -> SendStream:
+            nonlocal streams
+            streams += 1
+            stream = await open_stream()
+            if streams != 2:
+                return stream
+            if operation == "open_group":
+                cancel_when_task_completes()
+            return CancelOnCompletionStream(stream)
+
+        monkeypatch.setattr(transport, "create_unidirectional_stream", open_wrapped)
+        return created
+
+    publisher = await connect_relay_publisher(
+        URL, namespace=NAMESPACE, create_transport=create_transport, cancellation=owner
+    )
+    subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
+    cleanup.extend([subscriber.close, publisher.close])
+    track = publisher.register_track("events")
+    receive(subscriber, "events")
+    with pytest.raises(Exception) as failure:
+        if operation == "write":
+            await track.write(b"value")
+        else:
+            group = await track.open_group()
+            if operation == "group_write":
+                await group.write(b"value")
+            elif operation == "group_close":
+                await group.close()
+    assert failure.value is owner.reason
+    assert (await publisher.closed).error is owner.reason
+
+
+@pytest.mark.parametrize("operation", ["write", "open_group"])
+async def test_task_cancellation_wins_over_simultaneous_owner_closure(cleanup: Cleanup, operation: str) -> None:
+    hub = create_relay_hub()
+    cleanup.append(hub.destroy)
+    owner = CancellationToken()
+    publisher = await connect_relay_publisher(
+        URL, namespace=NAMESPACE, create_transport=hub.connect_publisher, cancellation=owner
+    )
+    cleanup.append(publisher.close)
+    track = publisher.register_track("events")
+    pending = asyncio.ensure_future(track.write(b"value") if operation == "write" else track.open_group())
+    await asyncio.sleep(0)
+    # Wake the task first, then close the lifetime before its continuation runs.
+    pending.cancel("caller cancelled task")
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError, match="caller cancelled task"):
+        await pending
+    assert pending.cancelled()
+    assert (await publisher.closed).error is owner.reason

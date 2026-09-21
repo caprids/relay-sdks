@@ -53,7 +53,7 @@ class Track:
     def __init__(self, *, gate: asyncio.Event | None = None, timeout: bool = False) -> None:
         self.gate = gate
         self.timeout = timeout
-        self.bound = True
+        self.has_demand = True
         self.closed = False
         self.started = asyncio.Event()
         self.written = asyncio.Event()

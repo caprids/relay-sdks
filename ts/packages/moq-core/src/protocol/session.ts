@@ -113,6 +113,52 @@ export interface SubscriptionHandlers {
   onGoaway?(goaway: Goaway): void;
 }
 
+/** Validate once; returned promises are diagnosed and observed, never awaited by delivery. */
+function synchronousSubscriptionHandlers(handlers: SubscriptionHandlers): SubscriptionHandlers {
+  const result: SubscriptionHandlers = {};
+  const names = [
+    'onOk',
+    'onError',
+    'onObject',
+    'onSubgroupEnd',
+    'onSubgroupReset',
+    'onDone',
+    'onUpdateOk',
+    'onStateNotify',
+    'onGoaway',
+  ] as const;
+  for (const name of names) {
+    const callback = handlers[name];
+    if (!callback) continue;
+    if (Object.prototype.toString.call(callback) === '[object AsyncFunction]') {
+      throw new TypeError(`${name} must be synchronous; use Relay subscribeEvents() for async consumption`);
+    }
+    let reportedAsyncResult = false;
+    Object.assign(result, {
+      [name]: (...args: unknown[]) => {
+        const returned: unknown = Reflect.apply(callback, handlers, args);
+        if (
+          returned &&
+          (typeof returned === 'object' || typeof returned === 'function') &&
+          'then' in returned &&
+          typeof returned.then === 'function'
+        ) {
+          // JS promises cannot be cancelled. Observe failures without serializing delivery.
+          void Promise.resolve(returned).catch(() => {});
+          if (!reportedAsyncResult) {
+            reportedAsyncResult = true;
+            // biome-ignore lint/suspicious/noConsole: public diagnostic for unsupported async callbacks
+            console.error(
+              new TypeError(`${name} returned a promise; callbacks must be synchronous; use Relay subscribeEvents()`)
+            );
+          }
+        }
+      },
+    });
+  }
+  return result;
+}
+
 export interface Subscription {
   readonly requestId: number;
   /** Modify the subscription (REQUEST_UPDATE, §10.9). */
@@ -256,6 +302,7 @@ interface RequestRecordBase {
 }
 
 interface SubscriptionRecord extends RequestRecordBase {
+  readers: Set<StreamReader>;
   requestId: number;
   handlers: SubscriptionHandlers;
   trackAlias?: number;
@@ -395,6 +442,7 @@ class MoqtSessionImpl implements MoqtSession {
       record.stream?.cancel(error);
     }
 
+    for (const record of this.#subscriptions.values()) this.#removeSubscription(record);
     this.#subscriptions.clear();
     this.#fetches.clear();
     this.#trackStatuses.clear();
@@ -450,9 +498,10 @@ class MoqtSessionImpl implements MoqtSession {
     return id;
   }
 
-  subscribe(options: MoqtSubscribeOptions, handlers: SubscriptionHandlers = {}): Subscription {
+  subscribe(options: MoqtSubscribeOptions, callbacks: SubscriptionHandlers = {}): Subscription {
+    const handlers = synchronousSubscriptionHandlers(callbacks);
     const requestId = this.#allocateRequestId();
-    const record: SubscriptionRecord = { requestId, handlers, cancelled: false, settled: false };
+    const record: SubscriptionRecord = { requestId, handlers, cancelled: false, settled: false, readers: new Set() };
 
     this.#subscriptions.set(requestId, record);
 
@@ -632,6 +681,7 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   #handleSubscriptionMessage(record: SubscriptionRecord, message: ControlMessage): void {
+    if (record.cancelled) return;
     switch (message.kind) {
       case 'subscribe-ok': {
         if (record.trackAlias !== undefined && record.trackAlias !== message.trackAlias) {
@@ -740,6 +790,10 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   #removeSubscription(record: SubscriptionRecord): void {
+    record.cancelled = true;
+    record.stream?.cancel(record.pendingCancelReason);
+    for (const reader of record.readers) void reader.cancel(record.pendingCancelReason).catch(() => {});
+    record.readers.clear();
     this.#subscriptions.delete(record.requestId);
 
     if (record.trackAlias !== undefined && this.#aliasRoutes.get(record.trackAlias) === record) {
@@ -887,6 +941,7 @@ class MoqtSessionImpl implements MoqtSession {
       return;
     }
 
+    record.readers.add(reader);
     let lastSubgroupId = header.subgroupIdMode === 'explicit' ? header.subgroupId! : 0;
 
     try {
@@ -900,17 +955,21 @@ class MoqtSessionImpl implements MoqtSession {
         record.handlers.onObject?.(object);
       }
 
+      if (record.cancelled) return;
       record.handlers.onSubgroupEnd?.({
         groupId: header.groupId,
         subgroupId: lastSubgroupId,
         endOfGroup: header.endOfGroup,
       });
     } catch (error) {
+      if (record.cancelled) return;
       if (isMoqtProtocolError(error)) throw error;
 
       // A reset stream is a delivery event (timeout, cancellation), not a
       // session error — surface it to the subscription.
       record.handlers.onSubgroupReset?.({ groupId: header.groupId, error });
+    } finally {
+      record.readers.delete(reader);
     }
   }
 

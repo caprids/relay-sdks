@@ -34,7 +34,7 @@ catalog = build_msf_catalog(
     video=VideoTrackInfo(codec=h264.codec, width=640, height=360, init_data=h264.avcc),
     audio=AudioTrackInfo(),
 )
-video = publisher.publish("video", track_properties=loc_track_properties())
+video = publisher.register_track("video", track_properties=loc_track_properties())
 # The application opens a group at each keyframe and handles demand/recovery.
 await group.write(h264.to_avcc(access_unit), properties=loc_properties(timestamp_us, video_config=h264.avcc))
 ```

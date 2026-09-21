@@ -5,7 +5,7 @@
  * run.mjs serves it next to the built SDK and drives it in headless Chromium because Node has no
  * WebTransport. `log` receives one plain object per event so the runner can print it.
  */
-import { connectRelay, connectRelayPublisher } from '@mux/relay';
+import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -60,13 +60,13 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         connectRelayPublisher({ url, namespace, getToken: () => token, signal: lifetime.signal }),
       );
       log({ event: 'publisher connected', url, namespace: namespace.join('/') });
-      writer = publisher.publish({ track, writeTimeoutMs: 15_000 });
+      writer = publisher.registerTrack({ track, writeTimeoutMs: 15_000 });
     }
 
     if (mode !== 'publish') {
       const subscriber = await watch(
         'subscriber',
-        connectRelay({ url, getToken: () => token, signal: lifetime.signal }),
+        connectRelaySubscriber({ url, getToken: () => token, signal: lifetime.signal }),
       );
       log({ event: 'subscriber connected', url });
       // subscribeWithRetry runs in the background (nothing below depends on its result), but
@@ -77,7 +77,8 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         subscriber,
         { namespace, track },
         {
-          onOk: (ok) => log({ event: 'subscribed', namespace: namespace.join('/'), track, alias: ok.trackAlias }),
+          onSubscribed: (ok) =>
+            log({ event: 'subscribed', namespace: namespace.join('/'), track, alias: ok.trackAlias }),
           onObject: (object) => {
             // Status-only objects (end-of-group and end-of-track markers) carry no payload.
             if (object.status !== 'normal') return;
@@ -91,7 +92,7 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
           },
           onError: (error) => problems.push(`subscribe rejected: code ${error.errorCode} ${error.reason}`),
           onSubgroupReset: ({ groupId, error }) => problems.push(`group ${groupId} reset: ${describe(error)}`),
-          onDone: (done) => log({ event: 'publisher done', status: done.statusCode, reason: done.reason }),
+          onPublisherDone: (done) => log({ event: 'publisher done', status: done.statusCode, reason: done.reason }),
         },
         lifetime.signal,
         log,
@@ -106,7 +107,7 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         const bytes = encoder.encode(
           JSON.stringify({ seq, sentAt: new Date().toISOString(), message: `tick ${seq} from the @mux/relay example` }),
         );
-        await writeWhenDemanded(writer, bytes, failIfBroken, log);
+        await writeWhenDemanded(writer, bytes, failIfBroken, lifetime.signal, log);
         log({ event: 'published', seq, bytes: bytes.byteLength });
         if (seq < count) await sleep(intervalMs, lifetime.signal);
       }
@@ -122,22 +123,27 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
     closing = true;
     clearTimeout(deadline);
     // publisher.close() retracts the namespace and awaits shutdown; subscriber.close() is synchronous.
-    for (const connection of connections) await connection.close();
+    try {
+      await Promise.all(connections.map((connection) => connection.close()));
+    } finally {
+      // Closed connections have removed their abort listeners; only retry sleeps need waking now.
+      lifetime.abort();
+    }
   }
 }
 
-/** write() waits until the relay wants the track. Timing out there means no subscriber yet; it is retryable. */
-async function writeWhenDemanded(writer, bytes, failIfBroken, log) {
-  for (;;) {
-    try {
-      await writer.write(bytes);
-      return;
-    } catch (error) {
-      failIfBroken();
-      if (!/timed out/.test(describe(error))) throw error;
-      log({ event: 'waiting', detail: 'no subscriber has requested the track yet; retrying the write' });
-    }
+/** Wait without sending; once write() starts, failure may mean partial delivery. Never replay it. */
+async function writeWhenDemanded(writer, bytes, failIfBroken, signal, log) {
+  if (!writer.hasDemand) log({ event: 'waiting', detail: 'no relay demand yet; waiting before writing' });
+  while (!writer.hasDemand) {
+    failIfBroken();
+    if (writer.closed) throw new Error('Published track closed while waiting for demand');
+    await sleep(100, signal);
   }
+  failIfBroken();
+  // Demand can disappear after the check. The SDK bounds that race with its write deadline.
+  // Even a timeout is propagated: this API cannot prove that no bytes were sent.
+  await writer.write(bytes);
 }
 
 /**
@@ -152,8 +158,8 @@ async function subscribeWithRetry(subscriber, options, handlers, signal, log) {
     const rejection = await new Promise((resolve) => {
       subscriber.subscribe(options, {
         ...handlers,
-        onOk: (ok) => {
-          handlers.onOk?.(ok);
+        onSubscribed: (ok) => {
+          handlers.onSubscribed?.(ok);
           resolve(undefined);
         },
         onError: (error) => resolve(error),

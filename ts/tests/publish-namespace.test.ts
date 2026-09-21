@@ -2,7 +2,7 @@ import { createMoqtSession, type MoqtObject } from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { solicitNamespace } from '../packages/moq-core/src/tests/helpers/raw-peer.js';
 import { createTransportPair } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
-import { connectRelayPublisher } from '../src/index.js';
+import { connectRelayPublisher, RelayError } from '../src/index.js';
 
 const namespace = ['live', 'example'];
 const cleanup: (() => void | Promise<void>)[] = [];
@@ -21,11 +21,25 @@ async function connectPublisher() {
     createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
   });
   cleanup.push(() => publisher.close());
-  const track = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
-  return { pair, subscriber, track };
+  const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
+  return { pair, subscriber, publisher, track };
 }
 
 describe('publisher namespace coverage', () => {
+  it('shares namespace withdrawal with closure and pending operations', async () => {
+    const { pair, publisher, track } = await connectPublisher();
+    const solicitation = await solicitNamespace(pair.server, ['live']);
+    await vi.waitFor(() => expect(solicitation.received).toHaveLength(2));
+    const pending = track.write(new Uint8Array([1])).catch((error: unknown) => error);
+    await solicitation.reset();
+    const { error } = await publisher.closed;
+    expect(error).toBeInstanceOf(RelayError);
+    expect(error).toMatchObject({ code: 'NAMESPACE_ENDED', phase: 'connection', cause: expect.any(Error) });
+    expect(await pending).toBe(error);
+    await expect(track.write(new Uint8Array([2]))).rejects.toBe(error);
+    expect(() => publisher.registerTrack({ track: 'another' })).toThrow(error as RelayError);
+  });
+
   it.each(['write', 'openGroup'] as const)(
     '%s distinguishes an uncovered namespace and recovers after a later matching solicitation',
     async (method) => {
@@ -34,7 +48,7 @@ describe('publisher namespace coverage', () => {
       await vi.waitFor(() => expect(unrelated.received.map((message) => message.kind)).toEqual(['request-ok']));
 
       const pending = method === 'write' ? track.write(new Uint8Array([1])) : track.openGroup();
-      await expect(pending).rejects.toThrow('Publisher namespace is not covered by the relay namespace solicitations');
+      await expect(pending).rejects.toMatchObject({ code: 'NAMESPACE_NOT_SOLICITED', phase: 'waiting-for-demand' });
       expect(track.closed).toBe(false);
 
       const matching = await solicitNamespace(pair.server, ['live'], 3);
@@ -66,9 +80,10 @@ describe('publisher namespace coverage', () => {
         const matching = await solicitNamespace(pair.server, ['live']);
         await vi.waitFor(() => expect(matching.received).toHaveLength(2));
       }
-      await expect(track.write(new Uint8Array([1]))).rejects.toThrow(
-        'Publish write timed out waiting for relay demand or transport',
-      );
+      await expect(track.write(new Uint8Array([1]))).rejects.toMatchObject({
+        code: 'WRITE_TIMEOUT',
+        phase: 'waiting-for-demand',
+      });
       expect(track.closed).toBe(false);
     },
   );

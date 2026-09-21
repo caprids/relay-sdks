@@ -32,7 +32,7 @@ const catalog = buildMsfCatalog({
   video: { codec: 'avc1.42E01F', width: 640, height: 360, initData: avcc },
   audio: { codec: 'opus' },
 });
-const video = publisher.publish({ track: 'video', trackProperties: locTrackProperties() });
+const video = publisher.registerTrack({ track: 'video', trackProperties: locTrackProperties() });
 await group.write(encodedFrame, { properties: locProperties(timestampUs, { videoConfig: avcc }) });
 const source = composeMoqSource('https://relay.example', ['room', 'live'], { token });
 ```

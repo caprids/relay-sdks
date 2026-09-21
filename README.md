@@ -12,6 +12,10 @@ This is an initial development workspace. Package names are provisional and publ
 | `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol and `@mux/moq-media` format packages, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
 | `python/` | Python SDK `mux-relay` and the generic `moq-core` and `moq-media` packages, as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
 
+Start with the [JavaScript quickstart](ts/README.md#first-round-trip) (browser WebTransport) or
+[Python quickstart](python/README.md#first-round-trip) (native asyncio). Both use local packages
+and include credential setup and a bounded publish/subscribe round trip.
+
 ## Development
 
 Tool versions for every language are pinned in `mise.toml`, and the mise tasks are the entry points:
@@ -38,6 +42,8 @@ Alignment comes from `spec/`, not from shared version numbers:
 - `spec/behavior.md` states the semantics an SDK must exhibit: connection deadlines and
   cancellation, what subscribing does and does not promise, the announce-and-serve publishing
   flow, package boundaries, and the assertion list for the live smoke test.
+- `spec/vocabulary.md` fixes the public names both SDKs use for each concept, in each language's
+  casing, and records why each was chosen.
 - `spec/vectors/` holds encoding vectors that every protocol layer's tests load.
 
 ## Versioning and releases
