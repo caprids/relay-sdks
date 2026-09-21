@@ -258,7 +258,10 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   which is how LOC/MSF media (one GOP per group) is published. A group that fails part-way is reset
   rather than completed, and the track stays open for the next group; only one write or group may
   be pending per track. The write deadline applies separately to opening a group (including demand),
-  each object write, and closing the group. Idle time between operations is unrestricted.
+  each object write, and closing the group. Idle time between operations is unrestricted. Aborting a
+  group after it closed cleanly has no effect: the FIN already ended the stream, and a reset after
+  complete delivery is ignorable
+  ([draft-20 Section 11.4.3](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.4.3)).
   Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
   observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.

@@ -616,6 +616,34 @@ describe('connectRelayPublisher', () => {
     await third.close();
   });
 
+  it('ignores abort after a clean group close and keeps the track usable', async () => {
+    const { publisher, subscriber } = await connectHub();
+    const track = publisher.registerTrack({ track: 'events' });
+    const objects: MoqtObject[] = [];
+    const resets: unknown[] = [];
+    subscriber.subscribe(
+      { namespace, track: 'events' },
+      { onObject: (object) => objects.push(object), onSubgroupReset: (info) => resets.push(info) },
+    );
+    const group = await track.openGroup();
+    await group.write(new Uint8Array([1]));
+    await group.close();
+    expect(group.closed).toBe(true);
+
+    // draft-ietf-moq-transport-20 section 11.4.3: a reset after all data and the FIN is ignorable,
+    // so the SDK sends none and a repeated close stays a no-op.
+    group.abort(new Error('late abort'));
+    expect(group.closed).toBe(true);
+    await group.close();
+
+    const next = await track.openGroup();
+    expect(next.groupId).toBe(1);
+    await next.write(new Uint8Array([2]));
+    await next.close();
+    await vi.waitFor(() => expect(objects).toHaveLength(2));
+    expect(resets).toEqual([]);
+  });
+
   it('resets a bound write when demand disappears and publishes again after resubscription', async () => {
     const pair = createTransportPair();
     const open = pair.client.createUnidirectionalStream.bind(pair.client);

@@ -216,6 +216,35 @@ class TestOpenGroup:
         await replacement.close()
         await wait_for(lambda: any(obj.group_id == 1 for obj in objects))
 
+    async def test_abort_after_a_clean_close_has_no_effect(self, cleanup: Cleanup) -> None:
+        _, publisher, subscriber = await connect_hub(cleanup)
+        video = publisher.register_track("video")
+        objects: list[MoqtObject] = []
+        resets: list[object] = []
+        subscriber.subscribe(
+            NAMESPACE,
+            "video",
+            RelaySubscriptionHandlers(on_object=objects.append, on_subgroup_reset=resets.append),
+        )
+        group = await video.open_group()
+        await group.write(b"key")
+        await group.close()
+        assert group.closed
+
+        # draft-ietf-moq-transport-20 section 11.4.3: a reset after all data and the FIN is ignorable,
+        # so the SDK sends none and a repeated close stays a no-op.
+        group.abort()
+        assert group.closed
+        await group.close()
+
+        replacement = await video.open_group()
+        assert replacement.group_id == 1
+        await replacement.write(b"key-2")
+        await replacement.close()
+        await wait_for(lambda: len(objects) == 2)
+        await settle()
+        assert resets == []
+
     async def test_a_replaced_relay_subscription_ends_the_group_but_not_the_track(self, cleanup: Cleanup) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
         video = publisher.register_track("video")

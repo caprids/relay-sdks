@@ -109,11 +109,11 @@ class RelayGroupWriter:
 
     Objects are appended in order with increasing object IDs starting at 0, so the first object is
     the group's random-access point in LOC/MSF terms. ``close()`` FINs the stream, which is how a
-    complete group is announced; ``abort()`` resets it. A group that fails part-way is reset, and the
-    track stays open for the next group.
+    complete group is announced; ``abort()`` resets it unless it already closed cleanly. A group that
+    fails part-way is reset, and the track stays open for the next group.
     """
 
-    __slots__ = ("_next_object_id", "_operation", "_pending", "_track", "_writer", "group_id")
+    __slots__ = ("_complete", "_next_object_id", "_operation", "_pending", "_track", "_writer", "group_id")
 
     def __init__(self, track: RelayTrackWriter, operation: _Operation, writer: SubgroupWriter) -> None:
         self._track = track
@@ -121,12 +121,13 @@ class RelayGroupWriter:
         self._writer = writer
         self._next_object_id = 0
         self._pending = False
+        self._complete = False
         self.group_id = writer.group_id
 
     @property
     def closed(self) -> bool:
         """True once the group was FINed or reset; no further objects can be written."""
-        return self._operation.cancelled or self._track._active is not self._operation
+        return self._complete or self._operation.cancelled or self._track._active is not self._operation
 
     @property
     def object_count(self) -> int:
@@ -189,6 +190,9 @@ class RelayGroupWriter:
 
     async def close(self) -> None:
         """FIN within ``write_timeout``; expiry resets the group. Idempotent once closed cleanly."""
+        if self._complete:
+            return
+
         if self._operation.cancelled:
             assert self._operation.failure is not None
             raise self._operation.failure
@@ -199,6 +203,7 @@ class RelayGroupWriter:
         self._check()
         try:
             await self._await_transport(self._writer.fin(), "closing")
+            self._complete = True
         finally:
             if self._track._active is self._operation:
                 self._track._active = None
@@ -228,7 +233,14 @@ class RelayGroupWriter:
                 sending.cancel()
 
     def abort(self, reason: BaseException | None = None) -> None:
-        """Reset the group's stream; objects already sent may be incomplete at the peer."""
+        """Reset the group's stream; objects already sent may be incomplete at the peer.
+
+        After a clean ``close()`` this has no effect: the FIN already ended the stream, and a reset
+        after complete delivery is ignorable (draft-ietf-moq-transport-20 section 11.4.3).
+        """
+        if self._complete:
+            return
+
         self._track._cancel_operation(
             self._operation,
             reason if reason is not None else RelayClosedError("Group was aborted", phase=self._operation.phase),
