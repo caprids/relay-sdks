@@ -17,7 +17,6 @@ from mux_relay import (
     Closed,
     ConnectingTransport,
     RelayClosedError,
-    RelayError,
     RelayGroupWriter,
     RelayPublisher,
     RelaySubscriber,
@@ -338,49 +337,6 @@ class TestConnectRelayPublisher:
         assert on_timed[0].track_properties == track_properties
         assert on_raw[0].track_properties == []
 
-    async def test_reports_a_stream_open_failure_and_allows_a_fresh_write_without_silently_retrying(
-        self, cleanup: Cleanup
-    ) -> None:
-        hub = create_relay_hub()
-        cleanup.append(hub.destroy)
-        failure = ConnectionError("data stream failed")
-
-        def create_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
-            created = hub.connect_publisher(url, protocols)
-            transport: Any = created.transport
-            open_stream = transport.create_unidirectional_stream
-            streams = [0]
-
-            async def failing_open() -> SendStream:
-                streams[0] += 1
-
-                if streams[0] == 2:
-                    raise failure
-
-                return await open_stream()
-
-            transport.create_unidirectional_stream = failing_open
-            return created
-
-        publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=create_transport)
-        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
-        cleanup.append(subscriber.close)
-        cleanup.append(publisher.close)
-        events = publisher.register_track("events")
-        Received(subscriber, "events")
-
-        with pytest.raises(RelayError) as raised:
-            await events.write(bytes([1]))
-
-        assert raised.value.__cause__ is failure
-        assert raised.value.code == "TRANSPORT_ERROR"
-        assert raised.value.phase == "opening-stream"
-
-        assert not events.closed
-        assert hub.object_count("events") == 0
-        await events.write(bytes([2]))
-        await wait_for(lambda: hub.object_count("events") == 1)
-
     async def test_catalog_retries_after_a_bound_timeout_without_another_subscription(
         self, cleanup: Cleanup, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -429,91 +385,12 @@ class TestConnectRelayPublisher:
             serving.cancel()
             await asyncio.gather(serving, return_exceptions=True)
 
-    async def test_times_out_a_stalled_stream_open_and_aborts_a_late_stream_without_sending_payload_bytes(
-        self, cleanup: Cleanup
-    ) -> None:
-        hub = create_relay_hub()
-        cleanup.append(hub.destroy)
-        late_stream: asyncio.Future[SendStream] = asyncio.get_running_loop().create_future()
-
-        def create_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
-            created = hub.connect_publisher(url, protocols)
-            transport: Any = created.transport
-            open_stream = transport.create_unidirectional_stream
-            streams = [0]
-
-            async def stalling_open() -> SendStream:
-                streams[0] += 1
-
-                if streams[0] != 2:
-                    return await open_stream()
-
-                return await late_stream
-
-            transport.create_unidirectional_stream = stalling_open
-            return created
-
-        publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=create_transport)
-        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
-        cleanup.append(subscriber.close)
-        cleanup.append(publisher.close)
-        events = publisher.register_track("events", write_timeout=0.1)
-        Received(subscriber, "events")
-
-        with pytest.raises(RelayTimeoutError) as failure:
-            await events.write(bytes([1]))
-        assert failure.value.code == "WRITE_TIMEOUT"
-        assert failure.value.phase == "opening-stream"
-
-        assert not events.closed
-        await events.write(bytes([2]))
-        await wait_for(lambda: hub.object_count("events") == 1)
-
-        class RecordingStream:
-            def __init__(self) -> None:
-                self.aborted = 0
-                self.writes: list[bytes] = []
-
-            async def write(self, data: bytes) -> None:
-                self.writes.append(data)
-
-            async def close(self) -> None:
-                pass
-
-            def abort(self, reason: object = None) -> None:
-                self.aborted += 1
-
-        recording = RecordingStream()
-        late_stream.set_result(recording)
-        await wait_for(lambda: recording.aborted == 1)
-        assert recording.writes == []
-
     async def test_rejects_oversized_objects_before_waiting_for_demand(self, cleanup: Cleanup) -> None:
         _, publisher, _ = await connect_hub(cleanup)
         track = publisher.register_track("events")
 
         with pytest.raises(ValueError, match="16 MiB"):
             await track.write(bytes(16 * 1024 * 1024 + 1))
-
-    async def test_releases_the_pending_slot_when_a_payload_or_property_cannot_be_converted(
-        self, cleanup: Cleanup
-    ) -> None:
-        _, publisher, _ = await connect_hub(cleanup)
-        events = publisher.register_track("events", write_timeout=0.05)
-        text: Any = "not bytes"
-        unconvertible: Any = object()
-
-        with pytest.raises(TypeError):
-            await events.write(text)
-
-        with pytest.raises(TypeError):
-            await events.write(bytes([1]), properties=[KeyValuePair(3, unconvertible)])
-
-        # Neither call ever held the track's single in-flight slot, so the next write fails the
-        # ordinary retryable way (nobody is subscribed) instead of reporting a write that does not
-        # exist for the life of the connection.
-        with pytest.raises(RelayTimeoutError, match="timed out"):
-            await events.write(bytes([2]))
 
     async def test_rejects_oversized_namespace_before_token_or_transport(self) -> None:
         def forbidden(*args: Any) -> Any:

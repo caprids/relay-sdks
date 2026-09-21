@@ -302,10 +302,7 @@ A failed group's ID is never reused, which is stricter than §2.2 (a subgroup ma
 stream after a premature reset); group IDs increase monotonically and object IDs start at 0 within a
 group (draft-ietf-moq-msf-01 §6). A group may end without an `END_OF_GROUP` marker (§2.4.2). There
 is no automatic retry, and the application chooses the next random-access point after a failure;
-MSF and LOC say nothing about an abandoned group.
-
-Reset codes other than `INTERNAL_ERROR` (0x0): TypeScript only. Python sends 0x0 until its write
-slot lands.
+MSF and LOC say nothing about an abandoned group. Implemented in both SDKs.
 
 ### Relay property handling
 

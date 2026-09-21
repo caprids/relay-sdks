@@ -154,6 +154,15 @@ def _error_code_of(reason: object) -> int:
     if isinstance(reason, WebTransportError) and reason.code is not None:
         return reason.code
 
+    # A publisher-side reset reason (the write slot's StreamReset) names the MOQT code it wants sent.
+    stream_error_code = getattr(reason, "stream_error_code", None)
+    if (
+        isinstance(stream_error_code, int)
+        and not isinstance(stream_error_code, bool)
+        and 0 <= stream_error_code <= 0xFFFFFFFF
+    ):
+        return stream_error_code
+
     if isinstance(reason, int) and not isinstance(reason, bool) and 0 <= reason <= 0xFFFFFFFF:
         return reason
 

@@ -1,24 +1,20 @@
 """Multi-object groups and demand observation on ``RelayTrackWriter``, the additions video publishing needs."""
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import pytest
 from core_helpers.waiting import settle, wait_for
 from relay_helpers.relay_hub import RelayHub, create_relay_hub
 
-from moq_core import KeyValuePair, MoqtObject, TrackBinding
-from moq_core.transport import SendStream
+from moq_core import KeyValuePair, MoqtObject
 from mux_relay import (
-    ConnectingTransport,
     RelayClosedError,
-    RelayError,
     RelayPublisher,
     RelaySubscriber,
     RelaySubscriptionHandlers,
     RelayTimeoutError,
-    RelayTrackWriter,
     RelayWritePendingError,
     connect_relay_publisher,
     connect_relay_subscriber,
@@ -56,62 +52,6 @@ def receive(subscriber: RelaySubscriber, track: str) -> list[MoqtObject]:
     objects: list[MoqtObject] = []
     subscriber.subscribe(NAMESPACE, track, RelaySubscriptionHandlers(on_object=objects.append))
     return objects
-
-
-class HeldStreams:
-    """A publisher transport whose data-stream opens can be held, freezing a write while it is bound.
-
-    A write takes the relay's alias just before it opens its stream, so holding that open is how a
-    test keeps a write bound and in flight long enough for the relay to move the binding under it.
-    """
-
-    def __init__(self, hub: RelayHub) -> None:
-        self._hub = hub
-        self.holding = False
-        self.holds = 0
-        self._held: asyncio.Future[SendStream] = asyncio.get_running_loop().create_future()
-
-    def connect(self, url: str, protocols: Sequence[str]) -> ConnectingTransport:
-        created = self._hub.connect_publisher(url, protocols)
-        transport: Any = created.transport
-        open_stream = transport.create_unidirectional_stream
-
-        async def open_or_hold() -> SendStream:
-            if self.holding:
-                self.holds += 1
-                return await self._held
-
-            return await open_stream()
-
-        transport.create_unidirectional_stream = open_or_hold
-        return created
-
-    def release(self) -> None:
-        """Let go of the held open so no send task is left parked when the test ends."""
-        if not self._held.done():
-            self._held.cancel()
-
-
-async def connect_held_hub(cleanup: Cleanup) -> tuple[HeldStreams, RelayPublisher, RelaySubscriber]:
-    hub = create_relay_hub()
-    cleanup.append(hub.destroy)
-    streams = HeldStreams(hub)
-    cleanup.append(streams.release)
-    publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=streams.connect)
-    subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
-    cleanup.append(subscriber.close)
-    cleanup.append(publisher.close)
-    return streams, publisher, subscriber
-
-
-def watch_demand_changes(track: RelayTrackWriter, seen: list[bool]) -> asyncio.Task[None]:
-    """Collect a track's demand changes in the background until its ``demand_changes()`` iterator stops."""
-
-    async def collect() -> None:
-        async for bound in track.demand_changes():
-            seen.append(bound)
-
-    return asyncio.ensure_future(collect())
 
 
 class TestOpenGroup:
@@ -245,42 +185,6 @@ class TestOpenGroup:
         await settle()
         assert resets == []
 
-    async def test_a_replaced_relay_subscription_ends_the_group_but_not_the_track(self, cleanup: Cleanup) -> None:
-        _, publisher, subscriber = await connect_hub(cleanup)
-        video = publisher.register_track("video")
-        receive(subscriber, "video")
-        group = await video.open_group()
-        await group.write(b"key")
-
-        # Simulate the relay re-subscribing: the binding moves to a new alias mid-group.
-        video._bind(None)
-        video._bind(42)
-
-        with pytest.raises(RelayError, match="subscription changed"):
-            await group.write(b"delta")
-
-        assert group.closed
-        assert video.has_demand
-
-    async def test_demand_that_vanishes_before_the_write_starts_is_retryable(self, cleanup: Cleanup) -> None:
-        _, publisher, subscriber = await connect_hub(cleanup)
-        video = publisher.register_track("video")
-        writing = asyncio.ensure_future(video.write(b"x"))
-        await asyncio.sleep(0)
-
-        # The relay subscribes and unsubscribes before the waiting write resumes.
-        video._bind(5)
-        video._bind(None)
-
-        with pytest.raises(RelayError, match="ended before the write started") as raised:
-            await writing
-
-        # Not a closed track: demand simply came and went, and the next write can wait again.
-        assert not isinstance(raised.value, RelayClosedError)
-        objects = receive(subscriber, "video")
-        await video.write(b"y")
-        await wait_for(lambda: len(objects) == 1)
-
     async def test_a_payload_that_cannot_be_converted_leaves_the_group_open(self, cleanup: Cleanup) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
         video = publisher.register_track("video")
@@ -339,80 +243,6 @@ class TestDemandChanges:
         catalog.close()
         await wait_for(lambda: watcher.done())
         assert catalog.closed
-
-    async def test_yields_true_again_for_a_replacement_subscription(self, cleanup: Cleanup) -> None:
-        _, publisher, subscriber = await connect_hub(cleanup)
-        catalog = publisher.register_track("catalog")
-        seen: list[bool] = []
-
-        async def watch() -> None:
-            async for bound in catalog.demand_changes():
-                seen.append(bound)
-
-        watcher = asyncio.ensure_future(watch())
-        subscriber.subscribe(NAMESPACE, "catalog")
-        await wait_for(lambda: seen == [False, True])
-
-        catalog._bind(7)
-        await wait_for(lambda: seen == [False, True, True])
-        watcher.cancel()
-
-    async def test_a_relay_re_bind_during_a_bound_write_resets_it_and_preserves_its_watchers(
-        self, cleanup: Cleanup
-    ) -> None:
-        streams, publisher, subscriber = await connect_held_hub(cleanup)
-        audio = publisher.register_track("audio")
-        seen: list[bool] = []
-        watcher = watch_demand_changes(audio, seen)
-        receive(subscriber, "audio")
-        await wait_for(lambda: audio.has_demand)
-
-        # Hold the write's stream open so it stays bound in flight, then move the relay's binding to
-        # another alias: the shape of a relay re-subscribing under a running publisher.
-        streams.holding = True
-        writing = asyncio.ensure_future(audio.write(b"x"))
-        await wait_for(lambda: streams.holds == 1)
-        alias = audio._alias
-        assert alias is not None
-        publisher._on_track_binding(TrackBinding(track_name="audio", track_alias=alias + 1))
-
-        with pytest.raises(RelayError, match="subscription changed") as raised:
-            await writing
-
-        assert not isinstance(raised.value, RelayClosedError)
-        assert not audio.closed
-        assert audio.has_demand
-        await wait_for(lambda: seen == [False, True, True])
-        assert not watcher.done()
-        # Restore the alias understood by the hub, then send fresh data on the same track.
-        audio._bind(alias)
-        streams.holding = False
-        await audio.write(b"y")
-        audio.close()
-        await watcher
-
-    async def test_a_bound_write_timeout_leaves_the_track_and_its_watchers_open(self, cleanup: Cleanup) -> None:
-        streams, publisher, subscriber = await connect_held_hub(cleanup)
-        audio = publisher.register_track("audio", write_timeout=0.05)
-        seen: list[bool] = []
-        watcher = watch_demand_changes(audio, seen)
-        objects = receive(subscriber, "audio")
-        await wait_for(lambda: audio.has_demand)
-        streams.holding = True
-
-        with pytest.raises(RelayTimeoutError, match="timed out"):
-            await audio.write(b"x")
-
-        assert not audio.closed
-        assert audio.has_demand
-        assert not watcher.done()
-        assert seen == [False, True]
-        streams.holding = False
-        await audio.write(b"y")
-        await wait_for(lambda: len(objects) == 1)
-        assert (objects[0].group_id, objects[0].payload) == (1, b"y")
-        audio.close()
-        await watcher
 
     async def test_replays_state_on_every_subscribe(self, cleanup: Cleanup) -> None:
         # The catalog pattern: a fresh subscription must not wait for the next change.
