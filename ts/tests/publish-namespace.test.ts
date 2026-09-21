@@ -21,7 +21,7 @@ async function connectPublisher() {
     createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
   });
   cleanup.push(() => publisher.close());
-  const track = publisher.publish({ track: 'events', writeTimeoutMs: 100 });
+  const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
   return { pair, subscriber, publisher, track };
 }
 
@@ -37,7 +37,7 @@ describe('publisher namespace coverage', () => {
     expect(error).toMatchObject({ code: 'NAMESPACE_ENDED', phase: 'connection', cause: expect.any(Error) });
     expect(await pending).toBe(error);
     await expect(track.write(new Uint8Array([2]))).rejects.toBe(error);
-    expect(() => publisher.publish({ track: 'another' })).toThrow(error as RelayError);
+    expect(() => publisher.registerTrack({ track: 'another' })).toThrow(error as RelayError);
   });
 
   it.each(['write', 'openGroup'] as const)(

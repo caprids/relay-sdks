@@ -141,7 +141,7 @@ retries current catalog state after a one-second pause while demand remains; it 
 pending catalog document. Shutdown cancels the pause. Data that already reached the relay cannot
 be withdrawn.
 A closed track or connection is terminal. The example checks the writer's `closed` state after a
-write failure (`bound` cannot distinguish a closed track from one with no current subscribers).
+write failure (`has_demand` cannot distinguish a closed track from one with no current subscribers).
 
 An ended track is reported once, with the error, on its own `audio track ended` / `video track ended`
 / `catalog track ended` line, and the run then **fails with a non-zero exit**. That is the default

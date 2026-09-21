@@ -30,7 +30,7 @@ The broader structured error/phase policy is tracked in [#67](https://github.com
 A successful write means transport acceptance, not viewer acknowledgment. The combined run waits
 for the requested object count to come back through the subscriber before reporting success.
 
-Publisher completion (`onDone` / `on_done`) is logged independently: trailing objects can still
+Publisher completion (`onPublisherDone` / `on_publisher_done`) is logged independently: trailing objects can still
 arrive afterward. The demo observes connection closure, does not treat publisher completion as
 all data received, and does not automatically resubscribe on completion. Additional readiness and
 termination APIs are tracked in [#68](https://github.com/muxinc/relay-sdks/issues/68).

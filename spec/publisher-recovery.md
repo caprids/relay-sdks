@@ -9,9 +9,9 @@ The SDKs do not automatically reconnect or resubscribe.
 
 | Signal | What it establishes |
 | --- | --- |
-| `onOk` / `on_ok` | The relay accepted a subscription. It does not establish that the publisher is still producing live data. |
+| `onSubscribed` / `on_subscribed` | The relay accepted a subscription. It does not establish that the publisher is still producing live data. |
 | `onObject` / `on_object` | An object arrived. It may be cached; arrival alone does not establish freshness. |
-| `onDone` / `on_done` | The relay sent `PUBLISH_DONE`. Trailing object streams may still arrive until cancellation or connection closure. |
+| `onPublisherDone` / `on_publisher_done` | The relay sent `PUBLISH_DONE`. Trailing object streams may still arrive until cancellation or connection closure. |
 | `onSubgroupReset` / `on_subgroup_reset` | One subgroup was reset. It does not establish that the entire publisher has stopped. |
 | Connection `closed` | This subscriber's transport/session ended. A publisher's separate connection can die while the subscriber connection remains open. |
 
@@ -40,19 +40,19 @@ A useful policy is:
    catalog, sparse event track, paused source, or long GOP is not evidence of failure by itself.
    Where silence is valid, use an application heartbeat or an external publisher-health signal.
 2. When progress stops, report a stalled state and schedule one recovery attempt. Do not wait only
-   for `on_done`: it can be delayed while the relay detects a dead upstream connection. Keep an
+   for `on_publisher_done`: it can be delayed while the relay detects a dead upstream connection. Keep an
    overall recovery deadline and a cancellation path; do not create a new loop on every callback.
 3. Retire the old subscription before accumulating replacement attempts. For live playback,
    cancelling it deliberately discards any trailing data so the application can prefer a fresh
    random-access point. A consumer that needs trailing data must choose its own bounded drain
-   policy before cancelling; `on_done` alone does not prove the data is drained.
+   policy before cancelling; `on_publisher_done` alone does not prove the data is drained.
 4. Request the desired live track again. The subscriber connection can stay open; if it has closed,
    open a replacement connection first. A new connection is not a guaranteed bypass for relay
    state. During a known publisher transition, classify `404` and initial-response timeouts as
    potentially transient and retry within the recovery budget. Authentication, invalid input, and
    protocol failures need their own handling rather than an unlimited retry loop.
 5. Apply backoff and jitter across failed attempts **and accepted-but-stale attempts**. Cached
-   objects followed by `on_done` must not reset the budget or create an immediate resubscribe loop.
+   objects followed by `on_publisher_done` must not reset the budget or create an immediate resubscribe loop.
    Reset only after meaningful fresh progress. See
    [the cached-track resubscription issue](https://github.com/muxinc/relay-sdks/issues/21).
 6. On a media publisher generation change, reacquire the catalog/configuration and resume at a

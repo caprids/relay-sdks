@@ -35,7 +35,7 @@ inside the demo and are redacted from its output.
 Relay currently authenticates with `?jwt=<token>` on the WebTransport URL. On a failed handshake,
 Chromium can log that full URL, including the token, to its own console. The SDK cannot suppress
 those browser-generated messages. This can expose a live token to console collectors and error
-reporting services even when the error returned by `connectRelay` contains no token.
+reporting services even when the error returned by `connectRelaySubscriber` contains no token.
 
 Before forwarding browser diagnostics, remove `jwt` query values and token strings from console
 breadcrumbs, network URLs, traces, and error reports, or disable collection of those fields. Use
@@ -151,11 +151,15 @@ See [demo options](examples/mux-global/README.md) for multiple objects and inter
 
 ## Subscription lifecycle
 
+A subscriber connection can only subscribe; publishing uses a separate publisher connection. The
+names both SDKs use for each concept, and why, are recorded in
+[SDK vocabulary](../spec/vocabulary.md).
+
 `subscribe` returns a cancellable handle immediately; acceptance is reported by
-`onOk` and rejection by `onError`. Observe the connection's `closed`
+`onSubscribed` and rejection by `onError`. Observe the connection's `closed`
 promise as well: an accepted subscription is no longer usable once the connection closes.
-Cancelling a subscription stops that consumer (including trailing objects after `onDone`),
-while closing the connection stops all of its subscriptions. `onDone` alone neither closes the
+Cancelling a subscription stops that consumer (including trailing objects after `onPublisherDone`),
+while closing the connection stops all of its subscriptions. `onPublisherDone` alone neither closes the
 connection nor proves delivery has drained. The demo waits for its object count or the deadline.
 Separate readiness/termination awaitables are proposed in
 [#68](https://github.com/muxinc/relay-sdks/issues/68); they are not APIs in this checkout.
@@ -167,17 +171,18 @@ bounds its initial response. An idle connection still depends on peer traffic or
 keepalive; the SDK does not schedule its own keepalive. Subscriptions have independent cancellation; the application owns connection shutdown.
 
 Object callbacks run synchronously as streams deliver objects. The SDK adds no application queue,
-ordering across streams, automatic JSON decoding, clock synchronization, or media scheduling. Handle
-subgroup resets and connection closure explicitly; this API makes no exactly-once or gap-free delivery promise.
-`onDone` is the publisher's control notification, and may precede trailing objects in transit.
+ordering across streams, automatic JSON decoding, clock synchronization, or media scheduling. Handle subgroup
+resets and connection closure explicitly; this API makes no exactly-once or gap-free delivery promise.
+`onPublisherDone` is the publisher's control notification: it may precede trailing objects in
+transit, and it does not end the subscription. Cancel the subscription when you are finished with it.
 
-Re-subscribing after `onDone` creates a new request and can replay cached objects followed
+Re-subscribing after `onPublisherDone` creates a new request and can replay cached objects followed
 by another done notification while the publisher is absent. Apply retry backoff to done callbacks
 as well as retryable request errors, and define any continuity policy in the application. See
 [publisher restarts and resubscription](../spec/relay-interop.md#publisher-restarts-and-resubscription)
 for retry, trailing-object, and publisher-generation guidance.
 
-`connectRelay` has a deadline covering token resolution and both handshakes. Its optional abort
+`connectRelaySubscriber` has a deadline covering token resolution and both handshakes. Its optional abort
 signal controls the connection's entire lifetime. An explicit `jwt` query parameter takes precedence
 over `getToken`, matching the current Relay connection authentication convention. Every deadline
 (`connectTimeoutMs`, `requestTimeoutMs`, and `writeTimeoutMs`) must be between 0 (exclusive) and
@@ -194,9 +199,9 @@ be non-empty strings.
 A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate
 transport from subscriber connections. No camera, microphone, catalog, or timestamps are required.
 
-Publishing follows Relay's announce-and-serve ingest flow. `publish()` registers the track;
-`write()` waits for the relay to subscribe upstream before sending bytes. Start a subscriber to
-create that demand. The default 10-second write deadline covers both demand and transport writes.
+Publishing follows Relay's announce-and-serve ingest flow. `registerTrack()` registers the track
+and sends nothing; `write()` waits for the relay to subscribe upstream (demand) before sending
+bytes. Start a subscriber to create that demand. The default 10-second write deadline covers both demand and transport writes.
 A failed or cancelled write resets its stream and leaves the track open while the publisher
 connection remains open. The next explicit write uses a new group ID. After a timeout or relay
 subscription change, choose fresh data or the next random-access point; already delivered bytes
@@ -210,7 +215,7 @@ means the transport accepted the complete group, not that a viewer acknowledged 
 or retention after an object is sent. Late-subscriber behavior also depends on relay caching and
 subscription filters. A failed write may have delivered partial data; there is no automatic retry.
 
-Optional `trackProperties` on `publish()` and `properties` on `write()` carry explicit protocol
+Optional `trackProperties` on `registerTrack()` and `properties` on `write()` carry explicit protocol
 metadata. Property types and even-type integer values must be non-negative safe integers; odd-type
 values must be `ArrayBufferView`s and are copied as their raw bytes. Invalid properties raise a
 `TypeError` naming the property index before registering a track or starting a write. The SDK adds
@@ -266,7 +271,7 @@ starting at 0; `group.close()` sends the group's FIN. This amortizes stream crea
 across a group, such as a video GOP, instead of waiting for a FIN for every frame.
 
 ```ts
-const video = publisher.publish({ track: 'video', writeTimeoutMs: 10_000 });
+const video = publisher.registerTrack({ track: 'video', writeTimeoutMs: 10_000 });
 const lifetime = new AbortController();
 const group = await video.openGroup({ signal: lifetime.signal });
 try {
@@ -290,20 +295,28 @@ report its state; the count includes only successfully accepted objects. Empty p
 `status: 'end-of-group'` or `'end-of-track'`. Application queues and frame dropping remain the
 application's responsibility.
 
-`track.bound` reports current relay demand. `track.closed` distinguishes a retired track from a
-track waiting for demand. `track.bindings()` yields the current demand state followed by changes,
-including `true` again for replacement subscriptions, and ends when the track ends. For example,
-a catalog can be re-sent on each relay subscription:
+`track.hasDemand` reports whether the relay currently has an upstream subscription for the track,
+so a write would proceed at once. `track.closed` distinguishes a retired track from a track waiting
+for demand. `track.demandChanges()` yields the current demand state first, then one value per relay
+subscription change: `true` when the relay subscribes or replaces its subscription (so `true` can
+repeat), `false` when its subscription ends; it ends when the track ends. For example, a catalog
+can be re-sent on each relay subscription:
 
 ```ts
-for await (const bound of catalog.bindings()) {
-  if (bound) await catalog.write(catalogBytes);
+for await (const demanded of catalog.demandChanges()) {
+  if (demanded) await catalog.write(catalogBytes);
 }
 ```
 
 Breaking the loop releases its observer. Explicit iterator consumers can call `return()` to release
-an observer, including a pending `next()`. Demand is the relay's upstream subscription; it does not
-represent each individual downstream viewer.
+an observer, including a pending `next()`.
+
+Demand is the relay's own subscription, not a viewer count and not a liveness signal. The relay
+fans one upstream subscription out to every downstream viewer, so a second viewer produces no new
+`true` and is served from the relay's cache; and it keeps the subscription for a while after the
+last viewer leaves (about 30 seconds on the tested relay), so `hasDemand` lags the last viewer and
+`true` does not prove anyone is watching. Write only state that is safe to serve from cache, and do
+not use demand to decide whether to keep encoding.
 
 Custom transports with asynchronous sink writes or closes must honor the writable controller's
 abort signal to interrupt them and reset their underlying stream, as browser WebTransport does.
@@ -378,8 +391,9 @@ try {
 - The `ts/` root package, `@mux/relay`, owns the Relay product API and authentication convention.
 - `packages/moq-core` is an independently buildable, Apache-2.0 generic protocol package. It uses
   standard streams, has no runtime dependencies, and imports no player, UI, or media engine.
-- `relay.tracks` exposes the generic `MoqTrackSource` contract for future player integrations. It
-  offers track requests and closure observation, with no operation to close the shared connection.
+- `subscriber.trackSource` exposes the generic `MoqTrackSource` contract for future player
+  integrations: track requests in protocol terms (with the core's `onOk`/`onDone` handler names) and
+  closure observation, with no track listing and no operation to close the shared connection.
 - `tests/spec-protocol.test.ts` and `tests/spec-vectors.test.ts` check the core against the shared
   `../spec`, which is how this SDK stays in lockstep with the other languages.
 

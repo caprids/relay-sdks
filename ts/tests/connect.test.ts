@@ -1,22 +1,24 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   encodeGoaway,
+  encodePublishDone,
   encodeRequestError,
   encodeSetup,
   encodeSubscribeOk,
+  PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
 } from '../packages/moq-core/src/protocol/control-messages.js';
 import {
   type ConnectRelayOptions,
-  connectRelay,
+  connectRelaySubscriber,
   type MoqtObject,
-  type RelayConnection,
   RelayError,
+  type RelaySubscriber,
   type RelayTransportFactory,
 } from '../src/index.js';
 import { createFakeTransport, encodeSubgroup } from './helpers/relay.js';
 
-const connections: RelayConnection[] = [];
+const connections: RelaySubscriber[] = [];
 const endpoint = 'https://relay.example.com/moq';
 
 afterEach(() => {
@@ -28,7 +30,7 @@ afterEach(() => {
 async function connectFake(options: Partial<ConnectRelayOptions> = {}) {
   const fake = createFakeTransport();
   const createTransport = vi.fn<RelayTransportFactory>(() => ({ transport: fake.transport, ready: Promise.resolve() }));
-  const connecting = connectRelay({ url: endpoint, createTransport, ...options });
+  const connecting = connectRelaySubscriber({ url: endpoint, createTransport, ...options });
 
   fake.sendServerSetup();
   const connection = await connecting;
@@ -48,7 +50,7 @@ function deferred<T>() {
   return { promise, resolve, reject };
 }
 
-describe('connectRelay', () => {
+describe('connectRelaySubscriber', () => {
   it.each([new Error('owner stopped'), 'stop', null])('preserves cancellation identity: %s', async (reason) => {
     const owner = new AbortController();
     const { connection } = await connectFake({ signal: owner.signal });
@@ -66,7 +68,7 @@ describe('connectRelay', () => {
   it('preserves token-provider exceptions', async () => {
     const cause = new TypeError('token provider failed');
     await expect(
-      connectRelay({
+      connectRelaySubscriber({
         url: endpoint,
         getToken: () => {
           throw cause;
@@ -78,7 +80,7 @@ describe('connectRelay', () => {
   it('shares a wrapped transport failure between closure and rejected operations', async () => {
     const fake = createFakeTransport();
     const failure = deferred<never>();
-    const connecting = connectRelay({
+    const connecting = connectRelaySubscriber({
       url: endpoint,
       createTransport: () => ({ transport: { ...fake.transport, closed: failure.promise }, ready: Promise.resolve() }),
     });
@@ -105,7 +107,7 @@ describe('connectRelay', () => {
       const fake = await connectFake();
       const invalid = namespace as unknown as string[];
       expect(() => fake.connection.subscribe({ namespace: invalid, track: 'events' })).toThrow(TypeError);
-      expect(() => fake.connection.tracks.subscribe({ trackNamespace: invalid, trackName: 'events' })).toThrow(
+      expect(() => fake.connection.trackSource.subscribe({ trackNamespace: invalid, trackName: 'events' })).toThrow(
         TypeError,
       );
       fake.connection.subscribe({ namespace: ['live', 'room/42'], track: 'events' });
@@ -121,7 +123,7 @@ describe('connectRelay', () => {
       /at most 32/,
     );
     expect(() =>
-      fake.connection.tracks.subscribe({ trackNamespace: [...namespace, 'extra'], trackName: 'events' }),
+      fake.connection.trackSource.subscribe({ trackNamespace: [...namespace, 'extra'], trackName: 'events' }),
     ).toThrow(/at most 32/);
     fake.connection.subscribe({ namespace, track: 'events' });
     const request = await fake.nextRequestStream();
@@ -156,7 +158,7 @@ describe('connectRelay', () => {
   it.each([false, true])('settles GOAWAY with a pending callback that throws: %s', async (throws) => {
     const fake = createFakeTransport();
     const control = fake.openControlledDataStream();
-    const connecting = connectRelay({
+    const connecting = connectRelaySubscriber({
       url: endpoint,
       createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
     });
@@ -168,8 +170,8 @@ describe('connectRelay', () => {
     });
     const acceptedError = vi.fn();
     const cancelledError = vi.fn();
-    const onOk = vi.fn();
-    connection.subscribe({ namespace: ['live'], track: 'pending' }, { onError: pendingError, onOk });
+    const onSubscribed = vi.fn();
+    connection.subscribe({ namespace: ['live'], track: 'pending' }, { onError: pendingError, onSubscribed });
     await (await fake.nextRequestStream()).firstMessage;
     connection.subscribe({ namespace: ['live'], track: 'accepted' }, { onError: acceptedError });
     const accepted = await fake.nextRequestStream();
@@ -187,7 +189,7 @@ describe('connectRelay', () => {
     connection.close();
     await Promise.resolve();
     expect(pendingError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: (error as Error).message }));
-    expect(onOk).not.toHaveBeenCalled();
+    expect(onSubscribed).not.toHaveBeenCalled();
     expect(acceptedError).not.toHaveBeenCalled();
     expect(cancelledError).not.toHaveBeenCalled();
   });
@@ -223,7 +225,7 @@ describe('connectRelay', () => {
     await firstRequest.send(encodeSubscribeOk(11));
 
     const onObject = vi.fn();
-    const second = fake.connection.tracks.subscribe({ trackNamespace: ['room'], trackName: 'two' }, { onObject });
+    const second = fake.connection.trackSource.subscribe({ trackNamespace: ['room'], trackName: 'two' }, { onObject });
     const secondRequest = await fake.nextRequestStream();
 
     await secondRequest.firstMessage;
@@ -238,15 +240,41 @@ describe('connectRelay', () => {
     expect(fake.createTransport).toHaveBeenCalledOnce();
   });
 
+  it('maps product handler names onto the core and keeps protocol names on trackSource', async () => {
+    const fake = await connectFake();
+    const onSubscribed = vi.fn();
+    const onPublisherDone = vi.fn();
+    fake.connection.subscribe({ namespace: ['live'], track: 'events' }, { onSubscribed, onPublisherDone });
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeSubscribeOk(11));
+    await request.send(encodePublishDone(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, 'track ended'));
+    await vi.waitFor(() => expect(onPublisherDone).toHaveBeenCalledOnce());
+    expect(onSubscribed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ trackAlias: 11 }));
+    expect(onPublisherDone).toHaveBeenCalledWith(
+      expect.objectContaining({ statusCode: PUBLISH_DONE_STATUS.TRACK_ENDED, reason: 'track ended' }),
+    );
+
+    const onOk = vi.fn();
+    const onDone = vi.fn();
+    fake.connection.trackSource.subscribe({ trackNamespace: ['live'], trackName: 'raw' }, { onOk, onDone });
+    const second = await fake.nextRequestStream();
+    await second.firstMessage;
+    await second.send(encodeSubscribeOk(12));
+    await second.send(encodePublishDone(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, 'track ended'));
+    await vi.waitFor(() => expect(onDone).toHaveBeenCalledOnce());
+    expect(onOk).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ trackAlias: 12 }));
+  });
+
   it('provides a borrowed generic track interface without connection shutdown', async () => {
     const { connection } = await connectFake();
 
-    expect(connection.tracks).not.toHaveProperty('close');
-    expect(connection.tracks).not.toHaveProperty('destroy');
-    expect(connection.tracks.closed).toBe(connection.closed);
+    expect(connection.trackSource).not.toHaveProperty('close');
+    expect(connection.trackSource).not.toHaveProperty('destroy');
+    expect(connection.trackSource.closed).toBe(connection.closed);
     connection.close();
     await expect(connection.closed).resolves.toEqual({});
-    expect(() => connection.tracks.subscribe({ trackNamespace: ['room'], trackName: 'events' })).toThrow(/closed/);
+    expect(() => connection.trackSource.subscribe({ trackNamespace: ['room'], trackName: 'events' })).toThrow(/closed/);
   });
 
   it('preserves request error codes without closing unrelated consumers', async () => {
@@ -313,7 +341,7 @@ describe('connectRelay', () => {
     const owner = new AbortController();
     const token = deferred<string>();
     const createTransport = vi.fn();
-    const connecting = connectRelay({
+    const connecting = connectRelaySubscriber({
       url: endpoint,
       signal: owner.signal,
       getToken: () => token.promise,
@@ -333,7 +361,7 @@ describe('connectRelay', () => {
     const fake = createFakeTransport();
     const ready = deferred<void>();
     const close = vi.spyOn(fake.transport, 'close');
-    const connecting = connectRelay({
+    const connecting = connectRelaySubscriber({
       url: endpoint,
       signal: owner.signal,
       createTransport: () => ({ transport: fake.transport, ready: ready.promise }),
@@ -354,7 +382,7 @@ describe('connectRelay', () => {
     const close = vi.spyOn(fake.transport, 'close');
 
     await expect(
-      connectRelay({
+      connectRelaySubscriber({
         url: endpoint,
         signal: owner.signal,
         createTransport: () => {
@@ -370,7 +398,7 @@ describe('connectRelay', () => {
     vi.useFakeTimers();
     const fake = createFakeTransport();
     const close = vi.spyOn(fake.transport, 'close');
-    const connecting = connectRelay({
+    const connecting = connectRelaySubscriber({
       url: endpoint,
       connectTimeoutMs: 20,
       createTransport: () => ({ transport: fake.transport, ready: new Promise(() => {}) }),
@@ -386,7 +414,7 @@ describe('connectRelay', () => {
     vi.useFakeTimers();
     const fake = createFakeTransport();
     const close = vi.spyOn(fake.transport, 'close');
-    const connecting = connectRelay({
+    const connecting = connectRelaySubscriber({
       url: endpoint,
       connectTimeoutMs: 20,
       createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
@@ -404,7 +432,7 @@ describe('connectRelay', () => {
     const close = vi.spyOn(fake.transport, 'close');
 
     await expect(
-      connectRelay({
+      connectRelaySubscriber({
         url: endpoint,
         createTransport: () => ({ transport: fake.transport, ready: Promise.reject(cause) }),
       }),
@@ -418,16 +446,16 @@ describe('connectRelay', () => {
     const createTransport = vi.fn();
 
     owner.abort(new Error('already cancelled'));
-    await expect(connectRelay({ url: endpoint, signal: owner.signal, getToken, createTransport })).rejects.toThrow(
-      'already cancelled',
-    );
+    await expect(
+      connectRelaySubscriber({ url: endpoint, signal: owner.signal, getToken, createTransport }),
+    ).rejects.toThrow('already cancelled');
     expect(getToken).not.toHaveBeenCalled();
     expect(createTransport).not.toHaveBeenCalled();
   });
 
   it('reports missing browser transport support', async () => {
     vi.stubGlobal('WebTransport', undefined);
-    await expect(connectRelay({ url: endpoint })).rejects.toMatchObject({
+    await expect(connectRelaySubscriber({ url: endpoint })).rejects.toMatchObject({
       code: 'TRANSPORT_UNAVAILABLE',
       phase: 'connecting',
     });
@@ -439,7 +467,7 @@ describe('connectRelay', () => {
     async (connectTimeoutMs) => {
       vi.useFakeTimers();
       const createTransport = vi.fn<RelayTransportFactory>();
-      const rejected = connectRelay({ url: endpoint, connectTimeoutMs, createTransport });
+      const rejected = connectRelaySubscriber({ url: endpoint, connectTimeoutMs, createTransport });
 
       await expect(rejected).rejects.toThrow(RangeError);
       await expect(rejected).rejects.toThrow('connectTimeoutMs must be between 0 (exclusive) and 2147483647');
@@ -452,7 +480,7 @@ describe('connectRelay', () => {
     async (requestTimeoutMs) => {
       vi.useFakeTimers();
       const createTransport = vi.fn<RelayTransportFactory>();
-      const rejected = connectRelay({ url: endpoint, requestTimeoutMs, createTransport });
+      const rejected = connectRelaySubscriber({ url: endpoint, requestTimeoutMs, createTransport });
 
       await expect(rejected).rejects.toThrow(RangeError);
       await expect(rejected).rejects.toThrow('requestTimeoutMs must be between 0 (exclusive) and 2147483647');
@@ -464,16 +492,16 @@ describe('connectRelay', () => {
     vi.useFakeTimers();
     const fake = await connectFake({ connectTimeoutMs: 2_147_483_647, requestTimeoutMs: 2_147_483_647 });
     const onError = vi.fn();
-    const onOk = vi.fn();
+    const onSubscribed = vi.fn();
 
-    fake.connection.subscribe({ namespace: ['scores'], track: 'current' }, { onOk, onError });
+    fake.connection.subscribe({ namespace: ['scores'], track: 'current' }, { onSubscribed, onError });
     const request = await fake.nextRequestStream();
 
     await request.firstMessage;
     await vi.advanceTimersByTimeAsync(1_000);
     expect(onError).not.toHaveBeenCalled();
     await request.send(encodeSubscribeOk(11));
-    await vi.waitFor(() => expect(onOk).toHaveBeenCalled());
+    await vi.waitFor(() => expect(onSubscribed).toHaveBeenCalled());
     expect(onError).not.toHaveBeenCalled();
   });
 });

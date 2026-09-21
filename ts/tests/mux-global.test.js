@@ -1,9 +1,9 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { runDemo } from '../examples/mux-global/demo.js';
-import { connectRelay, connectRelayPublisher } from '../src/index.js';
+import { connectRelayPublisher, connectRelaySubscriber } from '../src/index.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
-const connectors = vi.hoisted(() => ({ connectRelay: vi.fn(), connectRelayPublisher: vi.fn() }));
+const connectors = vi.hoisted(() => ({ connectRelaySubscriber: vi.fn(), connectRelayPublisher: vi.fn() }));
 vi.mock('@mux/relay', () => connectors);
 
 const config = {
@@ -26,8 +26,8 @@ beforeEach(() => {
     connections.push(publisher);
     return publisher;
   });
-  connectors.connectRelay.mockImplementation(async (options) => {
-    const subscriber = await connectRelay({ ...options, createTransport: hub.connectSubscriber });
+  connectors.connectRelaySubscriber.mockImplementation(async (options) => {
+    const subscriber = await connectRelaySubscriber({ ...options, createTransport: hub.connectSubscriber });
     connections.push(subscriber);
     return subscriber;
   });
@@ -56,7 +56,7 @@ it('bounds waiting for demand without attempting a write', async () => {
   connectors.connectRelayPublisher.mockImplementation(async (options) => {
     const publisher = await connectRelayPublisher({ ...options, createTransport: hub.connectPublisher });
     connections.push(publisher);
-    vi.spyOn(publisher, 'publish').mockReturnValue({ bound: false, closed: false, write });
+    vi.spyOn(publisher, 'registerTrack').mockReturnValue({ hasDemand: false, closed: false, write });
     return publisher;
   });
   await expect(runDemo({ ...config, mode: 'publish', timeoutMs: 50 }, vi.fn())).rejects.toThrow('Run exceeded');
@@ -70,8 +70,8 @@ it('does not replay a write that times out after partial progress', async () => 
   connectors.connectRelayPublisher.mockImplementation(async (options) => {
     const publisher = await connectRelayPublisher({ ...options, createTransport: hub.connectPublisher });
     connections.push(publisher);
-    const publish = publisher.publish.bind(publisher);
-    vi.spyOn(publisher, 'publish').mockImplementation((options) => {
+    const publish = publisher.registerTrack.bind(publisher);
+    vi.spyOn(publisher, 'registerTrack').mockImplementation((options) => {
       const writer = publish(options);
       const write = writer.write.bind(writer);
       vi.spyOn(writer, 'write').mockImplementation(async (bytes) => {
@@ -89,7 +89,7 @@ it('does not replay a write that times out after partial progress', async () => 
 });
 
 it('closes the publisher when subscriber connection setup fails', async () => {
-  connectors.connectRelay.mockRejectedValue(new Error('handshake failed'));
+  connectors.connectRelaySubscriber.mockRejectedValue(new Error('handshake failed'));
   await expect(runDemo(config, vi.fn())).rejects.toThrow('subscriber failed to connect');
   expect(connections).toHaveLength(1);
   await expectClosed();
@@ -108,8 +108,8 @@ it('allows subscriber-first startup with a matching publisher', async () => {
 
 it('retries a fresh-namespace 404 with backoff before receiving an object', async () => {
   let subscribe;
-  connectors.connectRelay.mockImplementation(async (options) => {
-    const subscriber = await connectRelay({ ...options, createTransport: hub.connectSubscriber });
+  connectors.connectRelaySubscriber.mockImplementation(async (options) => {
+    const subscriber = await connectRelaySubscriber({ ...options, createTransport: hub.connectSubscriber });
     connections.push(subscriber);
     const original = subscriber.subscribe.bind(subscriber);
     subscribe = vi
@@ -133,8 +133,8 @@ it('fails without writing when the track closes while waiting for demand', async
   connectors.connectRelayPublisher.mockImplementation(async (options) => {
     const publisher = await connectRelayPublisher({ ...options, createTransport: hub.connectPublisher });
     connections.push(publisher);
-    const publish = publisher.publish.bind(publisher);
-    vi.spyOn(publisher, 'publish').mockImplementation((options) => {
+    const publish = publisher.registerTrack.bind(publisher);
+    vi.spyOn(publisher, 'registerTrack').mockImplementation((options) => {
       const writer = publish(options);
       vi.spyOn(writer, 'write').mockImplementation(write);
       queueMicrotask(() => writer.close());

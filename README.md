@@ -42,6 +42,8 @@ Alignment comes from `spec/`, not from shared version numbers:
 - `spec/behavior.md` states the semantics an SDK must exhibit: connection deadlines and
   cancellation, what subscribing does and does not promise, the announce-and-serve publishing
   flow, package boundaries, and the assertion list for the live smoke test.
+- `spec/vocabulary.md` fixes the public names both SDKs use for each concept, in each language's
+  casing, and records why each was chosen.
 - `spec/vectors/` holds encoding vectors that every protocol layer's tests load.
 
 ## Versioning and releases

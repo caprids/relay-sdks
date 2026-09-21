@@ -18,6 +18,11 @@ export type RelayTransportFactory = (
   protocols: string[],
 ) => { transport: MoqtTransport; ready: Promise<void> };
 
+/**
+ * Connection options shared by connectRelaySubscriber and connectRelayPublisher: endpoint,
+ * token, lifetime signal, deadlines, and transport injection. Issue #72 separates the
+ * subscriber-only requestTimeoutMs from this shared shape.
+ */
 export interface ConnectRelayOptions {
   /** Relay's HTTPS WebTransport endpoint, including any endpoint path. */
   url: string;
@@ -26,7 +31,7 @@ export interface ConnectRelayOptions {
    * An explicit jwt in the URL wins, and the provider is not called in that case.
    */
   getToken?: () => string | undefined | Promise<string | undefined>;
-  /** Aborting closes the connection, including after connectRelay has resolved. */
+  /** Aborting closes the connection, including after the connect call has resolved. */
   signal?: AbortSignal;
   /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
   connectTimeoutMs?: number;

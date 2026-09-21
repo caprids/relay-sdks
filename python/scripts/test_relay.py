@@ -40,12 +40,12 @@ from mux_relay import (
     MessageParameters,
     MoqtObject,
     NextObjectFilter,
-    RelayConnection,
     RelayPublisher,
+    RelaySubscriber,
+    RelaySubscriptionHandlers,
     RelayTimeoutError,
-    SubscriptionHandlers,
-    connect_relay,
     connect_relay_publisher,
+    connect_relay_subscriber,
 )
 
 RUN_DEADLINE = 45.0
@@ -92,8 +92,8 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
     expected_events = [bytes([0, 255, 128, 1]), b"hello from Relay SDK", b""]
     closing = False
     publisher: RelayPublisher | None = None
-    subscriber: RelayConnection | None = None
-    late_subscriber: RelayConnection | None = None
+    subscriber: RelaySubscriber | None = None
+    late_subscriber: RelaySubscriber | None = None
     late_largest_object = None
 
     def observe_closed(label: str, closed: asyncio.Future[Closed]) -> None:
@@ -130,9 +130,9 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         )
         observe_closed("publisher", publisher.closed)
         report({"phase": "publisher connected", "namespace": namespace})
-        events = publisher.publish("events", write_timeout=20)
-        status = publisher.publish("status", write_timeout=20)
-        subscriber = await connect_relay(
+        events = publisher.register_track("events", write_timeout=20)
+        status = publisher.register_track("status", write_timeout=20)
+        subscriber = await connect_relay_subscriber(
             endpoint, get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
         )
         observe_closed("subscriber", subscriber.closed)
@@ -147,8 +147,8 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
             subscriber.subscribe(
                 namespace,
                 track,
-                SubscriptionHandlers(
-                    on_ok=lambda ok, track=track: report({"phase": "subscribed", "track": track}),
+                RelaySubscriptionHandlers(
+                    on_subscribed=lambda ok, track=track: report({"phase": "subscribed", "track": track}),
                     on_object=on_object,
                     on_error=lambda error, track=track: errors.append(f"{track}: {error.error_code} {error.reason}"),
                     on_subgroup_reset=lambda reset, track=track: errors.append(f"{track} reset: {reset.error}"),
@@ -165,7 +165,7 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
             {"phase": "received initial payloads", "events": len(received["events"]), "status": len(received["status"])}
         )
         # Make the relay send LARGEST_OBJECT by joining after content has arrived.
-        late_subscriber = await connect_relay(
+        late_subscriber = await connect_relay_subscriber(
             endpoint, get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
         )
         observe_closed("late subscriber", late_subscriber.closed)
@@ -183,8 +183,8 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         late_subscriber.subscribe(
             namespace,
             "status",
-            SubscriptionHandlers(
-                on_ok=on_late_ok,
+            RelaySubscriptionHandlers(
+                on_subscribed=on_late_ok,
                 on_object=on_late_object,
                 on_error=lambda error: errors.append(f"late status: {error.error_code} {error.reason}"),
             ),

@@ -226,7 +226,7 @@ class FakeGroup:
 class FakeTrack:
     """A track writer with injected operation failures and optional terminal closure.
 
-    `bindings()` mirrors RelayTrackWriter: current demand first, and no values after closure.
+    `demand_changes()` mirrors RelayTrackWriter: current demand first, and no values after closure.
     A relay re-bind is now transient; terminal injections model an explicitly closed track.
     """
 
@@ -240,7 +240,7 @@ class FakeTrack:
         group_fail_on: int | None = None,
         group_error: RelayError | None = None,
     ) -> None:
-        self.bound = bound
+        self.has_demand = bound
         self.ended = False
         self.writes = 0
         self.groups = 0
@@ -254,7 +254,7 @@ class FakeTrack:
         if self._fail_on is not None and self.writes + self.groups == self._fail_on:
             assert self._error is not None
             self._fail_on = None
-            self.bound = False
+            self.has_demand = False
             self.ended = self._retires
             raise self._error
 
@@ -268,18 +268,18 @@ class FakeTrack:
         self.groups += 1
         return group
 
-    async def _bindings(self) -> AsyncIterator[bool]:
+    async def _demand_changes(self) -> AsyncIterator[bool]:
         if self.ended:
             return
 
-        yield self.bound
+        yield self.has_demand
 
-    def bindings(self) -> AsyncIterator[bool]:
-        return self._bindings()
+    def demand_changes(self) -> AsyncIterator[bool]:
+        return self._demand_changes()
 
 
 class TestTrackHasEnded:
-    async def test_reads_the_end_of_track_out_of_the_bindings_iterator(self) -> None:
+    async def test_reads_the_end_of_track_out_of_the_demand_changes_iterator(self) -> None:
         assert await track_has_ended(cast(Any, FakeTrack(bound=True))) is False
         assert await track_has_ended(cast(Any, FakeTrack(bound=False))) is False
 
@@ -290,9 +290,9 @@ class TestTrackHasEnded:
 
     async def test_prefers_the_closed_property_that_31_adds(self) -> None:
         # #31 gives RelayTrackWriter a `closed` property; the example uses it as soon as it exists
-        # and falls back to `bindings()` against today's SDK.
-        alive = SimpleNamespace(closed=False, bindings=lambda: pytest.fail("bindings() was consulted"))
-        gone = SimpleNamespace(closed=True, bindings=lambda: pytest.fail("bindings() was consulted"))
+        # and falls back to `demand_changes()` against today's SDK.
+        alive = SimpleNamespace(closed=False, demand_changes=lambda: pytest.fail("demand_changes() was consulted"))
+        gone = SimpleNamespace(closed=True, demand_changes=lambda: pytest.fail("demand_changes() was consulted"))
 
         assert await track_has_ended(cast(Any, alive)) is False
         assert await track_has_ended(cast(Any, gone)) is True
@@ -376,13 +376,13 @@ class TestPublishMediaTrackEnd:
         assert summarize(stats)["endedTracks"] is None
 
     async def test_a_vanished_subscription_only_skips_the_frame(self) -> None:
-        # `bound` was True when the write started but demand disappeared before it bound, so the
+        # `has_demand` was True when the write started but demand disappeared before it bound, so the
         # writer is still open; the example must confirm that instead of ending the run.
         vanished = RelayError("Relay subscription ended before the write started")
         audio = FakeTrack(fail_on=2, error=vanished, retires=False)
         stats, ended = await drive(audio_samples(3), video=FakeTrack(bound=False), audio=audio)
 
-        # The third frame then finds `bound` False, the way it does while nobody is subscribed.
+        # The third frame then finds `has_demand` False, the way it does while nobody is subscribed.
         assert (stats.audio_objects, stats.skipped_audio, stats.dropped_audio) == (2, 1, 0)
         assert ended == []
 
@@ -447,7 +447,7 @@ class CancellingTrack:
     """A video writer that fails everything in flight with the reason the lifetime was cancelled with."""
 
     def __init__(self, lifetime: CancellationToken) -> None:
-        self.bound = True
+        self.has_demand = True
         self.ended = False
         self.closes = 0
         self._lifetime = lifetime
@@ -654,10 +654,10 @@ class TestServeCatalog:
         delivered: list[bytes] = []
 
         class FakeCatalog:
-            bound = True
+            has_demand = True
             closed = False
 
-            async def bindings(self) -> AsyncIterator[bool]:
+            async def demand_changes(self) -> AsyncIterator[bool]:
                 yield True  # No second subscription event is needed for recovery.
 
             async def write(self, payload: bytes) -> None:
@@ -690,11 +690,11 @@ class TestServeCatalog:
         failed = asyncio.Event()
 
         class FakeCatalog:
-            bound = True
+            has_demand = True
             closed = False
             attempts = 0
 
-            async def bindings(self) -> AsyncIterator[bool]:
+            async def demand_changes(self) -> AsyncIterator[bool]:
                 yield True
 
             async def write(self, payload: bytes) -> None:
@@ -718,7 +718,7 @@ class TestServeCatalog:
             with pytest.raises(asyncio.CancelledError):
                 await serving
         else:
-            catalog.bound = False
+            catalog.has_demand = False
             await asyncio.wait_for(serving, 1)
         assert catalog.attempts == 1
 
@@ -729,12 +729,12 @@ class TestServeCatalog:
             def __init__(self) -> None:
                 self.writes = 0
 
-            async def _bindings(self) -> AsyncIterator[bool]:
+            async def _demand_changes(self) -> AsyncIterator[bool]:
                 yield True
                 yield True
 
-            def bindings(self) -> AsyncIterator[bool]:
-                return self._bindings()
+            def demand_changes(self) -> AsyncIterator[bool]:
+                return self._demand_changes()
 
             async def write(self, payload: bytes, *, properties: object = None) -> None:
                 self.writes += 1

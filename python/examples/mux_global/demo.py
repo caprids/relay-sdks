@@ -2,7 +2,7 @@
 """Publish JSON ticks to a Relay namespace and subscribe to them again.
 
 The SDK usage lives in :func:`run_demo`. It connects a publisher with ``connect_relay_publisher``,
-registers a track, connects a subscriber with ``connect_relay`` to the same track, publishes JSON
+registers a track, connects a subscriber with ``connect_relay_subscriber`` to the same track, publishes JSON
 objects one second apart, and prints each object as it comes back through the relay. It decodes the
 JSON itself; the SDK only delivers bytes. Unlike the TypeScript example, no browser is involved: the
 aioquic WebTransport transport runs natively.
@@ -31,13 +31,13 @@ from mux_relay import (
     DEFAULT_ENDPOINT,
     Closed,
     MoqtObject,
-    RelayConnection,
+    RelaySubscriber,
+    RelaySubscriptionHandlers,
     RelayTrackWriter,
     RequestError,
     SubscribeOk,
-    SubscriptionHandlers,
-    connect_relay,
     connect_relay_publisher,
+    connect_relay_subscriber,
 )
 
 Log = Callable[[dict[str, Any]], None]
@@ -109,11 +109,11 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                     await connections.enter_async_context(publisher)
                     watch("publisher", publisher.closed)
                     log({"event": "publisher connected", "url": config.url, "namespace": "/".join(config.namespace)})
-                    writer = publisher.publish(config.track, write_timeout=15)
+                    writer = publisher.register_track(config.track, write_timeout=15)
 
                 if config.mode != "publish":
                     try:
-                        subscriber = await connect_relay(config.url, get_token=lambda: config.token)
+                        subscriber = await connect_relay_subscriber(config.url, get_token=lambda: config.token)
                     except Exception as error:
                         raise RuntimeError(
                             f"subscriber failed to connect (check the token and endpoint): {describe(error)}"
@@ -145,8 +145,8 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                             subscriber,
                             config.namespace,
                             config.track,
-                            SubscriptionHandlers(
-                                on_ok=lambda ok: log(
+                            RelaySubscriptionHandlers(
+                                on_subscribed=lambda ok: log(
                                     {
                                         "event": "subscribed",
                                         "namespace": "/".join(config.namespace),
@@ -161,7 +161,7 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                                 on_subgroup_reset=lambda reset: problems.append(
                                     f"group {reset.group_id} reset: {describe(reset.error)}"
                                 ),
-                                on_done=lambda done: log(
+                                on_publisher_done=lambda done: log(
                                     {"event": "publisher done", "status": done.status_code, "reason": done.reason}
                                 ),
                             ),
@@ -207,9 +207,9 @@ async def write_when_demanded(
     writer: RelayTrackWriter, payload: bytes, fail_if_broken: Callable[[], None], log: Log
 ) -> None:
     """Wait without sending; once write() starts, failure may mean partial delivery. Never replay it."""
-    if not writer.bound:
+    if not writer.has_demand:
         log({"event": "waiting", "detail": "no relay demand yet; waiting before writing"})
-    while not writer.bound:
+    while not writer.has_demand:
         fail_if_broken()
         if writer.closed:
             raise RuntimeError("Published track closed while waiting for demand")
@@ -220,10 +220,10 @@ async def write_when_demanded(
 
 
 async def subscribe_with_retry(
-    subscriber: RelayConnection,
+    subscriber: RelaySubscriber,
     namespace: list[str],
     track: str,
-    handlers: SubscriptionHandlers,
+    handlers: RelaySubscriptionHandlers,
     log: Log,
 ) -> None:
     """A subscribe issued before the relay has processed the publisher's announce is rejected with 404
@@ -236,9 +236,9 @@ async def subscribe_with_retry(
     while True:
         outcome: asyncio.Future[RequestError | None] = asyncio.get_running_loop().create_future()
 
-        def on_ok(ok: SubscribeOk, outcome: asyncio.Future[RequestError | None] = outcome) -> None:
-            if handlers.on_ok is not None:
-                handlers.on_ok(ok)
+        def on_subscribed(ok: SubscribeOk, outcome: asyncio.Future[RequestError | None] = outcome) -> None:
+            if handlers.on_subscribed is not None:
+                handlers.on_subscribed(ok)
 
             if not outcome.done():
                 outcome.set_result(None)
@@ -247,7 +247,7 @@ async def subscribe_with_retry(
             if not outcome.done():
                 outcome.set_result(error)
 
-        subscriber.subscribe(namespace, track, replace(handlers, on_ok=on_ok, on_error=on_error))
+        subscriber.subscribe(namespace, track, replace(handlers, on_subscribed=on_subscribed, on_error=on_error))
         rejection = await outcome
 
         if rejection is None:

@@ -9,7 +9,7 @@ import pytest
 from mux_global import demo
 from relay_helpers.relay_hub import create_relay_hub
 
-from mux_relay import RelayTimeoutError, RelayTrackWriter, connect_relay, connect_relay_publisher
+from mux_relay import RelayTimeoutError, RelayTrackWriter, connect_relay_publisher, connect_relay_subscriber
 
 CONFIG = demo.Config(
     url="https://relay.example.com",
@@ -34,12 +34,12 @@ async def connected(monkeypatch: pytest.MonkeyPatch):
         return result
 
     async def subscriber(url: str, **kwargs: Any):
-        result = await connect_relay(url, **kwargs, create_transport=hub.connect_subscriber)
+        result = await connect_relay_subscriber(url, **kwargs, create_transport=hub.connect_subscriber)
         connections.append(result)
         return result
 
     monkeypatch.setattr(demo, "connect_relay_publisher", publisher)
-    monkeypatch.setattr(demo, "connect_relay", subscriber)
+    monkeypatch.setattr(demo, "connect_relay_subscriber", subscriber)
     try:
         yield connections
     finally:
@@ -85,7 +85,7 @@ async def test_partial_delivery_timeout_is_not_replayed(connected, monkeypatch: 
 
 
 async def test_second_connection_failure_closes_publisher(connected, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(demo, "connect_relay", AsyncMock(side_effect=RuntimeError("handshake failed")))
+    monkeypatch.setattr(demo, "connect_relay_subscriber", AsyncMock(side_effect=RuntimeError("handshake failed")))
     with pytest.raises(RuntimeError, match="subscriber failed to connect"):
         await demo.run_demo(CONFIG, lambda _: None)
     assert len(connected) == 1
@@ -133,10 +133,10 @@ async def test_demo_over_native_aioquic(monkeypatch: pytest.MonkeyPatch):
         return await connect_relay_publisher(server.url_for("/publish"), **kwargs, create_transport=transport)
 
     async def subscriber(_url, **kwargs):
-        return await connect_relay(server.url_for("/subscribe"), **kwargs, create_transport=transport)
+        return await connect_relay_subscriber(server.url_for("/subscribe"), **kwargs, create_transport=transport)
 
     monkeypatch.setattr(demo, "connect_relay_publisher", publisher)
-    monkeypatch.setattr(demo, "connect_relay", subscriber)
+    monkeypatch.setattr(demo, "connect_relay_subscriber", subscriber)
     try:
         assert await demo.run_demo(CONFIG, lambda _: None) == {"published": 1, "received": 1}
     finally:
@@ -146,9 +146,9 @@ async def test_demo_over_native_aioquic(monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_fresh_namespace_rejection_is_retried(connected, monkeypatch: pytest.MonkeyPatch):
-    from mux_relay import RelayConnection, RequestError
+    from mux_relay import RelaySubscriber, RequestError
 
-    original = RelayConnection.subscribe
+    original = RelaySubscriber.subscribe
     attempts = 0
 
     def subscribe(self, namespace, track, handlers):
@@ -159,7 +159,7 @@ async def test_fresh_namespace_rejection_is_retried(connected, monkeypatch: pyte
             return None
         return original(self, namespace, track, handlers)
 
-    monkeypatch.setattr(RelayConnection, "subscribe", subscribe)
+    monkeypatch.setattr(RelaySubscriber, "subscribe", subscribe)
     entries = []
     assert await demo.run_demo(CONFIG, entries.append) == {"published": 1, "received": 1}
     assert attempts == 2
@@ -170,16 +170,16 @@ async def test_fresh_namespace_rejection_is_retried(connected, monkeypatch: pyte
 async def test_track_closed_while_waiting_for_demand(connected, monkeypatch: pytest.MonkeyPatch):
     from mux_relay import RelayPublisher
 
-    original = RelayPublisher.publish
+    original = RelayPublisher.register_track
     write = AsyncMock()
     monkeypatch.setattr(RelayTrackWriter, "write", write)
 
-    def publish(self, track, **kwargs):
+    def register_track(self, track, **kwargs):
         writer = original(self, track, **kwargs)
         asyncio.get_running_loop().call_soon(writer.close)
         return writer
 
-    monkeypatch.setattr(RelayPublisher, "publish", publish)
+    monkeypatch.setattr(RelayPublisher, "register_track", register_track)
     with pytest.raises(RuntimeError, match="Published track closed while waiting for demand"):
         await demo.run_demo(replace(CONFIG, mode="publish"), lambda _: None)
     write.assert_not_awaited()
