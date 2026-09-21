@@ -1,9 +1,10 @@
-"""Connect to Relay for arbitrary track subscriptions. The caller owns connection shutdown."""
+"""Connect to Relay for subscribing to tracks. The caller owns connection shutdown."""
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from types import TracebackType
 from typing import Self
 
@@ -12,13 +13,20 @@ from moq_core import (
     Closed,
     FetchHandle,
     FetchHandlers,
+    Goaway,
     MessageParameters,
+    MoqtObject,
     MoqTrackSource,
     MoqtSession,
     MoqtSessionCallbacks,
     MoqtSessionConfig,
     MoqtSubscribeOptions,
     MoqtTransport,
+    PublishDone,
+    RequestError,
+    SubgroupEnd,
+    SubgroupReset,
+    SubscribeOk,
     Subscription,
     SubscriptionHandlers,
     TrackStatusHandlers,
@@ -53,11 +61,75 @@ def _validate_namespace(namespace: Sequence[str]) -> None:
         raise ValueError(f"A subscription namespace must contain at most {MAX_NAMESPACE_FIELDS} fields")
 
 
-class _BorrowedTracks:
-    """Generic borrowed track access for integrations.
+@dataclass(slots=True, kw_only=True)
+class RelaySubscriptionHandlers:
+    """Callbacks for one subscription made through :meth:`RelaySubscriber.subscribe`.
 
-    Exposes no connection shutdown operation and has no dependency on Relay resource identifiers.
-    Satisfies :class:`moq_core.MoqTrackSource`.
+    Each is optional and runs synchronously as the protocol layer delivers the event; the SDK adds
+    no queue. The names say what happened between this connection and the relay. The borrowed
+    :attr:`RelaySubscriber.track_source` keeps the core's protocol names (``on_ok``, ``on_done``).
+    """
+
+    on_subscribed: Callable[[SubscribeOk], None] | None = None
+    """The relay accepted the subscription (SUBSCRIBE_OK) and will forward objects.
+
+    ``info`` carries the track alias, the relay's parameters (``largest_object`` when the track
+    already has content), and the track properties as the relay sends them, which can differ from
+    what the publisher declared.
+    """
+    on_error: Callable[[RequestError], None] | None = None
+    """The relay rejected the subscription, or it failed before acceptance.
+
+    Request timeout, connection shutdown, and GOAWAY all arrive here. Not called after acceptance;
+    later failures surface as subgroup resets and connection closure.
+    """
+    on_object: Callable[[MoqtObject], None] | None = None
+    """One object arrived. Payloads are uninterpreted bytes. Objects can arrive after ``on_publisher_done``."""
+    on_subgroup_end: Callable[[SubgroupEnd], None] | None = None
+    """A subgroup stream finished cleanly (FIN)."""
+    on_subgroup_reset: Callable[[SubgroupReset], None] | None = None
+    """A subgroup stream was reset; objects from it may be missing."""
+    on_publisher_done: Callable[[PublishDone], None] | None = None
+    """The publisher finished with the track (PUBLISH_DONE).
+
+    A control notification, not the end of the subscription: objects still in transit can arrive
+    after it, and the request stays open until ``cancel()`` or connection shutdown. The SDK does not
+    resubscribe; doing so can replay cached objects and another done notification while the
+    publisher is absent.
+    """
+    on_update_ok: Callable[[], None] | None = None
+    """The relay acknowledged an ``update()`` on this subscription (REQUEST_OK)."""
+    on_state_notify: Callable[[MessageParameters], None] | None = None
+    """The publisher changed the subscription's state on its own (PUBLISH_STATE_NOTIFY).
+
+    The parameters carry only what changed. Informational.
+    """
+    on_goaway: Callable[[Goaway], None] | None = None
+    """GOAWAY on this request stream: the relay wants this request re-issued, possibly elsewhere.
+
+    A GOAWAY on the connection itself ends the connection instead; observe ``closed`` for that.
+    """
+
+    def _to_core(self) -> SubscriptionHandlers:
+        """Snapshot callbacks without hiding async functions or their return values from the core."""
+        return SubscriptionHandlers(
+            on_ok=self.on_subscribed,
+            on_error=self.on_error,
+            on_object=self.on_object,
+            on_subgroup_end=self.on_subgroup_end,
+            on_subgroup_reset=self.on_subgroup_reset,
+            on_done=self.on_publisher_done,
+            on_update_ok=self.on_update_ok,
+            on_state_notify=self.on_state_notify,
+            on_goaway=self.on_goaway,
+        )
+
+
+class _BorrowedTrackSource:
+    """This connection seen through the generic :class:`moq_core.MoqTrackSource` contract.
+
+    Track requests in protocol terms plus closure observation. No connection shutdown operation and
+    no dependency on Relay resource identifiers.
     """
 
     __slots__ = ("_closed", "_lifetime")
@@ -84,14 +156,17 @@ class _BorrowedTracks:
         self._lifetime.session.track_status(options, handlers)
 
 
-class RelayConnection:
-    """A subscriber connection. Create one with :func:`connect_relay`."""
+class RelaySubscriber:
+    """A connection that can only subscribe. Create one with :func:`connect_relay_subscriber`.
 
-    __slots__ = ("_lifetime", "_tracks")
+    Publishing uses a separate connection and token; see :func:`connect_relay_publisher`.
+    """
+
+    __slots__ = ("_lifetime", "_track_source")
 
     def __init__(self, lifetime: RelaySessionLifetime[MoqtSession]) -> None:
         self._lifetime = lifetime
-        self._tracks = _BorrowedTracks(lifetime)
+        self._track_source = _BorrowedTrackSource(lifetime)
 
     @property
     def closed(self) -> asyncio.Future[Closed]:
@@ -99,26 +174,33 @@ class RelayConnection:
         return self._lifetime.closed
 
     @property
-    def tracks(self) -> MoqTrackSource:
-        """Borrowed generic track access (subscribe, fetch, track status) without connection shutdown."""
-        return self._tracks
+    def track_source(self) -> MoqTrackSource:
+        """This connection seen through the generic ``MoqTrackSource`` contract, for integrations such as players.
+
+        ``subscribe``, ``fetch``, and ``track_status`` in protocol terms, plus ``closed``. It lists no
+        tracks and cannot close the connection; the application that opened the connection owns shutdown.
+        """
+        return self._track_source
 
     def subscribe(
         self,
         namespace: Sequence[str],
         track: str,
-        handlers: SubscriptionHandlers | None = None,
+        handlers: RelaySubscriptionHandlers | None = None,
         *,
         parameters: MessageParameters | None = None,
     ) -> Subscription:
-        """Subscribe to any track payload format without discovering or loading a catalog.
+        """Ask the relay for a track's objects, in any payload format, without discovering or loading a catalog.
 
-        ``namespace`` fields are sent verbatim, without splitting or joining on slashes.
-        ``parameters`` carries protocol subscription controls such as the location filter and priority.
+        Returns at once with a cancellable handle; ``handlers.on_subscribed`` or ``handlers.on_error``
+        reports the relay's answer. ``namespace`` fields are sent verbatim, without splitting or
+        joining on slashes. ``parameters`` carries protocol subscription controls such as the
+        location filter and priority.
         """
         _validate_namespace(namespace)
-        return self._tracks.subscribe(
-            MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters), handlers
+        return self._track_source.subscribe(
+            MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters),
+            None if handlers is None else handlers._to_core(),
         )
 
     def subscribe_events(
@@ -137,7 +219,9 @@ class RelayConnection:
         self._lifetime.assert_open()
         _validate_namespace(namespace)
         return SubscriptionEvents(
-            lambda handlers: self.subscribe(namespace, track, handlers, parameters=parameters),
+            lambda handlers: self._track_source.subscribe(
+                MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters), handlers
+            ),
             self.closed,
             capacity=capacity,
             cancellation=cancellation,
@@ -156,7 +240,7 @@ class RelayConnection:
         self.close()
 
 
-async def connect_relay(
+async def connect_relay_subscriber(
     url: str,
     *,
     get_token: TokenProvider | None = None,
@@ -164,12 +248,13 @@ async def connect_relay(
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT,
     create_transport: RelayTransportFactory | None = None,
-) -> RelayConnection:
-    """Connect to Relay for arbitrary track subscriptions.
+) -> RelaySubscriber:
+    """Open a Relay connection for subscribing to tracks.
 
     One deadline (``connect_timeout``) covers token resolution and both handshakes. ``cancellation``
     controls the connection's entire lifetime. An explicit ``jwt`` query parameter on ``url`` takes
-    precedence over ``get_token``, matching the Relay authentication convention.
+    precedence over ``get_token``, matching the Relay authentication convention. Publishing uses a
+    separate connection; see :func:`connect_relay_publisher`.
     """
     options = ConnectRelayOptions(
         url=url,
@@ -191,7 +276,7 @@ async def connect_relay(
         )
 
     lifetime = await open_relay_session(options, create_session)
-    return RelayConnection(lifetime)
+    return RelaySubscriber(lifetime)
 
 
-__all__ = ["RelayConnection", "connect_relay"]
+__all__ = ["RelaySubscriber", "RelaySubscriptionHandlers", "connect_relay_subscriber"]

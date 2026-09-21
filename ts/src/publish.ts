@@ -8,6 +8,7 @@ import {
   type SubgroupWriter,
 } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import { RelayError, type RelayErrorPhase, transportError } from './errors.js';
 import { encodeJSON, encodeText } from './payload.js';
 
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
@@ -21,7 +22,12 @@ export interface PublishProperty {
   value: number | ArrayBufferView;
 }
 
-export interface PublishTrackOptions {
+/**
+ * What {@link RelayPublisher.registerTrack} needs. The namespace is the publisher connection's;
+ * the generic core's type of the same name spells it out as a field one level down.
+ */
+export interface RegisterTrackOptions {
+  /** Track name, unique within this publisher connection, including after its writer closes. */
   track: string;
   /**
    * Track metadata sent to the relay. The SDK adds no default timescale; the relay may
@@ -57,15 +63,31 @@ export interface RelayGroupWriter {
   ): Promise<void>;
 }
 
+/**
+ * One registered track on a publisher connection, from {@link RelayPublisher.registerTrack}.
+ * Registration sends nothing; `write()` and `openGroup()` send, after waiting for relay demand.
+ */
 export interface RelayTrackWriter {
-  readonly bound: boolean;
+  /**
+   * Whether the relay currently has an upstream subscription for this track, so a write would
+   * proceed at once. Demand is the relay's own subscription, shared by every downstream viewer
+   * and kept for a while after the last viewer leaves: it is neither a viewer count nor a
+   * liveness signal. Always false once the track is closed.
+   */
+  readonly hasDemand: boolean;
+  /** True once the application closed the track or the publisher connection ended. */
   readonly closed: boolean;
-  /** Current demand first, then each change/replacement; completes when the track ends. */
-  bindings(): AsyncIterableIterator<boolean>;
+  /**
+   * The current demand state first, then one value per relay subscription change: `true` when the
+   * relay subscribes or replaces its subscription (so `true` can repeat), `false` when its
+   * subscription ends. Ends when the track ends. This is how a catalog re-sends its document on
+   * every relay subscription. Values are per relay subscription, never per downstream viewer.
+   */
+  demandChanges(): AsyncIterableIterator<boolean>;
   /** Hold the track's single write slot until the group closes or aborts. */
   openGroup(options?: { signal?: AbortSignal }): Promise<RelayGroupWriter>;
   /**
-   * Write one independent object/group. Waits for relay demand. Resolves when the
+   * Send one independent object/group. Waits for relay demand (see hasDemand). Resolves when the
    * transport accepts the complete group, not when a downstream viewer acknowledges it.
    * Only one write may be pending; await it before writing again. Any ArrayBufferView is
    * copied as its raw bytes; anything else is a TypeError that leaves the track usable.
@@ -85,9 +107,19 @@ export interface RelayTrackWriter {
   writeJSON(value: unknown, options?: { properties?: readonly PublishProperty[]; signal?: AbortSignal }): Promise<void>;
 }
 
+/**
+ * A connection that can only publish, serving one namespace. Create one with
+ * {@link connectRelayPublisher}. Subscribing uses a separate connection; see `connectRelaySubscriber`.
+ */
 export interface RelayPublisher {
-  /** Register a data track without starting capture or publishing a media catalog. */
-  publish(options: PublishTrackOptions): RelayTrackWriter;
+  /**
+   * Register a track this publisher will serve and return its writer. Nothing is sent: the relay
+   * learns of the track when a subscriber asks for it, and bytes move when the writer's `write()`
+   * or `openGroup()` runs, after waiting for that relay demand. No capture starts and no media
+   * catalog is published. Track names are unique per publisher connection, including after their
+   * writer closes.
+   */
+  registerTrack(options: RegisterTrackOptions): RelayTrackWriter;
   /** Ends when the connection shuts down. Errors are returned as data; this never rejects. */
   readonly closed: Promise<{ error?: unknown }>;
   /** End all tracks, retract the namespace, and wait for transport shutdown. Idempotent. */
@@ -111,9 +143,9 @@ function copyProperties(properties: readonly PublishProperty[] = []): KeyValuePa
 }
 
 /**
- * Open a dedicated Relay publisher connection. Subscribe clients use connectRelay;
- * this initial publishing API does not share their physical transport. A relay must
- * solicit the namespace and subscribe upstream before data can flow.
+ * Open a dedicated Relay publisher connection. Subscribers use connectRelaySubscriber; this
+ * initial publishing API does not share their physical transport. A relay must solicit the
+ * namespace and subscribe upstream before data can flow.
  */
 export async function connectRelayPublisher(options: ConnectRelayPublisherOptions): Promise<RelayPublisher> {
   const namespace = [...options.namespace];
@@ -132,7 +164,9 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         ...callbacks,
         onTrackBinding: ({ trackName, trackAlias }) => tracks.get(trackName)?.bind(trackAlias),
         onAnnounceEnded: ({ error }) =>
-          callbacks.onClosed?.({ error: error ?? new Error('Relay withdrew the namespace') }),
+          callbacks.onClosed?.({
+            error: new RelayError('NAMESPACE_ENDED', 'Relay withdrew the namespace', 'connection', { cause: error }),
+          }),
       },
     }),
   );
@@ -151,12 +185,12 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
 
   return {
     closed,
-    publish({ track, trackProperties, writeTimeoutMs = 10_000 }) {
+    registerTrack({ track, trackProperties, writeTimeoutMs = 10_000 }) {
       lifetime.assertOpen();
-      if (closing) throw new Error('Relay publisher is closed');
+      if (closing) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');
       if (typeof track !== 'string') throw new TypeError('Track name must be a string');
       if (track.length === 0) throw new TypeError('Track name must be non-empty');
-      if (tracks.has(track)) throw new Error('Track name is already registered on this publisher connection');
+      if (tracks.has(track)) throw new TypeError('Track name is already registered on this publisher connection');
       assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
 
       const registered = session.registerTrack({
@@ -173,6 +207,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         writer: SubgroupWriter | undefined;
         cancelled: boolean;
         failure: unknown;
+        phase: RelayErrorPhase;
         demand: Promise<void>;
         interrupted: Promise<never>;
         wake(): void;
@@ -191,15 +226,22 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         notify(undefined);
         watchers.clear();
       };
-      const close = (error: unknown = new Error('Published track is closed')): void => {
+      const close = (
+        error: unknown = new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'writing'),
+      ): void => {
         if (ended) return;
         active?.cancel(error);
         end();
       };
       const assertWritable = () => {
         lifetime.assertOpen();
-        if (ended || closing) throw new Error('Published track is closed');
-        if (active) throw new Error('A write or group is already pending; await it before writing another object');
+        if (ended || closing) throw new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'writing');
+        if (active)
+          throw new RelayError(
+            'WRITE_PENDING',
+            'A write or group is already pending; await it before writing another object',
+            'writing',
+          );
       };
       const copyPayload = (payload: ArrayBufferView) => {
         if (!ArrayBuffer.isView(payload))
@@ -219,9 +261,15 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         });
         // An open group can be aborted between calls, when nobody is awaiting this promise.
         void interrupted.catch(() => {});
-        const abort = () => operation.cancel(signal?.reason ?? new Error('Publish operation aborted'));
+        const abort = () => {
+          const reason = signal?.reason;
+          operation.cancel(
+            reason === undefined ? new RelayError('CLOSED', 'Publish operation aborted', operation.phase) : reason,
+          );
+        };
         const operation: Operation = {
           kind,
+          phase: 'waiting-for-demand',
           alias: undefined,
           writer: undefined,
           cancelled: false,
@@ -256,10 +304,14 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         const timer = setTimeout(
           () =>
             operation.cancel(
-              new Error(
-                operation.alias === undefined && session.namespaceSolicited === false
+              new RelayError(
+                operation.phase === 'waiting-for-demand' && session.namespaceSolicited === false
+                  ? 'NAMESPACE_NOT_SOLICITED'
+                  : 'WRITE_TIMEOUT',
+                operation.phase === 'waiting-for-demand' && session.namespaceSolicited === false
                   ? 'Publisher namespace is not covered by the relay namespace solicitations; check the token and namespace'
                   : 'Publish write timed out waiting for relay demand or transport',
+                operation.phase,
               ),
             ),
           writeTimeoutMs,
@@ -270,8 +322,17 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           check(operation);
           return result;
         } catch (error) {
-          operation.cancel(error);
-          throw error;
+          let failure: unknown;
+          try {
+            // Closure can precede the callback that cancels this track. Preserve its reason
+            // even when the send continuation runs before that callback.
+            check(operation);
+            failure = transportError(error, operation.phase);
+          } catch (interrupted) {
+            failure = interrupted;
+          }
+          operation.cancel(failure);
+          throw failure;
         } finally {
           clearTimeout(timer);
         }
@@ -280,11 +341,17 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         if (alias === undefined) {
           await operation.demand;
           check(operation);
-          if (alias === undefined) throw new Error('Relay subscription ended before the write started');
+          if (alias === undefined)
+            throw new RelayError(
+              'SUBSCRIPTION_CHANGED',
+              'Relay subscription ended before the write started',
+              operation.phase,
+            );
         }
         check(operation);
         operation.alias = alias;
         const groupId = nextGroupId++;
+        operation.phase = 'opening-stream';
         const stream = await session.openUniStream();
         if (operation.cancelled) {
           void stream.abort(operation.failure).catch(() => {});
@@ -302,7 +369,13 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         close,
         bind(nextAlias) {
           if (active?.alias !== undefined && active.alias !== nextAlias) {
-            active.cancel(new Error('Relay subscription changed during a write or group; objects may be incomplete'));
+            active.cancel(
+              new RelayError(
+                'SUBSCRIPTION_CHANGED',
+                'Relay subscription changed during a write or group; objects may be incomplete',
+                active.phase,
+              ),
+            );
           }
           const changed = alias !== nextAlias;
           alias = nextAlias;
@@ -312,13 +385,13 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       });
 
       const trackWriter: RelayTrackWriter = {
-        get bound() {
+        get hasDemand() {
           return alias !== undefined && !ended;
         },
         get closed() {
           return ended;
         },
-        bindings() {
+        demandChanges() {
           const queue: boolean[] = ended ? [] : [alias !== undefined];
           const waiting: ((result: IteratorResult<boolean>) => void)[] = [];
           let done = ended;
@@ -370,8 +443,10 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           try {
             await run(operation, async () => {
               const writer = await openStream(operation);
+              operation.phase = 'writing';
               await writer.writeObject({ objectId: 0, properties, payload: bytes });
               check(operation);
+              operation.phase = 'closing';
               await writer.fin();
             });
           } finally {
@@ -387,8 +462,8 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
           let complete = false;
           const assertGroup = () => {
             check(operation);
-            if (complete) throw new Error('Group is closed');
-            if (pending) throw new Error('A group write or close is already pending');
+            if (complete) throw new RelayError('CLOSED', 'Group is closed', 'writing');
+            if (pending) throw new RelayError('WRITE_PENDING', 'A group write or close is already pending', 'writing');
           };
           const groupWriter: RelayGroupWriter = {
             groupId: writer.groupId,
@@ -413,6 +488,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
                 throw new TypeError('Unknown object status');
               pending = true;
               try {
+                operation.phase = 'writing';
                 await run(operation, () =>
                   writer.writeObject({ objectId: objectCount, properties, payload: bytes, status }),
                 );
@@ -426,6 +502,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
               assertGroup();
               pending = true;
               try {
+                operation.phase = 'closing';
                 await run(operation, () => writer.fin());
                 complete = true;
                 release(operation);
@@ -433,7 +510,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
                 pending = false;
               }
             },
-            abort(reason = new Error('Group was aborted')) {
+            abort(reason = new RelayError('CLOSED', 'Group was aborted', operation.phase)) {
               if (!complete) operation.cancel(reason);
             },
           };

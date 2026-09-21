@@ -45,10 +45,10 @@ from mux_relay import (
     RelayError,
     RelayGroupWriter,
     RelayPublisher,
+    RelaySubscriptionHandlers,
     RelayTrackWriter,
-    SubscriptionHandlers,
-    connect_relay,
     connect_relay_publisher,
+    connect_relay_subscriber,
 )
 
 # Runnable both as `python examples/videojs_stream/stream.py` and as a module: put `examples/` on the
@@ -594,11 +594,11 @@ def failure_ends_track(error: RelayError, *, operation: Literal["write", "group"
 
 
 async def track_has_ended(track: RelayTrackWriter) -> bool:
-    """Ask the writer whether it is retired, instead of reading that out of `bound`.
+    """Ask the writer whether it is retired, instead of reading that out of `has_demand`.
 
-    `bound` cannot answer: False is equally what "nobody is subscribed right now" looks like. #31
+    `has_demand` cannot answer: False is equally what "the relay has no subscription" looks like. #31
     adds a `closed` property that says it outright; until that lands, the same fact is readable from
-    a fresh `bindings()` iterator, which replays the track's current demand state and "stops once
+    a fresh `demand_changes()` iterator, which replays the track's current demand state and "stops once
     the track is closed", so one that stops before yielding anything means the track is gone.
     """
     closed = getattr(track, "closed", None)
@@ -607,7 +607,7 @@ async def track_has_ended(track: RelayTrackWriter) -> bool:
         return closed
 
     # `anext` drops the iterator as soon as it answers, which releases the watcher it registered.
-    return await anext(track.bindings(), None) is None
+    return await anext(track.demand_changes(), None) is None
 
 
 async def write_ended_track(track: RelayTrackWriter, error: RelayError, *, bound: bool) -> bool:
@@ -740,8 +740,8 @@ async def serve_catalog(
     catalog: RelayTrackWriter, document: bytes, stats: Stats, log: Log, on_track_end: TrackEndHandler
 ) -> None:
     """Send current catalog state on each subscription, retrying transient failures while demanded."""
-    async for bound in catalog.bindings():
-        if not bound:
+    async for demanded in catalog.demand_changes():
+        if not demanded:
             continue
 
         while True:
@@ -759,11 +759,11 @@ async def serve_catalog(
                 log("catalog write failed", {"error": describe(error)})
                 # Catalog state must eventually arrive even if the relay keeps its subscription.
                 # Retain only this document and pause between attempts; task cancellation interrupts
-                # the pause during shutdown. Losing demand returns to the binding iterator.
-                if not catalog.bound:
+                # the pause during shutdown. Losing demand returns to the demand iterator.
+                if not catalog.has_demand:
                     break
                 await asyncio.sleep(CATALOG_RETRY_DELAY)
-                if not catalog.bound:
+                if not catalog.has_demand:
                     break
 
 
@@ -834,7 +834,7 @@ async def publish_media(
 
                 # Confirm the writer state on failure: a group reset is retryable, but a closed
                 # track or connection still needs the existing track-end policy.
-                bound = audio.bound
+                bound = audio.has_demand
 
                 if not bound:
                     stats.skipped_audio += 1
@@ -888,7 +888,7 @@ async def publish_media(
                     stale_sample(sample, stats)
                     continue
 
-                if not video_ended and video.bound:
+                if not video_ended and video.has_demand:
                     try:
                         opened = await video.open_group()
                     except RelayError as error:
@@ -1018,7 +1018,7 @@ class Verified:
 async def verify(config: Config, lifetime: CancellationToken, log: Log) -> tuple[Any, Verified]:
     """Subscribe like a player would and record what arrives, so the wire can be checked without a browser."""
     result = Verified(video_groups=set(), problems=[])
-    subscriber = await connect_relay(config.url, get_token=lambda: config.token, cancellation=lifetime)
+    subscriber = await connect_relay_subscriber(config.url, get_token=lambda: config.token, cancellation=lifetime)
     assert result.problems is not None
     assert result.video_groups is not None
     problems = result.problems
@@ -1062,15 +1062,15 @@ async def verify(config: Config, lifetime: CancellationToken, log: Log) -> tuple
         return lambda error: problems.append(f"{track}: subscribe error {error.error_code} {error.reason}")
 
     subscriber.subscribe(
-        config.namespace, CATALOG_TRACK, SubscriptionHandlers(on_object=on_catalog, on_error=on_error("catalog"))
+        config.namespace, CATALOG_TRACK, RelaySubscriptionHandlers(on_object=on_catalog, on_error=on_error("catalog"))
     )
     subscriber.subscribe(
-        config.namespace, VIDEO_TRACK, SubscriptionHandlers(on_object=on_video, on_error=on_error("video"))
+        config.namespace, VIDEO_TRACK, RelaySubscriptionHandlers(on_object=on_video, on_error=on_error("video"))
     )
 
     if config.audio != "off":
         subscriber.subscribe(
-            config.namespace, AUDIO_TRACK, SubscriptionHandlers(on_object=on_audio, on_error=on_error("audio"))
+            config.namespace, AUDIO_TRACK, RelaySubscriptionHandlers(on_object=on_audio, on_error=on_error("audio"))
         )
 
     return subscriber, result
@@ -1142,10 +1142,10 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
         {"codec": video_info.codec, "size": f"{config.width}x{config.height}", "audio": audio_info is not None},
     )
 
-    catalog = publisher.publish(CATALOG_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
-    video = publisher.publish(VIDEO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+    catalog = publisher.register_track(CATALOG_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+    video = publisher.register_track(VIDEO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
     audio = (
-        publisher.publish(AUDIO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+        publisher.register_track(AUDIO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
         if producer.audio is not None
         else None
     )

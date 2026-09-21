@@ -107,12 +107,15 @@ SubscriptionEvent: TypeAlias = (
 class SubscriptionOverflowError(RelayError):
     """A stalled consumer exceeded the event capacity; the subscription was cancelled."""
 
+    def __init__(self, message: str = "Subscription event buffer overflow") -> None:
+        super().__init__(message, code="SUBSCRIPTION_OVERFLOW", phase="subscription")
+
 
 class SubscriptionRequestError(RelayError):
     """Request rejection, timeout, or request failure, with the protocol details preserved."""
 
     def __init__(self, request_error: RequestError) -> None:
-        super().__init__(request_error.reason)
+        super().__init__(request_error.reason, code="SUBSCRIPTION_REQUEST_FAILED", phase="subscription")
         self.request_error = request_error
 
 
@@ -120,7 +123,7 @@ class SubscriptionConnectionClosedError(RelayError):
     """The connection ended, without proving that subscription delivery was drained."""
 
     def __init__(self, cause: BaseException | None) -> None:
-        super().__init__("Connection closed; subscription delivery ended without a drain guarantee")
+        super().__init__("Connection closed; subscription delivery ended without a drain guarantee", code="CLOSED")
         self.__cause__ = cause
 
 

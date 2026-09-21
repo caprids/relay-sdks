@@ -6,8 +6,9 @@ import {
   encodeSubscribeOk,
 } from '../packages/moq-core/src/protocol/control-messages.js';
 import {
-  connectRelay,
-  type RelayConnection,
+  connectRelaySubscriber,
+  RelayError,
+  type RelaySubscriber,
   SubscriptionConnectionClosedError,
   SubscriptionOverflowError,
   SubscriptionRequestError,
@@ -15,7 +16,7 @@ import {
 import { closureObservers, createSubscriptionEvents } from '../src/subscription-events.js';
 import { createFakeTransport, encodeSubgroup } from './helpers/relay.js';
 
-const connections: RelayConnection[] = [];
+const connections: RelaySubscriber[] = [];
 afterEach(() => {
   for (const connection of connections.splice(0)) connection.close();
   vi.restoreAllMocks();
@@ -23,7 +24,7 @@ afterEach(() => {
 
 async function setup() {
   const fake = createFakeTransport();
-  const connecting = connectRelay({
+  const connecting = connectRelaySubscriber({
     url: 'https://relay.example.com/moq',
     requestTimeoutMs: 30,
     createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
@@ -106,10 +107,10 @@ it.each([false, true])('for-await break or consumer exception releases only its 
   if (throws) await expect(consume()).rejects.toThrow('consumer');
   else await consume();
   expect(await events.next()).toMatchObject({ done: true });
-  const onOk = vi.fn();
-  connection.subscribe({ namespace: ['test'], track: 'other' }, { onOk });
+  const onSubscribed = vi.fn();
+  connection.subscribe({ namespace: ['test'], track: 'other' }, { onSubscribed });
   await (await fake.nextRequestStream()).send(encodeSubscribeOk(12));
-  await vi.waitFor(() => expect(onOk).toHaveBeenCalledOnce());
+  await vi.waitFor(() => expect(onSubscribed).toHaveBeenCalledOnce());
   expect(fake.getCloseInfo()).toBeUndefined();
 });
 
@@ -286,10 +287,50 @@ it('snapshots handlers at subscription creation', async () => {
   const { fake, connection } = await setup();
   const original = vi.fn();
   const replacement = vi.fn();
-  const handlers = { onOk: original };
+  const handlers = { onSubscribed: original };
   connection.subscribe({ namespace: ['test'], track: 'events' }, handlers);
-  handlers.onOk = replacement;
+  handlers.onSubscribed = replacement;
   await (await fake.nextRequestStream()).send(encodeSubscribeOk(11));
   await vi.waitFor(() => expect(original).toHaveBeenCalledOnce());
   expect(replacement).not.toHaveBeenCalled();
+});
+
+it.each(['onSubscribed', 'onPublisherDone'] as const)(
+  'rejects async product %s before sending a request',
+  async (name) => {
+    const { connection } = await setup();
+    expect(() => connection.subscribe({ namespace: ['test'], track: 'events' }, { [name]: async () => {} })).toThrow(
+      'synchronous',
+    );
+    expect(connection.subscribe({ namespace: ['test'], track: 'events' }).requestId).toBe(0);
+  },
+);
+
+it('preserves the handler receiver when mapping product callback names', async () => {
+  const { fake, connection } = await setup();
+  const handlers = {
+    calls: 0,
+    onSubscribed() {
+      this.calls++;
+    },
+  };
+  connection.subscribe({ namespace: ['test'], track: 'events' }, handlers);
+  await (await fake.nextRequestStream()).send(encodeSubscribeOk(11));
+  await vi.waitFor(() => expect(handlers.calls).toBe(1));
+});
+
+it('integrates iterator errors with stable Relay error codes and phases', () => {
+  const request = { errorCode: 404, retryInterval: 0, reason: 'missing' };
+  const cause = new Error('lost');
+  const errors = [
+    [new SubscriptionOverflowError(), 'SUBSCRIPTION_OVERFLOW', 'subscription'],
+    [new SubscriptionRequestError(request), 'SUBSCRIPTION_REQUEST_FAILED', 'subscription'],
+    [new SubscriptionConnectionClosedError(cause), 'CLOSED', 'connection'],
+  ] as const;
+  for (const [error, code, phase] of errors) {
+    expect(error).toBeInstanceOf(RelayError);
+    expect(error).toMatchObject({ code, phase });
+  }
+  expect(errors[1][0].requestError).toBe(request);
+  expect(errors[2][0].cause).toBe(cause);
 });

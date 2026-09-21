@@ -15,22 +15,24 @@ from moq_core.control_messages import encode_publish_done, encode_request_error,
 from mux_relay import (
     CancellationToken,
     ConnectingTransport,
-    RelayConnection,
+    RelayError,
+    RelaySubscriber,
+    RelaySubscriptionHandlers,
     SubscriptionConnectionClosedError,
     SubscriptionEvents,
     SubscriptionOverflowError,
     SubscriptionRequestError,
-    connect_relay,
+    connect_relay_subscriber,
 )
 
 
 @pytest.fixture
-async def connected() -> AsyncIterator[tuple[FakeTransport, RelayConnection]]:
+async def connected() -> AsyncIterator[tuple[FakeTransport, RelaySubscriber]]:
     fake = create_fake_transport()
     ready = asyncio.get_running_loop().create_future()
     ready.set_result(None)
     connecting = asyncio.create_task(
-        connect_relay(
+        connect_relay_subscriber(
             "https://relay.example.com/moq",
             request_timeout=0.1,
             create_transport=lambda url, protocols: ConnectingTransport(transport=fake, ready=ready),
@@ -44,7 +46,7 @@ async def connected() -> AsyncIterator[tuple[FakeTransport, RelayConnection]]:
 
 
 async def test_done_trailing_objects_and_cross_stream_arrival_order(
-    connected: tuple[FakeTransport, RelayConnection],
+    connected: tuple[FakeTransport, RelaySubscriber],
 ) -> None:
     fake, connection = connected
     async with connection.subscribe_events(["test"], "events") as events:
@@ -68,7 +70,7 @@ async def test_done_trailing_objects_and_cross_stream_arrival_order(
     assert not connection.closed.done()
 
 
-async def test_subgroup_reset_is_gap_and_not_eof(connected: tuple[FakeTransport, RelayConnection]) -> None:
+async def test_subgroup_reset_is_gap_and_not_eof(connected: tuple[FakeTransport, RelaySubscriber]) -> None:
     fake, connection = connected
     async with connection.subscribe_events(["test"], "events") as events:
         request = await fake.next_request_stream()
@@ -84,7 +86,7 @@ async def test_subgroup_reset_is_gap_and_not_eof(connected: tuple[FakeTransport,
 
 
 @pytest.mark.parametrize("mode", ["reject", "timeout", "drop", "close", "drop-pending", "close-pending"])
-async def test_terminal_reads(connected: tuple[FakeTransport, RelayConnection], mode: str) -> None:
+async def test_terminal_reads(connected: tuple[FakeTransport, RelaySubscriber], mode: str) -> None:
     fake, connection = connected
     events = connection.subscribe_events(["test"], "events")
     request = await fake.next_request_stream()
@@ -109,7 +111,7 @@ async def test_terminal_reads(connected: tuple[FakeTransport, RelayConnection], 
 
 @pytest.mark.parametrize("throws", [False, True])
 async def test_context_cleans_up_break_and_consumer_errors(
-    connected: tuple[FakeTransport, RelayConnection],
+    connected: tuple[FakeTransport, RelaySubscriber],
     throws: bool,
 ) -> None:
     fake, connection = connected
@@ -132,14 +134,14 @@ async def test_context_cleans_up_break_and_consumer_errors(
     with pytest.raises(StopAsyncIteration):
         await anext(events)
     answers: list[Any] = []
-    connection.subscribe(["test"], "other", SubscriptionHandlers(on_ok=answers.append))
+    connection.subscribe(["test"], "other", RelaySubscriptionHandlers(on_subscribed=answers.append))
     await (await fake.next_request_stream()).send(encode_subscribe_ok(12))
     await wait_for(lambda: len(answers) == 1)
     assert not connection.closed.done()
 
 
 async def test_cancel_pending_read_detaches_without_cancelling_connection(
-    connected: tuple[FakeTransport, RelayConnection],
+    connected: tuple[FakeTransport, RelaySubscriber],
 ) -> None:
     _, connection = connected
     events = connection.subscribe_events(["test"], "events")
@@ -156,7 +158,7 @@ async def test_cancel_pending_read_detaches_without_cancelling_connection(
 
 
 @pytest.mark.parametrize("already", [False, True])
-async def test_cancellation_token(connected: tuple[FakeTransport, RelayConnection], already: bool) -> None:
+async def test_cancellation_token(connected: tuple[FakeTransport, RelaySubscriber], already: bool) -> None:
     _, connection = connected
     token = CancellationToken()
     reason = ValueError("stop")
@@ -209,7 +211,7 @@ async def test_invalid_capacity(capacity: Any) -> None:
         harness(capacity)
 
 
-async def test_async_handler_misuse(connected: tuple[FakeTransport, RelayConnection]) -> None:
+async def test_async_handler_misuse(connected: tuple[FakeTransport, RelaySubscriber]) -> None:
     fake, connection = connected
     calls: list[int] = []
 
@@ -218,11 +220,11 @@ async def test_async_handler_misuse(connected: tuple[FakeTransport, RelayConnect
         raise RuntimeError("async failure")
 
     with pytest.raises(TypeError, match="synchronous"):
-        connection.subscribe(["test"], "events", SubscriptionHandlers(on_object=cast(Any, on_object)))
+        connection.subscribe(["test"], "events", RelaySubscriptionHandlers(on_object=cast(Any, on_object)))
     subscription = connection.subscribe(
         ["test"],
         "events",
-        SubscriptionHandlers(on_object=cast(Any, lambda obj: on_object(obj))),
+        RelaySubscriptionHandlers(on_object=cast(Any, lambda obj: on_object(obj))),
     )
     assert subscription.request_id == 0
     request = await fake.next_request_stream()
@@ -233,7 +235,7 @@ async def test_async_handler_misuse(connected: tuple[FakeTransport, RelayConnect
     assert calls == []
 
 
-async def test_close_cancels_idle_subgroup_reader(connected: tuple[FakeTransport, RelayConnection]) -> None:
+async def test_close_cancels_idle_subgroup_reader(connected: tuple[FakeTransport, RelaySubscriber]) -> None:
     fake, connection = connected
     events = connection.subscribe_events(["test"], "events")
     request = await fake.next_request_stream()
@@ -252,14 +254,14 @@ async def test_close_cancels_idle_subgroup_reader(connected: tuple[FakeTransport
 
 @pytest.mark.parametrize("failed", [False, True])
 async def test_returned_future_is_cancelled_or_observed(
-    connected: tuple[FakeTransport, RelayConnection],
+    connected: tuple[FakeTransport, RelaySubscriber],
     failed: bool,
 ) -> None:
     fake, connection = connected
     future: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     if failed:
         future.set_exception(RuntimeError("async failure"))
-    connection.subscribe(["test"], "events", SubscriptionHandlers(on_object=cast(Any, lambda obj: future)))
+    connection.subscribe(["test"], "events", RelaySubscriptionHandlers(on_object=cast(Any, lambda obj: future)))
     request = await fake.next_request_stream()
     await request.send(encode_subscribe_ok(11))
     with pytest.warns(RuntimeWarning, match="returned an awaitable"):
@@ -284,7 +286,7 @@ async def test_subscribe_failure_detaches_observers() -> None:
     assert not token._callbacks
 
 
-async def test_rejection_releases_request_stream(connected: tuple[FakeTransport, RelayConnection]) -> None:
+async def test_rejection_releases_request_stream(connected: tuple[FakeTransport, RelaySubscriber]) -> None:
     fake, connection = connected
     events = connection.subscribe_events(["test"], "events")
     request = await fake.next_request_stream()
@@ -302,7 +304,7 @@ async def test_rejection_releases_request_stream(connected: tuple[FakeTransport,
 
 @pytest.mark.parametrize("timeout_style", ["context", "wait_for"])
 async def test_read_timeout_ends_subscription(
-    connected: tuple[FakeTransport, RelayConnection],
+    connected: tuple[FakeTransport, RelaySubscriber],
     timeout_style: str,
 ) -> None:
     fake, connection = connected
@@ -342,13 +344,49 @@ async def test_direct_handoff_is_outside_queue_capacity_and_survives_teardown(ov
         await anext(events)
 
 
-async def test_handlers_are_snapshotted(connected: tuple[FakeTransport, RelayConnection]) -> None:
+async def test_handlers_are_snapshotted(connected: tuple[FakeTransport, RelaySubscriber]) -> None:
     fake, connection = connected
     original = Mock()
     replacement = Mock()
-    handlers = SubscriptionHandlers(on_ok=original)
+    handlers = RelaySubscriptionHandlers(on_subscribed=original)
     connection.subscribe(["test"], "events", handlers)
-    handlers.on_ok = replacement
+    handlers.on_subscribed = replacement
     await (await fake.next_request_stream()).send(encode_subscribe_ok(11))
     await wait_for(lambda: original.call_count == 1)
     replacement.assert_not_called()
+
+
+@pytest.mark.parametrize("name", ["on_subscribed", "on_publisher_done"])
+async def test_rejects_async_product_handlers_before_sending(
+    connected: tuple[FakeTransport, RelaySubscriber],
+    name: str,
+) -> None:
+    _, connection = connected
+
+    async def callback(value: object) -> None:
+        pass
+
+    handlers = RelaySubscriptionHandlers()
+    setattr(handlers, name, callback)
+    with pytest.raises(TypeError, match="synchronous"):
+        connection.subscribe(["test"], "events", handlers)
+    assert connection.subscribe(["test"], "events").request_id == 0
+
+
+def test_iterator_errors_have_stable_relay_codes_and_phases() -> None:
+    from moq_core import RequestError
+
+    request = RequestError(error_code=404, retry_interval=0, reason="missing")
+    cause = RuntimeError("lost")
+    overflow = SubscriptionOverflowError()
+    rejected = SubscriptionRequestError(request)
+    closed = SubscriptionConnectionClosedError(cause)
+    for error, code, phase in (
+        (overflow, "SUBSCRIPTION_OVERFLOW", "subscription"),
+        (rejected, "SUBSCRIPTION_REQUEST_FAILED", "subscription"),
+        (closed, "CLOSED", "connection"),
+    ):
+        assert isinstance(error, RelayError)
+        assert (error.code, error.phase) == (code, phase)
+    assert rejected.request_error is request
+    assert closed.__cause__ is cause

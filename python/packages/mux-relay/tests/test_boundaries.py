@@ -43,5 +43,5 @@ def test_importing_the_core_loads_no_transport_or_product_module() -> None:
 def test_the_sdk_reexports_the_shared_protocol_pin() -> None:
     assert mux_relay.MOQT_PROTOCOL_ID == moq_core.MOQT_PROTOCOL_ID
     assert mux_relay.MAX_OBJECT_PAYLOAD_LENGTH == moq_core.MAX_OBJECT_PAYLOAD_LENGTH
-    assert callable(mux_relay.connect_relay)
+    assert callable(mux_relay.connect_relay_subscriber)
     assert callable(mux_relay.connect_relay_publisher)

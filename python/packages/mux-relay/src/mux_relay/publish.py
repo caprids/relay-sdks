@@ -1,8 +1,9 @@
 """Publish data on a dedicated Relay connection.
 
-Publishing follows Relay's announce-and-serve ingest flow. :meth:`RelayPublisher.publish` registers
-a track; :meth:`RelayTrackWriter.write` waits for the relay to subscribe upstream before sending
-bytes. Each write copies its bytes and sends one independent group containing one object.
+Publishing follows Relay's announce-and-serve ingest flow. :meth:`RelayPublisher.register_track`
+registers a track and sends nothing; :meth:`RelayTrackWriter.write` waits for the relay to subscribe
+upstream (demand) before sending bytes. Each write copies its bytes and sends one independent group
+containing one object.
 :meth:`RelayTrackWriter.open_group` sends a multi-object group instead: the LOC/MSF shape for video,
 where a group is one GOP whose object 0 is the keyframe.
 """
@@ -48,9 +49,11 @@ from .connect_session import (
 from .errors import (
     RelayClosedError,
     RelayError,
+    RelayErrorPhase,
     RelayNamespaceError,
     RelayTimeoutError,
     RelayWritePendingError,
+    _transport_error,
 )
 from .payload import _encode_json, _encode_text
 
@@ -90,6 +93,7 @@ class _Operation:
     kind: Literal["write", "group"]
     demand: asyncio.Future[None]
     interrupted: asyncio.Future[None]
+    phase: RelayErrorPhase = "waiting-for-demand"
     alias: int | None = None
     writer: SubgroupWriter | None = None
     cancelled: bool = False
@@ -109,13 +113,14 @@ class RelayGroupWriter:
     track stays open for the next group.
     """
 
-    __slots__ = ("_next_object_id", "_operation", "_track", "_writer", "group_id")
+    __slots__ = ("_next_object_id", "_operation", "_pending", "_track", "_writer", "group_id")
 
     def __init__(self, track: RelayTrackWriter, operation: _Operation, writer: SubgroupWriter) -> None:
         self._track = track
         self._operation = operation
         self._writer = writer
         self._next_object_id = 0
+        self._pending = False
         self.group_id = writer.group_id
 
     @property
@@ -134,9 +139,11 @@ class RelayGroupWriter:
             raise self._operation.failure
 
         if self._track._active is not self._operation:
-            raise RelayClosedError("Group is closed")
+            raise RelayClosedError("Group is closed", phase="writing")
 
         self._track._lifetime.assert_open()
+        if self._pending:
+            raise RelayWritePendingError("A group write or close is already pending", phase="writing")
 
     async def write_text(
         self, text: str, *, properties: Sequence[KeyValuePair] | None = None, status: ObjectStatus = "normal"
@@ -164,12 +171,16 @@ class RelayGroupWriter:
         if len(payload) > MAX_OBJECT_PAYLOAD_LENGTH:
             raise ValueError("Payload exceeds the 16 MiB object limit")
 
+        if status not in ("normal", "end-of-group", "end-of-track"):
+            raise ValueError("Unknown object status")
+
         object_id = self._next_object_id
         data = bytes(payload)
         object_properties = _copy_properties(properties)
 
         await self._await_transport(
-            self._writer.write_object(object_id=object_id, payload=data, properties=object_properties, status=status)
+            self._writer.write_object(object_id=object_id, payload=data, properties=object_properties, status=status),
+            "writing",
         )
 
         # The binding may have moved while the write was in flight; the object may then be lost.
@@ -185,36 +196,50 @@ class RelayGroupWriter:
         if self._track._active is not self._operation:
             return
 
+        self._check()
         try:
-            await self._await_transport(self._writer.fin())
+            await self._await_transport(self._writer.fin(), "closing")
         finally:
             if self._track._active is self._operation:
                 self._track._active = None
 
-    async def _await_transport(self, action: Awaitable[None]) -> None:
+    async def _await_transport(self, action: Awaitable[None], phase: RelayErrorPhase) -> None:
+        self._pending = True
+        self._operation.phase = phase
         timer = self._track._arm_timeout(self._operation)
         sending = asyncio.ensure_future(action)
         observe(sending)
         try:
             await asyncio.wait({sending, self._operation.interrupted}, return_when=asyncio.FIRST_COMPLETED)
             # Preserve the cancellation/re-bind/deadline reason even if abort also woke the send.
-            self._check()
+            self._track._check(self._operation)
             sending.result()
         except BaseException as error:
-            self._track._cancel_operation(self._operation, error)
-            raise
+            failure = self._track._operation_failure(self._operation, error)
+            assert failure is not None
+            self._track._cancel_operation(self._operation, failure)
+            if failure is error:
+                raise
+            raise failure from failure.__cause__
         finally:
+            self._pending = False
             timer.cancel()
             if not sending.done():
                 sending.cancel()
 
     def abort(self, reason: BaseException | None = None) -> None:
         """Reset the group's stream; objects already sent may be incomplete at the peer."""
-        self._track._cancel_operation(self._operation, reason or RelayClosedError("Group was aborted"))
+        self._track._cancel_operation(
+            self._operation,
+            reason if reason is not None else RelayClosedError("Group was aborted", phase=self._operation.phase),
+        )
 
 
 class RelayTrackWriter:
-    """One registered track on a publisher connection. Create one with :meth:`RelayPublisher.publish`."""
+    """One registered track on a publisher connection. Create one with :meth:`RelayPublisher.register_track`.
+
+    Registration sends nothing; :meth:`write` and :meth:`open_group` send, after waiting for relay demand.
+    """
 
     __slots__ = (
         "_active",
@@ -249,14 +274,16 @@ class RelayTrackWriter:
         self._active: _Operation | None = None
         self._watchers: set[asyncio.Queue[bool | None]] = set()
 
-    # ------------------------------------------------------------------ binding
+    # ------------------------------------------------------------------ demand
 
     @property
-    def bound(self) -> bool:
-        """True while the relay has a live subscription for this track, so writes can flow at once.
+    def has_demand(self) -> bool:
+        """Whether the relay currently has an upstream subscription for this track, so a write would proceed at once.
 
-        Always ``False`` once the track has ended: no write can flow again, whatever the relay asks
-        for. Read ``closed`` to tell a track that ended apart from one nobody is subscribed to.
+        Demand is the relay's own subscription, shared by every downstream viewer and kept for a
+        while after the last viewer leaves: it is neither a viewer count nor a liveness signal.
+        Always ``False`` once the track has ended, whatever the relay asks for; read ``closed`` to
+        tell a track that ended apart from one the relay has not subscribed to.
         """
         return self._alias is not None and not self._ended
 
@@ -268,20 +295,20 @@ class RelayTrackWriter:
         """
         return self._ended
 
-    def bindings(self) -> AsyncIterator[bool]:
-        """Iterate the track's demand state: the current value first, then every change.
+    def demand_changes(self) -> AsyncIterator[bool]:
+        """Iterate relay demand: the current state first, then one value per relay subscription change.
 
-        Yields ``True`` when the relay (re)subscribes and ``False`` when its subscription ends, and
-        stops once the track ends, however it ended. A replacement subscription yields ``True``
-        again, so a publisher that re-sends state on every subscribe (a catalog) can key off each
-        ``True``.
+        Yields ``True`` when the relay subscribes or replaces its subscription (so ``True`` can
+        repeat) and ``False`` when its subscription ends, and stops once the track ends, however it
+        ended. This is how a catalog re-sends its document on every relay subscription. Values are
+        per relay subscription, never per downstream viewer.
         """
         queue: asyncio.Queue[bool | None] = asyncio.Queue()
-        queue.put_nowait(None if self._ended else self.bound)
+        queue.put_nowait(None if self._ended else self.has_demand)
         self._watchers.add(queue)
-        return self._iterate_bindings(queue)
+        return self._iterate_demand(queue)
 
-    async def _iterate_bindings(self, queue: asyncio.Queue[bool | None]) -> AsyncIterator[bool]:
+    async def _iterate_demand(self, queue: asyncio.Queue[bool | None]) -> AsyncIterator[bool]:
         try:
             while True:
                 item = await queue.get()
@@ -301,7 +328,11 @@ class RelayTrackWriter:
         active = self._active
 
         if active is not None and active.alias is not None and active.alias != next_alias:
-            error = RelayError("Relay subscription changed during a write or group; objects may be incomplete")
+            error = RelayError(
+                "Relay subscription changed during a write or group; objects may be incomplete",
+                code="SUBSCRIPTION_CHANGED",
+                phase=active.phase,
+            )
             self._cancel_operation(active, error)
 
         changed = self._alias != next_alias
@@ -338,7 +369,7 @@ class RelayTrackWriter:
     def _end_track(self) -> None:
         """Retire the track once: refuse later writes, end the registration, and tell the watchers.
 
-        Every path that ends a track goes through here, so a ``bindings()`` consumer always learns
+        Every path that ends a track goes through here, so a ``demand_changes()`` consumer always learns
         the track is over whether the application closed it or the publisher connection ended.
         """
         if self._ended:
@@ -356,7 +387,10 @@ class RelayTrackWriter:
             return
 
         if self._active is not None:
-            self._cancel_operation(self._active, error or RelayClosedError("Published track is closed"))
+            self._cancel_operation(
+                self._active,
+                error if error is not None else RelayClosedError("Published track is closed", phase=self._active.phase),
+            )
 
         self._end_track()
 
@@ -365,10 +399,12 @@ class RelayTrackWriter:
         self._lifetime.assert_open()
 
         if self._ended or self._publisher._closing:
-            raise RelayClosedError("Published track is closed")
+            raise RelayClosedError("Published track is closed", phase="writing")
 
         if self._active is not None:
-            raise RelayWritePendingError("A write or group is already pending; await it before writing another object")
+            raise RelayWritePendingError(
+                "A write or group is already pending; await it before writing another object", phase="writing"
+            )
 
     def _begin(self, kind: Literal["write", "group"]) -> _Operation:
         self._assert_writable()
@@ -381,13 +417,16 @@ class RelayTrackWriter:
     def _arm_timeout(self, operation: _Operation) -> asyncio.TimerHandle:
         def expire() -> None:
             error: RelayError
-            if operation.alias is None and self._session.namespace_solicited is False:
+            if operation.phase == "waiting-for-demand" and self._session.namespace_solicited is False:
                 error = RelayNamespaceError(
                     "Publisher namespace is not covered by the relay namespace solicitations; "
-                    "check the token and namespace"
+                    "check the token and namespace",
+                    phase=operation.phase,
                 )
             else:
-                error = RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
+                error = RelayTimeoutError(
+                    "Publish write timed out waiting for relay demand or transport", phase=operation.phase
+                )
             self._cancel_operation(operation, error)
 
         return call_later(self._write_timeout, expire)
@@ -401,9 +440,9 @@ class RelayTrackWriter:
         await self.write(_encode_json(value), properties=properties)
 
     async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
-        """Write one independent object/group.
+        """Send one independent object/group.
 
-        Waits for relay demand. Returns when the transport accepts the complete group, not when a
+        Waits for relay demand (see ``has_demand``). Returns when the transport accepts the complete group, not when a
         downstream viewer acknowledges it. Only one write or group may be pending; await it before
         writing again. Bytes are copied. Failure resets this group and leaves the track usable
         while the connection is open. Data may already have reached the relay; choose the next
@@ -431,8 +470,12 @@ class RelayTrackWriter:
             self._check(operation)
             sending.result()
         except BaseException as error:
-            self._cancel_operation(operation, error)
-            raise
+            failure = self._operation_failure(operation, error)
+            assert failure is not None
+            self._cancel_operation(operation, failure)
+            if failure is error:
+                raise
+            raise failure from failure.__cause__
         finally:
             timer.cancel()
 
@@ -454,24 +497,37 @@ class RelayTrackWriter:
             opening = spawn(self._open_group_stream(operation))
             await asyncio.wait({opening, operation.interrupted}, return_when=asyncio.FIRST_COMPLETED)
 
+            self._check(operation)
             if opening.done():
                 writer = opening.result()
             else:
                 operation.interrupted.result()
                 raise AssertionError("unreachable: an interrupted group always carries an error")
         except BaseException as error:
-            self._cancel_operation(operation, error)
-
-            if self._active is operation:
-                self._active = None
-
-            raise
+            failure = self._operation_failure(operation, error)
+            assert failure is not None
+            self._cancel_operation(operation, failure)
+            if failure is error:
+                raise
+            raise failure from failure.__cause__
         finally:
             timer.cancel()
 
         return RelayGroupWriter(self, operation, writer)
 
     # ------------------------------------------------------------------ internals
+
+    def _operation_failure(self, operation: _Operation, error: BaseException) -> BaseException:
+        # Preserve asyncio task cancellation even when another failure arrives in the same turn.
+        if not isinstance(error, Exception):
+            return error
+        try:
+            # Closure can precede the callback that cancels this track. The public operation
+            # may resume first, so consult the lifetime before classifying a transport failure.
+            self._check(operation)
+        except BaseException as interrupted:
+            return interrupted
+        return _transport_error(error, operation.phase)
 
     def _check(self, operation: _Operation) -> None:
         if operation.cancelled:
@@ -488,8 +544,12 @@ class RelayTrackWriter:
 
             if self._alias is None:
                 # Demand came and went before the write could start. The track itself is still open,
-                # so this is a retryable failure, not a closed track.
-                raise RelayError("Relay subscription ended before the write started")
+                # so report the lost binding while leaving the track open.
+                raise RelayError(
+                    "Relay subscription ended before the write started",
+                    code="SUBSCRIPTION_CHANGED",
+                    phase=operation.phase,
+                )
 
         self._check(operation)
         return self._alias
@@ -499,6 +559,7 @@ class RelayTrackWriter:
         operation.alias = alias
         group_id = self._next_group_id
         self._next_group_id += 1
+        operation.phase = "opening-stream"
         stream = await self._session.open_uni_stream()
 
         if operation.cancelled:
@@ -511,8 +572,10 @@ class RelayTrackWriter:
 
     async def _send(self, operation: _Operation, data: bytes, properties: list[KeyValuePair]) -> None:
         writer = await self._open_stream(operation)
+        operation.phase = "writing"
         await writer.write_object(object_id=0, properties=properties, payload=data)
         self._check(operation)
+        operation.phase = "closing"
         await writer.fin()
         self._check(operation)
 
@@ -523,7 +586,10 @@ class RelayTrackWriter:
 
 
 class RelayPublisher:
-    """A dedicated publisher connection serving one namespace. Create one with :func:`connect_relay_publisher`."""
+    """A connection that can only publish, serving one namespace. Create one with :func:`connect_relay_publisher`.
+
+    Subscribing uses a separate connection; see :func:`connect_relay_subscriber`.
+    """
 
     __slots__ = ("_closed", "_closing", "_lifetime", "_namespace", "_tracks")
 
@@ -572,15 +638,19 @@ class RelayPublisher:
         """Resolves when the connection shuts down. Errors are returned as data; this never raises."""
         return self._closed
 
-    def publish(
+    def register_track(
         self,
         track: str,
         *,
         track_properties: Sequence[KeyValuePair] | None = None,
         write_timeout: float = DEFAULT_WRITE_TIMEOUT,
     ) -> RelayTrackWriter:
-        """Register a data track without starting capture or publishing a media catalog.
+        """Register a track this publisher will serve and return its writer.
 
+        Nothing is sent: the relay learns of the track when a subscriber asks for it, and bytes move
+        when the writer's ``write()`` or ``open_group()`` runs, after waiting for that relay demand.
+        No capture starts and no media catalog is published. Track names are unique per publisher
+        connection, including after their writer closes.
         ``track_properties`` is encoded as supplied; the SDK adds no default timescale.
         The relay may add, drop, or rewrite properties before delivery to subscribers; see README.
         ``write_timeout`` (seconds) bounds relay demand and the transport write together.
@@ -635,6 +705,12 @@ class RelayPublisher:
         await self.close()
 
 
+def _namespace_ended(cause: BaseException | None) -> RelayError:
+    error = RelayError("Relay withdrew the namespace", code="NAMESPACE_ENDED", phase="connection")
+    error.__cause__ = cause
+    return error
+
+
 async def connect_relay_publisher(
     url: str,
     *,
@@ -646,7 +722,7 @@ async def connect_relay_publisher(
 ) -> RelayPublisher:
     """Open a dedicated Relay publisher connection.
 
-    Subscribe clients use :func:`connect_relay`; publishing does not share their transport. One
+    Subscribers use :func:`connect_relay_subscriber`; publishing does not share their transport. One
     publisher connection serves one ``namespace`` and any number of tracks. A relay must solicit the
     namespace and subscribe upstream before data can flow.
     """
@@ -679,9 +755,7 @@ async def connect_relay_publisher(
                     on_closed=callbacks.on_closed,
                     on_goaway=callbacks.on_goaway,
                     on_track_binding=on_track_binding,
-                    on_announce_ended=lambda ended: callbacks.on_closed(
-                        Closed(ended.error if ended.error is not None else RelayError("Relay withdrew the namespace"))
-                    ),
+                    on_announce_ended=lambda ended: callbacks.on_closed(Closed(_namespace_ended(ended.error))),
                 ),
             ),
         )

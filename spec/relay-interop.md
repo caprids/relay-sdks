@@ -18,7 +18,7 @@ backfill is a separate feature. The test fixtures now send the 0.14.17 pull para
 ## Publisher restarts and resubscription
 
 Against moq-relay 0.14.17, re-subscribing to the same namespace and track after
-`on_done` / `onDone` can replay cached objects and immediately receive another
+`on_publisher_done` / `onPublisherDone` can replay cached objects and immediately receive another
 `PUBLISH_DONE`. An application that re-subscribes from every done callback can
 therefore generate a request loop while the publisher is absent. See
 [issue #21](https://github.com/muxinc/relay-sdks/issues/21) for reproduction evidence

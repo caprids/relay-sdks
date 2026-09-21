@@ -19,7 +19,7 @@ from moq_core import MOQT_PROTOCOL_ID, Closed, Goaway, MoqtTransport
 from moq_core._tasks import call_later, observe, spawn
 
 from .cancellation import CancellationToken
-from .errors import RelayClosedError, RelayGoawayError, RelayTimeoutError
+from .errors import RelayClosedError, RelayGoawayError, RelayTimeoutError, _transport_error
 
 TokenProvider = Callable[[], "str | Awaitable[str | None] | None"]
 """Resolve a connection token, synchronously or asynchronously. ``None`` or ``""`` sends no token."""
@@ -53,7 +53,7 @@ class ConnectRelayOptions:
     An explicit ``jwt`` in the URL wins, and the provider is not called in that case.
     """
     cancellation: CancellationToken | None = None
-    """Cancelling closes the connection, including after ``connect_relay`` has returned."""
+    """Cancelling closes the connection, including after the connect call has returned."""
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
     """Seconds for token resolution, transport connection, and protocol SETUP together."""
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
@@ -172,6 +172,8 @@ async def open_relay_session(
     loop = asyncio.get_running_loop()
     state: _Connecting[T] = _Connecting()
     stopped = False
+    established = False
+    using_transport = False
     stop_error: BaseException | None = None
     interrupted: asyncio.Future[None] = loop.create_future()
     observe(interrupted)
@@ -210,7 +212,10 @@ async def open_relay_session(
     def on_cancel(reason: BaseException) -> None:
         finish(Closed(reason))
 
-    timer = call_later(options.connect_timeout, lambda: finish(Closed(RelayTimeoutError("Relay connection timed out"))))
+    timer = call_later(
+        options.connect_timeout,
+        lambda: finish(Closed(RelayTimeoutError("Relay connection timed out", phase="connecting"))),
+    )
 
     if cancellation is not None:
         cancellation.add_callback(on_cancel)
@@ -221,6 +226,7 @@ async def open_relay_session(
             raise stop_error
 
     async def establish() -> T:
+        nonlocal using_transport
         connect_url = url
 
         if not has_jwt and options.get_token is not None:
@@ -238,6 +244,7 @@ async def open_relay_session(
                 connect_url = _with_token(connect_url, token)
 
         assert_open()
+        using_transport = True
         created = (options.create_transport or _default_transport)(connect_url, [MOQT_PROTOCOL_ID])
         transport = created.transport
         state.transport = transport
@@ -260,9 +267,18 @@ async def open_relay_session(
         session = create_session(
             transport,
             LifetimeCallbacks(
-                on_closed=finish,
+                on_closed=lambda info: finish(
+                    Closed(_transport_error(info.error, "connection" if established else "connecting"))
+                    if info.error is not None
+                    else info
+                ),
                 on_goaway=lambda goaway: finish(
-                    Closed(RelayGoawayError("Relay requested session migration; open a new connection"))
+                    Closed(
+                        RelayGoawayError(
+                            "Relay requested session migration; open a new connection",
+                            phase="connection" if established else "connecting",
+                        )
+                    )
                 ),
             ),
         )
@@ -282,10 +298,20 @@ async def open_relay_session(
         connected = establishing.result()
         assert_open()
     except BaseException as error:
-        finish(Closed(error))
-        raise
+        if not isinstance(error, Exception):
+            failure = error  # A caller's asyncio task cancellation takes precedence over closure.
+        elif stopped:
+            failure = stop_error
+        else:
+            failure = _transport_error(error, "connecting") if using_transport else error
+        assert failure is not None
+        finish(Closed(failure))
+        if failure is error:
+            raise
+        raise failure from failure.__cause__
 
     timer.cancel()
+    established = True
     assert state.transport is not None
 
     return RelaySessionLifetime(connected, closed, state.transport, assert_open, lambda: finish())

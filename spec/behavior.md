@@ -2,7 +2,8 @@
 
 Every Relay SDK, in any language, implements the same protocol pin and the same observable
 semantics. This document states those semantics without reference to any one language. The
-language READMEs describe how each API spells them; this file says what must be true.
+language READMEs describe how each API spells them; this file says what must be true; and
+`vocabulary.md` fixes the public names every SDK uses for the concepts named here.
 
 `protocol.json` holds the machine-readable pins. Each SDK has a test that checks its constants
 against that file.
@@ -28,6 +29,62 @@ against that file.
   Requests still awaiting their first response receive their error callback once; accepted or
   cancelled requests do not receive a second initial response.
   Automatic reconnection and token refresh on a live session are not yet part of this contract.
+
+## Error identities and operation phases
+
+Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:
+
+| Code | Application response |
+| --- | --- |
+| `CONNECTION_TIMEOUT` | Connecting exceeded its deadline; consider a new connection with backoff. |
+| `WRITE_TIMEOUT` | Inspect the phase below, then choose the next object or group explicitly. |
+| `CLOSED` | The handle is closed; use an open connection, track, or group. |
+| `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
+| `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
+| `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
+| `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
+| `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
+| `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
+| `GOAWAY` | The relay requested migration; open a replacement connection. |
+| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
+
+`connecting` covers token resolution and connection setup. `connection` marks a connection-wide
+failure; it makes no claim about individual writes that were in flight. `subscription` marks an
+async subscription request failure or local event-buffer overflow. Publishing records
+`waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
+A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
+phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
+sent. Opening a group can start sending its header before the first object write. A phase records
+the failure's origin, and a later call on the failed handle can report that same error.
+
+For `WRITE_PENDING` and calls rejected because a handle is already closed, phase describes the
+refused operation; that call sends nothing. `CLOSED` can also interrupt an operation already in
+flight, so the code alone does not rule out partial delivery.
+
+No code or phase promises safe replay. Account for previous attempts, data freshness, and your
+application's deduplication policy. Successful writes mean transport acceptance, not viewer
+acknowledgment. The SDK does not automatically retry or reconnect. Neither a connection failure nor
+an uncovered namespace proves authentication was denied.
+
+Clean connection shutdown still resolves `closed` without an error; subsequent operations fail
+with `CLOSED`. After a failed connection, `closed` and subsequent connection operations expose the
+same failure. Caller cancellation reasons and token-provider exceptions retain their identity.
+Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
+`on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
+
+Implementations export a Relay error type with a stable `code` discriminant and `phase` field.
+Human-readable messages are not a compatibility contract. Wrapped transport/session failures retain
+the original cause. TypeScript uses `RelayError.cause`; Python uses exception chaining and preserves
+its existing Relay exception subclasses. Python's low-level `WebTransportError` retains its numeric
+application code; Relay API failures wrap it with `TRANSPORT_ERROR`. Manually constructed Python base
+`RelayError` instances retain the fallback `RELAY_ERROR` code.
+
+Local argument errors remain `TypeError`/`RangeError` in TypeScript and `TypeError`/`ValueError` in
+Python as appropriate. A refused concurrent operation uses `WRITE_PENDING` and does not cancel the
+active operation. Caller-provided cancellation reasons bypass wrapping, including non-Error
+JavaScript values and Python task cancellation. Connection failures are shared with pending
+publishing operations; their connection phase does not establish whether those writes sent bytes.
 
 ## Subscribing
 
@@ -56,8 +113,9 @@ against that file.
 - Subgroup resets and connection closure are surfaced explicitly. There is no exactly-once or
   gap-free delivery promise.
 - The publisher's done notification is a control message and may arrive before trailing objects
-  still in transit. It is not a prompt publisher-death detector; the SDK reports it when the relay
-  sends it.
+  still in transit. It does not end the subscription: the request stays open until the application
+  cancels it or the connection ends, and the SDK does not resubscribe on its own.
+  It is not a prompt publisher-death detector; the SDK reports it when the relay sends it.
 - Replacing a publisher on the same namespace does not guarantee handoff of existing subscriptions.
   New subscriptions may also see transient 404s or initial-response timeouts after retract/re-announce.
   Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
@@ -65,13 +123,13 @@ against that file.
 
 ## Async subscription consumption
 
-The Relay product API provides `relay.subscribeEvents(options, { capacity, signal })` in TS and
-`relay.subscribe_events(namespace, track, capacity=..., cancellation=...)` in Python. These create
+The Relay product API provides `subscriber.subscribeEvents(options, { capacity, signal })` in TS and
+`subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` in Python. These create
 and own a new subscription immediately. They yield typed data and lifecycle events, using the same
 payload objects as callbacks. The generic `MoqTrackSource` and existing `subscribe` callbacks remain
 available and retain their synchronous delivery model. This additive API does not implement the
-separate readiness/termination handle proposal (#68) or rename existing callbacks (#63). Its explicit
-`publisherDone` / `publisher_done` event avoids confusing publisher completion with final delivery.
+separate readiness/termination handle proposal (#68). It follows the product vocabulary from #63;
+its explicit `publisherDone` / `publisher_done` event distinguishes publisher completion from final delivery.
 
 - `capacity` defaults to **64 events** and must be a positive integer (a safe integer in TS).
   Every queued object **and lifecycle event** consumes one slot. This is an event-count limit,
@@ -106,9 +164,15 @@ separate readiness/termination handle proposal (#68) or rename existing callback
 Before acceptance, a connection failure may reach the core's request-error callback before the
 connection observer. In that case the iterator raises `SubscriptionRequestError` with the core's
 reason string, just like an initial request-stream failure; it does not preserve the underlying
-connection exception. Check `relay.closed` for the connection-level cause when distinguishing a
+connection exception. Check `subscriber.closed` for the connection-level cause when distinguishing a
 request rejection from a lost connection. Once accepted, connection loss instead raises
 `SubscriptionConnectionClosedError`. This preserves the core's existing first-failure ordering.
+
+The iterator errors are `RelayError` subclasses with stable codes: `SubscriptionRequestError`
+uses `SUBSCRIPTION_REQUEST_FAILED`, and `SubscriptionOverflowError` uses `SUBSCRIPTION_OVERFLOW`,
+both in the `subscription` phase. `SubscriptionConnectionClosedError` uses `CLOSED` in the
+`connection` phase and retains the underlying connection failure as its cause when present.
+The callback API still receives unwrapped MOQT `RequestError` values.
 
 A failure remains observable on subsequent reads. The first termination wins. Do not close the
 shared connection merely to stop this consumer. Publisher completion never auto-cancels or
@@ -156,8 +220,10 @@ still invokes the gap callback. Publisher completion leaves readers active for t
 
 - Publishing uses a dedicated connection with a token authorized to publish the namespace. One
   publisher connection serves one namespace and any number of tracks.
-- Publishing follows the relay's announce-and-serve flow. Registering a track announces it. A write
-  waits for the relay to subscribe upstream before sending bytes; a subscriber creates that demand.
+- Publishing follows the relay's announce-and-serve flow. Connecting a publisher announces its
+  namespace. Registering a track makes it servable and sends nothing; the relay learns of the track
+  when a subscriber asks for it. A write waits for the relay to subscribe upstream before sending
+  bytes; a subscriber creates that demand.
   If namespace solicitations have arrived but none currently covers the publisher namespace when
   the demand deadline expires, the write reports a namespace coverage error instead of an ordinary
   demand timeout. Check the token and namespace before retrying. This does not prove authorization
@@ -196,8 +262,12 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
   observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
-  Demand observers emit the current state first, include replacement subscriptions, and finish when
-  the track ends. A closed track reports no demand. Implemented in both SDKs.
+  Demand observers emit the current state first, include replacement subscriptions (a repeated
+  "demanded" value), and finish when the track ends. A closed track reports no demand. Demand is
+  the relay's single upstream subscription for the track: the relay shares it across every
+  downstream viewer, so additional viewers produce no further notification, and it may keep the
+  subscription for a period after the last viewer leaves. Demand is therefore neither a viewer
+  count nor a liveness signal. Implemented in both SDKs.
 
 ### Relay property handling
 

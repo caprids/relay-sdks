@@ -83,7 +83,7 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   const result = await page.evaluate(
     async ({ endpoint, token, namespace, certificateHash }) => {
-      const { connectRelay, connectRelayPublisher } = await import('/sdk/index.js');
+      const { connectRelaySubscriber, connectRelayPublisher } = await import('/sdk/index.js');
       if (typeof WebTransport === 'undefined') throw new Error('This browser does not provide WebTransport');
       let publisher;
       let subscriber;
@@ -131,9 +131,9 @@ try {
         });
         observeClosed('publisher', publisher);
         await window.reportPhase({ phase: 'publisher connected', namespace });
-        const events = publisher.publish({ track: 'events', writeTimeoutMs: 20_000 });
-        const status = publisher.publish({ track: 'status', writeTimeoutMs: 20_000 });
-        subscriber = await connectRelay({
+        const events = publisher.registerTrack({ track: 'events', writeTimeoutMs: 20_000 });
+        const status = publisher.registerTrack({ track: 'status', writeTimeoutMs: 20_000 });
+        subscriber = await connectRelaySubscriber({
           url: endpoint,
           getToken: () => token,
           signal: lifetime.signal,
@@ -145,7 +145,7 @@ try {
           subscriber.subscribe(
             { namespace, track },
             {
-              onOk: () => {
+              onSubscribed: () => {
                 void window.reportPhase({ phase: 'subscribed', track });
               },
               onObject: (object) => {
@@ -166,7 +166,7 @@ try {
           status: received.status.length,
         });
         // A fresh subscriber must decode the relay's SUBSCRIBE_OK for a track with content.
-        lateSubscriber = await connectRelay({
+        lateSubscriber = await connectRelaySubscriber({
           url: endpoint,
           getToken: () => token,
           signal: lifetime.signal,
@@ -176,7 +176,7 @@ try {
         lateSubscriber.subscribe(
           { namespace, track: 'status', parameters: { locationFilter: { type: 'next-object' } } },
           {
-            onOk: (ok) => {
+            onSubscribed: (ok) => {
               lateLargestObject = ok.parameters.largestObject;
               if (!lateLargestObject) errors.push('late SUBSCRIBE_OK omitted LARGEST_OBJECT');
             },

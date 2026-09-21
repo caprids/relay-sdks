@@ -44,7 +44,7 @@ from moq_core import (
 )
 
 from .cancellation import CancellationToken, Cancelled
-from .connect import RelayConnection, connect_relay
+from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import (
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_REQUEST_TIMEOUT,
@@ -55,6 +55,8 @@ from .connect_session import (
 from .errors import (
     RelayClosedError,
     RelayError,
+    RelayErrorCode,
+    RelayErrorPhase,
     RelayGoawayError,
     RelayNamespaceError,
     RelayTimeoutError,
@@ -128,12 +130,15 @@ __all__ = [
     "PublisherDoneEvent",
     "RelativeGroupFilter",
     "RelayClosedError",
-    "RelayConnection",
     "RelayError",
+    "RelayErrorCode",
+    "RelayErrorPhase",
     "RelayGoawayError",
     "RelayGroupWriter",
     "RelayNamespaceError",
     "RelayPublisher",
+    "RelaySubscriber",
+    "RelaySubscriptionHandlers",
     "RelayTimeoutError",
     "RelayTrackEndedError",
     "RelayTrackWriter",
@@ -160,8 +165,8 @@ __all__ = [
     "UpdateOkEvent",
     "WebTransportError",
     "WebTransportSession",
-    "connect_relay",
     "connect_relay_publisher",
+    "connect_relay_subscriber",
     "connect_webtransport",
     "read_json",
     "read_text",

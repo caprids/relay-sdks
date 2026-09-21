@@ -8,6 +8,7 @@ import type {
   Subscription,
   SubscriptionHandlers,
 } from '@mux/moq-core';
+import { RelayError } from './errors.js';
 
 /** Delivery order is callback arrival order, with no ordering guarantee across streams. */
 export type SubscriptionEvent =
@@ -27,27 +28,29 @@ export interface SubscriptionEventOptions {
   signal?: AbortSignal;
 }
 
-export class SubscriptionOverflowError extends Error {
+export class SubscriptionOverflowError extends RelayError {
+  override readonly name = 'SubscriptionOverflowError';
   constructor() {
-    super('Subscription event buffer overflow');
-    this.name = 'SubscriptionOverflowError';
+    super('SUBSCRIPTION_OVERFLOW', 'Subscription event buffer overflow', 'subscription');
   }
 }
 
-export class SubscriptionRequestError extends Error {
+export class SubscriptionRequestError extends RelayError {
+  override readonly name = 'SubscriptionRequestError';
   readonly requestError: RequestError;
 
   constructor(requestError: RequestError) {
-    super(requestError.reason);
-    this.name = 'SubscriptionRequestError';
+    super('SUBSCRIPTION_REQUEST_FAILED', requestError.reason, 'subscription');
     this.requestError = requestError;
   }
 }
 
-export class SubscriptionConnectionClosedError extends Error {
+export class SubscriptionConnectionClosedError extends RelayError {
+  override readonly name = 'SubscriptionConnectionClosedError';
   constructor(cause?: unknown) {
-    super('Connection closed; subscription delivery ended without a drain guarantee', { cause });
-    this.name = 'SubscriptionConnectionClosedError';
+    super('CLOSED', 'Connection closed; subscription delivery ended without a drain guarantee', 'connection', {
+      cause,
+    });
   }
 }
 

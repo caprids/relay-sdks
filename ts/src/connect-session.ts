@@ -1,5 +1,7 @@
 import { MOQT_PROTOCOL_ID, type MoqtSessionCallbacks, type MoqtTransport } from '@mux/moq-core';
 
+import { RelayError, transportError } from './errors.js';
+
 /** setTimeout stores its delay in a signed 32-bit integer; a larger one wraps and fires at once. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
@@ -16,6 +18,11 @@ export type RelayTransportFactory = (
   protocols: string[],
 ) => { transport: MoqtTransport; ready: Promise<void> };
 
+/**
+ * Connection options shared by connectRelaySubscriber and connectRelayPublisher: endpoint,
+ * token, lifetime signal, deadlines, and transport injection. Issue #72 separates the
+ * subscriber-only requestTimeoutMs from this shared shape.
+ */
 export interface ConnectRelayOptions {
   /** Relay's HTTPS WebTransport endpoint, including any endpoint path. */
   url: string;
@@ -24,7 +31,7 @@ export interface ConnectRelayOptions {
    * An explicit jwt in the URL wins, and the provider is not called in that case.
    */
   getToken?: () => string | undefined | Promise<string | undefined>;
-  /** Aborting closes the connection, including after connectRelay has resolved. */
+  /** Aborting closes the connection, including after the connect call has resolved. */
   signal?: AbortSignal;
   /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
   connectTimeoutMs?: number;
@@ -52,7 +59,11 @@ interface RelaySessionLifetime<T extends Session> {
 
 function createBrowserTransport(url: string, protocols: string[]) {
   if (typeof WebTransport === 'undefined') {
-    throw new Error('WebTransport is unavailable; supply createTransport for this runtime');
+    throw new RelayError(
+      'TRANSPORT_UNAVAILABLE',
+      'WebTransport is unavailable; supply createTransport for this runtime',
+      'connecting',
+    );
   }
 
   const transport = new WebTransport(url, { protocols });
@@ -93,7 +104,8 @@ export async function openRelaySession<T extends Session>(
     if (stopped) return;
 
     stopped = true;
-    stopError = info.error ?? new Error('Relay connection is closed');
+    stopError =
+      info.error !== undefined ? info.error : new RelayError('CLOSED', 'Relay connection is closed', 'connection');
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', onAbort);
 
@@ -113,7 +125,10 @@ export async function openRelaySession<T extends Session>(
   };
 
   const onAbort = (): void => finish({ error: options.signal?.reason });
-  const timer = setTimeout(() => finish({ error: new Error('Relay connection timed out') }), timeoutMs);
+  const timer = setTimeout(
+    () => finish({ error: new RelayError('CONNECTION_TIMEOUT', 'Relay connection timed out', 'connecting') }),
+    timeoutMs,
+  );
 
   options.signal?.addEventListener('abort', onAbort, { once: true });
 
@@ -121,6 +136,8 @@ export async function openRelaySession<T extends Session>(
     if (stopped) throw stopError;
   };
 
+  let established = false;
+  let usingTransport = false;
   const establish = async (): Promise<{ session: T; transport: MoqtTransport }> => {
     if (!url.searchParams.has('jwt') && options.getToken) {
       const token = await options.getToken();
@@ -132,6 +149,7 @@ export async function openRelaySession<T extends Session>(
     }
 
     assertOpen();
+    usingTransport = true;
     const created = (options.createTransport ?? createBrowserTransport)(url.href, [MOQT_PROTOCOL_ID]);
 
     transport = created.transport;
@@ -152,8 +170,20 @@ export async function openRelaySession<T extends Session>(
     assertOpen();
 
     session = createSession(transport, {
-      onClosed: finish,
-      onGoaway: () => finish({ error: new Error('Relay requested session migration; open a new connection') }),
+      onClosed: (info) =>
+        finish(
+          info.error === undefined
+            ? info
+            : { error: transportError(info.error, established ? 'connection' : 'connecting') },
+        ),
+      onGoaway: () =>
+        finish({
+          error: new RelayError(
+            'GOAWAY',
+            'Relay requested session migration; open a new connection',
+            established ? 'connection' : 'connecting',
+          ),
+        }),
     });
 
     await session.ready;
@@ -167,11 +197,13 @@ export async function openRelaySession<T extends Session>(
     connected = await Promise.race([establish(), interrupted]);
     assertOpen();
   } catch (error) {
-    finish({ error });
-    throw error;
+    const failure = stopped ? stopError : usingTransport ? transportError(error, 'connecting') : error;
+    finish({ error: failure });
+    throw failure;
   }
 
   clearTimeout(timer);
+  established = true;
 
   return {
     session: connected.session,
