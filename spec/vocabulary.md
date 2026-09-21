@@ -209,16 +209,16 @@ names from the original examples; the mappings below are explicit.
 | Compose source URL | `composeMoqSource` / `ComposeMoqSourceOptions` | `compose_player_url` keyword arguments |
 | Escape UTF-8 component | `encodeNameComponent` | `encode_name_component` |
 | Encode namespace plus track name | `encodeNamespaceName` | `encode_namespace_name` |
-| H.264 configuration record | `H264Config` | `H264Config` |
-| Configuration from Annex B | `H264Config.fromAnnexb` | `H264Config.from_annexb` |
-| Configuration bytes / codec string | `H264Config.avcc` / `.codec` | `H264Config.avcc` / `.codec` |
-| Configuration's access-unit conversion | `H264Config.toAvcc` | `H264Config.to_avcc` |
-| Split Annex B NALs | `iterAnnexbNalUnits` | `iter_annexb_nal_units` |
-| NAL type | `nalUnitType` | `nal_unit_type` |
-| Extract SPS/PPS | `extractParameterSets` | `extract_parameter_sets` |
-| Build avcC | `buildAvcc` | `build_avcc` |
+| H.264 configuration record | — (Python only) | `H264Config` |
+| Configuration from Annex B | — (Python only) | `H264Config.from_annexb` |
+| Configuration bytes / codec string | — (Python only) | `H264Config.avcc` / `.codec` |
+| Configuration's access-unit conversion | — (Python only) | `H264Config.to_avcc` |
+| Split Annex B NALs | — (Python only) | `iter_annexb_nal_units` |
+| NAL type | — (Python only) | `nal_unit_type` |
+| Extract SPS/PPS | — (Python only) | `extract_parameter_sets` |
+| Build avcC | — (Python only) | `build_avcc` |
 | Codec string from avcC header | `avcCodecString` | `avc_codec_string` |
-| Convert Annex B access unit | `annexbToAvcc` | `annexb_to_avcc` |
+| Convert Annex B access unit | — (Python only) | `annexb_to_avcc` |
 
 Constants use the same spelling in both languages: `LOC_DOCUMENT`, `MSF_DOCUMENT`,
 `MSF_CATALOG_VERSION`, `MICROSECONDS_PER_SECOND`, `CATALOG_TRACK`, `VIDEO_TRACK`, `AUDIO_TRACK`,
@@ -229,3 +229,8 @@ Python also retains the example's `TRACK_TIMESCALE_PROPERTIES` as a tuple; new c
 Track fields use camelCase in TypeScript and snake_case in Python (`initData` / `init_data`,
 `channelConfig` / `channel_config`). Catalog generation time is `generatedAt` / `generated_at_ms`.
 Media publishing-handle and reader names remain provisional.
+
+The optional TypeScript-only `@mux/moq-mediabunny` integration exports
+`videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`, `packetToLocFrame`, `LocFrame`, and
+`PacketToLocFrameOptions`. These consume public Mediabunny packets/WebCodecs decoder configs;
+Python keeps its PyAV Annex B conversion helpers.

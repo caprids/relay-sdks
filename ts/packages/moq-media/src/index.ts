@@ -6,15 +6,7 @@ export {
   type MsfCatalogInput,
   type VideoTrackInfo,
 } from './catalog.js';
-export {
-  annexbToAvcc,
-  avcCodecString,
-  buildAvcc,
-  extractParameterSets,
-  H264Config,
-  iterAnnexbNalUnits,
-  nalUnitType,
-} from './h264.js';
+export { avcCodecString } from './h264.js';
 export {
   AUDIO_TRACK,
   CATALOG_TRACK,

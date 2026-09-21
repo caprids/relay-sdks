@@ -11,6 +11,19 @@ not runnable stage 1 examples. See the format packages' READMEs for current usag
 `buildMsfCatalog` for UTF-8 bytes. The internal TypeScript parser supports builder round-trip tests;
 player presentation projection and delta updates are not part of this extraction.
 
+## TypeScript input integration
+
+Stage 1 now includes an optional `@mux/moq-mediabunny` adapter and a
+[typed file-publishing example](../ts/examples/mediabunny/README.md). Mediabunny owns demuxing and
+encoding; our adapter consumes its public encoded packets and decoder configs. LOC properties,
+MSF catalogs, and source URLs remain in `@mux/moq-media`, with no Mediabunny dependency.
+
+The original symmetric H.264 helper proposal below is narrowed: TypeScript retains avcC codec-header
+inspection and consumes supplied decoder configuration and length-prefixed packets. Annex B
+splitting, SPS/PPS reconstruction, and conversion stay Python-only, where the PyAV example needs
+them. The optional adapter currently accepts AVC with four-byte NAL lengths and Opus. Grouping,
+catalog serving, demand, and pacing remain example code; this does not implement stage 2.
+
 ## What a media publisher has to know today
 
 The product SDKs stop at bytes, groups, and demand. `behavior.md` says so on purpose: "The SDK adds

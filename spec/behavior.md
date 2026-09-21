@@ -345,7 +345,7 @@ The media pins in `protocol.json` and exact bytes in `vectors/media.json` apply 
   Source composition accepts explicit `https://` or `moqt://` URLs without a fragment or credentials,
   preserves authority/path/query, supplies `/` for an absent path, defaults to the `catalog` track,
   and percent-escapes an optional `c4m` token using RFC 3986 unreserved characters.
-- H.264 helpers accept three- or four-byte Annex B start codes, omit Annex B padding zeros,
+- Python H.264 helpers accept three- or four-byte Annex B start codes, omit Annex B padding zeros,
   extract SPS/PPS, construct a four-byte-length avcC, and convert access units to four-byte NAL
   lengths. SPS/PPS/AUD are dropped by default; retaining them is an explicit option. avcC creation
   rejects missing/wrong-kind parameter sets, more than 31 SPS or 255 PPS, and NALs over 65,535 bytes.
@@ -353,6 +353,13 @@ The media pins in `protocol.json` and exact bytes in `vectors/media.json` apply 
   rejected until their SPS-derived chroma/bit-depth extension fields are implemented. Encoder-generated
   avcC records of other profiles can still be passed to the catalog builder. The extension requirement
   is reflected in [FFmpeg's avcC writer](https://patches.ffmpeg.org/doxygen/4.4/avc_8c_source.html).
+- TypeScript consumes encoder/demuxer-provided avcC and length-prefixed packets, and exposes only
+  `avcCodecString` for header inspection. It does not expose Annex B parsing or construction APIs.
+  The optional `@mux/moq-mediabunny` adapter maps public Mediabunny packets and decoder configs
+  for four-byte-length AVC and Opus. It copies configuration views, borrows packet payloads,
+  preserves decode order and presentation timestamps, and attaches configs only to key packets.
+  Metadata-only packets are rejected. A caller-supplied shared integer timestamp offset can
+  normalize negative timestamps; the final timestamp still follows the LOC safe-integer contract.
 - Encoding, demand handling, catalog serving, GOP grouping, recovery, pacing, and time-based frame
   dropping remain application responsibilities in stage 1. Publishing handles and public readers
   are not implemented. The TypeScript package keeps an internal independent Video.js catalog
@@ -360,6 +367,8 @@ The media pins in `protocol.json` and exact bytes in `vectors/media.json` apply 
 
 ## Package boundaries
 
+- The optional TypeScript Mediabunny adapter depends on the media format package and declares
+  Mediabunny as a peer. Neither the core, format package, nor product SDK depends on the adapter.
 - The generic media format package depends only on the core, imports no product or transport
   library, and owns no encoder. The core imports nothing from the media package.
 

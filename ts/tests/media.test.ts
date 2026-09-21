@@ -34,9 +34,7 @@ interface Vectors {
   }[];
   urls: { name: string; origin: string; namespace: string[]; token?: string; trackName?: string; url: string }[];
   urlErrors: { origin: string; namespace: string[] }[];
-  h264: { name: string; annexb: string; sps: string[]; pps: string[]; avcc: string; codec: string }[];
-  h264Errors: { name: string; sps: string[]; pps: string[] }[];
-  accessUnits: { name: string; annexb: string; avcc: string; allAvcc: string }[];
+  h264: { name: string; avcc: string; codec: string }[];
 }
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/media.json', import.meta.url), 'utf8')) as Vectors;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -106,29 +104,8 @@ describe('shared media vectors', () => {
       expect(() => media.composeMoqSource(vector.origin, vector.namespace)).toThrow());
   }
   for (const vector of vectors.h264) {
-    it(`H.264 ${vector.name}`, () => {
-      const data = bytes(vector.annexb);
-      const [sps, pps] = media.extractParameterSets(data);
-      expect(sps.map(hex)).toEqual(vector.sps);
-      expect(pps.map(hex)).toEqual(vector.pps);
-      const config = media.H264Config.fromAnnexb(data);
-      expect(hex(config.avcc)).toBe(vector.avcc);
-      expect(config.codec).toBe(vector.codec);
-    });
-  }
-  for (const vector of vectors.h264Errors) {
-    it(`rejects avcC ${vector.name}`, () => {
-      expect(() => media.buildAvcc(vector.sps.map(bytes), vector.pps.map(bytes))).toThrow(/profiles/);
-      const annexb = bytes([...vector.sps, ...vector.pps].map((nal) => `000001${nal}`).join(''));
-      expect(() => media.H264Config.fromAnnexb(annexb)).toThrow(/profiles/);
-    });
-  }
-  for (const vector of vectors.accessUnits) {
-    it(`access unit ${vector.name}`, () => {
-      const data = bytes(vector.annexb);
-      expect(hex(media.annexbToAvcc(data))).toBe(vector.avcc);
-      expect(hex(media.annexbToAvcc(data, { dropParameterSets: false }))).toBe(vector.allAvcc);
-      expect(hex(new media.H264Config(bytes('0142c014')).toAvcc(data))).toBe(vector.avcc);
+    it(`AVC codec string ${vector.name}`, () => {
+      expect(media.avcCodecString(bytes(vector.avcc))).toBe(vector.codec);
     });
   }
 });
@@ -142,19 +119,8 @@ it.each([
 ])('rejects LOC timestamp %s and timescale %s', (timestamp, timescale) => {
   expect(() => media.locProperties(timestamp, { timescale })).toThrow();
 });
-it('checks parameter-set type, count and length', () => {
-  const sps = bytes('6742c014');
-  const pps = bytes('68');
-  for (const [ss, ps] of [
-    [[], [pps]],
-    [[sps], []],
-    [new Array<Uint8Array>(32).fill(sps), [pps]],
-    [[sps], new Array<Uint8Array>(256).fill(pps)],
-    [[pps], [pps]],
-    [[sps], [new Uint8Array(65536).fill(0x68)]],
-  ] as const) {
-    expect(() => media.buildAvcc(ss, ps)).toThrow();
-  }
+it.each(['', '0142', '0242c014'])('rejects invalid avcC header %s', (record) => {
+  expect(() => media.avcCodecString(bytes(record))).toThrow();
 });
 it('pins every media constant', () => {
   const spec = JSON.parse(readFileSync(new URL('../../spec/protocol.json', import.meta.url), 'utf8')) as {

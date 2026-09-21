@@ -20,3 +20,6 @@ markers. The regression tests under `ts/packages/moq-core/src/tests` are the see
 
 Media vectors use decimal strings for numeric inputs and hex for binary data; `json` is the exact
 expected UTF-8 catalog text. Property type IDs are small JSON integers. Both SDKs consume every case.
+
+The AVC codec-header vectors apply to both languages. Annex B construction/error and access-unit
+conversion vectors are Python-only; TypeScript consumes supplied avcC and length-prefixed packets.

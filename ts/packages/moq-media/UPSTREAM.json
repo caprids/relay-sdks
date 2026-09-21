@@ -12,7 +12,7 @@
     "Catalog building has one video track, default names and Opus defaults, validation, and avcC-derived H.264 codec strings. It emits UTF-8 bytes.",
     "Source composition accepts explicit https/moqt URLs and namespace tuples, with RFC 3986 token escaping.",
     "The internal catalog parser retains the independent-catalog path for builder round-trip tests; player presentation types, variable substitution, and delta updates are omitted. It is not a public reader API.",
-    "H.264 Annex B helpers and LOC properties are ported from the Relay Python example, with validation shared through spec vectors."
+    "LOC properties are ported from the Relay Python example, with validation shared through spec vectors. TypeScript consumes supplied avcC records and retains only codec-header inspection; Annex B conversion remains Python-only."
   ],
   "migration": "Attributed extraction for reuse by Video.js. Changes to format behavior should migrate upstream."
 }

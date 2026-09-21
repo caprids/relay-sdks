@@ -14,12 +14,11 @@ LOC helpers accept nonnegative microsecond timestamps and a positive timescale, 
 (up to 2^53−1). A custom timescale rounds to the nearest tick, ties upward. Pass decoder configs only
 on keyframes, declare the same timescale on the track, and keep init data in the catalog too.
 
-H.264 helpers split Annex B, build avcC from SPS/PPS, and convert access units to four-byte NAL
-length prefixes. Conversion removes SPS, PPS, and AUD by default, as `avc1` requires. Codec-string
-inspection checks the avcC version/header; it does not validate SPS semantics or decode a bitstream.
-Construction from SPS/PPS supports Baseline, Main, and Extended profiles. Other profiles require
-extension fields and are rejected; callers can still supply an encoder-generated High-profile avcC
-to the catalog builder.
+TypeScript consumes encoder/demuxer-provided decoder configuration and length-prefixed H.264
+packets. `avcCodecString` inspects the avcC header; it does not parse SPS or validate a bitstream.
+Annex B parsing, SPS/PPS reconstruction, and access-unit conversion are not exposed in TypeScript.
+For Mediabunny inputs, use the optional [packet adapter](../moq-mediabunny/README.md). Python retains
+its Annex B helpers for the PyAV publisher.
 
 Shared vectors live in `spec/vectors/media.json`. See `UPSTREAM.json` for Video.js provenance.
 Publishing handles and public readers are later stages of `spec/media-layer.md`.
