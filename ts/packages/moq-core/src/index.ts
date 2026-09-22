@@ -1,5 +1,6 @@
 export type { KeyValuePair, LocationFilter, MessageParameters, TrackNamespace } from './protocol/control-messages.js';
 export {
+  encodeRequestUpdate,
   MAX_NAMESPACE_FIELDS,
   MOQT_PROTOCOL_ID,
   PUBLISH_DONE_STATUS,

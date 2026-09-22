@@ -3,7 +3,7 @@
  * recording consumers. Relay behaviour over a real connection stays in connect.test.ts and
  * subscription-events.test.ts.
  */
-import type { RequestError, SubscriptionHandlers } from '@mux/moq-core';
+import type { MessageParameters, RequestError, SubscriptionHandlers } from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   closureObservers,
@@ -12,6 +12,7 @@ import {
   type SubscriptionEnd,
   type SubscriptionEvent,
   synchronousCallback,
+  UPDATE_QUEUE_BOUND,
 } from '../src/subscription.js';
 
 afterEach(() => {
@@ -98,10 +99,11 @@ describe('subscription: translating the core once', () => {
     expect(subscription.end).toBeUndefined();
   });
 
-  it('forwards update() to the core handle', () => {
+  it('forwards update() to the core handle once the subscription is accepted', () => {
     const h = harness();
     const subscription = createSubscription(h.deps);
-    subscription.update({ forward: 0 } as never);
+    h.core().onOk?.(ok);
+    subscription.update({ forward: 0 });
     expect(h.update).toHaveBeenCalledWith({ forward: 0 });
   });
 
@@ -227,6 +229,74 @@ describe('closure observers', () => {
     const late = vi.fn();
     observe(late);
     expect(late).toHaveBeenCalledExactlyOnceWith('lost');
+  });
+});
+
+describe('subscription: updates before acceptance', () => {
+  it('queues updates issued before SUBSCRIBE_OK, sends them in order once accepted, then forwards directly', () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    subscription.update({ forward: 0 });
+    subscription.update({ forward: 1 });
+    expect(h.update).not.toHaveBeenCalled();
+    h.core().onOk?.(ok);
+    expect(h.update.mock.calls).toEqual([[{ forward: 0 }], [{ forward: 1 }]]);
+    subscription.update({ subscriberPriority: 3 });
+    expect(h.update).toHaveBeenCalledTimes(3);
+  });
+
+  it('refuses a further queued update with UPDATE_QUEUE_FULL once the bound is reached, keeping the others', () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    for (let priority = 0; priority < UPDATE_QUEUE_BOUND; priority++)
+      subscription.update({ subscriberPriority: priority });
+    expect(() => subscription.update({ forward: 0 })).toThrowError(
+      expect.objectContaining({ code: 'UPDATE_QUEUE_FULL', phase: 'subscription' }),
+    );
+    h.core().onOk?.(ok);
+    expect(h.update).toHaveBeenCalledTimes(UPDATE_QUEUE_BOUND);
+  });
+
+  it('rejects a malformed update synchronously and leaves the subscription and its queue intact', () => {
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    subscription.update({ forward: 0 });
+    expect(() => subscription.update({ expires: -1 })).toThrow(RangeError);
+    h.core().onOk?.(ok);
+    expect(h.update.mock.calls).toEqual([[{ forward: 0 }]]);
+    expect(r.events.map((event) => event.type)).toEqual(['subscribed']);
+    expect(subscription.end).toBeUndefined();
+  });
+
+  it('queues a snapshot, so mutating the caller object afterwards does not change what is sent', () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    const parameters: MessageParameters = { forward: 0, authorizationTokens: [new Uint8Array([1])] };
+    subscription.update(parameters);
+    parameters.forward = 1;
+    parameters.authorizationTokens?.[0]?.set([9]);
+    h.core().onOk?.(ok);
+    expect(h.update).toHaveBeenCalledExactlyOnceWith({ forward: 0, authorizationTokens: [new Uint8Array([1])] });
+  });
+
+  it('discards queued updates when the subscription ends before acceptance', () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    subscription.update({ forward: 0 });
+    h.core().onError?.(requestError);
+    expect(h.update).not.toHaveBeenCalled();
+  });
+
+  it('throws CLOSED for an update after the subscription ended', () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    h.core().onOk?.(ok);
+    subscription.cancel(new Error('done'));
+    expect(() => subscription.update({ forward: 0 })).toThrowError(
+      expect.objectContaining({ code: 'CLOSED', phase: 'subscription' }),
+    );
+    expect(h.update).not.toHaveBeenCalled();
   });
 });
 

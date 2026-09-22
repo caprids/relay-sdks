@@ -9,15 +9,16 @@
  * from the package: the public handle keeps the core `Subscription` shape, and readiness and
  * termination (issue #68) and the pre-acceptance `update()` queue (issue #69) land here later.
  */
-import type {
-  Goaway,
-  MessageParameters,
-  MoqtObject,
-  PublishDone,
-  RequestError,
-  SubscribeOk,
-  Subscription,
-  SubscriptionHandlers,
+import {
+  encodeRequestUpdate,
+  type Goaway,
+  type MessageParameters,
+  type MoqtObject,
+  type PublishDone,
+  type RequestError,
+  type SubscribeOk,
+  type Subscription,
+  type SubscriptionHandlers,
 } from '@mux/moq-core';
 import { RelayError } from './errors.js';
 
@@ -123,6 +124,12 @@ export function synchronousCallback(
   };
 }
 
+/**
+ * How many `update()` calls may wait for SUBSCRIBE_OK. REQUEST_UPDATE is legal only on an accepted
+ * subscription (draft-ietf-moq-transport-20 §5.1), so earlier updates queue here in order.
+ */
+export const UPDATE_QUEUE_BOUND = 8;
+
 export function createSubscription(
   deps: SubscriptionDependencies,
   initial: readonly SubscriptionConsumer[] = [],
@@ -132,10 +139,12 @@ export function createSubscription(
   let end: SubscriptionEnd | undefined;
   let core: Subscription | undefined;
   let removeClosed: () => void = () => {};
+  const queuedUpdates: MessageParameters[] = [];
 
   const finish = (next: SubscriptionEnd) => {
     if (end) return;
     end = next;
+    queuedUpdates.length = 0;
     removeClosed();
     // Every ending cancels the core handle: after a REQUEST_ERROR or closure the core has already
     // dropped the request, and cancelling then is harmless; after a local cancel it is the point.
@@ -146,7 +155,18 @@ export function createSubscription(
   };
   const deliver = (event: SubscriptionEvent) => {
     if (end) return;
-    if (event.type === 'subscribed') accepted = true;
+    if (event.type === 'subscribed') {
+      accepted = true;
+      // Now Established: the updates that waited go out in order, before consumers hear of it.
+      try {
+        for (const parameters of queuedUpdates.splice(0)) core?.update(parameters);
+      } catch (error) {
+        // Unreachable after enqueue-time validation. A throw here would escape into the core's
+        // request reader and disable the subscription silently; end it loudly instead.
+        finish({ cause: 'cancelled', accepted, error });
+        return;
+      }
+    }
     for (const consumer of [...consumers]) consumer.event(event);
   };
   /** Read through a call: the core's callbacks can end the subscription inside deps.subscribe(). */
@@ -188,7 +208,29 @@ export function createSubscription(
       return handle().requestId;
     },
     update(parameters) {
-      handle().update(parameters);
+      if (ending()) {
+        throw new RelayError(
+          'CLOSED',
+          'Subscription has ended; open a new one to change what you receive',
+          'subscription',
+        );
+      }
+      if (accepted) {
+        handle().update(parameters);
+        return;
+      }
+      if (queuedUpdates.length >= UPDATE_QUEUE_BOUND) {
+        throw new RelayError(
+          'UPDATE_QUEUE_FULL',
+          `More than ${UPDATE_QUEUE_BOUND} updates are waiting for the subscription to be accepted; await onSubscribed before updating again`,
+          'subscription',
+        );
+      }
+      // A malformed update must fail here, where the caller can see it, not during the flush on
+      // SUBSCRIBE_OK. The queue holds a snapshot, so later mutation of the caller's object cannot
+      // change what is sent, as an immediate send would have serialized it at once.
+      encodeRequestUpdate(0, parameters);
+      queuedUpdates.push(structuredClone(parameters));
     },
     cancel(reason) {
       finish({ cause: 'cancelled', accepted, error: reason });

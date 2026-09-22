@@ -300,6 +300,19 @@ it.each(['onSubscribed', 'onPublisherDone'] as const)(
   },
 );
 
+it('sends an update issued before acceptance once SUBSCRIBE_OK arrives, under its own request ID', async () => {
+  const { fake, connection } = await setup();
+  const subscription = connection.subscribe({ namespace: ['test'], track: 'events' });
+  subscription.update({ forward: 0 });
+  const request = await fake.nextRequestStream();
+  await request.firstMessage;
+  expect(request.messages).toHaveLength(1);
+  await request.send(encodeSubscribeOk(11));
+  await vi.waitFor(() => expect(request.messages).toHaveLength(2));
+  expect(request.messages[1]).toMatchObject({ kind: 'request-update', parameters: { forward: 0 } });
+  expect(request.messages[1]).not.toMatchObject({ requestId: 0 });
+});
+
 it('preserves the handler receiver when mapping product callback names', async () => {
   const { fake, connection } = await setup();
   const handlers = {
