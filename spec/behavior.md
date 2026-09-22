@@ -44,6 +44,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
 | `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
 | `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
+| `UPDATE_QUEUE_FULL` | More than eight updates were issued before the subscription was accepted; await acceptance (`onSubscribed` / `on_subscribed`) before updating again. Nothing was sent for the refused update. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
@@ -107,6 +108,15 @@ publishing operations; their connection phase does not establish whether those w
   has no application inactivity deadline. Keeping an idle transport connected depends on peer
   traffic or transport-provided keepalive; the SDK does not schedule its own keepalive. The Python
   transport uses aioquic's default 60-second local idle timeout, subject to peer negotiation.
+- `update()` sends REQUEST_UPDATE, which the draft allows only on an accepted subscription
+  ([draft-20 Section 5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1)).
+  An update issued before acceptance is queued in order and sent when SUBSCRIBE_OK arrives; at most
+  eight wait, and a further one raises `UPDATE_QUEUE_FULL` without sending anything. A subscription
+  that ends before acceptance discards its queue, and its ending is what the application observes.
+  An update on an ended subscription raises `CLOSED`. Each update consumes its own Request ID, and
+  the relay's acknowledgement arrives as `onUpdateOk` / `on_update_ok`; a refused update arrives as
+  REQUEST_ERROR and ends the subscription ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+  Implemented in both SDKs.
 - A subscribe for a namespace the relay has not seen announced is rejected with request error 404,
   not parked; a namespace freshly announced can still answer 404 for about a second, so applications
   retry that rejection rather than treat it as fatal.

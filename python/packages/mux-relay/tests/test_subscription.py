@@ -10,9 +10,10 @@ from unittest.mock import Mock
 
 import pytest
 
-from moq_core import Closed, RequestError, SubscribeOk, Subscription, SubscriptionHandlers
-from mux_relay import RelayClosedError
+from moq_core import Closed, MessageParameters, RequestError, SubscribeOk, Subscription, SubscriptionHandlers
+from mux_relay import RelayClosedError, RelayError
 from mux_relay._subscription import (
+    UPDATE_QUEUE_BOUND,
     ProductSubscription,
     SubscribedEvent,
     SubscriptionDependencies,
@@ -103,10 +104,13 @@ class TestTranslatingTheCoreOnce:
         assert first.endings == []
         assert subscription.end is None
 
-    async def test_forwards_update_to_the_core_handle(self) -> None:
+    async def test_forwards_update_to_the_core_handle_once_the_subscription_is_accepted(self) -> None:
         h = Harness()
         subscription = ProductSubscription(h.deps)
-        parameters = Mock(name="parameters")
+        on_ok = h.core_handlers().on_ok
+        assert on_ok is not None
+        on_ok(OK)
+        parameters = MessageParameters(forward=0)
         subscription.update(parameters)
         h.core.update.assert_called_once_with(parameters)
 
@@ -225,6 +229,59 @@ class TestEndings:
         core.cancel.assert_called_once_with(REQUEST_ERROR)
         assert subscription.request_id == 1
         assert not closed._callbacks
+
+
+class TestUpdatesBeforeAcceptance:
+    async def test_queues_updates_issued_before_subscribe_ok_sends_them_in_order_once_accepted_then_forwards(
+        self,
+    ) -> None:
+        h = Harness()
+        subscription = ProductSubscription(h.deps)
+        first = MessageParameters(forward=0)
+        second = MessageParameters(forward=1)
+        subscription.update(first)
+        subscription.update(second)
+        h.core.update.assert_not_called()
+        on_ok = h.core_handlers().on_ok
+        assert on_ok is not None
+        on_ok(OK)
+        assert [call.args[0] for call in h.core.update.call_args_list] == [first, second]
+        subscription.update(MessageParameters(subscriber_priority=3))
+        assert h.core.update.call_count == 3
+
+    async def test_refuses_a_further_queued_update_with_update_queue_full_once_the_bound_is_reached(self) -> None:
+        h = Harness()
+        subscription = ProductSubscription(h.deps)
+        for priority in range(UPDATE_QUEUE_BOUND):
+            subscription.update(MessageParameters(subscriber_priority=priority))
+        with pytest.raises(RelayError) as failure:
+            subscription.update(MessageParameters(forward=0))
+        assert (failure.value.code, failure.value.phase) == ("UPDATE_QUEUE_FULL", "subscription")
+        on_ok = h.core_handlers().on_ok
+        assert on_ok is not None
+        on_ok(OK)
+        assert h.core.update.call_count == UPDATE_QUEUE_BOUND
+
+    async def test_discards_queued_updates_when_the_subscription_ends_before_acceptance(self) -> None:
+        h = Harness()
+        subscription = ProductSubscription(h.deps)
+        subscription.update(MessageParameters(forward=0))
+        on_error = h.core_handlers().on_error
+        assert on_error is not None
+        on_error(REQUEST_ERROR)
+        h.core.update.assert_not_called()
+
+    async def test_raises_closed_for_an_update_after_the_subscription_ended(self) -> None:
+        h = Harness()
+        subscription = ProductSubscription(h.deps)
+        on_ok = h.core_handlers().on_ok
+        assert on_ok is not None
+        on_ok(OK)
+        subscription.cancel(RuntimeError("done"))
+        with pytest.raises(RelayClosedError) as failure:
+            subscription.update(MessageParameters(forward=0))
+        assert failure.value.phase == "subscription"
+        h.core.update.assert_not_called()
 
 
 class TestSynchronousCallbacks:

@@ -32,7 +32,14 @@ from moq_core import (
     SubscriptionHandlers,
 )
 
-from .errors import RelayClosedError
+from .errors import RelayClosedError, RelayError
+
+UPDATE_QUEUE_BOUND = 8
+"""How many ``update()`` calls may wait for SUBSCRIBE_OK.
+
+REQUEST_UPDATE is legal only on an accepted subscription (draft-ietf-moq-transport-20 §5.1), so
+earlier updates queue in order.
+"""
 
 # ------------------------------------------------------------------ product events
 
@@ -193,11 +200,12 @@ class ProductSubscription(Subscription):
     ``Subscription``; every inherited member is overridden and the core's own slots are never set.
     """
 
-    __slots__ = ("_accepted", "_closed", "_consumers", "_core", "_end")
+    __slots__ = ("_accepted", "_closed", "_consumers", "_core", "_end", "_queued_updates")
 
     def __init__(self, dependencies: SubscriptionDependencies, consumers: Iterable[SubscriptionConsumer] = ()) -> None:
         # Deliberately no super().__init__(): the base's record and session stay unset.
         self._consumers: list[SubscriptionConsumer] = list(consumers)
+        self._queued_updates: list[MessageParameters] = []
         self._accepted = False
         self._end: SubscriptionEnd | None = None
         self._core: Subscription | None = None
@@ -238,7 +246,22 @@ class ProductSubscription(Subscription):
         return self._handle().request_id
 
     def update(self, parameters: MessageParameters) -> None:
-        self._handle().update(parameters)
+        """Send REQUEST_UPDATE, or queue it in order until the relay accepts the subscription."""
+        if self._end is not None:
+            raise RelayClosedError(
+                "Subscription has ended; open a new one to change what you receive", phase="subscription"
+            )
+        if self._accepted:
+            self._handle().update(parameters)
+            return
+        if len(self._queued_updates) >= UPDATE_QUEUE_BOUND:
+            raise RelayError(
+                f"More than {UPDATE_QUEUE_BOUND} updates are waiting for the subscription to be accepted; "
+                "await on_subscribed before updating again",
+                code="UPDATE_QUEUE_FULL",
+                phase="subscription",
+            )
+        self._queued_updates.append(parameters)
 
     def cancel(self, reason: object = None) -> None:
         self._finish(SubscriptionEnd("cancelled", self._accepted, reason))
@@ -285,6 +308,11 @@ class ProductSubscription(Subscription):
             return
         if isinstance(event, SubscribedEvent):
             self._accepted = True
+            # Now Established: the updates that waited go out in order, before consumers hear of it.
+            queued, self._queued_updates = self._queued_updates, []
+            if self._core is not None:
+                for parameters in queued:
+                    self._core.update(parameters)
         for consumer in list(self._consumers):
             consumer.event(event)
 
@@ -292,6 +320,7 @@ class ProductSubscription(Subscription):
         if self._end is not None:
             return
         self._end = end
+        self._queued_updates.clear()
         self._closed.remove_done_callback(self._connection_closed)
         # Every ending cancels the core handle: after a REQUEST_ERROR or closure the core has already
         # dropped the request, and cancelling then is harmless; after a local cancel it is the point.

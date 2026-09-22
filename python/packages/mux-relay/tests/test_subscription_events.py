@@ -10,8 +10,13 @@ from core_helpers.fake_transport import FakeTransport, create_fake_transport, en
 from core_helpers.streams import StreamClosedError
 from core_helpers.waiting import settle, wait_for
 
-from moq_core import MoqtObject
-from moq_core.control_messages import encode_publish_done, encode_request_error, encode_subscribe_ok
+from moq_core import MessageParameters, MoqtObject
+from moq_core.control_messages import (
+    RequestUpdate,
+    encode_publish_done,
+    encode_request_error,
+    encode_subscribe_ok,
+)
 from mux_relay import (
     CancellationToken,
     ConnectingTransport,
@@ -365,6 +370,23 @@ async def test_direct_handoff_is_outside_queue_capacity_and_survives_teardown(ov
     assert (await pending).type == "update_ok"
     with pytest.raises(SubscriptionOverflowError if overflow else StopAsyncIteration):
         await anext(events)
+
+
+async def test_sends_an_update_issued_before_acceptance_once_subscribe_ok_arrives(
+    connected: tuple[FakeTransport, RelaySubscriber],
+) -> None:
+    fake, connection = connected
+    subscription = connection.subscribe(["test"], "events")
+    subscription.update(MessageParameters(forward=0))
+    request = await fake.next_request_stream()
+    await request.first_message
+    assert len(request.messages) == 1
+    await request.send(encode_subscribe_ok(11))
+    await wait_for(lambda: len(request.messages) == 2)
+    update = request.messages[1]
+    assert isinstance(update, RequestUpdate)
+    assert update.parameters.forward == 0
+    assert update.request_id != 0
 
 
 async def test_handlers_are_snapshotted(connected: tuple[FakeTransport, RelaySubscriber]) -> None:

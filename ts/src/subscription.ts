@@ -123,6 +123,12 @@ export function synchronousCallback(
   };
 }
 
+/**
+ * How many `update()` calls may wait for SUBSCRIBE_OK. REQUEST_UPDATE is legal only on an accepted
+ * subscription (draft-ietf-moq-transport-20 §5.1), so earlier updates queue here in order.
+ */
+export const UPDATE_QUEUE_BOUND = 8;
+
 export function createSubscription(
   deps: SubscriptionDependencies,
   initial: readonly SubscriptionConsumer[] = [],
@@ -132,10 +138,12 @@ export function createSubscription(
   let end: SubscriptionEnd | undefined;
   let core: Subscription | undefined;
   let removeClosed: () => void = () => {};
+  const queuedUpdates: MessageParameters[] = [];
 
   const finish = (next: SubscriptionEnd) => {
     if (end) return;
     end = next;
+    queuedUpdates.length = 0;
     removeClosed();
     // Every ending cancels the core handle: after a REQUEST_ERROR or closure the core has already
     // dropped the request, and cancelling then is harmless; after a local cancel it is the point.
@@ -146,7 +154,11 @@ export function createSubscription(
   };
   const deliver = (event: SubscriptionEvent) => {
     if (end) return;
-    if (event.type === 'subscribed') accepted = true;
+    if (event.type === 'subscribed') {
+      accepted = true;
+      // Now Established: the updates that waited go out in order, before consumers hear of it.
+      for (const parameters of queuedUpdates.splice(0)) core?.update(parameters);
+    }
     for (const consumer of [...consumers]) consumer.event(event);
   };
   /** Read through a call: the core's callbacks can end the subscription inside deps.subscribe(). */
@@ -188,7 +200,25 @@ export function createSubscription(
       return handle().requestId;
     },
     update(parameters) {
-      handle().update(parameters);
+      if (ending()) {
+        throw new RelayError(
+          'CLOSED',
+          'Subscription has ended; open a new one to change what you receive',
+          'subscription',
+        );
+      }
+      if (accepted) {
+        handle().update(parameters);
+        return;
+      }
+      if (queuedUpdates.length >= UPDATE_QUEUE_BOUND) {
+        throw new RelayError(
+          'UPDATE_QUEUE_FULL',
+          `More than ${UPDATE_QUEUE_BOUND} updates are waiting for the subscription to be accepted; await onSubscribed before updating again`,
+          'subscription',
+        );
+      }
+      queuedUpdates.push(parameters);
     },
     cancel(reason) {
       finish({ cause: 'cancelled', accepted, error: reason });

@@ -176,6 +176,14 @@ resets and connection closure explicitly; this API makes no exactly-once or gap-
 `onPublisherDone` is the publisher's control notification: it may precede trailing objects in
 transit, and it does not end the subscription. Cancel the subscription when you are finished with it.
 
+`subscription.update(parameters)` changes what an accepted subscription delivers (REQUEST_UPDATE);
+`subscription.update({ forward: 0 })` pauses forwarding, for example, and the relay acknowledges
+through `onUpdateOk`. The protocol allows updates only after acceptance, so an update issued before
+`onSubscribed` is queued in order and sent as soon as the relay accepts; at most eight wait, and a
+further one throws a `RelayError` with code `UPDATE_QUEUE_FULL`. Updating an ended subscription
+throws `CLOSED`. A refused update arrives as `onError` and ends the subscription
+([#94](https://github.com/muxinc/relay-sdks/issues/94)).
+
 Re-subscribing after `onPublisherDone` creates a new request and can replay cached objects followed
 by another done notification while the publisher is absent. Apply retry backoff to done callbacks
 as well as retryable request errors, and define any continuity policy in the application. See

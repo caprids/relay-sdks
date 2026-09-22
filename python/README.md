@@ -166,6 +166,14 @@ or gap-free delivery promise. `on_publisher_done` is the publisher's control not
 precede trailing objects in transit, and it does not end the subscription. Cancel the subscription
 when you are finished with it.
 
+`subscription.update(parameters)` changes what an accepted subscription delivers (REQUEST_UPDATE);
+`subscription.update(MessageParameters(forward=0))` pauses forwarding, for example, and the relay
+acknowledges through `on_update_ok`. The protocol allows updates only after acceptance, so an update
+issued before `on_subscribed` is queued in order and sent as soon as the relay accepts; at most eight
+wait, and a further one raises a `RelayError` with code `UPDATE_QUEUE_FULL`. Updating an ended
+subscription raises `RelayClosedError`. A refused update arrives as `on_error` and ends the
+subscription ([#94](https://github.com/muxinc/relay-sdks/issues/94)).
+
 Re-subscribing after `on_publisher_done` creates a new request and can replay cached objects followed
 by another done notification while the publisher is absent. Apply retry backoff to done callbacks
 as well as retryable request errors, and define any continuity policy in the application. See
