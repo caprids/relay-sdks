@@ -16,6 +16,7 @@ import asyncio
 import inspect
 import warnings
 from collections.abc import Callable, Iterable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, TypeAlias
 
@@ -31,6 +32,7 @@ from moq_core import (
     Subscription,
     SubscriptionHandlers,
 )
+from moq_core.control_messages import encode_request_update
 
 from .errors import RelayClosedError, RelayError
 
@@ -261,7 +263,11 @@ class ProductSubscription(Subscription):
                 code="UPDATE_QUEUE_FULL",
                 phase="subscription",
             )
-        self._queued_updates.append(parameters)
+        # A malformed update must fail here, where the caller can see it, not during the flush on
+        # SUBSCRIBE_OK. The queue holds a snapshot, so later mutation of the caller's object cannot
+        # change what is sent, as an immediate send would have serialized it at once.
+        encode_request_update(0, parameters)
+        self._queued_updates.append(deepcopy(parameters))
 
     def cancel(self, reason: object = None) -> None:
         self._finish(SubscriptionEnd("cancelled", self._accepted, reason))
@@ -310,9 +316,15 @@ class ProductSubscription(Subscription):
             self._accepted = True
             # Now Established: the updates that waited go out in order, before consumers hear of it.
             queued, self._queued_updates = self._queued_updates, []
-            if self._core is not None:
-                for parameters in queued:
-                    self._core.update(parameters)
+            try:
+                if self._core is not None:
+                    for parameters in queued:
+                        self._core.update(parameters)
+            except Exception as error:
+                # Unreachable after enqueue-time validation. A raise here would escape into the core's
+                # request reader and disable the subscription silently; end it loudly instead.
+                self._finish(SubscriptionEnd("cancelled", True, error))
+                return
         for consumer in list(self._consumers):
             consumer.event(event)
 

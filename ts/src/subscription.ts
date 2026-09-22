@@ -9,15 +9,16 @@
  * from the package: the public handle keeps the core `Subscription` shape, and readiness and
  * termination (issue #68) and the pre-acceptance `update()` queue (issue #69) land here later.
  */
-import type {
-  Goaway,
-  MessageParameters,
-  MoqtObject,
-  PublishDone,
-  RequestError,
-  SubscribeOk,
-  Subscription,
-  SubscriptionHandlers,
+import {
+  encodeRequestUpdate,
+  type Goaway,
+  type MessageParameters,
+  type MoqtObject,
+  type PublishDone,
+  type RequestError,
+  type SubscribeOk,
+  type Subscription,
+  type SubscriptionHandlers,
 } from '@mux/moq-core';
 import { RelayError } from './errors.js';
 
@@ -157,7 +158,14 @@ export function createSubscription(
     if (event.type === 'subscribed') {
       accepted = true;
       // Now Established: the updates that waited go out in order, before consumers hear of it.
-      for (const parameters of queuedUpdates.splice(0)) core?.update(parameters);
+      try {
+        for (const parameters of queuedUpdates.splice(0)) core?.update(parameters);
+      } catch (error) {
+        // Unreachable after enqueue-time validation. A throw here would escape into the core's
+        // request reader and disable the subscription silently; end it loudly instead.
+        finish({ cause: 'cancelled', accepted, error });
+        return;
+      }
     }
     for (const consumer of [...consumers]) consumer.event(event);
   };
@@ -218,7 +226,11 @@ export function createSubscription(
           'subscription',
         );
       }
-      queuedUpdates.push(parameters);
+      // A malformed update must fail here, where the caller can see it, not during the flush on
+      // SUBSCRIBE_OK. The queue holds a snapshot, so later mutation of the caller's object cannot
+      // change what is sent, as an immediate send would have serialized it at once.
+      encodeRequestUpdate(0, parameters);
+      queuedUpdates.push(structuredClone(parameters));
     },
     cancel(reason) {
       finish({ cause: 'cancelled', accepted, error: reason });

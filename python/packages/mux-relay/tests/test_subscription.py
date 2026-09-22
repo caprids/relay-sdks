@@ -262,6 +262,36 @@ class TestUpdatesBeforeAcceptance:
         on_ok(OK)
         assert h.core.update.call_count == UPDATE_QUEUE_BOUND
 
+    async def test_rejects_a_malformed_update_synchronously_and_leaves_the_subscription_and_its_queue_intact(
+        self,
+    ) -> None:
+        h = Harness()
+        r = Recorder()
+        subscription = ProductSubscription(h.deps, [r])
+        subscription.update(MessageParameters(forward=0))
+        with pytest.raises(ValueError, match="out of range"):
+            subscription.update(MessageParameters(expires=-1))
+        on_ok = h.core_handlers().on_ok
+        assert on_ok is not None
+        on_ok(OK)
+        assert [call.args[0] for call in h.core.update.call_args_list] == [MessageParameters(forward=0)]
+        assert types(r.events) == ["subscribed"]
+        assert subscription.end is None
+
+    async def test_queues_a_snapshot_so_mutating_the_caller_object_afterwards_does_not_change_what_is_sent(
+        self,
+    ) -> None:
+        h = Harness()
+        subscription = ProductSubscription(h.deps)
+        parameters = MessageParameters(forward=0, authorization_tokens=[b"\x01"])
+        subscription.update(parameters)
+        parameters.forward = 1
+        parameters.authorization_tokens = [b"\x09"]
+        on_ok = h.core_handlers().on_ok
+        assert on_ok is not None
+        on_ok(OK)
+        h.core.update.assert_called_once_with(MessageParameters(forward=0, authorization_tokens=[b"\x01"]))
+
     async def test_discards_queued_updates_when_the_subscription_ends_before_acceptance(self) -> None:
         h = Harness()
         subscription = ProductSubscription(h.deps)

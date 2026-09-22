@@ -3,7 +3,7 @@
  * recording consumers. Relay behaviour over a real connection stays in connect.test.ts and
  * subscription-events.test.ts.
  */
-import type { RequestError, SubscriptionHandlers } from '@mux/moq-core';
+import type { MessageParameters, RequestError, SubscriptionHandlers } from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   closureObservers,
@@ -255,6 +255,29 @@ describe('subscription: updates before acceptance', () => {
     );
     h.core().onOk?.(ok);
     expect(h.update).toHaveBeenCalledTimes(UPDATE_QUEUE_BOUND);
+  });
+
+  it('rejects a malformed update synchronously and leaves the subscription and its queue intact', () => {
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    subscription.update({ forward: 0 });
+    expect(() => subscription.update({ expires: -1 })).toThrow(RangeError);
+    h.core().onOk?.(ok);
+    expect(h.update.mock.calls).toEqual([[{ forward: 0 }]]);
+    expect(r.events.map((event) => event.type)).toEqual(['subscribed']);
+    expect(subscription.end).toBeUndefined();
+  });
+
+  it('queues a snapshot, so mutating the caller object afterwards does not change what is sent', () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    const parameters: MessageParameters = { forward: 0, authorizationTokens: [new Uint8Array([1])] };
+    subscription.update(parameters);
+    parameters.forward = 1;
+    parameters.authorizationTokens?.[0]?.set([9]);
+    h.core().onOk?.(ok);
+    expect(h.update).toHaveBeenCalledExactlyOnceWith({ forward: 0, authorizationTokens: [new Uint8Array([1])] });
   });
 
   it('discards queued updates when the subscription ends before acceptance', () => {
