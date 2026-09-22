@@ -33,13 +33,13 @@ from getpass import getpass
 from typing import Any
 from urllib.parse import urlsplit
 
+from moq_core import NextObjectFilter
 from mux_relay import (
     DEFAULT_ENDPOINT,
     CancellationToken,
     Closed,
     MessageParameters,
     MoqtObject,
-    NextObjectFilter,
     RelayPublisher,
     RelaySubscriber,
     RelaySubscriptionHandlers,

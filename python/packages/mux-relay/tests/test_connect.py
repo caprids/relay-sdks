@@ -37,9 +37,9 @@ from mux_relay import (
     SubscriptionConnectionClosedError,
     SubscriptionEnd,
     SubscriptionRequestError,
-    WebTransportError,
     connect_relay_subscriber,
 )
+from mux_relay.webtransport import WebTransportError
 
 ENDPOINT = "https://relay.example.com/moq"
 

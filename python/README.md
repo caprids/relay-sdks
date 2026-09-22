@@ -90,6 +90,11 @@ demo's round trip.
 The workspace installs both packages as editable sources. Put a script in `python/` and run it
 with `mise exec -- uv run --project python python python/your_script.py` from the repository root;
 `from mux_relay import connect_relay_subscriber, connect_relay_publisher` resolves the local packages.
+`mux_relay` re-exports the core types its own signatures use (`MoqtObject`, `MessageParameters`,
+`SubscribeOk`, `RequestError`, `Closed`, and the rest of the "Protocol types borrowed from the core"
+row in [the vocabulary](../spec/vocabulary.md)); other protocol types, such as the location filters
+for `subscribe(parameters=...)`, come from the core package, which the workspace installs alongside:
+`from moq_core import AbsoluteLocationFilter`.
 For a separate virtual environment, install **both** local packages together (from the repository root):
 
 ```sh

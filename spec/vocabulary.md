@@ -37,6 +37,12 @@ without a row here is a bug.
 | The track ended and cannot be written again | `writer.closed` | `writer.closed` |
 | Borrowed protocol-level track access for integrations | `subscriber.trackSource` (a `MoqTrackSource`) | `subscriber.track_source` (a `MoqTrackSource`) |
 | The connection ended, and why | `connection.closed` resolves `{ error? }` | `await connection.closed` returns `Closed(error=...)` |
+| Cancel a connection's whole lifetime from outside | `AbortSignal` (platform), given as `signal` | `CancellationToken`, given as `cancellation=`; `Cancelled` is the reason it raises when `cancel()` was given none |
+| Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready)` (`RelayTransportFactory`); `connect_webtransport`, the aioquic factory, by default |
+| Consume one subscription as an async iterator | `subscriber.subscribeEvents(options)` returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
+| One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
+| Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
+| The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
@@ -244,4 +250,7 @@ subscription, not a failure of the caller's await, and the connection's `closed`
 - `RelayTrackWriter`, `RelayGroupWriter`, `write`, `openGroup`, `close`, `abort`: these say what
   they do.
 - Everything in `@mux/moq-core` and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
-  `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it.
+  `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it. The
+  product packages re-export the same short list of core names (the "Protocol types borrowed from
+  the core" row; Python adds `Closed`, which TypeScript spells inline) and nothing else;
+  `python/packages/mux-relay/tests/test_exports.py` checks that list against `ts/src/index.ts`.
