@@ -228,7 +228,13 @@ export function createSubscription(
     // turn. Hold the failure until the turn ends, so a closure that follows is the ending this
     // subscription describes; a genuine rejection is recorded one microtask later.
     queueMicrotask(() => {
-      if (!ending()) finish({ kind: 'rejected', cause: 'request-error', accepted: false, error });
+      if (ending()) return;
+      try {
+        finish({ kind: 'rejected', cause: 'request-error', accepted: false, error });
+      } catch {
+        // Inside the core's request reader a throwing callback is caught and dropped. This runs
+        // outside it, so contain the throw the same way rather than let it escape the microtask.
+      }
     });
   };
   const connectionClosed = (error: unknown) =>

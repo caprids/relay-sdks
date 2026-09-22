@@ -163,6 +163,23 @@ describe('subscription: endings', () => {
     expect(r.endings).toHaveLength(1);
   });
 
+  it('contains a consumer that throws while a deferred rejection is recorded, as the core does', async () => {
+    const h = harness();
+    const throwing: SubscriptionConsumer = {
+      event: () => {},
+      ended: () => {
+        throw new Error('application callback failed');
+      },
+    };
+    const subscription = createSubscription(h.deps, [throwing]);
+    h.core().onError?.(requestError);
+    await turnEnds();
+    // Reaching here without an unhandled error is the point; vitest fails the run on one.
+    expect(subscription.end).toMatchObject({ kind: 'rejected' });
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
+    expect(h.cancel).toHaveBeenCalledExactlyOnceWith(requestError);
+  });
+
   it('lets a closure reported in the same turn as a pending request failure win, as the core orders them', async () => {
     const h = harness();
     const r = recorder();

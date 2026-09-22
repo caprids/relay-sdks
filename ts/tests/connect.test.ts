@@ -16,6 +16,7 @@ import {
   type RelaySubscriber,
   type RelayTransportFactory,
   SubscriptionConnectionClosedError,
+  SubscriptionRequestError,
 } from '../src/index.js';
 import { createFakeTransport, encodeSubgroup } from './helpers/relay.js';
 
@@ -207,6 +208,23 @@ describe('connectRelaySubscriber', () => {
     expect(pendingError).not.toHaveBeenCalled();
     expect(acceptedError).not.toHaveBeenCalled();
     expect(cancelledError).not.toHaveBeenCalled();
+  });
+
+  it('contains an onError that throws on rejection and keeps the connection usable', async () => {
+    const fake = await connectFake();
+    const onError = vi.fn(() => {
+      throw new Error('application callback failed');
+    });
+    const subscription = fake.connection.subscribe({ namespace: ['room'], track: 'missing' }, { onError });
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestError(REQUEST_ERROR_CODE.DOES_NOT_EXIST, 'missing track'));
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
+    await expect(subscription.ended).resolves.toMatchObject({ kind: 'rejected' });
+    expect(onError).toHaveBeenCalledOnce();
+    const other = fake.connection.subscribe({ namespace: ['room'], track: 'present' });
+    await (await fake.nextRequestStream()).send(encodeSubscribeOk(11));
+    await expect(other.subscribed).resolves.toMatchObject({ trackAlias: 11 });
   });
 
   it('reports a transport drop before SUBSCRIBE_OK as a closure with the connection error, not as a rejection', async () => {
