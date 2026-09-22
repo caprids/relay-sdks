@@ -107,10 +107,10 @@ it.each(['reject', 'timeout', 'drop', 'close', 'drop-pending', 'close-pending'] 
       await request.send(encodeSubscribeOk(11));
       await events.next();
     }
+    // A transport drop before SUBSCRIBE_OK is a closure, not a rejection, although the core fails
+    // the pending request first.
     const read = expect(events.next()).rejects.toBeInstanceOf(
-      mode === 'reject' || mode === 'timeout' || mode === 'drop-pending'
-        ? SubscriptionRequestError
-        : SubscriptionConnectionClosedError,
+      mode === 'reject' || mode === 'timeout' ? SubscriptionRequestError : SubscriptionConnectionClosedError,
     );
     if (mode === 'reject') await request.send(encodeRequestError(1, 'denied'));
     if (mode === 'drop' || mode === 'drop-pending') fake.dropTransport();

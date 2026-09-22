@@ -82,7 +82,10 @@ export interface SubscriptionConsumer {
 export interface SubscriptionDependencies {
   /** The core session's subscribe, already bound to the track options. */
   subscribe(handlers: SubscriptionHandlers): Subscription;
-  /** Observe the connection's closure; the returned function removes the observer. */
+  /**
+   * Observe the connection's closure in the turn it happens, ahead of the request failures the
+   * core synthesizes while tearing down. The returned function removes the observer.
+   */
   observeClosed(observer: (error?: unknown) => void): () => void;
 }
 
@@ -130,30 +133,11 @@ export function endError(end: SubscriptionEnd): unknown {
     case 'connection-closed':
       return new SubscriptionConnectionClosedError(end.error);
     case 'cancelled':
-      return (
-        end.error ?? new RelayError('CLOSED', 'Subscription was cancelled before the relay answered', 'subscription')
-      );
+      // Any reason the caller gave stands, null included; only an omitted one gets the default.
+      return end.error === undefined
+        ? new RelayError('CLOSED', 'Subscription was cancelled before the relay answered', 'subscription')
+        : end.error;
   }
-}
-
-/** One promise reaction per connection; individual observers can be removed on early exit. */
-export function closureObservers(closed: Promise<{ error?: unknown }>) {
-  const observers = new Set<(error?: unknown) => void>();
-  let ended = false;
-  let reason: unknown;
-  void closed.then(({ error }) => {
-    ended = true;
-    reason = error;
-    for (const observer of observers) observer(error);
-    observers.clear();
-  });
-  return (observer: (error?: unknown) => void): (() => void) => {
-    if (ended) observer(reason);
-    else observers.add(observer);
-    return () => {
-      observers.delete(observer);
-    };
-  };
 }
 
 /**
@@ -235,8 +219,18 @@ export function createSubscription(
     consumers.clear();
     for (const consumer of consumersToTell) consumer.ended(next);
   };
-  const failRequest = (error: RequestError) =>
-    finish({ kind: accepted ? 'terminated' : 'rejected', cause: 'request-error', accepted, error });
+  const failRequest = (error: RequestError) => {
+    if (accepted) {
+      finish({ kind: 'terminated', cause: 'request-error', accepted: true, error });
+      return;
+    }
+    // The core fails a pending request before it reports the closure that killed it, in the same
+    // turn. Hold the failure until the turn ends, so a closure that follows is the ending this
+    // subscription describes; a genuine rejection is recorded one microtask later.
+    queueMicrotask(() => {
+      if (!ending()) finish({ kind: 'rejected', cause: 'request-error', accepted: false, error });
+    });
+  };
   const connectionClosed = (error: unknown) =>
     finish({ kind: 'terminated', cause: 'connection-closed', accepted, error });
   const cancelWith = (error: unknown) => finish({ kind: 'cancelled', cause: 'cancelled', accepted, error });
@@ -245,16 +239,18 @@ export function createSubscription(
     if (end) return;
     if (event.type === 'subscribed') {
       accepted = true;
+      resolveSubscribed(event.value);
       // Now Established: the updates that waited go out in order, before consumers hear of it.
       try {
         for (const parameters of queuedUpdates.splice(0)) core?.update(parameters);
       } catch (error) {
-        // Unreachable after enqueue-time validation. A throw here would escape into the core's
-        // request reader and disable the subscription silently; end it loudly instead.
+        // Enqueue-time validation encoded each update with this request's id, so a throw here is
+        // a core fault. Letting it escape into the core's request reader would disable the
+        // subscription silently; end it loudly instead. Readiness settled first, so a caller
+        // awaiting it sees the acceptance and then this ending.
         cancelWith(error);
         return;
       }
-      resolveSubscribed(event.value);
     }
     for (const consumer of [...consumers]) consumer.event(event);
   };
@@ -286,8 +282,10 @@ export function createSubscription(
       cancelWith(error);
       throw error;
     }
-    // A source may deliver callbacks synchronously during subscribe(); the handle did not exist
-    // when the ending was recorded, so cancel it now.
+    // A source may end the subscription synchronously during subscribe(), through a closure
+    // observer it invokes at once; the handle did not exist when the ending was recorded, so
+    // cancel it now. A request failure delivered that early is held until the turn ends and
+    // cancels the handle then.
     const endedDuringSubscribe = ending();
     if (endedDuringSubscribe) core.cancel(endedDuringSubscribe.error);
   }
@@ -317,10 +315,11 @@ export function createSubscription(
           'subscription',
         );
       }
-      // A malformed update must fail here, where the caller can see it, not during the flush on
-      // SUBSCRIBE_OK. The queue holds a snapshot, so later mutation of the caller's object cannot
-      // change what is sent, as an immediate send would have serialized it at once.
-      encodeRequestUpdate(0, parameters);
+      // A malformed or oversize update must fail here, where the caller can see it, not during the
+      // flush on SUBSCRIBE_OK, so it is encoded exactly as the flush will encode it. The queue
+      // holds a snapshot, so later mutation of the caller's object cannot change what is sent, as
+      // an immediate send would have serialized it at once.
+      encodeRequestUpdate(handle().requestId, parameters);
       queuedUpdates.push(structuredClone(parameters));
     },
     cancel(reason) {

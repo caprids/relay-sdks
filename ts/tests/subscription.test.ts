@@ -3,10 +3,14 @@
  * recording consumers. Relay behaviour over a real connection stays in connect.test.ts and
  * subscription-events.test.ts.
  */
-import type { MessageParameters, RequestError, SubscriptionHandlers } from '@mux/moq-core';
+import {
+  encodeRequestUpdate,
+  type MessageParameters,
+  type RequestError,
+  type SubscriptionHandlers,
+} from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  closureObservers,
   createSubscription,
   SubscriptionConnectionClosedError,
   type SubscriptionConsumer,
@@ -31,7 +35,7 @@ function recorder() {
   return { consumer, events, endings };
 }
 
-function harness(options: { closedAlready?: unknown; subscribeThrows?: unknown } = {}) {
+function harness(options: { closedAlready?: unknown; subscribeThrows?: unknown; requestId?: number } = {}) {
   let handlers: SubscriptionHandlers | undefined;
   let observer: ((error?: unknown) => void) | undefined;
   const cancel = vi.fn();
@@ -40,7 +44,7 @@ function harness(options: { closedAlready?: unknown; subscribeThrows?: unknown }
   const subscribe = vi.fn((value: SubscriptionHandlers) => {
     if ('subscribeThrows' in options) throw options.subscribeThrows;
     handlers = value;
-    return { requestId: 7, cancel, update };
+    return { requestId: options.requestId ?? 7, cancel, update };
   });
   const observeClosed = vi.fn((value: (error?: unknown) => void) => {
     if ('closedAlready' in options) value(options.closedAlready);
@@ -60,6 +64,9 @@ function harness(options: { closedAlready?: unknown; subscribeThrows?: unknown }
     subscribe,
   };
 }
+
+/** The core records a pending request failure when the turn ends. */
+const turnEnds = () => Promise.resolve();
 
 const requestError: RequestError = { errorCode: 404, retryInterval: 0, reason: 'missing' };
 const ok = { trackAlias: 11, parameters: {}, trackProperties: [] } as unknown as Parameters<
@@ -122,29 +129,55 @@ describe('subscription: translating the core once', () => {
 });
 
 describe('subscription: endings', () => {
-  it.each([
-    ['before', false],
-    ['after', true],
-  ])(
-    'records a REQUEST_ERROR %s acceptance, cancels the core, releases the closure observer, and drops later events',
-    (_, accepted) => {
-      const h = harness();
-      const r = recorder();
-      const subscription = createSubscription(h.deps, [r.consumer]);
-      if (accepted) h.core().onOk?.(ok);
-      h.core().onError?.(requestError);
-      expect(r.endings).toEqual([
-        { kind: accepted ? 'terminated' : 'rejected', cause: 'request-error', accepted, error: requestError },
-      ]);
-      expect(subscription.end).toEqual(r.endings[0]);
-      expect(h.cancel).toHaveBeenCalledExactlyOnceWith(requestError);
-      expect(h.remove).toHaveBeenCalledOnce();
-      h.core().onUpdateOk?.();
-      h.core().onError?.(requestError);
-      expect(r.events).toEqual(accepted ? [{ type: 'subscribed', value: ok }] : []);
-      expect(r.endings).toHaveLength(1);
-    },
-  );
+  it('records a REQUEST_ERROR after acceptance at once, cancels the core, releases the closure observer, and drops later events', () => {
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    h.core().onOk?.(ok);
+    h.core().onError?.(requestError);
+    expect(r.endings).toEqual([{ kind: 'terminated', cause: 'request-error', accepted: true, error: requestError }]);
+    expect(subscription.end).toEqual(r.endings[0]);
+    expect(h.cancel).toHaveBeenCalledExactlyOnceWith(requestError);
+    expect(h.remove).toHaveBeenCalledOnce();
+    h.core().onUpdateOk?.();
+    h.core().onError?.(requestError);
+    expect(r.events).toEqual([{ type: 'subscribed', value: ok }]);
+    expect(r.endings).toHaveLength(1);
+  });
+
+  it('records a REQUEST_ERROR before acceptance when the turn ends, as rejected, then drops later events', async () => {
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    h.core().onError?.(requestError);
+    expect(r.endings).toEqual([]);
+    await turnEnds();
+    expect(r.endings).toEqual([{ kind: 'rejected', cause: 'request-error', accepted: false, error: requestError }]);
+    expect(subscription.end).toEqual(r.endings[0]);
+    expect(h.cancel).toHaveBeenCalledExactlyOnceWith(requestError);
+    expect(h.remove).toHaveBeenCalledOnce();
+    h.core().onUpdateOk?.();
+    h.core().onError?.(requestError);
+    await turnEnds();
+    expect(r.events).toEqual([]);
+    expect(r.endings).toHaveLength(1);
+  });
+
+  it('lets a closure reported in the same turn as a pending request failure win, as the core orders them', async () => {
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    const lost = new Error('transport dropped');
+    h.core().onError?.({ errorCode: 0, retryInterval: 0, reason: 'session closed before the request was answered' });
+    h.closeConnection(lost);
+    expect(r.endings).toEqual([{ kind: 'terminated', cause: 'connection-closed', accepted: false, error: lost }]);
+    await turnEnds();
+    expect(r.endings).toHaveLength(1);
+    expect(h.cancel).toHaveBeenCalledExactlyOnceWith(lost);
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionConnectionClosedError);
+    await expect(subscription.subscribed).rejects.toMatchObject({ cause: lost });
+    await expect(subscription.ended).resolves.toMatchObject({ kind: 'terminated', cause: 'connection-closed' });
+  });
 
   it.each([
     ['before', false],
@@ -201,7 +234,7 @@ describe('subscription: endings', () => {
     ]);
   });
 
-  it('cancels the core handle when the source ends the subscription synchronously during subscribe', () => {
+  it('cancels the core handle when the source fails the request synchronously during subscribe, once the turn ends', async () => {
     const cancel = vi.fn();
     const deps = {
       subscribe: (handlers: SubscriptionHandlers) => {
@@ -212,31 +245,10 @@ describe('subscription: endings', () => {
     };
     const r = recorder();
     const subscription = createSubscription(deps, [r.consumer]);
+    expect(subscription.requestId).toBe(1);
+    await turnEnds();
     expect(r.endings).toEqual([{ kind: 'rejected', cause: 'request-error', accepted: false, error: requestError }]);
     expect(cancel).toHaveBeenCalledExactlyOnceWith(requestError);
-    expect(subscription.requestId).toBe(1);
-  });
-});
-
-describe('closure observers', () => {
-  it('fans one connection promise out and forgets removed observers', async () => {
-    let end!: (value: { error?: unknown }) => void;
-    const observe = closureObservers(
-      new Promise((resolve) => {
-        end = resolve;
-      }),
-    );
-    const removed = vi.fn();
-    const live = vi.fn();
-    observe(removed)();
-    observe(live);
-    end({ error: 'lost' });
-    await Promise.resolve();
-    expect(removed).not.toHaveBeenCalled();
-    expect(live).toHaveBeenCalledExactlyOnceWith('lost');
-    const late = vi.fn();
-    observe(late);
-    expect(late).toHaveBeenCalledExactlyOnceWith('lost');
   });
 });
 
@@ -309,7 +321,7 @@ describe('subscription: readiness and termination', () => {
     },
   );
 
-  it('rejects subscribed with the cancel reason, or CLOSED when none was given', async () => {
+  it('rejects subscribed with the cancel reason, null included, or CLOSED when none was given', async () => {
     const h = harness();
     const withReason = createSubscription(h.deps);
     const reason = new Error('changed my mind');
@@ -321,6 +333,10 @@ describe('subscription: readiness and termination', () => {
       accepted: false,
       error: reason,
     });
+    const withNull = createSubscription(harness().deps);
+    withNull.cancel(null);
+    await expect(withNull.subscribed).rejects.toBeNull();
+    await expect(withNull.ended).resolves.toMatchObject({ kind: 'cancelled', error: null });
     const bare = createSubscription(harness().deps);
     bare.cancel();
     await expect(bare.subscribed).rejects.toMatchObject({ code: 'CLOSED', phase: 'subscription' });
@@ -331,10 +347,31 @@ describe('subscription: readiness and termination', () => {
     const subscription = createSubscription(h.deps);
     h.core().onError?.(requestError);
     // No await on `subscribed` here: an unhandled rejection would fail the run.
-    await Promise.resolve();
+    await turnEnds();
     subscription.cancel(new Error('too late'));
     await expect(subscription.ended).resolves.toMatchObject({ kind: 'rejected' });
     await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
+  });
+
+  it('settles subscribed before flushing queued updates, so a flush failure ends loudly without hanging readiness', async () => {
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    subscription.update({ forward: 0 });
+    const fault = new Error('core refused the update');
+    h.update.mockImplementationOnce(() => {
+      throw fault;
+    });
+    h.core().onOk?.(ok);
+    await expect(subscription.subscribed).resolves.toBe(ok);
+    await expect(subscription.ended).resolves.toEqual({
+      kind: 'cancelled',
+      cause: 'cancelled',
+      accepted: true,
+      error: fault,
+    });
+    expect(r.events).toEqual([]);
+    expect(h.cancel).toHaveBeenCalledExactlyOnceWith(fault);
   });
 });
 
@@ -375,6 +412,28 @@ describe('subscription: updates before acceptance', () => {
     expect(subscription.end).toBeUndefined();
   });
 
+  it('validates a queued update with its own request id, so an update the flush could not frame is refused now', () => {
+    const fits = (requestId: number, parameters: MessageParameters) => {
+      try {
+        encodeRequestUpdate(requestId, parameters);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    // A two-byte request id can push a message over the control-message frame limit.
+    let parameters: MessageParameters | undefined;
+    for (let length = 0xffff; length > 0xffff - 64 && !parameters; length--) {
+      const candidate = { authorizationTokens: [new Uint8Array(length)] };
+      if (fits(7, candidate) && !fits(128, candidate)) parameters = candidate;
+    }
+    if (!parameters) throw new Error('no token length sits on the frame boundary');
+    const wide = createSubscription(harness({ requestId: 128 }).deps);
+    expect(() => wide.update(parameters)).toThrow('control message exceeds');
+    const narrow = createSubscription(harness({ requestId: 7 }).deps);
+    expect(() => narrow.update(parameters)).not.toThrow();
+  });
+
   it('queues a snapshot, so mutating the caller object afterwards does not change what is sent', () => {
     const h = harness();
     const subscription = createSubscription(h.deps);
@@ -386,11 +445,13 @@ describe('subscription: updates before acceptance', () => {
     expect(h.update).toHaveBeenCalledExactlyOnceWith({ forward: 0, authorizationTokens: [new Uint8Array([1])] });
   });
 
-  it('discards queued updates when the subscription ends before acceptance', () => {
+  it('discards queued updates when the subscription ends before acceptance', async () => {
     const h = harness();
     const subscription = createSubscription(h.deps);
     subscription.update({ forward: 0 });
     h.core().onError?.(requestError);
+    await turnEnds();
+    expect(subscription.end).toMatchObject({ kind: 'rejected' });
     expect(h.update).not.toHaveBeenCalled();
   });
 

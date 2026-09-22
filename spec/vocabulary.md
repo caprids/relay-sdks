@@ -19,7 +19,7 @@ without a row here is a bug.
 | Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
 | Events on one subscription | `RelaySubscriptionHandlers` | `RelaySubscriptionHandlers` |
 | The relay accepted the subscription | `onSubscribed(info)` | `on_subscribed(info)` |
-| The relay rejected it, or it failed before acceptance | `onError(error)` | `on_error(error)` |
+| The relay rejected it, or the request itself failed before acceptance | `onError(error)` | `on_error(error)` |
 | An object arrived | `onObject(object)` | `on_object(object)` |
 | A subgroup stream ended cleanly or was reset | `onSubgroupEnd(info)`, `onSubgroupReset(info)` | `on_subgroup_end(info)`, `on_subgroup_reset(info)` |
 | The publisher said it is finished with the track | `onPublisherDone(info)` | `on_publisher_done(info)` |
@@ -142,11 +142,12 @@ fetch, track status). At the product level it did not say what became ready. `on
 names agree.
 
 `onError` keeps its name: the relay answered the request with REQUEST_ERROR, because it rejected
-the subscription or the request failed before acceptance (request timeout, connection shutdown,
-GOAWAY). A REQUEST_ERROR can also arrive after acceptance, for example when the relay refuses an
-`update()`, and it ends the subscription then too ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
-Connection loss after acceptance does not reach `onError`; it surfaces as subgroup resets and
-connection closure.
+the subscription or the request itself failed before acceptance (request timeout, or the request
+stream failing). A REQUEST_ERROR can also arrive after acceptance, for example when the relay
+refuses an `update()`, and it ends the subscription then too ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+Connection shutdown and GOAWAY never reach `onError`: a pending subscription ends through
+`subscribed` and `ended` as terminated by the closure, so a lost connection is never mistaken for
+a rejection, and after acceptance closure surfaces as subgroup resets and connection closure.
 
 ## Borrowed protocol access: `trackSource`
 
@@ -192,9 +193,11 @@ acceptance info `onSubscribed` receives, and rejects with the same error classes
 iterator raises (`SubscriptionRequestError` for REQUEST_ERROR before acceptance, including the
 request timeout; `SubscriptionConnectionClosedError` when the connection ended first) or with the
 reason given to `cancel()`. `ended` settles once, when the subscription can no longer deliver, and
-never rejects: its `SubscriptionEnd` value carries `kind` (`rejected`, `terminated`, `cancelled`),
-the protocol `cause`, whether the subscription had been `accepted`, and the `error`. That mirrors
-the connection's `closed`, which resolves with the error as data.
+never rejects: its `SubscriptionEnd` value carries `kind` (`rejected`, `terminated`, `cancelled`;
+the type is `SubscriptionEndKind`), the protocol `cause`, whether the subscription had been
+`accepted`, and the `error`. That mirrors the connection's `closed`, which resolves with the error
+as data. A connection that ends before the relay answers is a `terminated` ending with the
+connection error, never a `rejected` one, although the core fails the pending request first.
 
 Publisher completion settles neither. `onPublisherDone` is a control notification; trailing objects
 can still arrive and the request stays open, so a `subscribed` or `ended` that moved on it would

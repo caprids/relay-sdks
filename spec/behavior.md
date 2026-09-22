@@ -26,8 +26,9 @@ against that file.
   cancellation token, that governs the connection's entire lifetime rather than only setup.
 - Every connection exposes a way to observe its closure and the error that caused it, if any.
 - A GOAWAY from the relay ends the connection with an error. The application opens a replacement.
-  Requests still awaiting their first response receive their error callback once; accepted or
-  cancelled requests do not receive a second initial response.
+  Subscriptions still awaiting their first response end as terminated by the closure (see
+  "Subscription lifecycle"); accepted or cancelled requests do not receive a second initial
+  response. The core's own track source still fails pending requests through their error callback.
   Automatic reconnection and token refresh on a live session are not yet part of this contract.
 
 ## Error identities and operation phases
@@ -147,7 +148,7 @@ and the `error`. Implemented in TypeScript; the Python port removes this sentenc
 | --- | --- | --- | --- | --- |
 | pending | SUBSCRIBE_OK | resolves with the acceptance info | stays pending | `onSubscribed` |
 | pending | REQUEST_ERROR: rejection, request timeout, or the request stream failing before an answer | rejects `SubscriptionRequestError`, preserving the request error | resolves `kind: rejected`, `cause: request-error` | `onError` |
-| pending | connection ends | rejects `SubscriptionConnectionClosedError`, preserving the connection error as its cause when known | resolves `kind: terminated`, `cause: connection-closed`, `accepted: false` | `onError` when the core reports the unexpected closure as a request failure first, otherwise nothing |
+| pending | connection ends | rejects `SubscriptionConnectionClosedError`, preserving the connection error as its cause when known | resolves `kind: terminated`, `cause: connection-closed`, `accepted: false` | nothing on the subscription; the connection's `closed` carries the reason |
 | pending | `cancel(reason)` | rejects with `reason`, or a `CLOSED` Relay error when none was given | resolves `kind: cancelled`, with the reason as `error` | nothing |
 | accepted | objects, subgroup end or reset, state notify, update acknowledged, GOAWAY on the request stream | settled | stays pending | the matching callback |
 | accepted | PUBLISH_DONE | settled | stays pending: publisher completion is not an ending, trailing objects can still arrive | `onPublisherDone` |
@@ -155,6 +156,12 @@ and the `error`. Implemented in TypeScript; the Python port removes this sentenc
 | accepted | connection ends | settled | resolves `kind: terminated`, `cause: connection-closed`, `accepted: true` | nothing on the subscription; the connection's `closed` carries the reason |
 | accepted | `cancel(reason)` | settled | resolves `kind: cancelled` | nothing; trailing objects stop |
 | ended | anything, including a second `cancel()` | settled | settled, unchanged | nothing; `update()` raises `CLOSED`; the events iterator has already raised or reached EOF |
+
+The core fails a pending request before it reports the closure that killed it, in the same turn.
+A pre-acceptance request failure is therefore recorded when that turn ends, so the closure is the
+ending the subscription describes, with the connection error preserved; a genuine rejection reaches
+`subscribed`, `ended` and `onError` one turn after the core delivers it. A REQUEST_ERROR after
+acceptance is recorded at once.
 
 A readiness awaitable nobody awaits cannot surface as an unhandled rejection: the SDK pre-handles
 it. Awaiting it later still observes the same result.
@@ -196,16 +203,15 @@ the iterator's raise or EOF is its own. It follows the product vocabulary from #
 | Update acknowledged | `updateOk` / `update_ok` |
 | Request GOAWAY | `goaway`, with relocation details; informational, no automatic retry |
 | Request rejection, initial-response timeout, or initial request failure | Raises `SubscriptionRequestError`, preserving `requestError` / `request_error` |
-| Connection ends after acceptance, or local clean connection close at any point | Raises `SubscriptionConnectionClosedError`, preserving the connection error as `cause` / `__cause__` if available; never a claim of drained EOF |
+| Connection ends at any point, including a clean local close | Raises `SubscriptionConnectionClosedError`, preserving the connection error as `cause` / `__cause__` if available; never a claim of drained EOF |
 | Iterator `close()` / TS `return()` / Python `aclose()` | Discards buffered events, cancels the owned subscription, pending reads settle as clean EOF |
 | Per-iterator abort signal / cancellation token | Discards buffered events and raises the supplied reason (or the platform's default cancellation reason) |
 
-Before acceptance, a connection failure may reach the core's request-error callback before the
-connection observer. In that case the iterator raises `SubscriptionRequestError` with the core's
-reason string, just like an initial request-stream failure; it does not preserve the underlying
-connection exception. Check `subscriber.closed` for the connection-level cause when distinguishing a
-request rejection from a lost connection. Once accepted, connection loss instead raises
-`SubscriptionConnectionClosedError`. This preserves the core's existing first-failure ordering.
+Before acceptance, a connection failure reaches the core's request-error callback before the
+connection observer. The subscription holds that failure until the turn ends (see "Subscription
+lifecycle"), so the iterator raises `SubscriptionConnectionClosedError` with the connection
+exception preserved, the same as after acceptance, rather than a `SubscriptionRequestError`
+carrying the core's reason string.
 
 The iterator errors are `RelayError` subclasses with stable codes: `SubscriptionRequestError`
 uses `SUBSCRIPTION_REQUEST_FAILED`, and `SubscriptionOverflowError` uses `SUBSCRIPTION_OVERFLOW`,

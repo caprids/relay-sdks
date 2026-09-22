@@ -12,7 +12,6 @@ import {
 } from '@mux/moq-core';
 import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 import {
-  closureObservers,
   createSubscription,
   type RelaySubscription,
   type SubscriptionConsumer,
@@ -51,10 +50,11 @@ export interface RelaySubscriptionHandlers {
   onSubscribed?(info: SubscribeOk): void;
   /**
    * The relay answered the request with REQUEST_ERROR: it rejected the subscription, or the request
-   * failed before acceptance (request timeout, connection shutdown, GOAWAY). A REQUEST_ERROR can
+   * failed before acceptance (request timeout, or the request stream failing). A REQUEST_ERROR can
    * also arrive after acceptance, for example when the relay refuses an `update()`, and it ends the
-   * subscription then too (issue #94). Connection loss after acceptance surfaces as subgroup resets
-   * and connection closure, not here.
+   * subscription then too (issue #94). Connection shutdown and GOAWAY never arrive here: a pending
+   * subscription ends through `subscribed` and `ended`, and an accepted one surfaces them as
+   * subgroup resets and connection closure.
    */
   onError?(error: RequestError): void;
   /** One object arrived. Payloads are uninterpreted bytes. Objects can arrive after onPublisherDone. */
@@ -116,6 +116,7 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
   const {
     session: connected,
     closed,
+    observeClosed,
     assertOpen,
     close,
   } = await openRelaySession(options, (transport, callbacks) =>
@@ -143,7 +144,6 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
     },
   });
 
-  const observeClosed = closureObservers(closed);
   /** One product subscription per public call; both entry points bind the core the same way. */
   const subscription = ({ namespace, track, parameters }: RelayTrackOptions, consumers: SubscriptionConsumer[]) =>
     createSubscription(
