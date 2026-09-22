@@ -139,9 +139,12 @@ fetch, track status). At the product level it did not say what became ready. `on
 The awaitable readiness result planned in issue #68 settles on the same event, so the two names
 will agree.
 
-`onError` keeps its name: the relay rejected the subscription, or it failed before acceptance
-(request timeout, connection shutdown, GOAWAY). It is not called for failures after acceptance;
-those surface as subgroup resets and connection closure.
+`onError` keeps its name: the relay answered the request with REQUEST_ERROR, because it rejected
+the subscription or the request failed before acceptance (request timeout, connection shutdown,
+GOAWAY). A REQUEST_ERROR can also arrive after acceptance, for example when the relay refuses an
+`update()`, and it ends the subscription then too ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+Connection loss after acceptance does not reach `onError`; it surfaces as subgroup resets and
+connection closure.
 
 ## Borrowed protocol access: `trackSource`
 

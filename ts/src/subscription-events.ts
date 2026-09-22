@@ -1,25 +1,13 @@
-import type {
-  Goaway,
-  MessageParameters,
-  MoqtObject,
-  PublishDone,
-  RequestError,
-  SubscribeOk,
-  Subscription,
-  SubscriptionHandlers,
-} from '@mux/moq-core';
+/**
+ * The bounded events iterator: one consumer of a subscription (see `subscription.ts`) that queues
+ * product events with a capacity and turns the subscription's ending into the three subscription
+ * error classes. It owns its subscription, never the connection.
+ */
+import type { RequestError } from '@mux/moq-core';
 import { RelayError } from './errors.js';
+import type { ProductSubscription, SubscriptionConsumer, SubscriptionEvent } from './subscription.js';
 
-/** Delivery order is callback arrival order, with no ordering guarantee across streams. */
-export type SubscriptionEvent =
-  | { type: 'subscribed'; value: SubscribeOk }
-  | { type: 'object'; value: MoqtObject }
-  | { type: 'publisherDone'; value: PublishDone }
-  | { type: 'subgroupEnd'; value: { groupId: number; subgroupId: number; endOfGroup: boolean } }
-  | { type: 'subgroupReset'; value: { groupId: number; error: unknown } }
-  | { type: 'stateNotify'; value: MessageParameters }
-  | { type: 'goaway'; value: Goaway }
-  | { type: 'updateOk'; value: undefined };
+export type { SubscriptionEvent } from './subscription.js';
 
 export interface SubscriptionEventOptions {
   /** Maximum queued events (including lifecycle events). Positive integer; default 64. */
@@ -61,29 +49,8 @@ export interface SubscriptionEvents extends AsyncIterableIterator<SubscriptionEv
   return(): Promise<IteratorResult<SubscriptionEvent>>;
 }
 
-/** One promise reaction per connection; individual observers can be removed on early exit. */
-export function closureObservers(closed: Promise<{ error?: unknown }>) {
-  const observers = new Set<(error?: unknown) => void>();
-  let ended = false;
-  let reason: unknown;
-  void closed.then(({ error }) => {
-    ended = true;
-    reason = error;
-    for (const observer of observers) observer(error);
-    observers.clear();
-  });
-  return (observer: (error?: unknown) => void): (() => void) => {
-    if (ended) observer(reason);
-    else observers.add(observer);
-    return () => {
-      observers.delete(observer);
-    };
-  };
-}
-
 export function createSubscriptionEvents(
-  subscribe: (handlers: SubscriptionHandlers) => Subscription,
-  observeClosed: (observer: (error?: unknown) => void) => () => void,
+  subscribe: (consumer: SubscriptionConsumer) => ProductSubscription,
   { capacity = 64, signal }: SubscriptionEventOptions = {},
 ): SubscriptionEvents {
   if (!Number.isSafeInteger(capacity) || capacity <= 0)
@@ -94,14 +61,12 @@ export function createSubscriptionEvents(
     | undefined;
   let ended = false;
   let failure: unknown;
-  let subscription: Subscription | undefined;
-  let removeClosed = () => {};
+  let subscription: ProductSubscription | undefined;
   const finish = (error?: unknown) => {
     if (ended) return;
     ended = true;
     failure = error;
     queue = [];
-    removeClosed();
     signal?.removeEventListener('abort', abort);
     subscription?.cancel(error);
     const read = pending;
@@ -110,37 +75,29 @@ export function createSubscriptionEvents(
     else read?.resolve({ done: true, value: undefined });
   };
   const abort = () => finish(signal?.reason ?? new DOMException('Subscription aborted', 'AbortError'));
-  const push = (event: SubscriptionEvent) => {
-    if (ended) return;
-    if (pending) {
-      const read = pending;
-      pending = undefined;
-      read.resolve({ done: false, value: event });
-    } else if (queue.length === capacity) finish(new SubscriptionOverflowError());
-    else queue.push(event);
+  const consumer: SubscriptionConsumer = {
+    event(event) {
+      if (ended) return;
+      if (pending) {
+        const read = pending;
+        pending = undefined;
+        read.resolve({ done: false, value: event });
+      } else if (queue.length === capacity) finish(new SubscriptionOverflowError());
+      else queue.push(event);
+    },
+    ended(end) {
+      // An ending this iterator started (close, return, abort, overflow) echoes back here.
+      if (ended) return;
+      if (end.cause === 'request-error') finish(new SubscriptionRequestError(end.error));
+      else if (end.cause === 'connection-closed') finish(new SubscriptionConnectionClosedError(end.error));
+      else finish(end.error);
+    },
   };
   if (signal?.aborted) abort();
   else {
     signal?.addEventListener('abort', abort, { once: true });
-    removeClosed = observeClosed((error) => finish(new SubscriptionConnectionClosedError(error)));
     try {
-      if (!ended)
-        subscription = subscribe({
-          onOk: (value) => push({ type: 'subscribed', value }),
-          onObject: (value) => push({ type: 'object', value }),
-          onDone: (value) => push({ type: 'publisherDone', value }),
-          onSubgroupEnd: (value) => push({ type: 'subgroupEnd', value }),
-          onSubgroupReset: (value) => push({ type: 'subgroupReset', value }),
-          onStateNotify: (value) => push({ type: 'stateNotify', value }),
-          onGoaway: (value) => push({ type: 'goaway', value }),
-          onUpdateOk: () => push({ type: 'updateOk', value: undefined }),
-          onError: (error) => finish(new SubscriptionRequestError(error)),
-        });
-      // Also supports a source delivering callbacks synchronously during subscribe().
-      if (ended) {
-        removeClosed();
-        subscription?.cancel(failure);
-      }
+      subscription = subscribe(consumer);
     } catch (error) {
       finish(error);
       throw error;

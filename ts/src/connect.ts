@@ -10,11 +10,16 @@ import {
   type RequestError,
   type SubscribeOk,
   type Subscription,
-  type SubscriptionHandlers,
 } from '@mux/moq-core';
 import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 import {
   closureObservers,
+  createSubscription,
+  type SubscriptionConsumer,
+  type SubscriptionEvent,
+  synchronousCallback,
+} from './subscription.js';
+import {
   createSubscriptionEvents,
   type SubscriptionEventOptions,
   type SubscriptionEvents,
@@ -45,9 +50,11 @@ export interface RelaySubscriptionHandlers {
    */
   onSubscribed?(info: SubscribeOk): void;
   /**
-   * The relay rejected the subscription, or it failed before acceptance: request timeout,
-   * connection shutdown, or GOAWAY. Not called after acceptance; later failures surface as
-   * subgroup resets and connection closure.
+   * The relay answered the request with REQUEST_ERROR: it rejected the subscription, or the request
+   * failed before acceptance (request timeout, connection shutdown, GOAWAY). A REQUEST_ERROR can
+   * also arrive after acceptance, for example when the relay refuses an `update()`, and it ends the
+   * subscription then too (issue #94). Connection loss after acceptance surfaces as subgroup resets
+   * and connection closure, not here.
    */
   onError?(error: RequestError): void;
   /** One object arrived. Payloads are uninterpreted bytes. Objects can arrive after onPublisherDone. */
@@ -136,49 +143,68 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
   });
 
   const observeClosed = closureObservers(closed);
+  /** One product subscription per public call; both entry points bind the core the same way. */
+  const subscription = ({ namespace, track, parameters }: RelayTrackOptions, consumers: SubscriptionConsumer[]) =>
+    createSubscription(
+      {
+        subscribe: (handlers) =>
+          connected.subscribe({ trackNamespace: [...namespace], trackName: track, parameters }, handlers),
+        observeClosed,
+      },
+      consumers,
+    );
 
   return {
     closed,
     trackSource,
-    subscribe: ({ namespace, track, parameters }, handlers) => {
-      validateNamespace(namespace);
-      return trackSource.subscribe(
-        { trackNamespace: [...namespace], trackName: track, parameters },
-        handlers && toSubscriptionHandlers(handlers),
-      );
-    },
-    subscribeEvents: ({ namespace, track, parameters }, buffer) => {
+    subscribe: (options, handlers) => {
+      validateNamespace(options.namespace);
       assertOpen();
-      validateNamespace(namespace);
-      return createSubscriptionEvents(
-        (handlers) => trackSource.subscribe({ trackNamespace: [...namespace], trackName: track, parameters }, handlers),
-        observeClosed,
-        buffer,
-      );
+      return subscription(options, handlers ? [handlersConsumer(handlers)] : []);
+    },
+    subscribeEvents: (options, buffer) => {
+      assertOpen();
+      validateNamespace(options.namespace);
+      return createSubscriptionEvents((consumer) => subscription(options, [consumer]), buffer);
     },
     close,
   };
 }
 
-/** Snapshot product callbacks without hiding async functions or their return values from the core. */
-function toSubscriptionHandlers(handlers: RelaySubscriptionHandlers): SubscriptionHandlers {
-  const result: SubscriptionHandlers = {};
-  const names = [
-    ['onOk', 'onSubscribed'],
-    ['onError', 'onError'],
-    ['onObject', 'onObject'],
-    ['onSubgroupEnd', 'onSubgroupEnd'],
-    ['onSubgroupReset', 'onSubgroupReset'],
-    ['onDone', 'onPublisherDone'],
-    ['onUpdateOk', 'onUpdateOk'],
-    ['onStateNotify', 'onStateNotify'],
-    ['onGoaway', 'onGoaway'],
-  ] as const;
-  for (const [coreName, productName] of names) {
-    const callback = handlers[productName];
-    if (callback) Object.assign(result, { [coreName]: callback.bind(handlers) });
+/** Which product handler each product event reaches. */
+const EVENT_HANDLERS = {
+  subscribed: 'onSubscribed',
+  object: 'onObject',
+  publisherDone: 'onPublisherDone',
+  subgroupEnd: 'onSubgroupEnd',
+  subgroupReset: 'onSubgroupReset',
+  stateNotify: 'onStateNotify',
+  goaway: 'onGoaway',
+  updateOk: 'onUpdateOk',
+} as const satisfies Record<SubscriptionEvent['type'], keyof RelaySubscriptionHandlers>;
+
+/**
+ * The callback form as one consumer: snapshot the product callbacks at subscribe time, hold them to
+ * the synchronous callback policy, and dispatch each product event to the handler of the same
+ * meaning. A REQUEST_ERROR ending reaches `onError`; other endings reach nothing until issue #68.
+ */
+function handlersConsumer(handlers: RelaySubscriptionHandlers): SubscriptionConsumer {
+  const snapshot = new Map<keyof RelaySubscriptionHandlers, (...args: unknown[]) => void>();
+  for (const name of [...Object.values(EVENT_HANDLERS), 'onError'] as const) {
+    const callback = handlers[name];
+    if (callback) snapshot.set(name, synchronousCallback(name, callback, handlers));
   }
-  return result;
+  return {
+    event(event) {
+      const callback = snapshot.get(EVENT_HANDLERS[event.type]);
+      if (!callback) return;
+      if (event.type === 'updateOk') callback();
+      else callback(event.value);
+    },
+    ended(end) {
+      if (end.cause === 'request-error') snapshot.get('onError')?.(end.error);
+    },
+  };
 }
 
 function validateNamespace(namespace: readonly string[]): void {

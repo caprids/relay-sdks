@@ -1,4 +1,3 @@
-import type { SubscriptionHandlers } from '@mux/moq-core';
 import { afterEach, expect, it, vi } from 'vitest';
 import {
   encodePublishDone,
@@ -13,7 +12,8 @@ import {
   SubscriptionOverflowError,
   SubscriptionRequestError,
 } from '../src/index.js';
-import { closureObservers, createSubscriptionEvents } from '../src/subscription-events.js';
+import type { ProductSubscription, SubscriptionConsumer } from '../src/subscription.js';
+import { createSubscriptionEvents } from '../src/subscription-events.js';
 import { createFakeTransport, encodeSubgroup } from './helpers/relay.js';
 
 const connections: RelaySubscriber[] = [];
@@ -21,6 +21,28 @@ afterEach(() => {
   for (const connection of connections.splice(0)) connection.close();
   vi.restoreAllMocks();
 });
+
+/** A subscription that records its consumer, so a test can drive events into the iterator directly. */
+function fakeSubscription() {
+  let consumer!: SubscriptionConsumer;
+  const cancel = vi.fn((reason?: unknown) => consumer.ended({ cause: 'cancelled', accepted: false, error: reason }));
+  const subscribe = (value: SubscriptionConsumer): ProductSubscription => {
+    consumer = value;
+    return {
+      requestId: 0,
+      cancel,
+      update() {},
+      attach: () => () => {},
+      accepted: false,
+      end: undefined,
+    };
+  };
+  return {
+    subscribe,
+    cancel,
+    event: (type: 'updateOk' | 'publisherDone') => consumer.event({ type, value: undefined } as never),
+  };
+}
 
 async function setup() {
   const fake = createFakeTransport();
@@ -114,39 +136,22 @@ it.each([false, true])('for-await break or consumer exception releases only its 
   expect(fake.getCloseInfo()).toBeUndefined();
 });
 
-it('bounds stalled consumers, fails without draining, and removes observers', async () => {
-  let handlers!: SubscriptionHandlers;
-  const cancel = vi.fn();
-  const remove = vi.fn();
-  const events = createSubscriptionEvents(
-    (value) => {
-      handlers = value;
-      return { requestId: 0, cancel, update() {} };
-    },
-    () => remove,
-    { capacity: 2 },
-  );
-  handlers.onDone?.({ statusCode: 0, streamCount: undefined, reason: '' });
-  handlers.onUpdateOk?.();
-  handlers.onUpdateOk?.();
-  for (let i = 0; i < 1000; i++) handlers.onUpdateOk?.();
+it('bounds stalled consumers, fails without draining, and cancels its subscription once', async () => {
+  const fake = fakeSubscription();
+  const events = createSubscriptionEvents(fake.subscribe, { capacity: 2 });
+  fake.event('publisherDone');
+  fake.event('updateOk');
+  fake.event('updateOk');
+  for (let i = 0; i < 1000; i++) fake.event('updateOk');
   await expect(events.next()).rejects.toBeInstanceOf(SubscriptionOverflowError);
-  expect(cancel).toHaveBeenCalledOnce();
-  expect(remove).toHaveBeenCalledOnce();
+  expect(fake.cancel).toHaveBeenCalledOnce();
 });
 
 it('supports slow reads within capacity and rejects concurrent reads', async () => {
-  let handlers!: SubscriptionHandlers;
-  const events = createSubscriptionEvents(
-    (value) => {
-      handlers = value;
-      return { requestId: 0, cancel() {}, update() {} };
-    },
-    () => () => {},
-    { capacity: 2 },
-  );
-  handlers.onUpdateOk?.();
-  handlers.onDone?.({ statusCode: 0, streamCount: 0, reason: 'done' });
+  const fake = fakeSubscription();
+  const events = createSubscriptionEvents(fake.subscribe, { capacity: 2 });
+  fake.event('updateOk');
+  fake.event('publisherDone');
   expect((await events.next()).value.type).toBe('updateOk');
   expect((await events.next()).value.type).toBe('publisherDone');
   const pending = events.next();
@@ -167,23 +172,6 @@ it.each([false, true])('abort settles reads and removes listeners, pre-aborted: 
   await read;
   expect(remove).toHaveBeenCalled();
   expect(fake.getCloseInfo()).toBeUndefined();
-});
-
-it('removes closed observers without retaining iterators on the connection promise', async () => {
-  let end!: (value: { error?: unknown }) => void;
-  const observe = closureObservers(
-    new Promise((resolve) => {
-      end = resolve;
-    }),
-  );
-  const removed = vi.fn();
-  const live = vi.fn();
-  observe(removed)();
-  observe(live);
-  end({ error: 'lost' });
-  await Promise.resolve();
-  expect(removed).not.toHaveBeenCalled();
-  expect(live).toHaveBeenCalledExactlyOnceWith('lost');
 });
 
 it('rejects async handlers before sending and diagnoses returned promises without unhandled rejection', async () => {
@@ -209,7 +197,7 @@ it.each([0, -1, 1.2, Number.POSITIVE_INFINITY, Number.NaN])(
   'rejects invalid capacity %s before opening a subscription',
   (capacity) => {
     const subscribe = vi.fn();
-    expect(() => createSubscriptionEvents(subscribe, () => () => {}, { capacity })).toThrow('capacity');
+    expect(() => createSubscriptionEvents(subscribe, { capacity })).toThrow('capacity');
     expect(subscribe).not.toHaveBeenCalled();
   },
 );
@@ -232,17 +220,14 @@ it('cancels an idle subgroup reader on early exit without a spurious reset callb
 it('detaches cancellation listeners even when subscribe throws', () => {
   const signal = new AbortController().signal;
   const remove = vi.spyOn(signal, 'removeEventListener');
-  const unsubscribe = vi.fn();
   expect(() =>
     createSubscriptionEvents(
       () => {
         throw new Error('bad options');
       },
-      () => unsubscribe,
       { signal },
     ),
   ).toThrow('bad options');
-  expect(unsubscribe).toHaveBeenCalledOnce();
   expect(remove).toHaveBeenCalledOnce();
 });
 
@@ -262,21 +247,13 @@ it('releases the request stream after rejection even if the peer leaves it open'
 });
 
 it.each([false, true])('a direct handoff is outside capacity and survives teardown, overflow: %s', async (overflow) => {
-  let handlers!: SubscriptionHandlers;
-  const cancel = vi.fn();
-  const events = createSubscriptionEvents(
-    (value) => {
-      handlers = value;
-      return { requestId: 0, cancel, update() {} };
-    },
-    () => () => {},
-    { capacity: 1 },
-  );
+  const fake = fakeSubscription();
+  const events = createSubscriptionEvents(fake.subscribe, { capacity: 1 });
   const pending = events.next();
-  handlers.onUpdateOk?.(); // direct handoff
-  handlers.onUpdateOk?.(); // exactly one queued event
-  expect(cancel).not.toHaveBeenCalled();
-  if (overflow) handlers.onUpdateOk?.();
+  fake.event('updateOk'); // direct handoff
+  fake.event('updateOk'); // exactly one queued event
+  expect(fake.cancel).not.toHaveBeenCalled();
+  if (overflow) fake.event('updateOk');
   else events.close();
   expect((await pending).value.type).toBe('updateOk');
   if (overflow) await expect(events.next()).rejects.toBeInstanceOf(SubscriptionOverflowError);
