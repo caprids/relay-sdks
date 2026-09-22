@@ -213,6 +213,24 @@ async def test_slow_consumer_and_overflow_bound_all_events_and_cancel_the_subscr
     fake.cancel.assert_called_once()
 
 
+async def test_overflow_during_construction_still_cancels_the_subscription() -> None:
+    # An eager transport can deliver events before subscribe() returns. The ending recorded then had
+    # no subscription to cancel, so the iterator must cancel it once it holds it.
+    fake = FakeSubscription()
+
+    def subscribe(consumer: SubscriptionConsumer) -> ProductSubscription:
+        subscription = fake.subscribe(consumer)
+        for _ in range(3):
+            fake.update_ok()
+        return subscription
+
+    events = SubscriptionEvents(subscribe, capacity=1)
+    fake.cancel.assert_called_once()
+    assert isinstance(fake.cancel.call_args.args[0], SubscriptionOverflowError)
+    with pytest.raises(SubscriptionOverflowError):
+        await anext(events)
+
+
 @pytest.mark.parametrize("capacity", [0, -1, 1.2, True, float("inf")])
 async def test_invalid_capacity(capacity: Any) -> None:
     with pytest.raises(ValueError, match="capacity"):

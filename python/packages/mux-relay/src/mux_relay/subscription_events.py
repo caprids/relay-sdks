@@ -120,6 +120,10 @@ class SubscriptionEvents:
         except BaseException:
             self.close()
             raise
+        # Events can overflow the queue before subscribe() returns. The ending recorded then had no
+        # subscription to cancel, so cancel it now; the echo of that cancel is ignored above.
+        if self._ended:
+            self._subscription.cancel(self._failure)
 
     def _push(self, event: SubscriptionEvent) -> None:
         if self._ended:
