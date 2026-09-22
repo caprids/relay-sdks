@@ -43,7 +43,7 @@ from moq_core import (
     TrackStatusOk,
 )
 
-from ._subscription import RelaySubscription, SubscriptionEnd, SubscriptionEndKind
+from ._subscription import RelaySubscription, SubscriptionAwaitable, SubscriptionEnd, SubscriptionEndKind
 from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import (
@@ -155,6 +155,7 @@ __all__ = [
     "SubscribeOk",
     "SubscribedEvent",
     "Subscription",
+    "SubscriptionAwaitable",
     "SubscriptionConnectionClosedError",
     "SubscriptionEnd",
     "SubscriptionEndKind",

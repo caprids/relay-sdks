@@ -12,7 +12,7 @@ import inspect
 import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeAlias, TypeVar
+from typing import Generic, Protocol, TypeAlias, TypeVar, runtime_checkable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from moq_core import MOQT_PROTOCOL_ID, Closed, Goaway, MoqtTransport
@@ -74,6 +74,19 @@ ClosureObserver: TypeAlias = Callable[[BaseException | None], None]
 """Told the error that ended the connection, ``None`` after a clean shutdown."""
 
 
+@runtime_checkable
+class _EndAware(Protocol):
+    """A transport that can say it has ended before ``wait_closed`` returns.
+
+    The native transport fails its streams the moment the QUIC connection terminates but releases
+    its socket, and so returns from ``wait_closed``, turns later. Subscriptions ask this to tell a
+    stream failure that the closure caused from a rejection the relay sent.
+    """
+
+    @property
+    def ended(self) -> bool: ...
+
+
 @dataclass(slots=True)
 class _Connecting(Generic[T]):
     """What ``establish()`` has produced so far, so ``finish()`` can tear down exactly that."""
@@ -121,6 +134,15 @@ class RelaySessionLifetime(Generic[T]):
         An observer added after the end is told at once. Returns the function that removes it.
         """
         return self._observe_closed(observer)
+
+    def transport_ended(self) -> bool:
+        """Whether the transport has already ended, ahead of the session reporting the closure.
+
+        ``False`` for a transport that cannot say; the closure then arrives in the turn the session
+        reports it.
+        """
+        transport = self._transport
+        return isinstance(transport, _EndAware) and transport.ended
 
     def close(self) -> None:
         self._close()

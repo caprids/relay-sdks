@@ -17,6 +17,7 @@ without a row here is a bug.
 | Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `RelaySubscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `RelaySubscription` |
 | Await the relay's answer to a subscription | `subscription.subscribed` resolves `SubscribeOk` | `await subscription.subscribed` returns `SubscribeOk` |
 | Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
+| The type of `subscribed` and `ended` | `Promise<T>` | `SubscriptionAwaitable[T]`: awaitable by any number of isolated waiters, with `done()`, `result()`, `exception()` and `add_done_callback()`; not a cancellable `Future` |
 | Events on one subscription | `RelaySubscriptionHandlers` | `RelaySubscriptionHandlers` |
 | The relay accepted the subscription | `onSubscribed(info)` | `on_subscribed(info)` |
 | The relay rejected it, or the request itself failed before acceptance | `onError(error)` | `on_error(error)` |
@@ -198,6 +199,12 @@ the type is `SubscriptionEndKind`), the protocol `cause`, whether the subscripti
 `accepted`, and the `error`. That mirrors the connection's `closed`, which resolves with the error
 as data. A connection that ends before the relay answers is a `terminated` ending with the
 connection error, never a `rejected` one, although the core fails the pending request first.
+
+In Python the two are `SubscriptionAwaitable[T]` rather than bare futures: a task cancelled while
+awaiting a future cancels the future itself, and `asyncio.wait_for` does the same on timeout, so a
+shared future would let one impatient waiter destroy the signal for every later one. The awaitable
+isolates each waiter and reads status without allocating. `Future` was rejected for that reason;
+`Signal` and `Promise` for naming a mechanism rather than the fact the caller awaits.
 
 Publisher completion settles neither. `onPublisherDone` is a control notification; trailing objects
 can still arrive and the request stays open, so a `subscribed` or `ended` that moved on it would

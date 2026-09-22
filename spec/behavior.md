@@ -157,11 +157,13 @@ and the `error`. Implemented in both SDKs.
 | accepted | `cancel(reason)` | settled | resolves `kind: cancelled` | nothing; trailing objects stop |
 | ended | anything, including a second `cancel()` | settled | settled, unchanged | nothing; `update()` raises `CLOSED`; the events iterator has already raised or reached EOF |
 
-The core fails a pending request before it reports the closure that killed it, in the same turn.
-A pre-acceptance request failure is therefore recorded when that turn ends, so the closure is the
-ending the subscription describes, with the connection error preserved; a genuine rejection reaches
-`subscribed`, `ended` and `onError` one turn after the core delivers it. A REQUEST_ERROR after
-acceptance is recorded at once.
+The core fails a pending request before it reports the closure that killed it: in the same turn
+when the session notices the closure, or turns earlier when the transport fails its streams before
+the session learns of it. A pre-acceptance request failure is therefore never recorded before the
+turn ends, and one that arrives after the transport has already ended is left to the closure, so
+the closure is the ending the subscription describes, with the connection error preserved. A
+genuine rejection reaches `subscribed`, `ended` and `onError` one turn after the core delivers it.
+A REQUEST_ERROR after acceptance is recorded at once.
 
 A readiness awaitable nobody awaits cannot surface as an unhandled rejection: the SDK pre-handles
 it. Awaiting it later still observes the same result.

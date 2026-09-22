@@ -21,6 +21,7 @@ def test_all_lists_the_product_types_and_the_borrowed_core_contract() -> None:
         "RelayPublisher",
         "RelaySubscriptionHandlers",
         "RelaySubscription",
+        "SubscriptionAwaitable",
         "SubscriptionEnd",
         "SubscriptionEndKind",
         "SubscriptionEvents",

@@ -240,6 +240,7 @@ class RelaySubscriber:
             SubscriptionDependencies(
                 subscribe=lambda handlers: session.subscribe(options, handlers),
                 observe_closed=self._lifetime.observe_closed,
+                transport_ended=self._lifetime.transport_ended,
             ),
             consumers,
         )

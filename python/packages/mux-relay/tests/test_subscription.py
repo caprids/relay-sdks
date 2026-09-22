@@ -18,6 +18,7 @@ from mux_relay import (
     RelayClosedError,
     RelayError,
     RelaySubscription,
+    SubscriptionAwaitable,
     SubscriptionConnectionClosedError,
     SubscriptionEnd,
     SubscriptionRequestError,
@@ -57,9 +58,12 @@ class Harness:
         self.core.request_id = request_id
         self.closed_already = closed_already
         self.closed_error = closed_error
+        self.transport_ended = False
         self.observers: list[ClosureObserver] = []
         self.subscribe = Mock(side_effect=self._subscribe)
-        self.deps = SubscriptionDependencies(subscribe=self.subscribe, observe_closed=self.observe_closed)
+        self.deps = SubscriptionDependencies(
+            subscribe=self.subscribe, observe_closed=self.observe_closed, transport_ended=lambda: self.transport_ended
+        )
 
     def _subscribe(self, handlers: SubscriptionHandlers) -> Subscription:
         self.handlers = handlers
@@ -256,6 +260,25 @@ class TestEndings:
         assert failure.value.__cause__ is lost
         assert (await subscription.ended).kind == "terminated"
 
+    async def test_leaves_a_pending_failure_to_the_closure_observer_when_the_transport_has_already_ended(
+        self,
+    ) -> None:
+        h = Harness()
+        r = Recorder()
+        subscription = RelaySubscription(h.deps, [r])
+        h.transport_ended = True
+        h.reject(RequestError(error_code=0, retry_interval=0, reason="stream reset: transport gone"))
+        await turn_ends()
+        await turn_ends()
+        assert r.endings == []
+        assert subscription._end is None
+        assert not subscription.subscribed.done()
+        lost = RuntimeError("QUIC connection terminated")
+        h.close_connection(lost)
+        assert r.endings == [SubscriptionEnd(kind="terminated", cause="connection-closed", accepted=False, error=lost)]
+        with pytest.raises(SubscriptionConnectionClosedError):
+            await subscription.subscribed
+
     @pytest.mark.parametrize("accepted", [False, True])
     async def test_records_connection_closure_with_the_connection_error_and_cancels_the_core_with_it(
         self, accepted: bool
@@ -324,7 +347,10 @@ class TestEndings:
 
         r = Recorder()
         subscription = RelaySubscription(
-            SubscriptionDependencies(subscribe=subscribe, observe_closed=lambda observer: lambda: None), [r]
+            SubscriptionDependencies(
+                subscribe=subscribe, observe_closed=lambda observer: lambda: None, transport_ended=lambda: False
+            ),
+            [r],
         )
         assert subscription.request_id == 1
         await turn_ends()
@@ -432,6 +458,28 @@ class TestReadinessAndTermination:
         subscription.cancel(RuntimeError("done"))
         assert (await subscription.ended).kind == "cancelled"
         assert subscription.subscribed.done() and subscription.ended.done()
+
+    async def test_the_awaitables_are_stable_objects_whose_status_checks_allocate_nothing(self) -> None:
+        h = Harness()
+        subscription = RelaySubscription(h.deps)
+        assert subscription.subscribed is subscription.subscribed
+        assert subscription.ended is subscription.ended
+        assert isinstance(subscription.ended, SubscriptionAwaitable)
+        # The C future reports no callbacks as None.
+        registered = len(subscription._ended._callbacks or [])
+        for _ in range(1000):
+            assert not subscription.ended.done()
+        assert len(subscription._ended._callbacks or []) == registered
+        with pytest.raises(asyncio.InvalidStateError):
+            subscription.ended.result()
+        seen: list[SubscriptionEnd] = []
+        subscription.ended.add_done_callback(lambda done: seen.append(done.result()))
+        subscription.cancel(RuntimeError("done"))
+        await asyncio.sleep(0)
+        assert [end.kind for end in seen] == ["cancelled"]
+        assert subscription.ended.exception() is None
+        assert subscription.ended.result().kind == "cancelled"
+        assert (await asyncio.ensure_future(subscription.ended)).kind == "cancelled"
 
     async def test_settles_subscribed_before_flushing_queued_updates_so_a_flush_failure_ends_loudly(self) -> None:
         h = Harness()

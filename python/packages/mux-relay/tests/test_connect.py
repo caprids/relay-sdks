@@ -257,6 +257,38 @@ class TestConnectRelay:
         )
         assert errors == []
 
+    async def test_reports_a_transport_drop_as_a_closure_even_when_the_session_learns_of_it_turns_later(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        fake = create_fake_transport()
+        # Like the native transport: streams fail at once, wait_closed returns after the socket is
+        # released, so the core fails the pending request turns before it reports the closure.
+        fake.release_after_turns = 5
+        connecting = asyncio.create_task(connect_relay_subscriber(ENDPOINT, create_transport=Factory(fake)))
+        fake.send_server_setup()
+        connection = await connecting
+        connections.append(connection)
+        # Drain the client's SETUP so the session's start-up write completes, as it does at once over
+        # a real transport; left pending, its failure would make the fake report closure early.
+        await wait_for(lambda: len(fake.client_uni_streams) > 0)
+        await fake.client_uni_streams[0].read()
+        errors: list[Any] = []
+        subscription = connection.subscribe(["room"], "pending", RelaySubscriptionHandlers(on_error=errors.append))
+        await (await fake.next_request_stream()).first_message
+        fake.drop_transport()
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # The request stream has failed by now, the session has not reported closure yet.
+        assert not connection.closed.done()
+        assert not subscription.ended.done(), subscription.ended.result()
+        closed = await connection.closed
+        assert await subscription.ended == SubscriptionEnd(
+            kind="terminated", cause="connection-closed", accepted=False, error=closed.error
+        )
+        with pytest.raises(SubscriptionConnectionClosedError):
+            await subscription.subscribed
+        assert errors == []
+
     async def test_contains_an_on_error_that_raises_on_rejection_and_keeps_the_connection_usable(
         self, connections: list[RelaySubscriber]
     ) -> None:

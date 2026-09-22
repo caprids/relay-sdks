@@ -148,7 +148,9 @@ relay's answer: it returns the acceptance info (`on_subscribed` receives the sam
 if the connection ends first, or your own reason if you cancelled. Await `subscription.ended` to
 learn that the subscription can no longer deliver and why: it settles once, never raises, with
 `kind` (`rejected`, `terminated` or `cancelled`), the protocol `cause`, whether it had been
-accepted, and the error.
+accepted, and the error. Both are `SubscriptionAwaitable` objects rather than bare futures: any
+number of tasks can await them, a cancelled waiter or a timed-out `asyncio.wait_for` leaves the
+result intact, and `done()`, `result()` and `add_done_callback()` read it without allocating.
 
 ```python
 subscription = subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(on_object=handle))
