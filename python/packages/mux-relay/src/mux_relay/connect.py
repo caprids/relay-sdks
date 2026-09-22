@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from types import TracebackType
 from typing import Self
 
@@ -33,6 +33,15 @@ from moq_core import (
     create_moqt_session,
 )
 
+from ._subscription import (
+    ProductSubscription,
+    SubscriptionConsumer,
+    SubscriptionDependencies,
+    SubscriptionEnd,
+    SubscriptionEvent,
+    UpdateOkEvent,
+    synchronous_callback,
+)
 from .cancellation import CancellationToken
 from .connect_session import (
     DEFAULT_CONNECT_TIMEOUT,
@@ -78,10 +87,12 @@ class RelaySubscriptionHandlers:
     what the publisher declared.
     """
     on_error: Callable[[RequestError], None] | None = None
-    """The relay rejected the subscription, or it failed before acceptance.
+    """The relay answered the request with REQUEST_ERROR.
 
-    Request timeout, connection shutdown, and GOAWAY all arrive here. Not called after acceptance;
-    later failures surface as subgroup resets and connection closure.
+    It rejected the subscription, or the request failed before acceptance (request timeout,
+    connection shutdown, GOAWAY). A REQUEST_ERROR can also arrive after acceptance, for example when
+    the relay refuses an ``update()``, and it ends the subscription then too (issue #94). Connection
+    loss after acceptance surfaces as subgroup resets and connection closure, not here.
     """
     on_object: Callable[[MoqtObject], None] | None = None
     """One object arrived. Payloads are uninterpreted bytes. Objects can arrive after ``on_publisher_done``."""
@@ -110,19 +121,51 @@ class RelaySubscriptionHandlers:
     A GOAWAY on the connection itself ends the connection instead; observe ``closed`` for that.
     """
 
-    def _to_core(self) -> SubscriptionHandlers:
-        """Snapshot callbacks without hiding async functions or their return values from the core."""
-        return SubscriptionHandlers(
-            on_ok=self.on_subscribed,
-            on_error=self.on_error,
-            on_object=self.on_object,
-            on_subgroup_end=self.on_subgroup_end,
-            on_subgroup_reset=self.on_subgroup_reset,
-            on_done=self.on_publisher_done,
-            on_update_ok=self.on_update_ok,
-            on_state_notify=self.on_state_notify,
-            on_goaway=self.on_goaway,
-        )
+
+_EVENT_HANDLERS: dict[str, str] = {
+    "subscribed": "on_subscribed",
+    "object": "on_object",
+    "publisher_done": "on_publisher_done",
+    "subgroup_end": "on_subgroup_end",
+    "subgroup_reset": "on_subgroup_reset",
+    "state_notify": "on_state_notify",
+    "goaway": "on_goaway",
+    "update_ok": "on_update_ok",
+}
+"""Which product handler each product event reaches."""
+
+
+class _HandlersConsumer:
+    """The callback form as one consumer of a subscription.
+
+    Snapshots the product callbacks at subscribe time, holds them to the synchronous callback policy,
+    and dispatches each product event to the handler of the same meaning. A REQUEST_ERROR ending
+    reaches ``on_error``; other endings reach nothing until issue #68.
+    """
+
+    __slots__ = ("_callbacks",)
+
+    def __init__(self, handlers: RelaySubscriptionHandlers) -> None:
+        self._callbacks: dict[str, Callable[..., None]] = {}
+        for handler_field in fields(handlers):
+            callback = getattr(handlers, handler_field.name)
+            if callback is not None:
+                self._callbacks[handler_field.name] = synchronous_callback(handler_field.name, callback)
+
+    def event(self, event: SubscriptionEvent) -> None:
+        callback = self._callbacks.get(_EVENT_HANDLERS[event.type])
+        if callback is None:
+            return
+        if isinstance(event, UpdateOkEvent):
+            callback()
+        else:
+            callback(event.value)
+
+    def ended(self, end: SubscriptionEnd) -> None:
+        if end.cause == "request-error":
+            callback = self._callbacks.get("on_error")
+            if callback is not None:
+                callback(end.error)
 
 
 class _BorrowedTrackSource:
@@ -182,6 +225,23 @@ class RelaySubscriber:
         """
         return self._track_source
 
+    def _subscription(
+        self,
+        namespace: Sequence[str],
+        track: str,
+        parameters: MessageParameters | None,
+        consumers: Sequence[SubscriptionConsumer],
+    ) -> ProductSubscription:
+        """One product subscription per public call; both entry points bind the core the same way."""
+        options = MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters)
+        session = self._lifetime.session
+        return ProductSubscription(
+            SubscriptionDependencies(
+                subscribe=lambda handlers: session.subscribe(options, handlers), closed=self._lifetime.closed
+            ),
+            consumers,
+        )
+
     def subscribe(
         self,
         namespace: Sequence[str],
@@ -198,10 +258,9 @@ class RelaySubscriber:
         location filter and priority.
         """
         _validate_namespace(namespace)
-        return self._track_source.subscribe(
-            MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters),
-            None if handlers is None else handlers._to_core(),
-        )
+        self._lifetime.assert_open()
+        consumers = [_HandlersConsumer(handlers)] if handlers is not None else []
+        return self._subscription(namespace, track, parameters, consumers)
 
     def subscribe_events(
         self,
@@ -219,10 +278,7 @@ class RelaySubscriber:
         self._lifetime.assert_open()
         _validate_namespace(namespace)
         return SubscriptionEvents(
-            lambda handlers: self._track_source.subscribe(
-                MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters), handlers
-            ),
-            self.closed,
+            lambda consumer: self._subscription(namespace, track, parameters, [consumer]),
             capacity=capacity,
             cancellation=cancellation,
         )

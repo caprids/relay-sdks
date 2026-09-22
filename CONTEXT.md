@@ -20,6 +20,16 @@ completes or fails. Its steps are the phases `spec/behavior.md` records: waiting
 opening-stream, writing, closing.
 _Avoid_: request, job, transaction, publish
 
+### Subscribing internals
+
+**Subscription**:
+The application's own SUBSCRIBE request for one track, from the moment it is made until it ends,
+whether the relay rejected it, the connection closed, or the application cancelled it. It is not
+demand, which is the relay's upstream subscription to a publisher, and it does not end when the
+publisher is done.
+_Avoid_: relay subscription (that is demand), request (fetch and track status are requests too),
+listener, viewer
+
 ### Test vocabulary
 
 **Relay hub**:

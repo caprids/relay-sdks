@@ -10,7 +10,7 @@ from core_helpers.fake_transport import FakeTransport, create_fake_transport, en
 from core_helpers.streams import StreamClosedError
 from core_helpers.waiting import settle, wait_for
 
-from moq_core import Closed, MoqtObject, Subscription, SubscriptionHandlers
+from moq_core import MoqtObject
 from moq_core.control_messages import encode_publish_done, encode_request_error, encode_subscribe_ok
 from mux_relay import (
     CancellationToken,
@@ -24,6 +24,7 @@ from mux_relay import (
     SubscriptionRequestError,
     connect_relay_subscriber,
 )
+from mux_relay._subscription import ProductSubscription, SubscriptionConsumer, SubscriptionEnd, UpdateOkEvent
 
 
 @pytest.fixture
@@ -173,36 +174,61 @@ async def test_cancellation_token(connected: tuple[FakeTransport, RelaySubscribe
     assert not connection.closed.done()
 
 
-def harness(capacity: int = 2) -> tuple[SubscriptionEvents, SubscriptionHandlers, Mock, asyncio.Future[Closed]]:
-    handlers = SubscriptionHandlers()
-    subscription = Mock(spec=Subscription)
-    closed: asyncio.Future[Closed] = asyncio.get_running_loop().create_future()
+class FakeSubscription:
+    """A subscription that records its consumer, so a test can drive events into the iterator directly."""
 
-    def subscribe(value: SubscriptionHandlers) -> Subscription:
-        nonlocal handlers
-        handlers = value
-        return cast(Subscription, subscription)
+    def __init__(self) -> None:
+        self.consumer: SubscriptionConsumer | None = None
+        self.cancel = Mock(side_effect=self._cancel)
 
-    events = SubscriptionEvents(subscribe, closed, capacity=capacity)
-    return events, handlers, subscription, closed
+    def _cancel(self, reason: object = None) -> None:
+        assert self.consumer is not None
+        self.consumer.ended(SubscriptionEnd("cancelled", False, reason))
+
+    def subscribe(self, consumer: SubscriptionConsumer) -> ProductSubscription:
+        self.consumer = consumer
+        return cast(ProductSubscription, self)
+
+    def update_ok(self) -> None:
+        assert self.consumer is not None
+        self.consumer.event(UpdateOkEvent())
 
 
-async def test_slow_consumer_and_overflow_bound_all_events_and_remove_observers() -> None:
-    events, handlers, subscription, closed = harness()
-    assert handlers.on_update_ok is not None
-    handlers.on_update_ok()
-    handlers.on_update_ok()
+def harness(capacity: int = 2) -> tuple[SubscriptionEvents, FakeSubscription]:
+    fake = FakeSubscription()
+    return SubscriptionEvents(fake.subscribe, capacity=capacity), fake
+
+
+async def test_slow_consumer_and_overflow_bound_all_events_and_cancel_the_subscription_once() -> None:
+    events, fake = harness()
+    fake.update_ok()
+    fake.update_ok()
     assert (await anext(events)).type == "update_ok"
-    handlers.on_update_ok()
+    fake.update_ok()
     for _ in range(1000):
-        handlers.on_update_ok()
+        fake.update_ok()
     with pytest.raises(SubscriptionOverflowError):
         await anext(events)
     assert not events._queue
-    subscription.cancel.assert_called_once()
-    assert not closed._callbacks
-    closed.set_result(Closed())
-    await settle()
+    fake.cancel.assert_called_once()
+
+
+async def test_overflow_during_construction_still_cancels_the_subscription() -> None:
+    # An eager transport can deliver events before subscribe() returns. The ending recorded then had
+    # no subscription to cancel, so the iterator must cancel it once it holds it.
+    fake = FakeSubscription()
+
+    def subscribe(consumer: SubscriptionConsumer) -> ProductSubscription:
+        subscription = fake.subscribe(consumer)
+        for _ in range(3):
+            fake.update_ok()
+        return subscription
+
+    events = SubscriptionEvents(subscribe, capacity=1)
+    fake.cancel.assert_called_once()
+    assert isinstance(fake.cancel.call_args.args[0], SubscriptionOverflowError)
+    with pytest.raises(SubscriptionOverflowError):
+        await anext(events)
 
 
 @pytest.mark.parametrize("capacity", [0, -1, 1.2, True, float("inf")])
@@ -273,16 +299,14 @@ async def test_returned_future_is_cancelled_or_observed(
         assert future.cancelled()
 
 
-async def test_subscribe_failure_detaches_observers() -> None:
-    closed: asyncio.Future[Closed] = asyncio.get_running_loop().create_future()
+async def test_subscribe_failure_detaches_the_cancellation_token() -> None:
     token = CancellationToken()
 
-    def subscribe(handlers: SubscriptionHandlers) -> Subscription:
+    def subscribe(consumer: SubscriptionConsumer) -> ProductSubscription:
         raise ValueError("bad options")
 
     with pytest.raises(ValueError, match="bad options"):
-        SubscriptionEvents(subscribe, closed, cancellation=token)
-    assert not closed._callbacks
+        SubscriptionEvents(subscribe, cancellation=token)
     assert not token._callbacks
 
 
@@ -327,16 +351,15 @@ async def test_read_timeout_ends_subscription(
 
 @pytest.mark.parametrize("overflow", [False, True])
 async def test_direct_handoff_is_outside_queue_capacity_and_survives_teardown(overflow: bool) -> None:
-    events, handlers, subscription, _ = harness(capacity=1)
+    events, fake = harness(capacity=1)
     pending = asyncio.create_task(anext(events))
     await settle()
-    assert handlers.on_update_ok is not None
-    handlers.on_update_ok()  # direct handoff
-    handlers.on_update_ok()  # exactly one queued event
+    fake.update_ok()  # direct handoff
+    fake.update_ok()  # exactly one queued event
     assert len(events._queue) == 1
-    subscription.cancel.assert_not_called()
+    fake.cancel.assert_not_called()
     if overflow:
-        handlers.on_update_ok()
+        fake.update_ok()
     else:
         events.close()
     assert (await pending).type == "update_ok"
