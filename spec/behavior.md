@@ -258,7 +258,10 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   which is how LOC/MSF media (one GOP per group) is published. A group that fails part-way is reset
   rather than completed, and the track stays open for the next group; only one write or group may
   be pending per track. The write deadline applies separately to opening a group (including demand),
-  each object write, and closing the group. Idle time between operations is unrestricted.
+  each object write, and closing the group. Idle time between operations is unrestricted. Aborting a
+  group after it closed cleanly has no effect: the FIN already ended the stream, and a reset after
+  complete delivery is ignorable
+  ([draft-20 Section 11.4.3](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.4.3)).
   Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
   observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
@@ -268,6 +271,38 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   downstream viewer, so additional viewers produce no further notification, and it may keep the
   subscription for a period after the last viewer leaves. Demand is therefore neither a viewer
   count nor a liveness signal. Implemented in both SDKs.
+
+### Write phases and interruptions
+
+Every write and every open group is one operation occupying the track's write slot (see
+`CONTEXT.md`). The operation records its phase before each step, and this table is the shared test
+list both SDKs implement: what the caller sees, what reaches the wire, and what state the track is
+left in. The Source column separates what the protocol rules from SDK policy. Section numbers refer
+to [draft-ietf-moq-transport-20](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html)
+unless stated otherwise.
+
+| Phase | Interruption | Reported to the caller | Wire effect | Track afterwards | Source |
+| --- | --- | --- | --- | --- | --- |
+| waiting-for-demand | write deadline expires | `WRITE_TIMEOUT`, or `NAMESPACE_NOT_SOLICITED` when solicitations arrived but none covers the namespace; phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | SDK policy: the protocol has no timer for awaiting a subscription (§13.6 only warns of idle timeout) |
+| waiting-for-demand | relay subscription ends while waiting | the wait continues until the deadline | nothing sent | open | SDK policy |
+| waiting-for-demand | caller cancels | the caller's reason, unwrapped; phase `waiting-for-demand` | nothing sent | open | SDK policy |
+| waiting-for-demand | track closed | `CLOSED`, phase `waiting-for-demand` | nothing sent | ended | SDK policy |
+| waiting-for-demand | connection ends | the connection's own error (phase `connection`), or `CLOSED` after a clean shutdown | nothing sent | ended | §3.5: streams and subscriptions end with the session |
+| opening-stream | write deadline expires or caller cancels | `WRITE_TIMEOUT` or the caller's reason; phase `opening-stream` | a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) or `CANCELLED` (0x1); its header may precede the reset (RESET_STREAM_AT) | open; the next write uses a new group ID | §11.4.3: a stream closed before all objects are delivered MUST be reset, and the reset SHOULD include the header; the deadline itself is SDK policy |
+| writing, closing | write deadline expires | `WRITE_TIMEOUT`, phase `writing` or `closing`; object bytes may have been delivered, and `closing` can fail after all of them were | stream reset, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §11.4.3 MUST reset; §8 and §15.11.4 for the code; the deadline is SDK policy |
+| opening-stream, writing, closing | caller cancels (AbortSignal, task cancellation, or `group.abort()`) | the caller's reason unwrapped, or `CLOSED` when `abort()` gave none; the current phase | stream reset, code `CANCELLED` (0x1) | open | §11.4.3 MUST reset; code choice is SDK policy (§3.3.4 SHOULD be relevant) |
+| opening-stream, writing, closing | the transport refuses the stream or fails a write | `TRANSPORT_ERROR` with the cause preserved; the current phase | stream reset, code `INTERNAL_ERROR` (0x0), when a stream exists | open | SDK policy |
+| opening-stream, writing, closing | relay subscription replaced or ended | `SUBSCRIPTION_CHANGED`; the current phase | stream reset, code `CANCELLED` (0x1) | open; the next write waits for the new demand | §5.1.1: the publisher MUST reset open streams of a cancelled subscription; treating a new SUBSCRIBE as a replacement rather than a concurrent subscription is SDK policy (§5.1, ADR-0001) |
+| opening-stream, writing, closing | track closed | `CLOSED`; the current phase | stream reset, code `CANCELLED` (0x1) | ended | §10.12: every stream is closed or reset before the track ends |
+| opening-stream, writing, closing | connection ends | the connection's own error (phase `connection`), or `CLOSED` | streams end with the session; a reset that is still sent carries `SESSION_CLOSED` (0x3), or `GOING_AWAY` (0x4) after GOAWAY | ended | §3.5; §15.11.4 for the codes |
+| any | a second write or group is started | `WRITE_PENDING`, phase `writing`; the active operation is unaffected | nothing sent | unchanged | SDK policy: one pending operation per track |
+| after a clean group close | `abort()` | nothing; `closed` stays true and a repeated `close()` returns | nothing sent | open | §11.4.3: a reset after all data and the FIN is ignorable |
+
+A failed group's ID is never reused, which is stricter than §2.2 (a subgroup may resume on a new
+stream after a premature reset); group IDs increase monotonically and object IDs start at 0 within a
+group (draft-ietf-moq-msf-01 §6). A group may end without an `END_OF_GROUP` marker (§2.4.2). There
+is no automatic retry, and the application chooses the next random-access point after a failure;
+MSF and LOC say nothing about an abandoned group. Implemented in both SDKs.
 
 ### Relay property handling
 
