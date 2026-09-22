@@ -185,7 +185,7 @@ when you are finished with it.
 acknowledges through `on_update_ok`. The protocol allows updates only after acceptance, so an update
 issued before `on_subscribed` is queued in order and sent as soon as the relay accepts; at most eight
 wait, and a further one raises a `RelayError` with code `UPDATE_QUEUE_FULL`. Updating an ended
-subscription raises `RelayClosedError`. A refused update arrives as `on_error` and ends the
+subscription raises `RelayError` with code `CLOSED`. A refused update arrives as `on_error` and ends the
 subscription ([#94](https://github.com/muxinc/relay-sdks/issues/94)).
 
 Re-subscribing after `on_publisher_done` creates a new request and can replay cached objects followed
@@ -261,21 +261,21 @@ transport from subscriber connections. No camera, microphone, catalog, or timest
 Publishing follows Relay's announce-and-serve ingest flow. `register_track()` registers the track
 and sends nothing; `write()` waits for the relay to subscribe upstream (demand) before sending
 bytes. Start a subscriber to create that demand. The default 10-second write deadline (`write_timeout`) covers both demand and
-transport writes. A `RelayTimeoutError` with `phase == "waiting-for-demand"` means this attempt sent
-no object bytes; choose the next write using application freshness and deduplication policy.
-The exception type alone does not prove replay is safe. If the relay has solicited
+transport writes. A `RelayError` with code `WRITE_TIMEOUT` and `phase == "waiting-for-demand"` means
+this attempt sent no object bytes; choose the next write using application freshness and
+deduplication policy. The code alone does not prove replay is safe. If the relay has solicited
 namespace prefixes but none covers this publisher's namespace, the demand deadline instead raises
-`RelayNamespaceError`: check the token and namespace instead of blindly retrying. The track stays
+`NAMESPACE_NOT_SOLICITED`: check the token and namespace instead of blindly retrying. The track stays
 open, and a later matching solicitation can let it proceed. An ordinary absence of subscriber
-demand still raises `RelayTimeoutError`. A failed or cancelled write resets its stream and leaves
+demand still raises `WRITE_TIMEOUT`. A failed or cancelled write resets its stream and leaves
 `track.closed` false while the publisher connection remains open. A relay subscription change
-raises `RelayError`; a transport deadline raises `RelayTimeoutError`. The next explicit write uses
+raises `SUBSCRIPTION_CHANGED`; a transport deadline raises `WRITE_TIMEOUT`. The next explicit write uses
 a new group ID. Choose fresh data or the next random-access point; already delivered bytes cannot
 be withdrawn. If demand disappeared, the next write waits for a new relay subscription, and
 `demand_changes()` continues reporting changes.
 
 Each write copies its bytes and sends one independent group containing one object. Await each
-write; a concurrent call raises `RelayWritePendingError` rather than growing a queue. Completion
+write; a concurrent call raises `WRITE_PENDING` rather than growing a queue. Completion
 means the transport accepted the complete group, not that a viewer acknowledged it. There is no
 publisher-side replay or retention after an object is sent. Late-subscriber behavior also depends on
 relay caching and subscription filters. A failed write may have delivered partial data; there is no
@@ -308,7 +308,7 @@ whose object 0 is the keyframe. `open_group()` waits for relay demand like `writ
 `RelayGroupWriter` that appends objects with increasing IDs and FINs the group on `close()`.
 Opening the group, each `group.write()`, and `group.close()` get a separate `write_timeout`
 deadline. Time between calls does not count toward a deadline. A timeout resets that group and
-raises `RelayTimeoutError`; the track stays open for a new group at the next keyframe:
+raises `WRITE_TIMEOUT`; the track stays open for a new group at the next keyframe:
 
 The following is an application sketch, not the data quickstart. `loc_properties` belongs to
 [the Video.js example](examples/videojs_stream/moq_media.py), not `mux_relay`; the encoded frames,
@@ -420,23 +420,26 @@ same failure. Caller cancellation reasons and token-provider exceptions retain t
 Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
 `on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
 
-Python exports `RelayErrorCode` and `RelayErrorPhase` type aliases and preserves the existing
-exception hierarchy: `RelayTimeoutError`, `RelayClosedError` (including legacy `RelayTrackEndedError`),
-`RelayWritePendingError`, `RelayNamespaceError`, and `RelayGoawayError` remain catchable subclasses
-of `RelayError`. Other lifecycle categories use `RelayError` with the code above. Manually constructed
-base `RelayError` instances default to `RELAY_ERROR` for compatibility.
+Python raises one `RelayError`, with the `code` above and a `phase`, exactly as TypeScript does; the
+`RelayErrorCode` and `RelayErrorPhase` aliases type them. The only subclasses are the three
+subscription errors that carry payload (`SubscriptionRequestError`, `SubscriptionOverflowError`,
+`SubscriptionConnectionClosedError`). Branch on `code`, never on the message.
 
 Wrapped transport/session failures preserve the original exception in `__cause__`. The lower-level
-WebTransport API's `WebTransportError` keeps its numeric `code` and `reason`; a failure surfaced
-through the Relay connection/publishing API wraps it with `code == "TRANSPORT_ERROR"`. Explicit
-caller cancellation, including `asyncio.CancelledError`, is passed through unchanged.
+WebTransport API's `WebTransportError` (in `mux_relay.webtransport`) is the transport's own
+exception, not a `RelayError`; it keeps its numeric `code` and `reason`, and a failure surfaced
+through the Relay connection/publishing API wraps it in a `RelayError` with `code == "TRANSPORT_ERROR"`
+and the `WebTransportError` as `__cause__`. Explicit caller cancellation, including
+`asyncio.CancelledError`, is passed through unchanged.
 
 ```python
-from mux_relay import RelayTimeoutError
+from mux_relay import RelayError
 
 try:
     await track.write_text("current state")
-except RelayTimeoutError as error:
+except RelayError as error:
+    if error.code != "WRITE_TIMEOUT":
+        raise
     print("Write deadline expired during", error.phase)
     # Choose what to publish next using phase and application freshness/deduplication policy.
 ```
@@ -503,7 +506,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
 | `subscriber.closed` resolves `{ error? }` | `await subscriber.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
-| `RelayError` with `code` and `phase` | `RelayError` with `code` and `phase`, preserving typed subclasses |
+| `RelayError` with `code` and `phase` | `RelayError` with `code` and `phase` |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
 | `openGroup()`, `hasDemand`, `demandChanges()`, `writer.closed` | `open_group()`, `has_demand`, `demand_changes()`, `writer.closed` (see `spec/behavior.md`) |
 | `subscriber.trackSource` | `subscriber.track_source` |
@@ -518,7 +521,7 @@ updates and cancellation, plus data-only publication on a dedicated connection. 
 also exposes FETCH and TRACK_STATUS. The protocol is pinned to `moqt-20`.
 
 Automatic reconnection, token refresh on a live session, datagram reception, and product resource
-discovery are not implemented yet. A GOAWAY ends the connection with a `RelayGoawayError`;
+discovery are not implemented yet. A GOAWAY ends the connection with a `RelayError` of code `GOAWAY`;
 subscriptions still awaiting their first response end with it (`subscribed` raises
 `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `on_error`;
 callers can open a replacement.

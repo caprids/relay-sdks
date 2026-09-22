@@ -35,7 +35,7 @@ from moq_core import (
 )
 from moq_core.control_messages import encode_request_update
 
-from .errors import RelayClosedError, RelayError
+from .errors import RelayError
 
 _log = logging.getLogger("mux_relay")
 
@@ -209,7 +209,7 @@ def _end_error(end: SubscriptionEnd) -> BaseException:
         return SubscriptionConnectionClosedError(end.error if isinstance(end.error, BaseException) else None)
     if isinstance(end.error, BaseException):
         return end.error
-    return RelayClosedError("Subscription was cancelled before the relay answered", phase="subscription")
+    return RelayError("Subscription was cancelled before the relay answered", code="CLOSED", phase="subscription")
 
 
 def _observe(future: asyncio.Future[Any]) -> None:
@@ -310,7 +310,7 @@ class RelaySubscription(Subscription):
     settles when the relay answers: it resolves with the acceptance info ``on_subscribed`` receives
     and raises :class:`SubscriptionRequestError` when the relay rejected the request or it timed out,
     :class:`SubscriptionConnectionClosedError` when the connection ended first, or the reason given to
-    ``cancel()`` (a ``CLOSED`` :class:`RelayClosedError` when none was given). ``ended`` settles once,
+    ``cancel()`` (a ``CLOSED`` :class:`RelayError` when none was given). ``ended`` settles once,
     when the subscription can no longer deliver, with a :class:`SubscriptionEnd`; it never raises.
     Publisher completion settles neither, and neither implies exactly-once or gap-free delivery.
 
@@ -405,8 +405,8 @@ class RelaySubscription(Subscription):
     def update(self, parameters: MessageParameters) -> None:
         """Send REQUEST_UPDATE, or queue it in order until the relay accepts the subscription."""
         if self._end is not None:
-            raise RelayClosedError(
-                "Subscription has ended; open a new one to change what you receive", phase="subscription"
+            raise RelayError(
+                "Subscription has ended; open a new one to change what you receive", code="CLOSED", phase="subscription"
             )
         if self._accepted:
             self._handle().update(parameters)
@@ -452,7 +452,7 @@ class RelaySubscription(Subscription):
         error = self._end.error if self._end is not None else None
         if isinstance(error, BaseException):
             raise error
-        raise RelayClosedError("Subscription ended before its request was sent", phase="subscription")
+        raise RelayError("Subscription ended before its request was sent", code="CLOSED", phase="subscription")
 
     def _fail_request(self, error: RequestError) -> None:
         if self._accepted:

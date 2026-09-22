@@ -13,14 +13,7 @@ from core_helpers.waiting import settle, wait_for
 
 from moq_core import KeyValuePair, ObjectStatus
 from moq_core.control_messages import STREAM_RESET_CODE
-from mux_relay import (
-    RelayClosedError,
-    RelayError,
-    RelayGoawayError,
-    RelayNamespaceError,
-    RelayTimeoutError,
-    RelayWritePendingError,
-)
+from mux_relay import RelayError
 from mux_relay._write_slot import RelayTrackWriter, StreamReset, WriteSlotDependencies
 
 Stall = Literal["none", "write", "second-write", "fin"]
@@ -58,7 +51,7 @@ class FakeSubgroup:
 
     def abort(self, reason: object = None) -> None:
         self.aborts.append(reason)
-        self._finish(reason if isinstance(reason, BaseException) else RelayClosedError("stream was reset"))
+        self._finish(reason if isinstance(reason, BaseException) else RelayError("stream was reset", code="CLOSED"))
 
     def fail(self, error: BaseException) -> None:
         """The transport rejects the stalled step, as a failed stream write would."""
@@ -140,7 +133,7 @@ class Harness:
 
     def _assert_open(self) -> None:
         if self._connection_closed:
-            raise self._connection_error or RelayClosedError("Relay connection is closed", phase="connection")
+            raise self._connection_error or RelayError("Relay connection is closed", code="CLOSED", phase="connection")
 
     def _end_track(self) -> None:
         self.end_track_calls += 1
@@ -191,7 +184,7 @@ class TestWaitingForDemand:
 
     async def test_times_out_with_no_stream_opened_and_no_group_id_consumed_then_writes_after_demand(self) -> None:
         h = Harness(write_timeout=SHORT)
-        with pytest.raises(RelayTimeoutError) as failure:
+        with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x01")
         assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", "waiting-for-demand")
         assert h.opened == []
@@ -201,18 +194,14 @@ class TestWaitingForDemand:
         assert h.opened[0].group_id == 0
 
     @pytest.mark.parametrize(
-        ("solicited", "error_type", "code"),
-        [
-            (False, RelayNamespaceError, "NAMESPACE_NOT_SOLICITED"),
-            (True, RelayTimeoutError, "WRITE_TIMEOUT"),
-            (None, RelayTimeoutError, "WRITE_TIMEOUT"),
-        ],
+        ("solicited", "code"),
+        [(False, "NAMESPACE_NOT_SOLICITED"), (True, "WRITE_TIMEOUT"), (None, "WRITE_TIMEOUT")],
     )
     async def test_the_deadline_reports_namespace_coverage_when_solicitations_exclude_it(
-        self, solicited: bool | None, error_type: type[RelayError], code: str
+        self, solicited: bool | None, code: str
     ) -> None:
         h = Harness(write_timeout=SHORT, solicited=solicited)
-        with pytest.raises(error_type) as failure:
+        with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x01")
         assert (failure.value.code, failure.value.phase) == (code, "waiting-for-demand")
 
@@ -223,8 +212,9 @@ class TestWaitingForDemand:
         await asyncio.sleep(SHORT / 2)
         assert not writing.done()
         assert h.opened == []
-        with pytest.raises(RelayTimeoutError):
+        with pytest.raises(RelayError) as failure:
             await writing
+        assert failure.value.code == "WRITE_TIMEOUT"
 
     async def test_reports_demand_that_came_and_went_before_the_write_started(self) -> None:
         h = Harness()
@@ -234,7 +224,6 @@ class TestWaitingForDemand:
         with pytest.raises(RelayError, match="ended before the write started") as failure:
             await writing
         assert failure.value.code == "SUBSCRIPTION_CHANGED"
-        assert not isinstance(failure.value, RelayClosedError)
         assert not h.writer.closed
         h.writer._bind(6)
         await h.writer.write(b"\x02")
@@ -242,11 +231,12 @@ class TestWaitingForDemand:
     async def test_rejects_a_second_write_or_group_with_write_pending_and_leaves_the_first_unaffected(self) -> None:
         h = Harness()
         writing = await started(h.writer.write(b"\x01"))
-        with pytest.raises(RelayWritePendingError) as failure:
+        with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x02")
         assert (failure.value.code, failure.value.phase) == ("WRITE_PENDING", "writing")
-        with pytest.raises(RelayWritePendingError):
+        with pytest.raises(RelayError) as failure:
             await h.writer.open_group()
+        assert failure.value.code == "WRITE_PENDING"
         h.writer._bind(1)
         await writing
         assert len(h.opened) == 1
@@ -267,15 +257,16 @@ class TestWaitingForDemand:
         writing = await started(h.writer.write(b"\x01"))
         h.writer.close()
         h.writer.close()
-        with pytest.raises(RelayClosedError) as failure:
+        with pytest.raises(RelayError) as failure:
             await writing
-        assert failure.value.phase == "waiting-for-demand"
+        assert (failure.value.code, failure.value.phase) == ("CLOSED", "waiting-for-demand")
         assert h.end_track_calls == 1
         assert h.writer.closed
         assert not h.writer.has_demand
         assert h.opened == []
-        with pytest.raises(RelayClosedError):
+        with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x02")
+        assert failure.value.code == "CLOSED"
 
     @pytest.mark.parametrize("error", [RelayError("link dropped", code="TRANSPORT_ERROR", phase="connection"), None])
     async def test_shares_the_connection_end_with_the_pending_write_and_ends_the_track(
@@ -298,9 +289,9 @@ class TestOpeningTheStream:
     async def test_times_out_a_held_open_and_resets_the_late_stream_with_delivery_timeout(self) -> None:
         h = Harness(write_timeout=SHORT, open="hold")
         h.writer._bind(1)
-        with pytest.raises(RelayTimeoutError) as failure:
+        with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x01")
-        assert failure.value.phase == "opening-stream"
+        assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", "opening-stream")
         assert not h.writer.closed
         h.release_open()
         await settle()
@@ -360,7 +351,7 @@ class TestOpeningTheStream:
         ("error", "code"),
         [
             (RelayError("gone", code="TRANSPORT_ERROR", phase="connection"), STREAM_RESET_CODE.SESSION_CLOSED),
-            (RelayGoawayError("migrate"), STREAM_RESET_CODE.GOING_AWAY),
+            (RelayError("migrate", code="GOAWAY", phase="connection"), STREAM_RESET_CODE.GOING_AWAY),
         ],
     )
     async def test_resets_a_late_stream_after_the_connection_ended_with_the_matching_code(
@@ -389,9 +380,10 @@ class TestWritingAndClosingASingleWrite:
         h.writer._bind(1)
         writing = await started(h.writer.write(b"\x01"))
         await wait_for(lambda: h.opened[0].stalled)
-        with pytest.raises(RelayWritePendingError):
+        with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x02")
-        with pytest.raises(RelayTimeoutError) as failure:
+        assert failure.value.code == "WRITE_PENDING"
+        with pytest.raises(RelayError) as failure:
             await writing
         assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", phase)
         assert [reset_code(reason) for reason in h.opened[0].aborts] == [STREAM_RESET_CODE.DELIVERY_TIMEOUT]
@@ -450,9 +442,9 @@ class TestWritingAndClosingASingleWrite:
         writing = await started(h.writer.write(b"\x01"))
         await wait_for(lambda: h.opened[0].stalled)
         h.writer.close()
-        with pytest.raises(RelayClosedError) as failure:
+        with pytest.raises(RelayError) as failure:
             await writing
-        assert failure.value.phase == "writing"
+        assert (failure.value.code, failure.value.phase) == ("CLOSED", "writing")
         assert [reset_code(reason) for reason in h.opened[0].aborts] == [STREAM_RESET_CODE.CANCELLED]
         assert h.end_track_calls == 1
         assert h.writer.closed
@@ -502,10 +494,12 @@ class TestGroups:
         h.writer._bind(1)
         group = await h.writer.open_group()
         assert (group.group_id, group.object_count, group.closed) == (0, 0, False)
-        with pytest.raises(RelayWritePendingError):
+        with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x01")
-        with pytest.raises(RelayWritePendingError):
+        assert failure.value.code == "WRITE_PENDING"
+        with pytest.raises(RelayError) as failure:
             await h.writer.open_group()
+        assert failure.value.code == "WRITE_PENDING"
         text: Any = "not bytes"
         unknown_status: Any = "later"
         with pytest.raises(TypeError):
@@ -527,16 +521,17 @@ class TestGroups:
         await group.close()
         assert group.closed
         assert h.opened[0].fin_calls == 1
-        with pytest.raises(RelayClosedError, match="Group is closed"):
+        with pytest.raises(RelayError, match="Group is closed") as failure:
             await group.write(b"\x09")
+        assert failure.value.code == "CLOSED"
         await h.writer.write(b"\x03")
         assert h.opened[1].group_id == 1
 
     async def test_waits_for_demand_before_opening_a_group_and_releases_the_slot_after_a_timeout(self) -> None:
         h = Harness(write_timeout=SHORT)
-        with pytest.raises(RelayTimeoutError) as failure:
+        with pytest.raises(RelayError) as failure:
             await h.writer.open_group()
-        assert failure.value.phase == "waiting-for-demand"
+        assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", "waiting-for-demand")
         assert not h.writer.closed
         h.writer._bind(1)
         group = await h.writer.open_group()
@@ -556,11 +551,13 @@ class TestGroups:
         await group.write(b"\x01")
         pending = await started(group.write(b"\x02") if mode == "write" else group.close())
         await wait_for(lambda: h.opened[0].stalled)
-        with pytest.raises(RelayWritePendingError):
+        with pytest.raises(RelayError) as failure:
             await group.write(b"\x03")
-        with pytest.raises(RelayWritePendingError):
+        assert failure.value.code == "WRITE_PENDING"
+        with pytest.raises(RelayError) as failure:
             await group.close()
-        with pytest.raises(RelayTimeoutError) as failure:
+        assert failure.value.code == "WRITE_PENDING"
+        with pytest.raises(RelayError) as failure:
             await pending
         assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", phase)
         assert [reset_code(reason) for reason in h.opened[0].aborts] == [STREAM_RESET_CODE.DELIVERY_TIMEOUT]
@@ -588,8 +585,9 @@ class TestGroups:
         second = await h.writer.open_group()
         second.abort()
         assert second.closed
-        with pytest.raises(RelayClosedError):
+        with pytest.raises(RelayError) as failure:
             await second.close()
+        assert failure.value.code == "CLOSED"
         third = await h.writer.open_group()
         await third.write(b"\x03")
         await third.close()
@@ -601,7 +599,7 @@ class TestGroups:
         group = await h.writer.open_group()
         await group.write(b"\x01")
         await group.close()
-        group.abort(RelayError("late abort"))
+        group.abort(RelayError("late abort", code="CLOSED"))
         assert group.closed
         await group.close()
         assert h.opened[0].aborts == []
@@ -677,6 +675,6 @@ class TestDemandObservers:
 
 
 def test_stream_reset_carries_the_moqt_code_and_the_cause() -> None:
-    cause = RelayTimeoutError("why", phase="writing")
+    cause = RelayError("why", code="WRITE_TIMEOUT", phase="writing")
     reset = StreamReset(STREAM_RESET_CODE.DELIVERY_TIMEOUT, cause)
     assert (reset.stream_error_code, str(reset), reset.__cause__) == (2, "why", cause)

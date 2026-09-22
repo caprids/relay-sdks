@@ -24,12 +24,8 @@ from moq_core import MAX_OBJECT_PAYLOAD_LENGTH, KeyValuePair, ObjectStatus
 from moq_core.control_messages import STREAM_RESET_CODE
 
 from .errors import (
-    RelayClosedError,
     RelayError,
     RelayErrorPhase,
-    RelayNamespaceError,
-    RelayTimeoutError,
-    RelayWritePendingError,
     _transport_error,
 )
 from .payload import _copy_properties, _encode_json, _encode_text
@@ -209,13 +205,16 @@ class _Operation:
     def _expire(self) -> None:
         error: RelayError
         if self.phase == "waiting-for-demand" and self._slot._deps.namespace_solicited() is False:
-            error = RelayNamespaceError(
+            error = RelayError(
                 "Publisher namespace is not covered by the relay namespace solicitations; "
                 "check the token and namespace",
+                code="NAMESPACE_NOT_SOLICITED",
                 phase=self.phase,
             )
         else:
-            error = RelayTimeoutError("Publish write timed out waiting for relay demand or transport", phase=self.phase)
+            error = RelayError(
+                "Publish write timed out waiting for relay demand or transport", code="WRITE_TIMEOUT", phase=self.phase
+            )
         self.cancel(error, STREAM_RESET_CODE.DELIVERY_TIMEOUT)
 
 
@@ -252,10 +251,10 @@ class RelayGroupWriter:
         self._operation.check()
 
         if self._complete:
-            raise RelayClosedError("Group is closed", phase="writing")
+            raise RelayError("Group is closed", code="CLOSED", phase="writing")
 
         if self._pending:
-            raise RelayWritePendingError("A group write or close is already pending", phase="writing")
+            raise RelayError("A group write or close is already pending", code="WRITE_PENDING", phase="writing")
 
     async def write_text(
         self, text: str, *, properties: Sequence[KeyValuePair] | None = None, status: ObjectStatus = "normal"
@@ -327,7 +326,9 @@ class RelayGroupWriter:
             return
 
         self._operation.cancel(
-            reason if reason is not None else RelayClosedError("Group was aborted", phase=self._operation.phase),
+            reason
+            if reason is not None
+            else RelayError("Group was aborted", code="CLOSED", phase=self._operation.phase),
             STREAM_RESET_CODE.CANCELLED,
         )
 
@@ -440,7 +441,9 @@ class RelayTrackWriter:
 
         if self._active is not None:
             self._active.cancel(
-                error if error is not None else RelayClosedError("Published track is closed", phase=self._active.phase),
+                error
+                if error is not None
+                else RelayError("Published track is closed", code="CLOSED", phase=self._active.phase),
                 code,
             )
 
@@ -464,11 +467,13 @@ class RelayTrackWriter:
         self._deps.assert_open()
 
         if self._ended:
-            raise RelayClosedError("Published track is closed", phase="writing")
+            raise RelayError("Published track is closed", code="CLOSED", phase="writing")
 
         if self._active is not None:
-            raise RelayWritePendingError(
-                "A write or group is already pending; await it before writing another object", phase="writing"
+            raise RelayError(
+                "A write or group is already pending; await it before writing another object",
+                code="WRITE_PENDING",
+                phase="writing",
             )
 
     def _begin(self, kind: Literal["write", "group"]) -> _Operation:

@@ -16,13 +16,11 @@ from mux_relay import (
     CancellationToken,
     Closed,
     ConnectingTransport,
-    RelayClosedError,
+    RelayError,
     RelayGroupWriter,
     RelayPublisher,
     RelaySubscriber,
     RelaySubscriptionHandlers,
-    RelayTimeoutError,
-    RelayWritePendingError,
     connect_relay_publisher,
     connect_relay_subscriber,
     read_json,
@@ -195,7 +193,7 @@ class TestConnectRelayPublisher:
         await wait_for(lambda: len(received_two.objects) == 2)
         assert ObservedSubscribeFin("one") in hub.track_ends
 
-        with pytest.raises(RelayClosedError) as failure:
+        with pytest.raises(RelayError) as failure:
             await one.write(bytes([4]))
         assert failure.value.code == "CLOSED"
         assert failure.value.phase == "writing"
@@ -206,7 +204,7 @@ class TestConnectRelayPublisher:
         _, publisher, subscriber = await connect_hub(cleanup)
         events = publisher.register_track("events", write_timeout=0.05)
 
-        with pytest.raises(RelayTimeoutError) as failure:
+        with pytest.raises(RelayError) as failure:
             await events.write(bytes([1]))
         assert failure.value.code == "WRITE_TIMEOUT"
         assert failure.value.phase == "waiting-for-demand"
@@ -224,15 +222,16 @@ class TestConnectRelayPublisher:
         writing = asyncio.ensure_future(events.write(bytes([1])))
         await asyncio.sleep(0)
 
-        with pytest.raises(RelayWritePendingError) as failure:
+        with pytest.raises(RelayError) as failure:
             await events.write(bytes([2]))
         assert failure.value.code == "WRITE_PENDING"
         assert failure.value.phase == "writing"
 
         events.close()
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayError, match="closed") as failure:
             await writing
+        assert failure.value.code == "CLOSED"
 
     async def test_cancels_pending_writes_and_retracts_the_namespace_when_the_publisher_closes(
         self, cleanup: Cleanup
@@ -246,15 +245,17 @@ class TestConnectRelayPublisher:
 
         await publisher.close()
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayError, match="closed") as failure:
             await pending
+        assert failure.value.code == "CLOSED"
 
         await publisher.close()
         assert ObservedNamespaceDone(NAMESPACE) in hub.track_ends
         assert await publisher.closed == Closed()
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayError, match="closed") as failure:
             publisher.register_track("late")
+        assert failure.value.code == "CLOSED"
 
     async def test_does_not_re_register_a_track_name_or_silently_restart_its_group_numbering(
         self, cleanup: Cleanup
@@ -354,7 +355,7 @@ class TestConnectRelayPublisher:
                 nonlocal streams
                 streams += 1
                 if streams == 2:
-                    raise RelayTimeoutError("bound write timed out")
+                    raise RelayError("bound write timed out", code="WRITE_TIMEOUT", phase="opening-stream")
                 return await open_stream()
 
             transport.create_unidirectional_stream = fail_once
@@ -503,12 +504,14 @@ async def test_encoding_errors_leave_writers_usable(cleanup: Cleanup) -> None:
 async def test_helpers_keep_deadlines_concurrency_and_task_cancellation(cleanup: Cleanup) -> None:
     _, publisher, subscriber = await connect_hub(cleanup)
     track = publisher.register_track("helpers", write_timeout=0.05)
-    with pytest.raises(RelayTimeoutError):
+    with pytest.raises(RelayError) as failure:
         await track.write_text("no demand")
+    assert failure.value.code == "WRITE_TIMEOUT"
     writing = asyncio.create_task(track.write_json({"waiting": True}))
     await asyncio.sleep(0)
-    with pytest.raises(RelayWritePendingError):
+    with pytest.raises(RelayError) as failure:
         await track.write_text("concurrent")
+    assert failure.value.code == "WRITE_PENDING"
     writing.cancel()
     with pytest.raises(asyncio.CancelledError):
         await writing

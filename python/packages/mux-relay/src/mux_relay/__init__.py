@@ -53,17 +53,7 @@ from .connect_session import (
     RelayTransportFactory,
     TokenProvider,
 )
-from .errors import (
-    RelayClosedError,
-    RelayError,
-    RelayErrorCode,
-    RelayErrorPhase,
-    RelayGoawayError,
-    RelayNamespaceError,
-    RelayTimeoutError,
-    RelayTrackEndedError,
-    RelayWritePendingError,
-)
+from .errors import RelayError, RelayErrorCode, RelayErrorPhase
 from .payload import read_json, read_text
 from .publish import (
     DEFAULT_WRITE_TIMEOUT,
@@ -130,22 +120,16 @@ __all__ = [
     "PublishDone",
     "PublisherDoneEvent",
     "RelativeGroupFilter",
-    "RelayClosedError",
     "RelayError",
     "RelayErrorCode",
     "RelayErrorPhase",
-    "RelayGoawayError",
     "RelayGroupWriter",
-    "RelayNamespaceError",
     "RelayPublisher",
     "RelaySubscriber",
     "RelaySubscription",
     "RelaySubscriptionHandlers",
-    "RelayTimeoutError",
-    "RelayTrackEndedError",
     "RelayTrackWriter",
     "RelayTransportFactory",
-    "RelayWritePendingError",
     "RequestError",
     "StateNotifyEvent",
     "SubgroupEnd",

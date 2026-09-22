@@ -177,6 +177,24 @@ repository (examples, live smoke tests, the Video.js streaming example) moved in
 Once a package is published, a rename of this kind needs a deprecation cycle; record that policy
 here when the first release happens.
 
+## One error identity: `RelayError`, `code`, `phase`
+
+Both SDKs raise one `RelayError` whose `code` says what happened and whose `phase` says where, the
+identity `spec/behavior.md` tells callers to branch on. The three subscription errors
+(`SubscriptionRequestError`, `SubscriptionOverflowError`, `SubscriptionConnectionClosedError`)
+subclass it in both SDKs because they carry payload the code cannot: the relay's `RequestError`, or
+the connection's failure as the cause.
+
+Not adopted: Python-only exception subclasses per code (`RelayClosedError`, `RelayTimeoutError`,
+`RelayNamespaceError`, `RelayGoawayError`, `RelayWritePendingError`, and the never-raised alias
+`RelayTrackEndedError`). They duplicated the `code` discriminant under names TypeScript did not have,
+so a caller switching languages met two identities for one failure, and `except RelayError as
+error: if error.code == "WRITE_TIMEOUT"` is one line longer than a subclass catch. Also not adopted:
+a `RELAY_ERROR` fallback code for a `RelayError` built without one (`code` is required in both SDKs),
+and a transport error that is itself a Relay error (`WebTransportError` is the transport layer's own
+exception, wrapped as `TRANSPORT_ERROR` at the Relay boundary). Removed without aliases under the
+policy above; reversible before the first release, so no ADR.
+
 ## Async subscription consumption
 
 `subscriber.subscribeEvents()` / `subscriber.subscribe_events()` creates a bounded iterator of

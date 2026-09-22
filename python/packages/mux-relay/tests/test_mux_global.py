@@ -9,7 +9,7 @@ import pytest
 from mux_global import demo
 from relay_helpers.relay_hub import create_relay_hub
 
-from mux_relay import RelayTimeoutError, RelayTrackWriter, connect_relay_publisher, connect_relay_subscriber
+from mux_relay import RelayError, RelayTrackWriter, connect_relay_publisher, connect_relay_subscriber
 
 CONFIG = demo.Config(
     url="https://relay.example.com",
@@ -68,7 +68,7 @@ async def test_deadline_waiting_for_demand_never_attempts_write(connected, monke
 async def test_partial_delivery_timeout_is_not_replayed(connected, monkeypatch: pytest.MonkeyPatch):
     original = RelayTrackWriter.write
     attempts = 0
-    failure = RelayTimeoutError("transport write timed out after partial progress")
+    failure = RelayError("transport write timed out after partial progress", code="WRITE_TIMEOUT", phase="writing")
 
     async def partial_write(self, payload, **kwargs):
         nonlocal attempts
@@ -77,7 +77,7 @@ async def test_partial_delivery_timeout_is_not_replayed(connected, monkeypatch: 
         raise failure
 
     monkeypatch.setattr(RelayTrackWriter, "write", partial_write)
-    with pytest.raises(RelayTimeoutError) as caught:
+    with pytest.raises(RelayError) as caught:
         await demo.run_demo(CONFIG, lambda _: None)
     assert caught.value is failure
     assert attempts == 1

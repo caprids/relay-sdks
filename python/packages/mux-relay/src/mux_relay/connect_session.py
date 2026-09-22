@@ -19,7 +19,7 @@ from moq_core import MOQT_PROTOCOL_ID, Closed, Goaway, MoqtTransport
 from moq_core._tasks import call_later, observe, spawn
 
 from .cancellation import CancellationToken
-from .errors import RelayClosedError, RelayGoawayError, RelayTimeoutError, _transport_error
+from .errors import RelayError, _transport_error
 
 TokenProvider = Callable[[], "str | Awaitable[str | None] | None"]
 """Resolve a connection token, synchronously or asynchronously. ``None`` or ``""`` sends no token."""
@@ -224,7 +224,7 @@ async def open_relay_session(
         info = info or Closed()
         stopped = True
         closed_info = info
-        stop_error = info.error if info.error is not None else RelayClosedError("Relay connection is closed")
+        stop_error = info.error if info.error is not None else RelayError("Relay connection is closed", code="CLOSED")
         timer.cancel()
 
         if cancellation is not None:
@@ -258,7 +258,7 @@ async def open_relay_session(
 
     timer = call_later(
         options.connect_timeout,
-        lambda: finish(Closed(RelayTimeoutError("Relay connection timed out", phase="connecting"))),
+        lambda: finish(Closed(RelayError("Relay connection timed out", code="CONNECTION_TIMEOUT", phase="connecting"))),
     )
 
     if cancellation is not None:
@@ -331,8 +331,9 @@ async def open_relay_session(
                 ),
                 on_goaway=lambda goaway: finish(
                     Closed(
-                        RelayGoawayError(
+                        RelayError(
                             "Relay requested session migration; open a new connection",
+                            code="GOAWAY",
                             phase="connection" if established else "connecting",
                         )
                     )

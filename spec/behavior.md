@@ -75,12 +75,13 @@ same failure. Caller cancellation reasons and token-provider exceptions retain t
 Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
 `on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
 
-Implementations export a Relay error type with a stable `code` discriminant and `phase` field.
-Human-readable messages are not a compatibility contract. Wrapped transport/session failures retain
-the original cause. TypeScript uses `RelayError.cause`; Python uses exception chaining and preserves
-its existing Relay exception subclasses. Python's low-level `WebTransportError` retains its numeric
-application code; Relay API failures wrap it with `TRANSPORT_ERROR`. Manually constructed Python base
-`RelayError` instances retain the fallback `RELAY_ERROR` code.
+Both SDKs export one Relay error type, `RelayError`, with a stable `code` discriminant and a `phase`
+field, plus the three subscription errors that carry payload (`SubscriptionRequestError`,
+`SubscriptionOverflowError`, `SubscriptionConnectionClosedError`). There are no other subclasses;
+callers branch on `code`. Human-readable messages are not a compatibility contract. Wrapped
+transport and session failures retain the original cause: TypeScript in `RelayError.cause`, Python
+chained as `__cause__`. Transport-layer exceptions are not Relay errors; a Relay operation that fails
+on the transport raises `TRANSPORT_ERROR` with the transport exception as its cause.
 
 Local argument errors remain `TypeError`/`RangeError` in TypeScript and `TypeError`/`ValueError` in
 Python as appropriate. A refused concurrent operation uses `WRITE_PENDING` and does not cancel the

@@ -15,7 +15,6 @@ import pytest
 from moq_core import MessageParameters, RequestError, SubscribeOk, Subscription, SubscriptionHandlers
 from moq_core.control_messages import encode_request_update
 from mux_relay import (
-    RelayClosedError,
     RelayError,
     RelaySubscription,
     SubscriptionAwaitable,
@@ -319,8 +318,11 @@ class TestEndings:
         subscription = RelaySubscription(h.deps, [r])
         h.subscribe.assert_not_called()
         assert r.endings == [SubscriptionEnd(kind="terminated", cause="connection-closed", accepted=False, error=error)]
-        with pytest.raises(RuntimeError if error is not None else RelayClosedError):
+        with pytest.raises(RuntimeError if error is not None else RelayError) as failure:
             _ = subscription.request_id
+        if error is None:
+            assert isinstance(failure.value, RelayError)
+            assert failure.value.code == "CLOSED"
 
     async def test_releases_the_closure_observer_tells_consumers_and_reraises_when_the_core_subscribe_raises(
         self,
@@ -429,8 +431,9 @@ class TestReadinessAndTermination:
         )
         bare = RelaySubscription(Harness().deps)
         bare.cancel()
-        with pytest.raises(RelayClosedError) as closed:
+        with pytest.raises(RelayError) as closed:
             await bare.subscribed
+        assert closed.value.code == "CLOSED"
         assert closed.value.phase == "subscription"
 
     async def test_settles_each_awaitable_once_and_observes_a_readiness_failure_nobody_awaits(self) -> None:
@@ -588,8 +591,9 @@ class TestUpdatesBeforeAcceptance:
         subscription = RelaySubscription(h.deps)
         h.accept()
         subscription.cancel(RuntimeError("done"))
-        with pytest.raises(RelayClosedError) as failure:
+        with pytest.raises(RelayError) as failure:
             subscription.update(MessageParameters(forward=0))
+        assert failure.value.code == "CLOSED"
         assert failure.value.phase == "subscription"
         h.core.update.assert_not_called()
 
