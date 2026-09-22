@@ -37,6 +37,12 @@ without a row here is a bug.
 | The track ended and cannot be written again | `writer.closed` | `writer.closed` |
 | Borrowed protocol-level track access for integrations | `subscriber.trackSource` (a `MoqTrackSource`) | `subscriber.track_source` (a `MoqTrackSource`) |
 | The connection ended, and why | `connection.closed` resolves `{ error? }` | `await connection.closed` returns `Closed(error=...)` |
+| Cancel a connection's whole lifetime from outside | `AbortSignal` (platform), given as `signal` | `CancellationToken`, given as `cancellation=`; `Cancelled` is the reason it raises when `cancel()` was given none |
+| Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready)` (`RelayTransportFactory`); `connect_webtransport`, the aioquic factory, by default |
+| Consume one subscription as an async iterator | `subscriber.subscribeEvents(options)` returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
+| One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
+| Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
+| The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
@@ -177,6 +183,24 @@ repository (examples, live smoke tests, the Video.js streaming example) moved in
 Once a package is published, a rename of this kind needs a deprecation cycle; record that policy
 here when the first release happens.
 
+## One error identity: `RelayError`, `code`, `phase`
+
+Both SDKs raise one `RelayError` whose `code` says what happened and whose `phase` says where, the
+identity `spec/behavior.md` tells callers to branch on. The three subscription errors
+(`SubscriptionRequestError`, `SubscriptionOverflowError`, `SubscriptionConnectionClosedError`)
+subclass it in both SDKs because they carry payload the code cannot: the relay's `RequestError`, or
+the connection's failure as the cause.
+
+Not adopted: Python-only exception subclasses per code (`RelayClosedError`, `RelayTimeoutError`,
+`RelayNamespaceError`, `RelayGoawayError`, `RelayWritePendingError`, and the never-raised alias
+`RelayTrackEndedError`). They duplicated the `code` discriminant under names TypeScript did not have,
+so a caller switching languages met two identities for one failure, and `except RelayError as
+error: if error.code == "WRITE_TIMEOUT"` is one line longer than a subclass catch. Also not adopted:
+a `RELAY_ERROR` fallback code for a `RelayError` built without one (`code` is required in both SDKs),
+and a transport error that is itself a Relay error (`WebTransportError` is the transport layer's own
+exception, wrapped as `TRANSPORT_ERROR` at the Relay boundary). Removed without aliases under the
+policy above; reversible before the first release, so no ADR.
+
 ## Async subscription consumption
 
 `subscriber.subscribeEvents()` / `subscriber.subscribe_events()` creates a bounded iterator of
@@ -226,4 +250,7 @@ subscription, not a failure of the caller's await, and the connection's `closed`
 - `RelayTrackWriter`, `RelayGroupWriter`, `write`, `openGroup`, `close`, `abort`: these say what
   they do.
 - Everything in `@mux/moq-core` and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
-  `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it.
+  `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it. The
+  product packages re-export the same short list of core names (the "Protocol types borrowed from
+  the core" row; Python adds `Closed`, which TypeScript spells inline) and nothing else;
+  `python/packages/mux-relay/tests/test_exports.py` checks that list against `ts/src/index.ts`.

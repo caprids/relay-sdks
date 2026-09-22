@@ -41,7 +41,6 @@ from mux_relay import (
     Cancelled,
     Closed,
     MoqtObject,
-    RelayClosedError,
     RelayError,
     RelayGroupWriter,
     RelayPublisher,
@@ -590,7 +589,7 @@ def failure_ends_track(error: RelayError, *, operation: Literal["write", "group"
     Single-object writes and groups both reset their stream after failure; demand before the
     operation does not distinguish a transient failure from a closed track.
     """
-    return isinstance(error, RelayClosedError)
+    return error.code == "CLOSED"
 
 
 async def track_has_ended(track: RelayTrackWriter) -> bool:
@@ -612,7 +611,7 @@ async def track_has_ended(track: RelayTrackWriter) -> bool:
 
 async def write_ended_track(track: RelayTrackWriter, error: RelayError, *, bound: bool) -> bool:
     """Check the writer after failure; sampled demand does not indicate whether it ended."""
-    return isinstance(error, RelayClosedError) or await track_has_ended(track)
+    return error.code == "CLOSED" or await track_has_ended(track)
 
 
 @dataclass(slots=True)
@@ -1115,7 +1114,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
             if not closing:
                 log(f"{label} connection closed", {"error": describe(future.result().error)})
-                lifetime.cancel(future.result().error or RelayClosedError(f"{label} connection closed"))
+                lifetime.cancel(future.result().error or RelayError(f"{label} connection closed", code="CLOSED"))
 
         closed.add_done_callback(done)
 

@@ -31,18 +31,15 @@ from moq_core.control_messages import (
 from mux_relay import (
     CancellationToken,
     ConnectingTransport,
-    RelayClosedError,
     RelayError,
-    RelayGoawayError,
     RelaySubscriber,
     RelaySubscriptionHandlers,
-    RelayTimeoutError,
     SubscriptionConnectionClosedError,
     SubscriptionEnd,
     SubscriptionRequestError,
-    WebTransportError,
     connect_relay_subscriber,
 )
+from mux_relay.webtransport import WebTransportError
 
 ENDPOINT = "https://relay.example.com/moq"
 
@@ -214,7 +211,7 @@ class TestConnectRelay:
         cancelled.cancel()
         await control.write(encode_goaway(1000))
         closed = await connection.closed
-        assert isinstance(closed.error, RelayGoawayError)
+        assert isinstance(closed.error, RelayError)
         assert closed.error.code == "GOAWAY"
         assert closed.error.phase == "connection"
         assert fake.close_info is not None
@@ -408,8 +405,9 @@ class TestConnectRelay:
         connection.close()
         assert await connection.closed == Closed()
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayError, match="closed") as failure:
             connection.track_source.subscribe(MoqtSubscribeOptions(track_namespace=["room"], track_name="events"))
+        assert failure.value.code == "CLOSED"
 
     async def test_preserves_request_error_codes_without_closing_unrelated_consumers(
         self, connections: list[RelaySubscriber]
@@ -477,8 +475,9 @@ class TestConnectRelay:
         fake.drop_transport()
         await connection.closed
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayError, match="closed") as failure:
             connection.subscribe(["room"], "events")
+        assert failure.value.code == "CLOSED"
 
     async def test_cancels_while_a_token_provider_is_pending_without_opening_a_late_transport(self) -> None:
         owner = CancellationToken()
@@ -536,7 +535,7 @@ class TestConnectRelay:
         fake = create_fake_transport()
         never: asyncio.Future[None] = asyncio.get_running_loop().create_future()
 
-        with pytest.raises(RelayTimeoutError) as failure:
+        with pytest.raises(RelayError) as failure:
             await connect_relay_subscriber(ENDPOINT, connect_timeout=0.02, create_transport=Factory(fake, never))
         assert failure.value.code == "CONNECTION_TIMEOUT"
         assert failure.value.phase == "connecting"
@@ -546,8 +545,9 @@ class TestConnectRelay:
     async def test_times_out_a_peer_that_connects_but_never_sends_protocol_setup(self) -> None:
         fake = create_fake_transport()
 
-        with pytest.raises(RelayTimeoutError, match="timed out"):
+        with pytest.raises(RelayError, match="timed out") as failure:
             await connect_relay_subscriber(ENDPOINT, connect_timeout=0.02, create_transport=Factory(fake))
+        assert (failure.value.code, failure.value.phase) == ("CONNECTION_TIMEOUT", "connecting")
 
         assert fake.close_calls == 1
 
@@ -585,8 +585,9 @@ class TestConnectRelay:
     async def test_uses_the_aioquic_webtransport_client_by_default(self) -> None:
         # Nothing listens here, so the default transport's handshake never completes and the
         # connection deadline is what ends the attempt.
-        with pytest.raises(RelayTimeoutError, match="timed out"):
+        with pytest.raises(RelayError, match="timed out") as failure:
             await connect_relay_subscriber("https://127.0.0.1:9/moq", connect_timeout=0.3)
+        assert failure.value.code == "CONNECTION_TIMEOUT"
 
     @pytest.mark.parametrize("connect_timeout", [0, -1, math.nan, math.inf])
     async def test_rejects_invalid_connection_deadlines(self, connect_timeout: float) -> None:

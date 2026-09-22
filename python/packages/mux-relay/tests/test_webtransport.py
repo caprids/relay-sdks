@@ -33,7 +33,6 @@ from moq_core.transport import ReceiveStream, SendStream
 from mux_relay import (
     Closed,
     ConnectingTransport,
-    RelayError,
     RelaySubscriptionHandlers,
     connect_relay_publisher,
     connect_relay_subscriber,
@@ -59,12 +58,12 @@ NAMESPACE = ["loopback", "data"]
 
 
 class TestWireHelpers:
-    async def test_transport_failures_are_relay_errors_and_keep_their_details(self) -> None:
+    async def test_transport_failures_keep_their_details(self) -> None:
         session = WebTransportSessionBase()
         error = WebTransportError("QUIC connection terminated", code=1, reason="Idle timeout")
         session._finish(error)
 
-        with pytest.raises(RelayError) as failure:
+        with pytest.raises(WebTransportError) as failure:
             await session.wait_closed()
 
         assert failure.value is error

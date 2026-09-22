@@ -8,7 +8,7 @@ from typing import Any, cast
 import pytest
 from videojs_stream.stream import EncodedSample, LiveQueue, Stats, discard_queue, publish_live_media, publish_media
 
-from mux_relay import CancellationToken, RelayTimeoutError
+from mux_relay import CancellationToken, RelayError
 
 
 def sample(kind: str, timestamp: float, *, key: bool = True, size: int = 4) -> EncodedSample:
@@ -38,7 +38,7 @@ class Group:
             self.track.started.set()
             await self.track.gate.wait()
             if self.track.timeout:
-                raise RelayTimeoutError("transport stalled")
+                raise RelayError("transport stalled", code="WRITE_TIMEOUT", phase="writing")
         self.timestamps.append(next(p.value for p in properties if p.type == 0x10))
         self.track.written.set()
 

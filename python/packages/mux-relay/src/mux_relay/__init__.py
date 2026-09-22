@@ -3,75 +3,36 @@
 Owns the Relay product API and authentication convention, built on ``moq_core``. The default
 transport is WebTransport over HTTP/3 through aioquic, which reaches a relay natively with no
 browser; ``create_transport`` swaps in another implementation of the same seam.
+
+The public names are the rows of ``spec/vocabulary.md``, pinned by ``tests/test_exports.py``. From
+the core this package re-exports exactly what ``@mux/relay`` re-exports, plus ``Closed``; every
+other protocol type (location filters, fetch, track status, the constants) is imported from
+``moq_core``, a declared dependency.
 """
 
 from moq_core import (
-    MAX_OBJECT_PAYLOAD_LENGTH,
-    MOQT_PROTOCOL_ID,
-    PUBLISH_DONE_STATUS,
-    REQUEST_ERROR_CODE,
-    AbsoluteLocationFilter,
     Closed,
-    FetchEndOfRange,
-    FetchHandle,
-    FetchHandlers,
-    FetchObject,
-    FetchOk,
-    FetchReset,
-    FetchStreamEntry,
     Goaway,
     KeyValuePair,
-    Location,
     LocationFilter,
     MessageParameters,
     MoqtObject,
-    MoqtProtocolError,
     MoqTrackSource,
-    MoqtSubscribeOptions,
     MoqtTransport,
-    NextObjectFilter,
-    NoLocationFilter,
     PublishDone,
-    RelativeGroupFilter,
     RequestError,
-    SubgroupEnd,
-    SubgroupReset,
     SubscribeOk,
     Subscription,
     SubscriptionHandlers,
-    TrackStatusHandlers,
-    TrackStatusOk,
 )
 
 from ._subscription import RelaySubscription, SubscriptionAwaitable, SubscriptionEnd, SubscriptionEndKind
 from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
-from .connect_session import (
-    DEFAULT_CONNECT_TIMEOUT,
-    DEFAULT_REQUEST_TIMEOUT,
-    ConnectingTransport,
-    RelayTransportFactory,
-    TokenProvider,
-)
-from .errors import (
-    RelayClosedError,
-    RelayError,
-    RelayErrorCode,
-    RelayErrorPhase,
-    RelayGoawayError,
-    RelayNamespaceError,
-    RelayTimeoutError,
-    RelayTrackEndedError,
-    RelayWritePendingError,
-)
+from .connect_session import ConnectingTransport, RelayTransportFactory
+from .errors import RelayError, RelayErrorCode, RelayErrorPhase
 from .payload import read_json, read_text
-from .publish import (
-    DEFAULT_WRITE_TIMEOUT,
-    RelayGroupWriter,
-    RelayPublisher,
-    RelayTrackWriter,
-    connect_relay_publisher,
-)
+from .publish import RelayGroupWriter, RelayPublisher, RelayTrackWriter, connect_relay_publisher
 from .subscription_events import (
     GoawayEvent,
     ObjectEvent,
@@ -87,70 +48,41 @@ from .subscription_events import (
     SubscriptionRequestError,
     UpdateOkEvent,
 )
-from .webtransport import WebTransportError, WebTransportSession, connect_webtransport
+from .webtransport import connect_webtransport
 
 DEFAULT_ENDPOINT = "https://sjc.relay.mux.global"
 """The default Relay endpoint pinned in ``spec/protocol.json``."""
 
 __all__ = [
-    "DEFAULT_CONNECT_TIMEOUT",
     "DEFAULT_ENDPOINT",
-    "DEFAULT_REQUEST_TIMEOUT",
-    "DEFAULT_WRITE_TIMEOUT",
-    "MAX_OBJECT_PAYLOAD_LENGTH",
-    "MOQT_PROTOCOL_ID",
-    "PUBLISH_DONE_STATUS",
-    "REQUEST_ERROR_CODE",
-    "AbsoluteLocationFilter",
     "CancellationToken",
     "Cancelled",
     "Closed",
     "ConnectingTransport",
-    "FetchEndOfRange",
-    "FetchHandle",
-    "FetchHandlers",
-    "FetchObject",
-    "FetchOk",
-    "FetchReset",
-    "FetchStreamEntry",
     "Goaway",
     "GoawayEvent",
     "KeyValuePair",
-    "Location",
     "LocationFilter",
     "MessageParameters",
     "MoqTrackSource",
     "MoqtObject",
-    "MoqtProtocolError",
-    "MoqtSubscribeOptions",
     "MoqtTransport",
-    "NextObjectFilter",
-    "NoLocationFilter",
     "ObjectEvent",
     "PublishDone",
     "PublisherDoneEvent",
-    "RelativeGroupFilter",
-    "RelayClosedError",
     "RelayError",
     "RelayErrorCode",
     "RelayErrorPhase",
-    "RelayGoawayError",
     "RelayGroupWriter",
-    "RelayNamespaceError",
     "RelayPublisher",
     "RelaySubscriber",
     "RelaySubscription",
     "RelaySubscriptionHandlers",
-    "RelayTimeoutError",
-    "RelayTrackEndedError",
     "RelayTrackWriter",
     "RelayTransportFactory",
-    "RelayWritePendingError",
     "RequestError",
     "StateNotifyEvent",
-    "SubgroupEnd",
     "SubgroupEndEvent",
-    "SubgroupReset",
     "SubgroupResetEvent",
     "SubscribeOk",
     "SubscribedEvent",
@@ -164,12 +96,7 @@ __all__ = [
     "SubscriptionHandlers",
     "SubscriptionOverflowError",
     "SubscriptionRequestError",
-    "TokenProvider",
-    "TrackStatusHandlers",
-    "TrackStatusOk",
     "UpdateOkEvent",
-    "WebTransportError",
-    "WebTransportSession",
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_webtransport",

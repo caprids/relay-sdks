@@ -44,7 +44,7 @@ from .connect_session import (
     TokenProvider,
     open_relay_session,
 )
-from .errors import RelayClosedError, RelayError
+from .errors import RelayError
 from .payload import _copy_properties
 
 IMPLEMENTATION_NAME = "mux-relay (Python) publisher"
@@ -128,7 +128,7 @@ class RelayPublisher:
         self._lifetime.assert_open()
 
         if self._closing:
-            raise RelayClosedError("Relay publisher is closed")
+            raise RelayError("Relay publisher is closed", code="CLOSED")
 
         if not isinstance(track, str):
             raise TypeError("Track name must be a string")

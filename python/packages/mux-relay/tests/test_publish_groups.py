@@ -10,12 +10,10 @@ from relay_helpers.relay_hub import RelayHub, create_relay_hub
 
 from moq_core import KeyValuePair, MoqtObject
 from mux_relay import (
-    RelayClosedError,
+    RelayError,
     RelayPublisher,
     RelaySubscriber,
     RelaySubscriptionHandlers,
-    RelayTimeoutError,
-    RelayWritePendingError,
     connect_relay_publisher,
     connect_relay_subscriber,
 )
@@ -96,11 +94,13 @@ class TestOpenGroup:
 
         group = await video.open_group()
 
-        with pytest.raises(RelayWritePendingError, match="already pending"):
+        with pytest.raises(RelayError, match="already pending") as failure:
             await video.open_group()
+        assert failure.value.code == "WRITE_PENDING"
 
-        with pytest.raises(RelayWritePendingError, match="already pending"):
+        with pytest.raises(RelayError, match="already pending") as failure:
             await video.write(b"x")
+        assert failure.value.code == "WRITE_PENDING"
 
         await group.close()
         await video.write(b"after")
@@ -109,8 +109,9 @@ class TestOpenGroup:
         _, publisher, subscriber = await connect_hub(cleanup)
         video = publisher.register_track("video", write_timeout=0.05)
 
-        with pytest.raises(RelayTimeoutError, match="timed out"):
+        with pytest.raises(RelayError, match="timed out") as failure:
             await video.open_group()
+        assert failure.value.code == "WRITE_TIMEOUT"
 
         objects = receive(subscriber, "video")
         group = await video.open_group()
@@ -129,11 +130,13 @@ class TestOpenGroup:
 
         assert group.closed
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayError, match="closed") as failure:
             await group.write(b"late")
+        assert failure.value.code == "CLOSED"
 
-        with pytest.raises(RelayClosedError, match="closed"):
+        with pytest.raises(RelayError, match="closed") as failure:
             await group.close()
+        assert failure.value.code == "CLOSED"
 
     async def test_abort_resets_the_group_and_leaves_the_track_usable(self, cleanup: Cleanup) -> None:
         _, publisher, subscriber = await connect_hub(cleanup)
@@ -146,8 +149,9 @@ class TestOpenGroup:
 
         assert group.closed
 
-        with pytest.raises(RelayClosedError):
+        with pytest.raises(RelayError) as failure:
             await group.write(b"more")
+        assert failure.value.code == "CLOSED"
 
         # The track stays open: the next group starts fresh with the next id.
         replacement = await video.open_group()

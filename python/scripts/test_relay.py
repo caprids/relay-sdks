@@ -33,17 +33,16 @@ from getpass import getpass
 from typing import Any
 from urllib.parse import urlsplit
 
+from moq_core import NextObjectFilter
 from mux_relay import (
     DEFAULT_ENDPOINT,
     CancellationToken,
     Closed,
     MessageParameters,
     MoqtObject,
-    NextObjectFilter,
     RelayPublisher,
     RelaySubscriber,
     RelaySubscriptionHandlers,
-    RelayTimeoutError,
     connect_relay_publisher,
     connect_relay_subscriber,
 )
@@ -85,7 +84,7 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
     lifetime = CancellationToken()
     loop = asyncio.get_running_loop()
     deadline = loop.call_later(
-        RUN_DEADLINE, lambda: lifetime.cancel(RelayTimeoutError(f"Live relay test exceeded {RUN_DEADLINE:.0f} seconds"))
+        RUN_DEADLINE, lambda: lifetime.cancel(TimeoutError(f"Live relay test exceeded {RUN_DEADLINE:.0f} seconds"))
     )
     received: dict[str, list[bytes]] = {"events": [], "status": [], "lateStatus": []}
     errors: list[str] = []
