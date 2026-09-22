@@ -102,6 +102,9 @@ export function createSubscriptionEvents(
       finish(error);
       throw error;
     }
+    // Events can overflow the queue before subscribe() returns. The ending recorded then had no
+    // subscription to cancel, so cancel it now; the echo of that cancel is ignored above.
+    if (ended) subscription.cancel(failure);
   }
   return {
     [Symbol.asyncIterator]() {

@@ -147,6 +147,23 @@ it('bounds stalled consumers, fails without draining, and cancels its subscripti
   expect(fake.cancel).toHaveBeenCalledOnce();
 });
 
+it('cancels a subscription that overflowed before subscribe returned', async () => {
+  // An eager transport can deliver events during construction. The ending recorded then had no
+  // subscription to cancel, so the iterator must cancel it once it holds it.
+  const fake = fakeSubscription();
+  const events = createSubscriptionEvents(
+    (consumer) => {
+      const subscription = fake.subscribe(consumer);
+      for (let i = 0; i < 3; i++) fake.event('updateOk');
+      return subscription;
+    },
+    { capacity: 1 },
+  );
+  expect(fake.cancel).toHaveBeenCalledOnce();
+  expect(fake.cancel.mock.calls[0]?.[0]).toBeInstanceOf(SubscriptionOverflowError);
+  await expect(events.next()).rejects.toBeInstanceOf(SubscriptionOverflowError);
+});
+
 it('supports slow reads within capacity and rejects concurrent reads', async () => {
   const fake = fakeSubscription();
   const events = createSubscriptionEvents(fake.subscribe, { capacity: 2 });
