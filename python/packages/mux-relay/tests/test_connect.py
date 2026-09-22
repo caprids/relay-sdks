@@ -37,6 +37,8 @@ from mux_relay import (
     RelaySubscriber,
     RelaySubscriptionHandlers,
     RelayTimeoutError,
+    SubscriptionConnectionClosedError,
+    SubscriptionEnd,
     WebTransportError,
     connect_relay_subscriber,
 )
@@ -179,9 +181,8 @@ class TestConnectRelay:
             payload,
         )
 
-    @pytest.mark.parametrize("throws", [False, True])
-    async def test_fails_pending_subscriptions_once_when_goaway_ends_the_connection(
-        self, connections: list[RelaySubscriber], throws: bool
+    async def test_ends_pending_accepted_and_cancelled_subscriptions_with_a_goaway_as_a_closure_never_a_request_error(
+        self, connections: list[RelaySubscriber]
     ) -> None:
         fake = create_fake_transport()
         control = fake.open_controlled_data_stream()
@@ -194,19 +195,17 @@ class TestConnectRelay:
         cancelled_errors: list[Any] = []
         answers: list[Any] = []
 
-        def on_error(error: Any) -> None:
-            pending_errors.append(error)
-            if throws:
-                raise RuntimeError("application callback failed")
-
-        connection.subscribe(
-            ["live"], "pending", RelaySubscriptionHandlers(on_error=on_error, on_subscribed=answers.append)
+        pending = connection.subscribe(
+            ["live"], "pending", RelaySubscriptionHandlers(on_error=pending_errors.append, on_subscribed=answers.append)
         )
         await (await fake.next_request_stream()).first_message
-        connection.subscribe(["live"], "accepted", RelaySubscriptionHandlers(on_error=accepted_errors.append))
+        accepted_subscription = connection.subscribe(
+            ["live"], "accepted", RelaySubscriptionHandlers(on_error=accepted_errors.append)
+        )
         accepted = await fake.next_request_stream()
         await accepted.first_message
         await accepted.send(encode_subscribe_ok(11))
+        await accepted_subscription.subscribed
         cancelled = connection.subscribe(
             ["live"], "cancelled", RelaySubscriptionHandlers(on_error=cancelled_errors.append)
         )
@@ -222,9 +221,40 @@ class TestConnectRelay:
         assert fake.close_info.reason == ""
         connection.close()
         await settle()
-        assert len(pending_errors) == 1
-        assert pending_errors[0].reason == str(closed.error)
-        assert answers == accepted_errors == cancelled_errors == []
+        with pytest.raises(SubscriptionConnectionClosedError) as failure:
+            await pending.subscribed
+        assert failure.value.__cause__ is closed.error
+        assert await pending.ended == SubscriptionEnd(
+            kind="terminated", cause="connection-closed", accepted=False, error=closed.error
+        )
+        accepted_end = await accepted_subscription.ended
+        assert (accepted_end.kind, accepted_end.accepted, accepted_end.error) == ("terminated", True, closed.error)
+        assert (await cancelled.ended).kind == "cancelled"
+        assert pending_errors == answers == accepted_errors == cancelled_errors == []
+
+    async def test_reports_a_transport_drop_before_subscribe_ok_as_a_closure_not_a_rejection(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        fake = create_fake_transport()
+        connecting = asyncio.create_task(connect_relay_subscriber(ENDPOINT, create_transport=Factory(fake)))
+        fake.send_server_setup()
+        connection = await connecting
+        connections.append(connection)
+        errors: list[Any] = []
+        subscription = connection.subscribe(["room"], "pending", RelaySubscriptionHandlers(on_error=errors.append))
+        await (await fake.next_request_stream()).first_message
+        fake.drop_transport()
+        closed = await connection.closed
+        # The fake drops without a transport error, so the closure carries none; the core still fails
+        # the pending request first, and that failure must not become the subscription's ending.
+        assert closed.error is None
+        with pytest.raises(SubscriptionConnectionClosedError) as failure:
+            await subscription.subscribed
+        assert failure.value.__cause__ is None
+        assert await subscription.ended == SubscriptionEnd(
+            kind="terminated", cause="connection-closed", accepted=False, error=None
+        )
+        assert errors == []
 
     async def test_keeps_quiet_data_tracks_alive_after_their_subscription_is_accepted(
         self, connections: list[RelaySubscriber]

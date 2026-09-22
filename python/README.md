@@ -142,14 +142,26 @@ A subscriber connection can only subscribe; publishing uses a separate publisher
 names both SDKs use for each concept, and why, are recorded in
 [SDK vocabulary](../spec/vocabulary.md).
 
-`subscribe` returns a cancellable handle immediately; acceptance is reported by
-`on_subscribed` and rejection by `on_error`. Observe the connection's `closed`
-future as well: an accepted subscription is no longer usable once the connection closes.
+`subscribe` returns a `RelaySubscription` immediately. Await `subscription.subscribed` for the
+relay's answer: it returns the acceptance info (`on_subscribed` receives the same) and raises
+`SubscriptionRequestError` on rejection or request timeout, `SubscriptionConnectionClosedError`
+if the connection ends first, or your own reason if you cancelled. Await `subscription.ended` to
+learn that the subscription can no longer deliver and why: it settles once, never raises, with
+`kind` (`rejected`, `terminated` or `cancelled`), the protocol `cause`, whether it had been
+accepted, and the error.
+
+```python
+subscription = subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(on_object=handle))
+await subscription.subscribed  # raises on rejection, closure, or cancel
+subscription.ended.add_done_callback(lambda done: print("subscription", done.result().kind))
+```
+
 Cancelling a subscription stops that consumer (including trailing objects after `on_publisher_done`),
-while closing the connection stops all of its subscriptions. `on_publisher_done` alone neither closes the
-connection nor proves delivery has drained. The demo waits for its object count or the deadline.
-Separate readiness/termination awaitables are proposed in
-[#68](https://github.com/muxinc/relay-sdks/issues/68); they are not APIs in this checkout.
+while closing the connection stops all of its subscriptions. `on_publisher_done` settles neither
+awaitable: it is the publisher's control notification, trailing objects can still arrive, and the
+request stays open until you cancel it or the connection ends. The demo waits for its object count
+or the deadline. The full state table is in the
+[behavior contract](../spec/behavior.md#subscription-lifecycle).
 
 Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK neither
 interprets the payload nor assumes that a track contains audio, video, or timestamps. An accepted
@@ -227,10 +239,8 @@ The default capacity is **64 events**, including lifecycle events; it is a count
 budget. Objects may be up to 16 MiB plus properties. Overflow discards queued events, cancels the
 subscription and raises `SubscriptionOverflowError`. Request failures raise
 `SubscriptionRequestError`; connection closure raises `SubscriptionConnectionClosedError`, even
-for a clean connection close, because closure does not prove all objects arrived. Before
-acceptance, a connection failure can instead arrive first as `SubscriptionRequestError`; consult
-`subscriber.closed` for the connection-level cause. Errors propagate out of the loop for the caller to
-handle. `publisher_done` is an event, never EOF. Arrival order is preserved without ordering
+for a clean connection close, because closure does not prove all objects arrived, and before
+acceptance as well as after it. Errors propagate out of the loop for the caller to handle. `publisher_done` is an event, never EOF. Arrival order is preserved without ordering
 across streams or transport-wide backpressure. Early exit releases the owned subscription and
 observers without closing `subscriber` or other consumers. Only one pending `anext()` is supported. See
 the [complete event and ownership contract](../spec/behavior.md#async-subscription-consumption).
@@ -506,8 +516,10 @@ updates and cancellation, plus data-only publication on a dedicated connection. 
 also exposes FETCH and TRACK_STATUS. The protocol is pinned to `moqt-20`.
 
 Automatic reconnection, token refresh on a live session, datagram reception, and product resource
-discovery are not implemented yet. A GOAWAY ends the connection with a `RelayGoawayError` and fails
-requests still awaiting their first response via `on_error`; callers can open a replacement.
+discovery are not implemented yet. A GOAWAY ends the connection with a `RelayGoawayError`;
+subscriptions still awaiting their first response end with it (`subscribed` raises
+`SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `on_error`;
+callers can open a replacement.
 
 ## Live Relay smoke test
 

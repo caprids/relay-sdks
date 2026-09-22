@@ -4,10 +4,9 @@ terminal state, as distinct from demand, the relay's own subscription to a publi
 The module owns the core handle, the connection's closure observation and the terminal state, and
 translates the core's callbacks into product events once. Its consumers are the callback form
 (:meth:`mux_relay.RelaySubscriber.subscribe` with handlers) and the bounded events iterator; both
-attach through :class:`SubscriptionConsumer` and see the same events and the same ending. Nothing
-here is exported from the package: the public handle keeps the core ``Subscription`` type, and
-readiness and termination (issue #68) and the pre-acceptance ``update()`` queue (issue #69) land
-here later.
+attach through :class:`SubscriptionConsumer` and see the same events and the same ending. Its
+public face is :class:`RelaySubscription`: the core handle plus ``subscribed`` and ``ended``, the
+readiness and termination awaitables. The pre-acceptance ``update()`` queue lives here too.
 """
 
 from __future__ import annotations
@@ -18,14 +17,14 @@ import warnings
 from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias
 
 from moq_core import (
-    Closed,
     Goaway,
     MessageParameters,
     MoqtObject,
     PublishDone,
+    RequestError,
     SubgroupEnd,
     SubgroupReset,
     SubscribeOk,
@@ -125,18 +124,27 @@ SubscriptionEvent: TypeAlias = (
 
 # ------------------------------------------------------------------ lifecycle
 
+SubscriptionEndKind: TypeAlias = Literal["rejected", "terminated", "cancelled"]
+"""The lifecycle name for how a subscription ended.
+
+``rejected``: the relay answered the request with REQUEST_ERROR before accepting it (including the
+request timeout). ``terminated``: an accepted subscription can no longer deliver (the connection
+ended, or a REQUEST_ERROR arrived after acceptance, which is how a refused ``update()`` is answered,
+issue #94), or the connection ended before any answer. ``cancelled``: the application cancelled it.
+"""
+
 
 @dataclass(frozen=True, slots=True)
 class SubscriptionEnd:
     """How a subscription ended.
 
-    ``accepted`` says whether SUBSCRIBE_OK had arrived first, which is what separates a rejection from
-    a termination. A REQUEST_ERROR can arrive after acceptance: the core answers a refused ``update()``
-    that way and ends the request (issue #94). ``error`` is the :class:`moq_core.RequestError` for a
+    ``kind`` is the lifecycle name; ``cause`` is what happened on the wire or locally; ``accepted``
+    says whether SUBSCRIBE_OK had arrived; ``error`` is the :class:`moq_core.RequestError` for a
     request error, the connection's failure (``None`` after a clean shutdown) for closure, and the
     caller's reason for a cancel.
     """
 
+    kind: SubscriptionEndKind
     cause: Literal["request-error", "connection-closed", "cancelled"]
     accepted: bool
     error: object
@@ -158,8 +166,53 @@ class SubscriptionDependencies:
 
     subscribe: Callable[[SubscriptionHandlers], Subscription]
     """The core session's subscribe, already bound to the track options."""
-    closed: asyncio.Future[Closed]
-    """The connection's closure."""
+    observe_closed: Callable[[Callable[[BaseException | None], None]], Callable[[], None]]
+    """Observe the connection's closure in the turn it happens, ahead of the request failures the
+    core synthesizes while tearing down. The returned function removes the observer."""
+
+
+class SubscriptionOverflowError(RelayError):
+    """A stalled consumer exceeded the event capacity; the subscription was cancelled."""
+
+    def __init__(self, message: str = "Subscription event buffer overflow") -> None:
+        super().__init__(message, code="SUBSCRIPTION_OVERFLOW", phase="subscription")
+
+
+class SubscriptionRequestError(RelayError):
+    """Request rejection, timeout, or request failure, with the protocol details preserved."""
+
+    def __init__(self, request_error: RequestError) -> None:
+        super().__init__(request_error.reason, code="SUBSCRIPTION_REQUEST_FAILED", phase="subscription")
+        self.request_error = request_error
+
+
+class SubscriptionConnectionClosedError(RelayError):
+    """The connection ended, without proving that subscription delivery was drained."""
+
+    def __init__(self, cause: BaseException | None) -> None:
+        super().__init__("Connection closed; subscription delivery ended without a drain guarantee", code="CLOSED")
+        self.__cause__ = cause
+
+
+def _end_error(end: SubscriptionEnd) -> BaseException:
+    """The exception ``subscribed`` raises for an ending that came before acceptance."""
+    if end.cause == "request-error" and isinstance(end.error, RequestError):
+        return SubscriptionRequestError(end.error)
+    if end.cause == "connection-closed":
+        return SubscriptionConnectionClosedError(end.error if isinstance(end.error, BaseException) else None)
+    if isinstance(end.error, BaseException):
+        return end.error
+    return RelayClosedError("Subscription was cancelled before the relay answered", phase="subscription")
+
+
+def _observe(future: asyncio.Future[Any]) -> None:
+    """Mark a future's eventual exception as handled without acting on it."""
+
+    def finished(done: asyncio.Future[Any]) -> None:
+        if not done.cancelled():
+            done.exception()
+
+    future.add_done_callback(finished)
 
 
 def synchronous_callback(name: str, callback: Callable[..., object]) -> Callable[..., None]:
@@ -195,29 +248,51 @@ def synchronous_callback(name: str, callback: Callable[..., object]) -> Callable
     return invoke
 
 
-class ProductSubscription(Subscription):
-    """The product subscription: the core handle plus the lifecycle every consumer shares.
+class RelaySubscription(Subscription):
+    """The handle :meth:`mux_relay.RelaySubscriber.subscribe` returns.
 
-    It subclasses the core handle so :meth:`mux_relay.RelaySubscriber.subscribe` keeps returning a
-    ``Subscription``; every inherited member is overridden and the core's own slots are never set.
+    The core handle (``request_id``, ``update()``, ``cancel()``) plus two awaitables. ``subscribed``
+    settles when the relay answers: it resolves with the acceptance info ``on_subscribed`` receives
+    and raises :class:`SubscriptionRequestError` when the relay rejected the request or it timed out,
+    :class:`SubscriptionConnectionClosedError` when the connection ended first, or the reason given to
+    ``cancel()`` (a ``CLOSED`` :class:`RelayClosedError` when none was given). ``ended`` settles once,
+    when the subscription can no longer deliver, with a :class:`SubscriptionEnd`; it never raises.
+    Publisher completion settles neither, and neither implies exactly-once or gap-free delivery.
+
+    It subclasses the core handle so ``subscribe()`` keeps returning a ``Subscription``; every
+    inherited member is overridden and the core's own slots are never set.
     """
 
-    __slots__ = ("_accepted", "_closed", "_consumers", "_core", "_end", "_queued_updates")
+    __slots__ = (
+        "_accepted",
+        "_consumers",
+        "_core",
+        "_end",
+        "_ended",
+        "_queued_updates",
+        "_remove_closed",
+        "_subscribed",
+    )
 
     def __init__(self, dependencies: SubscriptionDependencies, consumers: Iterable[SubscriptionConsumer] = ()) -> None:
         # Deliberately no super().__init__(): the base's record and session stay unset.
+        loop = asyncio.get_running_loop()
         self._consumers: list[SubscriptionConsumer] = list(consumers)
         self._queued_updates: list[MessageParameters] = []
         self._accepted = False
         self._end: SubscriptionEnd | None = None
         self._core: Subscription | None = None
-        self._closed = dependencies.closed
+        self._remove_closed: Callable[[], None] = lambda: None
+        self._subscribed: asyncio.Future[SubscribeOk] = loop.create_future()
+        # Nobody may await readiness; a failure must not be reported as an unretrieved exception.
+        _observe(self._subscribed)
+        self._ended: asyncio.Future[SubscriptionEnd] = loop.create_future()
 
-        if self._closed.done():
-            self._finish(SubscriptionEnd("connection-closed", False, self._closed.result().error))
+        # A connection that has already ended tells the observer at once, ending this before any send.
+        self._remove_closed = dependencies.observe_closed(self._connection_ended)
+        if self._end is not None:
             return
 
-        self._closed.add_done_callback(self._connection_closed)
         try:
             self._core = dependencies.subscribe(
                 SubscriptionHandlers(
@@ -229,19 +304,31 @@ class ProductSubscription(Subscription):
                     on_state_notify=lambda value: self._deliver(StateNotifyEvent(value)),
                     on_goaway=lambda value: self._deliver(GoawayEvent(value)),
                     on_update_ok=lambda: self._deliver(UpdateOkEvent()),
-                    on_error=lambda error: self._finish(SubscriptionEnd("request-error", self._accepted, error)),
+                    on_error=self._fail_request,
                 )
             )
         except BaseException as error:
-            self._finish(SubscriptionEnd("cancelled", False, error))
+            self._cancel_with(error)
             raise
 
-        # A source may deliver callbacks synchronously during subscribe(); the handle did not exist
-        # when the ending was recorded, so cancel it now.
+        # A source may end the subscription synchronously during subscribe(), through a closure
+        # observer it invokes at once; the handle did not exist when the ending was recorded, so
+        # cancel it now. A request failure delivered that early is held until the turn ends and
+        # cancels the handle then.
         if self._end is not None:
             self._core.cancel(self._end.error)
 
-    # ------------------------------------------------------------------ the core handle
+    # ------------------------------------------------------------------ the public handle
+
+    @property
+    def subscribed(self) -> asyncio.Future[SubscribeOk]:
+        """Settles when the relay answers. See the class docstring for what it raises."""
+        return self._subscribed
+
+    @property
+    def ended(self) -> asyncio.Future[SubscriptionEnd]:
+        """Settles once, when the subscription can no longer deliver, with how it ended. Never raises."""
+        return self._ended
 
     @property
     def request_id(self) -> int:
@@ -263,28 +350,19 @@ class ProductSubscription(Subscription):
                 code="UPDATE_QUEUE_FULL",
                 phase="subscription",
             )
-        # A malformed update must fail here, where the caller can see it, not during the flush on
-        # SUBSCRIBE_OK. The queue holds a snapshot, so later mutation of the caller's object cannot
-        # change what is sent, as an immediate send would have serialized it at once.
-        encode_request_update(0, parameters)
+        # A malformed or oversize update must fail here, where the caller can see it, not during the
+        # flush on SUBSCRIBE_OK, so it is encoded exactly as the flush will encode it. The queue
+        # holds a snapshot, so later mutation of the caller's object cannot change what is sent, as
+        # an immediate send would have serialized it at once.
+        encode_request_update(self._handle().request_id, parameters)
         self._queued_updates.append(deepcopy(parameters))
 
     def cancel(self, reason: object = None) -> None:
-        self._finish(SubscriptionEnd("cancelled", self._accepted, reason))
+        self._cancel_with(reason)
 
-    # ------------------------------------------------------------------ the lifecycle
+    # ------------------------------------------------------------------ consumers (package-private)
 
-    @property
-    def accepted(self) -> bool:
-        """Whether SUBSCRIBE_OK has arrived."""
-        return self._accepted
-
-    @property
-    def end(self) -> SubscriptionEnd | None:
-        """How the subscription ended, once it has."""
-        return self._end
-
-    def attach(self, consumer: SubscriptionConsumer) -> Callable[[], None]:
+    def _attach(self, consumer: SubscriptionConsumer) -> Callable[[], None]:
         """Attach a consumer; one attached after the end is told the end at once. Returns the detach."""
         if self._end is not None:
             consumer.ended(self._end)
@@ -298,6 +376,8 @@ class ProductSubscription(Subscription):
 
         return detach
 
+    # ------------------------------------------------------------------ the lifecycle
+
     def _handle(self) -> Subscription:
         if self._core is not None:
             return self._core
@@ -306,14 +386,35 @@ class ProductSubscription(Subscription):
             raise error
         raise RelayClosedError("Subscription ended before its request was sent", phase="subscription")
 
-    def _connection_closed(self, done: asyncio.Future[Closed]) -> None:
-        self._finish(SubscriptionEnd("connection-closed", self._accepted, done.result().error))
+    def _fail_request(self, error: RequestError) -> None:
+        if self._accepted:
+            self._finish(SubscriptionEnd(kind="terminated", cause="request-error", accepted=True, error=error))
+            return
+
+        # The core fails a pending request before it reports the closure that killed it, in the same
+        # turn. Hold the failure until the turn ends, so a closure that follows is the ending this
+        # subscription describes; a genuine rejection is recorded one turn later.
+        def reject() -> None:
+            if self._end is None:
+                self._finish(SubscriptionEnd(kind="rejected", cause="request-error", accepted=False, error=error))
+
+        asyncio.get_running_loop().call_soon(reject)
+
+    def _connection_ended(self, error: BaseException | None) -> None:
+        self._finish(
+            SubscriptionEnd(kind="terminated", cause="connection-closed", accepted=self._accepted, error=error)
+        )
+
+    def _cancel_with(self, error: object) -> None:
+        self._finish(SubscriptionEnd(kind="cancelled", cause="cancelled", accepted=self._accepted, error=error))
 
     def _deliver(self, event: SubscriptionEvent) -> None:
         if self._end is not None:
             return
         if isinstance(event, SubscribedEvent):
             self._accepted = True
+            if not self._subscribed.done():
+                self._subscribed.set_result(event.value)
             # Now Established: the updates that waited go out in order, before consumers hear of it.
             queued, self._queued_updates = self._queued_updates, []
             try:
@@ -321,9 +422,11 @@ class ProductSubscription(Subscription):
                     for parameters in queued:
                         self._core.update(parameters)
             except Exception as error:
-                # Unreachable after enqueue-time validation. A raise here would escape into the core's
-                # request reader and disable the subscription silently; end it loudly instead.
-                self._finish(SubscriptionEnd("cancelled", True, error))
+                # Enqueue-time validation encoded each update with this request's id, so a raise here
+                # is a core fault. Letting it escape into the core's request reader would disable the
+                # subscription silently; end it loudly instead. Readiness settled first, so a caller
+                # awaiting it sees the acceptance and then this ending.
+                self._cancel_with(error)
                 return
         for consumer in list(self._consumers):
             consumer.event(event)
@@ -333,7 +436,11 @@ class ProductSubscription(Subscription):
             return
         self._end = end
         self._queued_updates.clear()
-        self._closed.remove_done_callback(self._connection_closed)
+        self._remove_closed()
+        if not self._subscribed.done():
+            self._subscribed.set_exception(_end_error(end))
+        if not self._ended.done():
+            self._ended.set_result(end)
         # Every ending cancels the core handle: after a REQUEST_ERROR or closure the core has already
         # dropped the request, and cancelling then is harmless; after a local cancel it is the point.
         if self._core is not None:
@@ -347,16 +454,20 @@ class ProductSubscription(Subscription):
 __all__ = [
     "GoawayEvent",
     "ObjectEvent",
-    "ProductSubscription",
     "PublisherDoneEvent",
+    "RelaySubscription",
     "StateNotifyEvent",
     "SubgroupEndEvent",
     "SubgroupResetEvent",
     "SubscribedEvent",
+    "SubscriptionConnectionClosedError",
     "SubscriptionConsumer",
     "SubscriptionDependencies",
     "SubscriptionEnd",
+    "SubscriptionEndKind",
     "SubscriptionEvent",
+    "SubscriptionOverflowError",
+    "SubscriptionRequestError",
     "UpdateOkEvent",
     "synchronous_callback",
 ]

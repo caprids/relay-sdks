@@ -16,19 +16,21 @@ from moq_core import RequestError
 from ._subscription import (
     GoawayEvent,
     ObjectEvent,
-    ProductSubscription,
     PublisherDoneEvent,
+    RelaySubscription,
     StateNotifyEvent,
     SubgroupEndEvent,
     SubgroupResetEvent,
     SubscribedEvent,
+    SubscriptionConnectionClosedError,
     SubscriptionConsumer,
     SubscriptionEnd,
     SubscriptionEvent,
+    SubscriptionOverflowError,
+    SubscriptionRequestError,
     UpdateOkEvent,
 )
 from .cancellation import CancellationToken
-from .errors import RelayError
 
 __all__ = [
     "GoawayEvent",
@@ -45,29 +47,6 @@ __all__ = [
     "SubscriptionRequestError",
     "UpdateOkEvent",
 ]
-
-
-class SubscriptionOverflowError(RelayError):
-    """A stalled consumer exceeded the event capacity; the subscription was cancelled."""
-
-    def __init__(self, message: str = "Subscription event buffer overflow") -> None:
-        super().__init__(message, code="SUBSCRIPTION_OVERFLOW", phase="subscription")
-
-
-class SubscriptionRequestError(RelayError):
-    """Request rejection, timeout, or request failure, with the protocol details preserved."""
-
-    def __init__(self, request_error: RequestError) -> None:
-        super().__init__(request_error.reason, code="SUBSCRIPTION_REQUEST_FAILED", phase="subscription")
-        self.request_error = request_error
-
-
-class SubscriptionConnectionClosedError(RelayError):
-    """The connection ended, without proving that subscription delivery was drained."""
-
-    def __init__(self, cause: BaseException | None) -> None:
-        super().__init__("Connection closed; subscription delivery ended without a drain guarantee", code="CLOSED")
-        self.__cause__ = cause
 
 
 class _Consumer:
@@ -96,7 +75,7 @@ class SubscriptionEvents:
 
     def __init__(
         self,
-        subscribe: Callable[[SubscriptionConsumer], ProductSubscription],
+        subscribe: Callable[[SubscriptionConsumer], RelaySubscription],
         *,
         capacity: int = 64,
         cancellation: CancellationToken | None = None,
@@ -108,7 +87,7 @@ class SubscriptionEvents:
         self._pending: asyncio.Future[SubscriptionEvent | None] | None = None
         self._ended = False
         self._failure: BaseException | None = None
-        self._subscription: ProductSubscription | None = None
+        self._subscription: RelaySubscription | None = None
         self._cancellation = cancellation
         if cancellation is not None and cancellation.cancelled:
             self._finish(cancellation.reason)

@@ -12,7 +12,7 @@ import inspect
 import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Protocol, TypeAlias, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from moq_core import MOQT_PROTOCOL_ID, Closed, Goaway, MoqtTransport
@@ -70,6 +70,9 @@ class _Session(Protocol):
 
 T = TypeVar("T", bound=_Session)
 
+ClosureObserver: TypeAlias = Callable[[BaseException | None], None]
+"""Told the error that ended the connection, ``None`` after a clean shutdown."""
+
 
 @dataclass(slots=True)
 class _Connecting(Generic[T]):
@@ -90,18 +93,20 @@ class LifetimeCallbacks:
 class RelaySessionLifetime(Generic[T]):
     """An established session plus the shutdown plumbing both connection kinds share."""
 
-    __slots__ = ("_assert_open", "_close", "_transport", "closed", "session")
+    __slots__ = ("_assert_open", "_close", "_observe_closed", "_transport", "closed", "session")
 
     def __init__(
         self,
         session: T,
         closed: asyncio.Future[Closed],
+        observe_closed: Callable[[ClosureObserver], Callable[[], None]],
         transport: MoqtTransport,
         assert_open: Callable[[], None],
         close: Callable[[], None],
     ) -> None:
         self.session = session
         self.closed = closed
+        self._observe_closed = observe_closed
         self._transport = transport
         self._assert_open = assert_open
         self._close = close
@@ -109,6 +114,13 @@ class RelaySessionLifetime(Generic[T]):
     def assert_open(self) -> None:
         """Raise the error that ended the connection, if it has ended."""
         self._assert_open()
+
+    def observe_closed(self, observer: ClosureObserver) -> Callable[[], None]:
+        """Observe the closure in the turn it happens, before the session tears its requests down.
+
+        An observer added after the end is told at once. Returns the function that removes it.
+        """
+        return self._observe_closed(observer)
 
     def close(self) -> None:
         self._close()
@@ -178,15 +190,18 @@ async def open_relay_session(
     interrupted: asyncio.Future[None] = loop.create_future()
     observe(interrupted)
     closed: asyncio.Future[Closed] = loop.create_future()
+    closure_observers: list[ClosureObserver] = []
+    closed_info = Closed()
 
     def finish(info: Closed | None = None) -> None:
-        nonlocal stopped, stop_error
+        nonlocal stopped, stop_error, closed_info
 
         if stopped:
             return
 
         info = info or Closed()
         stopped = True
+        closed_info = info
         stop_error = info.error if info.error is not None else RelayClosedError("Relay connection is closed")
         timer.cancel()
 
@@ -199,6 +214,13 @@ async def open_relay_session(
 
         if not interrupted.done():
             interrupted.set_exception(stop_error)
+
+        # Subscriptions hear the closure in this turn. The session fails a pending request before it
+        # reports an unexpected closure, so this is how a lost connection is kept from reading as a
+        # rejection.
+        observers, closure_observers[:] = list(closure_observers), []
+        for observer in observers:
+            observer(info.error)
 
         if state.session is not None:
             state.session.destroy(info.error)
@@ -224,6 +246,19 @@ async def open_relay_session(
         if stopped:
             assert stop_error is not None
             raise stop_error
+
+    def observe_closed(observer: ClosureObserver) -> Callable[[], None]:
+        if stopped:
+            observer(closed_info.error)
+            return lambda: None
+
+        closure_observers.append(observer)
+
+        def remove() -> None:
+            if observer in closure_observers:
+                closure_observers.remove(observer)
+
+        return remove
 
     async def establish() -> T:
         nonlocal using_transport
@@ -314,12 +349,13 @@ async def open_relay_session(
     established = True
     assert state.transport is not None
 
-    return RelaySessionLifetime(connected, closed, state.transport, assert_open, lambda: finish())
+    return RelaySessionLifetime(connected, closed, observe_closed, state.transport, assert_open, lambda: finish())
 
 
 __all__ = [
     "DEFAULT_CONNECT_TIMEOUT",
     "DEFAULT_REQUEST_TIMEOUT",
+    "ClosureObserver",
     "ConnectRelayOptions",
     "ConnectingTransport",
     "LifetimeCallbacks",

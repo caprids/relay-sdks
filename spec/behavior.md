@@ -142,7 +142,7 @@ The application's subscription (see `CONTEXT.md`) is pending until the relay ans
 SUBSCRIBE_OK, and ended once it can no longer deliver. Every ending is recorded as a
 `SubscriptionEnd` with a `kind` (`rejected`, `terminated`, `cancelled`), the protocol `cause`
 (`request-error`, `connection-closed`, `cancelled`), whether the subscription had been `accepted`,
-and the `error`. Implemented in TypeScript; the Python port removes this sentence.
+and the `error`. Implemented in both SDKs.
 
 | State | Event | `subscribed` | `ended` | Callbacks |
 | --- | --- | --- | --- | --- |

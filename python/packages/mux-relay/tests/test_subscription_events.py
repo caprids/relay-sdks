@@ -29,7 +29,7 @@ from mux_relay import (
     SubscriptionRequestError,
     connect_relay_subscriber,
 )
-from mux_relay._subscription import ProductSubscription, SubscriptionConsumer, SubscriptionEnd, UpdateOkEvent
+from mux_relay._subscription import RelaySubscription, SubscriptionConsumer, SubscriptionEnd, UpdateOkEvent
 
 
 @pytest.fixture
@@ -106,9 +106,9 @@ async def test_terminal_reads(connected: tuple[FakeTransport, RelaySubscriber], 
         fake.drop_transport()
     if mode in ("close", "close-pending"):
         connection.close()
-    error = (
-        SubscriptionRequestError if mode in ("reject", "timeout", "drop-pending") else SubscriptionConnectionClosedError
-    )
+    # A transport drop before SUBSCRIBE_OK is a closure, not a rejection, although the core fails the
+    # pending request first.
+    error = SubscriptionRequestError if mode in ("reject", "timeout") else SubscriptionConnectionClosedError
     with pytest.raises(error):
         await pending
     with pytest.raises(error):
@@ -188,11 +188,11 @@ class FakeSubscription:
 
     def _cancel(self, reason: object = None) -> None:
         assert self.consumer is not None
-        self.consumer.ended(SubscriptionEnd("cancelled", False, reason))
+        self.consumer.ended(SubscriptionEnd(kind="cancelled", cause="cancelled", accepted=False, error=reason))
 
-    def subscribe(self, consumer: SubscriptionConsumer) -> ProductSubscription:
+    def subscribe(self, consumer: SubscriptionConsumer) -> RelaySubscription:
         self.consumer = consumer
-        return cast(ProductSubscription, self)
+        return cast(RelaySubscription, self)
 
     def update_ok(self) -> None:
         assert self.consumer is not None
@@ -223,7 +223,7 @@ async def test_overflow_during_construction_still_cancels_the_subscription() -> 
     # no subscription to cancel, so the iterator must cancel it once it holds it.
     fake = FakeSubscription()
 
-    def subscribe(consumer: SubscriptionConsumer) -> ProductSubscription:
+    def subscribe(consumer: SubscriptionConsumer) -> RelaySubscription:
         subscription = fake.subscribe(consumer)
         for _ in range(3):
             fake.update_ok()
@@ -307,7 +307,7 @@ async def test_returned_future_is_cancelled_or_observed(
 async def test_subscribe_failure_detaches_the_cancellation_token() -> None:
     token = CancellationToken()
 
-    def subscribe(consumer: SubscriptionConsumer) -> ProductSubscription:
+    def subscribe(consumer: SubscriptionConsumer) -> RelaySubscription:
         raise ValueError("bad options")
 
     with pytest.raises(ValueError, match="bad options"):
@@ -387,6 +387,34 @@ async def test_sends_an_update_issued_before_acceptance_once_subscribe_ok_arrive
     assert isinstance(update, RequestUpdate)
     assert update.parameters.forward == 0
     assert update.request_id != 0
+
+
+async def test_subscribed_settles_on_subscribe_ok_and_ended_on_connection_close_over_the_wire(
+    connected: tuple[FakeTransport, RelaySubscriber],
+) -> None:
+    fake, connection = connected
+    subscription = connection.subscribe(["test"], "events")
+    request = await fake.next_request_stream()
+    await request.send(encode_subscribe_ok(11))
+    assert (await subscription.subscribed).track_alias == 11
+    connection.close()
+    end = await subscription.ended
+    assert (end.kind, end.cause, end.accepted) == ("terminated", "connection-closed", True)
+
+
+async def test_subscribed_raises_the_relay_rejection_and_ended_is_rejected_over_the_wire(
+    connected: tuple[FakeTransport, RelaySubscriber],
+) -> None:
+    fake, connection = connected
+    subscription = connection.subscribe(["test"], "events")
+    request = await fake.next_request_stream()
+    await request.send(encode_request_error(1, "denied"))
+    with pytest.raises(SubscriptionRequestError) as failure:
+        await subscription.subscribed
+    assert (failure.value.request_error.error_code, failure.value.request_error.reason) == (1, "denied")
+    end = await subscription.ended
+    assert (end.kind, end.cause, end.accepted) == ("rejected", "request-error", False)
+    assert not connection.closed.done()
 
 
 async def test_handlers_are_snapshotted(connected: tuple[FakeTransport, RelaySubscriber]) -> None:
