@@ -39,6 +39,7 @@ from mux_relay import (
     RelayTimeoutError,
     SubscriptionConnectionClosedError,
     SubscriptionEnd,
+    SubscriptionRequestError,
     WebTransportError,
     connect_relay_subscriber,
 )
@@ -255,6 +256,32 @@ class TestConnectRelay:
             kind="terminated", cause="connection-closed", accepted=False, error=None
         )
         assert errors == []
+
+    async def test_contains_an_on_error_that_raises_on_rejection_and_keeps_the_connection_usable(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        fake = create_fake_transport()
+        connecting = asyncio.create_task(connect_relay_subscriber(ENDPOINT, create_transport=Factory(fake)))
+        fake.send_server_setup()
+        connection = await connecting
+        connections.append(connection)
+        calls: list[Any] = []
+
+        def on_error(error: Any) -> None:
+            calls.append(error)
+            raise RuntimeError("application callback failed")
+
+        subscription = connection.subscribe(["room"], "missing", RelaySubscriptionHandlers(on_error=on_error))
+        request = await fake.next_request_stream()
+        await request.first_message
+        await request.send(encode_request_error(REQUEST_ERROR_CODE.DOES_NOT_EXIST, "missing track"))
+        with pytest.raises(SubscriptionRequestError):
+            await subscription.subscribed
+        assert (await subscription.ended).kind == "rejected"
+        assert len(calls) == 1
+        other = connection.subscribe(["room"], "present")
+        await (await fake.next_request_stream()).send(encode_subscribe_ok(11))
+        assert (await other.subscribed).track_alias == 11
 
     async def test_keeps_quiet_data_tracks_alive_after_their_subscription_is_accepted(
         self, connections: list[RelaySubscriber]

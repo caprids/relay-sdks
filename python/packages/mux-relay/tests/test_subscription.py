@@ -4,6 +4,7 @@ test_subscription_events.py.
 """
 
 import asyncio
+import logging
 import warnings
 from collections.abc import Callable
 from typing import Any, cast
@@ -215,6 +216,30 @@ class TestEndings:
         assert r.events == []
         assert len(r.endings) == 1
 
+    async def test_contains_a_consumer_that_raises_while_a_deferred_rejection_is_recorded(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        h = Harness()
+
+        class Raising:
+            def event(self, event: SubscriptionEvent) -> None:
+                pass
+
+            def ended(self, end: SubscriptionEnd) -> None:
+                raise RuntimeError("application callback failed")
+
+        subscription = RelaySubscription(h.deps, [Raising()])
+        h.reject()
+        with caplog.at_level(logging.DEBUG, logger="mux_relay"):
+            await turn_ends()
+        assert subscription._end == rejected()
+        with pytest.raises(SubscriptionRequestError):
+            await subscription.subscribed
+        h.core.cancel.assert_called_once_with(REQUEST_ERROR)
+        assert [record.getMessage() for record in caplog.records] == [
+            "subscription callback failed while recording a rejection"
+        ]
+
     async def test_lets_a_closure_reported_in_the_same_turn_as_a_pending_request_failure_win(self) -> None:
         h = Harness()
         r = Recorder()
@@ -391,6 +416,22 @@ class TestReadinessAndTermination:
         subscription.cancel(RuntimeError("too late"))
         assert (await subscription.ended).kind == "rejected"
         assert isinstance(subscription.subscribed.exception(), SubscriptionRequestError)
+
+    async def test_a_cancelled_or_timed_out_waiter_leaves_readiness_and_termination_intact(self) -> None:
+        h = Harness()
+        subscription = RelaySubscription(h.deps)
+        waiter = asyncio.ensure_future(subscription.subscribed)
+        await asyncio.sleep(0)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(subscription.ended, 0.01)
+        h.accept()
+        assert await subscription.subscribed is OK
+        subscription.cancel(RuntimeError("done"))
+        assert (await subscription.ended).kind == "cancelled"
+        assert subscription.subscribed.done() and subscription.ended.done()
 
     async def test_settles_subscribed_before_flushing_queued_updates_so_a_flush_failure_ends_loudly(self) -> None:
         h = Harness()

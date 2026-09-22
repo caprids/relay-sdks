@@ -13,11 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import warnings
 from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol, TypeAlias, TypeVar
 
 from moq_core import (
     Goaway,
@@ -34,6 +35,8 @@ from moq_core import (
 from moq_core.control_messages import encode_request_update
 
 from .errors import RelayClosedError, RelayError
+
+_log = logging.getLogger("mux_relay")
 
 UPDATE_QUEUE_BOUND = 8
 """How many ``update()`` calls may wait for SUBSCRIBE_OK.
@@ -215,6 +218,23 @@ def _observe(future: asyncio.Future[Any]) -> None:
     future.add_done_callback(finished)
 
 
+_T = TypeVar("_T")
+
+
+def _shielded(future: asyncio.Future[_T]) -> asyncio.Future[_T]:
+    """An awaitable for ``future`` that its waiter can cancel without touching ``future``.
+
+    A task cancelled while awaiting a future cancels that future, and ``asyncio.wait_for`` does the
+    same on timeout. Handing out the subscription's own future would let one impatient waiter
+    destroy the signal for every later one. A settled future is safe to share as is.
+    """
+    if future.done():
+        return future
+    outer = asyncio.shield(future)
+    _observe(outer)
+    return outer
+
+
 def synchronous_callback(name: str, callback: Callable[..., object]) -> Callable[..., None]:
     """Snapshot one product callback and hold it to the synchronous callback policy.
 
@@ -322,13 +342,20 @@ class RelaySubscription(Subscription):
 
     @property
     def subscribed(self) -> asyncio.Future[SubscribeOk]:
-        """Settles when the relay answers. See the class docstring for what it raises."""
-        return self._subscribed
+        """Settles when the relay answers. See the class docstring for what it raises.
+
+        Each access returns an awaitable of its own: cancelling it, as ``asyncio.wait_for`` does on
+        timeout, leaves the subscription's readiness intact for every other waiter.
+        """
+        return _shielded(self._subscribed)
 
     @property
     def ended(self) -> asyncio.Future[SubscriptionEnd]:
-        """Settles once, when the subscription can no longer deliver, with how it ended. Never raises."""
-        return self._ended
+        """Settles once, when the subscription can no longer deliver, with how it ended. Never raises.
+
+        Each access returns an awaitable of its own, as for ``subscribed``.
+        """
+        return _shielded(self._ended)
 
     @property
     def request_id(self) -> int:
@@ -395,8 +422,15 @@ class RelaySubscription(Subscription):
         # turn. Hold the failure until the turn ends, so a closure that follows is the ending this
         # subscription describes; a genuine rejection is recorded one turn later.
         def reject() -> None:
-            if self._end is None:
+            if self._end is not None:
+                return
+            try:
                 self._finish(SubscriptionEnd(kind="rejected", cause="request-error", accepted=False, error=error))
+            except Exception:
+                # Inside the core's request reader a raising callback fails that task, which is logged
+                # at debug level and dropped. This runs outside it, so contain the raise the same way
+                # rather than hand it to the loop's exception handler.
+                _log.debug("subscription callback failed while recording a rejection", exc_info=True)
 
         asyncio.get_running_loop().call_soon(reject)
 
