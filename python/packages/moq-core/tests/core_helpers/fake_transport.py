@@ -72,6 +72,13 @@ class FakeTransport:
         self._closed: asyncio.Future[None] = loop.create_future()
         self._pumps: list[asyncio.Task[None]] = []
         self.close_calls = 0
+        self.release_after_turns = 0
+        """Extra loop turns ``wait_closed`` takes after the drop, like the native transport's socket release."""
+
+    @property
+    def ended(self) -> bool:
+        """True once the transport has ended, before ``wait_closed`` returns, like the native transport."""
+        return self._closed.done()
 
     # ------------------------------------------------------------------ MoqtTransport
 
@@ -135,6 +142,8 @@ class FakeTransport:
 
     async def wait_closed(self) -> None:
         await self._closed
+        for _ in range(self.release_after_turns):
+            await asyncio.sleep(0)
 
     # ------------------------------------------------------------------ server-side controls
 

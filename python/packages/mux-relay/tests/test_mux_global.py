@@ -146,7 +146,9 @@ async def test_demo_over_native_aioquic(monkeypatch: pytest.MonkeyPatch):
 
 
 async def test_fresh_namespace_rejection_is_retried(connected, monkeypatch: pytest.MonkeyPatch):
-    from mux_relay import RelaySubscriber, RequestError
+    from types import SimpleNamespace
+
+    from mux_relay import RelaySubscriber, RequestError, SubscriptionRequestError
 
     original = RelaySubscriber.subscribe
     attempts = 0
@@ -155,8 +157,13 @@ async def test_fresh_namespace_rejection_is_retried(connected, monkeypatch: pyte
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            handlers.on_error(RequestError(error_code=404, reason="Broadcast not found"))
-            return None
+            # The relay's answer arrives through `subscribed`: a fresh namespace is still a 404.
+            loop = asyncio.get_running_loop()
+            subscribed = loop.create_future()
+            subscribed.set_exception(
+                SubscriptionRequestError(RequestError(error_code=404, retry_interval=0, reason="Broadcast not found"))
+            )
+            return SimpleNamespace(subscribed=subscribed, ended=loop.create_future(), cancel=lambda reason=None: None)
         return original(self, namespace, track, handlers)
 
     monkeypatch.setattr(RelaySubscriber, "subscribe", subscribe)

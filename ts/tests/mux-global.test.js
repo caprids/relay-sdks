@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { runDemo } from '../examples/mux-global/demo.js';
-import { connectRelayPublisher, connectRelaySubscriber } from '../src/index.js';
+import { connectRelayPublisher, connectRelaySubscriber, SubscriptionRequestError } from '../src/index.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
 const connectors = vi.hoisted(() => ({ connectRelaySubscriber: vi.fn(), connectRelayPublisher: vi.fn() }));
-vi.mock('@mux/relay', () => connectors);
+// The demo imports the SDK by its package name; the connectors are replaced, everything else is real.
+vi.mock('@mux/relay', async () => ({ ...(await vi.importActual('../src/index.js')), ...connectors }));
 
 const config = {
   url: 'https://relay.example.com',
@@ -114,9 +115,13 @@ it('retries a fresh-namespace 404 with backoff before receiving an object', asyn
     const original = subscriber.subscribe.bind(subscriber);
     subscribe = vi
       .spyOn(subscriber, 'subscribe')
-      .mockImplementationOnce((_options, handlers) => {
-        handlers.onError({ errorCode: 404, reason: 'Broadcast not found' });
-        return { cancel() {} };
+      .mockImplementationOnce(() => {
+        const rejection = new SubscriptionRequestError({
+          errorCode: 404,
+          retryInterval: 0,
+          reason: 'Broadcast not found',
+        });
+        return { cancel() {}, subscribed: Promise.reject(rejection), ended: new Promise(() => {}) };
       })
       .mockImplementation(original);
     return subscriber;

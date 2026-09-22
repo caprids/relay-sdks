@@ -666,6 +666,15 @@ class WebTransportSessionBase:
 
         spawn(self._drain_then_close(protocol))
 
+    @property
+    def ended(self) -> bool:
+        """True once the session has ended, before its socket is released and ``wait_closed`` returns.
+
+        The streams fail in the same turn the session ends, so a stream failure seen while this is
+        true is the closure's doing.
+        """
+        return self._closed.done()
+
     async def wait_closed(self) -> None:
         """Return once the session ended and its UDP socket is released, so a process may exit right after.
 

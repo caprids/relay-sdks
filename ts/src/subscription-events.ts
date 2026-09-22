@@ -3,43 +3,27 @@
  * product events with a capacity and turns the subscription's ending into the three subscription
  * error classes. It owns its subscription, never the connection.
  */
-import type { RequestError } from '@mux/moq-core';
-import { RelayError } from './errors.js';
-import type { ProductSubscription, SubscriptionConsumer, SubscriptionEvent } from './subscription.js';
+import {
+  type ProductSubscription,
+  SubscriptionConnectionClosedError,
+  type SubscriptionConsumer,
+  type SubscriptionEvent,
+  SubscriptionOverflowError,
+  SubscriptionRequestError,
+} from './subscription.js';
 
-export type { SubscriptionEvent } from './subscription.js';
+export {
+  SubscriptionConnectionClosedError,
+  type SubscriptionEvent,
+  SubscriptionOverflowError,
+  SubscriptionRequestError,
+} from './subscription.js';
 
 export interface SubscriptionEventOptions {
   /** Maximum queued events (including lifecycle events). Positive integer; default 64. */
   capacity?: number;
   /** Cancels only this subscription. */
   signal?: AbortSignal;
-}
-
-export class SubscriptionOverflowError extends RelayError {
-  override readonly name = 'SubscriptionOverflowError';
-  constructor() {
-    super('SUBSCRIPTION_OVERFLOW', 'Subscription event buffer overflow', 'subscription');
-  }
-}
-
-export class SubscriptionRequestError extends RelayError {
-  override readonly name = 'SubscriptionRequestError';
-  readonly requestError: RequestError;
-
-  constructor(requestError: RequestError) {
-    super('SUBSCRIPTION_REQUEST_FAILED', requestError.reason, 'subscription');
-    this.requestError = requestError;
-  }
-}
-
-export class SubscriptionConnectionClosedError extends RelayError {
-  override readonly name = 'SubscriptionConnectionClosedError';
-  constructor(cause?: unknown) {
-    super('CLOSED', 'Connection closed; subscription delivery ended without a drain guarantee', 'connection', {
-      cause,
-    });
-  }
 }
 
 /** Single-consumer iterator owning one subscription, never the shared connection. */

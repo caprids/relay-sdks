@@ -34,7 +34,7 @@ from moq_core import (
 )
 
 from ._subscription import (
-    ProductSubscription,
+    RelaySubscription,
     SubscriptionConsumer,
     SubscriptionDependencies,
     SubscriptionEnd,
@@ -89,10 +89,11 @@ class RelaySubscriptionHandlers:
     on_error: Callable[[RequestError], None] | None = None
     """The relay answered the request with REQUEST_ERROR.
 
-    It rejected the subscription, or the request failed before acceptance (request timeout,
-    connection shutdown, GOAWAY). A REQUEST_ERROR can also arrive after acceptance, for example when
-    the relay refuses an ``update()``, and it ends the subscription then too (issue #94). Connection
-    loss after acceptance surfaces as subgroup resets and connection closure, not here.
+    It rejected the subscription, or the request failed before acceptance (request timeout, or the
+    request stream failing). A REQUEST_ERROR can also arrive after acceptance, for example when the
+    relay refuses an ``update()``, and it ends the subscription then too (issue #94). Connection
+    shutdown and GOAWAY never arrive here: a pending subscription ends through ``subscribed`` and
+    ``ended``, and an accepted one surfaces them as subgroup resets and connection closure.
     """
     on_object: Callable[[MoqtObject], None] | None = None
     """One object arrived. Payloads are uninterpreted bytes. Objects can arrive after ``on_publisher_done``."""
@@ -140,7 +141,7 @@ class _HandlersConsumer:
 
     Snapshots the product callbacks at subscribe time, holds them to the synchronous callback policy,
     and dispatches each product event to the handler of the same meaning. A REQUEST_ERROR ending
-    reaches ``on_error``; other endings reach nothing until issue #68.
+    reaches ``on_error``; closure and cancellation reach no callback, only ``subscribed`` and ``ended``.
     """
 
     __slots__ = ("_callbacks",)
@@ -231,13 +232,15 @@ class RelaySubscriber:
         track: str,
         parameters: MessageParameters | None,
         consumers: Sequence[SubscriptionConsumer],
-    ) -> ProductSubscription:
+    ) -> RelaySubscription:
         """One product subscription per public call; both entry points bind the core the same way."""
         options = MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters)
         session = self._lifetime.session
-        return ProductSubscription(
+        return RelaySubscription(
             SubscriptionDependencies(
-                subscribe=lambda handlers: session.subscribe(options, handlers), closed=self._lifetime.closed
+                subscribe=lambda handlers: session.subscribe(options, handlers),
+                observe_closed=self._lifetime.observe_closed,
+                transport_ended=self._lifetime.transport_ended,
             ),
             consumers,
         )
@@ -249,13 +252,14 @@ class RelaySubscriber:
         handlers: RelaySubscriptionHandlers | None = None,
         *,
         parameters: MessageParameters | None = None,
-    ) -> Subscription:
+    ) -> RelaySubscription:
         """Ask the relay for a track's objects, in any payload format, without discovering or loading a catalog.
 
-        Returns at once with a cancellable handle; ``handlers.on_subscribed`` or ``handlers.on_error``
-        reports the relay's answer. ``namespace`` fields are sent verbatim, without splitting or
-        joining on slashes. ``parameters`` carries protocol subscription controls such as the
-        location filter and priority.
+        Returns at once with a cancellable handle whose ``subscribed`` settles when the relay answers
+        and whose ``ended`` settles once the subscription can no longer deliver;
+        ``handlers.on_subscribed`` and ``handlers.on_error`` report the same answer as callbacks.
+        ``namespace`` fields are sent verbatim, without splitting or joining on slashes.
+        ``parameters`` carries protocol subscription controls such as the location filter and priority.
         """
         _validate_namespace(namespace)
         self._lifetime.assert_open()

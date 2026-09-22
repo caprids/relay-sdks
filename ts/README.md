@@ -155,14 +155,26 @@ A subscriber connection can only subscribe; publishing uses a separate publisher
 names both SDKs use for each concept, and why, are recorded in
 [SDK vocabulary](../spec/vocabulary.md).
 
-`subscribe` returns a cancellable handle immediately; acceptance is reported by
-`onSubscribed` and rejection by `onError`. Observe the connection's `closed`
-promise as well: an accepted subscription is no longer usable once the connection closes.
+`subscribe` returns a `RelaySubscription` immediately. Await `subscription.subscribed` for the
+relay's answer: it resolves with the acceptance info (`onSubscribed` receives the same) and rejects
+with `SubscriptionRequestError` on rejection or request timeout, `SubscriptionConnectionClosedError`
+if the connection ends first, or your own reason if you cancelled. Await `subscription.ended` to
+learn that the subscription can no longer deliver and why: it resolves once, never rejects, with
+`kind` (`rejected`, `terminated` or `cancelled`), the protocol `cause`, whether it had been
+accepted, and the error.
+
+```ts
+const subscription = subscriber.subscribe({ namespace, track }, { onObject: handle });
+await subscription.subscribed; // throws on rejection, closure, or cancel
+subscription.ended.then((end) => console.log(`subscription ${end.kind}`, end.error));
+```
+
 Cancelling a subscription stops that consumer (including trailing objects after `onPublisherDone`),
-while closing the connection stops all of its subscriptions. `onPublisherDone` alone neither closes the
-connection nor proves delivery has drained. The demo waits for its object count or the deadline.
-Separate readiness/termination awaitables are proposed in
-[#68](https://github.com/muxinc/relay-sdks/issues/68); they are not APIs in this checkout.
+while closing the connection stops all of its subscriptions. `onPublisherDone` settles neither
+awaitable: it is the publisher's control notification, trailing objects can still arrive, and the
+request stays open until you cancel it or the connection ends. The demo waits for its object count
+or the deadline. The full state table is in the
+[behavior contract](../spec/behavior.md#subscription-lifecycle).
 
 Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK
 neither interprets the payload nor assumes that a track contains audio, video, or timestamps.
@@ -228,10 +240,8 @@ The default capacity is **64 events**, including lifecycle events; it is a count
 budget. Objects may be up to 16 MiB plus properties. Overflow discards queued events, cancels the
 subscription and throws `SubscriptionOverflowError`. Request failures throw
 `SubscriptionRequestError`; connection closure throws `SubscriptionConnectionClosedError`, even
-for a clean connection close, because closure does not prove all objects arrived. Before
-acceptance, a connection failure can instead arrive first as `SubscriptionRequestError`; consult
-`subscriber.closed` for the connection-level cause. Errors propagate out of the loop for the caller to
-handle. `publisherDone` is an event, never EOF. Arrival order is preserved without ordering across
+for a clean connection close, because closure does not prove all objects arrived, and before
+acceptance as well as after it. Errors propagate out of the loop for the caller to handle. `publisherDone` is an event, never EOF. Arrival order is preserved without ordering across
 streams or transport-wide backpressure. Early exit releases the owned subscription and observers
 without closing `subscriber` or other consumers. Only one pending `next()` is supported. `Promise.race`
 with a timeout leaves the losing `next()` pending: use the iterator's abort signal to end
@@ -464,7 +474,7 @@ updates and cancellation, plus data-only publication on a dedicated connection. 
 The protocol is pinned to `moqt-20`, matching the extracted implementation.
 
 Automatic reconnection, token refresh on a live session, datagram reception, product
-resource discovery, and a Video.js adapter are not implemented yet. A GOAWAY ends the connection with an error and fails requests still awaiting their first response via `onError`;
+resource discovery, and a Video.js adapter are not implemented yet. A GOAWAY ends the connection with an error; subscriptions still awaiting their first response end with it (`subscribed` rejects with `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `onError`;
 callers can open a replacement. A custom `createTransport`
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
 

@@ -31,11 +31,11 @@ from mux_relay import (
     DEFAULT_ENDPOINT,
     Closed,
     MoqtObject,
+    RelayError,
     RelaySubscriber,
     RelaySubscriptionHandlers,
     RelayTrackWriter,
-    RequestError,
-    SubscribeOk,
+    SubscriptionRequestError,
     connect_relay_publisher,
     connect_relay_subscriber,
 )
@@ -229,34 +229,25 @@ async def subscribe_with_retry(
     """A subscribe issued before the relay has processed the publisher's announce is rejected with 404
     Broadcast not found; that is expected on a fresh namespace, not fatal, so retry with bounded backoff
     until it is accepted, another error arrives, or the run deadline cancels the task. Every other
-    rejection is forwarded to ``handlers.on_error`` unchanged.
+    rejection is forwarded to ``handlers.on_error`` unchanged. ``subscription.subscribed`` is the
+    relay's answer; a connection that ends first is reported by the main loop, not here.
     """
     backoff = 0.5
+    delivery = replace(handlers, on_error=None)
 
     while True:
-        outcome: asyncio.Future[RequestError | None] = asyncio.get_running_loop().create_future()
+        subscription = subscriber.subscribe(namespace, track, delivery)
 
-        def on_subscribed(ok: SubscribeOk, outcome: asyncio.Future[RequestError | None] = outcome) -> None:
-            if handlers.on_subscribed is not None:
-                handlers.on_subscribed(ok)
-
-            if not outcome.done():
-                outcome.set_result(None)
-
-        def on_error(error: RequestError, outcome: asyncio.Future[RequestError | None] = outcome) -> None:
-            if not outcome.done():
-                outcome.set_result(error)
-
-        subscriber.subscribe(namespace, track, replace(handlers, on_subscribed=on_subscribed, on_error=on_error))
-        rejection = await outcome
-
-        if rejection is None:
+        try:
+            await subscription.subscribed
             return
+        except SubscriptionRequestError as error:
+            if error.request_error.error_code != 404:
+                if handlers.on_error is not None:
+                    handlers.on_error(error.request_error)
 
-        if rejection.error_code != 404:
-            if handlers.on_error is not None:
-                handlers.on_error(rejection)
-
+                return
+        except RelayError:
             return
 
         log({"event": "waiting", "detail": "namespace not announced yet; retrying the subscribe"})
