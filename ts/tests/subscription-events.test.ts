@@ -25,7 +25,9 @@ afterEach(() => {
 /** A subscription that records its consumer, so a test can drive events into the iterator directly. */
 function fakeSubscription() {
   let consumer!: SubscriptionConsumer;
-  const cancel = vi.fn((reason?: unknown) => consumer.ended({ cause: 'cancelled', accepted: false, error: reason }));
+  const cancel = vi.fn((reason?: unknown) =>
+    consumer.ended({ kind: 'cancelled', cause: 'cancelled', accepted: false, error: reason }),
+  );
   const subscribe = (value: SubscriptionConsumer): ProductSubscription => {
     consumer = value;
     return {
@@ -35,6 +37,8 @@ function fakeSubscription() {
       attach: () => () => {},
       accepted: false,
       end: undefined,
+      subscribed: new Promise(() => {}),
+      ended: new Promise(() => {}),
     };
   };
   return {
@@ -311,6 +315,34 @@ it('sends an update issued before acceptance once SUBSCRIBE_OK arrives, under it
   await vi.waitFor(() => expect(request.messages).toHaveLength(2));
   expect(request.messages[1]).toMatchObject({ kind: 'request-update', parameters: { forward: 0 } });
   expect(request.messages[1]).not.toMatchObject({ requestId: 0 });
+});
+
+it('settles subscribed on SUBSCRIBE_OK and ended on connection close, over the wire', async () => {
+  const { fake, connection } = await setup();
+  const subscription = connection.subscribe({ namespace: ['test'], track: 'events' });
+  const request = await fake.nextRequestStream();
+  await request.send(encodeSubscribeOk(11));
+  await expect(subscription.subscribed).resolves.toMatchObject({ trackAlias: 11 });
+  connection.close();
+  await expect(subscription.ended).resolves.toMatchObject({
+    kind: 'terminated',
+    cause: 'connection-closed',
+    accepted: true,
+  });
+});
+
+it('rejects subscribed with the relay rejection and ends as rejected, over the wire', async () => {
+  const { fake, connection } = await setup();
+  const subscription = connection.subscribe({ namespace: ['test'], track: 'events' });
+  const request = await fake.nextRequestStream();
+  await request.send(encodeRequestError(1, 'denied'));
+  await expect(subscription.subscribed).rejects.toMatchObject({ requestError: { errorCode: 1, reason: 'denied' } });
+  await expect(subscription.ended).resolves.toMatchObject({
+    kind: 'rejected',
+    cause: 'request-error',
+    accepted: false,
+  });
+  expect(fake.getCloseInfo()).toBeUndefined();
 });
 
 it('preserves the handler receiver when mapping product callback names', async () => {

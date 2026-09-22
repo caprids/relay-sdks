@@ -8,9 +8,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   closureObservers,
   createSubscription,
+  SubscriptionConnectionClosedError,
   type SubscriptionConsumer,
   type SubscriptionEnd,
   type SubscriptionEvent,
+  SubscriptionRequestError,
   synchronousCallback,
   UPDATE_QUEUE_BOUND,
 } from '../src/subscription.js';
@@ -131,7 +133,9 @@ describe('subscription: endings', () => {
       const subscription = createSubscription(h.deps, [r.consumer]);
       if (accepted) h.core().onOk?.(ok);
       h.core().onError?.(requestError);
-      expect(r.endings).toEqual([{ cause: 'request-error', accepted, error: requestError }]);
+      expect(r.endings).toEqual([
+        { kind: accepted ? 'terminated' : 'rejected', cause: 'request-error', accepted, error: requestError },
+      ]);
       expect(subscription.end).toEqual(r.endings[0]);
       expect(h.cancel).toHaveBeenCalledExactlyOnceWith(requestError);
       expect(h.remove).toHaveBeenCalledOnce();
@@ -154,7 +158,7 @@ describe('subscription: endings', () => {
       if (accepted) h.core().onOk?.(ok);
       const error = new Error('lost');
       h.closeConnection(error);
-      expect(r.endings).toEqual([{ cause: 'connection-closed', accepted, error }]);
+      expect(r.endings).toEqual([{ kind: 'terminated', cause: 'connection-closed', accepted, error }]);
       expect(h.cancel).toHaveBeenCalledExactlyOnceWith(error);
     },
   );
@@ -168,7 +172,7 @@ describe('subscription: endings', () => {
     const reason = new Error('done with it');
     subscription.cancel(reason);
     subscription.cancel(new Error('again'));
-    expect(r.endings).toEqual([{ cause: 'cancelled', accepted: true, error: reason }]);
+    expect(r.endings).toEqual([{ kind: 'cancelled', cause: 'cancelled', accepted: true, error: reason }]);
     expect(h.cancel).toHaveBeenCalledExactlyOnceWith(reason);
     expect(h.remove).toHaveBeenCalledOnce();
     const detach = subscription.attach(late.consumer);
@@ -181,7 +185,9 @@ describe('subscription: endings', () => {
     const r = recorder();
     const subscription = createSubscription(h.deps, [r.consumer]);
     expect(h.subscribe).not.toHaveBeenCalled();
-    expect(r.endings).toEqual([{ cause: 'connection-closed', accepted: false, error: new Error('gone') }]);
+    expect(r.endings).toEqual([
+      { kind: 'terminated', cause: 'connection-closed', accepted: false, error: new Error('gone') },
+    ]);
     expect(() => subscription.requestId).toThrow('gone');
   });
 
@@ -190,7 +196,9 @@ describe('subscription: endings', () => {
     const r = recorder();
     expect(() => createSubscription(h.deps, [r.consumer])).toThrow('bad options');
     expect(h.remove).toHaveBeenCalledOnce();
-    expect(r.endings).toEqual([{ cause: 'cancelled', accepted: false, error: new Error('bad options') }]);
+    expect(r.endings).toEqual([
+      { kind: 'cancelled', cause: 'cancelled', accepted: false, error: new Error('bad options') },
+    ]);
   });
 
   it('cancels the core handle when the source ends the subscription synchronously during subscribe', () => {
@@ -204,7 +212,7 @@ describe('subscription: endings', () => {
     };
     const r = recorder();
     const subscription = createSubscription(deps, [r.consumer]);
-    expect(r.endings).toEqual([{ cause: 'request-error', accepted: false, error: requestError }]);
+    expect(r.endings).toEqual([{ kind: 'rejected', cause: 'request-error', accepted: false, error: requestError }]);
     expect(cancel).toHaveBeenCalledExactlyOnceWith(requestError);
     expect(subscription.requestId).toBe(1);
   });
@@ -229,6 +237,104 @@ describe('closure observers', () => {
     const late = vi.fn();
     observe(late);
     expect(late).toHaveBeenCalledExactlyOnceWith('lost');
+  });
+});
+
+describe('subscription: readiness and termination', () => {
+  it('resolves subscribed on SUBSCRIBE_OK and keeps ended pending through publisher completion', async () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    let endedSettled = false;
+    void subscription.ended.then(() => {
+      endedSettled = true;
+    });
+    h.core().onOk?.(ok);
+    await expect(subscription.subscribed).resolves.toBe(ok);
+    h.core().onDone?.({ statusCode: 0, streamCount: 1, reason: '' });
+    await Promise.resolve();
+    expect(endedSettled).toBe(false);
+    subscription.cancel(new Error('done'));
+    await expect(subscription.ended).resolves.toMatchObject({ kind: 'cancelled', cause: 'cancelled', accepted: true });
+  });
+
+  it('rejects subscribed with SubscriptionRequestError and ends as rejected on a REQUEST_ERROR before acceptance', async () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    h.core().onError?.(requestError);
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
+    await expect(subscription.subscribed).rejects.toMatchObject({ requestError });
+    await expect(subscription.ended).resolves.toEqual({
+      kind: 'rejected',
+      cause: 'request-error',
+      accepted: false,
+      error: requestError,
+    });
+  });
+
+  it('ends as terminated on a REQUEST_ERROR after acceptance, with subscribed already resolved', async () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    h.core().onOk?.(ok);
+    h.core().onError?.(requestError);
+    await expect(subscription.subscribed).resolves.toBe(ok);
+    await expect(subscription.ended).resolves.toMatchObject({
+      kind: 'terminated',
+      cause: 'request-error',
+      accepted: true,
+    });
+  });
+
+  it.each([
+    ['before', false],
+    ['after', true],
+  ])(
+    'ends as terminated when the connection closes %s acceptance, rejecting subscribed only before',
+    async (_, accepted) => {
+      const h = harness();
+      const subscription = createSubscription(h.deps);
+      if (accepted) h.core().onOk?.(ok);
+      const error = new Error('lost');
+      h.closeConnection(error);
+      if (accepted) await expect(subscription.subscribed).resolves.toBe(ok);
+      else {
+        await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionConnectionClosedError);
+        await expect(subscription.subscribed).rejects.toMatchObject({ cause: error });
+      }
+      await expect(subscription.ended).resolves.toEqual({
+        kind: 'terminated',
+        cause: 'connection-closed',
+        accepted,
+        error,
+      });
+    },
+  );
+
+  it('rejects subscribed with the cancel reason, or CLOSED when none was given', async () => {
+    const h = harness();
+    const withReason = createSubscription(h.deps);
+    const reason = new Error('changed my mind');
+    withReason.cancel(reason);
+    await expect(withReason.subscribed).rejects.toBe(reason);
+    await expect(withReason.ended).resolves.toEqual({
+      kind: 'cancelled',
+      cause: 'cancelled',
+      accepted: false,
+      error: reason,
+    });
+    const bare = createSubscription(harness().deps);
+    bare.cancel();
+    await expect(bare.subscribed).rejects.toMatchObject({ code: 'CLOSED', phase: 'subscription' });
+  });
+
+  it('settles each awaitable once and pre-handles a readiness rejection nobody awaits', async () => {
+    const h = harness();
+    const subscription = createSubscription(h.deps);
+    h.core().onError?.(requestError);
+    // No await on `subscribed` here: an unhandled rejection would fail the run.
+    await Promise.resolve();
+    subscription.cancel(new Error('too late'));
+    await expect(subscription.ended).resolves.toMatchObject({ kind: 'rejected' });
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
   });
 });
 

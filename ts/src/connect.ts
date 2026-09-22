@@ -9,12 +9,12 @@ import {
   type PublishDone,
   type RequestError,
   type SubscribeOk,
-  type Subscription,
 } from '@mux/moq-core';
 import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 import {
   closureObservers,
   createSubscription,
+  type RelaySubscription,
   type SubscriptionConsumer,
   type SubscriptionEvent,
   synchronousCallback,
@@ -91,10 +91,11 @@ export interface RelaySubscriptionHandlers {
 export interface RelaySubscriber {
   /**
    * Ask the relay for a track's objects, in any payload format, without discovering or loading a
-   * catalog. Returns at once with a cancellable handle; `handlers.onSubscribed` or
-   * `handlers.onError` reports the relay's answer.
+   * catalog. Returns at once with a cancellable handle whose `subscribed` settles when the relay
+   * answers and whose `ended` settles once the subscription can no longer deliver;
+   * `handlers.onSubscribed` and `handlers.onError` report the same answer as callbacks.
    */
-  subscribe(options: RelayTrackOptions, handlers?: RelaySubscriptionHandlers): Subscription;
+  subscribe(options: RelayTrackOptions, handlers?: RelaySubscriptionHandlers): RelaySubscription;
   /** Bounded async events. Owns its subscription; break/return cancels it. */
   subscribeEvents(options: RelayTrackOptions, buffer?: SubscriptionEventOptions): SubscriptionEvents;
   /**

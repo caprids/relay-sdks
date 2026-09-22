@@ -14,7 +14,9 @@ without a row here is a bug.
 | --- | --- | --- |
 | Open a connection that can only subscribe | `connectRelaySubscriber(options)` returns `RelaySubscriber` | `connect_relay_subscriber(url, ...)` returns `RelaySubscriber` |
 | Open a connection that can only publish one namespace | `connectRelayPublisher(options)` returns `RelayPublisher` | `connect_relay_publisher(url, namespace=...)` returns `RelayPublisher` |
-| Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `Subscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `Subscription` |
+| Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `RelaySubscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `RelaySubscription` |
+| Await the relay's answer to a subscription | `subscription.subscribed` resolves `SubscribeOk` | `await subscription.subscribed` returns `SubscribeOk` |
+| Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
 | Events on one subscription | `RelaySubscriptionHandlers` | `RelaySubscriptionHandlers` |
 | The relay accepted the subscription | `onSubscribed(info)` | `on_subscribed(info)` |
 | The relay rejected it, or it failed before acceptance | `onError(error)` | `on_error(error)` |
@@ -136,8 +138,8 @@ itself, settling once when it can no longer deliver, is
 carries the track alias, the relay's parameters, and the track properties as the relay sends them.
 The handler used to be `onOk`, the core's name for the OK response on any request (subscribe,
 fetch, track status). At the product level it did not say what became ready. `onSubscribed` does.
-The awaitable readiness result planned in issue #68 settles on the same event, so the two names
-will agree.
+`subscription.subscribed`, the awaitable readiness result, settles on the same event, so the two
+names agree.
 
 `onError` keeps its name: the relay answered the request with REQUEST_ERROR, because it rejected
 the subscription or the request failed before acceptance (request timeout, connection shutdown,
@@ -182,13 +184,35 @@ same vocabulary as the product callbacks. It owns its subscription, never the co
 and termination semantics. Product and core callback objects are validated and snapshotted when
 subscribing; callbacks remain synchronous, and async consumers use this iterator.
 
+## Subscription readiness and termination: `RelaySubscription`, `subscribed`, `ended`
+
+`subscribe()` returns a `RelaySubscription`: the core handle (`requestId`, `update()`, `cancel()`)
+plus two awaitables. `subscribed` settles when the relay answers the request: it resolves with the
+acceptance info `onSubscribed` receives, and rejects with the same error classes the events
+iterator raises (`SubscriptionRequestError` for REQUEST_ERROR before acceptance, including the
+request timeout; `SubscriptionConnectionClosedError` when the connection ended first) or with the
+reason given to `cancel()`. `ended` settles once, when the subscription can no longer deliver, and
+never rejects: its `SubscriptionEnd` value carries `kind` (`rejected`, `terminated`, `cancelled`),
+the protocol `cause`, whether the subscription had been `accepted`, and the `error`. That mirrors
+the connection's `closed`, which resolves with the error as data.
+
+Publisher completion settles neither. `onPublisherDone` is a control notification; trailing objects
+can still arrive and the request stays open, so a `subscribed` or `ended` that moved on it would
+promise what the protocol cannot establish.
+
+Not adopted: `ready` or `accepted` for readiness (the callback is `onSubscribed`, and the two must
+agree); `closed`, `done`, `drained` or `complete` for termination (`closed` collides with the
+connection's word for a different scope, `done` with publisher completion, and the last two claim a
+delivery property the protocol does not give); an `ended` that rejects (an ending is data about the
+subscription, not a failure of the caller's await, and the connection's `closed` set the precedent).
+
 ## Names considered and left alone
 
 - `RelayTrackOptions`, the subscribe request shape (`namespace`, `track`, `parameters`), and
   `ConnectRelayOptions`, the connection options shared by both roles. Issue #72 separates the
   options types by role and can rename them then.
-- `Subscription`, the handle `subscribe()` returns (`requestId`, `update()`, `cancel()`). Issue #68
-  extends it with readiness and termination and may introduce a product handle type.
+- `SubscriptionEnd`'s field names `kind`, `cause`, `accepted`, `error`: plain words for a value most
+  callers only log or branch on once.
 - `RelayTrackWriter`, `RelayGroupWriter`, `write`, `openGroup`, `close`, `abort`: these say what
   they do.
 - Everything in `@mux/moq-core` and `moq_core`: protocol vocabulary (`onOk`, `onDone`,

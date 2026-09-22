@@ -130,6 +130,34 @@ publishing operations; their connection phase does not establish whether those w
   New subscriptions may also see transient 404s or initial-response timeouts after retract/re-announce.
   Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
+- `subscribe()` returns a `RelaySubscription`: the request handle plus two awaitables. `subscribed`
+  settles when the relay answers, and `ended` settles once when the subscription can no longer
+  deliver. Neither implies exactly-once or gap-free delivery, and publisher completion settles
+  neither. The table below is the shared contract for both.
+
+### Subscription lifecycle
+
+The application's subscription (see `CONTEXT.md`) is pending until the relay answers, accepted after
+SUBSCRIBE_OK, and ended once it can no longer deliver. Every ending is recorded as a
+`SubscriptionEnd` with a `kind` (`rejected`, `terminated`, `cancelled`), the protocol `cause`
+(`request-error`, `connection-closed`, `cancelled`), whether the subscription had been `accepted`,
+and the `error`. Implemented in TypeScript; the Python port removes this sentence.
+
+| State | Event | `subscribed` | `ended` | Callbacks |
+| --- | --- | --- | --- | --- |
+| pending | SUBSCRIBE_OK | resolves with the acceptance info | stays pending | `onSubscribed` |
+| pending | REQUEST_ERROR: rejection, request timeout, or the request stream failing before an answer | rejects `SubscriptionRequestError`, preserving the request error | resolves `kind: rejected`, `cause: request-error` | `onError` |
+| pending | connection ends | rejects `SubscriptionConnectionClosedError`, preserving the connection error as its cause when known | resolves `kind: terminated`, `cause: connection-closed`, `accepted: false` | `onError` when the core reports the unexpected closure as a request failure first, otherwise nothing |
+| pending | `cancel(reason)` | rejects with `reason`, or a `CLOSED` Relay error when none was given | resolves `kind: cancelled`, with the reason as `error` | nothing |
+| accepted | objects, subgroup end or reset, state notify, update acknowledged, GOAWAY on the request stream | settled | stays pending | the matching callback |
+| accepted | PUBLISH_DONE | settled | stays pending: publisher completion is not an ending, trailing objects can still arrive | `onPublisherDone` |
+| accepted | REQUEST_ERROR, which is how a refused `update()` is answered ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)) | settled | resolves `kind: terminated`, `cause: request-error`, `accepted: true` | `onError` |
+| accepted | connection ends | settled | resolves `kind: terminated`, `cause: connection-closed`, `accepted: true` | nothing on the subscription; the connection's `closed` carries the reason |
+| accepted | `cancel(reason)` | settled | resolves `kind: cancelled` | nothing; trailing objects stop |
+| ended | anything, including a second `cancel()` | settled | settled, unchanged | nothing; `update()` raises `CLOSED`; the events iterator has already raised or reached EOF |
+
+A readiness awaitable nobody awaits cannot surface as an unhandled rejection: the SDK pre-handles
+it. Awaiting it later still observes the same result.
 
 ## Async subscription consumption
 
@@ -137,9 +165,10 @@ The Relay product API provides `subscriber.subscribeEvents(options, { capacity, 
 `subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` in Python. These create
 and own a new subscription immediately. They yield typed data and lifecycle events, using the same
 payload objects as callbacks. The generic `MoqTrackSource` and existing `subscribe` callbacks remain
-available and retain their synchronous delivery model. This additive API does not implement the
-separate readiness/termination handle proposal (#68). It follows the product vocabulary from #63;
-its explicit `publisherDone` / `publisher_done` event distinguishes publisher completion from final delivery.
+available and retain their synchronous delivery model. The handle's `subscribed` and `ended`
+awaitables (see the subscription lifecycle table above) are the readiness and termination signals;
+the iterator's raise or EOF is its own. It follows the product vocabulary from #63; its explicit
+`publisherDone` / `publisher_done` event distinguishes publisher completion from final delivery.
 
 - `capacity` defaults to **64 events** and must be a positive integer (a safe integer in TS).
   Every queued object **and lifecycle event** consumes one slot. This is an event-count limit,

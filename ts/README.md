@@ -155,14 +155,26 @@ A subscriber connection can only subscribe; publishing uses a separate publisher
 names both SDKs use for each concept, and why, are recorded in
 [SDK vocabulary](../spec/vocabulary.md).
 
-`subscribe` returns a cancellable handle immediately; acceptance is reported by
-`onSubscribed` and rejection by `onError`. Observe the connection's `closed`
-promise as well: an accepted subscription is no longer usable once the connection closes.
+`subscribe` returns a `RelaySubscription` immediately. Await `subscription.subscribed` for the
+relay's answer: it resolves with the acceptance info (`onSubscribed` receives the same) and rejects
+with `SubscriptionRequestError` on rejection or request timeout, `SubscriptionConnectionClosedError`
+if the connection ends first, or your own reason if you cancelled. Await `subscription.ended` to
+learn that the subscription can no longer deliver and why: it resolves once, never rejects, with
+`kind` (`rejected`, `terminated` or `cancelled`), the protocol `cause`, whether it had been
+accepted, and the error.
+
+```ts
+const subscription = subscriber.subscribe({ namespace, track }, { onObject: handle });
+await subscription.subscribed; // throws on rejection, closure, or cancel
+subscription.ended.then((end) => console.log(`subscription ${end.kind}`, end.error));
+```
+
 Cancelling a subscription stops that consumer (including trailing objects after `onPublisherDone`),
-while closing the connection stops all of its subscriptions. `onPublisherDone` alone neither closes the
-connection nor proves delivery has drained. The demo waits for its object count or the deadline.
-Separate readiness/termination awaitables are proposed in
-[#68](https://github.com/muxinc/relay-sdks/issues/68); they are not APIs in this checkout.
+while closing the connection stops all of its subscriptions. `onPublisherDone` settles neither
+awaitable: it is the publisher's control notification, trailing objects can still arrive, and the
+request stays open until you cancel it or the connection ends. The demo waits for its object count
+or the deadline. The full state table is in the
+[behavior contract](../spec/behavior.md#subscription-lifecycle).
 
 Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK
 neither interprets the payload nor assumes that a track contains audio, video, or timestamps.
