@@ -5,7 +5,8 @@ Publishes and subscribes on the same random namespace over the aioquic WebTransp
 asserts the list in ``spec/behavior.md``:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
-2. Subscriptions to two tracks on the namespace are accepted.
+2. Once the publisher's ``announced`` settles, subscriptions to two tracks on the namespace are
+   accepted, retrying a 404 rejection while the announce propagates; the report records the retries.
 3. Binary payloads, an empty payload, and a text payload all arrive intact.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes LARGEST_OBJECT and receives the next live object.
@@ -30,6 +31,7 @@ import sys
 import time
 import uuid
 from getpass import getpass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -40,12 +42,21 @@ from mux_relay import (
     Closed,
     MessageParameters,
     MoqtObject,
+    RelayAwaitable,
     RelayPublisher,
     RelaySubscriber,
     RelaySubscriptionHandlers,
     connect_relay_publisher,
     connect_relay_subscriber,
 )
+
+# The announce-race retry is the examples' policy, shared with this test; see spec/behavior.md.
+EXAMPLES = str(Path(__file__).resolve().parents[1] / "examples")
+
+if EXAMPLES not in sys.path:
+    sys.path.insert(0, EXAMPLES)
+
+from shared.announce_race import subscribe_with_retry  # noqa: E402
 
 RUN_DEADLINE = 45.0
 RECEIVE_DEADLINE = 10.0
@@ -95,7 +106,7 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
     late_subscriber: RelaySubscriber | None = None
     late_largest_object = None
 
-    def observe_closed(label: str, closed: asyncio.Future[Closed]) -> None:
+    def observe_closed(label: str, closed: RelayAwaitable[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
             if not closing:
                 errors.append(f"{label} closed: {future.result().error or 'peer closure'}")
@@ -137,13 +148,24 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         observe_closed("subscriber", subscriber.closed)
         report({"phase": "subscriber connected"})
 
+        # Assertion 2. The announce left with the first registered track; the relay routes subscribes to
+        # the namespace about a round trip later, so the subscribe retries the 404 it may still answer.
+        await publisher.announced
+        report({"phase": "announced"})
+        retries = {"events": 0, "status": 0}
+
         for track in ("events", "status"):
 
             def on_object(obj: MoqtObject, track: str = track) -> None:
                 if obj.status == "normal":
                     received[track].append(obj.payload)
 
-            subscriber.subscribe(
+            def on_retry(attempt: int, delay: float, track: str = track) -> None:
+                retries[track] += 1
+                report({"phase": "subscribe retried", "track": track, "attempt": attempt, "delay": delay})
+
+            await subscribe_with_retry(
+                subscriber,
                 namespace,
                 track,
                 RelaySubscriptionHandlers(
@@ -152,7 +174,11 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
                     on_error=lambda error, track=track: errors.append(f"{track}: {error.error_code} {error.reason}"),
                     on_subgroup_reset=lambda reset, track=track: errors.append(f"{track} reset: {reset.error}"),
                 ),
+                on_retry=on_retry,
             )
+
+        if errors:
+            raise RuntimeError("; ".join(errors))
 
         for payload in expected_events:
             await events.write(payload)
@@ -208,6 +234,7 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
             "namespace": namespace,
             "events": len(received["events"]),
             "status": len(received["status"]),
+            "announceRaceRetries": retries,
             "binaryAndEmptyPayloads": "passed",
             "independentTrackClose": "passed",
             "lateSubscriberLargestObject": {

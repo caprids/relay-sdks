@@ -32,6 +32,7 @@ from moq_core import (
     create_moqt_session,
 )
 
+from ._awaitable import RelayAwaitable
 from ._subscription import (
     RelaySubscription,
     SubscriptionConsumer,
@@ -199,16 +200,21 @@ class RelaySubscriber:
     Publishing uses a separate connection and token; see :func:`connect_relay_publisher`.
     """
 
-    __slots__ = ("_lifetime", "_track_source")
+    __slots__ = ("_closed", "_lifetime", "_track_source")
 
     def __init__(self, lifetime: RelaySessionLifetime[MoqtSession]) -> None:
         self._lifetime = lifetime
         self._track_source = _BorrowedTrackSource(lifetime)
+        self._closed: RelayAwaitable[Closed] = RelayAwaitable(lifetime.closed)
 
     @property
-    def closed(self) -> asyncio.Future[Closed]:
-        """Resolves once for local shutdown, peer closure, or failure. It never raises."""
-        return self._lifetime.closed
+    def closed(self) -> RelayAwaitable[Closed]:
+        """Resolves once for local shutdown, peer closure, or failure. It never raises.
+
+        Every waiter is isolated: a timed-out ``asyncio.wait_for`` or a cancelled task leaves the
+        result intact for every other waiter.
+        """
+        return self._closed
 
     @property
     def track_source(self) -> MoqTrackSource:

@@ -30,6 +30,7 @@ from moq_core.transport import ReceiveStream, SendStream
 from mux_relay import (
     Closed,
     ConnectingTransport,
+    RelayAwaitable,
     RelaySubscriptionHandlers,
     connect_relay_publisher,
     connect_relay_subscriber,
@@ -120,7 +121,7 @@ class TestLoopback:
         closing = False
         problems: list[str] = []
 
-        def observe(label: str, closed: asyncio.Future[Closed]) -> None:
+        def observe(label: str, closed: RelayAwaitable[Closed]) -> None:
             def done(future: asyncio.Future[Closed]) -> None:
                 if not closing:
                     problems.append(f"{label} closed: {future.result().error!r}")

@@ -17,7 +17,7 @@ without a row here is a bug.
 | Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `RelaySubscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `RelaySubscription` |
 | Await the relay's answer to a subscription | `subscription.subscribed` resolves `SubscribeOk` | `await subscription.subscribed` returns `SubscribeOk` |
 | Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
-| The type of `subscribed` and `ended` | `Promise<T>` | `SubscriptionAwaitable[T]`: awaitable by any number of isolated waiters, with `done()`, `result()`, `exception()` and `add_done_callback()`; not a cancellable `Future` |
+| The type of `subscribed`, `ended`, `announced` and a connection's `closed` | `Promise<T>` | `RelayAwaitable[T]`: awaitable by any number of isolated waiters, with `done()`, `result()`, `exception()` and `add_done_callback()`; not a cancellable `Future` |
 | Events on one subscription | `RelaySubscriptionHandlers` | `RelaySubscriptionHandlers` |
 | The relay accepted the subscription | `onSubscribed(info)` | `on_subscribed(info)` |
 | The relay rejected it, or the request itself failed before acceptance | `onError(error)` | `on_error(error)` |
@@ -26,6 +26,7 @@ without a row here is a bug.
 | The publisher said it is finished with the track | `onPublisherDone(info)` | `on_publisher_done(info)` |
 | Protocol notifications on the request stream | `onUpdateOk()`, `onStateNotify(parameters)`, `onGoaway(goaway)` | `on_update_ok()`, `on_state_notify(parameters)`, `on_goaway(goaway)` |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
+| Await the namespace announce reaching the wire | `publisher.announced` resolves `void` | `await publisher.announced` returns `None` |
 | Send one object as its own group | `writer.write(bytes, options)` | `await writer.write(payload, properties=...)` |
 | Send one UTF-8 text object | `writer.writeText(text, options)` | `await writer.write_text(text, properties=...)` |
 | Send one JSON object | `writer.writeJSON(value, options)` | `await writer.write_json(value, properties=...)` |
@@ -224,11 +225,14 @@ the type is `SubscriptionEndKind`), the protocol `cause`, whether the subscripti
 as data. A connection that ends before the relay answers is a `terminated` ending with the
 connection error, never a `rejected` one, although the core fails the pending request first.
 
-In Python the two are `SubscriptionAwaitable[T]` rather than bare futures: a task cancelled while
-awaiting a future cancels the future itself, and `asyncio.wait_for` does the same on timeout, so a
-shared future would let one impatient waiter destroy the signal for every later one. The awaitable
-isolates each waiter and reads status without allocating. `Future` was rejected for that reason;
-`Signal` and `Promise` for naming a mechanism rather than the fact the caller awaits.
+In Python the two are `RelayAwaitable[T]` rather than bare futures, as are the publisher's
+`announced` and both connections' `closed`: a task cancelled while awaiting a future cancels the
+future itself, and `asyncio.wait_for` does the same on timeout, so a shared future would let one
+impatient waiter destroy the signal for every later one. The awaitable isolates each waiter and
+reads status without allocating. `Future` was rejected for that reason; `Signal` and `Promise` for
+naming a mechanism rather than the fact the caller awaits. The type was `SubscriptionAwaitable`
+until `announced` and `closed` joined it; a name that said "subscription" would have been wrong for
+three of its four uses.
 
 Publisher completion settles neither. `onPublisherDone` is a control notification; trailing objects
 can still arrive and the request stays open, so a `subscribed` or `ended` that moved on it would
@@ -239,6 +243,26 @@ agree); `closed`, `done`, `drained` or `complete` for termination (`closed` coll
 connection's word for a different scope, `done` with publisher completion, and the last two claim a
 delivery property the protocol does not give); an `ended` that rejects (an ending is data about the
 subscription, not a failure of the caller's await, and the connection's `closed` set the precedent).
+
+## Announce readiness: `announced`
+
+`connectRelayPublisher` announces the namespace once the first track is registered, and the relay
+acknowledges an announce with nothing: the strongest fact the publisher can have is that the
+NAMESPACE entry was handed to the transport on a solicitation that covers the namespace.
+`announced` settles on that fact, once, with no value. The relay routes subscribes to the namespace
+about a round trip later, so a subscribe that races the announce is rejected with 404 and the
+application retries it (see `behavior.md`); a process that owns both sides awaits `announced` before
+subscribing, which removes most of that race. It stays pending while no solicitation covers the
+namespace, where the first write's `NAMESPACE_NOT_SOLICITED` is the diagnostic, and the connection's
+closure terminates it if that comes first, as it does `subscribed`.
+
+It is a property awaitable like `closed` and `subscribed`; in Python a `RelayAwaitable[None]`.
+Not adopted: `announce()` as an awaitable verb (announcing is part of connecting and registering,
+not a step the application takes); `ready` (the connection is ready long before the announce, and
+the namespace is never "ready" for a viewer the relay has not routed yet); `solicited` (the fact the
+publisher observes is its own announce leaving, not the relay's request for it); resolving with the
+namespace (the publisher's own, `publisher.namespace` in Python and the caller's option in
+TypeScript).
 
 ## Names considered and left alone
 

@@ -20,8 +20,12 @@ A publisher registers a track, then **waits for a matching subscriber** to creat
 before calling `write()`. In combined mode (`both`, the default), the demo starts both sides.
 In separate processes, the namespace fields and track must match exactly. A subscriber started
 before the namespace announcement is visible can receive `404 Broadcast not found`; the demo
-retries that rejection with backoff starting at 500 ms and capped at 2 seconds. Other rejections
-fail the run. The overall `--timeout` bounds waiting, retries, and reception.
+retries that rejection with backoff starting at 500 ms and capped at 2 seconds, through
+`subscribe_with_retry` in `examples/shared/announce_race.py`, the one copy of that policy the
+examples and the live smoke test share. In combined mode it first awaits `publisher.announced`, the
+announce reaching the wire, which removes most of the race; the relay still needs about a round trip
+after it. Other rejections fail the run. The overall `--timeout` bounds waiting, retries, and
+reception.
 
 Once a write starts, any failure ends the run: transport writes and closes can time out after
 partial delivery. The demo does not infer the phase from error text or resend the same payload.

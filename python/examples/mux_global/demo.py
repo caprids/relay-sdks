@@ -22,8 +22,9 @@ import sys
 import uuid
 from collections.abc import Callable
 from contextlib import AsyncExitStack
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from getpass import getpass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -31,14 +32,21 @@ from mux_relay import (
     DEFAULT_ENDPOINT,
     Closed,
     MoqtObject,
-    RelayError,
-    RelaySubscriber,
+    RelayAwaitable,
+    RelayPublisher,
     RelaySubscriptionHandlers,
     RelayTrackWriter,
-    SubscriptionRequestError,
     connect_relay_publisher,
     connect_relay_subscriber,
 )
+
+# The policies the examples share live one directory up; a script run by path cannot see them otherwise.
+EXAMPLES = str(Path(__file__).resolve().parents[1])
+
+if EXAMPLES not in sys.path:
+    sys.path.insert(0, EXAMPLES)
+
+from shared.announce_race import subscribe_with_retry  # noqa: E402
 
 Log = Callable[[dict[str, Any]], None]
 
@@ -56,13 +64,13 @@ class Config:
 
 
 async def run_demo(config: Config, log: Log) -> dict[str, int]:
-    background_tasks: list[asyncio.Task[None]] = []
+    background_tasks: list[asyncio.Task[Any]] = []
     problems: list[str] = []
     received = 0
     closing = False
 
     # Both connection kinds expose `closed`; a connection ending before we close it is a failure.
-    def watch(label: str, closed: asyncio.Future[Closed]) -> None:
+    def watch(label: str, closed: RelayAwaitable[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
             if not closing:
                 problems.append(f"{label} connection closed: {describe(future.result().error)}")
@@ -72,8 +80,8 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
     # subscribe_with_retry runs in the background; it can itself raise synchronously (e.g. a namespace
     # too long to encode). Without this the exception went unobserved and the run just idled until its
     # deadline. A task cancelled by our own shutdown (below) is not a failure.
-    def watch_background(task: asyncio.Task[None]) -> None:
-        def done(finished: asyncio.Task[None]) -> None:
+    def watch_background(task: asyncio.Task[Any]) -> None:
+        def done(finished: asyncio.Task[Any]) -> None:
             if finished.cancelled():
                 return
 
@@ -94,6 +102,7 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
         async with deadline, AsyncExitStack() as connections:
             try:
                 writer: RelayTrackWriter | None = None
+                publisher: RelayPublisher | None = None
 
                 if config.mode != "subscribe":
                     # One publisher connection serves one namespace; register as many tracks on it as needed.
@@ -110,6 +119,14 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                     watch("publisher", publisher.closed)
                     log({"event": "publisher connected", "url": config.url, "namespace": "/".join(config.namespace)})
                     writer = publisher.register_track(config.track, write_timeout=15)
+
+                    # The announce leaves with the first registered track; the relay routes subscribes
+                    # about a round trip later. Logged so a two-process run shows the publisher's side.
+                    def on_announced(future: asyncio.Future[None]) -> None:
+                        if not future.cancelled() and future.exception() is None:
+                            log({"event": "announced", "namespace": "/".join(config.namespace)})
+
+                    publisher.announced.add_done_callback(on_announced)
 
                 if config.mode != "publish":
                     try:
@@ -140,6 +157,11 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                             }
                         )
 
+                    if publisher is not None:
+                        # Same process as the publisher: subscribing before its announce reached the wire
+                        # would be rejected for certain; after it, the retry below covers the round trip.
+                        await publisher.announced
+
                     subscribe_task = asyncio.ensure_future(
                         subscribe_with_retry(
                             subscriber,
@@ -165,7 +187,9 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                                     {"event": "publisher done", "status": done.status_code, "reason": done.reason}
                                 ),
                             ),
-                            log,
+                            on_retry=lambda attempt, delay: log(
+                                {"event": "waiting", "detail": "namespace not announced yet; retrying the subscribe"}
+                            ),
                         )
                     )
                     background_tasks.append(subscribe_task)
@@ -217,44 +241,6 @@ async def write_when_demanded(
     fail_if_broken()
     # Demand can disappear after the check; let the SDK's write deadline bound that race.
     await writer.write(payload)
-
-
-async def subscribe_with_retry(
-    subscriber: RelaySubscriber,
-    namespace: list[str],
-    track: str,
-    handlers: RelaySubscriptionHandlers,
-    log: Log,
-) -> None:
-    """A subscribe issued before the relay has processed the publisher's announce is rejected with 404
-    Broadcast not found; that is expected on a fresh namespace, not fatal, so retry with bounded backoff
-    until it is accepted, another error arrives, or the run deadline cancels the task. Every other
-    rejection is forwarded to ``handlers.on_error`` unchanged. ``subscription.subscribed`` is the
-    relay's answer; a connection that ends first is reported by the main loop, not here.
-    """
-    backoff = 0.5
-    delivery = replace(handlers, on_error=None)
-
-    while True:
-        subscription = subscriber.subscribe(namespace, track, delivery)
-
-        try:
-            await subscription.subscribed
-            return
-        except SubscriptionRequestError as error:
-            if error.request_error.error_code != 404:
-                if handlers.on_error is not None:
-                    handlers.on_error(error.request_error)
-
-                return
-        except RelayError:
-            return
-
-        log({"event": "waiting", "detail": "namespace not announced yet; retrying the subscribe"})
-
-        await asyncio.sleep(backoff)
-
-        backoff = min(backoff * 2, 2.0)
 
 
 def inspect(payload: bytes) -> dict[str, Any]:

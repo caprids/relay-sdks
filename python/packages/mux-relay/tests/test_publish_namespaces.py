@@ -55,6 +55,58 @@ async def test_namespace_demand_deadline_and_recovery(prefix: list[str] | None, 
         peer.destroy()
 
 
+async def test_announced_waits_for_a_solicitation_that_covers_the_namespace() -> None:
+    pair = create_transport_pair()
+    peer = create_moqt_session(pair.server, MoqtSessionConfig())
+    ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    ready.set_result(None)
+    publisher = await connect_relay_publisher(
+        "https://relay.example.com",
+        namespace=["testing", "data"],
+        create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=ready),
+    )
+    try:
+        publisher.register_track("events")
+        other = await solicit_namespace(pair.server, ["other"])
+        await wait_for(lambda: "request-ok" in other.kinds())
+        await asyncio.sleep(0.02)
+        # Solicited, but not for us: the announce has nowhere to go and the fact has not happened.
+        assert not publisher.announced.done()
+
+        matching = await solicit_namespace(pair.server, ["testing"], 3)
+        await wait_for(lambda: "namespace" in matching.kinds())
+
+        assert await asyncio.wait_for(publisher.announced, 1) is None
+    finally:
+        await publisher.close()
+        peer.destroy()
+
+
+async def test_announced_stays_pending_for_an_uncovered_namespace_until_the_connection_closes() -> None:
+    pair = create_transport_pair()
+    peer = create_moqt_session(pair.server, MoqtSessionConfig())
+    ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    ready.set_result(None)
+    publisher = await connect_relay_publisher(
+        "https://relay.example.com",
+        namespace=["testing", "data"],
+        create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=ready),
+    )
+    try:
+        publisher.register_track("events")
+        other = await solicit_namespace(pair.server, ["other"])
+        await wait_for(lambda: "request-ok" in other.kinds())
+        await asyncio.sleep(0.02)
+        assert not publisher.announced.done()
+    finally:
+        await publisher.close()
+        peer.destroy()
+
+    with pytest.raises(RelayError) as failure:
+        await publisher.announced
+    assert failure.value.code == "CLOSED"
+
+
 async def test_namespace_withdrawal_is_shared_with_closure_and_pending_operations() -> None:
     pair = create_transport_pair()
     peer = create_moqt_session(pair.server, MoqtSessionConfig())

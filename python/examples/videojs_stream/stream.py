@@ -58,6 +58,7 @@ from mux_relay import (
     Closed,
     KeyValuePair,
     MoqtObject,
+    RelayAwaitable,
     RelayError,
     RelayPublisher,
     RelaySubscriptionHandlers,
@@ -65,6 +66,14 @@ from mux_relay import (
     connect_relay_subscriber,
 )
 from mux_relay.media import CatalogService, FrameOutcome, FrameWriter
+
+# The policies the examples share live one directory up; a script run by path cannot see them otherwise.
+EXAMPLES = str(Path(__file__).resolve().parents[1])
+
+if EXAMPLES not in sys.path:
+    sys.path.insert(0, EXAMPLES)
+
+from shared.announce_race import subscribe_with_retry  # noqa: E402
 
 Log = Callable[[str, dict[str, Any]], None]
 
@@ -898,10 +907,19 @@ class Verified:
     problems: list[str] | None = None
 
 
-async def verify(config: Config, lifetime: CancellationToken, log: Log) -> tuple[Any, Verified]:
-    """Subscribe like a player would and record what arrives, so the wire can be checked without a browser."""
+async def verify(
+    config: Config, publisher: RelayPublisher, lifetime: CancellationToken, log: Log
+) -> tuple[Any, Verified]:
+    """Subscribe like a player would and record what arrives, so the wire can be checked without a browser.
+
+    The viewer shares this process with the publisher, so it waits for the announce to reach the wire
+    and then subscribes with the examples' announce-race retry (``shared.announce_race``): the relay
+    still needs about a round trip after the announce before it routes subscribes to the namespace.
+    """
     result = Verified(video_groups=set(), problems=[])
     subscriber = await connect_relay_subscriber(config.url, get_token=lambda: config.token, cancellation=lifetime)
+    await publisher.announced
+    log("verify: namespace announced", {"namespace": "/".join(config.namespace)})
     assert result.problems is not None
     assert result.video_groups is not None
     problems = result.problems
@@ -944,16 +962,24 @@ async def verify(config: Config, lifetime: CancellationToken, log: Log) -> tuple
     def on_error(track: str) -> Callable[[Any], None]:
         return lambda error: problems.append(f"{track}: subscribe error {error.error_code} {error.reason}")
 
-    subscriber.subscribe(
-        config.namespace, CATALOG_TRACK, RelaySubscriptionHandlers(on_object=on_catalog, on_error=on_error("catalog"))
-    )
-    subscriber.subscribe(
-        config.namespace, VIDEO_TRACK, RelaySubscriptionHandlers(on_object=on_video, on_error=on_error("video"))
-    )
+    def on_retry(track: str) -> Callable[[int, float], None]:
+        def retried(attempt: int, delay: float) -> None:
+            log("verify: subscribe retried", {"track": track, "attempt": attempt, "delay": delay})
+
+        return retried
+
+    tracks = [(CATALOG_TRACK, on_catalog), (VIDEO_TRACK, on_video)]
 
     if config.audio != "off":
-        subscriber.subscribe(
-            config.namespace, AUDIO_TRACK, RelaySubscriptionHandlers(on_object=on_audio, on_error=on_error("audio"))
+        tracks.append((AUDIO_TRACK, on_audio))
+
+    for track, on_object in tracks:
+        await subscribe_with_retry(
+            subscriber,
+            config.namespace,
+            track,
+            RelaySubscriptionHandlers(on_object=on_object, on_error=on_error(track)),
+            on_retry=on_retry(track),
         )
 
     return subscriber, result
@@ -994,7 +1020,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     lifetime.add_callback(on_cancelled)
 
-    def watch(label: str, closed: asyncio.Future[Closed]) -> None:
+    def watch(label: str, closed: RelayAwaitable[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
             if not closing:
                 log(f"{label} connection closed", {"error": describe(future.result().error)})
@@ -1054,7 +1080,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     verified: Verified | None = None
 
     if config.verify:
-        verifier, verified = await verify(config, lifetime, log)
+        verifier, verified = await verify(config, publisher, lifetime, log)
 
     stats.started = time.monotonic()
     producer.start()

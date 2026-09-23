@@ -401,9 +401,13 @@ class TestConnectRelay:
 
         assert not hasattr(connection.track_source, "close")
         assert not hasattr(connection.track_source, "destroy")
-        assert connection.track_source.closed is connection.closed
+        # The borrowed source keeps the core's `Future` contract; the product handle isolates its waiters.
+        # Both report the same closure.
+        assert not connection.track_source.closed.done()
+        assert not connection.closed.done()
         connection.close()
         assert await connection.closed == Closed()
+        assert connection.track_source.closed.result() == Closed()
 
         with pytest.raises(RelayError, match="closed") as failure:
             connection.track_source.subscribe(MoqtSubscribeOptions(track_namespace=["room"], track_name="events"))

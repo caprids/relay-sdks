@@ -26,7 +26,8 @@ from moq_core import (
     SubscriptionHandlers,
 )
 
-from ._subscription import RelaySubscription, SubscriptionAwaitable, SubscriptionEnd, SubscriptionEndKind
+from ._awaitable import RelayAwaitable
+from ._subscription import RelaySubscription, SubscriptionEnd, SubscriptionEndKind
 from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import ConnectingTransport, RelayTransportFactory
@@ -70,6 +71,7 @@ __all__ = [
     "ObjectEvent",
     "PublishDone",
     "PublisherDoneEvent",
+    "RelayAwaitable",
     "RelayError",
     "RelayErrorCode",
     "RelayErrorPhase",
@@ -87,7 +89,6 @@ __all__ = [
     "SubscribeOk",
     "SubscribedEvent",
     "Subscription",
-    "SubscriptionAwaitable",
     "SubscriptionConnectionClosedError",
     "SubscriptionEnd",
     "SubscriptionEndKind",

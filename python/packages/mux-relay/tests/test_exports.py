@@ -52,7 +52,7 @@ PUBLIC_NAMES = [
     "SubscribeOk",
     "SubscribedEvent",
     "Subscription",
-    "SubscriptionAwaitable",
+    "RelayAwaitable",
     "SubscriptionConnectionClosedError",
     "SubscriptionEnd",
     "SubscriptionEndKind",
