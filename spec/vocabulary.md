@@ -298,3 +298,40 @@ The optional TypeScript-only `@mux/moq-mediabunny` integration exports
 `videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`, `packetToLocFrame`, `LocFrame`, and
 `PacketToLocFrameOptions`. These consume public Mediabunny packets/WebCodecs decoder configs;
 Python keeps its PyAV Annex B conversion helpers.
+
+## Media publishing: `FrameWriter`, `CatalogService`
+
+The media publishing policy the Video.js example proved, lifted into the Python product package as
+`mux_relay.media` ([issue #84](https://github.com/muxinc/relay-sdks/issues/84)); its contract is the
+"Media publishing" section of [behavior.md](behavior.md#media-publishing). The TypeScript column is
+empty until that SDK gains the module. The root package exports none of these names in either
+language; `python/packages/mux-relay/tests/test_exports.py` pins the module's list.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| Serve a state-shaped track: send its document on every relay subscription | — (not yet implemented) | `CatalogService(track, document, retry_delay=1.0)` |
+| Run the service until cancelled or the track ends | — | `await service.serve()` |
+| Documents accepted, and failures that were retried | — | `service.sends`, `service.failures` |
+| Map encoded frames onto a track's groups | — | `FrameWriter(track, grouping="keyframe", stale=None)`; `grouping="frame"` for one group per frame |
+| Send one frame if the relay wants it | — | `await writer.write(frame)` returns a `FrameOutcome` |
+| What became of a frame | — | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `interrupted`, `ended`), `error`, `group_id` |
+| One encoded frame as the writer sees it | — | `Frame`, a protocol: `payload`, `key`, `properties`, `discontinuity` |
+| FIN the open group and refuse further frames | — | `await writer.close()` |
+| The writer ended, and how | — | `writer.closed`, `writer.ended` |
+| Groups opened and objects accepted | — | `writer.groups`, `writer.objects` |
+
+`FrameWriter.write` keeps the SDK's one verb for sending bytes, one tier above
+`RelayTrackWriter.write`: it sends when the relay wants the frame, and its return value is what
+says this write can decline (skip, drop, report) instead of waiting for demand or raising. The
+failures it reports are data because an encoder loop keeps producing after any of them; catching an
+exception per frame would be the caller's whole loop.
+
+`Frame` is a protocol, not a class. The application's own encoded-sample type qualifies once it
+carries the frame's object properties, so nothing is converted between the encoder and the writer.
+
+Not adopted: `FramePublisher.publish()` ("publisher" is the connection role, and `publish()` was
+already rejected as the name of a step that does not send); `MediaTrackWriter.write_frame()`
+(redundant on a type named for frames); an events iterator for the catalog service (two counters
+answer what the example's `finished` line asks); exceptions for interrupted and ended frames (see
+above). The `register_media` handle, `update()` of a served document, and the readers in
+[media-layer.md](media-layer.md) remain proposals.

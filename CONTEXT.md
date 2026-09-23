@@ -33,6 +33,37 @@ completes or fails. Its steps are the phases `spec/behavior.md` records: waiting
 opening-stream, writing, closing.
 _Avoid_: request, job, transaction, publish
 
+### Media publishing internals
+
+**Frame writer**:
+The module that maps one track's encoded frames onto its groups, one frame at a time: under
+keyframe grouping a keyframe opens a group and deltas append to it, under frame grouping every
+frame is its own group. It skips frames the relay has no subscription for and resumes at the next
+keyframe after any failure. It holds no queue and knows no format.
+_Avoid_: frame publisher, media writer, GOP mapper, track publisher
+
+**Catalog service**:
+The module that serves a state-shaped track: it sends the track's document on every relay
+subscription and retries a failed send while demand remains. The document is bytes to it.
+_Avoid_: catalog loop, catalog publisher, catalog server
+
+**Frame**:
+One encoded frame as the frame writer sees it: payload, keyframe flag, the object properties to
+send with it, and whether frames before it were dropped (a discontinuity). Timestamps and lateness
+are the application's business, expressed through the writer's `stale` predicate.
+_Avoid_: sample (the example's own type, a frame plus its place on the timeline), chunk, packet
+
+**Interruption**:
+A failure that resets the group in progress and leaves the track open: a demand timeout, a changed
+relay subscription, a transport error. The frame writer reports it and resumes at the next keyframe.
+_Avoid_: transient error, retryable failure (nothing is retried)
+
+**Retirement**:
+The end of a track under an operation, or before one: the failure's code is `CLOSED`, or the track
+reports `closed` afterwards. It ends the frame writer and the catalog service, and nothing further
+touches the track. Whether the relay closed the track or the connection ended is not distinguished.
+_Avoid_: terminal error, track death, disconnect
+
 ### Subscribing internals
 
 **Subscription**:

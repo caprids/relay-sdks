@@ -12,6 +12,7 @@ from pathlib import Path
 
 import moq_core
 import mux_relay
+import mux_relay.media
 from mux_relay import RelayPublisher, RelaySubscriber, RelaySubscriptionHandlers, RelayTrackWriter
 
 REPO = Path(__file__).resolve().parents[4]
@@ -68,10 +69,27 @@ PUBLIC_NAMES = [
 ]
 """The whole public interface. A name added here needs a row in ``spec/vocabulary.md`` first."""
 
+MEDIA_NAMES = [
+    "CatalogService",
+    "Frame",
+    "FrameOutcome",
+    "FrameOutcomeKind",
+    "FrameWriter",
+]
+"""The public interface of ``mux_relay.media``, the media publishing policy; the root exports none of it."""
+
 
 def test_all_is_exactly_the_pinned_list() -> None:
     assert sorted(mux_relay.__all__) == sorted(PUBLIC_NAMES)
     assert len(set(mux_relay.__all__)) == len(mux_relay.__all__)
+
+
+def test_the_media_module_is_exactly_the_pinned_list_and_stays_out_of_the_root() -> None:
+    assert sorted(mux_relay.media.__all__) == sorted(MEDIA_NAMES)
+    assert not set(MEDIA_NAMES) & set(mux_relay.__all__)
+
+    for name in MEDIA_NAMES:
+        assert hasattr(mux_relay.media, name)
 
 
 def test_all_matches_the_names_the_package_binds() -> None:
@@ -87,7 +105,8 @@ def test_all_matches_the_names_the_package_binds() -> None:
 def test_every_export_appears_in_the_spec() -> None:
     """``spec/vocabulary.md``: a name that exists in one SDK without a row is a bug."""
     spec = (REPO / "spec" / "vocabulary.md").read_text() + (REPO / "spec" / "behavior.md").read_text()
-    missing = [name for name in mux_relay.__all__ if re.search(rf"\b{re.escape(name)}\b", spec) is None]
+    names = [*mux_relay.__all__, *mux_relay.media.__all__]
+    missing = [name for name in names if re.search(rf"\b{re.escape(name)}\b", spec) is None]
     assert missing == []
 
 

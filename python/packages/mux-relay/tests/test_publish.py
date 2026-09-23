@@ -8,10 +8,8 @@ import pytest
 from core_helpers.transport_pair import create_transport_pair
 from core_helpers.waiting import wait_for
 from relay_helpers.relay_hub import ObservedNamespaceDone, ObservedSubscribeFin, RelayHub, create_relay_hub
-from videojs_stream.stream import Stats, serve_catalog
 
 from moq_core import KeyValuePair, MoqtObject
-from moq_core.transport import SendStream
 from mux_relay import (
     CancellationToken,
     Closed,
@@ -337,54 +335,6 @@ class TestConnectRelayPublisher:
         await wait_for(lambda: len(on_raw) == 1 and len(on_timed) == 1)
         assert on_timed[0].track_properties == track_properties
         assert on_raw[0].track_properties == []
-
-    async def test_catalog_retries_after_a_bound_timeout_without_another_subscription(
-        self, cleanup: Cleanup, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        monkeypatch.setattr("videojs_stream.stream.CATALOG_RETRY_DELAY", 0.01)
-        hub = create_relay_hub()
-        cleanup.append(hub.destroy)
-
-        def connect_publisher(url: str, protocols: Sequence[str]) -> ConnectingTransport:
-            created = hub.connect_publisher(url, protocols)
-            transport: Any = created.transport
-            open_stream = transport.create_unidirectional_stream
-            streams = 0
-
-            async def fail_once() -> SendStream:
-                nonlocal streams
-                streams += 1
-                if streams == 2:
-                    raise RelayError("bound write timed out", code="WRITE_TIMEOUT", phase="opening-stream")
-                return await open_stream()
-
-            transport.create_unidirectional_stream = fail_once
-            return created
-
-        publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=connect_publisher)
-        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
-        cleanup.extend([subscriber.close, publisher.close])
-        catalog = publisher.register_track("catalog")
-        received = Received(subscriber, "catalog")
-        stats = Stats()
-        serving = asyncio.create_task(
-            serve_catalog(
-                catalog,
-                b"latest catalog",
-                stats,
-                lambda event, fields: None,
-                lambda track, error: pytest.fail("transient write ended catalog"),
-            )
-        )
-        try:
-            await wait_for(lambda: len(received.objects) == 1)
-            assert hub.subscribes == ["catalog"]
-            assert (received.objects[0].group_id, received.objects[0].payload) == (1, b"latest catalog")
-            assert (stats.catalog_sends, stats.catalog_failures) == (1, 1)
-            assert not catalog.closed
-        finally:
-            serving.cancel()
-            await asyncio.gather(serving, return_exceptions=True)
 
     async def test_rejects_oversized_objects_before_waiting_for_demand(self, cleanup: Cleanup) -> None:
         _, publisher, _ = await connect_hub(cleanup)

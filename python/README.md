@@ -356,8 +356,20 @@ Demand is the relay's own subscription, not a viewer count and not a liveness si
 fans one upstream subscription out to every downstream viewer, so a second viewer produces no new
 `True` and is served from the relay's cache; and it keeps the subscription for a while after the
 last viewer leaves (about 30 seconds on the tested relay), so `has_demand` lags the last viewer and
-`True` does not prove anyone is watching. `examples/videojs_stream` puts all of this together for a
-Video.js player.
+`True` does not prove anyone is watching.
+
+Both loops above exist ready-made in `mux_relay.media`, the media publishing policy the Video.js
+example runs on. `CatalogService(track, document)` re-sends a document on every relay subscription
+and retries a failed send while demand remains; `FrameWriter(track)` maps encoded frames onto groups
+(a keyframe opens a group and deltas append, or `grouping="frame"` for one group per frame), skips
+frames the relay has no subscription for instead of waiting on the deadline, and resumes at the
+next keyframe after any failure. Each `await writer.write(frame)` returns what became of the frame
+(`sent`, `skipped`, `stale`, `interrupted` or `ended`) rather than raising, and a frame is anything
+with `payload`, `key`, `properties` and `discontinuity` attributes, so your own encoded-sample type
+qualifies once it carries its LOC properties. Pacing and time-based frame dropping stay yours; pass
+a `stale` predicate to have the writer drop what went stale while a write blocked. The contract is
+the "Media publishing" section of [behavior.md](../spec/behavior.md#media-publishing).
+`examples/videojs_stream` puts all of this together for a Video.js player.
 
 Run the data-only publishing/subscribing integration tests without a live relay:
 

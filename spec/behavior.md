@@ -465,10 +465,54 @@ The media pins in `protocol.json` and exact bytes in `vectors/media.json` apply 
   preserves decode order and presentation timestamps, and attaches configs only to key packets.
   Metadata-only packets are rejected. A caller-supplied shared integer timestamp offset can
   normalize negative timestamps; the final timestamp still follows the LOC safe-integer contract.
-- Encoding, demand handling, catalog serving, GOP grouping, recovery, pacing, and time-based frame
-  dropping remain application responsibilities in stage 1. Publishing handles and public readers
-  are not implemented. The TypeScript package keeps an internal independent Video.js catalog
-  parser extraction for builder compatibility tests.
+- Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
+  serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below,
+  implemented in Python; a `register_media` publishing handle and public readers are not
+  implemented. The TypeScript package keeps an internal independent Video.js catalog parser
+  extraction for builder compatibility tests.
+
+## Media publishing
+
+The media publishing policy lives in the product package (`mux_relay.media`) over registered
+tracks: one tier above the write slot, one below the proposed `register_media` handle. It knows no
+format. A frame carries its own object properties and a catalog is bytes. Implemented in Python;
+not yet implemented in TypeScript.
+
+- A catalog is a state-shaped track. The catalog service sends its document on the current relay
+  demand and again on every later relay subscription, including a replacement subscription (the
+  repeated "demanded" value), so a viewer joining after a relay reconnect receives it. It does not
+  publish on change alone, and a replaceable document is not implemented. Not adopted: MSF's
+  publish-on-change with a Joining FETCH from the relay cache. A plain SUBSCRIBE against the tested
+  relay is live-edge only ([#26](https://github.com/muxinc/relay-sdks/issues/26)), re-sending is
+  what the Video.js player relies on, and MSF-01 §6's one-object-per-stream sentence is treated as
+  a draft defect because it contradicts LOC-04 §4.2 and MSF-01 §5.
+- A catalog write that fails while the track stays open is retried after a configurable delay
+  (default one second) for as long as demand remains, keeping only the current document; losing
+  demand ends the retries until the next relay subscription. The service runs until cancelled or
+  until the track ends, and raises the failure that ended the track when a write exposed it.
+- A frame writer maps encoded frames onto one track's groups. Under keyframe grouping, the LOC
+  mapping for video, a keyframe FINs the open group and opens a new one, and deltas append to it.
+  Under frame grouping, for audio and any other independently decodable frames, every frame is its
+  own single-object group. Object properties are sent as the frame supplies them.
+- A frame the relay has no subscription for is skipped at once; the writer never waits on the write
+  deadline, because an encoder loop cannot block. When demand returns mid-GOP, deltas are skipped
+  until the next keyframe; the open group is not replayed.
+- Lateness is the application's. An optional `stale` predicate is consulted before a group is
+  opened and again before each write, since time passes inside those steps. A stale frame is
+  dropped, an open group that depended on it is reset, and deltas are dropped until the next
+  keyframe. A frame flagged as following a discontinuity resets the open group the same way.
+- A failure is one of two kinds. It ends the writer (a retirement, see `CONTEXT.md`) exactly when
+  the error code is `CLOSED` or the track reports `closed` afterwards, and likewise when the track
+  is already closed as a frame arrives; that frame and every later one are reported as ended, with
+  the error, and nothing further touches the track. Any other failure (an interruption) resets the
+  group, leaves the track open, and reports the frame as interrupted with its error; the next
+  keyframe, or the next independent frame, opens a new group. Demand alone never decides: no demand
+  is also what a track nobody subscribes to looks like.
+- Every frame gets exactly one outcome: sent, skipped, stale, interrupted or ended. The writer
+  returns it rather than raising, so a caller keeps counters without catching per frame, and the
+  group the frame was written to or that was reset on its behalf travels with it. Closing the writer
+  FINs the open group and refuses further frames with `CLOSED`; the registered track stays the
+  application's to close.
 
 ## Package boundaries
 

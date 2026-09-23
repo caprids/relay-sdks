@@ -21,7 +21,7 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from getpass import getpass
@@ -56,15 +56,15 @@ from mux_relay import (
     CancellationToken,
     Cancelled,
     Closed,
+    KeyValuePair,
     MoqtObject,
     RelayError,
-    RelayGroupWriter,
     RelayPublisher,
     RelaySubscriptionHandlers,
-    RelayTrackWriter,
     connect_relay_publisher,
     connect_relay_subscriber,
 )
+from mux_relay.media import CatalogService, FrameOutcome, FrameWriter
 
 Log = Callable[[str, dict[str, Any]], None]
 
@@ -102,11 +102,14 @@ class Config:
 
 @dataclass(frozen=True, slots=True)
 class EncodedSample:
+    """One encoded frame with its LOC properties attached: what the SDK's frame writer takes as a frame."""
+
     kind: Literal["video", "audio"]
     timestamp_us: int
     payload: bytes
     key: bool
     discontinuity: bool = False
+    properties: Sequence[KeyValuePair] = ()
 
 
 class LiveQueue(asyncio.Queue[EncodedSample | None]):
@@ -236,11 +239,14 @@ class VideoEncoder:
         return [self._sample(packet) for packet in self._context.encode(None)]
 
     def _sample(self, packet: av.Packet) -> EncodedSample:
+        timestamp_us = int(packet.pts or 0)
+        key = bool(packet.is_keyframe)
         return EncodedSample(
             kind="video",
-            timestamp_us=int(packet.pts or 0),
+            timestamp_us=timestamp_us,
             payload=annexb_to_avcc(bytes(packet)),
-            key=bool(packet.is_keyframe),
+            key=key,
+            properties=loc_properties(timestamp_us, video_config=self.avcc if key else None),
         )
 
 
@@ -280,7 +286,15 @@ class AudioEncoder:
             self._samples_out += OPUS_FRAME_SAMPLES
 
             for packet in self._context.encode(chunk):
-                samples.append(EncodedSample(kind="audio", timestamp_us=timestamp, payload=bytes(packet), key=True))
+                samples.append(
+                    EncodedSample(
+                        kind="audio",
+                        timestamp_us=timestamp,
+                        payload=bytes(packet),
+                        key=True,
+                        properties=loc_properties(timestamp),
+                    )
+                )
 
         return samples
 
@@ -569,41 +583,14 @@ def _interleave(
 # ---------------------------------------------------------------------------------------------------
 # Publisher side (asyncio)
 # ---------------------------------------------------------------------------------------------------
+#
+# The catalog service and the frame writer come from the SDK (`mux_relay.media`). What stays here is
+# this program's own policy: the live queue's time-based dropping, what to do when a track ends, how
+# the run's exit code is chosen, and the counters the `finished` line reports.
 
 
 class TrackEnded(RuntimeError):
     """A published track was retired mid-run. Raised through the lifetime so the run exits non-zero."""
-
-
-def failure_ends_track(error: RelayError, *, operation: Literal["write", "group"], bound: bool) -> bool:
-    """Only a closed track or connection makes a publish error terminal.
-
-    Single-object writes and groups both reset their stream after failure; demand before the
-    operation does not distinguish a transient failure from a closed track.
-    """
-    return error.code == "CLOSED"
-
-
-async def track_has_ended(track: RelayTrackWriter) -> bool:
-    """Ask the writer whether it is retired, instead of reading that out of `has_demand`.
-
-    `has_demand` cannot answer: False is equally what "the relay has no subscription" looks like. #31
-    adds a `closed` property that says it outright; until that lands, the same fact is readable from
-    a fresh `demand_changes()` iterator, which replays the track's current demand state and "stops once
-    the track is closed", so one that stops before yielding anything means the track is gone.
-    """
-    closed = getattr(track, "closed", None)
-
-    if isinstance(closed, bool):
-        return closed
-
-    # `anext` drops the iterator as soon as it answers, which releases the watcher it registered.
-    return await anext(track.demand_changes(), None) is None
-
-
-async def write_ended_track(track: RelayTrackWriter, error: RelayError, *, bound: bool) -> bool:
-    """Check the writer after failure; sampled demand does not indicate whether it ended."""
-    return error.code == "CLOSED" or await track_has_ended(track)
 
 
 @dataclass(slots=True)
@@ -727,233 +714,134 @@ def _caused_by(error: BaseException, cause: BaseException) -> BaseException:
     return error
 
 
-async def serve_catalog(
-    catalog: RelayTrackWriter, document: bytes, stats: Stats, log: Log, on_track_end: TrackEndHandler
+def stale_for(queue: LiveQueue) -> Callable[[EncodedSample], bool]:
+    """This program's time policy as the frame writer's ``stale`` predicate.
+
+    A sample older than one GOP (video) or 250 ms (audio) against the producer clock is not worth
+    sending. The frame writer asks before opening a group and again before each write, so a write
+    that blocked for a while drops what went stale behind it.
+    """
+    return lambda sample: queue.lag(sample) > queue.max_lag
+
+
+async def serve_catalog(catalog: CatalogService, stats: Stats, on_track_end: TrackEndHandler) -> None:
+    """Run the SDK's catalog service, and fold its end and its counters into the run's accounting."""
+    try:
+        await catalog.serve()
+    except RelayError as error:
+        on_track_end(CATALOG_TRACK, error)
+    finally:
+        stats.catalog_sends = catalog.sends
+        stats.catalog_failures = catalog.failures
+
+
+def account(
+    sample: EncodedSample, outcome: FrameOutcome, writer: FrameWriter[EncodedSample], stats: Stats, log: Log
 ) -> None:
-    """Send current catalog state on each subscription, retrying transient failures while demanded."""
-    async for demanded in catalog.demand_changes():
-        if not demanded:
-            continue
+    """Put one sample in exactly one counter, from what the frame writer said became of it."""
+    video = sample.kind == "video"
 
-        while True:
-            try:
-                await catalog.write(document)
-                stats.catalog_sends += 1
-                log("catalog sent", {"bytes": len(document)})
-                break
-            except RelayError as error:
-                if await write_ended_track(catalog, error, bound=True):
-                    on_track_end(CATALOG_TRACK, error)
-                    return
+    if outcome.kind == "sent":
+        if video:
+            if stats.video_objects == 0:
+                log("video flowing", {"group": outcome.group_id})
 
-                stats.catalog_failures += 1
-                log("catalog write failed", {"error": describe(error)})
-                # Catalog state must eventually arrive even if the relay keeps its subscription.
-                # Retain only this document and pause between attempts; task cancellation interrupts
-                # the pause during shutdown. Losing demand returns to the demand iterator.
-                if not catalog.has_demand:
-                    break
-                await asyncio.sleep(CATALOG_RETRY_DELAY)
-                if not catalog.has_demand:
-                    break
+            stats.video_objects += 1
+            stats.published_video_bytes += len(sample.payload)
+        else:
+            stats.audio_objects += 1
+            stats.published_audio_bytes += len(sample.payload)
+    elif outcome.kind == "stale":
+        stale_sample(sample, stats)
+    elif outcome.kind == "ended":
+        # The track is gone for good; these samples are lost, not deferred.
+        if video:
+            stats.dropped_video += 1
+        else:
+            stats.dropped_audio += 1
+    else:
+        # Skipped for want of demand, or interrupted: the track is fine, and the next keyframe (or
+        # the next audio frame) tries again.
+        if video:
+            stats.skipped_video += 1
+        else:
+            stats.skipped_audio += 1
+
+        if outcome.kind == "interrupted":
+            log(f"{sample.kind} group interrupted", {"group": outcome.group_id, "error": describe(outcome.error)})
+
+    if video:
+        stats.video_groups = writer.groups
 
 
 async def publish_media(
-    queue: asyncio.Queue[EncodedSample | None],
-    video: RelayTrackWriter,
-    audio: RelayTrackWriter | None,
-    encoder: VideoEncoder,
+    queue: LiveQueue,
+    writer: FrameWriter[EncodedSample],
     stats: Stats,
     log: Log,
     on_track_end: TrackEndHandler,
     lifetime: CancellationToken,
 ) -> None:
-    """Route encoded samples: video as one group per GOP while the relay wants the track, audio one group per frame."""
-    group: RelayGroupWriter | None = None
-    video_ended = False
-    recovering_video = False
-
-    async def end_group() -> None:
-        nonlocal group
-
-        if group is None:
-            return
-
-        closing, group = group, None
-
-        try:
-            await closing.close()
-        except (RelayError, ValueError):
-            # Expected while abandoning a group: the relay moved on, or the track is already gone.
-            pass
-        except BaseException as error:
-            # Cancelling the lifetime makes the SDK re-raise that same reason out of everything in
-            # flight, this close included. `run` reports it once; raising it again from a teardown
-            # would only replace the exception already on its way out. Anything else is a real bug.
-            if error is not lifetime.reason:
-                raise
+    """Feed one track's queue to its frame writer until the encoder is done, counting every sample once."""
+    track = VIDEO_TRACK if queue.kind == "video" else AUDIO_TRACK
+    reported = False
 
     # The sample in hand that has not landed in a counter yet. Nothing awaits between counting a
-    # sample and the next reset, so whatever is here when the run is torn down really did go
+    # sample and taking the next, so whatever is here when the run is torn down really did go
     # nowhere, whether the lifetime's cancel reason arrived or the task itself was cancelled.
     pending: EncodedSample | None = None
 
     try:
         while True:
-            pending = None
-            if isinstance(queue, LiveQueue):
-                queue.pending = None
+            queue.pending = None
             sample = await queue.get()
 
             if sample is None:
                 break
 
-            pending = sample
-            if isinstance(queue, LiveQueue):
-                queue.pending = sample
-            late = isinstance(queue, LiveQueue) and queue.lag(sample) > queue.max_lag
+            pending = queue.pending = sample
+            outcome = await writer.write(sample)
+            account(sample, outcome, writer, stats, log)
+            pending = None
 
-            if sample.kind == "audio":
-                if audio is None:
-                    # The track was retired earlier in the run; these frames are gone, not deferred.
-                    stats.dropped_audio += 1
-                    continue
-
-                if late:
-                    stale_sample(sample, stats)
-                    continue
-
-                # Confirm the writer state on failure: a group reset is retryable, but a closed
-                # track or connection still needs the existing track-end policy.
-                bound = audio.has_demand
-
-                if not bound:
-                    stats.skipped_audio += 1
-                    continue
-
-                try:
-                    # Keep the one-frame-per-group wire shape while allowing an interrupted frame
-                    # to reset its group without retiring the audio track during an uplink outage.
-                    audio_group = await audio.open_group()
-                    if isinstance(queue, LiveQueue) and queue.lag(sample) > queue.max_lag:
-                        audio_group.abort()
-                        stale_sample(sample, stats)
-                        continue
-                    try:
-                        await audio_group.write(sample.payload, properties=loc_properties(sample.timestamp_us))
-                        await audio_group.close()
-                    except BaseException:
-                        audio_group.abort()
-                        raise
-                    stats.audio_objects += 1
-                    stats.published_audio_bytes += len(sample.payload)
-                except RelayError as error:
-                    if not await write_ended_track(audio, error, bound=bound):
-                        # Demand came and went before the write started: the track is still open, so
-                        # this frame is skipped and the next one tries again.
-                        stats.skipped_audio += 1
-                        log("audio group interrupted", {"error": describe(error)})
-                        continue
-
-                    audio = None
-                    stats.dropped_audio += 1
-                    on_track_end(AUDIO_TRACK, error)
-
-                continue
-
-            if not video_ended and (late or sample.discontinuity):
-                if group is not None:
-                    group.abort()
-                    group = None
-                recovering_video = True
-
-            if not video_ended and (late or (recovering_video and not sample.key)):
-                stale_sample(sample, stats)
-                continue
-
-            if sample.key:
-                recovering_video = False
-                await end_group()
-                if not video_ended and isinstance(queue, LiveQueue) and queue.lag(sample) > queue.max_lag:
-                    recovering_video = True
-                    stale_sample(sample, stats)
-                    continue
-
-                if not video_ended and video.has_demand:
-                    try:
-                        opened = await video.open_group()
-                    except RelayError as error:
-                        if failure_ends_track(error, operation="group", bound=True):
-                            video_ended = True
-                            on_track_end(VIDEO_TRACK, error)
-                        else:
-                            log("group open failed", {"error": describe(error)})
-                    else:
-                        group = opened
-                        stats.video_groups += 1
-
-                        if stats.video_groups == 1:
-                            log("video flowing", {"group": opened.group_id})
-
-            if group is None:
-                if video_ended:
-                    stats.dropped_video += 1
-                else:
-                    stats.skipped_video += 1
-
-                continue
-
-            if isinstance(queue, LiveQueue) and queue.lag(sample) > queue.max_lag:
-                group.abort()
-                group = None
-                recovering_video = True
-                stale_sample(sample, stats)
-                continue
-
-            try:
-                await group.write(
-                    sample.payload,
-                    properties=loc_properties(sample.timestamp_us, video_config=encoder.avcc if sample.key else None),
-                )
-                stats.video_objects += 1
-                stats.published_video_bytes += len(sample.payload)
-            except RelayError as error:
-                # This sample went nowhere either, so it belongs in a counter like every other one.
-                group_id, group = group.group_id, None
-
-                if failure_ends_track(error, operation="group", bound=True):
-                    video_ended = True
-                    stats.dropped_video += 1
-                    on_track_end(VIDEO_TRACK, error)
-                else:
-                    stats.skipped_video += 1
-                    log("group interrupted", {"group": group_id, "error": describe(error)})
+            if outcome.kind == "ended" and not reported:
+                # Every later sample is `ended` too; the track-end policy runs once.
+                reported = True
+                assert outcome.error is not None
+                on_track_end(track, outcome.error)
     except BaseException:
         if pending is not None:
             discard_sample(pending, stats)
 
         raise
     finally:
-        if isinstance(queue, LiveQueue):
-            queue.pending = None
-        await end_group()
+        queue.pending = None
+
+        try:
+            await writer.close()
+        except BaseException as error:
+            # Cancelling the lifetime makes the SDK re-raise that same reason out of everything in
+            # flight, this FIN included. `run` reports it once; raising it again from a teardown
+            # would only replace the exception already on its way out. Anything else is a real bug.
+            if error is not lifetime.reason:
+                raise
 
 
 async def publish_live_media(
     queues: dict[str, LiveQueue],
-    video: RelayTrackWriter,
-    audio: RelayTrackWriter | None,
-    encoder: VideoEncoder,
+    writers: dict[str, FrameWriter[EncodedSample]],
+    catalog: CatalogService,
     stats: Stats,
     log: Log,
     on_track_end: TrackEndHandler,
     lifetime: CancellationToken,
 ) -> None:
-    """Each track gets its own writer so an audio FIN cannot hold up the video timeline."""
+    """Each track gets its own task so an audio FIN cannot hold up the video timeline."""
 
     async def report() -> None:
         while True:
             await asyncio.sleep(1)
+            stats.catalog_sends, stats.catalog_failures = catalog.sends, catalog.failures
             log(
                 "media progress",
                 {
@@ -965,24 +853,24 @@ async def publish_live_media(
                 },
             )
 
-    writers = [
-        asyncio.create_task(publish_media(queue, video, audio, encoder, stats, log, on_track_end, lifetime))
-        for queue in queues.values()
+    publishing = [
+        asyncio.create_task(publish_media(queues[kind], writer, stats, log, on_track_end, lifetime))
+        for kind, writer in writers.items()
     ]
     reporter = asyncio.create_task(report())
     try:
         # gather preserves the original failure object used by run_failure (TaskGroup wraps it).
-        await asyncio.gather(*writers)
+        await asyncio.gather(*publishing)
     finally:
-        for task in [*writers, reporter]:
+        for task in [*publishing, reporter]:
             task.cancel()
         try:
-            await asyncio.gather(*writers, reporter, return_exceptions=True)
+            await asyncio.gather(*publishing, reporter, return_exceptions=True)
         finally:
             # gather raises the first failure. A normal deadline may win that race while
             # another track has failed independently. Inspect the tasks even if run() also
             # cancels this parent during its drain, so that failure cannot disappear.
-            for task in writers:
+            for task in publishing:
                 error = task.exception() if task.done() and not task.cancelled() else None
                 if error is not None and error is not lifetime.reason:
                     raise error
@@ -1133,9 +1021,11 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
         {"codec": video_info.codec, "size": f"{config.width}x{config.height}", "audio": audio_info is not None},
     )
 
-    catalog = publisher.register_track(CATALOG_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
-    video = publisher.register_track(VIDEO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
-    audio = (
+    catalog_track = publisher.register_track(
+        CATALOG_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5
+    )
+    video_track = publisher.register_track(VIDEO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+    audio_track = (
         publisher.register_track(AUDIO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
         if producer.audio is not None
         else None
@@ -1143,11 +1033,18 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     print_player_url(config, log)
 
+    # The SDK's media policy over the registered tracks; the queues' time policy rides in as `stale`.
+    catalog = CatalogService(catalog_track, document, retry_delay=CATALOG_RETRY_DELAY)
+    writers: dict[str, FrameWriter[EncodedSample]] = {
+        "video": FrameWriter(video_track, stale=stale_for(queues["video"])),
+    }
+
+    if audio_track is not None:
+        writers["audio"] = FrameWriter(audio_track, grouping="frame", stale=stale_for(queues["audio"]))
+
     tasks = [
-        asyncio.ensure_future(serve_catalog(catalog, document, stats, log, on_track_end)),
-        asyncio.ensure_future(
-            publish_live_media(queues, video, audio, producer.video, stats, log, on_track_end, lifetime)
-        ),
+        asyncio.ensure_future(serve_catalog(catalog, stats, on_track_end)),
+        asyncio.ensure_future(publish_live_media(queues, writers, catalog, stats, log, on_track_end, lifetime)),
     ]
     verifier: Any = None
     verified: Verified | None = None
@@ -1186,11 +1083,11 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
         if verifier is not None:
             verifier.close()
 
-        video.close()
-        catalog.close()
+        video_track.close()
+        catalog_track.close()
 
-        if audio is not None:
-            audio.close()
+        if audio_track is not None:
+            audio_track.close()
 
         await publisher.close()
         stats.finished = time.monotonic()

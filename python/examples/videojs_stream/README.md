@@ -108,10 +108,13 @@ clock and each frame's media timestamp. Old audio is discarded individually. A v
 stale frame resets the current GOP, skips its dependent frames, and resumes at a fresh keyframe.
 Timestamps keep their original timeline; the publisher does not replay an outage at reduced speed.
 
-Audio still uses one group per frame on the wire, now through `open_group()` / `write()` / `close()`.
-A five-second group-operation deadline resets an interrupted audio frame or video GOP while keeping
-the track usable. Once the link recovers, audio resumes with recent frames and video with the next
-usable keyframe. A connection that closes still ends the run; this example does not reconnect.
+The group mapping itself is the SDK's: each track has a `FrameWriter` from `mux_relay.media`
+(`grouping="keyframe"` for video, `"frame"` for audio, so audio stays one group per frame on the
+wire), and the queue's age check is handed to it as the `stale` predicate, which the writer consults
+again after a blocked write so what went stale behind it is dropped before it is sent. A five-second
+group-operation deadline resets an interrupted audio frame or video GOP while keeping the track
+usable. Once the link recovers, audio resumes with recent frames and video with the next usable
+keyframe. A connection that closes still ends the run; this example does not reconnect.
 
 Every second a `media progress` line reports queued frame counts, current lag (including a blocked
 write), cumulative sent/skipped/dropped/stale counts, and the maximum observed lag. `staleVideo` and
@@ -135,13 +138,14 @@ policy, and the option of switching viewers to a fresh generation-specific names
 
 ## When a track ends under you
 
-The catalog uses a single-object write. Failed writes and media groups reset their stream and keep
-the track open while the publisher connection remains open. The example drops failed media and
-retries current catalog state after a one-second pause while demand remains; it keeps only one
-pending catalog document. Shutdown cancels the pause. Data that already reached the relay cannot
-be withdrawn.
-A closed track or connection is terminal. The example checks the writer's `closed` state after a
-write failure (`has_demand` cannot distinguish a closed track from one with no current subscribers).
+The catalog is served by the SDK's `CatalogService`: one single-object write per relay
+subscription, retried after a one-second pause while demand remains, with only the current document
+kept. Failed writes and media groups reset their stream and keep the track open while the publisher
+connection remains open; the frame writer reports such a frame as interrupted and the example counts
+it as skipped. Shutdown cancels the pause. Data that already reached the relay cannot be withdrawn.
+A closed track or connection is terminal. The SDK decides that from the error code or the writer's
+`closed` state after a failure (`has_demand` cannot distinguish a closed track from one with no
+current subscribers) and reports the frame as ended; the example's policy below takes it from there.
 
 An ended track is reported once, with the error, on its own `audio track ended` / `video track ended`
 / `catalog track ended` line, and the run then **fails with a non-zero exit**. That is the default

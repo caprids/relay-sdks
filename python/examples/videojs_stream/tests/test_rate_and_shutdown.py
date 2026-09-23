@@ -29,6 +29,16 @@ def test_cbr_payload_reaches_target_on_the_actual_test_pattern(width: int, heigh
     assert 0.90 * bitrate <= actual_bps <= 1.10 * bitrate
     assert len(samples) == 180
     assert [i for i, sample in enumerate(samples) if sample.key] == [0, 60, 120]
+    # The encoder attaches the LOC properties the SDK's frame writer sends: a timestamp on every
+    # frame, and the decoder configuration on keyframes only.
+    assert all(any(p.type == stream.LOC_TIMESTAMP for p in sample.properties) for sample in samples)
+    assert [
+        i for i, sample in enumerate(samples) if any(p.type == stream.LOC_VIDEO_CONFIG for p in sample.properties)
+    ] == [
+        0,
+        60,
+        120,
+    ]
 
 
 def test_rate_control_cli_is_explicit_and_defaults_to_abr(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -149,10 +159,10 @@ async def test_deadline_on_one_track_does_not_hide_other_track_failure(
         raise problem
 
     monkeypatch.setattr(stream, "publish_media", publish)
+    writers = {kind: cast(Any, None) for kind in queues}
+    idle_catalog = cast(Any, SimpleNamespace(sends=0, failures=0))
     task = asyncio.create_task(
-        stream.publish_live_media(
-            queues, cast(Any, None), None, cast(Any, None), stats, lambda *_: None, lambda *_: None, lifetime
-        )
+        stream.publish_live_media(queues, writers, idle_catalog, stats, lambda *_: None, lambda *_: None, lifetime)
     )
     if cancel_after_turns is not None:
         # Both writers have failed by turn two; later turns enter the parent's drain.
