@@ -321,13 +321,17 @@ Opening the group, each `group.write()`, and `group.close()` get a separate `wri
 deadline. Time between calls does not count toward a deadline. A timeout resets that group and
 raises `WRITE_TIMEOUT`; the track stays open for a new group at the next keyframe:
 
-The following is an application sketch, not the data quickstart. `loc_properties` belongs to
-[the Video.js example](examples/videojs_stream/moq_media.py), not `mux_relay`; the encoded frames,
-timestamps, and codec configuration come from your encoder. Making this media recipe standalone
-is tracked separately in [#29](https://github.com/muxinc/relay-sdks/issues/29).
+The following is an application sketch, not the data quickstart. The optional
+[moq-media format package](packages/moq-media/README.md) supplies `loc_properties` and
+`loc_track_properties`; the encoded frames, timestamps, and codec configuration come from your
+encoder. Install `moq-media` alongside `mux-relay` when publishing media (the development workspace
+includes it). It also provides the MSF catalog builder, source URLs, and H.264 configuration helpers
+used by the Video.js example.
 
 ```python
-video = publisher.register_track("video", track_properties=[KeyValuePair(0x08, 1_000_000)])
+from moq_media import loc_properties, loc_track_properties
+
+video = publisher.register_track("video", track_properties=loc_track_properties())
 
 if video.has_demand:  # the relay currently has an upstream subscription for the track
     group = await video.open_group()

@@ -1,0 +1,15 @@
+[project]
+name = "moq-media"
+version = "0.0.0"
+description = "Transport-independent LOC and MSF media format helpers"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.11"
+dependencies = ["moq-core"]
+
+[tool.uv.sources]
+moq-core = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"

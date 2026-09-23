@@ -17,5 +17,22 @@
     "maxObjectPropertiesBytes": 1048576,
     "maxPropertyValueBytes": 65535,
     "maxNamespaceFields": 32
+  },
+  "media": {
+    "locDocument": "draft-ietf-moq-loc-04",
+    "msfDocument": "draft-ietf-moq-msf-01",
+    "catalogVersion": "draft-01",
+    "defaultTimescale": 1000000,
+    "tracks": {
+      "catalog": "catalog",
+      "video": "video",
+      "audio": "audio"
+    },
+    "properties": {
+      "timestamp": 16,
+      "timescale": 8,
+      "videoConfig": 13,
+      "audioConfig": 15
+    }
   }
 }

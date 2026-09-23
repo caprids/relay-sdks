@@ -83,9 +83,9 @@
   },
   "overrides": [
     {
-      // Attributed Video.js snapshot (see packages/moq-core/UPSTREAM.json). It keeps upstream's
-      // formatting and non-null-assertion style so the diff against upstream stays readable.
-      "includes": ["packages/moq-core/src/protocol/**", "packages/moq-core/src/tests/**"],
+      // Attributed Video.js snapshots and Python-example media ports (see each package's UPSTREAM.json).
+      // Keep their formatting and non-null-assertion style consistent with the extracted modules.
+      "includes": ["packages/moq-core/src/protocol/**", "packages/moq-core/src/tests/**", "packages/moq-media/src/**"],
       "javascript": { "formatter": { "trailingCommas": "es5" } },
       "linter": { "rules": { "style": { "noNonNullAssertion": "off" } } }
     },

@@ -35,6 +35,22 @@ from av.audio.fifo import AudioFifo
 from av.audio.resampler import AudioResampler
 from av.codec.context import Flags
 
+from moq_media import (
+    AUDIO_TRACK,
+    CATALOG_TRACK,
+    LOC_TIMESTAMP,
+    LOC_VIDEO_CONFIG,
+    MICROSECONDS_PER_SECOND,
+    TRACK_TIMESCALE_PROPERTIES,
+    VIDEO_TRACK,
+    AudioTrackInfo,
+    H264Config,
+    VideoTrackInfo,
+    annexb_to_avcc,
+    build_msf_catalog,
+    compose_player_url,
+    loc_properties,
+)
 from mux_relay import (
     DEFAULT_ENDPOINT,
     CancellationToken,
@@ -48,30 +64,6 @@ from mux_relay import (
     RelayTrackWriter,
     connect_relay_publisher,
     connect_relay_subscriber,
-)
-
-# Runnable both as `python examples/videojs_stream/stream.py` and as a module: put `examples/` on the
-# path when started as a script so the sibling helper module resolves.
-if __package__ in (None, ""):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-
-from videojs_stream.moq_media import (
-    AUDIO_TRACK,
-    CATALOG_TRACK,
-    LOC_TIMESTAMP,
-    LOC_VIDEO_CONFIG,
-    MICROSECONDS_PER_SECOND,
-    TRACK_TIMESCALE_PROPERTIES,
-    VIDEO_TRACK,
-    AudioTrackInfo,
-    VideoTrackInfo,
-    annexb_to_avcc,
-    avc_codec_string,
-    build_avcc,
-    build_msf_catalog,
-    compose_player_url,
-    extract_parameter_sets,
-    loc_properties,
 )
 
 Log = Callable[[str, dict[str, Any]], None]
@@ -230,9 +222,9 @@ class VideoEncoder:
             context.options["x264-params"] += f":vbv-maxrate={rate_kbps}:vbv-bufsize={rate_kbps}:nal-hrd=cbr:filler=1"
         context.flags |= Flags.global_header
         context.open()
-        sps, pps = extract_parameter_sets(bytes(context.extradata or b""))
-        self.avcc = build_avcc(sps, pps)
-        self.codec = avc_codec_string(self.avcc)
+        h264 = H264Config.from_annexb(bytes(context.extradata or b""))
+        self.avcc = h264.avcc
+        self.codec = h264.codec
         self._context = context
         self.width = width
         self.height = height

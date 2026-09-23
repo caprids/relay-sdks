@@ -254,3 +254,47 @@ subscription, not a failure of the caller's await, and the connection's `closed`
   product packages re-export the same short list of core names (the "Protocol types borrowed from
   the core" row; Python adds `Closed`, which TypeScript spells inline) and nothing else;
   `python/packages/mux-relay/tests/test_exports.py` checks that list against `ts/src/index.ts`.
+
+## Media format helpers
+
+Stage 1 media format names. Python exports these from `moq_media`; TypeScript exports them from
+`@mux/moq-media`. The source-URL composer and catalog-generation timestamp retain their language-specific
+names from the original examples; the mappings below are explicit.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| Video description | `VideoTrackInfo` | `VideoTrackInfo` |
+| Audio description | `AudioTrackInfo` | `AudioTrackInfo` |
+| Data description | `DataTrackInfo` | `DataTrackInfo` |
+| Catalog input | `MsfCatalogInput` | `build_msf_catalog` keyword arguments |
+| Build independent catalog bytes | `buildMsfCatalog` | `build_msf_catalog` |
+| LOC track properties | `locTrackProperties` | `loc_track_properties` |
+| LOC object properties from microseconds | `locProperties` / `LocPropertiesOptions` | `loc_properties` keyword arguments |
+| Compose source URL | `composeMoqSource` / `ComposeMoqSourceOptions` | `compose_player_url` keyword arguments |
+| Escape UTF-8 component | `encodeNameComponent` | `encode_name_component` |
+| Encode namespace plus track name | `encodeNamespaceName` | `encode_namespace_name` |
+| H.264 configuration record | — (Python only) | `H264Config` |
+| Configuration from Annex B | — (Python only) | `H264Config.from_annexb` |
+| Configuration bytes / codec string | — (Python only) | `H264Config.avcc` / `.codec` |
+| Configuration's access-unit conversion | — (Python only) | `H264Config.to_avcc` |
+| Split Annex B NALs | — (Python only) | `iter_annexb_nal_units` |
+| NAL type | — (Python only) | `nal_unit_type` |
+| Extract SPS/PPS | — (Python only) | `extract_parameter_sets` |
+| Build avcC | — (Python only) | `build_avcc` |
+| Codec string from avcC header | `avcCodecString` | `avc_codec_string` |
+| Convert Annex B access unit | — (Python only) | `annexb_to_avcc` |
+
+Constants use the same spelling in both languages: `LOC_DOCUMENT`, `MSF_DOCUMENT`,
+`MSF_CATALOG_VERSION`, `MICROSECONDS_PER_SECOND`, `CATALOG_TRACK`, `VIDEO_TRACK`, `AUDIO_TRACK`,
+`LOC_TIMESTAMP`, `LOC_TIMESCALE`, `LOC_VIDEO_CONFIG`, and `LOC_AUDIO_CONFIG`.
+Python also retains the example's `TRACK_TIMESCALE_PROPERTIES` as a tuple; new code should call
+`loc_track_properties()` for fresh properties.
+
+Track fields use camelCase in TypeScript and snake_case in Python (`initData` / `init_data`,
+`channelConfig` / `channel_config`). Catalog generation time is `generatedAt` / `generated_at_ms`.
+Media publishing-handle and reader names remain provisional.
+
+The optional TypeScript-only `@mux/moq-mediabunny` integration exports
+`videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`, `packetToLocFrame`, `LocFrame`, and
+`PacketToLocFrameOptions`. These consume public Mediabunny packets/WebCodecs decoder configs;
+Python keeps its PyAV Annex B conversion helpers.

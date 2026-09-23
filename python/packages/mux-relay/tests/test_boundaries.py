@@ -34,7 +34,8 @@ def test_the_sdk_depends_only_on_the_core_and_its_transport_library() -> None:
 def test_importing_the_core_loads_no_transport_or_product_module() -> None:
     script = (
         "import sys, moq_core, moq_core.session, moq_core.publish_session; "
-        "loaded = sorted(m for m in sys.modules if m.split('.')[0] in {'aioquic', 'mux_relay', 'cryptography'}); "
+        "loaded = sorted(m for m in sys.modules "
+        "if m.split('.')[0] in {'aioquic', 'mux_relay', 'moq_media', 'cryptography'}); "
         "assert loaded == [], loaded"
     )
     subprocess.run([sys.executable, "-c", script], check=True)
@@ -48,3 +49,7 @@ def test_the_sdk_leaves_the_protocol_pin_and_limits_to_the_core() -> None:
     assert not hasattr(mux_relay, "MAX_OBJECT_PAYLOAD_LENGTH")
     assert callable(mux_relay.connect_relay_subscriber)
     assert callable(mux_relay.connect_relay_publisher)
+
+
+def test_the_media_package_depends_only_on_the_core() -> None:
+    assert dependencies("moq-media") == ["moq-core"]
