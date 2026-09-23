@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from types import TracebackType
 from typing import Self
 
 from moq_core import (
-    MAX_NAMESPACE_FIELDS,
     Closed,
     FetchHandle,
     FetchHandlers,
@@ -33,6 +32,16 @@ from moq_core import (
     create_moqt_session,
 )
 
+from ._subscription import (
+    RelaySubscription,
+    SubscriptionConsumer,
+    SubscriptionDependencies,
+    SubscriptionEnd,
+    SubscriptionEvent,
+    UpdateOkEvent,
+    synchronous_callback,
+)
+from ._validation import namespace_fields, track_name
 from .cancellation import CancellationToken
 from .connect_session import (
     DEFAULT_CONNECT_TIMEOUT,
@@ -47,18 +56,6 @@ from .connect_session import (
 from .subscription_events import SubscriptionEvents
 
 IMPLEMENTATION_NAME = "mux-relay (Python)"
-
-
-def _validate_namespace(namespace: Sequence[str]) -> None:
-    if (
-        not isinstance(namespace, Sequence)
-        or isinstance(namespace, (str, bytes, bytearray))
-        or not namespace
-        or any(not isinstance(field, str) or not field for field in namespace)
-    ):
-        raise TypeError("A subscription namespace must contain non-empty string fields")
-    if len(namespace) > MAX_NAMESPACE_FIELDS:
-        raise ValueError(f"A subscription namespace must contain at most {MAX_NAMESPACE_FIELDS} fields")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -78,10 +75,13 @@ class RelaySubscriptionHandlers:
     what the publisher declared.
     """
     on_error: Callable[[RequestError], None] | None = None
-    """The relay rejected the subscription, or it failed before acceptance.
+    """The relay answered the request with REQUEST_ERROR.
 
-    Request timeout, connection shutdown, and GOAWAY all arrive here. Not called after acceptance;
-    later failures surface as subgroup resets and connection closure.
+    It rejected the subscription, or the request failed before acceptance (request timeout, or the
+    request stream failing). A REQUEST_ERROR can also arrive after acceptance, for example when the
+    relay refuses an ``update()``, and it ends the subscription then too (issue #94). Connection
+    shutdown and GOAWAY never arrive here: a pending subscription ends through ``subscribed`` and
+    ``ended``, and an accepted one surfaces them as subgroup resets and connection closure.
     """
     on_object: Callable[[MoqtObject], None] | None = None
     """One object arrived. Payloads are uninterpreted bytes. Objects can arrive after ``on_publisher_done``."""
@@ -110,19 +110,51 @@ class RelaySubscriptionHandlers:
     A GOAWAY on the connection itself ends the connection instead; observe ``closed`` for that.
     """
 
-    def _to_core(self) -> SubscriptionHandlers:
-        """Snapshot callbacks without hiding async functions or their return values from the core."""
-        return SubscriptionHandlers(
-            on_ok=self.on_subscribed,
-            on_error=self.on_error,
-            on_object=self.on_object,
-            on_subgroup_end=self.on_subgroup_end,
-            on_subgroup_reset=self.on_subgroup_reset,
-            on_done=self.on_publisher_done,
-            on_update_ok=self.on_update_ok,
-            on_state_notify=self.on_state_notify,
-            on_goaway=self.on_goaway,
-        )
+
+_EVENT_HANDLERS: dict[str, str] = {
+    "subscribed": "on_subscribed",
+    "object": "on_object",
+    "publisher_done": "on_publisher_done",
+    "subgroup_end": "on_subgroup_end",
+    "subgroup_reset": "on_subgroup_reset",
+    "state_notify": "on_state_notify",
+    "goaway": "on_goaway",
+    "update_ok": "on_update_ok",
+}
+"""Which product handler each product event reaches."""
+
+
+class _HandlersConsumer:
+    """The callback form as one consumer of a subscription.
+
+    Snapshots the product callbacks at subscribe time, holds them to the synchronous callback policy,
+    and dispatches each product event to the handler of the same meaning. A REQUEST_ERROR ending
+    reaches ``on_error``; closure and cancellation reach no callback, only ``subscribed`` and ``ended``.
+    """
+
+    __slots__ = ("_callbacks",)
+
+    def __init__(self, handlers: RelaySubscriptionHandlers) -> None:
+        self._callbacks: dict[str, Callable[..., None]] = {}
+        for handler_field in fields(handlers):
+            callback = getattr(handlers, handler_field.name)
+            if callback is not None:
+                self._callbacks[handler_field.name] = synchronous_callback(handler_field.name, callback)
+
+    def event(self, event: SubscriptionEvent) -> None:
+        callback = self._callbacks.get(_EVENT_HANDLERS[event.type])
+        if callback is None:
+            return
+        if isinstance(event, UpdateOkEvent):
+            callback()
+        else:
+            callback(event.value)
+
+    def ended(self, end: SubscriptionEnd) -> None:
+        if end.cause == "request-error":
+            callback = self._callbacks.get("on_error")
+            if callback is not None:
+                callback(end.error)
 
 
 class _BorrowedTrackSource:
@@ -143,9 +175,14 @@ class _BorrowedTrackSource:
         return self._closed
 
     def subscribe(self, options: MoqtSubscribeOptions, handlers: SubscriptionHandlers | None = None) -> Subscription:
+        # Arguments before connection state, as on the product entry points.
+        admitted = replace(
+            options,
+            track_namespace=namespace_fields(options.track_namespace),
+            track_name=track_name(options.track_name),
+        )
         self._lifetime.assert_open()
-        _validate_namespace(options.track_namespace)
-        return self._lifetime.session.subscribe(options, handlers)
+        return self._lifetime.session.subscribe(admitted, handlers)
 
     def fetch(self, options: MoqtSubscribeOptions, handlers: FetchHandlers | None = None) -> FetchHandle:
         self._lifetime.assert_open()
@@ -182,6 +219,33 @@ class RelaySubscriber:
         """
         return self._track_source
 
+    def _admit(
+        self, namespace: Sequence[str], track: str, parameters: MessageParameters | None
+    ) -> MoqtSubscribeOptions:
+        """Admit the arguments of one public call: checked and copied first, then the connection state.
+
+        Both entry points do this synchronously, before anything (an iterator, a subscription) exists.
+        """
+        options = MoqtSubscribeOptions(
+            track_namespace=namespace_fields(namespace), track_name=track_name(track), parameters=parameters
+        )
+        self._lifetime.assert_open()
+        return options
+
+    def _subscription(
+        self, options: MoqtSubscribeOptions, consumers: Sequence[SubscriptionConsumer]
+    ) -> RelaySubscription:
+        """One product subscription per public call; both entry points bind the core the same way."""
+        session = self._lifetime.session
+        return RelaySubscription(
+            SubscriptionDependencies(
+                subscribe=lambda handlers: session.subscribe(options, handlers),
+                observe_closed=self._lifetime.observe_closed,
+                transport_ended=self._lifetime.transport_ended,
+            ),
+            consumers,
+        )
+
     def subscribe(
         self,
         namespace: Sequence[str],
@@ -189,19 +253,17 @@ class RelaySubscriber:
         handlers: RelaySubscriptionHandlers | None = None,
         *,
         parameters: MessageParameters | None = None,
-    ) -> Subscription:
+    ) -> RelaySubscription:
         """Ask the relay for a track's objects, in any payload format, without discovering or loading a catalog.
 
-        Returns at once with a cancellable handle; ``handlers.on_subscribed`` or ``handlers.on_error``
-        reports the relay's answer. ``namespace`` fields are sent verbatim, without splitting or
-        joining on slashes. ``parameters`` carries protocol subscription controls such as the
-        location filter and priority.
+        Returns at once with a cancellable handle whose ``subscribed`` settles when the relay answers
+        and whose ``ended`` settles once the subscription can no longer deliver;
+        ``handlers.on_subscribed`` and ``handlers.on_error`` report the same answer as callbacks.
+        ``namespace`` fields are sent verbatim, without splitting or joining on slashes.
+        ``parameters`` carries protocol subscription controls such as the location filter and priority.
         """
-        _validate_namespace(namespace)
-        return self._track_source.subscribe(
-            MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters),
-            None if handlers is None else handlers._to_core(),
-        )
+        consumers = [_HandlersConsumer(handlers)] if handlers is not None else []
+        return self._subscription(self._admit(namespace, track, parameters), consumers)
 
     def subscribe_events(
         self,
@@ -216,15 +278,10 @@ class RelaySubscriber:
 
         Owns only this request. ``publisher_done`` permits trailing objects; it is not EOF.
         """
-        self._lifetime.assert_open()
-        _validate_namespace(namespace)
+        # Admit before building the iterator: an already-cancelled token never runs its callback.
+        options = self._admit(namespace, track, parameters)
         return SubscriptionEvents(
-            lambda handlers: self._track_source.subscribe(
-                MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters), handlers
-            ),
-            self.closed,
-            capacity=capacity,
-            cancellation=cancellation,
+            lambda consumer: self._subscription(options, [consumer]), capacity=capacity, cancellation=cancellation
         )
 
     def close(self) -> None:

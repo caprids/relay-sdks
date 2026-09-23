@@ -31,6 +31,7 @@ export type {
   RelayTrackWriter,
 } from './publish.js';
 export { connectRelayPublisher } from './publish.js';
+export type { RelaySubscription, SubscriptionEnd, SubscriptionEndKind } from './subscription.js';
 
 export type { SubscriptionEvent, SubscriptionEventOptions, SubscriptionEvents } from './subscription-events.js';
 export {

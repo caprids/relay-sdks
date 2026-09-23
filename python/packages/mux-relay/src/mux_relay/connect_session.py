@@ -12,14 +12,14 @@ import inspect
 import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeVar
+from typing import Generic, Protocol, TypeAlias, TypeVar, runtime_checkable
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from moq_core import MOQT_PROTOCOL_ID, Closed, Goaway, MoqtTransport
 from moq_core._tasks import call_later, observe, spawn
 
 from .cancellation import CancellationToken
-from .errors import RelayClosedError, RelayGoawayError, RelayTimeoutError, _transport_error
+from .errors import RelayError, _transport_error
 
 TokenProvider = Callable[[], "str | Awaitable[str | None] | None"]
 """Resolve a connection token, synchronously or asynchronously. ``None`` or ``""`` sends no token."""
@@ -70,6 +70,22 @@ class _Session(Protocol):
 
 T = TypeVar("T", bound=_Session)
 
+ClosureObserver: TypeAlias = Callable[[BaseException | None], None]
+"""Told the error that ended the connection, ``None`` after a clean shutdown."""
+
+
+@runtime_checkable
+class _EndAware(Protocol):
+    """A transport that can say it has ended before ``wait_closed`` returns.
+
+    The native transport fails its streams the moment the QUIC connection terminates but releases
+    its socket, and so returns from ``wait_closed``, turns later. Subscriptions ask this to tell a
+    stream failure that the closure caused from a rejection the relay sent.
+    """
+
+    @property
+    def ended(self) -> bool: ...
+
 
 @dataclass(slots=True)
 class _Connecting(Generic[T]):
@@ -90,18 +106,20 @@ class LifetimeCallbacks:
 class RelaySessionLifetime(Generic[T]):
     """An established session plus the shutdown plumbing both connection kinds share."""
 
-    __slots__ = ("_assert_open", "_close", "_transport", "closed", "session")
+    __slots__ = ("_assert_open", "_close", "_observe_closed", "_transport", "closed", "session")
 
     def __init__(
         self,
         session: T,
         closed: asyncio.Future[Closed],
+        observe_closed: Callable[[ClosureObserver], Callable[[], None]],
         transport: MoqtTransport,
         assert_open: Callable[[], None],
         close: Callable[[], None],
     ) -> None:
         self.session = session
         self.closed = closed
+        self._observe_closed = observe_closed
         self._transport = transport
         self._assert_open = assert_open
         self._close = close
@@ -109,6 +127,22 @@ class RelaySessionLifetime(Generic[T]):
     def assert_open(self) -> None:
         """Raise the error that ended the connection, if it has ended."""
         self._assert_open()
+
+    def observe_closed(self, observer: ClosureObserver) -> Callable[[], None]:
+        """Observe the closure in the turn it happens, before the session tears its requests down.
+
+        An observer added after the end is told at once. Returns the function that removes it.
+        """
+        return self._observe_closed(observer)
+
+    def transport_ended(self) -> bool:
+        """Whether the transport has already ended, ahead of the session reporting the closure.
+
+        ``False`` for a transport that cannot say; the closure then arrives in the turn the session
+        reports it.
+        """
+        transport = self._transport
+        return isinstance(transport, _EndAware) and transport.ended
 
     def close(self) -> None:
         self._close()
@@ -178,16 +212,19 @@ async def open_relay_session(
     interrupted: asyncio.Future[None] = loop.create_future()
     observe(interrupted)
     closed: asyncio.Future[Closed] = loop.create_future()
+    closure_observers: list[ClosureObserver] = []
+    closed_info = Closed()
 
     def finish(info: Closed | None = None) -> None:
-        nonlocal stopped, stop_error
+        nonlocal stopped, stop_error, closed_info
 
         if stopped:
             return
 
         info = info or Closed()
         stopped = True
-        stop_error = info.error if info.error is not None else RelayClosedError("Relay connection is closed")
+        closed_info = info
+        stop_error = info.error if info.error is not None else RelayError("Relay connection is closed", code="CLOSED")
         timer.cancel()
 
         if cancellation is not None:
@@ -199,6 +236,13 @@ async def open_relay_session(
 
         if not interrupted.done():
             interrupted.set_exception(stop_error)
+
+        # Subscriptions hear the closure in this turn. The session fails a pending request before it
+        # reports an unexpected closure, so this is how a lost connection is kept from reading as a
+        # rejection.
+        observers, closure_observers[:] = list(closure_observers), []
+        for observer in observers:
+            observer(info.error)
 
         if state.session is not None:
             state.session.destroy(info.error)
@@ -214,7 +258,7 @@ async def open_relay_session(
 
     timer = call_later(
         options.connect_timeout,
-        lambda: finish(Closed(RelayTimeoutError("Relay connection timed out", phase="connecting"))),
+        lambda: finish(Closed(RelayError("Relay connection timed out", code="CONNECTION_TIMEOUT", phase="connecting"))),
     )
 
     if cancellation is not None:
@@ -224,6 +268,19 @@ async def open_relay_session(
         if stopped:
             assert stop_error is not None
             raise stop_error
+
+    def observe_closed(observer: ClosureObserver) -> Callable[[], None]:
+        if stopped:
+            observer(closed_info.error)
+            return lambda: None
+
+        closure_observers.append(observer)
+
+        def remove() -> None:
+            if observer in closure_observers:
+                closure_observers.remove(observer)
+
+        return remove
 
     async def establish() -> T:
         nonlocal using_transport
@@ -274,8 +331,9 @@ async def open_relay_session(
                 ),
                 on_goaway=lambda goaway: finish(
                     Closed(
-                        RelayGoawayError(
+                        RelayError(
                             "Relay requested session migration; open a new connection",
+                            code="GOAWAY",
                             phase="connection" if established else "connecting",
                         )
                     )
@@ -314,12 +372,13 @@ async def open_relay_session(
     established = True
     assert state.transport is not None
 
-    return RelaySessionLifetime(connected, closed, state.transport, assert_open, lambda: finish())
+    return RelaySessionLifetime(connected, closed, observe_closed, state.transport, assert_open, lambda: finish())
 
 
 __all__ = [
     "DEFAULT_CONNECT_TIMEOUT",
     "DEFAULT_REQUEST_TIMEOUT",
+    "ClosureObserver",
     "ConnectRelayOptions",
     "ConnectingTransport",
     "LifetimeCallbacks",

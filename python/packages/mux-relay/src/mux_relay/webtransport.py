@@ -34,7 +34,6 @@ from moq_core._tasks import observe, spawn
 from moq_core.transport import BidirectionalStream, ReceiveStream, SendStream
 
 from .connect_session import ConnectingTransport
-from .errors import RelayError
 
 # ---------------------------------------------------------------------------------------------------
 # Wire constants
@@ -139,10 +138,12 @@ def parse_sf_list_of_strings(value: bytes) -> list[str]:
 # ---------------------------------------------------------------------------------------------------
 
 
-class WebTransportError(RelayError):
-    """A WebTransport session or stream failure. ``code`` is the peer's application error code when known."""
+class WebTransportError(Exception):
+    """A WebTransport session or stream failure. ``code`` is the peer's application error code when known.
 
-    code: int | None
+    This is the transport layer's own exception, not a :class:`mux_relay.RelayError`: a Relay
+    operation that fails on the transport raises ``TRANSPORT_ERROR`` with this chained as its cause.
+    """
 
     def __init__(self, message: str, *, code: int | None = None, reason: str = "") -> None:
         super().__init__(message)
@@ -153,6 +154,15 @@ class WebTransportError(RelayError):
 def _error_code_of(reason: object) -> int:
     if isinstance(reason, WebTransportError) and reason.code is not None:
         return reason.code
+
+    # A publisher-side reset reason (the write slot's StreamReset) names the MOQT code it wants sent.
+    stream_error_code = getattr(reason, "stream_error_code", None)
+    if (
+        isinstance(stream_error_code, int)
+        and not isinstance(stream_error_code, bool)
+        and 0 <= stream_error_code <= 0xFFFFFFFF
+    ):
+        return stream_error_code
 
     if isinstance(reason, int) and not isinstance(reason, bool) and 0 <= reason <= 0xFFFFFFFF:
         return reason
@@ -290,7 +300,7 @@ class _SendHalf:
         self._aborted = True
         # Fail a pending write with the caller's reason before resetting: `_reset_stream` transmits,
         # and the reset branch of `_settle_stream` would otherwise settle the waiter first with a
-        # generic "stream was aborted", masking a `write_timeout`'s RelayTimeoutError.
+        # generic "stream was aborted", masking a `write_timeout`'s WRITE_TIMEOUT error.
         self._fail_transmit(reason if isinstance(reason, BaseException) else WebTransportError("stream was aborted"))
         self._session._reset_stream(self._stream_id, _error_code_of(reason))
 
@@ -656,6 +666,15 @@ class WebTransportSessionBase:
             pass
 
         spawn(self._drain_then_close(protocol))
+
+    @property
+    def ended(self) -> bool:
+        """True once the session has ended, before its socket is released and ``wait_closed`` returns.
+
+        The streams fail in the same turn the session ends, so a stream failure seen while this is
+        true is the closure's doing.
+        """
+        return self._closed.done()
 
     async def wait_closed(self) -> None:
         """Return once the session ended and its UDP socket is released, so a process may exit right after.

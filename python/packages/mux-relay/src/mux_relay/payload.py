@@ -1,4 +1,4 @@
-"""Opt-in text and JSON decoding for complete received objects."""
+"""Opt-in text and JSON encoding and decoding for object payloads."""
 
 import json
 from typing import Any

@@ -90,6 +90,11 @@ demo's round trip.
 The workspace installs both packages as editable sources. Put a script in `python/` and run it
 with `mise exec -- uv run --project python python python/your_script.py` from the repository root;
 `from mux_relay import connect_relay_subscriber, connect_relay_publisher` resolves the local packages.
+`mux_relay` re-exports the core types its own signatures use (`MoqtObject`, `MessageParameters`,
+`SubscribeOk`, `RequestError`, `Closed`, and the rest of the "Protocol types borrowed from the core"
+row in [the vocabulary](../spec/vocabulary.md)); other protocol types, such as the location filters
+for `subscribe(parameters=...)`, come from the core package, which the workspace installs alongside:
+`from moq_core import AbsoluteLocationFilter`.
 For a separate virtual environment, install **both** local packages together (from the repository root):
 
 ```sh
@@ -142,14 +147,28 @@ A subscriber connection can only subscribe; publishing uses a separate publisher
 names both SDKs use for each concept, and why, are recorded in
 [SDK vocabulary](../spec/vocabulary.md).
 
-`subscribe` returns a cancellable handle immediately; acceptance is reported by
-`on_subscribed` and rejection by `on_error`. Observe the connection's `closed`
-future as well: an accepted subscription is no longer usable once the connection closes.
+`subscribe` returns a `RelaySubscription` immediately. Await `subscription.subscribed` for the
+relay's answer: it returns the acceptance info (`on_subscribed` receives the same) and raises
+`SubscriptionRequestError` on rejection or request timeout, `SubscriptionConnectionClosedError`
+if the connection ends first, or your own reason if you cancelled. Await `subscription.ended` to
+learn that the subscription can no longer deliver and why: it settles once, never raises, with
+`kind` (`rejected`, `terminated` or `cancelled`), the protocol `cause`, whether it had been
+accepted, and the error. Both are `SubscriptionAwaitable` objects rather than bare futures: any
+number of tasks can await them, a cancelled waiter or a timed-out `asyncio.wait_for` leaves the
+result intact, and `done()`, `result()` and `add_done_callback()` read it without allocating.
+
+```python
+subscription = subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(on_object=handle))
+await subscription.subscribed  # raises on rejection, closure, or cancel
+subscription.ended.add_done_callback(lambda done: print("subscription", done.result().kind))
+```
+
 Cancelling a subscription stops that consumer (including trailing objects after `on_publisher_done`),
-while closing the connection stops all of its subscriptions. `on_publisher_done` alone neither closes the
-connection nor proves delivery has drained. The demo waits for its object count or the deadline.
-Separate readiness/termination awaitables are proposed in
-[#68](https://github.com/muxinc/relay-sdks/issues/68); they are not APIs in this checkout.
+while closing the connection stops all of its subscriptions. `on_publisher_done` settles neither
+awaitable: it is the publisher's control notification, trailing objects can still arrive, and the
+request stays open until you cancel it or the connection ends. The demo waits for its object count
+or the deadline. The full state table is in the
+[behavior contract](../spec/behavior.md#subscription-lifecycle).
 
 Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK neither
 interprets the payload nor assumes that a track contains audio, video, or timestamps. An accepted
@@ -165,6 +184,14 @@ scheduling. Use `subscribe_events` below to await work without blocking delivery
 or gap-free delivery promise. `on_publisher_done` is the publisher's control notification: it may
 precede trailing objects in transit, and it does not end the subscription. Cancel the subscription
 when you are finished with it.
+
+`subscription.update(parameters)` changes what an accepted subscription delivers (REQUEST_UPDATE);
+`subscription.update(MessageParameters(forward=0))` pauses forwarding, for example, and the relay
+acknowledges through `on_update_ok`. The protocol allows updates only after acceptance, so an update
+issued before `on_subscribed` is queued in order and sent as soon as the relay accepts; at most eight
+wait, and a further one raises a `RelayError` with code `UPDATE_QUEUE_FULL`. Updating an ended
+subscription raises `RelayError` with code `CLOSED`. A refused update arrives as `on_error` and ends the
+subscription ([#94](https://github.com/muxinc/relay-sdks/issues/94)).
 
 Re-subscribing after `on_publisher_done` creates a new request and can replay cached objects followed
 by another done notification while the publisher is absent. Apply retry backoff to done callbacks
@@ -184,10 +211,12 @@ separately from SDK errors (compare the exception to your application's `Cancell
 See [Errors and recovery](#errors-and-recovery) for stable SDK error codes, phases, and preserved
 transport causes.
 
-Namespaces contain 1–32 non-empty string fields, sent verbatim without splitting on `/`.
-The 32-field protocol limit is pinned in [protocol.json](../spec/protocol.json). Oversized namespaces are
-rejected before opening a publisher connection or sending a subscription; track names must
-be non-empty strings.
+Namespaces are lists or tuples of 1–32 non-empty string fields, sent verbatim without splitting on
+`/`; a single `str` is a `TypeError`, not a one-field namespace. The 32-field protocol limit is pinned
+in [protocol.json](../spec/protocol.json) and exceeding it is a `ValueError`. Track names must be
+non-empty strings. Both rules apply to publishing and subscribing alike, and are checked before the
+token provider, the transport factory, or any connection state is consulted; see the Arguments table
+in [behavior.md](../spec/behavior.md#arguments).
 
 ## Consume asynchronously
 
@@ -219,10 +248,8 @@ The default capacity is **64 events**, including lifecycle events; it is a count
 budget. Objects may be up to 16 MiB plus properties. Overflow discards queued events, cancels the
 subscription and raises `SubscriptionOverflowError`. Request failures raise
 `SubscriptionRequestError`; connection closure raises `SubscriptionConnectionClosedError`, even
-for a clean connection close, because closure does not prove all objects arrived. Before
-acceptance, a connection failure can instead arrive first as `SubscriptionRequestError`; consult
-`subscriber.closed` for the connection-level cause. Errors propagate out of the loop for the caller to
-handle. `publisher_done` is an event, never EOF. Arrival order is preserved without ordering
+for a clean connection close, because closure does not prove all objects arrived, and before
+acceptance as well as after it. Errors propagate out of the loop for the caller to handle. `publisher_done` is an event, never EOF. Arrival order is preserved without ordering
 across streams or transport-wide backpressure. Early exit releases the owned subscription and
 observers without closing `subscriber` or other consumers. Only one pending `anext()` is supported. See
 the [complete event and ownership contract](../spec/behavior.md#async-subscription-consumption).
@@ -241,31 +268,35 @@ transport from subscriber connections. No camera, microphone, catalog, or timest
 Publishing follows Relay's announce-and-serve ingest flow. `register_track()` registers the track
 and sends nothing; `write()` waits for the relay to subscribe upstream (demand) before sending
 bytes. Start a subscriber to create that demand. The default 10-second write deadline (`write_timeout`) covers both demand and
-transport writes. A `RelayTimeoutError` with `phase == "waiting-for-demand"` means this attempt sent
-no object bytes; choose the next write using application freshness and deduplication policy.
-The exception type alone does not prove replay is safe. If the relay has solicited
+transport writes. A `RelayError` with code `WRITE_TIMEOUT` and `phase == "waiting-for-demand"` means
+this attempt sent no object bytes; choose the next write using application freshness and
+deduplication policy. The code alone does not prove replay is safe. If the relay has solicited
 namespace prefixes but none covers this publisher's namespace, the demand deadline instead raises
-`RelayNamespaceError`: check the token and namespace instead of blindly retrying. The track stays
+`NAMESPACE_NOT_SOLICITED`: check the token and namespace instead of blindly retrying. The track stays
 open, and a later matching solicitation can let it proceed. An ordinary absence of subscriber
-demand still raises `RelayTimeoutError`. A failed or cancelled write resets its stream and leaves
+demand still raises `WRITE_TIMEOUT`. A failed or cancelled write resets its stream and leaves
 `track.closed` false while the publisher connection remains open. A relay subscription change
-raises `RelayError`; a transport deadline raises `RelayTimeoutError`. The next explicit write uses
+raises `SUBSCRIPTION_CHANGED`; a transport deadline raises `WRITE_TIMEOUT`. The next explicit write uses
 a new group ID. Choose fresh data or the next random-access point; already delivered bytes cannot
 be withdrawn. If demand disappeared, the next write waits for a new relay subscription, and
 `demand_changes()` continues reporting changes.
 
 Each write copies its bytes and sends one independent group containing one object. Await each
-write; a concurrent call raises `RelayWritePendingError` rather than growing a queue. Completion
+write; a concurrent call raises `WRITE_PENDING` rather than growing a queue. Completion
 means the transport accepted the complete group, not that a viewer acknowledged it. There is no
 publisher-side replay or retention after an object is sent. Late-subscriber behavior also depends on
 relay caching and subscription filters. A failed write may have delivered partial data; there is no
 automatic retry.
 
 Optional `track_properties` on `register_track()` and `properties` on `write()` carry explicit protocol
-metadata as `KeyValuePair` values. Property types and even-type values must be non-negative 64-bit
-integers (excluding `bool`); odd-type values must expose a bytes-like buffer. Invalid properties
-raise `TypeError` before a write starts or a track is registered. The SDK adds no default timescale,
-timestamp, or LOC media packaging. Objects are limited to 16 MiB.
+metadata as `KeyValuePair` values. Property types and even-type values must be non-negative integers
+up to `2**64 - 1`, the largest value the core's varint carries (`bool` is not an integer here);
+odd-type values must expose a bytes-like buffer and are copied. Invalid properties raise `TypeError`
+naming the property index before a write starts or a track is registered. A byte value longer than
+65535 bytes, or a list whose encoding exceeds 1 MiB, is a `ValueError` at the same point: the SDK
+measures the encoding with the core's own encoder, so an oversized property never opens a stream.
+The SDK adds no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB
+of payload.
 
 Properties are encoded as supplied, but subscribers see the relay's output. With relay 0.14.17,
 tracks without a declared Timescale (`0x08`) received relay-generated timestamps and a microsecond
@@ -288,7 +319,7 @@ whose object 0 is the keyframe. `open_group()` waits for relay demand like `writ
 `RelayGroupWriter` that appends objects with increasing IDs and FINs the group on `close()`.
 Opening the group, each `group.write()`, and `group.close()` get a separate `write_timeout`
 deadline. Time between calls does not count toward a deadline. A timeout resets that group and
-raises `RelayTimeoutError`; the track stays open for a new group at the next keyframe:
+raises `WRITE_TIMEOUT`; the track stays open for a new group at the next keyframe:
 
 The following is an application sketch, not the data quickstart. The optional
 [moq-media format package](packages/moq-media/README.md) supplies `loc_properties` and
@@ -404,23 +435,26 @@ same failure. Caller cancellation reasons and token-provider exceptions retain t
 Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
 `on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
 
-Python exports `RelayErrorCode` and `RelayErrorPhase` type aliases and preserves the existing
-exception hierarchy: `RelayTimeoutError`, `RelayClosedError` (including legacy `RelayTrackEndedError`),
-`RelayWritePendingError`, `RelayNamespaceError`, and `RelayGoawayError` remain catchable subclasses
-of `RelayError`. Other lifecycle categories use `RelayError` with the code above. Manually constructed
-base `RelayError` instances default to `RELAY_ERROR` for compatibility.
+Python raises one `RelayError`, with the `code` above and a `phase`, exactly as TypeScript does; the
+`RelayErrorCode` and `RelayErrorPhase` aliases type them. The only subclasses are the three
+subscription errors that carry payload (`SubscriptionRequestError`, `SubscriptionOverflowError`,
+`SubscriptionConnectionClosedError`). Branch on `code`, never on the message.
 
 Wrapped transport/session failures preserve the original exception in `__cause__`. The lower-level
-WebTransport API's `WebTransportError` keeps its numeric `code` and `reason`; a failure surfaced
-through the Relay connection/publishing API wraps it with `code == "TRANSPORT_ERROR"`. Explicit
-caller cancellation, including `asyncio.CancelledError`, is passed through unchanged.
+WebTransport API's `WebTransportError` (in `mux_relay.webtransport`) is the transport's own
+exception, not a `RelayError`; it keeps its numeric `code` and `reason`, and a failure surfaced
+through the Relay connection/publishing API wraps it in a `RelayError` with `code == "TRANSPORT_ERROR"`
+and the `WebTransportError` as `__cause__`. Explicit caller cancellation, including
+`asyncio.CancelledError`, is passed through unchanged.
 
 ```python
-from mux_relay import RelayTimeoutError
+from mux_relay import RelayError
 
 try:
     await track.write_text("current state")
-except RelayTimeoutError as error:
+except RelayError as error:
+    if error.code != "WRITE_TIMEOUT":
+        raise
     print("Write deadline expired during", error.phase)
     # Choose what to publish next using phase and application freshness/deduplication policy.
 ```
@@ -484,10 +518,10 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `onSubscribed`, `onPublisherDone` | `on_subscribed`, `on_publisher_done` |
 | `publisher.registerTrack({ track, trackProperties, writeTimeoutMs })` | `publisher.register_track(track, track_properties=..., write_timeout=seconds)` |
 | `writer.write(bytes, { properties })` | `await writer.write(payload, properties=...)` |
-| `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
+| `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any object with the buffer protocol (`bytes`, `bytearray`, `memoryview`, ...); a `str` or `list[int]` raises `TypeError` |
 | `subscriber.closed` resolves `{ error? }` | `await subscriber.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
-| `RelayError` with `code` and `phase` | `RelayError` with `code` and `phase`, preserving typed subclasses |
+| `RelayError` with `code` and `phase` | `RelayError` with `code` and `phase` |
 | Varints capped at 2^53-1 | full 64-bit range (Python integers are exact) |
 | `openGroup()`, `hasDemand`, `demandChanges()`, `writer.closed` | `open_group()`, `has_demand`, `demand_changes()`, `writer.closed` (see `spec/behavior.md`) |
 | `subscriber.trackSource` | `subscriber.track_source` |
@@ -502,8 +536,10 @@ updates and cancellation, plus data-only publication on a dedicated connection. 
 also exposes FETCH and TRACK_STATUS. The protocol is pinned to `moqt-20`.
 
 Automatic reconnection, token refresh on a live session, datagram reception, and product resource
-discovery are not implemented yet. A GOAWAY ends the connection with a `RelayGoawayError` and fails
-requests still awaiting their first response via `on_error`; callers can open a replacement.
+discovery are not implemented yet. A GOAWAY ends the connection with a `RelayError` of code `GOAWAY`;
+subscriptions still awaiting their first response end with it (`subscribed` raises
+`SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `on_error`;
+callers can open a replacement.
 
 ## Live Relay smoke test
 

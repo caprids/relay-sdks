@@ -15,6 +15,8 @@ import {
   RelayError,
   type RelaySubscriber,
   type RelayTransportFactory,
+  SubscriptionConnectionClosedError,
+  SubscriptionRequestError,
 } from '../src/index.js';
 import { createFakeTransport, encodeSubgroup } from './helpers/relay.js';
 
@@ -155,7 +157,7 @@ describe('connectRelaySubscriber', () => {
     expect(objects[0]).toMatchObject({ groupId: 8, objectId: 0, properties: [], payload });
   });
 
-  it.each([false, true])('settles GOAWAY with a pending callback that throws: %s', async (throws) => {
+  it('ends pending, accepted and cancelled subscriptions with a GOAWAY as a closure, never as a request error', async () => {
     const fake = createFakeTransport();
     const control = fake.openControlledDataStream();
     const connecting = connectRelaySubscriber({
@@ -165,18 +167,23 @@ describe('connectRelaySubscriber', () => {
     await control.write(encodeSetup([]));
     const connection = await connecting;
     connections.push(connection);
-    const pendingError = vi.fn(() => {
-      if (throws) throw new Error('application callback failed');
-    });
+    const pendingError = vi.fn();
     const acceptedError = vi.fn();
     const cancelledError = vi.fn();
     const onSubscribed = vi.fn();
-    connection.subscribe({ namespace: ['live'], track: 'pending' }, { onError: pendingError, onSubscribed });
+    const pending = connection.subscribe(
+      { namespace: ['live'], track: 'pending' },
+      { onError: pendingError, onSubscribed },
+    );
     await (await fake.nextRequestStream()).firstMessage;
-    connection.subscribe({ namespace: ['live'], track: 'accepted' }, { onError: acceptedError });
+    const acceptedSubscription = connection.subscribe(
+      { namespace: ['live'], track: 'accepted' },
+      { onError: acceptedError },
+    );
     const accepted = await fake.nextRequestStream();
     await accepted.firstMessage;
     await accepted.send(encodeSubscribeOk(11));
+    await acceptedSubscription.subscribed;
     const cancelled = connection.subscribe({ namespace: ['live'], track: 'cancelled' }, { onError: cancelledError });
     await (await fake.nextRequestStream()).firstMessage;
     cancelled.cancel();
@@ -187,11 +194,59 @@ describe('connectRelaySubscriber', () => {
     expect((error as Error).message).toContain('migration');
     expect(fake.getCloseInfo()).toMatchObject({ closeCode: 0, reason: '' });
     connection.close();
-    await Promise.resolve();
-    expect(pendingError).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ reason: (error as Error).message }));
+    await expect(pending.subscribed).rejects.toBeInstanceOf(SubscriptionConnectionClosedError);
+    await expect(pending.subscribed).rejects.toMatchObject({ cause: error });
+    await expect(pending.ended).resolves.toEqual({
+      kind: 'terminated',
+      cause: 'connection-closed',
+      accepted: false,
+      error,
+    });
+    await expect(acceptedSubscription.ended).resolves.toMatchObject({ kind: 'terminated', accepted: true, error });
+    await expect(cancelled.ended).resolves.toMatchObject({ kind: 'cancelled' });
     expect(onSubscribed).not.toHaveBeenCalled();
+    expect(pendingError).not.toHaveBeenCalled();
     expect(acceptedError).not.toHaveBeenCalled();
     expect(cancelledError).not.toHaveBeenCalled();
+  });
+
+  it('contains an onError that throws on rejection and keeps the connection usable', async () => {
+    const fake = await connectFake();
+    const onError = vi.fn(() => {
+      throw new Error('application callback failed');
+    });
+    const subscription = fake.connection.subscribe({ namespace: ['room'], track: 'missing' }, { onError });
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestError(REQUEST_ERROR_CODE.DOES_NOT_EXIST, 'missing track'));
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
+    await expect(subscription.ended).resolves.toMatchObject({ kind: 'rejected' });
+    expect(onError).toHaveBeenCalledOnce();
+    const other = fake.connection.subscribe({ namespace: ['room'], track: 'present' });
+    await (await fake.nextRequestStream()).send(encodeSubscribeOk(11));
+    await expect(other.subscribed).resolves.toMatchObject({ trackAlias: 11 });
+  });
+
+  it('reports a transport drop before SUBSCRIBE_OK as a closure with the connection error, not as a rejection', async () => {
+    const fake = await connectFake();
+    const onError = vi.fn();
+    const subscription = fake.connection.subscribe({ namespace: ['room'], track: 'pending' }, { onError });
+    await (await fake.nextRequestStream()).firstMessage;
+    fake.dropTransport();
+    // The fake drops without a transport error, so the closure carries none; the core still fails
+    // the pending request first, and that failure must not become the subscription's ending.
+    const { error } = await fake.connection.closed;
+    expect(error).toBeUndefined();
+    const failure: unknown = await subscription.subscribed.catch((reason: unknown) => reason);
+    expect(failure).toBeInstanceOf(SubscriptionConnectionClosedError);
+    expect((failure as SubscriptionConnectionClosedError).cause).toBeUndefined();
+    await expect(subscription.ended).resolves.toEqual({
+      kind: 'terminated',
+      cause: 'connection-closed',
+      accepted: false,
+      error: undefined,
+    });
+    expect(onError).not.toHaveBeenCalled();
   });
 
   it('keeps quiet data tracks alive after their subscription is accepted', async () => {

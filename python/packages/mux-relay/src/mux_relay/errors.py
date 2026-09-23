@@ -1,11 +1,17 @@
-"""Stable Relay failure identities. Messages are diagnostic text, not a programmatic contract."""
+"""Stable Relay failure identities. Messages are diagnostic text, not a programmatic contract.
+
+One exception type carries every Relay failure: :class:`RelayError`, with a ``code`` to branch on and
+the ``phase`` the failure came from, mirroring ``RelayError`` in ``@mux/relay``. The three
+subscription errors in :mod:`mux_relay._subscription` subclass it because they carry payload; nothing
+else does. Transport-layer exceptions are not Relay errors; a Relay operation that fails on the
+transport raises ``TRANSPORT_ERROR`` with the transport exception chained as ``__cause__``.
+"""
 
 from __future__ import annotations
 
 from typing import Literal
 
 RelayErrorCode = Literal[
-    "RELAY_ERROR",
     "CONNECTION_TIMEOUT",
     "WRITE_TIMEOUT",
     "CLOSED",
@@ -15,6 +21,7 @@ RelayErrorCode = Literal[
     "SUBSCRIPTION_CHANGED",
     "SUBSCRIPTION_REQUEST_FAILED",
     "SUBSCRIPTION_OVERFLOW",
+    "UPDATE_QUEUE_FULL",
     "GOAWAY",
     "TRANSPORT_ERROR",
     "TRANSPORT_UNAVAILABLE",
@@ -31,76 +38,29 @@ RelayErrorPhase = Literal[
 
 
 class RelayError(Exception):
-    """Base SDK failure with stable ``code`` and origin ``phase``; neither promises safe replay."""
+    """An SDK failure with a stable ``code`` and origin ``phase``; neither promises safe replay.
 
-    # WebTransportError retains its pre-existing numeric application code.
-    code: RelayErrorCode | int | None = "RELAY_ERROR"
-
-    def __init__(
-        self, message: str = "", *, phase: RelayErrorPhase = "connection", code: RelayErrorCode | None = None
-    ) -> None:
-        super().__init__(message)
-        self.phase = phase
-        if code is not None:
-            self.code = code
-
-
-class RelayClosedError(RelayError):
-    """The connection, publisher, or track is closed and cannot accept the operation."""
-
-    code: RelayErrorCode = "CLOSED"
-
-
-class RelayTrackEndedError(RelayClosedError):
-    """Legacy terminal-track error, retained for import compatibility.
-
-    Individual write failures now reset their stream and keep the track open. Subscription
-    changes raise :class:`RelayError`; explicitly closed tracks raise :class:`RelayClosedError`.
+    Branch on ``code`` (see ``spec/behavior.md``), never on the message. The underlying exception,
+    when there is one, is chained as ``__cause__``.
     """
 
+    code: RelayErrorCode
+    phase: RelayErrorPhase
 
-class RelayNamespaceError(RelayError):
-    """The relay's namespace solicitations do not cover the publisher namespace; check token and namespace."""
-
-    code: RelayErrorCode = "NAMESPACE_NOT_SOLICITED"
-
-
-class RelayTimeoutError(RelayError):
-    """A deadline elapsed. Inspect ``phase`` before deciding what to publish next."""
-
-    def __init__(self, message: str = "", *, phase: RelayErrorPhase = "writing") -> None:
-        super().__init__(message, phase=phase, code="CONNECTION_TIMEOUT" if phase == "connecting" else "WRITE_TIMEOUT")
-
-
-class RelayGoawayError(RelayError):
-    """The relay asked this session to migrate; open a replacement connection."""
-
-    code: RelayErrorCode = "GOAWAY"
-
-
-class RelayWritePendingError(RelayError):
-    """A second write was attempted on a track while one is still in flight."""
-
-    code: RelayErrorCode = "WRITE_PENDING"
+    def __init__(self, message: str, *, code: RelayErrorCode, phase: RelayErrorPhase = "connection") -> None:
+        super().__init__(message)
+        self.code = code
+        self.phase = phase
 
 
 def _transport_error(error: BaseException, phase: RelayErrorPhase) -> BaseException:
-    # asyncio task cancellation and existing Relay errors keep their identity.
-    if not isinstance(error, Exception) or (isinstance(error, RelayError) and isinstance(error.code, str)):
+    # asyncio task cancellation and Relay errors keep their identity; anything else, the transport's
+    # own exceptions included, becomes a Relay failure with the original chained as its cause.
+    if not isinstance(error, Exception) or isinstance(error, RelayError):
         return error
     wrapped = RelayError(str(error), code="TRANSPORT_ERROR", phase=phase)
     wrapped.__cause__ = error
     return wrapped
 
 
-__all__ = [
-    "RelayClosedError",
-    "RelayError",
-    "RelayErrorCode",
-    "RelayErrorPhase",
-    "RelayGoawayError",
-    "RelayNamespaceError",
-    "RelayTimeoutError",
-    "RelayTrackEndedError",
-    "RelayWritePendingError",
-]
+__all__ = ["RelayError", "RelayErrorCode", "RelayErrorPhase"]

@@ -21,43 +21,59 @@ from videojs_stream.stream import (
     write_ended_track,
 )
 
-from mux_relay import CancellationToken, Cancelled, RelayClosedError, RelayError, RelayTimeoutError
+from mux_relay import CancellationToken, Cancelled, RelayError
 
 
 class TestFailureEndsTrack:
     """The example's read of the SDK contract: which publish failures retire the track."""
 
     def test_a_timeout_waiting_for_demand_is_retryable(self) -> None:
-        timeout = RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
+        timeout = RelayError(
+            "Publish write timed out waiting for relay demand or transport",
+            code="WRITE_TIMEOUT",
+            phase="waiting-for-demand",
+        )
 
         assert failure_ends_track(timeout, operation="write", bound=False) is False
 
     def test_a_timeout_on_a_bound_write_is_retryable(self) -> None:
         # A bound write resets only its stream, just like a multi-object group.
-        timeout = RelayTimeoutError("Publish write timed out waiting for relay demand or transport")
+        timeout = RelayError(
+            "Publish write timed out waiting for relay demand or transport", code="WRITE_TIMEOUT", phase="writing"
+        )
 
         assert failure_ends_track(timeout, operation="write", bound=True) is False
 
     def test_a_closed_track_is_always_terminal(self) -> None:
-        closed = RelayClosedError("Published track is closed")
+        closed = RelayError("Published track is closed", code="CLOSED", phase="writing")
 
         assert failure_ends_track(closed, operation="write", bound=False) is True
         assert failure_ends_track(closed, operation="group", bound=True) is True
 
-    def test_a_bare_relay_error_on_a_bound_write_is_retryable(self) -> None:
+    def test_a_subscription_change_on_a_bound_write_is_retryable(self) -> None:
         # A changed relay subscription cancels the operation, leaving the track open.
-        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        rebind = RelayError(
+            "Relay subscription changed during a write; the object may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
 
         assert failure_ends_track(rebind, operation="write", bound=True) is False
 
-    def test_a_bare_relay_error_on_an_unbound_write_is_retryable(self) -> None:
-        vanished = RelayError("Relay subscription ended before the write started")
+    def test_a_vanished_subscription_on_an_unbound_write_is_retryable(self) -> None:
+        vanished = RelayError(
+            "Relay subscription ended before the write started", code="SUBSCRIPTION_CHANGED", phase="waiting-for-demand"
+        )
 
         assert failure_ends_track(vanished, operation="write", bound=False) is False
 
     def test_a_group_that_fails_part_way_keeps_its_track(self) -> None:
         # The SDK resets the group's stream and leaves the track open for the next keyframe.
-        interrupted = RelayError("Relay subscription changed during the group; it may be incomplete")
+        interrupted = RelayError(
+            "Relay subscription changed during the group; it may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
 
         assert failure_ends_track(interrupted, operation="group", bound=True) is False
 
@@ -160,7 +176,11 @@ class TestTrackHasEnded:
 
 class TestWriteEndedTrack:
     async def test_confirms_a_terminal_classification_against_the_writer(self) -> None:
-        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        rebind = RelayError(
+            "Relay subscription changed during a write; the object may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
         retired = FakeTrack()
         retired.ended = True
 
@@ -170,7 +190,7 @@ class TestWriteEndedTrack:
 
     async def test_a_closed_track_needs_no_confirmation(self) -> None:
         # A connection that went away leaves the writer un-retired while every write still fails.
-        closed = RelayClosedError("Published track is closed")
+        closed = RelayError("Published track is closed", code="CLOSED", phase="writing")
 
         assert await write_ended_track(cast(Any, FakeTrack()), closed, bound=True) is True
 
@@ -217,7 +237,11 @@ async def drive(
 class TestPublishMediaTrackEnd:
     async def test_a_bound_audio_write_failure_ends_the_track_once_and_counts_the_rest(self) -> None:
         # #32: a 30-minute run reported skippedAudio=0 while ~74,700 frames were never sent.
-        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        rebind = RelayError(
+            "Relay subscription changed during a write; the object may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
         audio = FakeTrack(fail_on=3, error=rebind)
         stats, ended = await drive(audio_samples(10), video=FakeTrack(bound=False), audio=audio)
 
@@ -238,7 +262,9 @@ class TestPublishMediaTrackEnd:
     async def test_a_vanished_subscription_only_skips_the_frame(self) -> None:
         # `has_demand` was True when the write started but demand disappeared before it bound, so the
         # writer is still open; the example must confirm that instead of ending the run.
-        vanished = RelayError("Relay subscription ended before the write started")
+        vanished = RelayError(
+            "Relay subscription ended before the write started", code="SUBSCRIPTION_CHANGED", phase="waiting-for-demand"
+        )
         audio = FakeTrack(fail_on=2, error=vanished, retires=False)
         stats, ended = await drive(audio_samples(3), video=FakeTrack(bound=False), audio=audio)
 
@@ -247,7 +273,7 @@ class TestPublishMediaTrackEnd:
         assert ended == []
 
     async def test_a_closed_video_track_is_reported_and_its_frames_counted_as_dropped(self) -> None:
-        closed = RelayClosedError("Published track is closed")
+        closed = RelayError("Published track is closed", code="CLOSED", phase="writing")
         video = FakeTrack(fail_on=0, error=closed)
         keyframes = [EncodedSample(kind="video", timestamp_us=i * 33_333, payload=b"\x00", key=True) for i in range(3)]
         stats, ended = await drive(keyframes, video=video, audio=None)
@@ -258,7 +284,11 @@ class TestPublishMediaTrackEnd:
     async def test_an_interrupted_group_counts_its_own_sample_as_skipped(self) -> None:
         # The group is reset and the track survives, so the sample that failed is a skip like the
         # ones that follow it before the next keyframe -- and it is in a counter either way.
-        interrupted = RelayError("Relay subscription changed during the group; it may be incomplete")
+        interrupted = RelayError(
+            "Relay subscription changed during the group; it may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
         video = FakeTrack(group_fail_on=0, group_error=interrupted)
         stats, ended = await drive(video_samples(3), video=video, audio=None)
 
@@ -266,7 +296,7 @@ class TestPublishMediaTrackEnd:
         assert ended == []
 
     async def test_a_terminal_group_write_failure_counts_its_own_sample_as_dropped(self) -> None:
-        closed = RelayClosedError("Published track is closed")
+        closed = RelayError("Published track is closed", code="CLOSED", phase="writing")
         video = FakeTrack(group_fail_on=0, group_error=closed)
         stats, ended = await drive(video_samples(3), video=video, audio=None)
 
@@ -275,7 +305,11 @@ class TestPublishMediaTrackEnd:
 
     async def test_every_sample_lands_in_exactly_one_counter(self) -> None:
         # What `summarize` promises: sent + skipped + dropped accounts for the whole timeline.
-        interrupted = RelayError("Relay subscription changed during the group; it may be incomplete")
+        interrupted = RelayError(
+            "Relay subscription changed during the group; it may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
         samples = video_samples(6) + audio_samples(4)
         stats, _ = await drive(
             samples, video=FakeTrack(group_fail_on=2, group_error=interrupted), audio=FakeTrack(bound=False)
@@ -358,7 +392,11 @@ class TestStopPolicyReporting:
         # The SDK re-raises the application's cancel reason out of the video write still in flight,
         # and it is not a RelayError, so it escapes the publish loop.
         lifetime = CancellationToken()
-        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        rebind = RelayError(
+            "Relay subscription changed during a write; the object may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
         samples = [
             EncodedSample(kind="video", timestamp_us=0, payload=b"\x00", key=True),
             EncodedSample(kind="audio", timestamp_us=0, payload=b"\xfc\xff", key=True),
@@ -388,7 +426,11 @@ class TestStopPolicyReporting:
         # Stopping abandons the sample in flight and everything still queued behind it. Both are
         # exactly what the summary exists to report, so neither may vanish from the counters.
         lifetime = CancellationToken()
-        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        rebind = RelayError(
+            "Relay subscription changed during a write; the object may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
         samples = [
             EncodedSample(kind="video", timestamp_us=0, payload=b"\x00", key=True),
             EncodedSample(kind="audio", timestamp_us=0, payload=b"\xfc\xff", key=True),
@@ -413,7 +455,11 @@ class TestStopPolicyReporting:
         # `end_group` runs in the publish loop's finally; raising the cancellation again there would
         # replace whatever was already on its way out.
         lifetime = CancellationToken()
-        rebind = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        rebind = RelayError(
+            "Relay subscription changed during a write; the object may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
         samples = [
             EncodedSample(kind="video", timestamp_us=0, payload=b"\x00", key=True),
             EncodedSample(kind="audio", timestamp_us=0, payload=b"\xfc\xff", key=True),
@@ -484,7 +530,11 @@ class TestTrackEndHandler:
         handler = make_track_end_handler(
             "stop", stats, cast(Any, lambda event, fields: logged.append(event)), stopped.append
         )
-        error = RelayError("Relay subscription changed during a write; the object may be incomplete")
+        error = RelayError(
+            "Relay subscription changed during a write; the object may be incomplete",
+            code="SUBSCRIPTION_CHANGED",
+            phase="writing",
+        )
 
         handler("audio", error)
         handler("audio", error)
@@ -499,7 +549,7 @@ class TestTrackEndHandler:
         stopped: list[BaseException] = []
         handler = make_track_end_handler("continue", stats, cast(Any, lambda event, fields: None), stopped.append)
 
-        handler("audio", RelayError("gone"))
+        handler("audio", RelayError("gone", code="CLOSED"))
 
         assert stopped == []
         assert stats.ended_tracks == {"audio": "RelayError: gone"}
@@ -523,7 +573,7 @@ class TestServeCatalog:
             async def write(self, payload: bytes) -> None:
                 attempts.append(asyncio.get_running_loop().time())
                 if len(attempts) == 1:
-                    raise RelayTimeoutError("bound write timed out")
+                    raise RelayError("bound write timed out", code="WRITE_TIMEOUT", phase="writing")
                 delivered.append(payload)
 
         stats = Stats()
@@ -560,7 +610,7 @@ class TestServeCatalog:
             async def write(self, payload: bytes) -> None:
                 self.attempts += 1
                 failed.set()
-                raise RelayTimeoutError("bound write timed out")
+                raise RelayError("bound write timed out", code="WRITE_TIMEOUT", phase="writing")
 
         catalog = FakeCatalog()
         serving = asyncio.create_task(
@@ -598,7 +648,7 @@ class TestServeCatalog:
 
             async def write(self, payload: bytes, *, properties: object = None) -> None:
                 self.writes += 1
-                raise RelayClosedError("Published track is closed")
+                raise RelayError("Published track is closed", code="CLOSED", phase="writing")
 
         catalog = FakeCatalog()
         stats = Stats()

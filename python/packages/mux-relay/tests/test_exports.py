@@ -1,9 +1,104 @@
-"""The public vocabulary in ``spec/vocabulary.md``, pinned so a rename in one SDK cannot land alone."""
+"""The public vocabulary in ``spec/vocabulary.md``, pinned so a rename in one SDK cannot land alone.
+
+The counterpart of ``ts/scripts/check-boundaries.mjs``, which pins ``@mux/relay``'s runtime export
+list: ``__all__`` is asserted in full, every name in it must appear in the spec, and the core
+re-exports must match what ``ts/src/index.ts`` re-exports from ``@mux/moq-core``.
+"""
 
 import dataclasses
+import re
+import types
+from pathlib import Path
 
+import moq_core
 import mux_relay
 from mux_relay import RelayPublisher, RelaySubscriber, RelaySubscriptionHandlers, RelayTrackWriter
+
+REPO = Path(__file__).resolve().parents[4]
+
+PUBLIC_NAMES = [
+    "DEFAULT_ENDPOINT",
+    "CancellationToken",
+    "Cancelled",
+    "Closed",
+    "ConnectingTransport",
+    "Goaway",
+    "GoawayEvent",
+    "KeyValuePair",
+    "LocationFilter",
+    "MessageParameters",
+    "MoqTrackSource",
+    "MoqtObject",
+    "MoqtTransport",
+    "ObjectEvent",
+    "PublishDone",
+    "PublisherDoneEvent",
+    "RelayError",
+    "RelayErrorCode",
+    "RelayErrorPhase",
+    "RelayGroupWriter",
+    "RelayPublisher",
+    "RelaySubscriber",
+    "RelaySubscription",
+    "RelaySubscriptionHandlers",
+    "RelayTrackWriter",
+    "RelayTransportFactory",
+    "RequestError",
+    "StateNotifyEvent",
+    "SubgroupEndEvent",
+    "SubgroupResetEvent",
+    "SubscribeOk",
+    "SubscribedEvent",
+    "Subscription",
+    "SubscriptionAwaitable",
+    "SubscriptionConnectionClosedError",
+    "SubscriptionEnd",
+    "SubscriptionEndKind",
+    "SubscriptionEvent",
+    "SubscriptionEvents",
+    "SubscriptionHandlers",
+    "SubscriptionOverflowError",
+    "SubscriptionRequestError",
+    "UpdateOkEvent",
+    "connect_relay_publisher",
+    "connect_relay_subscriber",
+    "connect_webtransport",
+    "read_json",
+    "read_text",
+]
+"""The whole public interface. A name added here needs a row in ``spec/vocabulary.md`` first."""
+
+
+def test_all_is_exactly_the_pinned_list() -> None:
+    assert sorted(mux_relay.__all__) == sorted(PUBLIC_NAMES)
+    assert len(set(mux_relay.__all__)) == len(mux_relay.__all__)
+
+
+def test_all_matches_the_names_the_package_binds() -> None:
+    """Nothing is importable from the root without being pinned, and nothing pinned is missing."""
+    bound = {
+        name
+        for name, value in vars(mux_relay).items()
+        if not name.startswith("_") and not isinstance(value, types.ModuleType)
+    }
+    assert bound == set(mux_relay.__all__)
+
+
+def test_every_export_appears_in_the_spec() -> None:
+    """``spec/vocabulary.md``: a name that exists in one SDK without a row is a bug."""
+    spec = (REPO / "spec" / "vocabulary.md").read_text() + (REPO / "spec" / "behavior.md").read_text()
+    missing = [name for name in mux_relay.__all__ if re.search(rf"\b{re.escape(name)}\b", spec) is None]
+    assert missing == []
+
+
+def test_core_reexports_are_exactly_what_the_typescript_sdk_reexports_plus_closed() -> None:
+    """``mux_relay`` re-exports what ``@mux/relay`` re-exports from the core, plus ``Closed``."""
+    index = (REPO / "ts" / "src" / "index.ts").read_text()
+    block = re.search(r"export type \{([^}]*)\} from '@mux/moq-core';", index)
+    assert block is not None, "ts/src/index.ts no longer has a single core re-export block"
+    typescript = {name.strip() for name in block.group(1).split(",") if name.strip()}
+    python = {name for name in mux_relay.__all__ if getattr(moq_core, name, None) is getattr(mux_relay, name)}
+    assert python == typescript | {"Closed"}
 
 
 def test_exports_one_entry_point_per_connection_role_and_nothing_under_the_old_names() -> None:
@@ -13,25 +108,6 @@ def test_exports_one_entry_point_per_connection_role_and_nothing_under_the_old_n
     for old in ("connect_relay", "RelayConnection"):
         assert not hasattr(mux_relay, old)
         assert old not in mux_relay.__all__
-
-
-def test_all_lists_the_product_types_and_the_borrowed_core_contract() -> None:
-    for name in (
-        "RelaySubscriber",
-        "RelayPublisher",
-        "RelaySubscriptionHandlers",
-        "SubscriptionEvents",
-        "SubscriptionEvent",
-        "SubscriptionOverflowError",
-        "SubscriptionRequestError",
-        "SubscriptionConnectionClosedError",
-        "RelayTrackWriter",
-        "RelayGroupWriter",
-        "MoqTrackSource",
-        "SubscriptionHandlers",
-    ):
-        assert name in mux_relay.__all__
-        assert hasattr(mux_relay, name)
 
 
 def test_spells_subscription_events_after_what_happened_not_after_the_protocol_message() -> None:

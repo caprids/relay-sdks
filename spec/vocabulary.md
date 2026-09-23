@@ -14,10 +14,13 @@ without a row here is a bug.
 | --- | --- | --- |
 | Open a connection that can only subscribe | `connectRelaySubscriber(options)` returns `RelaySubscriber` | `connect_relay_subscriber(url, ...)` returns `RelaySubscriber` |
 | Open a connection that can only publish one namespace | `connectRelayPublisher(options)` returns `RelayPublisher` | `connect_relay_publisher(url, namespace=...)` returns `RelayPublisher` |
-| Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `Subscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `Subscription` |
+| Ask the relay for a track's objects | `subscriber.subscribe(options, handlers)` returns `RelaySubscription` | `subscriber.subscribe(namespace, track, handlers, parameters=...)` returns `RelaySubscription` |
+| Await the relay's answer to a subscription | `subscription.subscribed` resolves `SubscribeOk` | `await subscription.subscribed` returns `SubscribeOk` |
+| Learn that a subscription ended, and how | `subscription.ended` resolves `SubscriptionEnd` | `await subscription.ended` returns `SubscriptionEnd` |
+| The type of `subscribed` and `ended` | `Promise<T>` | `SubscriptionAwaitable[T]`: awaitable by any number of isolated waiters, with `done()`, `result()`, `exception()` and `add_done_callback()`; not a cancellable `Future` |
 | Events on one subscription | `RelaySubscriptionHandlers` | `RelaySubscriptionHandlers` |
 | The relay accepted the subscription | `onSubscribed(info)` | `on_subscribed(info)` |
-| The relay rejected it, or it failed before acceptance | `onError(error)` | `on_error(error)` |
+| The relay rejected it, or the request itself failed before acceptance | `onError(error)` | `on_error(error)` |
 | An object arrived | `onObject(object)` | `on_object(object)` |
 | A subgroup stream ended cleanly or was reset | `onSubgroupEnd(info)`, `onSubgroupReset(info)` | `on_subgroup_end(info)`, `on_subgroup_reset(info)` |
 | The publisher said it is finished with the track | `onPublisherDone(info)` | `on_publisher_done(info)` |
@@ -34,6 +37,12 @@ without a row here is a bug.
 | The track ended and cannot be written again | `writer.closed` | `writer.closed` |
 | Borrowed protocol-level track access for integrations | `subscriber.trackSource` (a `MoqTrackSource`) | `subscriber.track_source` (a `MoqTrackSource`) |
 | The connection ended, and why | `connection.closed` resolves `{ error? }` | `await connection.closed` returns `Closed(error=...)` |
+| Cancel a connection's whole lifetime from outside | `AbortSignal` (platform), given as `signal` | `CancellationToken`, given as `cancellation=`; `Cancelled` is the reason it raises when `cancel()` was given none |
+| Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready)` (`RelayTransportFactory`); `connect_webtransport`, the aioquic factory, by default |
+| Consume one subscription as an async iterator | `subscriber.subscribeEvents(options)` returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
+| One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
+| Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
+| The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
@@ -136,12 +145,16 @@ itself, settling once when it can no longer deliver, is
 carries the track alias, the relay's parameters, and the track properties as the relay sends them.
 The handler used to be `onOk`, the core's name for the OK response on any request (subscribe,
 fetch, track status). At the product level it did not say what became ready. `onSubscribed` does.
-The awaitable readiness result planned in issue #68 settles on the same event, so the two names
-will agree.
+`subscription.subscribed`, the awaitable readiness result, settles on the same event, so the two
+names agree.
 
-`onError` keeps its name: the relay rejected the subscription, or it failed before acceptance
-(request timeout, connection shutdown, GOAWAY). It is not called for failures after acceptance;
-those surface as subgroup resets and connection closure.
+`onError` keeps its name: the relay answered the request with REQUEST_ERROR, because it rejected
+the subscription or the request itself failed before acceptance (request timeout, or the request
+stream failing). A REQUEST_ERROR can also arrive after acceptance, for example when the relay
+refuses an `update()`, and it ends the subscription then too ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+Connection shutdown and GOAWAY never reach `onError`: a pending subscription ends through
+`subscribed` and `ended` as terminated by the closure, so a lost connection is never mistaken for
+a rejection, and after acceptance closure surfaces as subgroup resets and connection closure.
 
 ## Borrowed protocol access: `trackSource`
 
@@ -170,6 +183,24 @@ repository (examples, live smoke tests, the Video.js streaming example) moved in
 Once a package is published, a rename of this kind needs a deprecation cycle; record that policy
 here when the first release happens.
 
+## One error identity: `RelayError`, `code`, `phase`
+
+Both SDKs raise one `RelayError` whose `code` says what happened and whose `phase` says where, the
+identity `spec/behavior.md` tells callers to branch on. The three subscription errors
+(`SubscriptionRequestError`, `SubscriptionOverflowError`, `SubscriptionConnectionClosedError`)
+subclass it in both SDKs because they carry payload the code cannot: the relay's `RequestError`, or
+the connection's failure as the cause.
+
+Not adopted: Python-only exception subclasses per code (`RelayClosedError`, `RelayTimeoutError`,
+`RelayNamespaceError`, `RelayGoawayError`, `RelayWritePendingError`, and the never-raised alias
+`RelayTrackEndedError`). They duplicated the `code` discriminant under names TypeScript did not have,
+so a caller switching languages met two identities for one failure, and `except RelayError as
+error: if error.code == "WRITE_TIMEOUT"` is one line longer than a subclass catch. Also not adopted:
+a `RELAY_ERROR` fallback code for a `RelayError` built without one (`code` is required in both SDKs),
+and a transport error that is itself a Relay error (`WebTransportError` is the transport layer's own
+exception, wrapped as `TRANSPORT_ERROR` at the Relay boundary). Removed without aliases under the
+policy above; reversible before the first release, so no ADR.
+
 ## Async subscription consumption
 
 `subscriber.subscribeEvents()` / `subscriber.subscribe_events()` creates a bounded iterator of
@@ -179,17 +210,50 @@ same vocabulary as the product callbacks. It owns its subscription, never the co
 and termination semantics. Product and core callback objects are validated and snapshotted when
 subscribing; callbacks remain synchronous, and async consumers use this iterator.
 
+## Subscription readiness and termination: `RelaySubscription`, `subscribed`, `ended`
+
+`subscribe()` returns a `RelaySubscription`: the core handle (`requestId`, `update()`, `cancel()`)
+plus two awaitables. `subscribed` settles when the relay answers the request: it resolves with the
+acceptance info `onSubscribed` receives, and rejects with the same error classes the events
+iterator raises (`SubscriptionRequestError` for REQUEST_ERROR before acceptance, including the
+request timeout; `SubscriptionConnectionClosedError` when the connection ended first) or with the
+reason given to `cancel()`. `ended` settles once, when the subscription can no longer deliver, and
+never rejects: its `SubscriptionEnd` value carries `kind` (`rejected`, `terminated`, `cancelled`;
+the type is `SubscriptionEndKind`), the protocol `cause`, whether the subscription had been
+`accepted`, and the `error`. That mirrors the connection's `closed`, which resolves with the error
+as data. A connection that ends before the relay answers is a `terminated` ending with the
+connection error, never a `rejected` one, although the core fails the pending request first.
+
+In Python the two are `SubscriptionAwaitable[T]` rather than bare futures: a task cancelled while
+awaiting a future cancels the future itself, and `asyncio.wait_for` does the same on timeout, so a
+shared future would let one impatient waiter destroy the signal for every later one. The awaitable
+isolates each waiter and reads status without allocating. `Future` was rejected for that reason;
+`Signal` and `Promise` for naming a mechanism rather than the fact the caller awaits.
+
+Publisher completion settles neither. `onPublisherDone` is a control notification; trailing objects
+can still arrive and the request stays open, so a `subscribed` or `ended` that moved on it would
+promise what the protocol cannot establish.
+
+Not adopted: `ready` or `accepted` for readiness (the callback is `onSubscribed`, and the two must
+agree); `closed`, `done`, `drained` or `complete` for termination (`closed` collides with the
+connection's word for a different scope, `done` with publisher completion, and the last two claim a
+delivery property the protocol does not give); an `ended` that rejects (an ending is data about the
+subscription, not a failure of the caller's await, and the connection's `closed` set the precedent).
+
 ## Names considered and left alone
 
 - `RelayTrackOptions`, the subscribe request shape (`namespace`, `track`, `parameters`), and
   `ConnectRelayOptions`, the connection options shared by both roles. Issue #72 separates the
   options types by role and can rename them then.
-- `Subscription`, the handle `subscribe()` returns (`requestId`, `update()`, `cancel()`). Issue #68
-  extends it with readiness and termination and may introduce a product handle type.
+- `SubscriptionEnd`'s field names `kind`, `cause`, `accepted`, `error`: plain words for a value most
+  callers only log or branch on once.
 - `RelayTrackWriter`, `RelayGroupWriter`, `write`, `openGroup`, `close`, `abort`: these say what
   they do.
 - Everything in `@mux/moq-core` and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
-  `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it.
+  `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it. The
+  product packages re-export the same short list of core names (the "Protocol types borrowed from
+  the core" row; Python adds `Closed`, which TypeScript spells inline) and nothing else;
+  `python/packages/mux-relay/tests/test_exports.py` checks that list against `ts/src/index.ts`.
 
 ## Media format helpers
 

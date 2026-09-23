@@ -1,144 +1,81 @@
-"""Bounded subscription events. The iterator owns its request, never the connection."""
+"""The bounded events iterator: one consumer of a subscription (see ``_subscription.py``) that queues
+product events with a capacity and turns the subscription's ending into the three subscription
+error classes. It owns its subscription, never the connection.
+"""
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Literal, Self, TypeAlias
+from typing import Self
 
-from moq_core import (
-    Closed,
-    Goaway,
-    MessageParameters,
-    MoqtObject,
-    PublishDone,
-    RequestError,
-    SubgroupEnd,
-    SubgroupReset,
-    SubscribeOk,
-    Subscription,
-    SubscriptionHandlers,
+from moq_core import RequestError
+
+from ._subscription import (
+    GoawayEvent,
+    ObjectEvent,
+    PublisherDoneEvent,
+    RelaySubscription,
+    StateNotifyEvent,
+    SubgroupEndEvent,
+    SubgroupResetEvent,
+    SubscribedEvent,
+    SubscriptionConnectionClosedError,
+    SubscriptionConsumer,
+    SubscriptionEnd,
+    SubscriptionEvent,
+    SubscriptionOverflowError,
+    SubscriptionRequestError,
+    UpdateOkEvent,
 )
-
 from .cancellation import CancellationToken
-from .errors import RelayError
+
+__all__ = [
+    "GoawayEvent",
+    "ObjectEvent",
+    "PublisherDoneEvent",
+    "StateNotifyEvent",
+    "SubgroupEndEvent",
+    "SubgroupResetEvent",
+    "SubscribedEvent",
+    "SubscriptionConnectionClosedError",
+    "SubscriptionEvent",
+    "SubscriptionEvents",
+    "SubscriptionOverflowError",
+    "SubscriptionRequestError",
+    "UpdateOkEvent",
+]
 
 
-@dataclass(frozen=True, slots=True)
-class SubscribedEvent:
-    """Subscription acceptance."""
+class _Consumer:
+    """The iterator's face towards its subscription."""
 
-    value: SubscribeOk
-    type: Literal["subscribed"] = field(default="subscribed", init=False)
+    __slots__ = ("_events",)
 
+    def __init__(self, events: SubscriptionEvents) -> None:
+        self._events = events
 
-@dataclass(frozen=True, slots=True)
-class ObjectEvent:
-    """An object, with its payload and protocol metadata."""
+    def event(self, event: SubscriptionEvent) -> None:
+        self._events._push(event)
 
-    value: MoqtObject
-    type: Literal["object"] = field(default="object", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class PublisherDoneEvent:
-    """Publisher completion; trailing objects may still arrive."""
-
-    value: PublishDone
-    type: Literal["publisher_done"] = field(default="publisher_done", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class SubgroupEndEvent:
-    """Clean FIN of one subgroup, not the whole subscription."""
-
-    value: SubgroupEnd
-    type: Literal["subgroup_end"] = field(default="subgroup_end", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class SubgroupResetEvent:
-    """A subgroup reset; objects may be missing."""
-
-    value: SubgroupReset
-    type: Literal["subgroup_reset"] = field(default="subgroup_reset", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class StateNotifyEvent:
-    """Publisher-initiated subscription state changes."""
-
-    value: MessageParameters
-    type: Literal["state_notify"] = field(default="state_notify", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class GoawayEvent:
-    """Request relocation details; no automatic retry."""
-
-    value: Goaway
-    type: Literal["goaway"] = field(default="goaway", init=False)
-
-
-@dataclass(frozen=True, slots=True)
-class UpdateOkEvent:
-    """Acknowledgement of a subscription update."""
-
-    value: None = None
-    type: Literal["update_ok"] = field(default="update_ok", init=False)
-
-
-SubscriptionEvent: TypeAlias = (
-    SubscribedEvent
-    | ObjectEvent
-    | PublisherDoneEvent
-    | SubgroupEndEvent
-    | SubgroupResetEvent
-    | StateNotifyEvent
-    | GoawayEvent
-    | UpdateOkEvent
-)
-"""Typed callback arrivals; no ordering across streams or drain guarantee is implied."""
-
-
-class SubscriptionOverflowError(RelayError):
-    """A stalled consumer exceeded the event capacity; the subscription was cancelled."""
-
-    def __init__(self, message: str = "Subscription event buffer overflow") -> None:
-        super().__init__(message, code="SUBSCRIPTION_OVERFLOW", phase="subscription")
-
-
-class SubscriptionRequestError(RelayError):
-    """Request rejection, timeout, or request failure, with the protocol details preserved."""
-
-    def __init__(self, request_error: RequestError) -> None:
-        super().__init__(request_error.reason, code="SUBSCRIPTION_REQUEST_FAILED", phase="subscription")
-        self.request_error = request_error
-
-
-class SubscriptionConnectionClosedError(RelayError):
-    """The connection ended, without proving that subscription delivery was drained."""
-
-    def __init__(self, cause: BaseException | None) -> None:
-        super().__init__("Connection closed; subscription delivery ended without a drain guarantee", code="CLOSED")
-        self.__cause__ = cause
+    def ended(self, end: SubscriptionEnd) -> None:
+        self._events._ended_by_subscription(end)
 
 
 class SubscriptionEvents:
     """Single-consumer iterator. Use ``async with`` for deterministic cleanup on break/errors.
 
-    At most ``capacity`` events are retained, including lifecycle events. Overflow discards the
-    queue, cancels only this request and raises on reads. No transport backpressure is implied.
-    Publisher completion is an event, never EOF. Explicit close produces EOF; failures raise.
+    Create one with :meth:`mux_relay.RelaySubscriber.subscribe_events`. At most ``capacity`` events are
+    retained, including lifecycle events. Overflow discards the queue, cancels only this request and
+    raises on reads. No transport backpressure is implied. Publisher completion is an event, never
+    EOF. Explicit close produces EOF; failures raise.
     """
 
     def __init__(
         self,
-        subscribe: Callable[[SubscriptionHandlers], Subscription],
-        closed: asyncio.Future[Closed],
+        subscribe: Callable[[SubscriptionConsumer], RelaySubscription],
         *,
         capacity: int = 64,
         cancellation: CancellationToken | None = None,
@@ -150,37 +87,22 @@ class SubscriptionEvents:
         self._pending: asyncio.Future[SubscriptionEvent | None] | None = None
         self._ended = False
         self._failure: BaseException | None = None
-        self._subscription: Subscription | None = None
-        self._closed = closed
+        self._subscription: RelaySubscription | None = None
         self._cancellation = cancellation
         if cancellation is not None and cancellation.cancelled:
             self._finish(cancellation.reason)
             return
-        closed.add_done_callback(self._connection_closed)
         if cancellation is not None:
             cancellation.add_callback(self._finish)
         try:
-            self._subscription = subscribe(
-                SubscriptionHandlers(
-                    on_ok=lambda value: self._push(SubscribedEvent(value)),
-                    on_object=lambda value: self._push(ObjectEvent(value)),
-                    on_done=lambda value: self._push(PublisherDoneEvent(value)),
-                    on_subgroup_end=lambda value: self._push(SubgroupEndEvent(value)),
-                    on_subgroup_reset=lambda value: self._push(SubgroupResetEvent(value)),
-                    on_state_notify=lambda value: self._push(StateNotifyEvent(value)),
-                    on_goaway=lambda value: self._push(GoawayEvent(value)),
-                    on_update_ok=lambda: self._push(UpdateOkEvent()),
-                    on_error=lambda error: self._finish(SubscriptionRequestError(error)),
-                )
-            )
-            if self._ended:
-                self._subscription.cancel(self._failure)
+            self._subscription = subscribe(_Consumer(self))
         except BaseException:
             self.close()
             raise
-
-    def _connection_closed(self, closed: asyncio.Future[Closed]) -> None:
-        self._finish(SubscriptionConnectionClosedError(closed.result().error))
+        # Events can overflow the queue before subscribe() returns. The ending recorded then had no
+        # subscription to cancel, so cancel it now; the echo of that cancel is ignored above.
+        if self._ended:
+            self._subscription.cancel(self._failure)
 
     def _push(self, event: SubscriptionEvent) -> None:
         if self._ended:
@@ -193,13 +115,23 @@ class SubscriptionEvents:
             return
         self._queue.append(event)
 
+    def _ended_by_subscription(self, end: SubscriptionEnd) -> None:
+        # An ending this iterator started (close, cancellation, overflow) echoes back here.
+        if self._ended:
+            return
+        if end.cause == "request-error" and isinstance(end.error, RequestError):
+            self._finish(SubscriptionRequestError(end.error))
+        elif end.cause == "connection-closed":
+            self._finish(SubscriptionConnectionClosedError(end.error if isinstance(end.error, BaseException) else None))
+        else:
+            self._finish(end.error if isinstance(end.error, BaseException) else None)
+
     def _finish(self, error: BaseException | None = None) -> None:
         if self._ended:
             return
         self._ended = True
         self._failure = error
         self._queue.clear()
-        self._closed.remove_done_callback(self._connection_closed)
         if self._cancellation is not None:
             self._cancellation.remove_callback(self._finish)
         if self._subscription is not None:

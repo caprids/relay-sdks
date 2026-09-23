@@ -26,8 +26,9 @@ against that file.
   cancellation token, that governs the connection's entire lifetime rather than only setup.
 - Every connection exposes a way to observe its closure and the error that caused it, if any.
 - A GOAWAY from the relay ends the connection with an error. The application opens a replacement.
-  Requests still awaiting their first response receive their error callback once; accepted or
-  cancelled requests do not receive a second initial response.
+  Subscriptions still awaiting their first response end as terminated by the closure (see
+  "Subscription lifecycle"); accepted or cancelled requests do not receive a second initial
+  response. The core's own track source still fails pending requests through their error callback.
   Automatic reconnection and token refresh on a live session are not yet part of this contract.
 
 ## Error identities and operation phases
@@ -44,6 +45,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
 | `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
 | `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
+| `UPDATE_QUEUE_FULL` | More than eight updates were issued before the subscription was accepted; await acceptance (`onSubscribed` / `on_subscribed`) before updating again. Nothing was sent for the refused update. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
@@ -73,27 +75,47 @@ same failure. Caller cancellation reasons and token-provider exceptions retain t
 Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
 `on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
 
-Implementations export a Relay error type with a stable `code` discriminant and `phase` field.
-Human-readable messages are not a compatibility contract. Wrapped transport/session failures retain
-the original cause. TypeScript uses `RelayError.cause`; Python uses exception chaining and preserves
-its existing Relay exception subclasses. Python's low-level `WebTransportError` retains its numeric
-application code; Relay API failures wrap it with `TRANSPORT_ERROR`. Manually constructed Python base
-`RelayError` instances retain the fallback `RELAY_ERROR` code.
+Both SDKs export one Relay error type, `RelayError`, with a stable `code` discriminant and a `phase`
+field, plus the three subscription errors that carry payload (`SubscriptionRequestError`,
+`SubscriptionOverflowError`, `SubscriptionConnectionClosedError`). There are no other subclasses;
+callers branch on `code`. Human-readable messages are not a compatibility contract. Wrapped
+transport and session failures retain the original cause: TypeScript in `RelayError.cause`, Python
+chained as `__cause__`. Transport-layer exceptions are not Relay errors; a Relay operation that fails
+on the transport raises `TRANSPORT_ERROR` with the transport exception as its cause.
 
 Local argument errors remain `TypeError`/`RangeError` in TypeScript and `TypeError`/`ValueError` in
-Python as appropriate. A refused concurrent operation uses `WRITE_PENDING` and does not cancel the
-active operation. Caller-provided cancellation reasons bypass wrapping, including non-Error
-JavaScript values and Python task cancellation. Connection failures are shared with pending
-publishing operations; their connection phase does not establish whether those writes sent bytes.
+Python: a value of the wrong type or shape is a `TypeError` in both languages; a value of the right
+type outside its bound is a `RangeError` in TypeScript and a `ValueError` in Python. The
+[Arguments](#arguments) table lists the rules. A refused concurrent operation uses `WRITE_PENDING`
+and does not cancel the active operation. Caller-provided cancellation reasons bypass wrapping,
+including non-Error JavaScript values and Python task cancellation. Connection failures are shared
+with pending publishing operations; their connection phase does not establish whether those writes
+sent bytes.
+
+## Arguments
+
+The values an application hands the SDK that end up on the wire are checked in their original
+container, copied once, and only then used. Both roles apply the same rules, so a namespace the
+publisher accepts is one the subscriber accepts. Arguments are checked before connection or slot
+state at every entry point: a bad argument is reported the same way on a closed connection or a busy
+track, and it never reaches the token provider, the transport factory, a request id or a stream. The
+portable cases live in `vectors/arguments.json` and run in every SDK's suite.
+
+| Argument | Rule | `TypeError` in both languages | `RangeError` (TypeScript) / `ValueError` (Python) | Checked at |
+| --- | --- | --- | --- | --- |
+| Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe` |
+| Track name | A non-empty string, in both roles. | anything else | | `registerTrack` / `register_track`; the three subscriber entry points |
+| Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length) and the encoded list at most `limits.maxObjectPropertiesBytes`; the SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds the object bound | `registerTrack` / `register_track`; `write` on a track or group writer |
+| Payload | A byte sequence: any `ArrayBufferView` in TypeScript; any object supporting the buffer protocol in Python (`bytes`, `bytearray`, `memoryview`, ...). Copied once. At most `limits.maxObjectPayloadBytes`. | a string, an `ArrayBuffer`, a list of integers, anything else | longer than the object payload limit | `write`, `writeText`, `writeJSON` on a track or group writer |
+
+Messages are not a compatibility contract; the class and the point of rejection are.
 
 ## Subscribing
 
 - Namespaces are ordered tuples of fields sent verbatim. The SDK adds no prefix and performs no
   normalization. Fields are absolute: the token's root prefix is part of the namespace the
-  application supplies. Subscription namespaces must contain non-empty string fields; invalid
-  namespaces are rejected locally before sending a request. Publishing and subscription namespaces
-  contain at most 32 fields (pinned in `protocol.json`); oversized namespaces are rejected locally,
-  before connecting a publisher or sending a subscription. Track names must be non-empty strings.
+  application supplies. Namespaces and track names follow the [Arguments](#arguments) table in both
+  roles: an invalid one is rejected locally, before connecting a publisher or sending a subscription.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The callback path adds no application queue, no
@@ -107,6 +129,15 @@ publishing operations; their connection phase does not establish whether those w
   has no application inactivity deadline. Keeping an idle transport connected depends on peer
   traffic or transport-provided keepalive; the SDK does not schedule its own keepalive. The Python
   transport uses aioquic's default 60-second local idle timeout, subject to peer negotiation.
+- `update()` sends REQUEST_UPDATE, which the draft allows only on an accepted subscription
+  ([draft-20 Section 5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1)).
+  An update issued before acceptance is queued in order and sent when SUBSCRIBE_OK arrives; at most
+  eight wait, and a further one raises `UPDATE_QUEUE_FULL` without sending anything. A subscription
+  that ends before acceptance discards its queue, and its ending is what the application observes.
+  An update on an ended subscription raises `CLOSED`. Each update consumes its own Request ID, and
+  the relay's acknowledgement arrives as `onUpdateOk` / `on_update_ok`; a refused update arrives as
+  REQUEST_ERROR and ends the subscription ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+  Implemented in both SDKs.
 - A subscribe for a namespace the relay has not seen announced is rejected with request error 404,
   not parked; a namespace freshly announced can still answer 404 for about a second, so applications
   retry that rejection rather than treat it as fatal.
@@ -120,6 +151,42 @@ publishing operations; their connection phase does not establish whether those w
   New subscriptions may also see transient 404s or initial-response timeouts after retract/re-announce.
   Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
+- `subscribe()` returns a `RelaySubscription`: the request handle plus two awaitables. `subscribed`
+  settles when the relay answers, and `ended` settles once when the subscription can no longer
+  deliver. Neither implies exactly-once or gap-free delivery, and publisher completion settles
+  neither. The table below is the shared contract for both.
+
+### Subscription lifecycle
+
+The application's subscription (see `CONTEXT.md`) is pending until the relay answers, accepted after
+SUBSCRIBE_OK, and ended once it can no longer deliver. Every ending is recorded as a
+`SubscriptionEnd` with a `kind` (`rejected`, `terminated`, `cancelled`), the protocol `cause`
+(`request-error`, `connection-closed`, `cancelled`), whether the subscription had been `accepted`,
+and the `error`. Implemented in both SDKs.
+
+| State | Event | `subscribed` | `ended` | Callbacks |
+| --- | --- | --- | --- | --- |
+| pending | SUBSCRIBE_OK | resolves with the acceptance info | stays pending | `onSubscribed` |
+| pending | REQUEST_ERROR: rejection, request timeout, or the request stream failing before an answer | rejects `SubscriptionRequestError`, preserving the request error | resolves `kind: rejected`, `cause: request-error` | `onError` |
+| pending | connection ends | rejects `SubscriptionConnectionClosedError`, preserving the connection error as its cause when known | resolves `kind: terminated`, `cause: connection-closed`, `accepted: false` | nothing on the subscription; the connection's `closed` carries the reason |
+| pending | `cancel(reason)` | rejects with `reason`, or a `CLOSED` Relay error when none was given | resolves `kind: cancelled`, with the reason as `error` | nothing |
+| accepted | objects, subgroup end or reset, state notify, update acknowledged, GOAWAY on the request stream | settled | stays pending | the matching callback |
+| accepted | PUBLISH_DONE | settled | stays pending: publisher completion is not an ending, trailing objects can still arrive | `onPublisherDone` |
+| accepted | REQUEST_ERROR, which is how a refused `update()` is answered ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)) | settled | resolves `kind: terminated`, `cause: request-error`, `accepted: true` | `onError` |
+| accepted | connection ends | settled | resolves `kind: terminated`, `cause: connection-closed`, `accepted: true` | nothing on the subscription; the connection's `closed` carries the reason |
+| accepted | `cancel(reason)` | settled | resolves `kind: cancelled` | nothing; trailing objects stop |
+| ended | anything, including a second `cancel()` | settled | settled, unchanged | nothing; `update()` raises `CLOSED`; the events iterator has already raised or reached EOF |
+
+The core fails a pending request before it reports the closure that killed it: in the same turn
+when the session notices the closure, or turns earlier when the transport fails its streams before
+the session learns of it. A pre-acceptance request failure is therefore never recorded before the
+turn ends, and one that arrives after the transport has already ended is left to the closure, so
+the closure is the ending the subscription describes, with the connection error preserved. A
+genuine rejection reaches `subscribed`, `ended` and `onError` one turn after the core delivers it.
+A REQUEST_ERROR after acceptance is recorded at once.
+
+A readiness awaitable nobody awaits cannot surface as an unhandled rejection: the SDK pre-handles
+it. Awaiting it later still observes the same result.
 
 ## Async subscription consumption
 
@@ -127,9 +194,10 @@ The Relay product API provides `subscriber.subscribeEvents(options, { capacity, 
 `subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` in Python. These create
 and own a new subscription immediately. They yield typed data and lifecycle events, using the same
 payload objects as callbacks. The generic `MoqTrackSource` and existing `subscribe` callbacks remain
-available and retain their synchronous delivery model. This additive API does not implement the
-separate readiness/termination handle proposal (#68). It follows the product vocabulary from #63;
-its explicit `publisherDone` / `publisher_done` event distinguishes publisher completion from final delivery.
+available and retain their synchronous delivery model. The handle's `subscribed` and `ended`
+awaitables (see the subscription lifecycle table above) are the readiness and termination signals;
+the iterator's raise or EOF is its own. It follows the product vocabulary from #63; its explicit
+`publisherDone` / `publisher_done` event distinguishes publisher completion from final delivery.
 
 - `capacity` defaults to **64 events** and must be a positive integer (a safe integer in TS).
   Every queued object **and lifecycle event** consumes one slot. This is an event-count limit,
@@ -157,16 +225,15 @@ its explicit `publisherDone` / `publisher_done` event distinguishes publisher co
 | Update acknowledged | `updateOk` / `update_ok` |
 | Request GOAWAY | `goaway`, with relocation details; informational, no automatic retry |
 | Request rejection, initial-response timeout, or initial request failure | Raises `SubscriptionRequestError`, preserving `requestError` / `request_error` |
-| Connection ends after acceptance, or local clean connection close at any point | Raises `SubscriptionConnectionClosedError`, preserving the connection error as `cause` / `__cause__` if available; never a claim of drained EOF |
+| Connection ends at any point, including a clean local close | Raises `SubscriptionConnectionClosedError`, preserving the connection error as `cause` / `__cause__` if available; never a claim of drained EOF |
 | Iterator `close()` / TS `return()` / Python `aclose()` | Discards buffered events, cancels the owned subscription, pending reads settle as clean EOF |
 | Per-iterator abort signal / cancellation token | Discards buffered events and raises the supplied reason (or the platform's default cancellation reason) |
 
-Before acceptance, a connection failure may reach the core's request-error callback before the
-connection observer. In that case the iterator raises `SubscriptionRequestError` with the core's
-reason string, just like an initial request-stream failure; it does not preserve the underlying
-connection exception. Check `subscriber.closed` for the connection-level cause when distinguishing a
-request rejection from a lost connection. Once accepted, connection loss instead raises
-`SubscriptionConnectionClosedError`. This preserves the core's existing first-failure ordering.
+Before acceptance, a connection failure reaches the core's request-error callback before the
+connection observer. The subscription holds that failure until the turn ends (see "Subscription
+lifecycle"), so the iterator raises `SubscriptionConnectionClosedError` with the connection
+exception preserved, the same as after acceptance, rather than a `SubscriptionRequestError`
+carrying the core's reason string.
 
 The iterator errors are `RelayError` subclasses with stable codes: `SubscriptionRequestError`
 uses `SUBSCRIPTION_REQUEST_FAILED`, and `SubscriptionOverflowError` uses `SUBSCRIPTION_OVERFLOW`,
@@ -236,8 +303,10 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   write uses a new group ID; failed groups are never reused. After demand disappears, later writes
   wait for a new relay subscription. Applications choose fresh data or the next random-access point
   after a failure; already delivered bytes cannot be withdrawn. There is no automatic retry.
-- A write's payload must be a byte sequence in the language's own terms. Any other type is rejected
-  before the write starts, which is a local argument error and leaves the track usable.
+- A write's payload must be a byte sequence in the language's own terms, and its properties must
+  follow the [Arguments](#arguments) table. Anything else is rejected before the write starts, which
+  is a local argument error and leaves the track usable; an oversized property is such an error too,
+  not a transport failure once demand arrives.
 - Each write copies its bytes and sends one independent group containing one object. Only one
   write may be pending per track; a concurrent write is rejected rather than queued.
 - Write completion means the transport accepted the complete group, not that any viewer received
@@ -249,7 +318,8 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   API adds no default timescale, timestamp, or LOC media packaging. Subscribers expose the properties received
   from the relay, which may differ from those sent by the publisher; end-to-end preservation of
   arbitrary properties is not guaranteed. See [Relay property handling](#relay-property-handling).
-- Object payloads are limited to the size in `protocol.json`.
+- Object payloads, encoded object properties and individual property values are limited to the
+  sizes in `protocol.json`.
 - Closing a track writer cancels an outstanding write and ends that track; other tracks continue.
   Closing the publisher ends all tracks, retracts the namespace, and waits for transport shutdown.
 - Track names cannot be reused within a publisher connection, including after their writer closes.
@@ -258,7 +328,10 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   which is how LOC/MSF media (one GOP per group) is published. A group that fails part-way is reset
   rather than completed, and the track stays open for the next group; only one write or group may
   be pending per track. The write deadline applies separately to opening a group (including demand),
-  each object write, and closing the group. Idle time between operations is unrestricted.
+  each object write, and closing the group. Idle time between operations is unrestricted. Aborting a
+  group after it closed cleanly has no effect: the FIN already ended the stream, and a reset after
+  complete delivery is ignorable
+  ([draft-20 Section 11.4.3](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.4.3)).
   Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
   observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
@@ -268,6 +341,38 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   downstream viewer, so additional viewers produce no further notification, and it may keep the
   subscription for a period after the last viewer leaves. Demand is therefore neither a viewer
   count nor a liveness signal. Implemented in both SDKs.
+
+### Write phases and interruptions
+
+Every write and every open group is one operation occupying the track's write slot (see
+`CONTEXT.md`). The operation records its phase before each step, and this table is the shared test
+list both SDKs implement: what the caller sees, what reaches the wire, and what state the track is
+left in. The Source column separates what the protocol rules from SDK policy. Section numbers refer
+to [draft-ietf-moq-transport-20](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html)
+unless stated otherwise.
+
+| Phase | Interruption | Reported to the caller | Wire effect | Track afterwards | Source |
+| --- | --- | --- | --- | --- | --- |
+| waiting-for-demand | write deadline expires | `WRITE_TIMEOUT`, or `NAMESPACE_NOT_SOLICITED` when solicitations arrived but none covers the namespace; phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | SDK policy: the protocol has no timer for awaiting a subscription (§13.6 only warns of idle timeout) |
+| waiting-for-demand | relay subscription ends while waiting | the wait continues until the deadline | nothing sent | open | SDK policy |
+| waiting-for-demand | caller cancels | the caller's reason, unwrapped; phase `waiting-for-demand` | nothing sent | open | SDK policy |
+| waiting-for-demand | track closed | `CLOSED`, phase `waiting-for-demand` | nothing sent | ended | SDK policy |
+| waiting-for-demand | connection ends | the connection's own error (phase `connection`), or `CLOSED` after a clean shutdown | nothing sent | ended | §3.5: streams and subscriptions end with the session |
+| opening-stream | write deadline expires or caller cancels | `WRITE_TIMEOUT` or the caller's reason; phase `opening-stream` | a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) or `CANCELLED` (0x1); its header may precede the reset (RESET_STREAM_AT) | open; the next write uses a new group ID | §11.4.3: a stream closed before all objects are delivered MUST be reset, and the reset SHOULD include the header; the deadline itself is SDK policy |
+| writing, closing | write deadline expires | `WRITE_TIMEOUT`, phase `writing` or `closing`; object bytes may have been delivered, and `closing` can fail after all of them were | stream reset, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §11.4.3 MUST reset; §8 and §15.11.4 for the code; the deadline is SDK policy |
+| opening-stream, writing, closing | caller cancels (AbortSignal, task cancellation, or `group.abort()`) | the caller's reason unwrapped, or `CLOSED` when `abort()` gave none; the current phase | stream reset, code `CANCELLED` (0x1) | open | §11.4.3 MUST reset; code choice is SDK policy (§3.3.4 SHOULD be relevant) |
+| opening-stream, writing, closing | the transport refuses the stream or fails a write | `TRANSPORT_ERROR` with the cause preserved; the current phase | stream reset, code `INTERNAL_ERROR` (0x0), when a stream exists | open | SDK policy |
+| opening-stream, writing, closing | relay subscription replaced or ended | `SUBSCRIPTION_CHANGED`; the current phase | stream reset, code `CANCELLED` (0x1) | open; the next write waits for the new demand | §5.1.1: the publisher MUST reset open streams of a cancelled subscription; treating a new SUBSCRIBE as a replacement rather than a concurrent subscription is SDK policy (§5.1, ADR-0001) |
+| opening-stream, writing, closing | track closed | `CLOSED`; the current phase | stream reset, code `CANCELLED` (0x1) | ended | §10.12: every stream is closed or reset before the track ends |
+| opening-stream, writing, closing | connection ends | the connection's own error (phase `connection`), or `CLOSED` | streams end with the session; a reset that is still sent carries `SESSION_CLOSED` (0x3), or `GOING_AWAY` (0x4) after GOAWAY | ended | §3.5; §15.11.4 for the codes |
+| any | a second write or group is started | `WRITE_PENDING`, phase `writing`; the active operation is unaffected | nothing sent | unchanged | SDK policy: one pending operation per track |
+| after a clean group close | `abort()` | nothing; `closed` stays true and a repeated `close()` returns | nothing sent | open | §11.4.3: a reset after all data and the FIN is ignorable |
+
+A failed group's ID is never reused, which is stricter than §2.2 (a subgroup may resume on a new
+stream after a premature reset); group IDs increase monotonically and object IDs start at 0 within a
+group (draft-ietf-moq-msf-01 §6). A group may end without an `END_OF_GROUP` marker (§2.4.2). There
+is no automatic retry, and the application chooses the next random-access point after a failure;
+MSF and LOC say nothing about an abandoned group. Implemented in both SDKs.
 
 ### Relay property handling
 

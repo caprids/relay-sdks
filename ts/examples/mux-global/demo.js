@@ -5,7 +5,7 @@
  * run.mjs serves it next to the built SDK and drives it in headless Chromium because Node has no
  * WebTransport. `log` receives one plain object per event so the runner can print it.
  */
-import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
+import { connectRelayPublisher, connectRelaySubscriber, SubscriptionRequestError } from '@mux/relay';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -150,25 +150,23 @@ async function writeWhenDemanded(writer, bytes, failIfBroken, signal, log) {
  * A subscribe issued before the relay has processed the publisher's announce is rejected with 404
  * Broadcast not found; that is expected on a fresh namespace, not fatal, so retry with bounded
  * backoff until it is accepted, another error arrives, or the run deadline aborts `signal`. Every
- * other rejection is forwarded to `handlers.onError` unchanged.
+ * other rejection is forwarded to `handlers.onError` unchanged. `subscription.subscribed` is the
+ * relay's answer; a connection that ends first is reported by the main loop, not here.
  */
 async function subscribeWithRetry(subscriber, options, handlers, signal, log) {
   let backoffMs = 500;
+  const { onError, ...delivery } = handlers;
   for (;;) {
-    const rejection = await new Promise((resolve) => {
-      subscriber.subscribe(options, {
-        ...handlers,
-        onSubscribed: (ok) => {
-          handlers.onSubscribed?.(ok);
-          resolve(undefined);
-        },
-        onError: (error) => resolve(error),
-      });
-    });
-    if (!rejection) return;
-    if (rejection.errorCode !== 404) {
-      handlers.onError?.(rejection);
+    const subscription = subscriber.subscribe(options, delivery);
+    try {
+      await subscription.subscribed;
       return;
+    } catch (error) {
+      if (!(error instanceof SubscriptionRequestError)) return;
+      if (error.requestError.errorCode !== 404) {
+        onError?.(error.requestError);
+        return;
+      }
     }
     log({ event: 'waiting', detail: 'namespace not announced yet; retrying the subscribe' });
     try {

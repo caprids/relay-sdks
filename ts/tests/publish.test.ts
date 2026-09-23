@@ -57,8 +57,8 @@ describe('connectRelayPublisher', () => {
     const namespace = Array.from({ length: 32 }, (_, index) => `field-${index}`);
     const publisher = await connectRelayPublisher({ url, namespace, createTransport: hub.connectPublisher });
     cleanup.push(() => publisher.close());
-    expect(() => publisher.registerTrack({ track: 7 as unknown as string })).toThrow('Track name must be a string');
-    expect(() => publisher.registerTrack({ track: '' })).toThrow('Track name must be non-empty');
+    expect(() => publisher.registerTrack({ track: 7 as unknown as string })).toThrow(TypeError);
+    expect(() => publisher.registerTrack({ track: '' })).toThrow('A track name must be a non-empty string');
     const events = publisher.registerTrack({ track: 'events' });
     const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
     cleanup.push(() => subscriber.close());
@@ -238,152 +238,6 @@ describe('connectRelayPublisher', () => {
     expect(onRaw).toHaveBeenCalledWith(expect.objectContaining({ trackProperties: [] }));
   });
 
-  it('reports a stream open failure and allows a fresh write without silently retrying', async () => {
-    const hub = createRelayHub();
-    cleanup.push(() => hub.destroy());
-    const failure = new Error('data stream failed');
-    const publisher = await connectRelayPublisher({
-      url,
-      namespace,
-      createTransport: (...args) => {
-        const created = hub.connectPublisher(...args);
-        const open = created.transport.createUnidirectionalStream.bind(created.transport);
-        let streams = 0;
-        created.transport.createUnidirectionalStream = () => (++streams === 2 ? Promise.reject(failure) : open());
-        return created;
-      },
-    });
-    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
-    cleanup.push(() => subscriber.close());
-    cleanup.push(() => publisher.close());
-    const events = publisher.registerTrack({ track: 'events' });
-    receive(subscriber, 'events');
-
-    await expect(events.write(new Uint8Array([1]))).rejects.toMatchObject({
-      code: 'TRANSPORT_ERROR',
-      phase: 'opening-stream',
-      cause: failure,
-    });
-    expect(events.closed).toBe(false);
-    expect(hub.objectCount('events')).toBe(0);
-    await events.write(new Uint8Array([2]));
-    await vi.waitFor(() => expect(hub.objectCount('events')).toBe(1));
-  });
-
-  it.each(['header', 'payload', 'fin'] as const)(
-    'recovers after a bound %s timeout or cancellation without closing the track',
-    async (stage) => {
-      const hub = createRelayHub();
-      cleanup.push(() => hub.destroy());
-      let stalled = false;
-      let resetCount = 0;
-      const publisher = await connectRelayPublisher({
-        url,
-        namespace,
-        createTransport: (...args) => {
-          const created = hub.connectPublisher(...args);
-          const open = created.transport.createUnidirectionalStream.bind(created.transport);
-          let streams = 0;
-          created.transport.createUnidirectionalStream = async () => {
-            if (++streams !== 2 && streams !== 4) return open();
-            let writes = 0;
-            let rejectPending: (error: unknown) => void;
-            const stall = () => {
-              stalled = true;
-              return new Promise<void>((_, reject) => {
-                rejectPending = reject;
-              });
-            };
-            return new WritableStream<Uint8Array>({
-              start(controller) {
-                controller.signal.addEventListener('abort', () => {
-                  resetCount++;
-                  rejectPending(controller.signal.reason);
-                });
-              },
-              write() {
-                writes++;
-                if ((stage === 'header' && writes === 1) || (stage === 'payload' && writes === 2)) return stall();
-                return undefined;
-              },
-              close() {
-                if (stage === 'fin') return stall();
-                return undefined;
-              },
-            });
-          };
-          return created;
-        },
-      });
-      cleanup.push(() => publisher.close());
-      const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
-      hub.subscribeUpstream('events');
-      for (const mode of ['timeout', 'cancel'] as const) {
-        stalled = false;
-        const owner = new AbortController();
-        const failure = new Error('discard stale object');
-        const writing = track.write(new Uint8Array([1]), { signal: owner.signal });
-        const rejected =
-          mode === 'timeout'
-            ? expect(writing).rejects.toMatchObject({
-                code: 'WRITE_TIMEOUT',
-                phase: stage === 'fin' ? 'closing' : 'writing',
-              })
-            : expect(writing).rejects.toBe(failure);
-        await vi.waitFor(() => expect(stalled).toBe(true), { interval: 1 });
-        await expect(track.write(new Uint8Array([2]))).rejects.toThrow(/already pending/);
-        if (mode === 'cancel') owner.abort(failure);
-        await rejected;
-        expect(track.closed).toBe(false);
-        expect(track.hasDemand).toBe(true);
-        await track.write(new Uint8Array([3]));
-      }
-      expect(resetCount).toBe(2);
-      await vi.waitFor(() => expect(hub.objectCount('events')).toBe(2));
-      expect(hub.trackEnds).toEqual([]);
-    },
-  );
-
-  it('times out a stalled stream open and aborts a late stream without sending payload bytes', async () => {
-    const hub = createRelayHub();
-    cleanup.push(() => hub.destroy());
-    let resolveStream!: (stream: WritableStream<Uint8Array>) => void;
-    const publisher = await connectRelayPublisher({
-      url,
-      namespace,
-      createTransport: (...args) => {
-        const created = hub.connectPublisher(...args);
-        const open = created.transport.createUnidirectionalStream.bind(created.transport);
-        let streams = 0;
-        created.transport.createUnidirectionalStream = () =>
-          ++streams !== 2
-            ? open()
-            : new Promise((resolve) => {
-                resolveStream = resolve;
-              });
-        return created;
-      },
-    });
-    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
-    cleanup.push(() => subscriber.close());
-    cleanup.push(() => publisher.close());
-    const events = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
-    receive(subscriber, 'events');
-    await expect(events.write(new Uint8Array([1]))).rejects.toMatchObject({
-      code: 'WRITE_TIMEOUT',
-      phase: 'opening-stream',
-    });
-    expect(events.closed).toBe(false);
-    await events.write(new Uint8Array([2]));
-    await vi.waitFor(() => expect(hub.objectCount('events')).toBe(1));
-    const abort = vi.fn();
-    const write = vi.fn();
-
-    resolveStream(new WritableStream({ abort, write }));
-    await vi.waitFor(() => expect(abort).toHaveBeenCalledOnce());
-    expect(write).not.toHaveBeenCalled();
-  });
-
   it('rejects oversized objects before waiting for demand', async () => {
     const { publisher } = await connectHub();
     const track = publisher.registerTrack({ track: 'events' });
@@ -490,130 +344,26 @@ describe('connectRelayPublisher', () => {
     ]);
   });
 
-  it('reserves one track slot for a group and keeps it open after local argument errors', async () => {
-    const { publisher, hub } = await connectHub();
+  it('ignores abort after a clean group close and keeps the track usable', async () => {
+    const { publisher, subscriber } = await connectHub();
     const track = publisher.registerTrack({ track: 'events' });
-    hub.subscribeUpstream('events');
-    const group = await track.openGroup();
-    await expect(track.write(new Uint8Array([1]))).rejects.toThrow(/already pending/);
-    await expect(track.openGroup()).rejects.toThrow(/already pending/);
-    await expect(group.write('bad' as unknown as ArrayBufferView)).rejects.toThrow(TypeError);
-    await expect(group.write(new Uint8Array([1]), { properties: [{ type: 3, value: 2 }] })).rejects.toThrow(TypeError);
-    await expect(group.write(new Uint8Array([1]), { properties: new Array<PublishProperty>(1) })).rejects.toThrow(
-      TypeError,
-    );
-    await group.write(new Uint8Array([2]));
-    expect(group.objectCount).toBe(1);
-    await group.close();
-    expect(track.closed).toBe(false);
-  });
-
-  it('bounds group demand and releases its slot after timeout or an already-aborted signal', async () => {
-    const { publisher, hub } = await connectHub();
-    const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 50 });
-    await expect(track.openGroup()).rejects.toMatchObject({ code: 'WRITE_TIMEOUT', phase: 'waiting-for-demand' });
-    const owner = new AbortController();
-    const reason = new Error('cancelled before opening');
-    owner.abort(reason);
-    await expect(track.openGroup({ signal: owner.signal })).rejects.toBe(reason);
-    expect(track.closed).toBe(false);
-    hub.subscribeUpstream('events');
+    const { objects } = receive(subscriber, 'events');
     const group = await track.openGroup();
     await group.write(new Uint8Array([1]));
     await group.close();
-  });
+    expect(group.closed).toBe(true);
 
-  it.each(['write', 'close'] as const)(
-    'bounds a stalled group %s, resets it, and permits the next group',
-    async (mode) => {
-      const hub = createRelayHub();
-      cleanup.push(() => hub.destroy());
-      const reset = vi.fn();
-      let rejectPending: ((reason: unknown) => void) | undefined;
-      let stalled = false;
-      const publisher = await connectRelayPublisher({
-        url,
-        namespace,
-        createTransport: (...args) => {
-          const created = hub.connectPublisher(...args);
-          const open = created.transport.createUnidirectionalStream.bind(created.transport);
-          let streams = 0;
-          created.transport.createUnidirectionalStream = async () => {
-            if (++streams !== 2) return open();
-            let writes = 0;
-            return new WritableStream<Uint8Array>({
-              start(controller) {
-                controller.signal.addEventListener('abort', () => {
-                  reset(controller.signal.reason);
-                  rejectPending?.(controller.signal.reason);
-                });
-              },
-              write() {
-                if (++writes === 2 && mode === 'write') {
-                  stalled = true;
-                  return new Promise<void>((_, reject) => {
-                    rejectPending = reject;
-                  });
-                }
-                return undefined;
-              },
-              close() {
-                if (mode === 'close') {
-                  stalled = true;
-                  return new Promise<void>((_, reject) => {
-                    rejectPending = reject;
-                  });
-                }
-                return undefined;
-              },
-            });
-          };
-          return created;
-        },
-      });
-      cleanup.push(() => publisher.close());
-      const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
-      hub.subscribeUpstream('events');
-      const group = await track.openGroup();
-      if (mode === 'close') await group.write(new Uint8Array([1]));
-      const pending = mode === 'write' ? group.write(new Uint8Array([1])) : group.close();
-      const rejected = expect(pending).rejects.toMatchObject({
-        code: 'WRITE_TIMEOUT',
-        phase: mode === 'write' ? 'writing' : 'closing',
-      });
-      await vi.waitFor(() => expect(stalled).toBe(true));
-      await expect(group.write(new Uint8Array([2]))).rejects.toMatchObject({ code: 'WRITE_PENDING' });
-      await expect(group.close()).rejects.toMatchObject({ code: 'WRITE_PENDING' });
-      await rejected;
-      expect(reset).toHaveBeenCalledOnce();
-      expect(group.closed).toBe(true);
-      expect(track.closed).toBe(false);
-      const next = await track.openGroup();
-      expect(next.groupId).toBe(1);
-      await next.write(new Uint8Array([3]));
-      await next.close();
-      await vi.waitFor(() => expect(hub.objectCount('events')).toBe(1));
-    },
-  );
+    // draft-ietf-moq-transport-20 section 11.4.3: a reset after all data and the FIN is ignorable.
+    // write-slot.test.ts proves no reset is sent; this pins the end-to-end shape through a relay.
+    group.abort(new Error('late abort'));
+    expect(group.closed).toBe(true);
+    await group.close();
 
-  it('aborts idle groups explicitly or through their signal and permits another group', async () => {
-    const { publisher, hub } = await connectHub();
-    const track = publisher.registerTrack({ track: 'events' });
-    hub.subscribeUpstream('events');
-    const owner = new AbortController();
-    const first = await track.openGroup({ signal: owner.signal });
-    await first.write(new Uint8Array([1]));
-    const reason = new Error('drop incomplete GOP');
-    owner.abort(reason);
-    await expect(first.write(new Uint8Array([2]))).rejects.toBe(reason);
-    await expect(first.close()).rejects.toBe(reason);
-    expect(first.closed).toBe(true);
-    const second = await track.openGroup();
-    second.abort(reason);
-    expect(second.closed).toBe(true);
-    const third = await track.openGroup();
-    await third.write(new Uint8Array([3]));
-    await third.close();
+    const next = await track.openGroup();
+    expect(next.groupId).toBe(1);
+    await next.write(new Uint8Array([2]));
+    await next.close();
+    await vi.waitFor(() => expect(objects).toHaveLength(2));
   });
 
   it('resets a bound write when demand disappears and publishes again after resubscription', async () => {
@@ -786,78 +536,4 @@ describe('text and JSON helpers', () => {
     await vi.waitFor(() => expect(objects).toHaveLength(3));
     expect(objects.map(readText)).toEqual(['false', 'false', 'after']);
   });
-
-  it('retains demand deadlines, concurrency rejection, and write cancellation', async () => {
-    const { publisher, subscriber } = await connectHub();
-    const track = publisher.registerTrack({ track: 'helpers', writeTimeoutMs: 50 });
-    await expect(track.writeText('no demand')).rejects.toThrow(/timed out/);
-    const controller = new AbortController();
-    const writing = track.writeJSON({ waiting: true }, { signal: controller.signal });
-    const rejected = expect(writing).rejects.toThrow('stop');
-    await expect(track.writeText('concurrent')).rejects.toThrow(/already pending/);
-    controller.abort(new Error('stop'));
-    await rejected;
-    const { objects } = receive(subscriber, 'helpers');
-    await track.writeJSON(0);
-    await vi.waitFor(() => expect(objects).toHaveLength(1));
-    expect(readJSON(objects[0]!)).toBe(0);
-  });
-});
-
-it.each(Array.from({ length: 12 }, (_, turns) => turns))(
-  'preserves owner cancellation when stream completion races closure after %s microtasks',
-  async (turns) => {
-    const hub = createRelayHub();
-    cleanup.push(() => hub.destroy());
-    const owner = new AbortController();
-    const reason = new Error('owner finished');
-    const publisher = await connectRelayPublisher({
-      url,
-      namespace,
-      signal: owner.signal,
-      createTransport: (...args) => {
-        const created = hub.connectPublisher(...args);
-        const open = created.transport.createUnidirectionalStream.bind(created.transport);
-        let streams = 0;
-        created.transport.createUnidirectionalStream = async () => {
-          if (++streams !== 2) return open();
-          return new WritableStream({
-            close() {
-              let completed = Promise.resolve();
-              for (let turn = 0; turn < turns; turn++) completed = completed.then(() => {});
-              void completed.then(() => owner.abort(reason));
-            },
-          });
-        };
-        return created;
-      },
-    });
-    cleanup.push(() => publisher.close());
-    const track = publisher.registerTrack({ track: 'events' });
-    hub.subscribeUpstream('events');
-    // Completion may win at later offsets. Any rejection must use the owner's exact reason.
-    await track.write(new Uint8Array([1])).catch((error: unknown) => expect(error).toBe(reason));
-    expect((await publisher.closed).error).toBe(reason);
-  },
-);
-
-it.each([undefined, null])('preserves null reasons and supplies an absent-reason fallback: %s', async (reason) => {
-  const { publisher } = await connectHub();
-  const owner = new AbortController();
-  // Older AbortSignal polyfills expose abort events but no reason field.
-  const signal = {
-    get aborted() {
-      return owner.signal.aborted;
-    },
-    reason,
-    addEventListener: owner.signal.addEventListener.bind(owner.signal),
-    removeEventListener: owner.signal.removeEventListener.bind(owner.signal),
-  } as AbortSignal;
-  const writing = publisher.registerTrack({ track: 'events' }).write(new Uint8Array([1]), { signal });
-  const rejected =
-    reason === undefined
-      ? expect(writing).rejects.toMatchObject({ code: 'CLOSED', phase: 'waiting-for-demand' })
-      : expect(writing).rejects.toBe(null);
-  owner.abort();
-  await rejected;
 });

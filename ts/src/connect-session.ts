@@ -50,6 +50,11 @@ interface RelaySessionLifetime<T extends Session> {
   session: T;
   /** Settles once the connection has ended, carrying the error that ended it if any. */
   closed: Promise<{ error?: unknown }>;
+  /**
+   * Observe the closure in the turn it happens, before the session tears its requests down; an
+   * observer added after the end is told at once. The returned function removes the observer.
+   */
+  observeClosed(observer: (error?: unknown) => void): () => void;
   transportClosed: MoqtTransport['closed'];
   /** Throws the closing error once the connection has ended. */
   assertOpen(): void;
@@ -99,11 +104,14 @@ export async function openRelaySession<T extends Session>(
   const closed = new Promise<{ error?: unknown }>((resolve) => {
     resolveClosed = resolve;
   });
+  const closureObservers = new Set<(error?: unknown) => void>();
+  let closedInfo: { error?: unknown } = {};
 
   const finish = (info: { error?: unknown } = {}): void => {
     if (stopped) return;
 
     stopped = true;
+    closedInfo = info;
     stopError =
       info.error !== undefined ? info.error : new RelayError('CLOSED', 'Relay connection is closed', 'connection');
     clearTimeout(timer);
@@ -112,6 +120,11 @@ export async function openRelaySession<T extends Session>(
     // Settle before synchronous user callbacks run during session teardown.
     resolveClosed(info);
     rejectConnect(stopError);
+    // Subscriptions hear the closure in this turn. The session fails a pending request before it
+    // reports an unexpected closure, so this is how a lost connection is kept from reading as a
+    // rejection.
+    for (const observer of [...closureObservers]) observer(info.error);
+    closureObservers.clear();
 
     if (session) {
       session.destroy(info.error);
@@ -208,6 +221,16 @@ export async function openRelaySession<T extends Session>(
   return {
     session: connected.session,
     closed,
+    observeClosed: (observer) => {
+      if (stopped) {
+        observer(closedInfo.error);
+        return () => {};
+      }
+      closureObservers.add(observer);
+      return () => {
+        closureObservers.delete(observer);
+      };
+    },
     transportClosed: connected.transport.closed,
     assertOpen,
     close: () => finish(),
