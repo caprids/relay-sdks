@@ -5,7 +5,8 @@
  * run.mjs serves it next to the built SDK and drives it in headless Chromium because Node has no
  * WebTransport. `log` receives one plain object per event so the runner can print it.
  */
-import { connectRelayPublisher, connectRelaySubscriber, SubscriptionRequestError } from '@mux/relay';
+import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
+import { subscribeWithRetry } from '../shared/announce-race.js';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -53,14 +54,21 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
 
   try {
     let writer;
+    let publisher;
     if (mode !== 'subscribe') {
       // One publisher connection serves one namespace; register as many tracks on it as needed.
-      const publisher = await watch(
+      publisher = await watch(
         'publisher',
         connectRelayPublisher({ url, namespace, getToken: () => token, signal: lifetime.signal }),
       );
       log({ event: 'publisher connected', url, namespace: namespace.join('/') });
       writer = publisher.registerTrack({ track, writeTimeoutMs: 15_000 });
+      // The announce leaves with the first registered track; the relay routes subscribes about a
+      // round trip later. Logged so a two-process run shows the publisher's side.
+      void publisher.announced.then(
+        () => log({ event: 'announced', namespace: namespace.join('/') }),
+        () => {},
+      );
     }
 
     if (mode !== 'publish') {
@@ -69,10 +77,13 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         connectRelaySubscriber({ url, getToken: () => token, signal: lifetime.signal }),
       );
       log({ event: 'subscriber connected', url });
+      // Same page as the publisher: subscribing before its announce reached the wire would be
+      // rejected for certain; after it, the shared retry covers the round trip the relay still needs.
+      if (publisher) await publisher.announced;
       // subscribeWithRetry runs in the background (nothing below depends on its result), but
       // subscribe() can itself throw synchronously (e.g. a namespace too long to encode); catch that
       // here instead of leaving it an unhandled rejection, so the run fails promptly on the real
-      // error rather than idling until the deadline.
+      // error rather than idling until the deadline. Our own abort ends its wait; that is not a failure.
       void subscribeWithRetry(
         subscriber,
         { namespace, track },
@@ -94,9 +105,12 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
           onSubgroupReset: ({ groupId, error }) => problems.push(`group ${groupId} reset: ${describe(error)}`),
           onPublisherDone: (done) => log({ event: 'publisher done', status: done.statusCode, reason: done.reason }),
         },
-        lifetime.signal,
-        log,
+        {
+          signal: lifetime.signal,
+          onRetry: () => log({ event: 'waiting', detail: 'namespace not announced yet; retrying the subscribe' }),
+        },
       ).catch((error) => {
+        if (lifetime.signal.aborted) return;
         problems.push(`subscribe failed: ${describe(error)}`);
         lifetime.abort(error);
       });
@@ -144,38 +158,6 @@ async function writeWhenDemanded(writer, bytes, failIfBroken, signal, log) {
   // Demand can disappear after the check. The SDK bounds that race with its write deadline.
   // Even a timeout is propagated: this API cannot prove that no bytes were sent.
   await writer.write(bytes);
-}
-
-/**
- * A subscribe issued before the relay has processed the publisher's announce is rejected with 404
- * Broadcast not found; that is expected on a fresh namespace, not fatal, so retry with bounded
- * backoff until it is accepted, another error arrives, or the run deadline aborts `signal`. Every
- * other rejection is forwarded to `handlers.onError` unchanged. `subscription.subscribed` is the
- * relay's answer; a connection that ends first is reported by the main loop, not here.
- */
-async function subscribeWithRetry(subscriber, options, handlers, signal, log) {
-  let backoffMs = 500;
-  const { onError, ...delivery } = handlers;
-  for (;;) {
-    const subscription = subscriber.subscribe(options, delivery);
-    try {
-      await subscription.subscribed;
-      return;
-    } catch (error) {
-      if (!(error instanceof SubscriptionRequestError)) return;
-      if (error.requestError.errorCode !== 404) {
-        onError?.(error.requestError);
-        return;
-      }
-    }
-    log({ event: 'waiting', detail: 'namespace not announced yet; retrying the subscribe' });
-    try {
-      await sleep(backoffMs, signal);
-    } catch {
-      return; // Run deadline or shutdown; the main loop already reports it.
-    }
-    backoffMs = Math.min(backoffMs * 2, 2000);
-  }
 }
 
 /** The SDK delivers raw bytes. This expects the JSON written above and shows anything else as text. */

@@ -49,20 +49,28 @@ const namespace = [
 const redact = (value) => (token ? String(value).replaceAll(token, '[redacted]') : String(value));
 const report = (value) => console.log(redact(typeof value === 'string' ? value : JSON.stringify(value)));
 
+/** The built SDK, the built core, and the example policy the test shares with the mux-global demo. */
+const modules = {
+  '/sdk/': resolve(root, 'dist'),
+  '/core/': resolve(root, 'packages/moq-core/dist'),
+  '/shared/': resolve(root, 'examples/shared'),
+};
 const server = createServer(async (request, response) => {
   try {
     const path = new URL(request.url, 'http://localhost').pathname;
     if (path === '/') {
       response.setHeader('Content-Type', 'text/html');
-      response.end('<!doctype html><script type="importmap">{"imports":{"@mux/moq-core":"/core/index.js"}}</script>');
+      response.end(
+        '<!doctype html><script type="importmap">{"imports":{"@mux/relay":"/sdk/index.js","@mux/moq-core":"/core/index.js"}}</script>',
+      );
       return;
     }
-    const prefix = path.startsWith('/sdk/') ? '/sdk/' : path.startsWith('/core/') ? '/core/' : undefined;
+    const prefix = Object.keys(modules).find((candidate) => path.startsWith(candidate));
     if (!prefix) {
       response.writeHead(404).end();
       return;
     }
-    const base = resolve(root, prefix === '/sdk/' ? 'dist' : 'packages/moq-core/dist');
+    const base = modules[prefix];
     const file = resolve(base, decodeURIComponent(path.slice(prefix.length)));
     if (!file.startsWith(base + sep) || !file.endsWith('.js')) {
       response.writeHead(403).end();
@@ -84,6 +92,7 @@ try {
   const result = await page.evaluate(
     async ({ endpoint, token, namespace, certificateHash }) => {
       const { connectRelaySubscriber, connectRelayPublisher } = await import('/sdk/index.js');
+      const { subscribeWithRetry } = await import('/shared/announce-race.js');
       if (typeof WebTransport === 'undefined') throw new Error('This browser does not provide WebTransport');
       let publisher;
       let subscriber;
@@ -141,8 +150,14 @@ try {
         });
         observeClosed('subscriber', subscriber);
         await window.reportPhase({ phase: 'subscriber connected' });
+        // Assertion 2. The announce left with the first registered track; the relay routes subscribes to
+        // the namespace about a round trip later, so the subscribe retries the 404 it may still answer.
+        await publisher.announced;
+        await window.reportPhase({ phase: 'announced' });
+        const retries = { events: 0, status: 0 };
         for (const track of ['events', 'status']) {
-          subscriber.subscribe(
+          await subscribeWithRetry(
+            subscriber,
             { namespace, track },
             {
               onSubscribed: () => {
@@ -154,8 +169,16 @@ try {
               onError: (error) => errors.push(`${track}: ${error.errorCode} ${error.reason}`),
               onSubgroupReset: ({ error }) => errors.push(`${track} reset: ${String(error)}`),
             },
+            {
+              signal: lifetime.signal,
+              onRetry: (attempt, delayMs) => {
+                retries[track] += 1;
+                void window.reportPhase({ phase: 'subscribe retried', track, attempt, delayMs });
+              },
+            },
           );
         }
+        if (errors.length > 0) throw new Error(errors.join('; '));
         for (const payload of expectedEvents) await events.write(new Uint8Array(payload));
         await status.write(new Uint8Array([42]));
         await waitForCount('events', 3);
@@ -203,6 +226,7 @@ try {
           namespace,
           events: received.events.length,
           status: received.status.length,
+          announceRaceRetries: retries,
           binaryAndEmptyPayloads: 'passed',
           independentTrackClose: 'passed',
           lateSubscriberLargestObject: lateLargestObject,

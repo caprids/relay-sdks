@@ -304,8 +304,7 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   the publisher has: the relay acknowledges an announce with nothing and routes subscribes about a
   round trip later. It stays pending while no solicitation covers the namespace (the first write
   reports `NAMESPACE_NOT_SOLICITED`), and the connection's closure terminates it if that comes
-  first, with the closure's error or `CLOSED` after a clean shutdown. Implemented in Python; the
-  TypeScript SDK does not have it yet.
+  first, with the closure's error or `CLOSED` after a clean shutdown.
 - The default write deadline is 10 seconds and covers both waiting for demand and the transport
   write.
 - A timeout, cancellation, transport write failure, or relay subscription change resets the

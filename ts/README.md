@@ -59,8 +59,9 @@ for your machine (`playwright install-deps chromium`) before continuing.
 
 A publisher's `write()` waits for relay demand: a matching subscriber must be running. Even when
 publishing connects first, a fresh namespace can briefly reject subscriptions with `404 Broadcast
-not found` while its announcement propagates. The combined demo starts both sides, retries only
-that subscription rejection with capped backoff, and waits for demand before writing. Once a write
+not found` while its announcement propagates, about a round trip. The combined demo starts both
+sides, waits for the publisher's `announced`, retries only that subscription rejection with capped
+backoff, and waits for demand before writing. Once a write
 starts, a failure stops the run; it never automatically replays potentially delivered bytes.
 
 Enter the endpoint and a **fresh namespace authorized by your token** when prompted below. The CLI
@@ -270,6 +271,15 @@ A failed or cancelled write resets its stream and leaves the track open while th
 connection remains open. The next explicit write uses a new group ID. After a timeout or relay
 subscription change, choose fresh data or the next random-access point; already delivered bytes
 cannot be withdrawn. If demand disappeared, the next write waits for a new relay subscription.
+
+Connecting announces the namespace once the first track is registered, and `publisher.announced`
+settles when that announce has reached the wire: the relay acknowledges nothing more, and it routes
+subscribes to the namespace about a round trip later. A subscribe that arrives before then is
+rejected with `404 Broadcast not found`. The SDK does not retry a subscribe, so a subscriber retries
+that rejection within its own budget (the demo and the live smoke test share
+`examples/shared/announce-race.js` for it), and a page that owns both sides awaits `announced`
+before subscribing. `announced` stays pending while no solicitation covers the namespace, and the
+connection's closure rejects it if that comes first; it is pre-handled, so nobody has to await it.
 
 Each write copies its bytes and sends one independent group containing one object. The payload is a
 `Uint8Array`; any other `ArrayBufferView` is accepted and copied as the raw bytes it spans, while a
@@ -498,8 +508,9 @@ mise exec -- pnpm --dir ts exec playwright install chromium   # once
 RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:test:relay
 ```
 
-The test checks binary
-and empty payloads plus independent track closure, then closes both connections. It defaults to
+The test waits for the publisher's `announced`, subscribes through the examples' announce-race
+retry and reports how often it retried, checks binary and empty payloads plus independent track
+closure, then closes both connections. It defaults to
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
 the SDK are absolute: include the token's root prefix when required by the relay.
 

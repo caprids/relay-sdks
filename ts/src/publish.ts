@@ -118,6 +118,17 @@ export interface RelayPublisher {
    * writer closes.
    */
   registerTrack(options: RegisterTrackOptions): RelayTrackWriter;
+  /**
+   * Settles once the namespace announce has reached the wire on a solicitation that covers it,
+   * which is no earlier than the first registered track. It is the strongest fact the publisher
+   * has: the relay acknowledges an announce with nothing and routes subscribes for the namespace
+   * about a round trip later, so a subscribe that races it is rejected with 404 (see
+   * spec/behavior.md). It stays pending while no solicitation covers the namespace, where the first
+   * write reports `NAMESPACE_NOT_SOLICITED`, and the connection's closure terminates it if that
+   * comes first: the closure's error, or a `CLOSED` RelayError after a clean shutdown. Pre-handled,
+   * so nobody has to await it.
+   */
+  readonly announced: Promise<void>;
   /** Ends when the connection shuts down. Errors are returned as data; this never rejects. */
   readonly closed: Promise<{ error?: unknown }>;
   /** End all tracks, retract the namespace, and wait for transport shutdown. Idempotent. */
@@ -137,11 +148,21 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   // One write slot per registered track; the session's binding callback and the connection's end
   // reach the slots through here.
   const tracks = new Map<string, WriteSlot>();
+  // Settled by the session's onAnnounced callback; a closure that comes first terminates it.
+  let announce: () => void = () => {};
+  let abandonAnnounce: (reason: unknown) => void = () => {};
+  const announced = new Promise<void>((resolve, reject) => {
+    announce = resolve;
+    abandonAnnounce = reject;
+  });
+  // Nobody may await readiness; a rejection must not surface as an unhandled rejection.
+  void announced.catch(() => {});
   const lifetime = await openRelaySession(options, (transport, callbacks) =>
     createMoqtPublishSession(transport, {
       implementationName: '@mux/relay publisher',
       callbacks: {
         ...callbacks,
+        onAnnounced: () => announce(),
         onTrackBinding: ({ trackName, trackAlias }) => tracks.get(trackName)?.bind(trackAlias),
         onAnnounceEnded: ({ error }) =>
           callbacks.onClosed?.({
@@ -156,6 +177,9 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   session.announce(namespace);
   void lifetime.closed.then(({ error }) => {
     closing = true;
+    abandonAnnounce(
+      error ?? new RelayError('CLOSED', 'Relay publisher closed before its namespace was announced', 'connection'),
+    );
     for (const slot of tracks.values()) slot.disconnect(error);
   });
   const closed = lifetime.transportClosed.then(
@@ -164,6 +188,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   );
 
   return {
+    announced,
     closed,
     registerTrack({ track, trackProperties, writeTimeoutMs = 10_000 }) {
       // Arguments first, then connection state, then the registry.

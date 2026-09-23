@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { runDemo } from '../examples/mux-global/demo.js';
-import { connectRelayPublisher, connectRelaySubscriber, SubscriptionRequestError } from '../src/index.js';
+import { connectRelayPublisher, connectRelaySubscriber } from '../src/index.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
 const connectors = vi.hoisted(() => ({ connectRelaySubscriber: vi.fn(), connectRelayPublisher: vi.fn() }));
@@ -48,6 +48,10 @@ it('runs the documented one-object round trip and closes both connections', asyn
   const log = vi.fn();
   await expect(runDemo(config, log)).resolves.toEqual({ published: 1, received: 1 });
   expect(log).toHaveBeenCalledWith(expect.objectContaining({ event: 'received', seq: 1 }));
+  // The combined run waits for the announce to reach the wire before it subscribes, and says so.
+  const events = log.mock.calls.map(([entry]) => entry.event);
+  expect(events.indexOf('announced')).toBeGreaterThanOrEqual(0);
+  expect(events.indexOf('announced')).toBeLessThan(events.indexOf('subscribed'));
   await expectClosed();
   for (const connection of connections) expect((await connection.closed).error).toBeUndefined();
 });
@@ -104,32 +108,6 @@ it('allows subscriber-first startup with a matching publisher', async () => {
     { published: 0, received: 1 },
     { published: 1, received: 0 },
   ]);
-  await expectClosed();
-});
-
-it('retries a fresh-namespace 404 with backoff before receiving an object', async () => {
-  let subscribe;
-  connectors.connectRelaySubscriber.mockImplementation(async (options) => {
-    const subscriber = await connectRelaySubscriber({ ...options, createTransport: hub.connectSubscriber });
-    connections.push(subscriber);
-    const original = subscriber.subscribe.bind(subscriber);
-    subscribe = vi
-      .spyOn(subscriber, 'subscribe')
-      .mockImplementationOnce(() => {
-        const rejection = new SubscriptionRequestError({
-          errorCode: 404,
-          retryInterval: 0,
-          reason: 'Broadcast not found',
-        });
-        return { cancel() {}, subscribed: Promise.reject(rejection), ended: new Promise(() => {}) };
-      })
-      .mockImplementation(original);
-    return subscriber;
-  });
-  const log = vi.fn();
-  await expect(runDemo(config, log)).resolves.toEqual({ published: 1, received: 1 });
-  expect(subscribe).toHaveBeenCalledTimes(2);
-  expect(log).toHaveBeenCalledWith({ event: 'waiting', detail: 'namespace not announced yet; retrying the subscribe' });
   await expectClosed();
 });
 
