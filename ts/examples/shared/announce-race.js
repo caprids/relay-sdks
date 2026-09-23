@@ -29,7 +29,8 @@ export const MAX_DELAY_MS = 2000;
  * plain `subscribe()`. The 404s this retries never reach `handlers.onError`; every other event
  * reaches the handlers untouched. The delay starts at `initialDelayMs` and doubles up to
  * `maxDelayMs`; `onRetry(attempt, delayMs)` runs before each wait. Only `signal` bounds the
- * retries: aborting it rejects with the abort reason.
+ * retries: aborting it rejects with the abort reason, and cancels a request the relay has not
+ * answered yet so it cannot be accepted after the budget ran out.
  *
  * @template {{ subscribed: Promise<unknown> }} T
  * @param {{ subscribe(options: object, handlers?: object): T }} subscriber
@@ -51,15 +52,37 @@ export async function subscribeWithRetry(
     signal?.throwIfAborted();
     const subscription = subscriber.subscribe(options, mutingRetriedRejections(handlers));
     try {
-      await subscription.subscribed;
+      await unlessAborted(subscription.subscribed, signal);
       return subscription;
     } catch (error) {
+      if (signal?.aborted) {
+        // The budget ran out while the relay had not answered: a request left pending could still be
+        // accepted and deliver objects to handlers nobody expects to run.
+        subscription.cancel(signal.reason);
+        throw signal.reason;
+      }
       // The connection ended first, or the caller cancelled the handle: it carries the reason.
       if (!isFreshNamespaceRejection(error)) return subscription;
     }
     onRetry?.(attempt, delayMs);
     await sleep(delayMs, signal);
     delayMs = Math.min(delayMs * 2, maxDelayMs);
+  }
+}
+
+/** `promise`, unless `signal` aborts first, which rejects with the abort reason. */
+async function unlessAborted(promise, signal) {
+  if (!signal) return promise;
+  signal.throwIfAborted();
+  let abort = () => {};
+  const aborted = new Promise((_, reject) => {
+    abort = () => reject(signal.reason);
+    signal.addEventListener('abort', abort, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    signal.removeEventListener('abort', abort);
   }
 }
 

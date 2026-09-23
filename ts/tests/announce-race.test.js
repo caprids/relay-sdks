@@ -131,6 +131,20 @@ it('rejects with the abort reason while waiting and subscribes no further', asyn
   expect(subscriber.attempts).toHaveLength(1);
 });
 
+it("rejects with the abort reason while awaiting the relay's answer and cancels the pending request", async () => {
+  const subscriber = new FakeSubscriber(); // never answers
+  const owner = new AbortController();
+  const reason = new Error('run deadline');
+
+  const pending = retry(subscriber, undefined, { signal: owner.signal });
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  owner.abort(reason);
+
+  await expect(pending).rejects.toBe(reason);
+  expect(subscriber.attempts).toHaveLength(1);
+  expect(subscriber.subscriptions[0].cancelled).toEqual([reason]);
+});
+
 it('returns the handle when the connection ends first', async () => {
   const closed = new Error('connection closed');
   const subscriber = new FakeSubscriber((subscription) => subscription.fail(closed));
