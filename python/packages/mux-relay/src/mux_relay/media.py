@@ -266,6 +266,12 @@ class FrameWriter(Generic[F]):
             # The SDK reset the group's stream already; the next keyframe opens a fresh one.
             self._group = None
             return self._failed(error, group_id=group.group_id)
+        except BaseException:
+            # Cancelled from outside (the task, the caller's deadline, the lifetime's reason): the
+            # SDK reset the group too, and it would replay this failure from the next FIN. Let it
+            # go; the next keyframe opens a fresh one.
+            self._group = None
+            raise
 
         self._objects += 1
         return FrameOutcome("sent", group_id=group.group_id)
@@ -302,6 +308,8 @@ class FrameWriter(Generic[F]):
         except RelayError as error:
             return self._failed(error, group_id=None)
 
+        self._groups += 1
+
         if self._stale(frame):
             # Opening the stream took long enough that the frame is too old; a reset costs less
             # than a late frame.
@@ -310,6 +318,7 @@ class FrameWriter(Generic[F]):
 
         try:
             await group.write(frame.payload, properties=frame.properties)
+            self._objects += 1
             await group.close()
         except RelayError as error:
             group.abort()
@@ -318,8 +327,6 @@ class FrameWriter(Generic[F]):
             group.abort()
             raise
 
-        self._groups += 1
-        self._objects += 1
         return FrameOutcome("sent", group_id=group.group_id)
 
     # ------------------------------------------------------------------ failures

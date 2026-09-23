@@ -26,6 +26,8 @@ class FakeGroupWriter:
         self.objects: list[tuple[bytes, tuple[KeyValuePair, ...]]] = []
         self.finished = False
         self.aborts: list[object] = []
+        self.failure: BaseException | None = None
+        """Like the real group writer: once an operation was cancelled, every later step raises that reason."""
 
     @property
     def payloads(self) -> list[bytes]:
@@ -38,10 +40,16 @@ class FakeGroupWriter:
         properties: Sequence[KeyValuePair] | None = None,
         status: ObjectStatus = "normal",
     ) -> None:
+        if self.failure is not None:
+            raise self.failure
+
         await self._track._step("group-write", self)
         self.objects.append((payload, tuple(properties or ())))
 
     async def close(self) -> None:
+        if self.failure is not None:
+            raise self.failure
+
         await self._track._step("group-close", self)
         self.finished = True
 
@@ -96,7 +104,14 @@ class FakeTrackWriter:
 
         if step == "group-write" and self.block is not None:
             self.blocked.set()
-            await self.block.wait()
+
+            try:
+                await self.block.wait()
+            except BaseException as error:
+                if group is not None:
+                    group.failure = error
+
+                raise
 
         if failure is not None:
             error, retire = failure

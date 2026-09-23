@@ -236,6 +236,30 @@ class TestKeyframeGrouping:
         await writer.close()
         assert track.groups == []
 
+    async def test_a_cancelled_write_abandons_the_group_and_the_next_keyframe_opens_another(self) -> None:
+        # The caller's own deadline or cancellation lands inside group.write(). The SDK resets that
+        # group and keeps failing it with the same reason; holding on to it would replay the reason
+        # from the next FIN although the track is healthy.
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+        task = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+
+        task.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        track.block = None
+        assert await kinds(writer, [delta(1)]) == ["skipped"], "the GOP in progress is gone"
+        assert await kinds(writer, [key(2), delta(3)]) == ["sent", "sent"]
+        assert track.groups[1].payloads == [b"key", b"delta"]
+        assert not track.groups[0].finished, "a cancelled group is abandoned, never FINned"
+        await writer.close()
+        assert track.groups[1].finished and writer.closed
+        assert (writer.groups, writer.objects) == (2, 2)
+
     def test_grouping_is_checked_as_an_argument(self) -> None:
         with pytest.raises(TypeError):
             FrameWriter(FakeTrackWriter(), grouping=3)  # ty: ignore[invalid-argument-type]
@@ -271,7 +295,7 @@ class TestFrameGrouping:
         assert track.groups == []
         assert await writer.write(key(1)) == FrameOutcome("stale", group_id=0)
         assert track.groups[0].aborts == [None] and track.groups[0].objects == []
-        assert (writer.groups, writer.objects) == (0, 0)
+        assert (writer.groups, writer.objects) == (1, 0), "the group was opened, nothing was accepted"
 
     async def test_an_interrupted_frame_resets_its_group_and_the_next_frame_proceeds(self) -> None:
         track = FakeTrackWriter()
@@ -282,7 +306,7 @@ class TestFrameGrouping:
         assert await writer.write(key(0)) == FrameOutcome("interrupted", error=error, group_id=0)
         assert track.groups[0].aborts == [None]
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
-        assert (writer.groups, writer.objects) == (1, 1)
+        assert (writer.groups, writer.objects) == (2, 1), "both groups were opened; one object was accepted"
 
     async def test_a_failed_fin_is_an_interruption(self) -> None:
         track = FakeTrackWriter()
@@ -292,7 +316,7 @@ class TestFrameGrouping:
 
         assert await writer.write(key(0)) == FrameOutcome("interrupted", error=error, group_id=0)
         assert track.groups[0].aborts == [None]
-        assert (writer.groups, writer.objects) == (0, 0)
+        assert (writer.groups, writer.objects) == (1, 1), "the object was accepted before the FIN failed"
 
     async def test_a_retirement_ends_the_writer(self) -> None:
         track = FakeTrackWriter()
@@ -323,6 +347,10 @@ class TestFrameGrouping:
         with pytest.raises(asyncio.CancelledError):
             await task
         assert track.groups[0].aborts == [None]
+
+        track.block = None
+        assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1), "nothing of the cancelled group lingers"
+        assert (writer.groups, writer.objects) == (2, 1)
 
 
 class TestCatalogService:
