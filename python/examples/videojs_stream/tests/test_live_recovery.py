@@ -224,6 +224,7 @@ async def test_cancelling_independent_writers_accounts_for_inflight_and_queued_s
         discard_queue(queue, stats)
     assert (stats.discarded_video, stats.discarded_audio) == (2, 2)
     assert audio.groups[0].aborts == [None]
+    assert stats.video_groups == 1, "the group the cancelled keyframe opened is still counted"
 
 
 async def test_stopping_producer_joins_handoff_and_flushes_both_eofs(monkeypatch: pytest.MonkeyPatch) -> None:

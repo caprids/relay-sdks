@@ -177,6 +177,13 @@ class TestKeyframeGrouping:
         assert await writer.write(key(1)) == FrameOutcome("ended", error=error)
         assert len(track.groups) == 1, "a retired writer never touches the track again"
 
+        # The application's own close still wins: afterwards a write is a programming error.
+        await writer.close()
+
+        with pytest.raises(RelayError) as caught:
+            await writer.write(key(2))
+        assert caught.value.code == "CLOSED"
+
     async def test_a_transient_error_on_a_track_that_closed_is_a_retirement_too(self) -> None:
         # The SDK may report the change of subscription first and close the track in the same turn;
         # `closed` afterwards is what tells them apart, never `has_demand`.

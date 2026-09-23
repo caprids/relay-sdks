@@ -817,6 +817,10 @@ async def publish_media(
     finally:
         queue.pending = None
 
+        if queue.kind == "video":
+            # A keyframe write cancelled by the shutdown may have opened a group `account` never saw.
+            stats.video_groups = writer.groups
+
         try:
             await writer.close()
         except BaseException as error:

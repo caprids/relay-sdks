@@ -187,11 +187,12 @@ class FrameWriter(Generic[F]):
         sent. Raises ``RelayError`` with code ``CLOSED`` after :meth:`close`; a track that ended on
         its own is reported as an ``ended`` outcome instead, because the encoder keeps producing.
         """
+        if self._closed:
+            # The application's own close wins over everything, a retirement seen earlier included.
+            raise RelayError("Frame writer is closed", code="CLOSED", phase="writing")
+
         if self._ended is not None:
             return FrameOutcome("ended", error=self._ended)
-
-        if self._closed:
-            raise RelayError("Frame writer is closed", code="CLOSED", phase="writing")
 
         if self._track.closed:
             # The track ended while nothing was in flight (the connection closed, or the application
