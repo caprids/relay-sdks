@@ -11,10 +11,13 @@ client role lives in :class:`WebTransportSession`, and the test suite adds a ser
 base so the loopback test exercises the real stream code.
 
 The package follows the layers of the protocol: ``_wire`` (capsules, structured-field lists and the
-error-code mapping), ``_errors``, ``_streams`` (the send and receive halves of a stream), ``_protocol``
-(the aioquic connection protocol driving HTTP/3), ``_session`` (what both ends of a session share)
-and ``_client`` (URL, socket and the extended CONNECT). The product imports :func:`connect_webtransport`
-and catches :class:`WebTransportError`; the test suite reaches the private modules directly.
+error-code mapping), ``_errors``, ``_streams`` (the send and receive halves of a stream, and the link
+they need from their session), ``_protocol`` (the aioquic connection protocol driving HTTP/3),
+``_session`` (what both ends of a session share) and ``_client`` (URL, socket and the extended
+CONNECT). Two modules hold what is aioquic's rather than WebTransport's: ``_aioquic`` names every
+private member the adapter reaches into, and ``_fin_retry`` is the dropped-FIN workaround (#47),
+deletable as a unit. The product imports :func:`connect_webtransport` and catches
+:class:`WebTransportError`; the test suite reaches the private modules directly.
 """
 
 from ._client import connect_webtransport

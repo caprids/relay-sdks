@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol
@@ -14,19 +13,19 @@ from aioquic.quic.connection import QuicConnection
 
 from moq_core._tasks import observe
 
+from ._aioquic import live_stream
+from ._fin_retry import DroppedFinRetry
+
 if TYPE_CHECKING:
     from ._session import WebTransportSessionBase
-
-_FIN_RETRY_INTERVAL = 0.25
-"""Seconds between sweeps that re-queue a FIN aioquic dropped under a full congestion window."""
 
 
 class WebTransportProtocol(QuicConnectionProtocol):
     """An aioquic connection protocol that drives HTTP/3 with WebTransport enabled.
 
     Routes HTTP/3 and QUIC stream events to the :class:`WebTransportSessionBase` that owns them and
-    hands request headers that belong to no session (a server's incoming CONNECT) to
-    ``on_request_headers``.
+    hands request headers that belong to no session (a server's incoming CONNECT) to the
+    :meth:`_on_request_headers` hook, which only a server role overrides.
     """
 
     def __init__(self, quic: QuicConnection, stream_handler: Any = None, *, owns_transport: bool = False) -> None:
@@ -34,18 +33,18 @@ class WebTransportProtocol(QuicConnectionProtocol):
         self.h3 = H3Connection(quic, enable_webtransport=True)
         self.sessions: dict[int, WebTransportSessionBase] = {}
         self.stream_owners: dict[int, WebTransportSessionBase] = {}
-        self.on_request_headers: Callable[[HeadersReceived], None] | None = None
         self.terminated: quic_events.ConnectionTerminated | None = None
         self.terminated_event: asyncio.Event = asyncio.Event()
         self.owns_transport = owns_transport
         """Whether the UDP transport is this connection's own (a client) or a listener's shared socket (a server)."""
         self.transport_closed: asyncio.Event = asyncio.Event()
         """Set once the connection is over and its UDP socket is released (or was never ours to release)."""
+        self.fin_retry = DroppedFinRetry(self._loop, quic, self.transmit)
+        """The aioquic dropped-FIN workaround (#47); ``_session`` hands it every stream whose FIN it queues."""
         self._orphans: dict[int, list[WebTransportStreamDataReceived]] = {}
         self._settling: dict[int, WebTransportSessionBase] = {}
         """Streams whose owner waits on a transmission or acknowledgement (a write, a FIN, a reset)."""
         self._draining: list[WebTransportSessionBase] = []
-        self._fin_retry_handle: asyncio.TimerHandle | None = None
 
     async def wait_connected(self) -> None:
         try:
@@ -65,40 +64,10 @@ class WebTransportProtocol(QuicConnectionProtocol):
 
     def watch_stream(self, stream_id: int, session: WebTransportSessionBase) -> None:
         self._settling[stream_id] = session
-        self._schedule_fin_retry()
 
     def watch_drain(self, session: WebTransportSessionBase) -> None:
         if session not in self._draining:
             self._draining.append(session)
-
-    def _schedule_fin_retry(self) -> None:
-        if self._fin_retry_handle is None and self._settling and self.terminated is None:
-            self._fin_retry_handle = self._loop.call_later(_FIN_RETRY_INTERVAL, self._retry_dropped_fins)
-
-    def _retry_dropped_fins(self) -> None:
-        """Periodically re-queue FINs aioquic dropped under a full window (see ``_rearm_fin``).
-
-        A time-based sweep, not a per-transmit one: a FIN can be dropped and the window then open
-        before the next transmit, so a congestion-gated retry would miss it, while re-queuing on every
-        transmit would resend a healthy in-flight FIN each round. On a healthy link a FIN is acknowledged
-        within the interval and is never re-queued; a genuinely dropped one is retried until it lands.
-        """
-        self._fin_retry_handle = None
-
-        if self.terminated is not None:
-            return
-
-        streams = self._quic._streams
-        rearmed = False
-
-        for stream_id, session in list(self._settling.items()):
-            if session._rearm_fin(stream_id, streams.get(stream_id)):
-                rearmed = True
-
-        if rearmed:
-            self.transmit()
-
-        self._schedule_fin_retry()
 
     def transmit(self) -> None:
         super().transmit()
@@ -109,10 +78,8 @@ class WebTransportProtocol(QuicConnectionProtocol):
             self._settle()
 
     def _settle(self) -> None:
-        streams = self._quic._streams
-
         for stream_id, session in list(self._settling.items()):
-            if not session._settle_stream(stream_id, streams.get(stream_id)):
+            if not session._settle_stream(stream_id, live_stream(self._quic, stream_id)):
                 self._settling.pop(stream_id, None)
 
         for session in list(self._draining):
@@ -120,13 +87,8 @@ class WebTransportProtocol(QuicConnectionProtocol):
                 self._draining.remove(session)
 
     def connection_lost(self, exc: Exception | None) -> None:
-        self._cancel_fin_retry()
+        self.fin_retry.stop()
         self.transport_closed.set()
-
-    def _cancel_fin_retry(self) -> None:
-        if self._fin_retry_handle is not None:
-            self._fin_retry_handle.cancel()
-            self._fin_retry_handle = None
 
     def quic_event_received(self, event: quic_events.QuicEvent) -> None:
         if isinstance(event, quic_events.StreamReset):
@@ -151,7 +113,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
             self._orphans.clear()
             self._settling.clear()
             self._draining.clear()
-            self._cancel_fin_retry()
+            self.fin_retry.stop()
 
             for session in list(self.sessions.values()):
                 session._on_terminated(event)
@@ -179,8 +141,8 @@ class WebTransportProtocol(QuicConnectionProtocol):
 
             if session is not None:
                 session._on_connect_headers(event)
-            elif self.on_request_headers is not None:
-                self.on_request_headers(event)
+            else:
+                self._on_request_headers(event)
 
             return
 
@@ -189,6 +151,13 @@ class WebTransportProtocol(QuicConnectionProtocol):
 
             if session is not None:
                 session._on_connect_data(event.data, event.stream_ended)
+
+    # ------------------------------------------------------------------ role hooks
+
+    def _on_request_headers(self, event: HeadersReceived) -> None:
+        """Headers on a stream no session owns: a peer's CONNECT. A client has no such role and ignores them."""
+
+    # ------------------------------------------------------------------ teardown
 
     def _close_transport_soon(self) -> None:
         transport = self._transport
@@ -208,16 +177,3 @@ class WebTransportProtocol(QuicConnectionProtocol):
                 self._transport.close()
 
         self._loop.call_later(3.0, release)
-
-
-def _finish_receiving_half(quic: QuicConnection, stream_id: int) -> None:
-    """Mark a locally opened unidirectional stream's receiving half done so aioquic can discard the stream.
-
-    aioquic 1.3 leaves that half unfinished although nothing can ever arrive on it, so the stream
-    would otherwise stay in ``QuicConnection._streams`` (and in the per-packet scheduling loop) for
-    the life of the connection after its FIN or reset was acknowledged.
-    """
-    stream = quic._streams.get(stream_id)
-
-    if stream is not None:
-        stream.receiver.is_finished = True

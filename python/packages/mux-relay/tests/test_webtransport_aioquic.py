@@ -1,14 +1,31 @@
-"""Pins the aioquic internals the adapter reaches into, names and behaviour, so a dependency bump fails here first."""
+"""Pins the aioquic internals the adapter reaches into, so a dependency bump fails here first.
+
+``TestAioquicInternals`` asserts the private members by name and behaviour; ``TestAioquicFunctions`` checks
+each function of ``mux_relay.webtransport._aioquic``, the one module that names those members, against
+real aioquic objects one state transition at a time.
+"""
 
 import asyncio
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol
-from aioquic.h3.connection import H3Connection, H3Stream
+from aioquic.h3.connection import FrameType, H3Connection, H3Stream
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet_builder import QuicDeliveryState
 from aioquic.quic.rangeset import RangeSet
 from aioquic.quic.stream import QuicStream, QuicStreamReceiver, QuicStreamSender
+
+from mux_relay.webtransport._aioquic import (
+    acknowledged,
+    fin_unsent,
+    finish_receiving_half,
+    forget_h3_stream,
+    live_stream,
+    mark_webtransport_stream,
+    rearm_fin,
+    reset_pending,
+    transmitted,
+)
 
 
 class TestAioquicInternals:
@@ -58,7 +75,8 @@ class TestAioquicInternals:
         assert len(sender._buffer) == 0
         assert sender.is_finished is True
 
-        # The FIN retry re-arms exactly these two after aioquic consumed a FIN it could not send.
+        # The dropped-FIN retry (`_fin_retry`, #47) re-arms exactly these two after aioquic consumed a FIN it
+        # could not send; delete this block with it.
         rearmed = QuicStreamSender(stream_id=6, writable=True)
         rearmed.write(b"", end_stream=True)
         rearmed._pending_eof = False
@@ -100,3 +118,142 @@ class TestAioquicInternals:
         assert protocol._connected_waiter is None
         assert protocol._transport is None
         assert protocol._loop is asyncio.get_running_loop()
+
+
+class TestAioquicFunctions:
+    """Each named question ``_aioquic`` answers, over real aioquic objects."""
+
+    @staticmethod
+    def _connection() -> QuicConnection:
+        return QuicConnection(configuration=QuicConfiguration(is_client=True))
+
+    def _stream_with(self, quic: QuicConnection, data: bytes, *, fin: bool = False) -> QuicStream:
+        stream_id = quic.get_next_available_stream_id(is_unidirectional=True)
+        quic.send_stream_data(stream_id, data, end_stream=fin)
+        stream = live_stream(quic, stream_id)
+        assert stream is not None
+        return stream
+
+    def test_live_stream_is_none_for_a_stream_aioquic_does_not_hold(self) -> None:
+        quic = self._connection()
+        assert live_stream(quic, 998) is None
+        stream = self._stream_with(quic, b"x")
+        stream_id = stream.stream_id
+        assert stream_id is not None
+        assert live_stream(quic, stream_id) is stream
+
+    def test_transmitted_once_nothing_queued_remains(self) -> None:
+        stream = self._stream_with(self._connection(), b"abc")
+        assert not transmitted(stream)
+
+        assert stream.sender.get_frame(1024) is not None
+
+        assert transmitted(stream)
+        assert not acknowledged(stream)  # on the wire, not yet acknowledged
+
+    def test_a_queued_fin_counts_as_untransmitted(self) -> None:
+        stream = self._stream_with(self._connection(), b"abc")
+        assert stream.sender.get_frame(1024) is not None
+        assert transmitted(stream)
+
+        stream.sender.write(b"", end_stream=True)
+
+        assert not transmitted(stream)
+        assert stream.sender.get_frame(1024) is not None
+        assert transmitted(stream)
+
+    def test_acknowledged_once_data_and_fin_are_acked(self) -> None:
+        stream = self._stream_with(self._connection(), b"abc", fin=True)
+        frame = stream.sender.get_frame(1024)
+        assert frame is not None and frame.fin
+        assert not acknowledged(stream)
+
+        stream.sender.on_data_delivery(QuicDeliveryState.ACKED, 0, 3, True)
+
+        assert acknowledged(stream)
+        assert stream.sender.is_finished
+
+    def test_a_stream_without_a_fin_is_acknowledged_once_its_bytes_are(self) -> None:
+        stream = self._stream_with(self._connection(), b"abc")
+        assert stream.sender.get_frame(1024) is not None
+
+        stream.sender.on_data_delivery(QuicDeliveryState.ACKED, 0, 3, False)
+
+        assert acknowledged(stream)
+        assert not stream.sender.is_finished  # more can still be written
+
+    def test_reset_pending_until_the_reset_is_acknowledged(self) -> None:
+        stream = self._stream_with(self._connection(), b"abc")
+        assert not reset_pending(stream)
+
+        stream.sender.reset(5)
+
+        assert reset_pending(stream)
+        assert not acknowledged(stream)
+
+        stream.sender.on_reset_delivery(QuicDeliveryState.ACKED)
+
+        assert not reset_pending(stream)
+        assert acknowledged(stream)
+
+    def test_fin_unsent_names_a_consumed_unacknowledged_fin_and_rearm_requeues_it(self) -> None:
+        stream = self._stream_with(self._connection(), b"", fin=True)
+        assert not fin_unsent(stream)  # queued, not yet consumed
+
+        frame = stream.sender.get_frame(1024)
+        assert frame is not None and frame.fin
+        assert fin_unsent(stream)
+
+        rearm_fin(stream)
+
+        assert not fin_unsent(stream)
+        assert stream.sender._pending_eof is True
+        assert stream.sender.buffer_is_empty is False
+        again = stream.sender.get_frame(1024)
+        assert again is not None and again.fin  # the next packet carries it
+
+        stream.sender.on_data_delivery(QuicDeliveryState.ACKED, 0, 0, True)
+
+        assert not fin_unsent(stream)
+
+    def test_fin_unsent_is_false_once_the_stream_is_reset(self) -> None:
+        stream = self._stream_with(self._connection(), b"", fin=True)
+        assert stream.sender.get_frame(1024) is not None
+        assert fin_unsent(stream)
+
+        stream.sender.reset(0)
+
+        assert not fin_unsent(stream)
+
+    def test_finish_receiving_half_marks_our_unidirectional_stream_done(self) -> None:
+        quic = self._connection()
+        stream = self._stream_with(quic, b"x")
+        assert stream.receiver.is_finished is False
+
+        stream_id = stream.stream_id
+        assert stream_id is not None
+        finish_receiving_half(quic, stream_id)
+
+        assert stream.receiver.is_finished is True
+        finish_receiving_half(quic, 998)  # a stream aioquic does not hold: nothing to do
+
+    def test_mark_webtransport_stream_records_the_frame_type_and_session(self) -> None:
+        quic = self._connection()
+        h3 = H3Connection(quic, enable_webtransport=True)
+        stream_id = quic.get_next_available_stream_id()
+
+        mark_webtransport_stream(h3, stream_id, 4)
+
+        assert h3._stream[stream_id].frame_type == FrameType.WEBTRANSPORT_STREAM
+        assert h3._stream[stream_id].session_id == 4
+
+    def test_forget_h3_stream_drops_the_record(self) -> None:
+        quic = self._connection()
+        h3 = H3Connection(quic, enable_webtransport=True)
+        stream_id = quic.get_next_available_stream_id()
+        mark_webtransport_stream(h3, stream_id, 4)
+
+        forget_h3_stream(h3, stream_id)
+
+        assert stream_id not in h3._stream
+        forget_h3_stream(h3, stream_id)  # already gone: nothing to do

@@ -1,32 +1,59 @@
-"""The two halves of a WebTransport stream, and the queue incoming streams are accepted from."""
+"""The two halves of a WebTransport stream, the link they need from their session, and the incoming-stream queue.
+
+A half never touches QUIC. It asks its :class:`_StreamLink` to queue bytes or a FIN, to reset or stop a
+stream, and whether the session is still live; the link drives the half back through
+:meth:`_ReceiveHalf.feed` and :meth:`_ReceiveHalf.fail`, and :meth:`_SendHalf.settled`,
+:meth:`_SendHalf.fail_transmit`, :meth:`_SendHalf.stopped` and :meth:`_SendHalf.fail`.
+``WebTransportSessionBase`` is the production link; the tests connect a send half to a receive half
+directly (``relay_helpers/stream_link.py``).
+"""
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
-from typing import TYPE_CHECKING, Any
+from typing import Any, Protocol
 
 from moq_core._tasks import observe
 
 from ._errors import WebTransportError, _error_code_of
 
-if TYPE_CHECKING:
-    from ._session import WebTransportSessionBase
+
+class _StreamLink(Protocol):
+    """What a half needs from the session it belongs to."""
+
+    def check_live(self) -> None:
+        """Raise the session's closure error when it can no longer carry streams."""
+
+    async def send(self, half: _SendHalf, data: bytes, end_stream: bool) -> None:
+        """Queue ``data`` (and the FIN when ``end_stream``) on the half's stream; return once it was transmitted."""
+
+    def reset_stream(self, stream_id: int, code: int) -> None:
+        """RESET_STREAM with the application error ``code``."""
+
+    def stop_stream(self, stream_id: int, code: int) -> None:
+        """STOP_SENDING with the application error ``code``."""
 
 
 class _ReceiveHalf:
     """The receiving side of a WebTransport stream; satisfies :class:`ReceiveStream`."""
 
-    __slots__ = ("_cancelled", "_chunks", "_eof", "_error", "_session", "_stream_id", "_waiter")
+    __slots__ = ("_cancelled", "_chunks", "_eof", "_error", "_link", "_stream_id", "_waiter")
 
-    def __init__(self, session: WebTransportSessionBase, stream_id: int) -> None:
-        self._session = session
+    def __init__(self, link: _StreamLink, stream_id: int) -> None:
+        self._link = link
         self._stream_id = stream_id
         self._chunks: deque[bytes] = deque()
         self._eof = False
         self._error: BaseException | None = None
         self._cancelled = False
         self._waiter: asyncio.Future[None] | None = None
+
+    @property
+    def stream_id(self) -> int:
+        return self._stream_id
+
+    # ------------------------------------------------------------------ ReceiveStream
 
     async def read(self) -> bytes | None:
         while True:
@@ -48,10 +75,13 @@ class _ReceiveHalf:
 
         self._cancelled = True
         self._chunks.clear()
-        self._session._stop_stream(self._stream_id, _error_code_of(reason))
+        self._link.stop_stream(self._stream_id, _error_code_of(reason))
         self._wake()
 
+    # ------------------------------------------------------------------ driven by the link
+
     def feed(self, data: bytes, end_stream: bool) -> None:
+        """Bytes (and possibly the FIN) arrived. Ignored once the half ended or was cancelled: a retransmitted FIN."""
         if self._cancelled or self._eof or self._error is not None:
             return
 
@@ -64,6 +94,7 @@ class _ReceiveHalf:
         self._wake()
 
     def fail(self, error: BaseException) -> None:
+        """The peer reset the stream, or the session ended. Buffered chunks are still read first."""
         if self._eof or self._error is not None:
             return
 
@@ -74,6 +105,11 @@ class _ReceiveHalf:
     def ended(self) -> bool:
         """The peer finished this half (FIN or reset); nothing more can arrive on it."""
         return self._eof or self._error is not None
+
+    @property
+    def cancelled(self) -> bool:
+        """The application stopped reading (STOP_SENDING)."""
+        return self._cancelled
 
     def _wake(self) -> None:
         waiter = self._waiter
@@ -93,10 +129,10 @@ class _SendHalf:
     a slow link is felt as a slow write, and a caller's deadline covers the transport write.
     """
 
-    __slots__ = ("_aborted", "_closed", "_error", "_session", "_stopped", "_stream_id", "_transmitted")
+    __slots__ = ("_aborted", "_closed", "_error", "_link", "_stopped", "_stream_id", "_transmitted")
 
-    def __init__(self, session: WebTransportSessionBase, stream_id: int) -> None:
-        self._session = session
+    def __init__(self, link: _StreamLink, stream_id: int) -> None:
+        self._link = link
         self._stream_id = stream_id
         self._closed = False
         self._aborted = False
@@ -104,6 +140,22 @@ class _SendHalf:
         self._error: BaseException | None = None
         self._transmitted: asyncio.Future[None] | None = None
         """Pending while queued bytes (or the FIN) await transmission; ``None`` when nothing is waiting."""
+
+    @property
+    def stream_id(self) -> int:
+        return self._stream_id
+
+    @property
+    def closed(self) -> bool:
+        """``close()`` was called: the FIN is queued, in flight, or acknowledged."""
+        return self._closed
+
+    @property
+    def pending(self) -> bool:
+        """A write or the FIN is waiting to be transmitted."""
+        return self._transmitted is not None
+
+    # ------------------------------------------------------------------ SendStream
 
     def _check_writable(self) -> None:
         if self._error is not None:
@@ -118,18 +170,18 @@ class _SendHalf:
         if self._stopped is not None:
             raise WebTransportError("peer stopped the stream", code=self._stopped)
 
-        self._session._check_live()
+        self._link.check_live()
 
     async def write(self, data: bytes) -> None:
         self._check_writable()
 
         if data:
-            await self._session._send(self, bytes(data), False)
+            await self._link.send(self, bytes(data), False)
 
     async def close(self) -> None:
         self._check_writable()
         self._closed = True
-        await self._session._send(self, b"", True)
+        await self._link.send(self, b"", True)
 
     def abort(self, reason: object = None) -> None:
         # A FIN that already went out is a complete stream at the peer; a reset now would only destroy it.
@@ -137,25 +189,29 @@ class _SendHalf:
             return
 
         self._aborted = True
-        # Fail a pending write with the caller's reason before resetting: `_reset_stream` transmits,
-        # and the reset branch of `_settle_stream` would otherwise settle the waiter first with a
-        # generic "stream was aborted", masking a `write_timeout`'s WRITE_TIMEOUT error.
-        self._fail_transmit(reason if isinstance(reason, BaseException) else WebTransportError("stream was aborted"))
-        self._session._reset_stream(self._stream_id, _error_code_of(reason))
+        # Fail a pending write with the caller's reason before resetting: `reset_stream` transmits,
+        # and the reset branch of the session's settlement would otherwise settle the waiter first with
+        # a generic "stream was aborted", masking a `write_timeout`'s WRITE_TIMEOUT error.
+        self.fail_transmit(reason if isinstance(reason, BaseException) else WebTransportError("stream was aborted"))
+        self._link.reset_stream(self._stream_id, _error_code_of(reason))
+
+    # ------------------------------------------------------------------ driven by the link
 
     def stopped(self, code: int) -> None:
+        """The peer sent STOP_SENDING: queued bytes will never go out (aioquic answers with a reset of its own)."""
         if self._stopped is None:
             self._stopped = code
-            # aioquic answers STOP_SENDING with a reset of its own, so queued bytes will never go out.
-            self._fail_transmit(WebTransportError("peer stopped the stream", code=code))
+            self.fail_transmit(WebTransportError("peer stopped the stream", code=code))
 
     def fail(self, error: BaseException) -> None:
+        """The session ended, or the stream is gone: the pending transmission fails, and so does every later write."""
         if self._error is None and not self._closed and not self._aborted:
             self._error = error
 
-        self._fail_transmit(error)
+        self.fail_transmit(error)
 
-    def _transmit_waiter(self) -> asyncio.Future[None]:
+    def transmit_waiter(self) -> asyncio.Future[None]:
+        """The future the link settles once everything queued so far went out; concurrent writers share it."""
         # Never hand out a future that is already done (settled, failed, or cancelled from outside):
         # a later write or close on the stream must get a live waiter of its own.
         if self._transmitted is None or self._transmitted.done():
@@ -164,13 +220,15 @@ class _SendHalf:
 
         return self._transmitted
 
-    def _settle_transmit(self) -> None:
+    def settled(self) -> None:
+        """Everything queued so far has been handed to the wire."""
         waiter, self._transmitted = self._transmitted, None
 
         if waiter is not None and not waiter.done():
             waiter.set_result(None)
 
-    def _fail_transmit(self, error: BaseException) -> None:
+    def fail_transmit(self, error: BaseException) -> None:
+        """What was queued will not be transmitted; the half itself is unchanged (see :meth:`fail` for that)."""
         waiter, self._transmitted = self._transmitted, None
 
         if waiter is not None and not waiter.done():

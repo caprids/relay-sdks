@@ -503,7 +503,7 @@ class TestSendBackpressure:
         pair = await asyncio.wait_for(anext(transport.incoming_bidirectional_streams()), 5)
         assert await pair.readable.read() == b"hello"
         assert await pair.readable.read() is None  # the peer's FIN
-        stream_id: int = pair.writable._stream_id
+        stream_id: int = pair.writable.stream_id
         await wait_for(lambda: len(sessions) == 1, timeout=5)
 
         sessions[0].impair(paused=True)  # our bytes stop leaving, so the write below stays pending
@@ -655,7 +655,7 @@ class TestReceivePruning:
             await wait_for(lambda: len(received) == count, timeout=30)
             # Pruning follows aioquic's own discard, which follows the acknowledgement.
             await wait_for(lambda: self._maps(transport) == baseline, timeout=10)
-            await wait_for(lambda: protocol._fin_retry_handle is None, timeout=5)
+            await wait_for(lambda: protocol.fin_retry.idle, timeout=5)
         finally:
             reader.cancel()
             transport.close()
@@ -677,14 +677,14 @@ class TestReceivePruning:
             await sender.write(b"head")
             incoming = await asyncio.wait_for(anext(transport.incoming_unidirectional_streams()), 5)
             assert await incoming.read() == b"head"
-            stream_id: int = incoming._stream_id
+            stream_id: int = incoming.stream_id
 
             # Our STOP_SENDING never reaches the peer, so its FIN is already on the way: the half is
             # cancelled when the end of stream arrives.
             sessions[0].impair(paused=True)
             incoming.cancel()
             await asyncio.wait_for(sender.close(), 10)
-            await wait_for(lambda: incoming._cancelled and not incoming.ended, timeout=5)
+            await wait_for(lambda: incoming.cancelled and not incoming.ended, timeout=5)
             sessions[0].impair()
 
             await wait_for(

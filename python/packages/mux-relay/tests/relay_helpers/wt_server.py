@@ -114,7 +114,6 @@ class WebTransportServerProtocol(WebTransportProtocol):
         self._on_session = on_session
         self._respond_to_connect = respond_to_connect
         self._on_request = on_request
-        self.on_request_headers = self._handle_request
         self.requests: list[dict[bytes, bytes]] = []
         self.impairment: Impairment | None = None
 
@@ -146,7 +145,8 @@ class WebTransportServerProtocol(WebTransportProtocol):
         else:
             self._loop.call_later(delay, super().datagram_received, data, addr)
 
-    def _handle_request(self, event: HeadersReceived) -> None:
+    def _on_request_headers(self, event: HeadersReceived) -> None:
+        """Answer the peer's CONNECT: accept it as a WebTransport session, or 404 anything else."""
         headers = {key.lower(): value for key, value in event.headers}
         self.requests.append(headers)
 
