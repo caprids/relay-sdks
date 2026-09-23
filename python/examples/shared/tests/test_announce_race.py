@@ -213,6 +213,23 @@ async def test_a_404_after_acceptance_reaches_on_error() -> None:
     assert [error.error_code for error in seen] == [404]
 
 
+async def test_returns_what_the_wrapped_callbacks_return_so_the_sdk_guard_still_sees_an_awaitable() -> None:
+    subscriber = FakeSubscriber(accepted)
+    marker = object()
+    handlers = RelaySubscriptionHandlers(
+        on_subscribed=cast(Callable[[SubscribeOk], None], lambda info: marker),
+        on_error=cast(Callable[[RequestError], None], lambda error: marker),
+    )
+
+    subscription = await retry(subscriber, handlers)
+
+    given = subscription.handlers
+    assert given is not None and given.on_subscribed is not None and given.on_error is not None
+    rejection = RequestError(error_code=500, retry_interval=0, reason="internal error")
+    assert cast(object, given.on_subscribed(SubscribeOk(track_alias=7))) is marker
+    assert cast(object, given.on_error(rejection)) is marker
+
+
 async def test_forwards_the_other_handlers_and_leaves_handlers_without_on_error_alone() -> None:
     subscriber = FakeSubscriber(not_found, accepted)
     infos: list[SubscribeOk] = []

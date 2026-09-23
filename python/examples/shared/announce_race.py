@@ -96,7 +96,9 @@ def _muting_retried_rejections(handlers: RelaySubscriptionHandlers | None) -> Re
     """``handlers`` whose ``on_error`` skips the fresh-namespace 404 until the relay has accepted the request.
 
     The retry reports the outcome through the returned handle, so the callback would otherwise see
-    every attempt fail. A 404 after acceptance is a different event and passes through.
+    every attempt fail. A 404 after acceptance is a different event and passes through. The wrappers
+    return what the caller's callbacks return, so the SDK's synchronous-callback guard still sees an
+    awaitable-returning handler and applies its policy.
     """
     if handlers is None or handlers.on_error is None:
         return handlers
@@ -110,13 +112,15 @@ def _muting_retried_rejections(handlers: RelaySubscriptionHandlers | None) -> Re
         accepted = True
 
         if on_subscribed is not None:
-            on_subscribed(info)
+            return on_subscribed(info)
+
+        return None
 
     def fail(error: RequestError) -> None:
         if error.error_code == FRESH_NAMESPACE_ERROR_CODE and not accepted:
-            return
+            return None
 
-        on_error(error)
+        return on_error(error)
 
     return replace(handlers, on_subscribed=accept, on_error=fail)
 
