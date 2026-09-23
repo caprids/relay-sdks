@@ -1,18 +1,34 @@
-"""Bounded, decodable recovery after a live publisher's transport stalls."""
+"""Bounded, decodable recovery after a live publisher's transport stalls.
+
+The example's queues own the time policy; the SDK's frame writer owns the group mapping. These tests
+drive both together over the shared fake track writer.
+"""
 
 import asyncio
 import time
-from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from videojs_stream.stream import EncodedSample, LiveQueue, Stats, discard_queue, publish_live_media, publish_media
+from core_helpers.waiting import wait_for
+from relay_helpers.fake_track_writer import FakeTrackWriter, timeout_error
+from videojs_stream.stream import (
+    EncodedSample,
+    LiveQueue,
+    Stats,
+    discard_queue,
+    publish_live_media,
+    publish_media,
+    stale_for,
+)
 
-from mux_relay import CancellationToken, RelayError
+from moq_media import LOC_TIMESTAMP, loc_properties
+from mux_relay import CancellationToken
+from mux_relay.media import CatalogService, FrameWriter
 
 
 def sample(kind: str, timestamp: float, *, key: bool = True, size: int = 4) -> EncodedSample:
-    return EncodedSample(cast(Any, kind), round(timestamp * 1_000_000), bytes(size), key)
+    timestamp_us = round(timestamp * 1_000_000)
+    return EncodedSample(cast(Any, kind), timestamp_us, bytes(size), key, properties=loc_properties(timestamp_us))
 
 
 def queues(stats: Stats, *, capacity: int = 8) -> dict[str, LiveQueue]:
@@ -25,56 +41,31 @@ def queues(stats: Stats, *, capacity: int = 8) -> dict[str, LiveQueue]:
     return result
 
 
-class Group:
-    def __init__(self, track: "Track", group_id: int) -> None:
-        self.track = track
-        self.group_id = group_id
-        self.timestamps: list[int] = []
-        self.aborted = False
-        self.finished = False
-
-    async def write(self, payload: bytes, *, properties: Any) -> None:
-        if self.group_id == 0 and self.track.gate is not None:
-            self.track.started.set()
-            await self.track.gate.wait()
-            if self.track.timeout:
-                raise RelayError("transport stalled", code="WRITE_TIMEOUT", phase="writing")
-        self.timestamps.append(next(p.value for p in properties if p.type == 0x10))
-        self.track.written.set()
-
-    async def close(self) -> None:
-        self.finished = True
-
-    def abort(self) -> None:
-        self.aborted = True
+def writers(
+    buffers: dict[str, LiveQueue], video: FakeTrackWriter, audio: FakeTrackWriter
+) -> dict[str, FrameWriter[EncodedSample]]:
+    return {
+        "video": FrameWriter(video, stale=stale_for(buffers["video"])),
+        "audio": FrameWriter(audio, grouping="frame", stale=stale_for(buffers["audio"])),
+    }
 
 
-class Track:
-    def __init__(self, *, gate: asyncio.Event | None = None, timeout: bool = False) -> None:
-        self.gate = gate
-        self.timeout = timeout
-        self.has_demand = True
-        self.closed = False
-        self.started = asyncio.Event()
-        self.written = asyncio.Event()
-        self.groups: list[Group] = []
-
-    async def open_group(self) -> Group:
-        group = Group(self, len(self.groups))
-        self.groups.append(group)
-        return group
+def timestamps(track: FakeTrackWriter, group: int) -> list[int | bytes]:
+    return [
+        next(p.value for p in properties if p.type == LOC_TIMESTAMP) for _, properties in track.groups[group].objects
+    ]
 
 
-async def publish(queue: LiveQueue, track: Track, stats: Stats) -> None:
+def idle_catalog() -> CatalogService:
+    """A catalog service nobody serves; the progress reporter reads its counters."""
+    return CatalogService(FakeTrackWriter(demand=False), b"{}")
+
+
+async def publish(queue: LiveQueue, track: FakeTrackWriter, stats: Stats) -> None:
+    grouping = "keyframe" if queue.kind == "video" else "frame"
+    writer = FrameWriter(track, grouping=grouping, stale=stale_for(queue))
     await publish_media(
-        queue,
-        cast(Any, track),
-        cast(Any, track),
-        cast(Any, SimpleNamespace(avcc=b"config")),
-        stats,
-        lambda *_: None,
-        lambda *_: pytest.fail("healthy track ended"),
-        CancellationToken(),
+        queue, writer, stats, lambda *_: None, lambda *_: pytest.fail("healthy track ended"), CancellationToken()
     )
 
 
@@ -112,13 +103,12 @@ async def test_video_stall_does_not_block_audio_and_overflow_recovers_at_live_ke
     stats = Stats()
     buffers = queues(stats, capacity=4)
     gate = asyncio.Event()
-    video, audio = Track(gate=gate), Track()
+    video, audio = FakeTrackWriter(block=gate), FakeTrackWriter()
     task = asyncio.create_task(
         publish_live_media(
             buffers,
-            cast(Any, video),
-            cast(Any, audio),
-            cast(Any, SimpleNamespace(avcc=b"config")),
+            writers(buffers, video, audio),
+            idle_catalog(),
             stats,
             lambda *_: None,
             lambda *_: pytest.fail("healthy track ended"),
@@ -127,9 +117,9 @@ async def test_video_stall_does_not_block_audio_and_overflow_recovers_at_live_ke
     )
     try:
         buffers["video"].put_nowait(sample("video", 0))
-        await asyncio.wait_for(video.started.wait(), 1)
+        await asyncio.wait_for(video.blocked.wait(), 1)
         buffers["audio"].put_nowait(sample("audio", 0))
-        await asyncio.wait_for(audio.written.wait(), 1)
+        await wait_for(lambda: bool(audio.groups) and audio.groups[0].finished)
         assert not gate.is_set()
         for queue in buffers.values():
             assert queue.started is not None
@@ -144,8 +134,8 @@ async def test_video_stall_does_not_block_audio_and_overflow_recovers_at_live_ke
             queue.put_nowait(None)
         gate.set()
         await asyncio.wait_for(task, 1)
-        assert video.groups[0].aborted
-        assert video.groups[1].timestamps == [20_000_000, 20_030_000]
+        assert video.groups[0].aborts == [None]
+        assert timestamps(video, 1) == [20_000_000, 20_030_000]
         assert video.groups[1].finished
         assert stats.audio_objects == 1
         assert stats.video_objects + stats.stale_video == 107
@@ -159,11 +149,11 @@ async def test_age_drop_resets_open_gop_and_skips_fresh_delta_until_keyframe() -
     stats = Stats()
     queue = queues(stats)["video"]
     gate = asyncio.Event()
-    video = Track(gate=gate)
+    video = FakeTrackWriter(block=gate)
     task = asyncio.create_task(publish(queue, video, stats))
     try:
         queue.put_nowait(sample("video", 0))
-        await asyncio.wait_for(video.started.wait(), 1)
+        await asyncio.wait_for(video.blocked.wait(), 1)
         assert queue.started is not None
         queue.started -= 20
         queue.put_nowait(sample("video", 1, key=False))
@@ -172,8 +162,8 @@ async def test_age_drop_resets_open_gop_and_skips_fresh_delta_until_keyframe() -
         queue.put_nowait(None)
         gate.set()
         await asyncio.wait_for(task, 1)
-        assert video.groups[0].aborted
-        assert video.groups[1].timestamps == [20_030_000]
+        assert video.groups[0].aborts == [None]
+        assert timestamps(video, 1) == [20_030_000]
         assert stats.stale_video == 2
         assert stats.max_lag_seconds >= 19
     finally:
@@ -185,11 +175,12 @@ async def test_audio_transport_timeout_resets_only_frame_and_drops_old_backlog()
     stats = Stats()
     queue = queues(stats)["audio"]
     gate = asyncio.Event()
-    audio = Track(gate=gate, timeout=True)
+    audio = FakeTrackWriter(block=gate)
+    audio.fail("group-write", timeout_error())
     task = asyncio.create_task(publish(queue, audio, stats))
     try:
         queue.put_nowait(sample("audio", 0))
-        await asyncio.wait_for(audio.started.wait(), 1)
+        await asyncio.wait_for(audio.blocked.wait(), 1)
         assert queue.started is not None
         queue.started -= 20
         queue.put_nowait(sample("audio", 1))
@@ -198,8 +189,8 @@ async def test_audio_transport_timeout_resets_only_frame_and_drops_old_backlog()
         assert queue.current_lag() >= 20
         gate.set()
         await asyncio.wait_for(task, 1)
-        assert audio.groups[0].aborted
-        assert audio.groups[1].timestamps == [20_000_000]
+        assert audio.groups[0].aborts == [None]
+        assert timestamps(audio, 1) == [20_000_000]
         assert (stats.audio_objects, stats.skipped_audio, stats.stale_audio) == (1, 1, 1)
         assert stats.ended_tracks == {}
     finally:
@@ -211,13 +202,12 @@ async def test_cancelling_independent_writers_accounts_for_inflight_and_queued_s
     stats = Stats()
     buffers = queues(stats)
     gate = asyncio.Event()
-    video, audio = Track(gate=gate), Track(gate=gate)
+    video, audio = FakeTrackWriter(block=gate), FakeTrackWriter(block=gate)
     task = asyncio.create_task(
         publish_live_media(
             buffers,
-            cast(Any, video),
-            cast(Any, audio),
-            cast(Any, SimpleNamespace(avcc=b"config")),
+            writers(buffers, video, audio),
+            idle_catalog(),
             stats,
             lambda *_: None,
             lambda *_: None,
@@ -227,16 +217,19 @@ async def test_cancelling_independent_writers_accounts_for_inflight_and_queued_s
     for kind, queue in buffers.items():
         queue.put_nowait(sample(kind, 0))
         queue.put_nowait(sample(kind, 0.03))
-    await asyncio.wait_for(asyncio.gather(video.started.wait(), audio.started.wait()), 1)
+    await asyncio.wait_for(asyncio.gather(video.blocked.wait(), audio.blocked.wait()), 1)
     task.cancel()
     await asyncio.gather(task, return_exceptions=True)
     for queue in buffers.values():
         discard_queue(queue, stats)
     assert (stats.discarded_video, stats.discarded_audio) == (2, 2)
-    assert audio.groups[0].aborted
+    assert audio.groups[0].aborts == [None]
+    assert stats.video_groups == 1, "the group the cancelled keyframe opened is still counted"
 
 
 async def test_stopping_producer_joins_handoff_and_flushes_both_eofs(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
     from videojs_stream.stream import Producer
 
     stats = Stats()

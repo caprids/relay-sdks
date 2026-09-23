@@ -1,9 +1,13 @@
 # Media layer proposal: LOC packaging and MSF catalogs
 
-Status: stage 1 implemented. The format packages (`@mux/moq-media`, `moq-media`), shared vectors,
-protocol pins, and Python example migration are present. Public names for this stage are recorded
-in [vocabulary.md](vocabulary.md); [behavior.md](behavior.md#media-helpers) is the implemented contract.
-The publishing handles and public readers below remain proposals (stages 2 and 3).
+Status: stage 1 implemented; stage 2 partly implemented in Python. The format packages
+(`@mux/moq-media`, `moq-media`), shared vectors, protocol pins, and Python example migration are
+present, with [behavior.md](behavior.md#media-helpers) as their contract. Of the "Media publishing"
+piece below, the catalog service and the frame writer exist as `mux_relay.media` (`CatalogService`,
+`FrameWriter`), with [behavior.md](behavior.md#media-publishing) as their contract and the Video.js
+example as their first caller; the `register_media` handle that would compose them with the catalog
+builder, `update()` of a served document, and the public readers (stage 3) remain proposals. Public
+names for the implemented stages are recorded in [vocabulary.md](vocabulary.md).
 
 This design was written 2026-09-18. Its before/after sketches describe the eventual API; they are
 not runnable stage 1 examples. See the format packages' READMEs for current usage. Stage 1 retains

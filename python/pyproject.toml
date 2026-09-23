@@ -90,8 +90,15 @@ root = [
 include = ["packages", "scripts", "examples"]
 
 [tool.pytest.ini_options]
-testpaths = ["packages/moq-media/tests", "packages/moq-core/tests", "packages/mux-relay/tests"]
-pythonpath = ["packages/moq-core/tests", "packages/mux-relay/tests", "examples"]
+# The example's own tests run in the same session; they import it through their conftest.py, so the
+# product packages' tests cannot reach `examples/` by accident.
+testpaths = [
+  "packages/moq-media/tests",
+  "packages/moq-core/tests",
+  "packages/mux-relay/tests",
+  "examples/videojs_stream/tests",
+]
+pythonpath = ["packages/moq-core/tests", "packages/mux-relay/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
