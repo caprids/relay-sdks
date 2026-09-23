@@ -15,6 +15,7 @@ wire (measured in ``spec/relay-interop.md``).
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 
@@ -105,6 +106,15 @@ def _muting_retried_rejections(handlers: RelaySubscriptionHandlers | None) -> Re
 
     on_error = handlers.on_error
     on_subscribed = handlers.on_subscribed
+
+    # The SDK refuses a declared-async callback before it sends anything; a synchronous wrapper would
+    # hide one from that check, so apply it here first.
+    for name, callback in (("on_subscribed", on_subscribed), ("on_error", on_error)):
+        if callback is not None and (
+            inspect.iscoroutinefunction(callback) or inspect.iscoroutinefunction(callback.__call__)
+        ):
+            raise TypeError(f"{name} must be synchronous; use Relay subscribe_events() for async consumption")
+
     accepted = False
 
     def accept(info: SubscribeOk) -> None:

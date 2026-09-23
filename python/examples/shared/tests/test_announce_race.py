@@ -230,6 +230,23 @@ async def test_returns_what_the_wrapped_callbacks_return_so_the_sdk_guard_still_
     assert cast(object, given.on_error(rejection)) is marker
 
 
+async def test_refuses_a_declared_async_callback_before_subscribing_as_the_sdk_would() -> None:
+    subscriber = FakeSubscriber(accepted)
+
+    async def on_subscribed(info: SubscribeOk) -> None:
+        pass
+
+    with pytest.raises(TypeError, match="on_subscribed must be synchronous"):
+        await retry(
+            subscriber,
+            RelaySubscriptionHandlers(
+                on_subscribed=cast(Callable[[SubscribeOk], None], on_subscribed), on_error=lambda error: None
+            ),
+        )
+
+    assert subscriber.attempts == []
+
+
 async def test_forwards_the_other_handlers_and_leaves_handlers_without_on_error_alone() -> None:
     subscriber = FakeSubscriber(not_found, accepted)
     infos: list[SubscribeOk] = []
