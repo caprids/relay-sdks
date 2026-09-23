@@ -177,6 +177,27 @@ it('returns what the wrapped callbacks return, so the SDK guard still sees a pro
   expect(subscription.handlers.onError({ errorCode: 500, retryInterval: 0, reason: 'internal error' })).toBe(marker);
 });
 
+it("calls the wrapped callbacks on the caller's object and refuses a declared-async one up front", async () => {
+  const subscriber = new FakeSubscriber(accepted);
+  const handlers = {
+    calls: 0,
+    onSubscribed() {
+      this.calls += 1;
+    },
+    onError() {},
+  };
+
+  await retry(subscriber, handlers);
+
+  expect(handlers.calls).toBe(1);
+
+  const untouched = new FakeSubscriber(accepted);
+  const asyncHandlers = { async onSubscribed() {}, onError() {} };
+
+  await expect(retry(untouched, asyncHandlers)).rejects.toThrow('onSubscribed must be synchronous');
+  expect(untouched.attempts).toHaveLength(0);
+});
+
 it('forwards the other handlers and leaves handlers without onError alone', async () => {
   const subscriber = new FakeSubscriber(notFound, accepted);
   const infos = [];

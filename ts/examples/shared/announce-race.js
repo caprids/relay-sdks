@@ -94,22 +94,29 @@ function isFreshNamespaceRejection(error) {
  * `handlers` whose `onError` skips the fresh-namespace 404 until the relay has accepted the request.
  * The retry reports the outcome through the returned handle, so the callback would otherwise see
  * every attempt fail. A 404 after acceptance is a different event and passes through. The wrappers
- * return what the caller's callbacks return, so the SDK's synchronous-callback guard still sees a
- * promise-returning handler and observes it.
+ * call the caller's callbacks on the caller's object and return what they return, so a method that
+ * uses `this` still works and the SDK's synchronous-callback guard still sees a promise-returning
+ * handler and observes it.
  */
 function mutingRetriedRejections(handlers) {
   if (!handlers?.onError) return handlers;
-  const { onError, onSubscribed } = handlers;
+  // The SDK refuses a declared-async callback before it sends anything; a synchronous wrapper would
+  // hide one from that check, so apply it here first.
+  for (const name of ['onSubscribed', 'onError']) {
+    if (Object.prototype.toString.call(handlers[name]) === '[object AsyncFunction]') {
+      throw new TypeError(`${name} must be synchronous; use Relay subscribeEvents() for async consumption`);
+    }
+  }
   let accepted = false;
   return {
     ...handlers,
     onSubscribed(info) {
       accepted = true;
-      return onSubscribed?.(info);
+      return handlers.onSubscribed?.(info);
     },
     onError(error) {
       if (error.errorCode === FRESH_NAMESPACE_ERROR_CODE && !accepted) return undefined;
-      return onError(error);
+      return handlers.onError(error);
     },
   };
 }
