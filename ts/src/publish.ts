@@ -1,7 +1,7 @@
-import { createMoqtPublishSession, createSubgroupWriter, MAX_NAMESPACE_FIELDS, type ObjectStatus } from '@mux/moq-core';
+import { createMoqtPublishSession, createSubgroupWriter, type ObjectStatus } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 import { RelayError } from './errors.js';
-import { copyProperties } from './payload.js';
+import { namespaceFields, propertyPairs, trackName } from './validation.js';
 import { createWriteSlot, type WriteSlot } from './write-slot.js';
 
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
@@ -130,13 +130,9 @@ export interface RelayPublisher {
  * namespace and subscribe upstream before data can flow.
  */
 export async function connectRelayPublisher(options: ConnectRelayPublisherOptions): Promise<RelayPublisher> {
-  const namespace = [...options.namespace];
-  if (namespace.length === 0 || namespace.some((part) => typeof part !== 'string' || part.length === 0)) {
-    throw new TypeError('A publisher namespace must contain non-empty string fields');
-  }
-  if (namespace.length > MAX_NAMESPACE_FIELDS) {
-    throw new RangeError(`A publisher namespace must contain at most ${MAX_NAMESPACE_FIELDS} fields`);
-  }
+  // Arguments before anything else: an invalid namespace never reaches the token provider or the
+  // transport factory.
+  const namespace = namespaceFields(options.namespace);
 
   // One write slot per registered track; the session's binding callback and the connection's end
   // reach the slots through here.
@@ -170,17 +166,18 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   return {
     closed,
     registerTrack({ track, trackProperties, writeTimeoutMs = 10_000 }) {
+      // Arguments first, then connection state, then the registry.
+      const name = trackName(track);
+      const properties = propertyPairs(trackProperties);
+      assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
       lifetime.assertOpen();
       if (closing) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');
-      if (typeof track !== 'string') throw new TypeError('Track name must be a string');
-      if (track.length === 0) throw new TypeError('Track name must be non-empty');
-      if (tracks.has(track)) throw new TypeError('Track name is already registered on this publisher connection');
-      assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
+      if (tracks.has(name)) throw new TypeError('Track name is already registered on this publisher connection');
 
       const registered = session.registerTrack({
         trackNamespace: namespace,
-        trackName: track,
-        trackProperties: copyProperties(trackProperties),
+        trackName: name,
+        trackProperties: properties,
       });
       const slot = createWriteSlot({
         openSubgroup: async (trackAlias, groupId) =>

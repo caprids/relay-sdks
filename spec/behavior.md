@@ -84,19 +84,38 @@ chained as `__cause__`. Transport-layer exceptions are not Relay errors; a Relay
 on the transport raises `TRANSPORT_ERROR` with the transport exception as its cause.
 
 Local argument errors remain `TypeError`/`RangeError` in TypeScript and `TypeError`/`ValueError` in
-Python as appropriate. A refused concurrent operation uses `WRITE_PENDING` and does not cancel the
-active operation. Caller-provided cancellation reasons bypass wrapping, including non-Error
-JavaScript values and Python task cancellation. Connection failures are shared with pending
-publishing operations; their connection phase does not establish whether those writes sent bytes.
+Python: a value of the wrong type or shape is a `TypeError` in both languages; a value of the right
+type outside its bound is a `RangeError` in TypeScript and a `ValueError` in Python. The
+[Arguments](#arguments) table lists the rules. A refused concurrent operation uses `WRITE_PENDING`
+and does not cancel the active operation. Caller-provided cancellation reasons bypass wrapping,
+including non-Error JavaScript values and Python task cancellation. Connection failures are shared
+with pending publishing operations; their connection phase does not establish whether those writes
+sent bytes.
+
+## Arguments
+
+The values an application hands the SDK that end up on the wire are checked in their original
+container, copied once, and only then used. Both roles apply the same rules, so a namespace the
+publisher accepts is one the subscriber accepts. Arguments are checked before connection or slot
+state at every entry point: a bad argument is reported the same way on a closed connection or a busy
+track, and it never reaches the token provider, the transport factory, a request id or a stream. The
+portable cases live in `vectors/arguments.json` and run in every SDK's suite.
+
+| Argument | Rule | `TypeError` in both languages | `RangeError` (TypeScript) / `ValueError` (Python) | Checked at |
+| --- | --- | --- | --- | --- |
+| Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe` |
+| Track name | A non-empty string, in both roles. | anything else | | `registerTrack` / `register_track`; the three subscriber entry points |
+| Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length) and the encoded list at most `limits.maxObjectPropertiesBytes`; the SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds the object bound | `registerTrack` / `register_track`; `write` on a track or group writer |
+| Payload | A byte sequence: any `ArrayBufferView` in TypeScript; any object supporting the buffer protocol in Python (`bytes`, `bytearray`, `memoryview`, ...). Copied once. At most `limits.maxObjectPayloadBytes`. | a string, an `ArrayBuffer`, a list of integers, anything else | longer than the object payload limit | `write`, `writeText`, `writeJSON` on a track or group writer |
+
+Messages are not a compatibility contract; the class and the point of rejection are.
 
 ## Subscribing
 
 - Namespaces are ordered tuples of fields sent verbatim. The SDK adds no prefix and performs no
   normalization. Fields are absolute: the token's root prefix is part of the namespace the
-  application supplies. Subscription namespaces must contain non-empty string fields; invalid
-  namespaces are rejected locally before sending a request. Publishing and subscription namespaces
-  contain at most 32 fields (pinned in `protocol.json`); oversized namespaces are rejected locally,
-  before connecting a publisher or sending a subscription. Track names must be non-empty strings.
+  application supplies. Namespaces and track names follow the [Arguments](#arguments) table in both
+  roles: an invalid one is rejected locally, before connecting a publisher or sending a subscription.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The callback path adds no application queue, no
@@ -284,8 +303,10 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   write uses a new group ID; failed groups are never reused. After demand disappears, later writes
   wait for a new relay subscription. Applications choose fresh data or the next random-access point
   after a failure; already delivered bytes cannot be withdrawn. There is no automatic retry.
-- A write's payload must be a byte sequence in the language's own terms. Any other type is rejected
-  before the write starts, which is a local argument error and leaves the track usable.
+- A write's payload must be a byte sequence in the language's own terms, and its properties must
+  follow the [Arguments](#arguments) table. Anything else is rejected before the write starts, which
+  is a local argument error and leaves the track usable; an oversized property is such an error too,
+  not a transport failure once demand arrives.
 - Each write copies its bytes and sends one independent group containing one object. Only one
   write may be pending per track; a concurrent write is rejected rather than queued.
 - Write completion means the transport accepted the complete group, not that any viewer received
@@ -297,7 +318,8 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   default timescale, timestamp, or LOC media packaging. Subscribers expose the properties received
   from the relay, which may differ from those sent by the publisher; end-to-end preservation of
   arbitrary properties is not guaranteed. See [Relay property handling](#relay-property-handling).
-- Object payloads are limited to the size in `protocol.json`.
+- Object payloads, encoded object properties and individual property values are limited to the
+  sizes in `protocol.json`.
 - Closing a track writer cancels an outstanding write and ends that track; other tracks continue.
   Closing the publisher ends all tracks, retracts the namespace, and waits for transport shutdown.
 - Track names cannot be reused within a publisher connection, including after their writer closes.

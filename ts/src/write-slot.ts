@@ -15,8 +15,9 @@
  */
 import type { SubgroupWriter } from '@mux/moq-core';
 import { RelayError, type RelayErrorPhase, transportError } from './errors.js';
-import { copyPayload, copyProperties, encodeJSON, encodeText } from './payload.js';
+import { encodeJSON, encodeText } from './payload.js';
 import type { RelayGroupWriter, RelayTrackWriter } from './publish.js';
+import { payloadBytes, propertyPairs } from './validation.js';
 
 /**
  * Stream reset codes a publisher sends (draft-ietf-moq-transport-20 §3.3.4, registry §15.11.4).
@@ -306,9 +307,10 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await writer.write(encodeJSON(value), writeOptions);
     },
     async write(payload, writeOptions = {}) {
+      // Arguments before slot state: a bad payload is a programming error whatever the slot holds.
+      const bytes = payloadBytes(payload);
+      const properties = propertyPairs(writeOptions.properties);
       assertWritable();
-      const bytes = copyPayload(payload);
-      const properties = copyProperties(writeOptions.properties);
       const operation = begin('write', writeOptions.signal);
       try {
         await run(operation, async () => {
@@ -350,12 +352,12 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
           await groupWriter.write(encodeJSON(value), writeOptions);
         },
         async write(payload, writeOptions = {}) {
-          assertGroup();
-          const bytes = copyPayload(payload);
-          const properties = copyProperties(writeOptions.properties);
+          const bytes = payloadBytes(payload);
+          const properties = propertyPairs(writeOptions.properties);
           const status = writeOptions.status ?? 'normal';
           if (!['normal', 'end-of-group', 'end-of-track'].includes(status))
             throw new TypeError('Unknown object status');
+          assertGroup();
           pending = true;
           try {
             operation.phase = 'writing';

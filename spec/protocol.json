@@ -14,6 +14,8 @@
   },
   "limits": {
     "maxObjectPayloadBytes": 16777216,
+    "maxObjectPropertiesBytes": 1048576,
+    "maxPropertyValueBytes": 65535,
     "maxNamespaceFields": 32
   }
 }

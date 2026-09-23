@@ -57,8 +57,8 @@ describe('connectRelayPublisher', () => {
     const namespace = Array.from({ length: 32 }, (_, index) => `field-${index}`);
     const publisher = await connectRelayPublisher({ url, namespace, createTransport: hub.connectPublisher });
     cleanup.push(() => publisher.close());
-    expect(() => publisher.registerTrack({ track: 7 as unknown as string })).toThrow('Track name must be a string');
-    expect(() => publisher.registerTrack({ track: '' })).toThrow('Track name must be non-empty');
+    expect(() => publisher.registerTrack({ track: 7 as unknown as string })).toThrow(TypeError);
+    expect(() => publisher.registerTrack({ track: '' })).toThrow('A track name must be a non-empty string');
     const events = publisher.registerTrack({ track: 'events' });
     const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
     cleanup.push(() => subscriber.close());
