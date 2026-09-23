@@ -1,18 +1,20 @@
-# Mediabunny → LOC/MSF
+# Optional file input: Mediabunny → LOC/MSF
 
-Optional adapter for [Mediabunny](https://mediabunny.dev/) encoded packets and WebCodecs decoder
-configs. The unpublished workspace package is `@mux/moq-mediabunny`; consumers install it alongside
+Optional adapter for encoded packets demuxed by [Mediabunny](https://mediabunny.dev/). The unpublished
+workspace package is `@mux/moq-mediabunny`; consumers install it alongside
 `@mux/moq-media` and Mediabunny (tested with 1.58.1). Neither the core, Relay SDK, nor format package
 requires Mediabunny.
 
 The initial adapter supports length-prefixed AVC/H.264 with four-byte NAL lengths and Opus.
-Mediabunny owns file parsing and encoding; this adapter maps the resulting metadata and packets.
+Mediabunny owns file parsing; this adapter maps its encoded packets. Standard WebCodecs decoder
+config mapping lives in `@mux/moq-media`, which also provides the
+[direct browser publishing path](../../examples/webcodecs/README.md).
 It uses only public APIs and never rebuilds SPS/PPS, converts Annex B, decodes, or re-encodes media.
 Other codecs can still use the generic format package directly.
 
 ```ts
-import { packetToLocFrame, videoTrackFromDecoderConfig } from '@mux/moq-mediabunny';
-import { buildMsfCatalog } from '@mux/moq-media';
+import { packetToLocFrame } from '@mux/moq-mediabunny';
+import { buildMsfCatalog, videoTrackFromDecoderConfig } from '@mux/moq-media';
 import { BlobSource, EncodedPacketSink, Input, MP4 } from 'mediabunny';
 
 const input = new Input({ source: new BlobSource(file), formats: [MP4] });
@@ -37,12 +39,11 @@ See the [complete publishing function](../../examples/mediabunny/publish-video.t
 
 ## Contract
 
-- `videoTrackFromDecoderConfig(config)` returns a `VideoTrackInfo`. It requires AVC init data,
-  keeps the `avc1`/`avc3` prefix, derives the codec suffix from avcC, and copies the exact description
-  buffer/view range. Encoder-supplied High-profile records are supported without interpreting SPS.
-  This is header inspection, not full bitstream validation.
-- `audioTrackFromDecoderConfig(config)` returns an Opus `AudioTrackInfo`, with 48 kHz and the
-  supplied channel count. Non-empty decoder description bytes are copied when present.
+The config mappers and `LocFrame` type belong to `@mux/moq-media`. This adapter retains their
+original exports for compatibility; new code should import them from the media package.
+
+See the [media package](../moq-media/README.md) for the AVC/Opus config-mapper contract.
+
 - `packetToLocFrame(packet, options?)` returns `{ payload, timestampUs, key, properties }`. Payload
   bytes are borrowed unchanged; keep them stable until the write completes. Metadata-only packets
   are rejected. Timestamps use Mediabunny's integer microsecond presentation timestamp, and input
@@ -52,10 +53,8 @@ See the [complete publishing function](../../examples/mediabunny/publish-video.t
   the track. Negative file timestamps need an explicit offset shared across audio/video; the
   resulting timestamp must fit the format package's nonnegative safe-integer contract.
 
-For browser encoding, pass `onEncodedPacket` metadata's `decoderConfig` through the corresponding
-track mapper. Keep the latest config when metadata is absent on later callbacks, and update the
-catalog before publishing packets for a changed config. The application owns callback serialization,
-bounded buffering, demand, and group recovery; the adapter performs no I/O.
+For live browser encoding, use `chunkToLocFrame` and the config mappers from `@mux/moq-media`
+directly. No conversion to a Mediabunny packet is needed.
 
 Public upstream APIs: [encoded packets](https://mediabunny.dev/api/EncodedPacket),
 [reading files](https://mediabunny.dev/guide/reading-media-files),

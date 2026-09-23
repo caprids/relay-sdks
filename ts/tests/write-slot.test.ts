@@ -653,3 +653,27 @@ describe('write slot: reset reasons', () => {
     expect(reset).toMatchObject({ name: 'StreamReset', streamErrorCode: 2, message: 'why', cause });
   });
 });
+
+it('resets browser streams with the legacy WebTransportError dictionary constructor', async () => {
+  class LegacyWebTransportError extends Error {
+    readonly streamErrorCode: number;
+    constructor(init: { message: string; streamErrorCode: number }) {
+      if (typeof init !== 'object') throw new TypeError('Expected WebTransportErrorInit');
+      super(init.message);
+      this.streamErrorCode = init.streamErrorCode;
+    }
+  }
+  vi.stubGlobal('WebTransportError', LegacyWebTransportError);
+  try {
+    const { slot, writer, opened } = harness();
+    slot.bind(1);
+    const group = await writer.openGroup();
+    expect(() => group.abort(new Error('Stopped'))).not.toThrow();
+    expect(opened[0]?.aborts[0]).toBeInstanceOf(LegacyWebTransportError);
+    expect(opened[0]?.aborts[0]).toMatchObject({ streamErrorCode: RESET_CODE.CANCELLED, message: 'Stopped' });
+    expect(group.closed).toBe(true);
+    await writer.write(bytes(2));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});

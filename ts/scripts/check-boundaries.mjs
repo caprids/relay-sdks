@@ -43,8 +43,19 @@ await inspect(resolve(root, 'packages/moq-core/dist'));
 await inspect(resolve(root, 'packages/moq-media/dist'), core.name);
 await inspect(resolve(root, 'dist'), core.name);
 await inspect(resolve(root, 'packages/moq-mediabunny/dist'), media.name);
-const { buildMsfCatalog } = await import('../packages/moq-media/dist/index.js');
-assert.equal(typeof buildMsfCatalog, 'function');
+const mediaExports = await import('../packages/moq-media/dist/index.js');
+for (const name of [
+  'buildMsfCatalog',
+  'chunkToLocFrame',
+  'videoTrackFromDecoderConfig',
+  'audioTrackFromDecoderConfig',
+]) {
+  assert.equal(typeof mediaExports[name], 'function', `${name} must be available without a browser runtime`);
+}
+const adapterExports = await import('../packages/moq-mediabunny/dist/index.js');
+for (const name of ['videoTrackFromDecoderConfig', 'audioTrackFromDecoderConfig']) {
+  assert.equal(adapterExports[name], mediaExports[name], `${name} remains a compatibility re-export`);
+}
 const sdkExports = await import('../dist/index.js');
 assert.deepEqual(Object.keys(sdkExports).sort(), [
   'RelayError',

@@ -23,3 +23,10 @@ export {
   VIDEO_TRACK,
 } from './loc.js';
 export { type ComposeMoqSourceOptions, composeMoqSource, encodeNameComponent, encodeNamespaceName } from './source.js';
+export {
+  audioTrackFromDecoderConfig,
+  type ChunkToLocFrameOptions,
+  chunkToLocFrame,
+  type LocFrame,
+  videoTrackFromDecoderConfig,
+} from './webcodecs.js';

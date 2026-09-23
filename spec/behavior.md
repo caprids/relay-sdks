@@ -460,11 +460,16 @@ The media pins in `protocol.json` and exact bytes in `vectors/media.json` apply 
   is reflected in [FFmpeg's avcC writer](https://patches.ffmpeg.org/doxygen/4.4/avc_8c_source.html).
 - TypeScript consumes encoder/demuxer-provided avcC and length-prefixed packets, and exposes only
   `avcCodecString` for header inspection. It does not expose Annex B parsing or construction APIs.
-  The optional `@mux/moq-mediabunny` adapter maps public Mediabunny packets and decoder configs
-  for four-byte-length AVC and Opus. It copies configuration views, borrows packet payloads,
-  preserves decode order and presentation timestamps, and attaches configs only to key packets.
-  Metadata-only packets are rejected. A caller-supplied shared integer timestamp offset can
-  normalize negative timestamps; the final timestamp still follows the LOC safe-integer contract.
+  `@mux/moq-media` maps standard WebCodecs decoder configs for four-byte-length AVC and Opus,
+  copying the exact description buffer/view range. `chunkToLocFrame` accepts native encoded video
+  or audio chunks, copies their payload bytes unchanged, preserves microsecond presentation
+  timestamps, and attaches supplied configs only to key chunks. Callers preserve encoder output
+  order. These helpers require no browser globals at import time.
+  The optional `@mux/moq-mediabunny` file-input adapter borrows public packet payloads and rejects
+  metadata-only packets. Both chunk and packet helpers accept a shared integer timestamp offset
+  to normalize negative timestamps; input timestamps must be safe integers and the final timestamp
+  follows the LOC nonnegative safe-integer contract. The adapter retains compatibility re-exports
+  of the config mappers and `LocFrame` type from the media package.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below,
   implemented in Python; a `register_media` publishing handle and public readers are not

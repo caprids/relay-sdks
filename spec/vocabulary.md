@@ -294,9 +294,11 @@ Track fields use camelCase in TypeScript and snake_case in Python (`initData` / 
 `channelConfig` / `channel_config`). Catalog generation time is `generatedAt` / `generated_at_ms`.
 Media publishing-handle and reader names remain provisional.
 
-The optional TypeScript-only `@mux/moq-mediabunny` integration exports
-`videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`, `packetToLocFrame`, `LocFrame`, and
-`PacketToLocFrameOptions`. These consume public Mediabunny packets/WebCodecs decoder configs;
+The TypeScript-only WebCodecs helpers in `@mux/moq-media` are `videoTrackFromDecoderConfig`,
+`audioTrackFromDecoderConfig`, `chunkToLocFrame`, `LocFrame`, and `ChunkToLocFrameOptions`.
+They consume standard decoder configs and native encoded video/audio chunks. The optional
+`@mux/moq-mediabunny` file-input integration exports `packetToLocFrame` and
+`PacketToLocFrameOptions`; it retains compatibility re-exports of the config mappers and `LocFrame`.
 Python keeps its PyAV Annex B conversion helpers.
 
 ## Media publishing: `FrameWriter`, `CatalogService`
