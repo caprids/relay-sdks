@@ -1,5 +1,12 @@
-import { buildMsfCatalog, CATALOG_TRACK, locProperties, locTrackProperties, VIDEO_TRACK } from '@mux/moq-media';
-import { packetToLocFrame, videoTrackFromDecoderConfig } from '@mux/moq-mediabunny';
+import {
+  buildMsfCatalog,
+  CATALOG_TRACK,
+  locProperties,
+  locTrackProperties,
+  VIDEO_TRACK,
+  videoTrackFromDecoderConfig,
+} from '@mux/moq-media';
+import { packetToLocFrame } from '@mux/moq-mediabunny';
 import type { RelayGroupWriter, RelayPublisher } from '@mux/relay';
 import { BlobSource, EncodedPacketSink, Input, MP4 } from 'mediabunny';
 

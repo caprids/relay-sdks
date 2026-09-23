@@ -83,8 +83,8 @@
   },
   "overrides": [
     {
-      // Attributed Video.js snapshots and Python-example media ports (see each package's UPSTREAM.json).
-      // Keep their formatting and non-null-assertion style consistent with the extracted modules.
+      // Attributed Video.js snapshots and media format sources (see each package's UPSTREAM.json).
+      // Media helpers share the extracted modules' package style, including original WebCodecs helpers.
       "includes": ["packages/moq-core/src/protocol/**", "packages/moq-core/src/tests/**", "packages/moq-media/src/**"],
       "javascript": { "formatter": { "trailingCommas": "es5" } },
       "linter": { "rules": { "style": { "noNonNullAssertion": "off" } } }

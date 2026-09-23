@@ -72,10 +72,14 @@ export class StreamReset extends Error {
 
 function resetReason(code: ResetCode, cause: unknown): unknown {
   if (typeof WebTransportError !== 'undefined') {
-    return new WebTransportError(cause instanceof Error ? cause.message : 'Publish operation reset', {
-      source: 'stream',
-      streamErrorCode: code,
-    });
+    const message = cause instanceof Error ? cause.message : 'Publish operation reset';
+    try {
+      return new WebTransportError(message, { source: 'stream', streamErrorCode: code });
+    } catch (error) {
+      if (!(error instanceof TypeError)) throw error;
+      // Chromium still implements the earlier dictionary constructor; current DOM types use two arguments.
+      return Reflect.construct(WebTransportError, [{ message, streamErrorCode: code }]);
+    }
   }
   return new StreamReset(code, cause);
 }

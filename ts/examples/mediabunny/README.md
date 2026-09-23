@@ -1,4 +1,6 @@
-# Publish an MP4's video with Mediabunny
+# Optional file input: publish an MP4's video with Mediabunny
+
+For live browser capture, start with the [direct WebCodecs example](../webcodecs/README.md).
 
 [publish-video.ts](publish-video.ts) is a type-checked browser integration example. It reads a local
 MP4 with Mediabunny, takes its AVC decoder configuration and encoded packets, and publishes a paced

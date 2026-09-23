@@ -17,8 +17,20 @@ on keyframes, declare the same timescale on the track, and keep init data in the
 TypeScript consumes encoder/demuxer-provided decoder configuration and length-prefixed H.264
 packets. `avcCodecString` inspects the avcC header; it does not parse SPS or validate a bitstream.
 Annex B parsing, SPS/PPS reconstruction, and access-unit conversion are not exposed in TypeScript.
-For Mediabunny inputs, use the optional [packet adapter](../moq-mediabunny/README.md). Python retains
-its Annex B helpers for the PyAV publisher.
+The primary browser input is native WebCodecs. `videoTrackFromDecoderConfig` maps AVC decoder
+configuration (four-byte NAL lengths); `audioTrackFromDecoderConfig` maps Opus configuration.
+Both copy description buffers, including the exact range of a view. `chunkToLocFrame` accepts
+`EncodedVideoChunk` or `EncodedAudioChunk` and returns `{ payload, timestampUs, key, properties }`.
+It copies encoded bytes unchanged, attaches supplied configs only on key chunks, and accepts the
+same timescale/config options as `locProperties`, plus an integer `timestampOffsetUs` for a shared
+track timeline. The final timestamp must be a nonnegative safe integer. Preserve encoder output
+order, even when presentation timestamps are reordered. These functions use WebCodecs types but
+do not require browser globals at import time.
+
+See the [direct WebCodecs publishing example](../../examples/webcodecs/README.md) for live browser
+video, catalog serving, groups, bounded buffering, and cleanup. For files that need demuxing, use
+the optional [Mediabunny packet adapter](../moq-mediabunny/README.md). Python retains its Annex B
+helpers for the PyAV publisher.
 
 Shared vectors live in `spec/vectors/media.json`. See `UPSTREAM.json` for Video.js provenance.
 Publishing handles and public readers are later stages of `spec/media-layer.md`.

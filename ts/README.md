@@ -507,10 +507,12 @@ The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects
 on `status`, with the second status object delivered after the events track closed.
 
 The optional [@mux/moq-media format package](packages/moq-media/README.md) provides LOC properties,
-independent MSF catalogs, source URLs, and AVC codec-header inspection. It depends only on
-`@mux/moq-core`; install it alongside `@mux/relay` when publishing media. The optional
-[Mediabunny adapter](packages/moq-mediabunny/README.md) maps encoded packets and decoder configs
-without adding a media engine dependency to the SDK. See the [file publishing example](examples/mediabunny/README.md).
+independent MSF catalogs, source URLs, and native WebCodecs chunk/config mapping. It depends only
+on `@mux/moq-core`; install it alongside `@mux/relay` when publishing media. Start with the
+[direct WebCodecs example](examples/webcodecs/README.md) for live browser video: encoded chunks
+become LOC payloads without a muxer or media engine. For existing media files, the optional
+[Mediabunny adapter](packages/moq-mediabunny/README.md) maps demuxed packets; see the
+[file publishing example](examples/mediabunny/README.md).
 
 ## Development
 

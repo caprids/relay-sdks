@@ -66,7 +66,9 @@ For the moq-relay 0.14.17 compatibility boundary and a reproducible local test, 
 The same shape applies in every language:
 
 - The optional media format packages (`@mux/moq-media`, `moq-media`) own pure LOC/MSF and H.264
-  helpers and depend only on the core. They have no transport or encoder dependencies.
+  helpers and depend only on the core. They have no transport or encoder dependencies. TypeScript
+  accepts native WebCodecs chunks/configuration; start with the
+  [live browser example](ts/examples/webcodecs/README.md). Mediabunny is an optional file-input adapter.
 - The product package (`@mux/relay`, `mux-relay`) owns the Relay API and the authentication
   convention.
 - The generic MoQ core (`@mux/moq-core`, `moq-core`) is protocol-only: an abstract transport, no

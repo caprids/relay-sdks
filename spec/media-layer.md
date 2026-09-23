@@ -17,16 +17,21 @@ player presentation projection and delta updates are not part of this extraction
 
 ## TypeScript input integration
 
-Stage 1 now includes an optional `@mux/moq-mediabunny` adapter and a
-[typed file-publishing example](../ts/examples/mediabunny/README.md). Mediabunny owns demuxing and
-encoding; our adapter consumes its public encoded packets and decoder configs. LOC properties,
-MSF catalogs, and source URLs remain in `@mux/moq-media`, with no Mediabunny dependency.
+Stage 1 accepts native WebCodecs chunks and decoder configs through `@mux/moq-media`:
+`chunkToLocFrame`, `videoTrackFromDecoderConfig`, and `audioTrackFromDecoderConfig`. The
+[direct browser example](../ts/examples/webcodecs/README.md) connects `VideoEncoder` output to
+LOC/MSF and Relay without a media engine. The pure helpers copy chunk bytes without converting
+the bitstream; encoding, callback buffering, and capture remain application concerns.
 
-The original symmetric H.264 helper proposal below is narrowed: TypeScript retains avcC codec-header
-inspection and consumes supplied decoder configuration and length-prefixed packets. Annex B
-splitting, SPS/PPS reconstruction, and conversion stay Python-only, where the PyAV example needs
-them. The optional adapter currently accepts AVC with four-byte NAL lengths and Opus. Grouping,
-catalog serving, demand, and pacing remain example code; this does not implement stage 2.
+The optional `@mux/moq-mediabunny` adapter handles file-input packets, demonstrated by the
+[MP4 example](../ts/examples/mediabunny/README.md). Mediabunny owns demuxing. Standard decoder
+config mapping, LOC properties, MSF catalogs, and source URLs belong to `@mux/moq-media`, with
+no Mediabunny dependency. The adapter retains compatibility re-exports of the config mappers.
+
+TypeScript consumes supplied AVC configuration and four-byte-length packets; Annex B splitting,
+SPS/PPS reconstruction, and conversion remain Python-only for the PyAV example. Config mappers
+currently support AVC and Opus. Grouping, catalog serving, demand, and pacing remain TypeScript
+example code; this does not implement the stage 2 publishing handle.
 
 ## What a media publisher has to know today
 

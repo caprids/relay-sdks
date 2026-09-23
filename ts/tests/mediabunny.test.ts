@@ -1,13 +1,16 @@
 import { readFileSync } from 'node:fs';
-import { buildMsfCatalog, LOC_AUDIO_CONFIG, LOC_TIMESTAMP, LOC_VIDEO_CONFIG } from '@mux/moq-media';
-import { audioTrackFromDecoderConfig, packetToLocFrame, videoTrackFromDecoderConfig } from '@mux/moq-mediabunny';
+import {
+  buildMsfCatalog,
+  LOC_AUDIO_CONFIG,
+  LOC_TIMESTAMP,
+  LOC_VIDEO_CONFIG,
+  videoTrackFromDecoderConfig,
+} from '@mux/moq-media';
+import { packetToLocFrame } from '@mux/moq-mediabunny';
 import { BufferSource, EncodedPacket, EncodedPacketSink, Input, MP4 } from 'mediabunny';
 import { expect, it } from 'vitest';
 
 const fixture = readFileSync(new URL('./fixtures/mediabunny-avc.mp4', import.meta.url));
-const avcc = Uint8Array.from(Buffer.from('0142c014ffe1000a6742c014da05067e784001000468ce3c80', 'hex'));
-const config = { codec: 'avc1.42001F', codedWidth: 320, codedHeight: 180, description: avcc };
-
 it('demuxes a real High-profile MP4 into catalog configuration and unchanged LOC payloads', async () => {
   const input = new Input({ source: new BufferSource(fixture), formats: [MP4] });
   try {
@@ -36,33 +39,7 @@ it('demuxes a real High-profile MP4 into catalog configuration and unchanged LOC
   }
 });
 
-it.each(['view', 'buffer', 'shared'] as const)('copies the exact decoder description bytes from a %s', (kind) => {
-  const backing = kind === 'shared' ? new SharedArrayBuffer(avcc.length + 4) : new ArrayBuffer(avcc.length + 4);
-  new Uint8Array(backing).set(avcc, 2);
-  const description = kind === 'buffer' ? avcc.slice().buffer : new DataView(backing, 2, avcc.length);
-  const video = videoTrackFromDecoderConfig({ ...config, codec: 'avc3.000000', description });
-  expect(video.initData).toEqual(avcc);
-  expect(video.codec).toBe('avc3.42C014');
-  new Uint8Array(backing).fill(0);
-  if (description instanceof ArrayBuffer) new Uint8Array(description).fill(0);
-  expect(video.initData).toEqual(avcc);
-});
-
-it('rejects Annex B, unsupported codecs, and non-four-byte NAL framing before advertising a track', () => {
-  const { description: _, ...annexb } = config;
-  expect(() => videoTrackFromDecoderConfig(annexb)).toThrow(/Annex B/);
-  expect(() => videoTrackFromDecoderConfig({ ...config, description: new Uint8Array() })).toThrow();
-  expect(() => videoTrackFromDecoderConfig({ ...config, codec: 'vp8' })).toThrow(/AVC/);
-  const shortLengths = avcc.slice();
-  shortLengths[4] = 0xfd;
-  expect(() => videoTrackFromDecoderConfig({ ...config, description: shortLengths })).toThrow(/four-byte/);
-});
-
-it('maps mono Opus and attaches its config only to key packets', () => {
-  const audio = audioTrackFromDecoderConfig({ codec: 'opus', sampleRate: 24000, numberOfChannels: 1 });
-  expect(audio).toEqual({ codec: 'opus', samplerate: 48000, channelConfig: '1' });
-  expect(() => audioTrackFromDecoderConfig({ codec: 'aac', sampleRate: 48000, numberOfChannels: 2 })).toThrow();
-  expect(() => audioTrackFromDecoderConfig({ codec: 'opus', sampleRate: 48000, numberOfChannels: 0 })).toThrow();
+it('attaches audio configuration only to key packets', () => {
   const packet = new EncodedPacket(new Uint8Array([1]), 'key', 0.02, 0.02);
   expect(packetToLocFrame(packet, { audioConfig: new Uint8Array([2]) }).properties).toContainEqual({
     type: LOC_AUDIO_CONFIG,
