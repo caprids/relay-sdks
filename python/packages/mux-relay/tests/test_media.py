@@ -184,6 +184,30 @@ class TestKeyframeGrouping:
             await writer.write(key(2))
         assert caught.value.code == "CLOSED"
 
+    async def test_a_track_that_ends_under_the_fin_before_a_keyframe_is_reported_as_ended(self) -> None:
+        # The GOP rollover FINs the previous group first. If the track goes away during that FIN,
+        # the keyframe is not "skipped for want of demand": it is the retirement, with its error.
+        track = FakeTrackWriter()
+        error = changed_error()
+        track.fail("group-close", error, retire=True)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        assert await kinds(writer, [key(0), delta(1)]) == ["sent", "sent"]
+        assert await writer.write(key(2)) == FrameOutcome("ended", error=error, group_id=0)
+        assert writer.ended is error and writer.closed
+        assert len(track.groups) == 1, "no group is opened on a track that just ended"
+
+    async def test_a_fin_that_only_fails_still_lets_the_next_group_open(self) -> None:
+        # The previous group's stream was reset by the SDK and what it delivered stands; the
+        # keyframe in hand starts the next GOP as usual.
+        track = FakeTrackWriter()
+        track.fail("group-close", timeout_error("closing"))
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        assert await kinds(writer, [key(0), delta(1)]) == ["sent", "sent"]
+        assert await writer.write(key(2)) == FrameOutcome("sent", group_id=1)
+        assert not track.groups[0].finished and writer.ended is None
+
     async def test_a_transient_error_on_a_track_that_closed_is_a_retirement_too(self) -> None:
         # The SDK may report the change of subscription first and close the track in the same turn;
         # `closed` afterwards is what tells them apart, never `has_demand`.

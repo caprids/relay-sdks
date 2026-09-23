@@ -506,8 +506,11 @@ not yet implemented in TypeScript.
   is already closed as a frame arrives; that frame and every later one are reported as ended, with
   the error, and nothing further touches the track. Any other failure (an interruption) resets the
   group, leaves the track open, and reports the frame as interrupted with its error; the next
-  keyframe, or the next independent frame, opens a new group. Demand alone never decides: no demand
-  is also what a track nobody subscribes to looks like.
+  keyframe, or the next independent frame, opens a new group. The FIN of the previous group that a
+  keyframe triggers is part of that keyframe's write: a retirement during it ends the writer, while
+  an interruption during it is absorbed, because the previous group's delivered objects stand and
+  the new group opens regardless. Demand alone never decides: no demand is also what a track nobody
+  subscribes to looks like.
 - Every frame gets exactly one outcome: sent, skipped, stale, interrupted or ended. The writer
   returns it rather than raising, so a caller keeps counters without catching per frame, and the
   group the frame was written to or that was reset on its behalf travels with it. Closing the writer

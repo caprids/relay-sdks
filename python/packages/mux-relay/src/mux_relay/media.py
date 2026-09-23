@@ -246,7 +246,14 @@ class FrameWriter(Generic[F]):
 
         if frame.key:
             self._recovering = False
-            await self._end_group()
+            previous = self._group.group_id if self._group is not None else None
+            failure = await self._end_group()
+
+            if failure is not None and _retired(self._track, failure):
+                # The track ended under the FIN of the group before this keyframe: that is the
+                # retirement, with its own error, not a keyframe nobody wanted.
+                self._ended = failure
+                return FrameOutcome("ended", error=failure, group_id=previous)
 
             if self._stale(frame):
                 # The FIN took long enough that this keyframe is too old to start a group with.
@@ -293,21 +300,28 @@ class FrameWriter(Generic[F]):
         group.abort()
         return group.group_id
 
-    async def _end_group(self) -> None:
+    async def _end_group(self) -> RelayError | None:
+        """FIN the open group, if any. Returns the failure if the FIN did not complete.
+
+        A failed FIN leaves nothing to complete: the SDK reset the group, and what was delivered
+        stands. Whether the failure also ended the track is the caller's question; :meth:`close`
+        does not ask it.
+        """
         group, self._group = self._group, None
 
         if group is None:
-            return
+            return None
 
         try:
             await group.close()
-        except RelayError:
-            # The group was already reset, or the track is gone: nothing left to complete.
-            pass
+        except RelayError as error:
+            return error
         except BaseException:
             # Cancelled mid-FIN: make sure the slot is free before the failure propagates.
             group.abort()
             raise
+
+        return None
 
     # ------------------------------------------------------------------ one group per frame
 
