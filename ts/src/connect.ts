@@ -166,7 +166,11 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
   return {
     closed,
     trackSource,
-    subscribe: (options, handlers) => subscription(admit(options), handlers ? [handlersConsumer(handlers)] : []),
+    subscribe: (options, handlers) => {
+      // Every argument (the handlers' shape included) before connection state.
+      const consumers = handlers ? [handlersConsumer(handlers)] : [];
+      return subscription(admit(options), consumers);
+    },
     subscribeEvents: (options, buffer) => {
       // Admit before building the iterator: an already-aborted signal never runs its callback.
       const admitted = admit(options);
