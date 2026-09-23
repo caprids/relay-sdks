@@ -19,7 +19,6 @@ from types import TracebackType
 from typing import Self
 
 from moq_core import (
-    MAX_NAMESPACE_FIELDS,
     Closed,
     KeyValuePair,
     MoqtPublishSession,
@@ -33,6 +32,7 @@ from moq_core import (
     create_subgroup_writer,
 )
 
+from ._validation import namespace_fields, property_pairs, track_name
 from ._write_slot import RelayGroupWriter, RelayTrackWriter, WriteSlotDependencies, _observe
 from .cancellation import CancellationToken
 from .connect_session import (
@@ -45,7 +45,6 @@ from .connect_session import (
     open_relay_session,
 )
 from .errors import RelayError
-from .payload import _copy_properties
 
 IMPLEMENTATION_NAME = "mux-relay (Python) publisher"
 DEFAULT_WRITE_TIMEOUT = 10.0
@@ -60,7 +59,7 @@ class RelayPublisher:
 
     __slots__ = ("_closed", "_closing", "_lifetime", "_namespace", "_tracks", "_watcher")
 
-    def __init__(self, lifetime: RelaySessionLifetime[MoqtPublishSession], namespace: list[str]) -> None:
+    def __init__(self, lifetime: RelaySessionLifetime[MoqtPublishSession], namespace: Sequence[str]) -> None:
         self._lifetime = lifetime
         self._namespace = namespace
         # One write slot per registered track; the session's binding callback and the connection's
@@ -125,18 +124,9 @@ class RelayPublisher:
         The relay may add, drop, or rewrite properties before delivery to subscribers; see README.
         ``write_timeout`` (seconds) bounds relay demand and the transport write together.
         """
-        self._lifetime.assert_open()
-
-        if self._closing:
-            raise RelayError("Relay publisher is closed", code="CLOSED")
-
-        if not isinstance(track, str):
-            raise TypeError("Track name must be a string")
-        if len(track) == 0:
-            raise TypeError("Track name must be non-empty")
-
-        if track in self._tracks:
-            raise ValueError("Track name is already registered on this publisher connection")
+        # Arguments first, then connection state, then the registry.
+        name = track_name(track)
+        properties = property_pairs(track_properties)
 
         if (
             not isinstance(write_timeout, int | float)
@@ -147,11 +137,17 @@ class RelayPublisher:
         ):
             raise ValueError(f"write_timeout must be between 0 (exclusive) and {MAX_WRITE_TIMEOUT} seconds")
 
+        self._lifetime.assert_open()
+
+        if self._closing:
+            raise RelayError("Relay publisher is closed", code="CLOSED")
+
+        if name in self._tracks:
+            raise ValueError("Track name is already registered on this publisher connection")
+
         session = self._lifetime.session
         registered = session.register_track(
-            RegisterTrackOptions(
-                track_namespace=self._namespace, track_name=track, track_properties=_copy_properties(track_properties)
-            )
+            RegisterTrackOptions(track_namespace=self._namespace, track_name=name, track_properties=properties)
         )
 
         async def open_subgroup(track_alias: int, group_id: int) -> SubgroupWriter:
@@ -159,7 +155,7 @@ class RelayPublisher:
             return create_subgroup_writer(stream, track_alias=track_alias, group_id=group_id, has_properties=True)
 
         writer = RelayTrackWriter(
-            track,
+            name,
             WriteSlotDependencies(
                 open_subgroup=open_subgroup,
                 namespace_solicited=lambda: session.namespace_solicited,
@@ -168,7 +164,7 @@ class RelayPublisher:
                 write_timeout=write_timeout,
             ),
         )
-        self._tracks[track] = writer
+        self._tracks[name] = writer
         return writer
 
     async def close(self) -> None:
@@ -211,12 +207,9 @@ async def connect_relay_publisher(
     publisher connection serves one ``namespace`` and any number of tracks. A relay must solicit the
     namespace and subscribe upstream before data can flow.
     """
-    fields = list(namespace)
-
-    if len(fields) == 0 or any(not isinstance(part, str) or len(part) == 0 for part in fields):
-        raise TypeError("A publisher namespace must contain non-empty string fields")
-    if len(fields) > MAX_NAMESPACE_FIELDS:
-        raise ValueError(f"A publisher namespace must contain at most {MAX_NAMESPACE_FIELDS} fields")
+    # Arguments before anything else: an invalid namespace never reaches the token provider or the
+    # transport factory.
+    fields = namespace_fields(namespace)
 
     options = ConnectRelayOptions(
         url=url,

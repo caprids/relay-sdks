@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from types import TracebackType
 from typing import Self
 
 from moq_core import (
-    MAX_NAMESPACE_FIELDS,
     Closed,
     FetchHandle,
     FetchHandlers,
@@ -42,6 +41,7 @@ from ._subscription import (
     UpdateOkEvent,
     synchronous_callback,
 )
+from ._validation import namespace_fields, track_name
 from .cancellation import CancellationToken
 from .connect_session import (
     DEFAULT_CONNECT_TIMEOUT,
@@ -56,18 +56,6 @@ from .connect_session import (
 from .subscription_events import SubscriptionEvents
 
 IMPLEMENTATION_NAME = "mux-relay (Python)"
-
-
-def _validate_namespace(namespace: Sequence[str]) -> None:
-    if (
-        not isinstance(namespace, Sequence)
-        or isinstance(namespace, (str, bytes, bytearray))
-        or not namespace
-        or any(not isinstance(field, str) or not field for field in namespace)
-    ):
-        raise TypeError("A subscription namespace must contain non-empty string fields")
-    if len(namespace) > MAX_NAMESPACE_FIELDS:
-        raise ValueError(f"A subscription namespace must contain at most {MAX_NAMESPACE_FIELDS} fields")
 
 
 @dataclass(slots=True, kw_only=True)
@@ -187,9 +175,14 @@ class _BorrowedTrackSource:
         return self._closed
 
     def subscribe(self, options: MoqtSubscribeOptions, handlers: SubscriptionHandlers | None = None) -> Subscription:
+        # Arguments before connection state, as on the product entry points.
+        admitted = replace(
+            options,
+            track_namespace=namespace_fields(options.track_namespace),
+            track_name=track_name(options.track_name),
+        )
         self._lifetime.assert_open()
-        _validate_namespace(options.track_namespace)
-        return self._lifetime.session.subscribe(options, handlers)
+        return self._lifetime.session.subscribe(admitted, handlers)
 
     def fetch(self, options: MoqtSubscribeOptions, handlers: FetchHandlers | None = None) -> FetchHandle:
         self._lifetime.assert_open()
@@ -226,15 +219,23 @@ class RelaySubscriber:
         """
         return self._track_source
 
+    def _admit(
+        self, namespace: Sequence[str], track: str, parameters: MessageParameters | None
+    ) -> MoqtSubscribeOptions:
+        """Admit the arguments of one public call: checked and copied first, then the connection state.
+
+        Both entry points do this synchronously, before anything (an iterator, a subscription) exists.
+        """
+        options = MoqtSubscribeOptions(
+            track_namespace=namespace_fields(namespace), track_name=track_name(track), parameters=parameters
+        )
+        self._lifetime.assert_open()
+        return options
+
     def _subscription(
-        self,
-        namespace: Sequence[str],
-        track: str,
-        parameters: MessageParameters | None,
-        consumers: Sequence[SubscriptionConsumer],
+        self, options: MoqtSubscribeOptions, consumers: Sequence[SubscriptionConsumer]
     ) -> RelaySubscription:
         """One product subscription per public call; both entry points bind the core the same way."""
-        options = MoqtSubscribeOptions(track_namespace=list(namespace), track_name=track, parameters=parameters)
         session = self._lifetime.session
         return RelaySubscription(
             SubscriptionDependencies(
@@ -261,10 +262,8 @@ class RelaySubscriber:
         ``namespace`` fields are sent verbatim, without splitting or joining on slashes.
         ``parameters`` carries protocol subscription controls such as the location filter and priority.
         """
-        _validate_namespace(namespace)
-        self._lifetime.assert_open()
         consumers = [_HandlersConsumer(handlers)] if handlers is not None else []
-        return self._subscription(namespace, track, parameters, consumers)
+        return self._subscription(self._admit(namespace, track, parameters), consumers)
 
     def subscribe_events(
         self,
@@ -279,12 +278,10 @@ class RelaySubscriber:
 
         Owns only this request. ``publisher_done`` permits trailing objects; it is not EOF.
         """
-        self._lifetime.assert_open()
-        _validate_namespace(namespace)
+        # Admit before building the iterator: an already-cancelled token never runs its callback.
+        options = self._admit(namespace, track, parameters)
         return SubscriptionEvents(
-            lambda consumer: self._subscription(namespace, track, parameters, [consumer]),
-            capacity=capacity,
-            cancellation=cancellation,
+            lambda consumer: self._subscription(options, [consumer]), capacity=capacity, cancellation=cancellation
         )
 
     def close(self) -> None:
