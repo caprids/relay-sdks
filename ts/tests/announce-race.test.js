@@ -166,6 +166,17 @@ it('lets a 404 after acceptance reach onError', async () => {
   expect(seen.map((error) => error.errorCode)).toEqual([404]);
 });
 
+it('returns what the wrapped callbacks return, so the SDK guard still sees a promise-returning handler', async () => {
+  const subscriber = new FakeSubscriber(accepted);
+  const marker = Promise.resolve('handled');
+  const handlers = { onSubscribed: () => marker, onError: () => marker };
+
+  const subscription = await retry(subscriber, handlers);
+
+  expect(subscription.handlers.onSubscribed({ trackAlias: 7 })).toBe(marker);
+  expect(subscription.handlers.onError({ errorCode: 500, retryInterval: 0, reason: 'internal error' })).toBe(marker);
+});
+
 it('forwards the other handlers and leaves handlers without onError alone', async () => {
   const subscriber = new FakeSubscriber(notFound, accepted);
   const infos = [];

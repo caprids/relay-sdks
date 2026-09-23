@@ -259,6 +259,24 @@ describe('connectRelayPublisher', () => {
     await expect(publisher.closed).resolves.toEqual({ error });
   });
 
+  it('rejects announced with a null abort reason instead of inventing a CLOSED error', async () => {
+    const hub = createRelayHub();
+    const owner = new AbortController();
+    cleanup.push(() => hub.destroy());
+    const publisher = await connectRelayPublisher({
+      url,
+      namespace,
+      signal: owner.signal,
+      createTransport: hub.connectPublisher,
+    });
+    cleanup.push(() => publisher.close());
+    const rejected = expect(publisher.announced).rejects.toBeNull();
+
+    owner.abort(null);
+    await rejected;
+    await expect(publisher.closed).resolves.toEqual({ error: null });
+  });
+
   it('authenticates the publisher independently from subscriber credentials', async () => {
     const hub = createRelayHub();
     cleanup.push(() => hub.destroy());

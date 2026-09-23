@@ -177,8 +177,11 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   session.announce(namespace);
   void lifetime.closed.then(({ error }) => {
     closing = true;
+    // Only a clean shutdown (no error at all) becomes CLOSED; a closure reason of `null` is preserved.
     abandonAnnounce(
-      error ?? new RelayError('CLOSED', 'Relay publisher closed before its namespace was announced', 'connection'),
+      error === undefined
+        ? new RelayError('CLOSED', 'Relay publisher closed before its namespace was announced', 'connection')
+        : error,
     );
     for (const slot of tracks.values()) slot.disconnect(error);
   });

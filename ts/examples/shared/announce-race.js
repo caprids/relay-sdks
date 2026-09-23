@@ -93,7 +93,9 @@ function isFreshNamespaceRejection(error) {
 /**
  * `handlers` whose `onError` skips the fresh-namespace 404 until the relay has accepted the request.
  * The retry reports the outcome through the returned handle, so the callback would otherwise see
- * every attempt fail. A 404 after acceptance is a different event and passes through.
+ * every attempt fail. A 404 after acceptance is a different event and passes through. The wrappers
+ * return what the caller's callbacks return, so the SDK's synchronous-callback guard still sees a
+ * promise-returning handler and observes it.
  */
 function mutingRetriedRejections(handlers) {
   if (!handlers?.onError) return handlers;
@@ -103,11 +105,11 @@ function mutingRetriedRejections(handlers) {
     ...handlers,
     onSubscribed(info) {
       accepted = true;
-      onSubscribed?.(info);
+      return onSubscribed?.(info);
     },
     onError(error) {
-      if (error.errorCode === FRESH_NAMESPACE_ERROR_CODE && !accepted) return;
-      onError(error);
+      if (error.errorCode === FRESH_NAMESPACE_ERROR_CODE && !accepted) return undefined;
+      return onError(error);
     },
   };
 }
