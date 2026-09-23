@@ -82,6 +82,7 @@ OPUS_RATE = 48_000
 OPUS_FRAME_SAMPLES = 960  # 20 ms
 BOUNCE_RATES = (Fraction(7, 20), Fraction(1, 2))  # Wall-to-wall trips per second (x, y).
 CATALOG_RETRY_DELAY = 1.0  # seconds between failed attempts while demand remains
+VERIFY_STARTUP_TIMEOUT = 10.0  # seconds the in-process viewer may wait for the announce and its subscribes
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -918,8 +919,6 @@ async def verify(
     """
     result = Verified(video_groups=set(), problems=[])
     subscriber = await connect_relay_subscriber(config.url, get_token=lambda: config.token, cancellation=lifetime)
-    await publisher.announced
-    log("verify: namespace announced", {"namespace": "/".join(config.namespace)})
     assert result.problems is not None
     assert result.video_groups is not None
     problems = result.problems
@@ -973,13 +972,26 @@ async def verify(
     if config.audio != "off":
         tracks.append((AUDIO_TRACK, on_audio))
 
-    for track, on_object in tracks:
-        await subscribe_with_retry(
-            subscriber,
-            config.namespace,
-            track,
-            RelaySubscriptionHandlers(on_object=on_object, on_error=on_error(track)),
-            on_retry=on_retry(track),
+    # Bounded: the run's own duration timer starts only after this returns, and an announce that no
+    # solicitation covers (or a relay that keeps answering 404) would otherwise hold the media back forever.
+    try:
+        async with asyncio.timeout(VERIFY_STARTUP_TIMEOUT):
+            await publisher.announced
+            log("verify: namespace announced", {"namespace": "/".join(config.namespace)})
+
+            for track, on_object in tracks:
+                await subscribe_with_retry(
+                    subscriber,
+                    config.namespace,
+                    track,
+                    RelaySubscriptionHandlers(on_object=on_object, on_error=on_error(track)),
+                    on_retry=on_retry(track),
+                )
+    except TimeoutError:
+        # Verification is diagnostic: record it and let the media start.
+        problems.append(
+            f"verify: subscribes not accepted within {VERIFY_STARTUP_TIMEOUT:g} s "
+            "(announce pending, or the namespace still unknown to the relay)"
         )
 
     return subscriber, result
