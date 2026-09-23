@@ -220,6 +220,18 @@ class FrameWriter(Generic[F]):
     # ------------------------------------------------------------------ keyframe grouping
 
     async def _write_into_gop(self, frame: F) -> FrameOutcome:
+        try:
+            return await self._map_into_gop(frame)
+        except BaseException:
+            # Whatever escapes (a cancelled write, a frame the SDK rejected as an argument, the
+            # caller's own predicate raising) leaves the GOP in progress with a gap, or a group that
+            # never got its keyframe. Reset it (a no-op when the SDK already did) so the track's
+            # write slot is free and the next delta is skipped rather than sent as object 0, and let
+            # the failure through. The next keyframe opens a fresh group.
+            self._reset_group()
+            raise
+
+    async def _map_into_gop(self, frame: F) -> FrameOutcome:
         stale = self._stale(frame)
         reset: int | None = None
 
@@ -266,14 +278,6 @@ class FrameWriter(Generic[F]):
             # The SDK reset the group's stream already; the next keyframe opens a fresh one.
             self._group = None
             return self._failed(error, group_id=group.group_id)
-        except BaseException:
-            # Cancelled from outside (the task, the caller's deadline, the lifetime's reason), or a
-            # frame the SDK rejected as an argument before anything was sent. Reset the group (a
-            # no-op when the SDK already did) so the track's write slot is free, and let it go: kept,
-            # it would replay this failure from the next FIN. The next keyframe opens a fresh one.
-            group.abort()
-            self._group = None
-            raise
 
         self._objects += 1
         return FrameOutcome("sent", group_id=group.group_id)

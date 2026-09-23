@@ -279,6 +279,36 @@ class TestKeyframeGrouping:
         assert await kinds(writer, [key(3)]) == ["sent"]
         assert track.groups[1].payloads == [b"key"]
 
+    @pytest.mark.parametrize("raising_call", [3, 4])
+    async def test_a_stale_predicate_that_raises_resets_the_gop_in_progress(self, raising_call: int) -> None:
+        # Call 3 is the check after the keyframe's group opened: the group never gets its keyframe.
+        # Call 4 is the next delta's first check: the group has its keyframe but would lose a delta.
+        # Either way the next delta must not be sent into that group, and the slot must be free.
+        calls = 0
+
+        def broken(frame: Sample) -> bool:
+            nonlocal calls
+            calls += 1
+
+            if calls == raising_call:
+                raise RuntimeError("the application's clock broke")
+
+            return False
+
+        track = FakeTrackWriter()
+        writer = FrameWriter(track, stale=broken)
+        frames = [key(0), delta(1)]
+
+        with pytest.raises(RuntimeError, match="clock"):
+            for frame in frames:
+                await writer.write(frame)
+
+        assert track.groups[0].aborts == [None]
+        assert await kinds(writer, [delta(2)]) == ["skipped"], "never object 0 of a group without its keyframe"
+        assert await kinds(writer, [key(3), delta(4)]) == ["sent", "sent"]
+        assert track.groups[1].payloads == [b"key", b"delta"]
+        assert track.groups[0].payloads == ([] if raising_call == 3 else [b"key"])
+
     def test_grouping_is_checked_as_an_argument(self) -> None:
         with pytest.raises(TypeError):
             FrameWriter(FakeTrackWriter(), grouping=3)  # ty: ignore[invalid-argument-type]
