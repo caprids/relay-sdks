@@ -101,10 +101,10 @@ class TestKeyframeGrouping:
         writer = FrameWriter(track, stale=late(2, 3))
 
         assert await kinds(writer, [key(0), delta(1)]) == ["sent", "sent"]
-        assert await kinds(writer, [key(2)]) == ["stale"]
+        assert await writer.write(key(2)) == FrameOutcome("stale", group_id=0), "the reset GOP is named"
         assert track.groups[0].aborts == [None], "the GOP in progress cannot be completed"
-        # Late, then dependent on the dropped keyframe.
-        assert await kinds(writer, [delta(3), delta(4)]) == ["stale", "stale"]
+        # Late, then dependent on the dropped keyframe; nothing left to reset.
+        assert [await writer.write(frame) for frame in [delta(3), delta(4)]] == [FrameOutcome("stale")] * 2
         assert await kinds(writer, [key(5), delta(6)]) == ["sent", "sent"]
         assert track.groups[1].payloads == [b"key", b"delta"]
         assert (writer.groups, writer.objects) == (2, 4)
@@ -114,7 +114,8 @@ class TestKeyframeGrouping:
         writer: FrameWriter[Sample] = FrameWriter(track)
 
         assert await kinds(writer, [key(0), delta(1)]) == ["sent", "sent"]
-        assert await kinds(writer, [delta(2, discontinuity=True), delta(3)]) == ["stale", "stale"]
+        assert await writer.write(delta(2, discontinuity=True)) == FrameOutcome("stale", group_id=0)
+        assert await writer.write(delta(3)) == FrameOutcome("stale")
         assert track.groups[0].aborts == [None]
         assert await kinds(writer, [key(4, discontinuity=True), delta(5)]) == ["sent", "sent"]
         assert track.groups[1].payloads == [b"key", b"delta"]
@@ -125,15 +126,16 @@ class TestKeyframeGrouping:
         writer = FrameWriter(track, stale=answers(False, False, False, False, True))
 
         assert await kinds(writer, [key(0)]) == ["sent"]  # asked before, after the FIN, before the write
-        assert await kinds(writer, [key(1)]) == ["stale"]  # asked before, then after the FIN of group 0
+        # Asked before, then after the FIN of group 0: nothing is open any more, so nothing is reset.
+        assert await writer.write(key(1)) == FrameOutcome("stale")
         assert track.groups[0].finished
         assert len(track.groups) == 1, "no group is opened for a keyframe that went stale during the FIN"
         assert await kinds(writer, [delta(2)]) == ["stale"], "it depends on the dropped keyframe"
 
         writer = FrameWriter(track, stale=answers(False, False, True))
 
-        # Fresh before and after the FIN, stale once the stream is open.
-        assert await kinds(writer, [key(3)]) == ["stale"]
+        # Fresh before and after the FIN, stale once the stream is open: the new group is reset and named.
+        assert await writer.write(key(3)) == FrameOutcome("stale", group_id=1)
         assert track.groups[1].aborts == [None] and track.groups[1].objects == []
         assert (writer.groups, writer.objects) == (1, 0)
 
@@ -351,6 +353,28 @@ class TestFrameGrouping:
 
         assert await kinds(writer, [delta(0, discontinuity=True), key(1, discontinuity=True)]) == ["sent", "sent"]
         assert [group.aborts for group in track.groups] == [[], []]
+
+    async def test_a_stale_predicate_that_raises_after_the_stream_opened_resets_the_group(self) -> None:
+        # The caller's bug propagates, but not with the track's write slot still taken.
+        calls = 0
+
+        def broken(frame: Sample) -> bool:
+            nonlocal calls
+            calls += 1
+
+            if calls == 2:
+                raise RuntimeError("the application's clock broke")
+
+            return False
+
+        track = FakeTrackWriter()
+        writer = FrameWriter(track, grouping="frame", stale=broken)
+
+        with pytest.raises(RuntimeError, match="clock"):
+            await writer.write(key(0))
+
+        assert track.groups[0].aborts == [None] and track.groups[0].objects == []
+        assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
 
     async def test_task_cancellation_inside_a_write_resets_the_group_and_propagates(self) -> None:
         gate = asyncio.Event()

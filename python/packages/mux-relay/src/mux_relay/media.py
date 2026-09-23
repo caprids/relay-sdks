@@ -221,14 +221,15 @@ class FrameWriter(Generic[F]):
 
     async def _write_into_gop(self, frame: F) -> FrameOutcome:
         stale = self._stale(frame)
+        reset: int | None = None
 
         if stale or frame.discontinuity:
             # Whatever group is open depended on frames that will never be sent.
-            self._reset_group()
+            reset = self._reset_group()
             self._recovering = True
 
         if stale or (self._recovering and not frame.key):
-            return FrameOutcome("stale")
+            return FrameOutcome("stale", group_id=reset)
 
         if frame.key:
             self._recovering = False
@@ -254,9 +255,8 @@ class FrameWriter(Generic[F]):
             return FrameOutcome("skipped")
 
         if self._stale(frame):
-            self._reset_group()
             self._recovering = True
-            return FrameOutcome("stale")
+            return FrameOutcome("stale", group_id=self._reset_group())
 
         group = self._group
 
@@ -278,11 +278,15 @@ class FrameWriter(Generic[F]):
         self._objects += 1
         return FrameOutcome("sent", group_id=group.group_id)
 
-    def _reset_group(self) -> None:
+    def _reset_group(self) -> int | None:
+        """Abort the open group, if any, and say which one it was."""
         group, self._group = self._group, None
 
-        if group is not None:
-            group.abort()
+        if group is None:
+            return None
+
+        group.abort()
+        return group.group_id
 
     async def _end_group(self) -> None:
         group, self._group = self._group, None
@@ -316,13 +320,15 @@ class FrameWriter(Generic[F]):
 
         self._groups += 1
 
-        if self._stale(frame):
-            # Opening the stream took long enough that the frame is too old; a reset costs less
-            # than a late frame.
-            group.abort()
-            return FrameOutcome("stale", group_id=group.group_id)
-
+        # From here on the group holds the track's write slot: whatever happens, including the
+        # caller's own predicate raising, it is reset before this method is left.
         try:
+            if self._stale(frame):
+                # Opening the stream took long enough that the frame is too old; a reset costs less
+                # than a late frame.
+                group.abort()
+                return FrameOutcome("stale", group_id=group.group_id)
+
             await group.write(frame.payload, properties=frame.properties)
             self._objects += 1
             await group.close()
