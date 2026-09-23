@@ -179,6 +179,17 @@ async def test_cancellation_while_waiting_raises_and_subscribes_no_further() -> 
     assert len(subscriber.attempts) == 1
 
 
+async def test_cancellation_while_awaiting_the_answer_raises_and_cancels_the_pending_request() -> None:
+    subscriber = FakeSubscriber()  # never answers
+
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.02):
+            await retry(subscriber)
+
+    assert len(subscriber.attempts) == 1
+    assert subscriber.subscriptions[0].cancelled == [None]
+
+
 async def test_returns_the_handle_when_the_connection_ends_first() -> None:
     closed = SubscriptionConnectionClosedError(None)
     subscriber = FakeSubscriber(lambda subscription: subscription.fail(closed))

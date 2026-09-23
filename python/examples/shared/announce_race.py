@@ -57,7 +57,8 @@ async def subscribe_with_retry(
     other event reaches the handlers untouched. The delay starts at ``initial_delay`` seconds and
     doubles up to ``max_delay``; ``on_retry(attempt, delay)`` runs before each wait. Only
     cancellation bounds the retries: run it under ``asyncio.timeout`` or cancel the task, and the
-    cancellation raises out of it.
+    cancellation raises out of it, cancelling a request the relay has not answered yet so it cannot
+    be accepted after the budget ran out.
     """
     delay = initial_delay
     attempt = 0
@@ -70,6 +71,11 @@ async def subscribe_with_retry(
 
         try:
             await subscription.subscribed
+        except asyncio.CancelledError:
+            # The budget ran out while the relay had not answered: a request left pending could still
+            # be accepted and deliver objects to handlers nobody expects to run.
+            subscription.cancel()
+            raise
         except SubscriptionRequestError as error:
             if error.request_error.error_code != FRESH_NAMESPACE_ERROR_CODE:
                 return subscription
