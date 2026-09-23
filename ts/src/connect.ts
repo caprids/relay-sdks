@@ -1,14 +1,15 @@
 import {
   createMoqtSession,
   type Goaway,
-  MAX_NAMESPACE_FIELDS,
   type MessageParameters,
   type MoqTrackSource,
   type MoqtObject,
   type MoqtSession,
+  type MoqtSubscribeOptions,
   type PublishDone,
   type RequestError,
   type SubscribeOk,
+  type SubscriptionHandlers,
 } from '@mux/moq-core';
 import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 import {
@@ -23,6 +24,7 @@ import {
   type SubscriptionEventOptions,
   type SubscriptionEvents,
 } from './subscription-events.js';
+import { namespaceFields, trackName } from './validation.js';
 
 export type { ConnectRelayOptions, RelayTransportFactory } from './connect-session.js';
 
@@ -129,10 +131,12 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
 
   const trackSource: MoqTrackSource = Object.freeze({
     closed,
-    subscribe: (...args: Parameters<MoqtSession['subscribe']>) => {
+    subscribe: (options: MoqtSubscribeOptions, handlers: SubscriptionHandlers) => {
+      // Arguments before connection state, as on the product entry points.
+      const trackNamespace = namespaceFields(options.trackNamespace);
+      const name = trackName(options.trackName);
       assertOpen();
-      validateNamespace(args[0].trackNamespace);
-      return connected.subscribe(...args);
+      return connected.subscribe({ ...options, trackNamespace, trackName: name }, handlers);
     },
     fetch: (...args: Parameters<MoqtSession['fetch']>) => {
       assertOpen();
@@ -144,29 +148,33 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
     },
   });
 
+  /**
+   * Admit the arguments of one public call: checked and copied first, then the connection state.
+   * Both entry points do this synchronously, before anything (an iterator, a subscription) exists.
+   */
+  const admit = ({ namespace, track, parameters }: RelayTrackOptions): MoqtSubscribeOptions => {
+    const trackNamespace = namespaceFields(namespace);
+    const name = trackName(track);
+    assertOpen();
+    return { trackNamespace, trackName: name, parameters };
+  };
+
   /** One product subscription per public call; both entry points bind the core the same way. */
-  const subscription = ({ namespace, track, parameters }: RelayTrackOptions, consumers: SubscriptionConsumer[]) =>
-    createSubscription(
-      {
-        subscribe: (handlers) =>
-          connected.subscribe({ trackNamespace: [...namespace], trackName: track, parameters }, handlers),
-        observeClosed,
-      },
-      consumers,
-    );
+  const subscription = (admitted: MoqtSubscribeOptions, consumers: SubscriptionConsumer[]) =>
+    createSubscription({ subscribe: (handlers) => connected.subscribe(admitted, handlers), observeClosed }, consumers);
 
   return {
     closed,
     trackSource,
     subscribe: (options, handlers) => {
-      validateNamespace(options.namespace);
-      assertOpen();
-      return subscription(options, handlers ? [handlersConsumer(handlers)] : []);
+      // Every argument (the handlers' shape included) before connection state.
+      const consumers = handlers ? [handlersConsumer(handlers)] : [];
+      return subscription(admit(options), consumers);
     },
     subscribeEvents: (options, buffer) => {
-      assertOpen();
-      validateNamespace(options.namespace);
-      return createSubscriptionEvents((consumer) => subscription(options, [consumer]), buffer);
+      // Admit before building the iterator: an already-aborted signal never runs its callback.
+      const admitted = admit(options);
+      return createSubscriptionEvents((consumer) => subscription(admitted, [consumer]), buffer);
     },
     close,
   };
@@ -206,17 +214,4 @@ function handlersConsumer(handlers: RelaySubscriptionHandlers): SubscriptionCons
       if (end.cause === 'request-error') snapshot.get('onError')?.(end.error);
     },
   };
-}
-
-function validateNamespace(namespace: readonly string[]): void {
-  if (
-    !Array.isArray(namespace) ||
-    namespace.length === 0 ||
-    Array.from(namespace).some((field) => typeof field !== 'string' || field.length === 0)
-  ) {
-    throw new TypeError('A subscription namespace must contain non-empty string fields');
-  }
-  if (namespace.length > MAX_NAMESPACE_FIELDS) {
-    throw new RangeError(`A subscription namespace must contain at most ${MAX_NAMESPACE_FIELDS} fields`);
-  }
 }

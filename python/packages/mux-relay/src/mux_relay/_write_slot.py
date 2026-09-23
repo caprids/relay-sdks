@@ -20,15 +20,16 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal, Protocol, TypeVar
 
-from moq_core import MAX_OBJECT_PAYLOAD_LENGTH, KeyValuePair, ObjectStatus
+from moq_core import KeyValuePair, ObjectStatus
 from moq_core.control_messages import STREAM_RESET_CODE
 
+from ._validation import payload_bytes, property_pairs
 from .errors import (
     RelayError,
     RelayErrorPhase,
     _transport_error,
 )
-from .payload import _copy_properties, _encode_json, _encode_text
+from .payload import _encode_json, _encode_text
 
 T = TypeVar("T")
 
@@ -277,17 +278,15 @@ class RelayGroupWriter:
         Each call has its own ``write_timeout`` deadline; expiry resets the group and leaves the
         track open. ``status`` is only meaningful for an empty payload (an end-of-group or end-of-track marker).
         """
-        self._check()
-
-        if len(payload) > MAX_OBJECT_PAYLOAD_LENGTH:
-            raise ValueError("Payload exceeds the 16 MiB object limit")
+        # Arguments before group state: a bad payload is a programming error whatever the group holds.
+        data = payload_bytes(payload)
+        object_properties = property_pairs(properties)
 
         if status not in ("normal", "end-of-group", "end-of-track"):
             raise ValueError("Unknown object status")
 
+        self._check()
         object_id = self._next_object_id
-        data = bytes(payload)
-        object_properties = _copy_properties(properties)
 
         self._pending = True
         try:
@@ -500,15 +499,11 @@ class RelayTrackWriter:
         object explicitly (no automatic retry).
         Properties are encoded as supplied; the relay may transform them before delivery.
         """
-        self._assert_writable()
-
-        if len(payload) > MAX_OBJECT_PAYLOAD_LENGTH:
-            raise ValueError("Payload exceeds the 16 MiB object limit")
-
-        # Copy the arguments before taking the track's single write slot: a payload or property
-        # that cannot be converted must not leave the slot held for the life of the connection.
-        data = bytes(payload)
-        object_properties = _copy_properties(properties)
+        # Admit the arguments before consulting the track's single write slot: a payload or property
+        # that cannot be converted must not leave the slot held, and a programming error is reported
+        # the same way whatever the slot holds. `_begin` checks the slot.
+        data = payload_bytes(payload)
+        object_properties = property_pairs(properties)
 
         operation = self._begin("write")
         try:

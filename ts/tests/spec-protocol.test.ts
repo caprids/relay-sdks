@@ -3,11 +3,22 @@ import { readFile } from 'node:fs/promises';
 
 import { describe, expect, it } from 'vitest';
 
-import { MAX_NAMESPACE_FIELDS, MAX_OBJECT_PAYLOAD_LENGTH, MOQT_PROTOCOL_ID } from '../packages/moq-core/src/index.js';
+import {
+  MAX_NAMESPACE_FIELDS,
+  MAX_OBJECT_PAYLOAD_LENGTH,
+  MAX_OBJECT_PROPERTIES_LENGTH,
+  MOQT_PROTOCOL_ID,
+} from '../packages/moq-core/src/index.js';
+import { MAX_PROPERTY_VALUE_LENGTH } from '../src/validation.js';
 
 interface ProtocolSpec {
   moqt: { document: string; protocolId: string };
-  limits: { maxObjectPayloadBytes: number; maxNamespaceFields: number };
+  limits: {
+    maxObjectPayloadBytes: number;
+    maxObjectPropertiesBytes: number;
+    maxPropertyValueBytes: number;
+    maxNamespaceFields: number;
+  };
 }
 
 const spec = JSON.parse(await readFile(new URL('../../spec/protocol.json', import.meta.url), 'utf8')) as ProtocolSpec;
@@ -28,5 +39,14 @@ describe('spec/protocol.json', () => {
 
   it('pins the object payload limit', () => {
     expect(MAX_OBJECT_PAYLOAD_LENGTH).toBe(spec.limits.maxObjectPayloadBytes);
+  });
+
+  it('pins the encoded object properties limit', () => {
+    expect(MAX_OBJECT_PROPERTIES_LENGTH).toBe(spec.limits.maxObjectPropertiesBytes);
+  });
+
+  it('pins the property value length the SDK checks before the core encodes it', () => {
+    // The core keeps its copy of this bound private; the SDK's validation module holds the one the pin checks.
+    expect(MAX_PROPERTY_VALUE_LENGTH).toBe(spec.limits.maxPropertyValueBytes);
   });
 });

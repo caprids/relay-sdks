@@ -7,6 +7,19 @@ internal, relay-side and test vocabulary that the code, its tests and its review
 
 ## Language
 
+### Track naming
+
+**Namespace**:
+The ordered tuple of non-empty string fields that scopes a publisher connection and every track
+under it. The application supplies it in full and it travels verbatim: a slash inside a field is part
+of that field, and the SDK never splits, joins or prefixes. It is never a single string.
+_Avoid_: path, prefix, channel, broadcast
+
+**Track name**:
+The string that names one track within a namespace; the two together are the full track name the
+relay routes on. Non-empty, in both roles.
+_Avoid_: track id, alias (that is the relay's numeric binding for a track), stream
+
 ### Publishing internals
 
 **Write slot**:

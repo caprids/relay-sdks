@@ -1,5 +1,7 @@
+export { ByteWriter } from './protocol/bytes.js';
 export type { KeyValuePair, LocationFilter, MessageParameters, TrackNamespace } from './protocol/control-messages.js';
 export {
+  encodeKeyValuePairs,
   encodeRequestUpdate,
   MAX_NAMESPACE_FIELDS,
   MOQT_PROTOCOL_ID,
@@ -8,7 +10,7 @@ export {
 } from './protocol/control-messages.js';
 export { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './protocol/errors.js';
 export type { FetchStreamEntry, MoqtObject, ObjectStatus } from './protocol/object-stream.js';
-export { MAX_OBJECT_PAYLOAD_LENGTH } from './protocol/object-stream.js';
+export { MAX_OBJECT_PAYLOAD_LENGTH, MAX_OBJECT_PROPERTIES_LENGTH } from './protocol/object-stream.js';
 export type {
   MoqtPublishSession,
   MoqtPublishSessionCallbacks,

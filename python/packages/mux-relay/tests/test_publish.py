@@ -409,9 +409,9 @@ class TestConnectRelayPublisher:
         publisher = await connect_relay_publisher(URL, namespace=namespace, create_transport=hub.connect_publisher)
         cleanup.append(publisher.close)
         invalid: Any = 7
-        with pytest.raises(TypeError, match="must be a string"):
+        with pytest.raises(TypeError, match="non-empty string"):
             publisher.register_track(invalid)
-        with pytest.raises(TypeError, match="must be non-empty"):
+        with pytest.raises(TypeError, match="non-empty string"):
             publisher.register_track("")
         events = publisher.register_track("events")
         subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)

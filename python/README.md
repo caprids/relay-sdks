@@ -211,10 +211,12 @@ separately from SDK errors (compare the exception to your application's `Cancell
 See [Errors and recovery](#errors-and-recovery) for stable SDK error codes, phases, and preserved
 transport causes.
 
-Namespaces contain 1–32 non-empty string fields, sent verbatim without splitting on `/`.
-The 32-field protocol limit is pinned in [protocol.json](../spec/protocol.json). Oversized namespaces are
-rejected before opening a publisher connection or sending a subscription; track names must
-be non-empty strings.
+Namespaces are lists or tuples of 1–32 non-empty string fields, sent verbatim without splitting on
+`/`; a single `str` is a `TypeError`, not a one-field namespace. The 32-field protocol limit is pinned
+in [protocol.json](../spec/protocol.json) and exceeding it is a `ValueError`. Track names must be
+non-empty strings. Both rules apply to publishing and subscribing alike, and are checked before the
+token provider, the transport factory, or any connection state is consulted; see the Arguments table
+in [behavior.md](../spec/behavior.md#arguments).
 
 ## Consume asynchronously
 
@@ -287,10 +289,14 @@ relay caching and subscription filters. A failed write may have delivered partia
 automatic retry.
 
 Optional `track_properties` on `register_track()` and `properties` on `write()` carry explicit protocol
-metadata as `KeyValuePair` values. Property types and even-type values must be non-negative 64-bit
-integers (excluding `bool`); odd-type values must expose a bytes-like buffer. Invalid properties
-raise `TypeError` before a write starts or a track is registered. The SDK adds no default timescale,
-timestamp, or LOC media packaging. Objects are limited to 16 MiB.
+metadata as `KeyValuePair` values. Property types and even-type values must be non-negative integers
+up to `2**64 - 1`, the largest value the core's varint carries (`bool` is not an integer here);
+odd-type values must expose a bytes-like buffer and are copied. Invalid properties raise `TypeError`
+naming the property index before a write starts or a track is registered. A byte value longer than
+65535 bytes, or a list whose encoding exceeds 1 MiB, is a `ValueError` at the same point: the SDK
+measures the encoding with the core's own encoder, so an oversized property never opens a stream.
+The SDK adds no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB
+of payload.
 
 Properties are encoded as supplied, but subscribers see the relay's output. With relay 0.14.17,
 tracks without a declared Timescale (`0x08`) received relay-generated timestamps and a microsecond
@@ -508,7 +514,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `onSubscribed`, `onPublisherDone` | `on_subscribed`, `on_publisher_done` |
 | `publisher.registerTrack({ track, trackProperties, writeTimeoutMs })` | `publisher.register_track(track, track_properties=..., write_timeout=seconds)` |
 | `writer.write(bytes, { properties })` | `await writer.write(payload, properties=...)` |
-| `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any bytes-like object, including `list[int]`; a `str` raises `TypeError` |
+| `write()` takes any `ArrayBufferView`; a string, `ArrayBuffer`, or array raises `TypeError` | `write()` takes any object with the buffer protocol (`bytes`, `bytearray`, `memoryview`, ...); a `str` or `list[int]` raises `TypeError` |
 | `subscriber.closed` resolves `{ error? }` | `await subscriber.closed` returns `Closed(error=...)` |
 | `AbortSignal` | `CancellationToken` (`cancel(reason)` closes every connection given the token) |
 | `RelayError` with `code` and `phase` | `RelayError` with `code` and `phase` |

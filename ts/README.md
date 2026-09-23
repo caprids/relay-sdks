@@ -209,10 +209,12 @@ over `getToken`, matching the current Relay connection authentication convention
 2147483647 milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError`
 rather than a deadline that fires immediately.
 
-Namespaces contain 1–32 non-empty string fields, sent verbatim without splitting on `/`.
-The 32-field protocol limit is pinned in [protocol.json](../spec/protocol.json). Oversized namespaces are
-rejected before opening a publisher connection or sending a subscription; track names must
-be non-empty strings.
+Namespaces are arrays of 1–32 non-empty string fields, sent verbatim without splitting on `/`; a
+single string is a `TypeError`, not a one-field namespace. The 32-field protocol limit is pinned in
+[protocol.json](../spec/protocol.json) and exceeding it is a `RangeError`. Track names must be
+non-empty strings. Both rules apply to publishing and subscribing alike, and are checked before the
+token provider, the transport factory, or any connection state is consulted; see the Arguments table
+in [behavior.md](../spec/behavior.md#arguments).
 
 ## Consume asynchronously
 
@@ -278,10 +280,13 @@ or retention after an object is sent. Late-subscriber behavior also depends on r
 subscription filters. A failed write may have delivered partial data; there is no automatic retry.
 
 Optional `trackProperties` on `registerTrack()` and `properties` on `write()` carry explicit protocol
-metadata. Property types and even-type integer values must be non-negative safe integers; odd-type
-values must be `ArrayBufferView`s and are copied as their raw bytes. Invalid properties raise a
-`TypeError` naming the property index before registering a track or starting a write. The SDK adds
-no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB.
+metadata. Property types and even-type integer values must be non-negative integers up to
+`Number.MAX_SAFE_INTEGER`, the largest value the core's varint carries; odd-type values must be
+`ArrayBufferView`s and are copied as their raw bytes. Invalid properties raise a `TypeError` naming
+the property index before registering a track or starting a write. A byte value longer than 65535
+bytes, or a list whose encoding exceeds 1 MiB, is a `RangeError` at the same point: the SDK measures
+the encoding with the core's own encoder, so an oversized property never opens a stream. The SDK adds
+no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB of payload.
 
 Properties are encoded as supplied, but subscribers see the relay's output. With relay 0.14.17,
 tracks without a declared Timescale (`0x08`) received relay-generated timestamps and a microsecond

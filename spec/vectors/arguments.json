@@ -1,0 +1,45 @@
+{
+  "source": "spec/behavior.md, Arguments table; boundary cases derived from the limits in spec/protocol.json",
+  "note": "Portable argument cases only: containers, fields and counts that JSON can express. Each SDK adds its own language-specific cases (sparse arrays, tuples, generators). A case without `error` is accepted and its value is sent verbatim. `error` names the argument-error class: `type` is TypeError in both languages; `range` is RangeError in TypeScript and ValueError in Python.",
+  "namespaces": [
+    { "name": "one field", "namespace": ["live"] },
+    { "name": "slash inside a field is kept verbatim", "namespace": ["live", "room/42"] },
+    {
+      "name": "32 fields",
+      "namespace": [
+        "f01", "f02", "f03", "f04", "f05", "f06", "f07", "f08",
+        "f09", "f10", "f11", "f12", "f13", "f14", "f15", "f16",
+        "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24",
+        "f25", "f26", "f27", "f28", "f29", "f30", "f31", "f32"
+      ]
+    },
+    { "name": "string container", "namespace": "live", "error": "type" },
+    { "name": "null container", "namespace": null, "error": "type" },
+    { "name": "number container", "namespace": 7, "error": "type" },
+    { "name": "object container", "namespace": { "0": "live", "length": 1 }, "error": "type" },
+    { "name": "empty", "namespace": [], "error": "type" },
+    { "name": "empty field", "namespace": ["live", ""], "error": "type" },
+    { "name": "number field", "namespace": ["live", 7], "error": "type" },
+    { "name": "null field", "namespace": ["live", null], "error": "type" },
+    { "name": "nested field", "namespace": [["live"]], "error": "type" },
+    {
+      "name": "33 fields",
+      "namespace": [
+        "f01", "f02", "f03", "f04", "f05", "f06", "f07", "f08",
+        "f09", "f10", "f11", "f12", "f13", "f14", "f15", "f16",
+        "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24",
+        "f25", "f26", "f27", "f28", "f29", "f30", "f31", "f32",
+        "f33"
+      ],
+      "error": "range"
+    }
+  ],
+  "trackNames": [
+    { "name": "plain", "track": "events" },
+    { "name": "slash is kept verbatim", "track": "room/42" },
+    { "name": "empty", "track": "", "error": "type" },
+    { "name": "number", "track": 7, "error": "type" },
+    { "name": "null", "track": null, "error": "type" },
+    { "name": "array", "track": ["events"], "error": "type" }
+  ]
+}
