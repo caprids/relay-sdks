@@ -6,7 +6,7 @@ writer, plus end-to-end checks over the relay hub. Rows follow the "Media publis
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from core_helpers.waiting import settle, wait_for
@@ -259,6 +259,23 @@ class TestKeyframeGrouping:
         await writer.close()
         assert track.groups[1].finished and writer.closed
         assert (writer.groups, writer.objects) == (2, 2)
+
+    async def test_a_frame_the_sdk_rejects_resets_the_group_and_propagates(self) -> None:
+        # An oversized payload or a bad property is a programming error the SDK raises before the
+        # group's operation is touched; the group must still be reset or the write slot stays taken.
+        track = FakeTrackWriter()
+        track.fail("group-write", TypeError("Payload must be bytes-like"), on=1)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        assert await kinds(writer, [key(0)]) == ["sent"]
+
+        with pytest.raises(TypeError):
+            await writer.write(delta(1))
+
+        assert track.groups[0].aborts == [None]
+        assert await kinds(writer, [delta(2)]) == ["skipped"]
+        assert await kinds(writer, [key(3)]) == ["sent"]
+        assert track.groups[1].payloads == [b"key"]
 
     def test_grouping_is_checked_as_an_argument(self) -> None:
         with pytest.raises(TypeError):
@@ -555,6 +572,30 @@ class TestOverTheRelayHub:
         assert [(obj.group_id, obj.object_id) for obj in audio_objects] == [(0, 0), (1, 0)]
         assert [p.value for obj in video_objects for p in obj.properties if p.type == TIMESTAMP] == [0, 1, 2, 3]
         assert (video.groups, video.objects, audio.groups, audio.objects) == (2, 4, 2, 2)
+
+    async def test_a_frame_the_sdk_rejects_frees_the_write_slot_for_the_next_keyframe(self, cleanup: Cleanup) -> None:
+        hub = create_relay_hub()
+        cleanup.append(hub.destroy)
+        publisher = await connect_relay_publisher(URL, namespace=NAMESPACE, create_transport=hub.connect_publisher)
+        subscriber = await connect_relay_subscriber(URL, create_transport=hub.connect_subscriber)
+        cleanup.extend([subscriber.close, publisher.close])
+        video_track = publisher.register_track("video")
+        objects = received(subscriber, "video")
+        await wait_for(lambda: video_track.has_demand)
+        video: FrameWriter[Sample] = FrameWriter(video_track)
+
+        assert await kinds(video, [key(0)]) == ["sent"]
+
+        with pytest.raises(TypeError):
+            await video.write(Sample(cast(Any, "not bytes"), False, (KeyValuePair(TIMESTAMP, 1),), False, 1))
+
+        # Not WRITE_PENDING: the rejected frame's group was reset and the slot is free again.
+        assert await kinds(video, [key(2), delta(3)]) == ["sent", "sent"]
+        await video.close()
+
+        await wait_for(lambda: len(objects) == 3)
+        assert [(obj.group_id, obj.object_id) for obj in objects] == [(0, 0), (1, 0), (1, 1)]
+        assert (video.groups, video.objects) == (2, 3)
 
     async def test_the_catalog_retries_after_a_bound_timeout_without_another_subscription(
         self, cleanup: Cleanup

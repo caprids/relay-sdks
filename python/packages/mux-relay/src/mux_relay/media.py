@@ -267,9 +267,11 @@ class FrameWriter(Generic[F]):
             self._group = None
             return self._failed(error, group_id=group.group_id)
         except BaseException:
-            # Cancelled from outside (the task, the caller's deadline, the lifetime's reason): the
-            # SDK reset the group too, and it would replay this failure from the next FIN. Let it
-            # go; the next keyframe opens a fresh one.
+            # Cancelled from outside (the task, the caller's deadline, the lifetime's reason), or a
+            # frame the SDK rejected as an argument before anything was sent. Reset the group (a
+            # no-op when the SDK already did) so the track's write slot is free, and let it go: kept,
+            # it would replay this failure from the next FIN. The next keyframe opens a fresh one.
+            group.abort()
             self._group = None
             raise
 
@@ -293,6 +295,10 @@ class FrameWriter(Generic[F]):
         except RelayError:
             # The group was already reset, or the track is gone: nothing left to complete.
             pass
+        except BaseException:
+            # Cancelled mid-FIN: make sure the slot is free before the failure propagates.
+            group.abort()
+            raise
 
     # ------------------------------------------------------------------ one group per frame
 
