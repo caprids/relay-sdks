@@ -1,6 +1,6 @@
 """A loopback WebTransport server on aioquic, so the real transport adapter can be tested without a relay.
 
-Reuses :class:`mux_relay.webtransport.WebTransportSessionBase` for the server role: the loopback test
+Reuses :class:`mux_relay.webtransport._session.WebTransportSessionBase` for the server role: the loopback test
 therefore exercises the very stream code the client ships, on both ends of a real QUIC connection.
 """
 
@@ -24,12 +24,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from mux_relay.webtransport import (
-    WebTransportProtocol,
-    WebTransportSessionBase,
-    parse_sf_list_of_strings,
-    sf_list_of_strings,
-)
+from mux_relay.webtransport._protocol import WebTransportProtocol
+from mux_relay.webtransport._session import WebTransportSessionBase
+from mux_relay.webtransport._wire import parse_sf_list_of_strings, sf_list_of_strings
 
 SERVER_NAME = "localhost"
 
