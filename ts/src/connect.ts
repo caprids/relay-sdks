@@ -149,28 +149,29 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
   });
 
   /**
-   * One product subscription per public call; both entry points bind the core the same way. The
-   * arguments are admitted (and copied) before connection state is consulted.
+   * Admit the arguments of one public call: checked and copied first, then the connection state.
+   * Both entry points do this synchronously, before anything (an iterator, a subscription) exists.
    */
-  const subscription = ({ namespace, track, parameters }: RelayTrackOptions, consumers: SubscriptionConsumer[]) => {
+  const admit = ({ namespace, track, parameters }: RelayTrackOptions): MoqtSubscribeOptions => {
     const trackNamespace = namespaceFields(namespace);
     const name = trackName(track);
     assertOpen();
-    return createSubscription(
-      {
-        subscribe: (handlers) => connected.subscribe({ trackNamespace, trackName: name, parameters }, handlers),
-        observeClosed,
-      },
-      consumers,
-    );
+    return { trackNamespace, trackName: name, parameters };
   };
+
+  /** One product subscription per public call; both entry points bind the core the same way. */
+  const subscription = (admitted: MoqtSubscribeOptions, consumers: SubscriptionConsumer[]) =>
+    createSubscription({ subscribe: (handlers) => connected.subscribe(admitted, handlers), observeClosed }, consumers);
 
   return {
     closed,
     trackSource,
-    subscribe: (options, handlers) => subscription(options, handlers ? [handlersConsumer(handlers)] : []),
-    subscribeEvents: (options, buffer) =>
-      createSubscriptionEvents((consumer) => subscription(options, [consumer]), buffer),
+    subscribe: (options, handlers) => subscription(admit(options), handlers ? [handlersConsumer(handlers)] : []),
+    subscribeEvents: (options, buffer) => {
+      // Admit before building the iterator: an already-aborted signal never runs its callback.
+      const admitted = admit(options);
+      return createSubscriptionEvents((consumer) => subscription(admitted, [consumer]), buffer);
+    },
     close,
   };
 }

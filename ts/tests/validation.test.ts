@@ -205,6 +205,20 @@ describe('arguments are checked before connection or slot state', () => {
     }
   });
 
+  it('checks subscribeEvents arguments and connection state even when the signal is already aborted', async () => {
+    const fake = await connectFakeSubscriber();
+    const aborted = { signal: AbortSignal.abort() };
+    expect(() => fake.connection.subscribeEvents({ namespace: [], track: '' }, aborted)).toThrow(TypeError);
+    expect(() => fake.connection.subscribeEvents({ namespace: ['live'], track: '' }, aborted)).toThrow(TypeError);
+    const events = fake.connection.subscribeEvents({ namespace: ['live'], track: 'events' }, aborted);
+    await expect(events.next()).rejects.toBe(aborted.signal.reason);
+    fake.connection.close();
+    await fake.connection.closed;
+    expect(() => fake.connection.subscribeEvents({ namespace: ['live'], track: 'events' }, aborted)).toThrow(
+      RelayError,
+    );
+  });
+
   it('reports an invalid track name on a closed publisher as a TypeError, not CLOSED', async () => {
     const { publisher } = await connectHubPublisher();
     await publisher.close();
