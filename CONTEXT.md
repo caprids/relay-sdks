@@ -74,6 +74,15 @@ publisher is done.
 _Avoid_: relay subscription (that is demand), request (fetch and track status are requests too),
 listener, viewer
 
+### Transport internals
+
+**Transport adapter**:
+An implementation of the transport seam a connection runs over: create and accept streams, close,
+observe closure (the core's `MoqtTransport`). The aioquic WebTransport client is the product's adapter;
+the tests supply in-memory pairs and a loopback server on the same base.
+_Avoid_: transport layer, transport implementation, WebTransport (the protocol, not the adapter),
+connection (a Relay connection runs over an adapter)
+
 ### Test vocabulary
 
 **Relay hub**:

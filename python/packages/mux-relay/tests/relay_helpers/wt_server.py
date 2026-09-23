@@ -1,6 +1,6 @@
 """A loopback WebTransport server on aioquic, so the real transport adapter can be tested without a relay.
 
-Reuses :class:`mux_relay.webtransport.WebTransportSessionBase` for the server role: the loopback test
+Reuses :class:`mux_relay.webtransport._session.WebTransportSessionBase` for the server role: the loopback test
 therefore exercises the very stream code the client ships, on both ends of a real QUIC connection.
 """
 
@@ -24,12 +24,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from mux_relay.webtransport import (
-    WebTransportProtocol,
-    WebTransportSessionBase,
-    parse_sf_list_of_strings,
-    sf_list_of_strings,
-)
+from mux_relay.webtransport._protocol import WebTransportProtocol
+from mux_relay.webtransport._session import WebTransportSessionBase
+from mux_relay.webtransport._wire import parse_sf_list_of_strings, sf_list_of_strings
 
 SERVER_NAME = "localhost"
 
@@ -117,7 +114,6 @@ class WebTransportServerProtocol(WebTransportProtocol):
         self._on_session = on_session
         self._respond_to_connect = respond_to_connect
         self._on_request = on_request
-        self.on_request_headers = self._handle_request
         self.requests: list[dict[bytes, bytes]] = []
         self.impairment: Impairment | None = None
 
@@ -149,7 +145,8 @@ class WebTransportServerProtocol(WebTransportProtocol):
         else:
             self._loop.call_later(delay, super().datagram_received, data, addr)
 
-    def _handle_request(self, event: HeadersReceived) -> None:
+    def _on_request_headers(self, event: HeadersReceived) -> None:
+        """Answer the peer's CONNECT: accept it as a WebTransport session, or 404 anything else."""
         headers = {key.lower(): value for key, value in event.headers}
         self.requests.append(headers)
 

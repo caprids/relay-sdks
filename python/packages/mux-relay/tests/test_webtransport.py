@@ -1,8 +1,10 @@
-"""The aioquic WebTransport adapter: wire helpers, and the whole SDK over a real QUIC loopback.
+"""The aioquic WebTransport adapter over a real QUIC loopback: the whole SDK, backpressure, pruning, teardown.
 
 The loopback test is the offline counterpart of the live smoke test in ``scripts/test_relay.py``: it
 runs the same assertion list from ``spec/behavior.md`` against the in-memory relay hub served over
-real WebTransport sessions on 127.0.0.1, so the transport adapter is exercised end to end.
+real WebTransport sessions on 127.0.0.1, so the transport adapter is exercised end to end. The wire
+codecs are covered in ``test_webtransport_wire.py`` and the aioquic internals the adapter relies on in
+``test_webtransport_aioquic.py``.
 """
 
 import asyncio
@@ -11,15 +13,10 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
-from aioquic.asyncio.protocol import QuicConnectionProtocol
-from aioquic.h3.connection import H3Connection, H3Stream
 from aioquic.h3.events import HeadersReceived, WebTransportStreamDataReceived
 from aioquic.quic import events as quic_events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
-from aioquic.quic.packet_builder import QuicDeliveryState
-from aioquic.quic.rangeset import RangeSet
-from aioquic.quic.stream import QuicStream, QuicStreamReceiver, QuicStreamSender
 from core_helpers.waiting import wait_for
 from relay_helpers.relay_hub import RelayHub, create_relay_hub
 from relay_helpers.wt_server import (
@@ -37,124 +34,11 @@ from mux_relay import (
     connect_relay_publisher,
     connect_relay_subscriber,
 )
-from mux_relay.webtransport import (
-    CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
-    WebTransportError,
-    WebTransportProtocol,
-    WebTransportSession,
-    WebTransportSessionBase,
-    _open_socket,
-    _parse_url,
-    connect_webtransport,
-    encode_close_session_capsule,
-    h3_to_webtransport_error_code,
-    parse_sf_list_of_strings,
-    parse_sf_string,
-    sf_list_of_strings,
-    webtransport_to_h3_error_code,
-)
+from mux_relay.webtransport import WebTransportError, connect_webtransport
+from mux_relay.webtransport._client import WebTransportSession
+from mux_relay.webtransport._protocol import WebTransportProtocol
 
 NAMESPACE = ["loopback", "data"]
-
-
-class TestWireHelpers:
-    async def test_transport_failures_keep_their_details(self) -> None:
-        session = WebTransportSessionBase()
-        error = WebTransportError("QUIC connection terminated", code=1, reason="Idle timeout")
-        session._finish(error)
-
-        with pytest.raises(WebTransportError) as failure:
-            await session.wait_closed()
-
-        assert failure.value is error
-        assert str(error) == "QUIC connection terminated"
-        assert error.code == 1
-        assert error.reason == "Idle timeout"
-
-    def test_error_codes_round_trip_through_the_reserved_h3_range(self) -> None:
-        for code in (0, 1, 0x1D, 0x1E, 0x1F, 12345, 0xFFFFFFFF):
-            mapped = webtransport_to_h3_error_code(code)
-            assert h3_to_webtransport_error_code(mapped) == code
-
-        # The draft's worked example: application code 0 sits at the start of the range.
-        assert webtransport_to_h3_error_code(0) == 0x52E4A40FA8DB
-        assert h3_to_webtransport_error_code(0x100) is None
-        # Every 31st value in the range is skipped (a GREASE code point), so it maps to nothing.
-        assert h3_to_webtransport_error_code(0x52E4A40FA8DB + 0x1E) is None
-
-    def test_structured_field_lists_of_strings(self) -> None:
-        assert sf_list_of_strings(["moqt-20"]) == b'"moqt-20"'
-        assert sf_list_of_strings(["a", 'b"c']) == b'"a", "b\\"c"'
-        assert parse_sf_list_of_strings(b'"moqt-20", "moqt-19"') == ["moqt-20", "moqt-19"]
-        assert parse_sf_string(b'"moqt-20"') == "moqt-20"
-        assert parse_sf_string(b"moqt-20") == "moqt-20"
-
-    def test_parses_endpoints_into_connect_headers(self) -> None:
-        endpoint = _parse_url("https://sjc.relay.mux.global")
-        assert (endpoint.host, endpoint.port, endpoint.authority, endpoint.path) == (
-            "sjc.relay.mux.global",
-            443,
-            "sjc.relay.mux.global",
-            "/",
-        )
-
-        endpoint = _parse_url("https://127.0.0.1:4443/moq?jwt=abc")
-        assert (endpoint.authority, endpoint.path) == ("127.0.0.1:4443", "/moq?jwt=abc")
-
-        with pytest.raises(ValueError, match="HTTPS"):
-            _parse_url("http://relay.example.com")
-
-    async def test_close_capsule_from_the_peer_ends_the_session_cleanly(self) -> None:
-        session = WebTransportSessionBase()
-        capsule = encode_close_session_capsule(7, "bye")
-
-        assert capsule[:2] == bytes([0x68, 0x43])  # 0x2843 as a two-byte QUIC varint
-        # Split across two DATA frames: the capsule parser buffers partial input.
-        session._on_connect_data(capsule[:3], False)
-        assert not session._closed.done()
-        session._on_connect_data(capsule[3:], False)
-        assert session.close_info == (7, "bye")
-        await session.wait_closed()
-
-    def test_the_close_capsule_type_is_the_registered_value(self) -> None:
-        assert CAPSULE_CLOSE_WEBTRANSPORT_SESSION == 0x2843
-
-    def test_socket_fallback_picks_an_ipv4_address_when_ipv6_sockets_are_unavailable(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import socket as socket_module
-
-        real_socket = socket_module.socket
-
-        def no_ipv6(family: int = socket_module.AF_INET, *args: Any, **kwargs: Any) -> Any:
-            if family == socket_module.AF_INET6:
-                raise OSError("IPv6 is unavailable")
-
-            return real_socket(family, *args, **kwargs)
-
-        monkeypatch.setattr(socket_module, "socket", no_ipv6)
-        # The resolver put an IPv6 address first; the IPv4 socket must not be pointed at it.
-        sock, address = _open_socket([("2001:db8::1", 443, 0, 0), ("192.0.2.1", 443)])
-
-        try:
-            assert sock.family == socket_module.AF_INET
-            assert address == ("192.0.2.1", 443)
-        finally:
-            sock.close()
-
-        with pytest.raises(WebTransportError, match="only to IPv6"):
-            _open_socket([("2001:db8::1", 443, 0, 0)])
-
-    def test_dual_stack_socket_maps_ipv4_addresses(self) -> None:
-        try:
-            sock, address = _open_socket([("192.0.2.1", 443)])
-        except WebTransportError:
-            pytest.skip("no IPv6 socket support on this host")
-
-        try:
-            assert address == ("::ffff:192.0.2.1", 443, 0, 0)
-        finally:
-            sock.close()
 
 
 @pytest.fixture
@@ -619,7 +503,7 @@ class TestSendBackpressure:
         pair = await asyncio.wait_for(anext(transport.incoming_bidirectional_streams()), 5)
         assert await pair.readable.read() == b"hello"
         assert await pair.readable.read() is None  # the peer's FIN
-        stream_id: int = pair.writable._stream_id
+        stream_id: int = pair.writable.stream_id
         await wait_for(lambda: len(sessions) == 1, timeout=5)
 
         sessions[0].impair(paused=True)  # our bytes stop leaving, so the write below stays pending
@@ -717,97 +601,6 @@ class TestCancelledHandshake:
             loop.set_exception_handler(previous_handler)
 
 
-class TestAioquicInternals:
-    """Pins the aioquic internals the adapter reaches into.
-
-    The send half's backpressure, the close drain, stream pruning and the FIN retry depend on state
-    aioquic's public API does not expose. A rename in a later aioquic 1.x would otherwise fail
-    silently and only under load (a write that never settles, a FIN never re-armed), so a dependency
-    bump has to fail here first. Behaviour is asserted alongside the names, since the adapter relies
-    on both.
-    """
-
-    async def test_the_private_aioquic_members_the_adapter_relies_on_still_exist(self) -> None:
-        # Verified with `uv run --with "aioquic==<version>" pytest <this file> -k aioquic` on:
-        #   1.3.0 (the locked version): passes.
-        #   1.2.0 (the only other 1.2.x release on PyPI): every QuicStreamSender / QuicStreamReceiver /
-        #     QuicConnection member below exists, but `H3Connection._get_or_create_stream` is a plain method
-        #     there and only became a context manager in 1.3.0; `create_bidirectional_stream` relied on that
-        #     before this test existed, so the adapter's real floor is 1.3.0 despite the `>=1.2` pin.
-        # Revisit this list, and the members below, with any aioquic bump.
-
-        # QuicStreamSender: what write() queues, what a transmit consumes (settling a write), what an
-        # ACK finishes (pruning the stream), and how a reset shows.
-        sender = QuicStreamSender(stream_id=2, writable=True)
-        assert isinstance(sender._pending, RangeSet)
-        assert len(sender._pending) == 0  # `len`, never truthiness: RangeSet.__bool__ is not implemented
-        assert isinstance(sender._buffer, bytearray)
-        assert sender._pending_eof is False
-        assert sender._acked_fin is False
-        assert sender._buffer_fin is None
-        assert sender._reset_error_code is None
-        assert sender.buffer_is_empty is True
-        assert sender.is_finished is False
-
-        sender.write(b"abc", end_stream=True)
-        assert len(sender._pending) == 1
-        assert sender._pending_eof is True
-        assert sender._buffer_fin == 3
-        assert sender.buffer_is_empty is False
-
-        frame = sender.get_frame(1024)
-        assert frame is not None and frame.fin and frame.data == b"abc"
-        assert len(sender._pending) == 0 and sender._pending_eof is False  # transmitted
-
-        sender.on_data_delivery(QuicDeliveryState.ACKED, 0, 3, True)
-        assert sender._acked_fin is True
-        assert len(sender._buffer) == 0
-        assert sender.is_finished is True
-
-        # The FIN retry re-arms exactly these two after aioquic consumed a FIN it could not send.
-        rearmed = QuicStreamSender(stream_id=6, writable=True)
-        rearmed.write(b"", end_stream=True)
-        rearmed._pending_eof = False
-        rearmed.buffer_is_empty = True
-        rearmed.reset(0)
-        assert rearmed._reset_error_code == 0
-
-        # QuicStreamReceiver: the half `_finish_receiving_half` marks done on a send-only stream.
-        receiver = QuicStreamReceiver(stream_id=2, readable=False)
-        assert receiver.is_finished is False  # aioquic ignores `readable` here; the adapter sets it
-        receiver.is_finished = True
-
-        # The mirror image, which the adapter relies on and does not set: the unused send half of a
-        # peer-initiated unidirectional stream is finished from the start, so the FIN alone lets
-        # aioquic discard the stream and the settle path prune a received group's entries.
-        assert QuicStreamSender(stream_id=3, writable=False).is_finished is True
-
-        # QuicConnection / QuicStream: the live stream table the settle and drain paths read.
-        connection = QuicConnection(configuration=QuicConfiguration(is_client=True))
-        h3 = H3Connection(connection, enable_webtransport=True)
-        stream_id = connection.get_next_available_stream_id(is_unidirectional=True)
-        connection.send_stream_data(stream_id, b"x")
-        assert isinstance(connection._streams, dict)
-        stream = connection._streams[stream_id]
-        assert isinstance(stream, QuicStream)
-        assert isinstance(stream.sender, QuicStreamSender)
-        assert isinstance(stream.receiver, QuicStreamReceiver)
-
-        # H3Connection: the per-stream record the adapter drops once both halves are done.
-        assert isinstance(h3._stream, dict)
-        with h3._get_or_create_stream(stream_id) as h3_stream:
-            assert isinstance(h3_stream, H3Stream)
-        assert stream_id in h3._stream
-
-        # QuicConnectionProtocol: the asyncio glue the adapter drives transmits through.
-        protocol = QuicConnectionProtocol(connection)
-        assert protocol._quic is connection
-        assert callable(protocol._transmit_soon)
-        assert protocol._connected_waiter is None
-        assert protocol._transport is None
-        assert protocol._loop is asyncio.get_running_loop()
-
-
 class TestReceivePruning:
     """Per-stream state for peer-initiated streams is dropped once aioquic discards the stream."""
 
@@ -862,7 +655,7 @@ class TestReceivePruning:
             await wait_for(lambda: len(received) == count, timeout=30)
             # Pruning follows aioquic's own discard, which follows the acknowledgement.
             await wait_for(lambda: self._maps(transport) == baseline, timeout=10)
-            await wait_for(lambda: protocol._fin_retry_handle is None, timeout=5)
+            await wait_for(lambda: protocol.fin_retry.idle, timeout=5)
         finally:
             reader.cancel()
             transport.close()
@@ -884,14 +677,14 @@ class TestReceivePruning:
             await sender.write(b"head")
             incoming = await asyncio.wait_for(anext(transport.incoming_unidirectional_streams()), 5)
             assert await incoming.read() == b"head"
-            stream_id: int = incoming._stream_id
+            stream_id: int = incoming.stream_id
 
             # Our STOP_SENDING never reaches the peer, so its FIN is already on the way: the half is
             # cancelled when the end of stream arrives.
             sessions[0].impair(paused=True)
             incoming.cancel()
             await asyncio.wait_for(sender.close(), 10)
-            await wait_for(lambda: incoming._cancelled and not incoming.ended, timeout=5)
+            await wait_for(lambda: incoming.cancelled and not incoming.ended, timeout=5)
             sessions[0].impair()
 
             await wait_for(
