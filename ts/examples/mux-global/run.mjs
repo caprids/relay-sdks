@@ -20,7 +20,9 @@ import { chromium } from 'playwright';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
-const modules = { '/sdk/': resolve(root, 'dist'), '/core/': resolve(root, 'packages/moq-core/dist') };
+/** The two built packages, which must exist, and the example policies shared with the smoke test. */
+const built = { '/sdk/': resolve(root, 'dist'), '/core/': resolve(root, 'packages/moq-core/dist') };
+const modules = { ...built, '/shared/': resolve(here, '../shared') };
 const usage = `Usage: node examples/mux-global/run.mjs [options]
 
   --url <https url>      Relay endpoint (default RELAY_URL or https://sjc.relay.mux.global)
@@ -89,7 +91,7 @@ const config = {
   timeoutMs: positiveInteger('timeout', args.timeout) * 1000,
 };
 
-await Promise.all(Object.values(modules).map((directory) => access(resolve(directory, 'index.js')))).catch(() =>
+await Promise.all(Object.values(built).map((directory) => access(resolve(directory, 'index.js')))).catch(() =>
   fail('The SDK is not built yet; run `pnpm build` first'),
 );
 
@@ -129,7 +131,7 @@ const server = createServer(async (request, response) => {
   }
 });
 
-/** Only demo.js and built .js files under the two dist directories are served. */
+/** Only demo.js, the shared example policies, and built .js files under the two dist directories are served. */
 function resolveModule(path) {
   if (path === '/demo.js') return resolve(here, 'demo.js');
   for (const [prefix, base] of Object.entries(modules)) {

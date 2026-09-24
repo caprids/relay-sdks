@@ -89,6 +89,7 @@ function recordingPublisher(
     disconnect = resolve;
   });
   const publisher: RelayPublisher = {
+    announced: Promise.resolve(),
     closed,
     close: vi.fn(async () => {}),
     registerTrack({ track }) {

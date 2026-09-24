@@ -43,8 +43,9 @@ mise run python:install
 
 A publisher's `write()` waits for relay demand: a matching subscriber must be running. Even when
 publishing connects first, a fresh namespace can briefly reject subscriptions with `404 Broadcast
-not found` while its announcement propagates. The combined demo starts both sides, retries only
-that subscription rejection with capped backoff, and waits for demand before writing. Once a write
+not found` while its announcement propagates, about a round trip. The combined demo starts both
+sides, waits for the publisher's `announced`, retries only that subscription rejection with capped
+backoff, and waits for demand before writing. Once a write
 starts, a failure stops the run; it never automatically replays potentially delivered bytes.
 
 Enter the endpoint and a **fresh namespace authorized by your token** when prompted below. The CLI
@@ -153,9 +154,10 @@ relay's answer: it returns the acceptance info (`on_subscribed` receives the sam
 if the connection ends first, or your own reason if you cancelled. Await `subscription.ended` to
 learn that the subscription can no longer deliver and why: it settles once, never raises, with
 `kind` (`rejected`, `terminated` or `cancelled`), the protocol `cause`, whether it had been
-accepted, and the error. Both are `SubscriptionAwaitable` objects rather than bare futures: any
-number of tasks can await them, a cancelled waiter or a timed-out `asyncio.wait_for` leaves the
-result intact, and `done()`, `result()` and `add_done_callback()` read it without allocating.
+accepted, and the error. Both are `RelayAwaitable` objects rather than bare futures, as are the
+publisher's `announced` and every connection's `closed`: any number of tasks can await them, a
+cancelled waiter or a timed-out `asyncio.wait_for` leaves the result intact, and `done()`,
+`result()` and `add_done_callback()` read it without allocating.
 
 ```python
 subscription = subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(on_object=handle))
@@ -280,6 +282,15 @@ raises `SUBSCRIPTION_CHANGED`; a transport deadline raises `WRITE_TIMEOUT`. The 
 a new group ID. Choose fresh data or the next random-access point; already delivered bytes cannot
 be withdrawn. If demand disappeared, the next write waits for a new relay subscription, and
 `demand_changes()` continues reporting changes.
+
+Connecting announces the namespace once the first track is registered, and `publisher.announced`
+settles when that announce has reached the wire: the relay acknowledges nothing more, and it routes
+subscribes to the namespace about a round trip later. A subscribe that arrives before then is
+rejected with `404 Broadcast not found`. The SDK does not retry a subscribe, so a subscriber retries
+that rejection within its own budget (the examples and the live smoke test share
+`examples/shared/announce_race.py` for it), and a process that owns both sides awaits `announced`
+before subscribing. `announced` stays pending while no solicitation covers the namespace, and the
+connection's closure terminates it if that comes first.
 
 Each write copies its bytes and sends one independent group containing one object. Await each
 write; a concurrent call raises `WRITE_PENDING` rather than growing a queue. Completion
@@ -572,8 +583,9 @@ random UUID. Running this command explicitly opts into contacting that endpoint.
 RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python:test:relay
 ```
 
-The test checks binary,
-empty, and text payloads plus independent track closure, then closes both connections. It defaults to
+The test waits for the publisher's `announced`, subscribes through the examples' announce-race
+retry and reports how often it retried, checks binary, empty, and text payloads plus independent
+track closure, then closes both connections. It defaults to
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
 the SDK are absolute: include the token's root prefix when required by the relay.
 

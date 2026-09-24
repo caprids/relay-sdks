@@ -49,6 +49,10 @@ async def connected(monkeypatch: pytest.MonkeyPatch):
 async def test_one_object_round_trip_closes_connections(connected):
     entries = []
     assert await demo.run_demo(CONFIG, entries.append) == {"published": 1, "received": 1}
+    # The combined run waits for the announce to reach the wire before it subscribes, and says so.
+    assert entries.index({"event": "announced", "namespace": "quickstart/test"}) < next(
+        index for index, entry in enumerate(entries) if entry["event"] == "subscribed"
+    )
     assert any(entry.get("seq") == 1 and entry["event"] == "received" for entry in entries)
     assert len(connected) == 2
     assert all(connection.closed.done() for connection in connected)
@@ -143,35 +147,6 @@ async def test_demo_over_native_aioquic(monkeypatch: pytest.MonkeyPatch):
         hub.destroy()
         server.close()
         await asyncio.sleep(0.05)
-
-
-async def test_fresh_namespace_rejection_is_retried(connected, monkeypatch: pytest.MonkeyPatch):
-    from types import SimpleNamespace
-
-    from mux_relay import RelaySubscriber, RequestError, SubscriptionRequestError
-
-    original = RelaySubscriber.subscribe
-    attempts = 0
-
-    def subscribe(self, namespace, track, handlers):
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            # The relay's answer arrives through `subscribed`: a fresh namespace is still a 404.
-            loop = asyncio.get_running_loop()
-            subscribed = loop.create_future()
-            subscribed.set_exception(
-                SubscriptionRequestError(RequestError(error_code=404, retry_interval=0, reason="Broadcast not found"))
-            )
-            return SimpleNamespace(subscribed=subscribed, ended=loop.create_future(), cancel=lambda reason=None: None)
-        return original(self, namespace, track, handlers)
-
-    monkeypatch.setattr(RelaySubscriber, "subscribe", subscribe)
-    entries = []
-    assert await demo.run_demo(CONFIG, entries.append) == {"published": 1, "received": 1}
-    assert attempts == 2
-    assert {"event": "waiting", "detail": "namespace not announced yet; retrying the subscribe"} in entries
-    assert all(connection.closed.done() for connection in connected)
 
 
 async def test_track_closed_while_waiting_for_demand(connected, monkeypatch: pytest.MonkeyPatch):

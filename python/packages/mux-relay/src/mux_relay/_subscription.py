@@ -12,14 +12,13 @@ readiness and termination awaitables. The pre-acceptance ``update()`` queue live
 from __future__ import annotations
 
 import asyncio
-import contextvars
 import inspect
 import logging
 import warnings
-from collections.abc import Callable, Generator, Iterable
+from collections.abc import Callable, Iterable
 from copy import deepcopy
 from dataclasses import dataclass, field
-from typing import Any, Generic, Literal, Protocol, TypeAlias, TypeVar
+from typing import Any, Literal, Protocol, TypeAlias
 
 from moq_core import (
     Goaway,
@@ -35,6 +34,7 @@ from moq_core import (
 )
 from moq_core.control_messages import encode_request_update
 
+from ._awaitable import RelayAwaitable
 from .errors import RelayError
 
 _log = logging.getLogger("mux_relay")
@@ -222,54 +222,6 @@ def _observe(future: asyncio.Future[Any]) -> None:
     future.add_done_callback(finished)
 
 
-_T = TypeVar("_T")
-
-
-class SubscriptionAwaitable(Generic[_T]):
-    """One of a subscription's lifecycle awaitables: ``subscribed`` or ``ended``.
-
-    Await it as often as needed. Each waiter is isolated: a task cancelled while awaiting, or an
-    ``asyncio.wait_for`` that times out, never touches the underlying result, where handing out the
-    future itself would let one impatient waiter destroy the signal for every later one. ``done()``,
-    ``result()``, ``exception()`` and ``add_done_callback()`` read the result directly and allocate
-    nothing, so polling is free. It is not an :class:`asyncio.Future`: it cannot be cancelled or
-    set. Wrap it with :func:`asyncio.ensure_future` for an API that needs a future.
-    """
-
-    __slots__ = ("_future",)
-
-    def __init__(self, future: asyncio.Future[_T]) -> None:
-        self._future = future
-
-    def __await__(self) -> Generator[Any, None, _T]:
-        future = self._future
-        if not future.done():
-            future = asyncio.shield(future)
-        return future.__await__()
-
-    def done(self) -> bool:
-        """Whether the result is in."""
-        return self._future.done()
-
-    def result(self) -> _T:
-        """The result; raises what awaiting would, or ``asyncio.InvalidStateError`` while pending."""
-        return self._future.result()
-
-    def exception(self) -> BaseException | None:
-        """The exception awaiting would raise, ``None`` for a plain result."""
-        return self._future.exception()
-
-    def add_done_callback(
-        self, callback: Callable[[asyncio.Future[_T]], object], *, context: contextvars.Context | None = None
-    ) -> None:
-        """Call ``callback`` with the settled future once the result is in."""
-        self._future.add_done_callback(callback, context=context)
-
-    def remove_done_callback(self, callback: Callable[[asyncio.Future[_T]], object]) -> int:
-        """Forget a callback; returns how many registrations were removed."""
-        return self._future.remove_done_callback(callback)
-
-
 def synchronous_callback(name: str, callback: Callable[..., object]) -> Callable[..., None]:
     """Snapshot one product callback and hold it to the synchronous callback policy.
 
@@ -346,8 +298,8 @@ class RelaySubscription(Subscription):
         # Nobody may await readiness; a failure must not be reported as an unretrieved exception.
         _observe(self._subscribed)
         self._ended: asyncio.Future[SubscriptionEnd] = loop.create_future()
-        self._subscribed_awaitable = SubscriptionAwaitable(self._subscribed)
-        self._ended_awaitable = SubscriptionAwaitable(self._ended)
+        self._subscribed_awaitable = RelayAwaitable(self._subscribed)
+        self._ended_awaitable = RelayAwaitable(self._ended)
 
         # A connection that has already ended tells the observer at once, ending this before any send.
         self._remove_closed = dependencies.observe_closed(self._connection_ended)
@@ -382,7 +334,7 @@ class RelaySubscription(Subscription):
     # ------------------------------------------------------------------ the public handle
 
     @property
-    def subscribed(self) -> SubscriptionAwaitable[SubscribeOk]:
+    def subscribed(self) -> RelayAwaitable[SubscribeOk]:
         """Settles when the relay answers. See the class docstring for what it raises.
 
         Every waiter is isolated: cancelling one, as ``asyncio.wait_for`` does on timeout, leaves
@@ -391,7 +343,7 @@ class RelaySubscription(Subscription):
         return self._subscribed_awaitable
 
     @property
-    def ended(self) -> SubscriptionAwaitable[SubscriptionEnd]:
+    def ended(self) -> RelayAwaitable[SubscriptionEnd]:
         """Settles once, when the subscription can no longer deliver, with how it ended. Never raises.
 
         Every waiter is isolated, as for ``subscribed``.
@@ -541,7 +493,6 @@ __all__ = [
     "SubgroupEndEvent",
     "SubgroupResetEvent",
     "SubscribedEvent",
-    "SubscriptionAwaitable",
     "SubscriptionConnectionClosedError",
     "SubscriptionConsumer",
     "SubscriptionDependencies",

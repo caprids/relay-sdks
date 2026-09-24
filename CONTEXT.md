@@ -33,6 +33,23 @@ completes or fails. Its steps are the phases `spec/behavior.md` records: waiting
 opening-stream, writing, closing.
 _Avoid_: request, job, transaction, publish
 
+### Announcing
+
+**Announce**:
+The publisher connection's namespace, written onto a relay solicitation that covers it, no earlier
+than its first registered track. The relay routes subscribes for the namespace only once it has
+processed the announce, about a round trip later, and acknowledges nothing: `announced` is the
+publisher's last fact.
+_Avoid_: announcement (the act or the relay's state, ambiguous), publish namespace (the draft's
+message), registration (that is a track's)
+
+**Announce race**:
+A subscribe that reaches the relay before it has processed the announce of its namespace. The relay
+rejects it with 404 rather than parking it; the application retries within its own budget, the SDK
+never does.
+_Avoid_: startup race, propagation delay, transient 404 (the same code after a retract is publisher
+recovery, a different case)
+
 ### Media publishing internals
 
 **Frame writer**:

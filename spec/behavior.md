@@ -138,9 +138,13 @@ Messages are not a compatibility contract; the class and the point of rejection 
   the relay's acknowledgement arrives as `onUpdateOk` / `on_update_ok`; a refused update arrives as
   REQUEST_ERROR and ends the subscription ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
   Implemented in both SDKs.
-- A subscribe for a namespace the relay has not seen announced is rejected with request error 404,
-  not parked; a namespace freshly announced can still answer 404 for about a second, so applications
-  retry that rejection rather than treat it as fatal.
+- A subscribe for a namespace the relay has not seen announced is rejected with request error 404
+  (moq-relay's literal), not parked. The relay routes subscribes to a namespace only once it has
+  processed the publisher's announce, about one round trip after the publisher's `announced` settles
+  ([announce propagation](relay-interop.md#announce-propagation)), so a subscribe that races the
+  announce is rejected the same way. The SDK reports that rejection like any other, through
+  `subscribed` and `on_error`, and does not retry a subscribe; the application retries it within its
+  own budget rather than treating it as fatal. The examples share one helper per language for this.
 - Subgroup resets and connection closure are surfaced explicitly. There is no exactly-once or
   gap-free delivery promise.
 - The publisher's done notification is a control message and may arrive before trailing objects
@@ -295,6 +299,12 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   the demand deadline expires, the write reports a namespace coverage error instead of an ordinary
   demand timeout. Check the token and namespace before retrying. This does not prove authorization
   was denied: solicitations can arrive independently, and a later matching prefix permits writes.
+- `publisher.announced` settles once the namespace has been handed to the transport on a
+  solicitation that covers it, no earlier than the first registered track. It is the strongest fact
+  the publisher has: the relay acknowledges an announce with nothing and routes subscribes about a
+  round trip later. It stays pending while no solicitation covers the namespace (the first write
+  reports `NAMESPACE_NOT_SOLICITED`), and the connection's closure terminates it if that comes
+  first, with the closure's error or `CLOSED` after a clean shutdown.
 - The default write deadline is 10 seconds and covers both waiting for demand and the transport
   write.
 - A timeout, cancellation, transport write failure, or relay subscription change resets the
@@ -551,7 +561,8 @@ Each SDK ships an opt-in test against a real relay, excluded from the default ch
 and subscribes on the same random namespace, then asserts:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
-2. Subscriptions to two tracks on the namespace are accepted.
+2. Once the publisher's `announced` settles, subscriptions to two tracks on the namespace are
+   accepted, retrying a 404 rejection while the announce propagates; the report records the retries.
 3. Binary payloads, an empty payload, and a text payload all arrive intact.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes `LARGEST_OBJECT` from a populated track's `SUBSCRIBE_OK` and receives the next live object.

@@ -67,6 +67,7 @@ function recordingPublisher(
     throw new Error('Unused text/JSON method');
   };
   const publisher: RelayPublisher = {
+    announced: Promise.resolve(),
     closed: new Promise(() => {}),
     close: async () => {},
     registerTrack({ track }) {

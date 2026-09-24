@@ -45,7 +45,12 @@ describe('public vocabulary', () => {
       closed: true,
       close: true,
     } satisfies Record<keyof RelaySubscriber, true>;
-    const publisher = { registerTrack: true, closed: true, close: true } satisfies Record<keyof RelayPublisher, true>;
+    const publisher = {
+      registerTrack: true,
+      announced: true,
+      closed: true,
+      close: true,
+    } satisfies Record<keyof RelayPublisher, true>;
     const writer = {
       hasDemand: true,
       closed: true,

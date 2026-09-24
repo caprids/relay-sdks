@@ -72,6 +72,40 @@ describe('publisher namespace coverage', () => {
     },
   );
 
+  it('settles announced only once a solicitation covers the namespace', async () => {
+    const { pair, publisher } = await connectPublisher();
+    const unrelated = await solicitNamespace(pair.server, ['other']);
+    await vi.waitFor(() => expect(unrelated.received.map((message) => message.kind)).toEqual(['request-ok']));
+    let settled = false;
+    void publisher.announced.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Solicited, but not for us: the announce has nowhere to go and the fact has not happened.
+    expect(settled).toBe(false);
+
+    const matching = await solicitNamespace(pair.server, ['live'], 3);
+    await vi.waitFor(() =>
+      expect(matching.received.map((message) => message.kind)).toEqual(['request-ok', 'namespace']),
+    );
+    await expect(publisher.announced).resolves.toBeUndefined();
+  });
+
+  it('keeps announced pending for an uncovered namespace until the connection closes', async () => {
+    const { pair, publisher } = await connectPublisher();
+    const unrelated = await solicitNamespace(pair.server, ['other']);
+    await vi.waitFor(() => expect(unrelated.received.map((message) => message.kind)).toEqual(['request-ok']));
+
+    await publisher.close();
+
+    await expect(publisher.announced).rejects.toMatchObject({ code: 'CLOSED' });
+  });
+
   it.each([false, true])(
     'keeps an ordinary demand timeout when a matching solicitation exists: %s',
     async (solicit) => {

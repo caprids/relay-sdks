@@ -96,6 +96,7 @@ testpaths = [
   "packages/moq-media/tests",
   "packages/moq-core/tests",
   "packages/mux-relay/tests",
+  "examples/shared/tests",
   "examples/videojs_stream/tests",
 ]
 pythonpath = ["packages/moq-core/tests", "packages/mux-relay/tests"]

@@ -203,6 +203,80 @@ describe('connectRelayPublisher', () => {
     await expect(publisher.closed).resolves.toEqual({ error });
   });
 
+  it('settles announced once the first registered track puts the announce on the wire', async () => {
+    const { publisher } = await connectHub();
+    let settled = false;
+    void publisher.announced.then(() => {
+      settled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The hub solicited at connect time, but an announce invites subscribes, so it waits for a track.
+    expect(settled).toBe(false);
+
+    publisher.registerTrack({ track: 'events' });
+
+    await expect(publisher.announced).resolves.toBeUndefined();
+    publisher.registerTrack({ track: 'status' });
+    await expect(publisher.announced).resolves.toBeUndefined();
+  });
+
+  it('terminates announced with CLOSED when a clean close comes first', async () => {
+    const { publisher } = await connectHub();
+
+    await publisher.close();
+
+    await expect(publisher.announced).rejects.toMatchObject({
+      code: 'CLOSED',
+      phase: 'connection',
+      message: /before its namespace was announced/,
+    });
+  });
+
+  it('pre-handles announced, so a publisher nobody awaits can close first without an unhandled rejection', async () => {
+    const { publisher } = await connectHub();
+
+    await publisher.close();
+    // Nothing awaits `announced`; vitest fails the run if its rejection surfaces as unhandled.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  });
+
+  it('rejects announced with the closure error when the connection fails first', async () => {
+    const hub = createRelayHub();
+    const owner = new AbortController();
+    cleanup.push(() => hub.destroy());
+    const publisher = await connectRelayPublisher({
+      url,
+      namespace,
+      signal: owner.signal,
+      createTransport: hub.connectPublisher,
+    });
+    cleanup.push(() => publisher.close());
+    const error = new Error('operator stopped the stream');
+    const rejected = expect(publisher.announced).rejects.toBe(error);
+
+    owner.abort(error);
+    await rejected;
+    await expect(publisher.closed).resolves.toEqual({ error });
+  });
+
+  it('rejects announced with a null abort reason instead of inventing a CLOSED error', async () => {
+    const hub = createRelayHub();
+    const owner = new AbortController();
+    cleanup.push(() => hub.destroy());
+    const publisher = await connectRelayPublisher({
+      url,
+      namespace,
+      signal: owner.signal,
+      createTransport: hub.connectPublisher,
+    });
+    cleanup.push(() => publisher.close());
+    const rejected = expect(publisher.announced).rejects.toBeNull();
+
+    owner.abort(null);
+    await rejected;
+    await expect(publisher.closed).resolves.toEqual({ error: null });
+  });
+
   it('authenticates the publisher independently from subscriber credentials', async () => {
     const hub = createRelayHub();
     cleanup.push(() => hub.destroy());

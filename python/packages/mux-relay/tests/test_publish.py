@@ -387,6 +387,70 @@ class TestConnectRelayPublisher:
         with pytest.raises(ValueError, match="write_timeout"):
             publisher.register_track("events", write_timeout=0)
 
+    async def test_announced_settles_once_the_first_registered_track_puts_the_announce_on_the_wire(
+        self, cleanup: Cleanup
+    ) -> None:
+        _, publisher, _ = await connect_hub(cleanup)
+        await asyncio.sleep(0)
+        # The hub solicited at connect time, but an announce invites subscribes, so it waits for a track.
+        assert not publisher.announced.done()
+
+        publisher.register_track("events")
+
+        assert await asyncio.wait_for(publisher.announced, 1) is None
+        assert publisher.announced.result() is None
+        publisher.register_track("status")
+        await asyncio.sleep(0)
+        assert await publisher.announced is None
+
+    async def test_announced_is_terminated_by_a_clean_close_that_comes_first(self, cleanup: Cleanup) -> None:
+        _, publisher, _ = await connect_hub(cleanup)
+
+        await publisher.close()
+
+        with pytest.raises(RelayError, match="closed before its namespace was announced") as failure:
+            await publisher.announced
+        assert failure.value.code == "CLOSED"
+        assert publisher.announced.exception() is failure.value
+
+    async def test_announced_raises_the_closure_error_when_the_connection_fails_first(self, cleanup: Cleanup) -> None:
+        hub = create_relay_hub()
+        cleanup.append(hub.destroy)
+        owner = CancellationToken()
+        publisher = await connect_relay_publisher(
+            URL, namespace=NAMESPACE, cancellation=owner, create_transport=hub.connect_publisher
+        )
+        cleanup.append(publisher.close)
+        reason = RuntimeError("operator stopped the stream")
+
+        owner.cancel(reason)
+
+        with pytest.raises(RuntimeError) as failure:
+            await publisher.announced
+        assert failure.value is reason
+        assert (await publisher.closed).error is reason
+
+    async def test_a_timed_out_waiter_on_closed_leaves_the_result_for_every_later_waiter(
+        self, cleanup: Cleanup
+    ) -> None:
+        """Issue #101: ``closed`` used to be the shared future itself, which ``wait_for`` cancelled on timeout."""
+        _, publisher, subscriber = await connect_hub(cleanup)
+
+        for connection in (publisher, subscriber):
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(connection.closed, 0.01)
+            assert not connection.closed.done()
+
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(publisher.announced, 0.01)
+        assert not publisher.announced.done()
+
+        await publisher.close()
+        subscriber.close()
+
+        assert (await publisher.closed).error is None
+        assert (await subscriber.closed).error is None
+
     async def test_is_an_async_context_manager_that_closes_on_exit(self, cleanup: Cleanup) -> None:
         hub = create_relay_hub()
         cleanup.append(hub.destroy)

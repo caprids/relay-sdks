@@ -15,9 +15,9 @@ import pytest
 from moq_core import MessageParameters, RequestError, SubscribeOk, Subscription, SubscriptionHandlers
 from moq_core.control_messages import encode_request_update
 from mux_relay import (
+    RelayAwaitable,
     RelayError,
     RelaySubscription,
-    SubscriptionAwaitable,
     SubscriptionConnectionClosedError,
     SubscriptionEnd,
     SubscriptionRequestError,
@@ -467,7 +467,7 @@ class TestReadinessAndTermination:
         subscription = RelaySubscription(h.deps)
         assert subscription.subscribed is subscription.subscribed
         assert subscription.ended is subscription.ended
-        assert isinstance(subscription.ended, SubscriptionAwaitable)
+        assert isinstance(subscription.ended, RelayAwaitable)
         # The C future reports no callbacks as None.
         registered = len(subscription._ended._callbacks or [])
         for _ in range(1000):

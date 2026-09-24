@@ -32,6 +32,7 @@ from moq_core import (
     create_subgroup_writer,
 )
 
+from ._awaitable import RelayAwaitable
 from ._validation import namespace_fields, property_pairs, track_name
 from ._write_slot import RelayGroupWriter, RelayTrackWriter, WriteSlotDependencies, _observe
 from .cancellation import CancellationToken
@@ -57,9 +58,24 @@ class RelayPublisher:
     Subscribing uses a separate connection; see :func:`connect_relay_subscriber`.
     """
 
-    __slots__ = ("_closed", "_closing", "_lifetime", "_namespace", "_tracks", "_watcher")
+    __slots__ = (
+        "_announced",
+        "_announced_awaitable",
+        "_closed",
+        "_closed_awaitable",
+        "_closing",
+        "_lifetime",
+        "_namespace",
+        "_tracks",
+        "_watcher",
+    )
 
-    def __init__(self, lifetime: RelaySessionLifetime[MoqtPublishSession], namespace: Sequence[str]) -> None:
+    def __init__(
+        self,
+        lifetime: RelaySessionLifetime[MoqtPublishSession],
+        namespace: Sequence[str],
+        announced: asyncio.Future[None],
+    ) -> None:
         self._lifetime = lifetime
         self._namespace = namespace
         # One write slot per registered track; the session's binding callback and the connection's
@@ -67,6 +83,11 @@ class RelayPublisher:
         self._tracks: dict[str, RelayTrackWriter] = {}
         self._closing = False
         self._closed: asyncio.Future[Closed] = asyncio.get_running_loop().create_future()
+        self._closed_awaitable: RelayAwaitable[Closed] = RelayAwaitable(self._closed)
+        # Settled by the session's on_announced callback; a closure that comes first terminates it.
+        self._announced = announced
+        self._announced_awaitable: RelayAwaitable[None] = RelayAwaitable(announced)
+        _observe(announced)
 
         lifetime.session.announce(namespace)
         lifetime.closed.add_done_callback(self._on_lifetime_closed)
@@ -76,6 +97,13 @@ class RelayPublisher:
     def _on_lifetime_closed(self, done: asyncio.Future[Closed]) -> None:
         self._closing = True
         error = done.result().error
+
+        if not self._announced.done():
+            self._announced.set_exception(
+                error
+                if error is not None
+                else RelayError("Relay publisher closed before its namespace was announced", code="CLOSED")
+            )
 
         for track in list(self._tracks.values()):
             track._disconnect(error)
@@ -103,9 +131,27 @@ class RelayPublisher:
         return list(self._namespace)
 
     @property
-    def closed(self) -> asyncio.Future[Closed]:
-        """Resolves when the connection shuts down. Errors are returned as data; this never raises."""
-        return self._closed
+    def announced(self) -> RelayAwaitable[None]:
+        """Settles once the namespace announce has reached the wire on a solicitation that covers it.
+
+        That is no earlier than the first :meth:`register_track`, and it is the strongest fact the
+        publisher has: the relay acknowledges an announce with nothing and routes subscribes for the
+        namespace about a round trip later, so a subscribe that races it is rejected with 404 (see
+        ``spec/behavior.md``). It stays pending while no solicitation covers the namespace, where
+        the first write reports ``NAMESPACE_NOT_SOLICITED``, and the connection's closure terminates
+        it if that comes first: it raises the closure's error, or a ``CLOSED`` :class:`RelayError`
+        after a clean shutdown. Every waiter is isolated, as for ``closed``.
+        """
+        return self._announced_awaitable
+
+    @property
+    def closed(self) -> RelayAwaitable[Closed]:
+        """Resolves when the connection shuts down. Errors are returned as data; this never raises.
+
+        Every waiter is isolated: a timed-out ``asyncio.wait_for`` or a cancelled task leaves the
+        result intact for every other waiter.
+        """
+        return self._closed_awaitable
 
     def register_track(
         self,
@@ -219,6 +265,11 @@ async def connect_relay_publisher(
         create_transport=create_transport,
     )
     publisher_ref: list[RelayPublisher] = []
+    announced: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    def on_announced(namespace: Sequence[str]) -> None:
+        if not announced.done():
+            announced.set_result(None)
 
     def create_session(transport: MoqtTransport, callbacks: LifetimeCallbacks) -> MoqtPublishSession:
         def on_track_binding(binding: TrackBinding) -> None:
@@ -232,6 +283,7 @@ async def connect_relay_publisher(
                 callbacks=MoqtPublishSessionCallbacks(
                     on_closed=callbacks.on_closed,
                     on_goaway=callbacks.on_goaway,
+                    on_announced=on_announced,
                     on_track_binding=on_track_binding,
                     on_announce_ended=lambda ended: callbacks.on_closed(Closed(_namespace_ended(ended.error))),
                 ),
@@ -239,7 +291,7 @@ async def connect_relay_publisher(
         )
 
     lifetime = await open_relay_session(options, create_session)
-    publisher = RelayPublisher(lifetime, fields)
+    publisher = RelayPublisher(lifetime, fields, announced)
     publisher_ref.append(publisher)
     return publisher
 

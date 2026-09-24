@@ -57,6 +57,27 @@ error` (0) have been observed around publisher shutdown; neither identifies a ne
 publisher generation. Preserve actual errors rather than interpreting all status-0
 responses as harmless shutdowns.
 
+## Announce propagation
+
+The relay acknowledges a NAMESPACE entry with nothing, and it routes subscribes to the namespace
+only once it has processed the entry. Measured against `sjc.relay.mux.global` on 2026-09-23 with the
+Python SDK: a fresh namespace per trial, the subscriber connection already open, three interleaved
+runs of twelve trials per mode.
+
+| subscribe issued | rejected 404 |
+| --- | --- |
+| at once after `register_track`, before the announce left | 13 / 36 |
+| after `announced` settled (within 1 ms of `register_track`) | 4 / 36 |
+| after `announced` + 100 ms | 0 / 12 |
+| after `announced` + 250 ms | 0 / 12 |
+| after `announced` + 500 ms | 0 / 12 |
+
+The relay answered every subscribe in about 50 ms, one round trip from that vantage point. So the
+window after `announced` is about one round trip, no SDK-side fact can close it, and a subscriber
+in another process cannot observe the announce at all: the retry belongs to the application
+([behavior.md](behavior.md#subscribing)). Earlier text said "about a second"; that was the retry
+interval of the original reproduction, not the window.
+
 ## Reproduce against a local relay
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium
