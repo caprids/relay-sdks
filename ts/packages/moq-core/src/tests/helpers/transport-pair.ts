@@ -6,6 +6,7 @@
 import { MESSAGE_TYPE } from '../../protocol/control-messages.js';
 import type { BidirectionalStreamLike } from '../../protocol/request-stream.js';
 import type { MoqtTransport } from '../../protocol/session.js';
+import { decodeVarint, encodeVarintInto, varintByteLength } from '../../protocol/varint.js';
 
 interface PushChannel<T> {
   stream: ReadableStream<T>;
@@ -97,34 +98,29 @@ const REQUEST_ID_MESSAGE_TYPES: ReadonlySet<number> = new Set([
   MESSAGE_TYPE.PUBLISH,
 ]);
 
-/** Encoded length of the QUIC varint whose first byte is `first`. */
-function varintLength(first: number): number {
-  return 1 << (first >> 6);
-}
-
-/** Read the QUIC varint at `offset` (the message types read here stay far below 2^53). */
-function readVarint(bytes: Uint8Array, offset: number): { value: number; length: number } {
-  const length = varintLength(bytes[offset]!);
-  let value = bytes[offset]! & 0x3f;
-
-  for (let i = 1; i < length; i++) value = value * 256 + bytes[offset + i]!;
-
-  return { value, length };
-}
-
-/** Copy `chunk` with the least significant bit of every request-initiating frame's Request ID set. */
-function setRequestIdParity(chunk: Uint8Array): Uint8Array {
+/**
+ * Copy `chunk` with the least significant bit of every request-initiating frame's Request ID set. Uses the core's MOQT
+ * varint codec. Every length limit of that encoding is a power of two (2^7, 2^14, ...), so an even value and its odd
+ * successor always encode to the same length and the field is re-encoded in place.
+ */
+export function setRequestIdParity(chunk: Uint8Array): Uint8Array {
   const bytes = new Uint8Array(chunk);
   let offset = 0;
 
   while (offset < bytes.length) {
-    const type = readVarint(bytes, offset);
-    const lengthAt = offset + type.length;
+    const type = decodeVarint(bytes, offset);
+    const lengthAt = offset + type.byteLength;
     const bodyStart = lengthAt + 2;
 
     if (REQUEST_ID_MESSAGE_TYPES.has(type.value)) {
-      // A varint value's LSB is its last byte's LSB, and even-to-odd never changes the encoded length.
-      bytes[bodyStart + varintLength(bytes[bodyStart]!) - 1]! |= 1;
+      const requestId = decodeVarint(bytes, bodyStart);
+      const odd = requestId.value | 1;
+
+      if (varintByteLength(odd) !== requestId.byteLength) {
+        throw new Error(`request id ${odd} would change the encoded length`);
+      }
+
+      encodeVarintInto(bytes, bodyStart, odd);
     }
 
     offset = bodyStart + ((bytes[lengthAt]! << 8) | bytes[lengthAt + 1]!);

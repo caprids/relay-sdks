@@ -9,6 +9,7 @@ import {
   encodeRequestUpdate,
   encodeSetup,
   encodeSubscribe,
+  encodeSubscribeNamespace,
   REQUEST_ERROR_CODE,
   type TrackNamespace,
 } from '../protocol/control-messages.js';
@@ -21,7 +22,7 @@ import {
 } from '../protocol/publish-session.js';
 import { createMoqtSession, type MoqtSession } from '../protocol/session.js';
 import { openRawRequest, rawSubscribe as rawSubscribeTo, solicitNamespace } from './helpers/raw-peer.js';
-import { createTransportPair, withServerRequestIds } from './helpers/transport-pair.js';
+import { createTransportPair, setRequestIdParity, withServerRequestIds } from './helpers/transport-pair.js';
 
 const NAMESPACE = ['live', 'abc123'];
 
@@ -53,6 +54,10 @@ function collectTrack(
   );
 
   return { objects, aliases, subscription };
+}
+
+function decodeFrames(bytes: Uint8Array): ControlMessage[] {
+  return new ControlMessageDeframer().push(bytes).map(decodeControlMessage);
 }
 
 describe('createMoqtPublishSession', () => {
@@ -359,6 +364,49 @@ describe('createMoqtPublishSession', () => {
     });
     session.destroy();
     subscriber.destroy();
+  });
+
+  it('gives the subscribe driver odd request ids past the one-byte varint range', async () => {
+    const closes: unknown[] = [];
+    const { session, subscriber } = makePublishHarness({ onClosed: (info) => closes.push(info) });
+
+    await session.ready;
+
+    // 70 subscriptions take the driver's ids 0..138, past 128, the one-byte MOQT varint limit.
+    const names = Array.from({ length: 70 }, (_, index) => `track-${index}`);
+
+    for (const trackName of names) session.registerTrack({ trackNamespace: NAMESPACE, trackName });
+
+    const tracks = names.map((trackName) => collectTrack(subscriber, trackName));
+
+    await vi.waitFor(() => {
+      expect(tracks.map((track) => track.aliases)).toEqual(tracks.map((track) => [track.subscription.requestId + 1]));
+    });
+    expect(tracks.at(-1)?.subscription.requestId).toBe(138);
+    expect(closes).toEqual([]);
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('sets only the request id bit, at every MOQT varint length boundary', () => {
+    for (const requestId of [0, 62, 64, 126, 128, 16_382, 16_384, 2 ** 21 - 2, 2 ** 21]) {
+      const [subscribe] = decodeFrames(
+        setRequestIdParity(encodeSubscribe({ requestId, trackNamespace: NAMESPACE, trackName: 'video' }))
+      );
+
+      expect(subscribe).toMatchObject({ kind: 'subscribe', requestId: requestId + 1, trackName: 'video' });
+    }
+
+    // SUBSCRIBE_NAMESPACE's type (0x50) takes two bytes in MOQT's encoding.
+    const [solicitation] = decodeFrames(
+      setRequestIdParity(encodeSubscribeNamespace({ requestId: 64, trackNamespacePrefix: NAMESPACE }))
+    );
+
+    expect(solicitation).toMatchObject({
+      kind: 'subscribe-namespace',
+      requestId: 65,
+      trackNamespacePrefix: NAMESPACE,
+    });
   });
 
   it('does not declare a media timescale for raw tracks', async () => {
