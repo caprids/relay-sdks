@@ -139,6 +139,53 @@ A subscriber therefore cannot rely on a reset to learn that a group was abandone
 ID is the only trace, and it is indistinguishable from a group the publisher never sent. An
 application that must detect loss carries its own sequence numbers in payloads.
 
+## Draft-20 deviations
+
+The relay behavior behind the [relay interop deviations](behavior.md#relay-interop-deviations).
+The constraints came into this repository with the Video.js core extraction
+([`UPSTREAM.json`](../ts/packages/moq-core/UPSTREAM.json)) as findings against moq-lite-rs, without
+a recorded relay version. On 2026-09-28 they were checked by reading the moq-relay **0.14.17**
+source (tag `moq-relay-v0.14.17`, commit `b2f26b92`, crate `rs/moq-net`); they were not re-measured
+live. Close codes are moq-net's own `Error::to_code` values, not draft-20 Section 3.5 codes.
+
+| SDK choice | relay behavior in 0.14.17 | where | effect |
+| --- | --- | --- | --- |
+| FIN without PUBLISH_DONE | after SUBSCRIBE_OK, the relay waits for the request stream to close; `Reader::closed` returns a decode error if any byte arrives first | `ietf/subscriber.rs` `run_subscribe`, `coding/reader.rs` `closed` | a clean FIN finishes the relay's track; a PUBLISH_DONE, or any other byte, aborts it for every downstream viewer |
+| no GOAWAY | a GOAWAY on the client's control stream is decoded and answered with `Error::Unsupported` | `ietf/session.rs` `run_goaway` | the session closes with code 17 |
+| alias = request ID | an alias already active for another request ID is `Error::Duplicate` when the two name different tracks, and `Error::Unsupported` for the new subscription when they name the same track | `ietf/subscriber.rs` `insert_track_alias`, `register_alias` | different tracks: the session closes with code 12; same track: that subscription is cancelled |
+
+The alias row refines the core headers, which say any alias bound to two live request IDs closes
+the session (code 12). On 0.14.17 that holds only for two different tracks, which draft-20 Section
+11.1 makes fatal anyway; for one track the relay cancels the newer subscription, because it cannot
+demultiplex subscriptions with identical filters. Unique aliases avoid both.
+
+Downstream, a viewer of a track that ended by FIN receives a PUBLISH_DONE the relay writes itself,
+with status 2 `track ended` on some runs and 0 `internal error` on others
+([issue #25](https://github.com/muxinc/relay-sdks/issues/25)). Both cores' publish-session tests
+pin the three choices against in-process raw peers: a track end FINs its subscription streams with
+no trailing message, an orderly close puts SETUP and nothing else on the control stream, and
+SUBSCRIBE_OK carries the request ID as the alias.
+
+Source reading of moq-dev/moq `main` at `2a5b6e23d` suggests one of the three has moved: its
+`run_goaway` records a client GOAWAY and keeps the session, while bytes after SUBSCRIBE_OK still
+abort the track. Which release first carries that, and whether `sjc.relay.mux.global` runs it, has
+not been checked.
+
+To re-test after a relay upgrade, run the local relay below at the new version and, for each
+deviation, make the one-line change in a scratch build of either core:
+
+- send PUBLISH_DONE (status `TRACK_ENDED`, stream count, then FIN) from the track-end path, then
+  check that a subscriber still receives every object and a done notification rather than a reset
+  or an early end;
+- write GOAWAY (timeout 0, empty URI) on the publisher's control stream before NAMESPACE_DONE, then
+  check that the connection's closure carries no error;
+- the alias choice needs no re-test while the SDK serves one subscription per track
+  ([ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md)); if that changes, check whether
+  the relay accepts one alias shared by two subscriptions to the same track.
+
+A change that passes can drop its deviation from [behavior.md](behavior.md#relay-interop-deviations)
+in the same pull request that changes both cores.
+
 ## Reproduce against a local relay
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium
