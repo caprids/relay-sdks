@@ -176,7 +176,10 @@ it('supports slow reads within capacity and rejects concurrent reads', async () 
   expect((await events.next()).value.type).toBe('updateOk');
   expect((await events.next()).value.type).toBe('publisherDone');
   const pending = events.next();
-  await expect(events.next()).rejects.toThrow('one pending');
+  const concurrent = events.next();
+  await expect(concurrent).rejects.toThrow('one pending');
+  // A state error, not an argument error: a plain Error, as Python raises RuntimeError.
+  await expect(concurrent).rejects.not.toBeInstanceOf(TypeError);
   await events.return();
   expect(await pending).toMatchObject({ done: true });
 });
@@ -218,10 +221,20 @@ it.each([0, -1, 1.2, Number.POSITIVE_INFINITY, Number.NaN])(
   'rejects invalid capacity %s before opening a subscription',
   (capacity) => {
     const subscribe = vi.fn();
-    expect(() => createSubscriptionEvents(subscribe, { capacity })).toThrow('capacity');
+    expect(() => createSubscriptionEvents(subscribe, { capacity })).toThrow(
+      new RangeError('capacity must be a positive integer'),
+    );
     expect(subscribe).not.toHaveBeenCalled();
   },
 );
+
+it.each(['64', null, true])('rejects a capacity that is not a number as a TypeError: %s', (capacity) => {
+  const subscribe = vi.fn();
+  expect(() => createSubscriptionEvents(subscribe, { capacity: capacity as unknown as number })).toThrow(
+    new TypeError('capacity must be a number'),
+  );
+  expect(subscribe).not.toHaveBeenCalled();
+});
 
 it('cancels an idle subgroup reader on early exit without a spurious reset callback', async () => {
   const { fake, connection } = await setup();

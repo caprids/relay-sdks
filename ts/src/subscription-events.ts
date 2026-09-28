@@ -37,8 +37,8 @@ export function createSubscriptionEvents(
   subscribe: (consumer: SubscriptionConsumer) => ProductSubscription,
   { capacity = 64, signal }: SubscriptionEventOptions = {},
 ): SubscriptionEvents {
-  if (!Number.isSafeInteger(capacity) || capacity <= 0)
-    throw new RangeError('capacity must be a positive safe integer');
+  if (typeof capacity !== 'number') throw new TypeError('capacity must be a number');
+  if (!Number.isSafeInteger(capacity) || capacity <= 0) throw new RangeError('capacity must be a positive integer');
   let queue: SubscriptionEvent[] = [];
   let pending:
     | { resolve: (result: IteratorResult<SubscriptionEvent>) => void; reject: (error: unknown) => void }
@@ -95,7 +95,7 @@ export function createSubscriptionEvents(
       return this;
     },
     next() {
-      if (pending) return Promise.reject(new TypeError('Only one pending subscription read is supported'));
+      if (pending) return Promise.reject(new Error('Only one pending subscription read is supported'));
       if (ended)
         return failure === undefined ? Promise.resolve({ done: true, value: undefined }) : Promise.reject(failure);
       const value = queue.shift();
