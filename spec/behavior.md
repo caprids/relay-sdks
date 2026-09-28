@@ -663,15 +663,17 @@ Both SDKs agree on all three, and the core module headers
    [Section 10.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.4):
    "An endpoint sends a GOAWAY message on its control stream to inform the peer it intends to close
    the session soon", and "A client MUST send a zero-length New Session URI in any GOAWAY". GOAWAY
-   is optional, so omitting it conforms; it is recorded because the relay closes the whole session
-   when a client sends one. Closing the publisher instead FINs every subscription, retracts the
+   is optional, so omitting it conforms. The SDK sends none because it has no drain behavior: a
+   GOAWAY written as the transport closes gives the peer nothing to act on. How the relay treats a
+   client GOAWAY depends on its version: moq-relay 0.14.17 closes the whole session, and 0.15.1 and
+   later record it and keep the session. Closing the publisher FINs every subscription, retracts the
    namespace with NAMESPACE_DONE, gives those writes a bounded window (250 ms) and closes the
    transport. Closing a subscriber connection closes the transport and writes nothing more on the
    control stream. The application observes nothing: the relay learns of the shutdown from the
-   transport close, and from a publisher's FINs and retraction before it. A GOAWAY the relay sends is still received and
-   handled on both connections. Sending GOAWAY becomes possible once the relay accepts a client
-   GOAWAY without closing the session, and becomes useful only when the SDK can drain on it, which
-   means giving it time to arrive before the transport closes.
+   transport close, and from a publisher's FINs and retraction before it. A GOAWAY the relay sends
+   is still received and handled on both connections. Sending GOAWAY becomes useful once the SDK
+   can drain on it, which means giving it time to arrive before the transport closes; on relays
+   older than 0.15.1 it would still close the session.
 3. **A track alias is the peer's own request ID.** Draft-20
    [Section 5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1): "A
    publisher MAY assign the same or different Track Aliases to these subscriptions"; and

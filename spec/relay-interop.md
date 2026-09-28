@@ -151,7 +151,7 @@ live. Close codes are moq-net's own `Error::to_code` values, not draft-20 Sectio
 | SDK choice | relay behavior in 0.14.17 | where | effect |
 | --- | --- | --- | --- |
 | FIN without PUBLISH_DONE | after SUBSCRIBE_OK, the relay waits for the request stream to close; `Reader::closed` returns a decode error if any byte arrives first | `ietf/subscriber.rs` `run_subscribe`, `coding/reader.rs` `closed` | a clean FIN finishes the relay's track; a PUBLISH_DONE, or any other byte, aborts it for every downstream viewer |
-| no GOAWAY | a GOAWAY on the client's control stream is decoded and answered with `Error::Unsupported` | `ietf/session.rs` `run_goaway` | the session closes with code 17 |
+| no GOAWAY | 0.14.17: a GOAWAY on the client's control stream is decoded and answered with `Error::Unsupported`. 0.15.1 and 0.15.8: it is decoded, logged and recorded, and the relay keeps reading the stream; a second GOAWAY is `Error::ProtocolViolation` | `ietf/session.rs` `run_goaway`; from 0.15.1 also `goaway.rs` `record` | 0.14.17: the session closes with code 17. 0.15.1 and later: the session stays open |
 | alias = request ID | an alias already active for another request ID is `Error::Duplicate` when the two name different tracks, and `Error::Unsupported` for the new subscription when they name the same track | `ietf/subscriber.rs` `insert_track_alias`, `register_alias` | different tracks: the session closes with code 12; same track: that subscription is cancelled |
 
 The alias row refines the core headers, which say any alias bound to two live request IDs closes
@@ -180,9 +180,11 @@ deviation, make the one-line change in a scratch build of either core:
 - send PUBLISH_DONE (status `TRACK_ENDED`, stream count, then FIN) from the track-end path, then
   check that a subscriber still receives every object and a done notification rather than a reset
   or an early end;
-- write GOAWAY (timeout 0, empty URI) on the publisher's control stream before NAMESPACE_DONE, and
-  on a subscriber connection's control stream before its transport close, then check that each
-  connection's closure carries no error;
+- GOAWAY is not sent because the SDK has no drain behavior, not because of the relay alone, so
+  dropping this deviation means adding a drain. Against 0.14.17 any client GOAWAY closes the
+  session; from 0.15.1, write GOAWAY (timeout 0, empty URI) on the publisher's control stream
+  before NAMESPACE_DONE, and on a subscriber connection's control stream before its transport
+  close, then check that each connection's closure carries no error;
 - the alias choice needs no re-test while the SDK serves one subscription per track
   ([ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md)); if that changes, check whether
   the relay accepts one alias shared by two subscriptions to the same track.

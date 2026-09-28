@@ -723,8 +723,8 @@ describe('createMoqtSession', () => {
   });
 
   it('writes nothing on the control stream after SETUP when closed: no GOAWAY', async () => {
-    // A client GOAWAY closes a moq-relay 0.14.17 session (code 17), and one sent in the same turn
-    // as the transport close gives the peer nothing to act on; the fake keeps every written byte.
+    // A GOAWAY sent as the transport closes gives the peer nothing to act on, so close() sends none;
+    // the fake keeps every written byte.
     const harness = createSessionHarness();
     const frames: ControlMessage[] = [];
 

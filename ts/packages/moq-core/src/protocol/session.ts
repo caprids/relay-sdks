@@ -489,9 +489,9 @@ class MoqtSessionImpl implements MoqtSession {
   #close(closeCode: number, reason: string, error?: unknown): void {
     if (this.#destroyed) return;
 
-    // No GOAWAY: moq-relay 0.14.17 closes the session on a client GOAWAY (code 17), and one written
-    // in the same turn as the transport close gives the peer nothing to act on. The publisher follows
-    // the same rule; see spec/behavior.md, "Relay interop deviations".
+    // No GOAWAY: one written as the transport closes gives the peer nothing to act on, and the
+    // session has no drain to offer. The publisher follows the same rule; see spec/behavior.md,
+    // "Relay interop deviations".
     try {
       this.#transport.close({ closeCode, reason });
     } catch {

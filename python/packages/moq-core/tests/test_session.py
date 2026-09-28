@@ -533,9 +533,9 @@ class TestCreateMoqtSession:
             await harness.session.ready
 
     async def test_writes_nothing_on_the_control_stream_after_setup_when_closed_no_goaway(self) -> None:
-        # A client GOAWAY closes a moq-relay 0.14.17 session (code 17), and one sent in the same turn
-        # as the transport close gives the peer nothing to act on. The fake breaks its pipes on
-        # close, so record every write the session attempts, not what arrives.
+        # A GOAWAY sent as the transport closes gives the peer nothing to act on, so close() sends
+        # none. The fake breaks its pipes on close, so record every write the session attempts, not
+        # what arrives.
         fake = _WriteRecordingTransport()
         attempted = fake.uni_writes
         session = create_moqt_session(fake, MoqtSessionConfig())
