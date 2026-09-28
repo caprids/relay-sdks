@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Generic, Protocol, TypeAlias, TypeVar, runtime_checkable
@@ -51,7 +50,7 @@ class ConnectRelayOptions:
     """Resolve a connection token. Relay carries it in the endpoint's ``jwt`` query parameter.
 
     An explicit ``jwt`` in the URL wins, and the provider is not called in that case. An empty
-    ``jwt`` in the URL is a ``TypeError``, raised before the provider or the transport is used.
+    ``jwt`` in the URL is a ``ValueError``, raised before the provider or the transport is used.
     """
     cancellation: CancellationToken | None = None
     """Cancelling closes the connection, including after the connect call has returned."""
@@ -151,33 +150,57 @@ class RelaySessionLifetime(Generic[T]):
         await self._transport.wait_closed()
 
 
-def validate_timeout(name: str, value: float) -> None:
-    """Reject a deadline that is not a positive finite number of seconds."""
-    if not isinstance(value, int | float) or isinstance(value, bool) or math.isnan(value) or value <= 0:
-        raise ValueError(f"{name} must be a positive finite number of seconds")
-
-    if math.isinf(value):
-        raise ValueError(f"{name} must be a positive finite number of seconds")
+#: The largest deadline, in seconds, that the TypeScript SDK's timers can hold (2147483647 ms). Python
+#: keeps the same bound so a deadline means the same thing in both SDKs.
+MAX_TIMEOUT = 2_147_483.647
 
 
-def _parse_endpoint(url: str) -> tuple[str, bool]:
-    """Validate the endpoint and return it normalized, plus whether it already carries a ``jwt``."""
-    parts = urlsplit(url)
+def validate_timeout(name: str, value: object) -> None:
+    """Reject a deadline that is not a number of seconds in ``(0, MAX_TIMEOUT]``.
+
+    A value that is not a number (including ``bool``) is a ``TypeError``; a number outside the
+    bound, ``nan`` or infinity is a ``ValueError``.
+    """
+    if not isinstance(value, int | float) or isinstance(value, bool):
+        raise TypeError(f"{name} must be a number of seconds")
+
+    if not 0 < value <= MAX_TIMEOUT:
+        raise ValueError(f"{name} must be between 0 (exclusive) and {MAX_TIMEOUT} seconds")
+
+
+def _parse_endpoint(url: object) -> tuple[str, bool]:
+    """Validate the endpoint and return it normalized, plus whether it already carries a ``jwt``.
+
+    Not a string, or not an absolute URL (no scheme, or an ``https`` URL with no host), is a
+    ``TypeError``: the wrong shape, as the TypeScript URL parser reports it. A URL that parses but
+    is not one Relay accepts is a ``ValueError``: a disallowed value.
+    """
+    if not isinstance(url, str):
+        raise TypeError("Relay endpoints must be a URL string")
+
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError as error:
+        raise TypeError("Relay endpoints must be a valid absolute URL") from error
+
+    if not parts.scheme:
+        raise TypeError("Relay endpoints must be a valid absolute URL")
 
     if parts.scheme != "https":
-        raise TypeError("Relay endpoints must use HTTPS")
+        raise ValueError("Relay endpoints must use HTTPS")
 
     if parts.fragment or "@" in parts.netloc:
-        raise TypeError("Relay endpoints cannot contain fragments or userinfo")
+        raise ValueError("Relay endpoints cannot contain fragments or userinfo")
 
-    if not parts.hostname:
+    if not hostname:
         raise TypeError("Relay endpoints must name a host")
 
     jwts = [value for key, value in parse_qsl(parts.query, keep_blank_values=True) if key == "jwt"]
 
     # A present jwt wins over get_token, so an empty one would connect with no credential at all.
     if "" in jwts:
-        raise TypeError(
+        raise ValueError(
             "Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply get_token"
         )
 

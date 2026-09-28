@@ -5,10 +5,14 @@ import { RelayError, transportError } from './errors.js';
 /** setTimeout stores its delay in a signed 32-bit integer; a larger one wraps and fires at once. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
-/** Reject a deadline a timer cannot hold, so a larger number never means a shorter wait. */
-export function assertTimeoutMs(name: string, value: number): void {
+/**
+ * Reject a deadline a timer cannot hold, so a larger number never means a shorter wait. A value
+ * that is not a number is a TypeError; a number outside (0, 2147483647] is a RangeError.
+ */
+export function assertTimeoutMs(name: string, value: unknown): void {
+  if (typeof value !== 'number') throw new TypeError(`${name} must be a number of milliseconds`);
   if (!Number.isFinite(value) || value <= 0 || value > MAX_TIMEOUT_MS) {
-    throw new RangeError(`${name} must be between 0 (exclusive) and ${MAX_TIMEOUT_MS}`);
+    throw new RangeError(`${name} must be between 0 (exclusive) and ${MAX_TIMEOUT_MS} milliseconds`);
   }
 }
 
@@ -30,7 +34,7 @@ export interface ConnectRelayOptions {
   /**
    * Resolve a connection token. Relay carries it in the endpoint's jwt query parameter.
    * An explicit jwt in the URL wins, and the provider is not called in that case. An empty jwt
-   * in the URL is a TypeError, raised before the provider or the transport is used.
+   * in the URL is a RangeError, raised before the provider or the transport is used.
    */
   getToken?: () => string | undefined | Promise<string | undefined>;
   /** Aborting closes the connection, including after the connect call has resolved. */
@@ -90,13 +94,21 @@ export async function openRelaySession<T extends Session>(
   options: ConnectRelayOptions,
   createSession: (transport: MoqtTransport, callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>) => T,
 ): Promise<RelaySessionLifetime<T>> {
-  const url = new URL(options.url);
-  if (url.protocol !== 'https:') throw new TypeError('Relay endpoints must use HTTPS');
+  // Not a string, or not a URL at all (including an https URL with no host), is a TypeError: the
+  // wrong shape. A URL that parses but is not one Relay accepts is a RangeError: a disallowed value.
+  if (typeof options.url !== 'string') throw new TypeError('Relay endpoints must be a URL string');
+  let url: URL;
+  try {
+    url = new URL(options.url);
+  } catch (error) {
+    throw new TypeError('Relay endpoints must be a valid absolute URL', { cause: error });
+  }
+  if (url.protocol !== 'https:') throw new RangeError('Relay endpoints must use HTTPS');
   if (url.hash || url.username || url.password)
-    throw new TypeError('Relay endpoints cannot contain fragments or userinfo');
+    throw new RangeError('Relay endpoints cannot contain fragments or userinfo');
   // A present jwt wins over getToken, so an empty one would connect with no credential at all.
   if (url.searchParams.getAll('jwt').some((value) => value.length === 0))
-    throw new TypeError(
+    throw new RangeError(
       'Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply getToken',
     );
 

@@ -322,7 +322,7 @@ async def connect_relay_subscriber(
     One deadline (``connect_timeout``) covers token resolution and both handshakes. ``cancellation``
     controls the connection's entire lifetime. An explicit ``jwt`` query parameter on ``url`` takes
     precedence over ``get_token``, matching the Relay authentication convention; an empty one is a
-    ``TypeError``. Publishing uses a separate connection; see :func:`connect_relay_publisher`.
+    ``ValueError``. Publishing uses a separate connection; see :func:`connect_relay_publisher`.
     """
     # The request deadline is subscriber-only, so the subscriber checks it; the shared opener checks
     # the rest before anything connects.

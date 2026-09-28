@@ -44,12 +44,12 @@ from .connect_session import (
     RelayTransportFactory,
     TokenProvider,
     open_relay_session,
+    validate_timeout,
 )
 from .errors import RelayError
 
 IMPLEMENTATION_NAME = "mux-relay (Python) publisher"
 DEFAULT_WRITE_TIMEOUT = 10.0
-MAX_WRITE_TIMEOUT = 2_147_483.647
 
 
 class RelayPublisher:
@@ -174,14 +174,7 @@ class RelayPublisher:
         name = track_name(track)
         properties = property_pairs(track_properties)
 
-        if (
-            not isinstance(write_timeout, int | float)
-            or isinstance(write_timeout, bool)
-            or write_timeout != write_timeout
-            or write_timeout <= 0
-            or write_timeout > MAX_WRITE_TIMEOUT
-        ):
-            raise ValueError(f"write_timeout must be between 0 (exclusive) and {MAX_WRITE_TIMEOUT} seconds")
+        validate_timeout("write_timeout", write_timeout)
 
         self._lifetime.assert_open()
 

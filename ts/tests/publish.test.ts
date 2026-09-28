@@ -56,7 +56,7 @@ describe('connectRelayPublisher', () => {
     const createTransport = vi.fn();
     const connecting = connectRelayPublisher({ url: `${url}?jwt=`, namespace: ['room'], getToken, createTransport });
 
-    await expect(connecting).rejects.toThrow(TypeError);
+    await expect(connecting).rejects.toThrow(RangeError);
     await expect(connecting).rejects.toThrow(/empty jwt query parameter/);
     expect(getToken).not.toHaveBeenCalled();
     expect(createTransport).not.toHaveBeenCalled();
@@ -68,9 +68,22 @@ describe('connectRelayPublisher', () => {
     const connecting = connectRelayPublisher({ url, namespace, connectTimeoutMs: 0, getToken, createTransport });
 
     await expect(connecting).rejects.toThrow(RangeError);
-    await expect(connecting).rejects.toThrow('connectTimeoutMs must be between 0 (exclusive) and 2147483647');
+    await expect(connecting).rejects.toThrow(
+      'connectTimeoutMs must be between 0 (exclusive) and 2147483647 milliseconds',
+    );
     expect(getToken).not.toHaveBeenCalled();
     expect(createTransport).not.toHaveBeenCalled();
+  });
+
+  it('rejects a write deadline that is not a number as a TypeError and one out of range as a RangeError', async () => {
+    const { publisher } = await connectHub();
+    expect(() => publisher.registerTrack({ track: 'a', writeTimeoutMs: '100' as unknown as number })).toThrow(
+      new TypeError('writeTimeoutMs must be a number of milliseconds'),
+    );
+    expect(() => publisher.registerTrack({ track: 'a', writeTimeoutMs: 0 })).toThrow(
+      new RangeError('writeTimeoutMs must be between 0 (exclusive) and 2147483647 milliseconds'),
+    );
+    expect(() => publisher.registerTrack({ track: 'a', writeTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
   });
 
   it('has no request deadline: a stray requestTimeoutMs is a type error and is ignored at runtime', async () => {
