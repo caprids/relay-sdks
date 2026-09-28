@@ -11,7 +11,7 @@ import {
   type SubscribeOk,
   type SubscriptionHandlers,
 } from '@mux/moq-core';
-import { type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import { assertTimeoutMs, type ConnectRelaySubscriberOptions, openRelaySession } from './connect-session.js';
 import {
   createSubscription,
   type RelaySubscription,
@@ -26,7 +26,11 @@ import {
 } from './subscription-events.js';
 import { namespaceFields, trackName } from './validation.js';
 
-export type { ConnectRelayOptions, RelayTransportFactory } from './connect-session.js';
+export type {
+  ConnectRelayOptions,
+  ConnectRelaySubscriberOptions,
+  RelayTransportFactory,
+} from './connect-session.js';
 
 export interface RelayTrackOptions {
   /** Namespace tuple; fields are preserved without splitting or joining on slashes. */
@@ -114,7 +118,10 @@ export interface RelaySubscriber {
 }
 
 /** Open a Relay connection for subscribing to tracks. The caller owns connection shutdown. */
-export async function connectRelaySubscriber(options: ConnectRelayOptions): Promise<RelaySubscriber> {
+export async function connectRelaySubscriber(options: ConnectRelaySubscriberOptions): Promise<RelaySubscriber> {
+  // The request deadline is subscriber-only, so the subscriber checks it; the shared opener checks
+  // the rest before anything connects.
+  assertTimeoutMs('requestTimeoutMs', options.requestTimeoutMs ?? 10_000);
   const {
     session: connected,
     closed,

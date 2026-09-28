@@ -4,6 +4,10 @@ import { RelayError } from './errors.js';
 import { namespaceFields, propertyPairs, trackName } from './validation.js';
 import { createWriteSlot, type WriteSlot } from './write-slot.js';
 
+/**
+ * Options for connectRelayPublisher: the shared connection options plus the namespace. There is no
+ * request deadline; each track's writeTimeoutMs bounds waiting for demand and writing.
+ */
 export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
   /** One namespace per publisher connection. Register any number of tracks within it. */
   namespace: readonly string[];
