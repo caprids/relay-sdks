@@ -266,7 +266,12 @@ class TestWaitingForDemand:
         assert h.opened == []
         with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x02")
-        assert failure.value.code == "CLOSED"
+        # Refused before any operation started: nothing sent, so not a sending phase.
+        assert (failure.value.code, failure.value.phase) == ("CLOSED", "waiting-for-demand")
+        with pytest.raises(RelayError) as failure:
+            await h.writer.open_group()
+        assert (failure.value.code, failure.value.phase) == ("CLOSED", "waiting-for-demand")
+        assert h.opened == []
 
     @pytest.mark.parametrize("error", [RelayError("link dropped", code="TRANSPORT_ERROR", phase="connection"), None])
     async def test_shares_the_connection_end_with_the_pending_write_and_ends_the_track(
@@ -526,7 +531,10 @@ class TestGroups:
         assert h.opened[0].fin_calls == 1
         with pytest.raises(RelayError, match="Group is closed") as failure:
             await group.write(b"\x09")
-        assert failure.value.code == "CLOSED"
+        # The FIN already went out: the refused write sent nothing.
+        assert (failure.value.code, failure.value.phase) == ("CLOSED", "waiting-for-demand")
+        assert group.object_count == 3
+        assert len(h.opened[0].objects) == 3
         await h.writer.write(b"\x03")
         assert h.opened[1].group_id == 1
 

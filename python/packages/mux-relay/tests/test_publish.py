@@ -194,7 +194,7 @@ class TestConnectRelayPublisher:
         with pytest.raises(RelayError) as failure:
             await one.write(bytes([4]))
         assert failure.value.code == "CLOSED"
-        assert failure.value.phase == "writing"
+        assert failure.value.phase == "waiting-for-demand"
 
     async def test_bounds_a_write_waiting_for_demand_and_can_publish_a_later_write_after_the_timeout(
         self, cleanup: Cleanup

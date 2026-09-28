@@ -252,7 +252,8 @@ class RelayGroupWriter:
         self._operation.check()
 
         if self._complete:
-            raise RelayError("Group is closed", code="CLOSED", phase="writing")
+            # The FIN already went out, so nothing of the refused call is sent.
+            raise RelayError("Group is closed", code="CLOSED", phase="waiting-for-demand")
 
         if self._pending:
             raise RelayError("A group write or close is already pending", code="WRITE_PENDING", phase="writing")
@@ -469,7 +470,8 @@ class RelayTrackWriter:
         self._deps.assert_open()
 
         if self._ended:
-            raise RelayError("Published track is closed", code="CLOSED", phase="writing")
+            # Refused before an operation starts: nothing of this write was sent (spec/behavior.md).
+            raise RelayError("Published track is closed", code="CLOSED", phase="waiting-for-demand")
 
         if self._active is not None:
             raise RelayError(
