@@ -33,6 +33,7 @@ from mux_relay import (
     Closed,
     MoqtObject,
     RelayAwaitable,
+    RelayError,
     RelayPublisher,
     RelaySubscriptionHandlers,
     RelayTrackWriter,
@@ -47,6 +48,7 @@ if EXAMPLES not in sys.path:
     sys.path.insert(0, EXAMPLES)
 
 from shared.announce_race import subscribe_with_retry  # noqa: E402
+from shared.demand_timeout import write_with_retry  # noqa: E402
 
 Log = Callable[[dict[str, Any]], None]
 
@@ -196,6 +198,27 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                     watch_background(subscribe_task)
 
                 if writer is not None:
+                    # The SDK waits for demand inside write(), up to the track's write deadline. Only a
+                    # timeout in that wait proves nothing was sent, so only it writes the same object again.
+                    def on_demand_timeout(attempt: int, error: RelayError) -> None:
+                        fail_if_broken()
+                        log(
+                            {
+                                "event": "waiting",
+                                "detail": "no relay demand within the write deadline; nothing was sent, writing again",
+                            }
+                        )
+
+                    def on_uncertain_write(error: RelayError) -> None:
+                        log(
+                            {
+                                "event": "write failed",
+                                "code": error.code,
+                                "phase": error.phase,
+                                "detail": "sending had started; the relay may hold the object, so it is not resent",
+                            }
+                        )
+
                     for seq in range(1, config.count + 1):
                         payload = json.dumps(
                             {
@@ -204,7 +227,14 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                                 "message": f"tick {seq} from the mux-relay example",
                             }
                         ).encode("utf-8")
-                        await write_when_demanded(writer, payload, fail_if_broken, log)
+                        fail_if_broken()
+
+                        if not writer.has_demand:
+                            log({"event": "waiting", "detail": "no relay demand yet; write() waits for a subscriber"})
+
+                        await write_with_retry(
+                            writer, payload, on_retry=on_demand_timeout, on_uncertain=on_uncertain_write
+                        )
                         log({"event": "published", "seq": seq, "bytes": len(payload)})
 
                         if seq < config.count:
@@ -225,22 +255,6 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
         if deadline.expired():
             raise TimeoutError(f"Run exceeded {config.timeout:g} s") from error
         raise
-
-
-async def write_when_demanded(
-    writer: RelayTrackWriter, payload: bytes, fail_if_broken: Callable[[], None], log: Log
-) -> None:
-    """Wait without sending; once write() starts, failure may mean partial delivery. Never replay it."""
-    if not writer.has_demand:
-        log({"event": "waiting", "detail": "no relay demand yet; waiting before writing"})
-    while not writer.has_demand:
-        fail_if_broken()
-        if writer.closed:
-            raise RuntimeError("Published track closed while waiting for demand")
-        await asyncio.sleep(0.1)
-    fail_if_broken()
-    # Demand can disappear after the check; let the SDK's write deadline bound that race.
-    await writer.write(payload)
 
 
 def inspect(payload: bytes) -> dict[str, Any]:
