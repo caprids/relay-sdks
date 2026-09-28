@@ -232,9 +232,10 @@ interface TrackRecord {
   subscribers: SubscriberStream[];
   done: boolean;
   /**
-   * Replacement ends (PUBLISH_DONE + FIN) still in flight (pruned as they settle). `end()` folds them into
-   * `doneFlushed` — a swept predecessor is already `finished`, so it would otherwise be skipped and its queued end
-   * discarded by the transport close, turning the clean replacement into an abrupt reset.
+   * Subscription ends (PUBLISH_DONE + FIN) still in flight, from any end path (pruned as they settle). `#endTrack`
+   * folds them into `doneFlushed`, which `close()` drains. An ended subscription is already `finished`, and one whose
+   * peer closed its request stream has left `subscribers`, so without this list its queued end would be skipped and
+   * discarded by the transport close, turning a clean end into an abrupt one.
    */
   pendingEnds: Promise<void>[];
   /** Settles when the ends queued by `end()` land. */
@@ -427,9 +428,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       this.#endTrack(track);
     }
 
-    const writes: Promise<unknown>[] = [...this.#tracks.values()].map(
-      (track) => track.doneFlushed ?? Promise.resolve()
-    );
+    const writes: Promise<unknown>[] = [];
+
+    for (const track of this.#tracks.values()) {
+      if (track.doneFlushed) writes.push(track.doneFlushed);
+      // An end started after the track's own end (none should, but a stray one must not be cut off).
+      writes.push(...track.pendingEnds);
+    }
 
     for (const stream of this.#namespaceStreams) {
       for (const suffix of stream.announced.splice(0)) {
@@ -578,13 +583,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     if (track.done) return;
 
     track.done = true;
-    const writes: Promise<void>[] = [...track.pendingEnds];
     let hadReported = false;
 
     for (const subscriber of track.subscribers) {
-      if (!subscriber.finished) {
-        writes.push(this.#endSubscription(subscriber, PUBLISH_DONE_STATUS.TRACK_ENDED, 'track ended'));
-      }
+      if (!subscriber.finished)
+        this.#endSubscription(track, subscriber, PUBLISH_DONE_STATUS.TRACK_ENDED, 'track ended');
 
       // The local end is authoritative: report each live subscription
       // ended NOW rather than when the peer eventually closes its
@@ -604,7 +607,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: undefined });
     }
 
-    track.doneFlushed = Promise.all(writes).then(() => {});
+    track.doneFlushed = Promise.all([...track.pendingEnds]).then(() => {});
   }
 
   /**
@@ -612,17 +615,19 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    * data stream opens on its alias. Then, in order: wait for data-stream opens in flight, reset every data stream the
    * caller has not closed (a caller that follows the binding has closed them already), write `preceding` (a
    * REQUEST_ERROR answering a failed update) and PUBLISH_DONE with the subscription's Stream Count, and FIN. Settles
-   * when the FIN lands or the stream fails; never rejects.
+   * when the FIN lands or the stream fails; never rejects. It stays in `track.pendingEnds` until then, so `close()`
+   * drains it whichever path started it.
    */
   #endSubscription(
+    track: TrackRecord,
     subscriber: SubscriberStream,
     status: number,
     reason: string,
     preceding?: Uint8Array
-  ): Promise<void> {
+  ): void {
     subscriber.finished = true;
 
-    return (async () => {
+    const ended = (async () => {
       if (subscriber.opening.size > 0) await Promise.all(subscriber.opening);
 
       resetDataStreams(subscriber);
@@ -632,6 +637,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       await subscriber.writer.write(done);
       await subscriber.writer.close();
     })().catch(() => {});
+
+    track.pendingEnds.push(ended);
+    void ended.then(() => {
+      const index = track.pendingEnds.indexOf(ended);
+
+      if (index >= 0) track.pendingEnds.splice(index, 1);
+    });
   }
 
   #liveSubscription(trackAlias: number): SubscriberStream | undefined {
@@ -1069,18 +1081,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
         // No status names a replacement. TRACK_ENDED is the one the relay finishes a track on (anything else aborts
         // it), and the newer subscription carries the track on.
-        const ended = this.#endSubscription(
-          other,
-          PUBLISH_DONE_STATUS.TRACK_ENDED,
-          'superseded by a newer subscription'
-        );
-
-        track.pendingEnds.push(ended);
-        void ended.then(() => {
-          const index = track.pendingEnds.indexOf(ended);
-
-          if (index >= 0) track.pendingEnds.splice(index, 1);
-        });
+        this.#endSubscription(track, other, PUBLISH_DONE_STATUS.TRACK_ENDED, 'superseded by a newer subscription');
       }
 
       this.#callbacks.onTrackBinding?.({
@@ -1129,7 +1130,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
               // too); anything else ends this request honestly: the
               // update's REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED
               // (§10.9.1).
-              void this.#endSubscription(
+              this.#endSubscription(
+                track,
                 subscriber,
                 PUBLISH_DONE_STATUS.UPDATE_FAILED,
                 'unsupported subscription update',
@@ -1165,7 +1167,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       // gets the PUBLISH_DONE §3.3.2 requires before our FIN. No status
       // names this, so it reports the publisher's own limitation.
       if (!subscriber.finished) {
-        void this.#endSubscription(
+        this.#endSubscription(
+          track,
           subscriber,
           PUBLISH_DONE_STATUS.INTERNAL_ERROR,
           'subscriber closed its request stream'

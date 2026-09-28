@@ -1284,6 +1284,72 @@ describe('createMoqtPublishSession', () => {
     subscriber.destroy();
   });
 
+  it('drains a peer-initiated end still waiting on a data-stream open before closing the transport', async () => {
+    const bindings: (number | undefined)[] = [];
+    const { pair, session, subscriber, events } = makePublishHarness({
+      onTrackBinding: ({ trackAlias }) => bindings.push(trackAlias),
+    });
+
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    const subscribe = await rawSubscribe(pair.server, 'video', 95);
+
+    await vi.waitFor(() => {
+      expect(bindings).toEqual([95]);
+    });
+
+    // Hold a data-stream open in flight, and mark where the transport closes in the event log.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const create = pair.client.createUnidirectionalStream.bind(pair.client);
+    const closeTransport = pair.client.close.bind(pair.client);
+    let transportClosedAt: number | undefined;
+
+    pair.client.createUnidirectionalStream = async () => {
+      await released;
+      return create();
+    };
+    pair.client.close = (info) => {
+      transportClosedAt ??= events.length;
+      closeTransport(info);
+    };
+    const opening = session.openUniStream(95).catch(() => {});
+
+    // The subscriber FINs while the open is pending: its end waits on the open, and the subscription leaves the track.
+    void subscribe.fin();
+    await vi.waitFor(() => {
+      expect(bindings).toEqual([95, undefined]);
+    });
+
+    session.close();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The close drain waits for that end instead of cutting it off.
+    expect(transportClosedAt).toBeUndefined();
+
+    release();
+    await opening;
+    await vi.waitFor(() => {
+      expect(transportClosedAt).toBeDefined();
+    });
+    expect(subscribe.ended()).toBe(true);
+    expect(afterSubscribeOk(subscribe, 95)).toEqual(publishDoneBytes(0x0, 0, 'subscriber closed its request stream'));
+
+    // PUBLISH_DONE and the request stream's FIN both precede the transport close.
+    const requestStream = events.find((event) => event.bytes[0] === PUBLISH_DONE_TYPE)?.stream;
+    const requestSteps = events
+      .map((event, index) => ({ ...event, index }))
+      .filter(
+        (event) => event.stream === requestStream && (event.kind === 'close' || event.bytes[0] === PUBLISH_DONE_TYPE)
+      );
+
+    expect(requestSteps.map((event) => event.kind)).toEqual(['write', 'close']);
+    expect(requestSteps.every((event) => event.index < transportClosedAt!)).toBe(true);
+    subscriber.destroy();
+  });
+
   it('the subscriber driver reports the PUBLISH_DONE of an ended track', async () => {
     const subscribes: IncomingSubscribe[] = [];
     const { session, subscriber } = makePublishHarness({ onSubscribe: (s) => subscribes.push(s) });
