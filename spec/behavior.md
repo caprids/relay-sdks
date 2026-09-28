@@ -367,7 +367,7 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   sizes in `protocol.json`.
 - Closing a track writer cancels an outstanding write and ends that track; other tracks continue.
   Closing the publisher ends all tracks, retracts the namespace, and waits for transport shutdown.
-  A track ends by FIN alone, without PUBLISH_DONE, and the publisher sends no GOAWAY
+  A track ends by FIN alone, without PUBLISH_DONE, and neither connection sends GOAWAY
   ([relay interop deviations](#relay-interop-deviations)).
 - Track names cannot be reused within a publisher connection, including after their writer closes.
 - A track writer may open a multi-object group: objects are appended with object IDs 0, 1, 2, ...
@@ -659,17 +659,21 @@ Both SDKs agree on all three, and the core module headers
    [Section 10.12](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.12)
    requires) once the relay reads messages after SUBSCRIBE_OK instead of treating any byte as an
    error.
-2. **The publisher never sends GOAWAY.** Draft-20
+2. **Neither connection sends GOAWAY.** Draft-20
    [Section 10.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.4):
    "An endpoint sends a GOAWAY message on its control stream to inform the peer it intends to close
    the session soon", and "A client MUST send a zero-length New Session URI in any GOAWAY". GOAWAY
-   is optional, so omitting it conforms; it is recorded because the relay closes the whole session
-   when a client sends one. Closing the publisher instead FINs every subscription, retracts the
+   is optional, so omitting it conforms. The SDK sends none because it has no drain behavior: a
+   GOAWAY written as the transport closes gives the peer nothing to act on. How the relay treats a
+   client GOAWAY depends on its version: moq-relay 0.14.17 closes the whole session, and 0.15.1 and
+   later record it and keep the session. Closing the publisher FINs every subscription, retracts the
    namespace with NAMESPACE_DONE, gives those writes a bounded window (250 ms) and closes the
-   transport. The application observes nothing: the relay learns of the shutdown from the FINs,
-   the retraction and the transport close. A subscriber connection's `close()` behaves differently;
-   see the note below the list. Sending GOAWAY becomes possible once the relay accepts a client
-   GOAWAY without closing the session, and becomes useful only when the SDK can drain on it.
+   transport. Closing a subscriber connection closes the transport and writes nothing more on the
+   control stream. The application observes nothing: the relay learns of the shutdown from the
+   transport close, and from a publisher's FINs and retraction before it. A GOAWAY the relay sends
+   is still received and handled on both connections. Sending GOAWAY becomes useful once the SDK
+   can drain on it, which means giving it time to arrive before the transport closes; on relays
+   older than 0.15.1 it would still close the session.
 3. **A track alias is the peer's own request ID.** Draft-20
    [Section 5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1): "A
    publisher MAY assign the same or different Track Aliases to these subscriptions"; and
@@ -683,7 +687,5 @@ Both SDKs agree on all three, and the core module headers
    change unless the SDK serves concurrent subscriptions to one track, which
    [ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md) rules out today.
 
-A subscriber connection does write a GOAWAY: its `close()` queues GOAWAY (timeout 0) on the control
-stream and closes the transport in the same turn, in both SDKs. Closing the transport discards
-queued data, so whether the GOAWAY reaches the relay depends on timing, and the session is ending
-either way. This contradicts the publisher's rule above and is an open follow-up, not a contract.
+Both cores pin the second choice for each role: after an orderly close, the control stream of a
+publish session and of a subscribe session carries SETUP and nothing else.
