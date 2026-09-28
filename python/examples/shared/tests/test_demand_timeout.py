@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
-from typing import cast
+from typing import Never, cast
 
 import pytest
 from relay_helpers.fake_track_writer import FakeTrackWriter, closed_error, timeout_error
 from shared.demand_timeout import is_demand_timeout, write_with_retry
 
 from mux_relay import KeyValuePair, RelayError, RelayErrorPhase, RelayTrackWriter
+from mux_relay._write_slot import WriteSlotDependencies
 
 PAYLOAD = b'{"seq": 1}'
 
@@ -120,6 +121,36 @@ async def test_other_failures_before_sending_are_raised_without_retrying(failure
 
     assert caught.value is failure
     assert writer.calls["write"] == 1
+    assert recorder.retries == []
+    assert recorder.uncertain == []
+
+
+async def test_a_write_on_an_ended_track_is_raised_without_retrying_or_uncertain_delivery() -> None:
+    # The SDK's own track writer, not a fake: a refusal that sent nothing must not look like a sending phase.
+    opened: list[int] = []
+
+    async def open_subgroup(track_alias: int, group_id: int) -> Never:
+        opened.append(group_id)
+        raise AssertionError("a closed track opens no stream")
+
+    writer = RelayTrackWriter(
+        "events",
+        WriteSlotDependencies(
+            open_subgroup=open_subgroup,
+            namespace_solicited=lambda: None,
+            assert_open=lambda: None,
+            end_track=lambda: None,
+            write_timeout=1.0,
+        ),
+    )
+    writer.close()
+    recorder = Recorder()
+
+    with pytest.raises(RelayError) as caught:
+        await write_with_retry(writer, PAYLOAD, on_retry=recorder.on_retry, on_uncertain=recorder.on_uncertain)
+
+    assert (caught.value.code, caught.value.phase) == ("CLOSED", "waiting-for-demand")
+    assert opened == []
     assert recorder.retries == []
     assert recorder.uncertain == []
 

@@ -460,8 +460,10 @@ sent. Opening a group can start sending its header before the first object write
 the failure's origin, and a later call on the failed handle can report that same error.
 
 For `WRITE_PENDING` and calls rejected because a handle is already closed, phase describes the
-refused operation; that call sends nothing. `CLOSED` can also interrupt an operation already in
-flight, so the code alone does not rule out partial delivery.
+refused operation; that call sends nothing. A write or group refused with `CLOSED` because its
+track or group is already closed reports phase `waiting-for-demand`, the phase that means nothing
+was sent. `CLOSED` can also interrupt an operation already in flight; it then carries that
+operation's phase, so the code alone does not rule out partial delivery.
 
 No code or phase promises safe replay. Account for previous attempts, data freshness, and your
 application's deduplication policy. Successful writes mean transport acceptance, not viewer

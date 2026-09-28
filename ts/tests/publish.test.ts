@@ -186,7 +186,7 @@ describe('connectRelayPublisher', () => {
     await two.write(new Uint8Array([3]));
     await vi.waitFor(() => expect(receivedTwo.objects).toHaveLength(2));
     expect(hub.trackEnds).toContainEqual({ kind: 'subscribe-fin', trackName: 'one' });
-    await expect(one.write(new Uint8Array([4]))).rejects.toMatchObject({ code: 'CLOSED', phase: 'writing' });
+    await expect(one.write(new Uint8Array([4]))).rejects.toMatchObject({ code: 'CLOSED', phase: 'waiting-for-demand' });
   });
 
   it('bounds a write waiting for demand and can publish a later write after the timeout', async () => {
