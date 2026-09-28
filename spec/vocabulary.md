@@ -265,11 +265,12 @@ subscription, not a failure of the caller's await, and the connection's `closed`
 acknowledges an announce with nothing: the strongest fact the publisher can have is that the
 NAMESPACE entry was handed to the transport on a solicitation that covers the namespace.
 `announced` settles on that fact, once, with no value. The relay routes subscribes to the namespace
-about a round trip later, so a subscribe that races the announce is rejected with 404 and the
-application retries it (see `behavior.md`); a process that owns both sides awaits `announced` before
-subscribing, which removes most of that race. It stays pending while no solicitation covers the
-namespace, where the first write's `NAMESPACE_NOT_SOLICITED` is the diagnostic, and the connection's
-closure terminates it if that comes first, as it does `subscribed`.
+about a round trip later, so a subscribe that races the announce is rejected (16 `unroutable` on
+moq-relay 0.15.8, 404 before) and the application retries it (see `behavior.md`); a process that
+owns both sides awaits `announced` before subscribing, which removes most of that race. It stays
+pending while no solicitation covers the namespace, where the first write's
+`NAMESPACE_NOT_SOLICITED` is the diagnostic, and the connection's closure terminates it if that
+comes first, as it does `subscribed`.
 
 It is a property awaitable like `closed` and `subscribed`; in Python a `RelayAwaitable[None]`.
 Not adopted: `announce()` as an awaitable verb (announcing is part of connecting and registering,

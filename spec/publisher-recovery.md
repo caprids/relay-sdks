@@ -22,7 +22,8 @@ inactivity detector. Transport keepalive likewise does not prove the publisher i
 With mux.global relay 0.14.17, publisher-death notifications can be delayed while the
 subscriber connection stays open. New subscriptions during this interval may receive only the
 old publisher's cached objects. After an orderly retract/re-announce, new subscriptions may
-also encounter transient 404s or initial-response timeouts. See
+also encounter transient fresh-namespace rejections (404 on 0.14.17; request error 16 `unroutable`
+on 0.15.8) or initial-response timeouts. See
 [issue #34](https://github.com/muxinc/relay-sdks/issues/34) for measured delays and reproduction
 evidence; these observations do not define a recovery deadline.
 
@@ -47,10 +48,11 @@ A useful policy is:
    random-access point. A consumer that needs trailing data must choose its own bounded drain
    policy before cancelling; `on_publisher_done` alone does not prove the data is drained.
 4. Request the desired live track again. The subscriber connection can stay open; if it has closed,
-   open a replacement connection first. A new connection is not a guaranteed bypass for relay
-   state. During a known publisher transition, classify `404` and initial-response timeouts as
-   potentially transient and retry within the recovery budget. Authentication, invalid input, and
-   protocol failures need their own handling rather than an unlimited retry loop.
+   open a replacement connection first. A new connection is not a guaranteed bypass for relay state.
+   During a known publisher transition, classify the fresh-namespace rejection (16 `unroutable`, or
+   `404` on older relays) and initial-response timeouts as potentially transient and retry within
+   the recovery budget. Authentication, invalid input, and protocol failures need their own handling
+   rather than an unlimited retry loop.
 5. Apply backoff and jitter across failed attempts **and accepted-but-stale attempts**. Cached
    objects followed by `on_publisher_done` must not reset the budget or create an immediate resubscribe loop.
    Reset only after meaningful fresh progress. See

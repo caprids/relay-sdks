@@ -42,11 +42,12 @@ mise run python:install
 ```
 
 A publisher's `write()` waits for relay demand: a matching subscriber must be running. Even when
-publishing connects first, a fresh namespace can briefly reject subscriptions with `404 Broadcast
-not found` while its announcement propagates, about a round trip. The combined demo starts both
-sides, waits for the publisher's `announced`, retries only that subscription rejection with capped
-backoff, and waits for demand before writing. Once a write
-starts, a failure stops the run; it never automatically replays potentially delivered bytes.
+publishing connects first, a fresh namespace can briefly reject subscriptions with request error 16
+`unroutable` (404 `Broadcast not found` on relays before 0.15.8) while its announcement propagates,
+about a round trip. The combined demo starts both sides, waits for the publisher's `announced`,
+retries only that subscription rejection with capped backoff, and waits for demand before writing.
+Once a write starts, a failure stops the run; it never automatically replays potentially delivered
+bytes.
 
 Enter the endpoint and a **fresh namespace authorized by your token** when prompted below. The CLI
 splits `team/quickstart/unique-run` into `["team", "quickstart", "unique-run"]`; the SDK itself sends
@@ -112,8 +113,8 @@ Installing only `mux-relay` would leave its unpublished `moq-core` dependency un
 Use two terminals in the same checkout. Set `RELAY_URL` and `RELAY_NAMESPACE` in **each** terminal
 using the prompts above, with the exact same values. Each process prompts for its own token; the
 subscriber needs subscribe permission and the publisher needs publish permission. Start them within
-60 seconds of each other, in either order. A subscriber started first retries fresh-namespace 404s;
-a publisher started alone waits for demand and then fails at the overall deadline.
+60 seconds of each other, in either order. A subscriber started first retries fresh-namespace
+rejections; a publisher started alone waits for demand and then fails at the overall deadline.
 
 Subscribe to one object:
 
@@ -135,8 +136,10 @@ See [demo options](examples/mux_global/README.md) for multiple objects and inter
 
 - A connection or handshake failure: check the endpoint, Relay JWT expiry/permissions, TLS trust,
   and QUIC/UDP reachability. The CLI redacts tokens; keep them out of diagnostic reports.
-- Repeated `404 Broadcast not found`: check that the publisher is still running and both sides
-  use the exact same authorized namespace and track. The demo's backoff stops at the run deadline.
+- Repeated request error 16 `unroutable` (or `404 Broadcast not found` on older relays): check that
+  the publisher is still running and both sides use the exact same authorized namespace. Error 16
+  `not found` means the namespace is announced but the track is not: check the track name. The
+  demo's backoff stops at the run deadline.
 - `waiting ... no relay demand yet` until the deadline: start the matching subscriber, and verify
   the token's namespace prefix and publish/subscribe permissions.
 - A write failure after demand: delivery may be partial. The demo stops without resending. Decide
@@ -301,8 +304,9 @@ be withdrawn. If demand disappeared, the next write waits for a new relay subscr
 Connecting announces the namespace once the first track is registered, and `publisher.announced`
 settles when that announce has reached the wire: the relay acknowledges nothing more, and it routes
 subscribes to the namespace about a round trip later. A subscribe that arrives before then is
-rejected with `404 Broadcast not found`. The SDK does not retry a subscribe, so a subscriber retries
-that rejection within its own budget (the examples and the live smoke test share
+rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-relay 0.15.8; relays
+through 0.15.1 answered `404 Broadcast not found`). The SDK does not retry a subscribe, so a
+subscriber retries that rejection within its own budget (the examples and the live smoke test share
 `examples/shared/announce_race.py` for it), and a process that owns both sides awaits `announced`
 before subscribing. `announced` stays pending while no solicitation covers the namespace, and the
 connection's closure terminates it if that comes first.

@@ -1,11 +1,12 @@
 """The announce race (see ``CONTEXT.md``), and the application's side of it.
 
 A subscribe that reaches the relay before it has processed the publisher's announce of the
-namespace is rejected with request error 404, moq-relay's literal for a namespace it has not seen
-announced (not MOQT's ``DOES_NOT_EXIST``); the relay parks nothing. The SDK reports that rejection
-like any other and never retries a subscribe, so an application that may start before its publisher
-retries within its own budget. This module is that policy, shared by the mux-global demo, the live
-smoke test and the Video.js example's ``--verify`` viewer.
+namespace is rejected, and the relay parks nothing. moq-relay 0.15.8 answers request error 16
+(0x10, MOQT's ``DOES_NOT_EXIST``) with reason ``unroutable``; moq-relay through 0.15.1 answered its
+literal 404 (``Broadcast not found``). The SDK reports that rejection like any other and never
+retries a subscribe, so an application that may start before its publisher retries within its own
+budget. This module is that policy, shared by the mux-global demo, the live smoke test and the
+Video.js example's ``--verify`` viewer.
 
 A process that also owns the publisher awaits ``publisher.announced`` first: that removes most of
 the race, and the retry covers the round trip the relay still needs after the announce reached the
@@ -29,8 +30,18 @@ from mux_relay import (
     SubscriptionRequestError,
 )
 
-FRESH_NAMESPACE_ERROR_CODE = 404
-"""moq-relay's request error for a namespace it has not seen announced (``Broadcast not found``)."""
+FRESH_NAMESPACE_ERROR_CODE = 0x10
+"""MOQT's ``DOES_NOT_EXIST``: moq-relay 0.15.8's code for a namespace it has not seen announced."""
+
+FRESH_NAMESPACE_REASON = "unroutable"
+"""The reason that singles the fresh namespace out of ``DOES_NOT_EXIST``.
+
+moq-relay 0.15.8 sends the same code with reason ``not found`` for an unknown track in an announced
+namespace, which no wait fixes; retrying it would spin until the caller's budget ran out.
+"""
+
+LEGACY_FRESH_NAMESPACE_ERROR_CODE = 404
+"""moq-relay's literal through 0.15.1 for a namespace it has not seen announced (``Broadcast not found``)."""
 
 INITIAL_DELAY = 0.5
 """Seconds before the second attempt; the delay doubles from here."""
@@ -50,12 +61,12 @@ async def subscribe_with_retry(
     max_delay: float = MAX_DELAY,
     on_retry: Callable[[int, float], None] | None = None,
 ) -> RelaySubscription:
-    """Subscribe, retrying only the fresh-namespace 404 until the relay answers otherwise.
+    """Subscribe, retrying only the fresh-namespace rejection until the relay answers otherwise.
 
     Returns the first subscription whose ``subscribed`` is not that rejection: accepted, or rejected
     for another reason, which the caller reads from ``subscribed`` or ``handlers.on_error`` exactly
-    as after a plain ``subscribe()``. The 404s this retries never reach ``handlers.on_error``; every
-    other event reaches the handlers untouched. The delay starts at ``initial_delay`` seconds and
+    as after a plain ``subscribe()``. The rejections this retries never reach ``handlers.on_error``;
+    every other event reaches the handlers untouched. The delay starts at ``initial_delay`` seconds and
     doubles up to ``max_delay``; ``on_retry(attempt, delay)`` runs before each wait. Only
     cancellation bounds the retries: run it under ``asyncio.timeout`` or cancel the task, and the
     cancellation raises out of it, cancelling a request the relay has not answered yet so it cannot
@@ -78,7 +89,7 @@ async def subscribe_with_retry(
             subscription.cancel()
             raise
         except SubscriptionRequestError as error:
-            if error.request_error.error_code != FRESH_NAMESPACE_ERROR_CODE:
+            if not is_fresh_namespace_rejection(error.request_error):
                 return subscription
         except Exception:
             # The connection ended first, or the caller cancelled the handle: it carries the reason.
@@ -93,13 +104,25 @@ async def subscribe_with_retry(
         delay = min(delay * 2, max_delay)
 
 
+def is_fresh_namespace_rejection(error: RequestError) -> bool:
+    """Whether ``error`` is the relay refusing a namespace it has not seen announced (yet).
+
+    Either 0.15.8's ``DOES_NOT_EXIST`` with reason ``unroutable`` or the older relays' 404. Any other
+    ``DOES_NOT_EXIST`` (``not found``: the namespace is there, the track is not) is not the race.
+    """
+    if error.error_code == LEGACY_FRESH_NAMESPACE_ERROR_CODE:
+        return True
+
+    return error.error_code == FRESH_NAMESPACE_ERROR_CODE and error.reason == FRESH_NAMESPACE_REASON
+
+
 def _muting_retried_rejections(handlers: RelaySubscriptionHandlers | None) -> RelaySubscriptionHandlers | None:
-    """``handlers`` whose ``on_error`` skips the fresh-namespace 404 until the relay has accepted the request.
+    """``handlers`` whose ``on_error`` skips the fresh-namespace rejection until the relay accepted.
 
     The retry reports the outcome through the returned handle, so the callback would otherwise see
-    every attempt fail. A 404 after acceptance is a different event and passes through. The wrappers
-    return what the caller's callbacks return, so the SDK's synchronous-callback guard still sees an
-    awaitable-returning handler and applies its policy.
+    every attempt fail. The same rejection after acceptance is a different event and passes through.
+    The wrappers return what the caller's callbacks return, so the SDK's synchronous-callback guard
+    still sees an awaitable-returning handler and applies its policy.
     """
     if handlers is None or handlers.on_error is None:
         return handlers
@@ -127,7 +150,7 @@ def _muting_retried_rejections(handlers: RelaySubscriptionHandlers | None) -> Re
         return None
 
     def fail(error: RequestError) -> None:
-        if error.error_code == FRESH_NAMESPACE_ERROR_CODE and not accepted:
+        if is_fresh_namespace_rejection(error) and not accepted:
             return None
 
         return on_error(error)
@@ -135,4 +158,12 @@ def _muting_retried_rejections(handlers: RelaySubscriptionHandlers | None) -> Re
     return replace(handlers, on_subscribed=accept, on_error=fail)
 
 
-__all__ = ["FRESH_NAMESPACE_ERROR_CODE", "INITIAL_DELAY", "MAX_DELAY", "subscribe_with_retry"]
+__all__ = [
+    "FRESH_NAMESPACE_ERROR_CODE",
+    "FRESH_NAMESPACE_REASON",
+    "INITIAL_DELAY",
+    "LEGACY_FRESH_NAMESPACE_ERROR_CODE",
+    "MAX_DELAY",
+    "is_fresh_namespace_rejection",
+    "subscribe_with_retry",
+]

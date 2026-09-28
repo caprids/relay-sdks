@@ -126,11 +126,11 @@ export interface RelayPublisher {
    * Settles once the namespace announce has reached the wire on a solicitation that covers it,
    * which is no earlier than the first registered track. It is the strongest fact the publisher
    * has: the relay acknowledges an announce with nothing and routes subscribes for the namespace
-   * about a round trip later, so a subscribe that races it is rejected with 404 (see
-   * spec/behavior.md). It stays pending while no solicitation covers the namespace, where the first
-   * write reports `NAMESPACE_NOT_SOLICITED`, and the connection's closure terminates it if that
-   * comes first: the closure's error, or a `CLOSED` RelayError after a clean shutdown. Pre-handled,
-   * so nobody has to await it.
+   * about a round trip later, so a subscribe that races it is rejected (request error 16
+   * `unroutable` on moq-relay 0.15.8; see spec/behavior.md). It stays pending while no
+   * solicitation covers the namespace, where the first write reports `NAMESPACE_NOT_SOLICITED`, and
+   * the connection's closure terminates it if that comes first: the closure's error, or a `CLOSED`
+   * RelayError after a clean shutdown. Pre-handled, so nobody has to await it.
    */
   readonly announced: Promise<void>;
   /** Ends when the connection shuts down. Errors are returned as data; this never rejects. */

@@ -6,7 +6,8 @@ asserts the list in ``spec/behavior.md``:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
 2. Once the publisher's ``announced`` settles, subscriptions to two tracks on the namespace are
-   accepted, retrying a 404 rejection while the announce propagates; the report records the retries.
+   accepted, retrying the fresh-namespace rejection while the announce propagates; the report
+   records the retries.
 3. Binary payloads, an empty payload, and a text payload all arrive intact.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes LARGEST_OBJECT and receives the next live object.
@@ -149,7 +150,7 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         report({"phase": "subscriber connected"})
 
         # Assertion 2. The announce left with the first registered track; the relay routes subscribes to
-        # the namespace about a round trip later, so the subscribe retries the 404 it may still answer.
+        # the namespace about a round trip later, so the subscribe retries the rejection it may still answer.
         await publisher.announced
         report({"phase": "announced"})
         retries = {"events": 0, "status": 0}

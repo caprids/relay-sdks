@@ -160,13 +160,17 @@ Messages are not a compatibility contract; the class and the point of rejection 
   the relay's acknowledgement arrives as `onUpdateOk` / `on_update_ok`; a refused update arrives as
   REQUEST_ERROR and ends the subscription ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
   Implemented in both SDKs.
-- A subscribe for a namespace the relay has not seen announced is rejected with request error 404
-  (moq-relay's literal), not parked. The relay routes subscribes to a namespace only once it has
-  processed the publisher's announce, about one round trip after the publisher's `announced` settles
-  ([announce propagation](relay-interop.md#announce-propagation)), so a subscribe that races the
-  announce is rejected the same way. The SDK reports that rejection like any other, through
-  `subscribed` and `on_error`, and does not retry a subscribe; the application retries it within its
-  own budget rather than treating it as fatal. The examples share one helper per language for this.
+- A subscribe for a namespace the relay has not seen announced is rejected, not parked: moq-relay
+  0.15.8 answers request error 16 (0x10, `DOES_NOT_EXIST`) with reason `unroutable`, and moq-relay
+  through 0.15.1 answered its literal 404. The same code 16 with reason `not found` means the
+  namespace is announced but the track is not, which is not the race. The relay routes subscribes to
+  a namespace only once it has processed the publisher's announce, about one round trip after the
+  publisher's `announced` settles ([announce propagation](relay-interop.md#announce-propagation)),
+  so a subscribe that races the announce is rejected the same way. The SDK reports that rejection
+  like any other, through `subscribed` and `on_error`, and does not retry a subscribe; the
+  application retries it within its own budget rather than treating it as fatal. The examples share
+  one helper per language for this; it retries 16 `unroutable` and the older 404 only, never
+  16 `not found` ([issue #136](https://github.com/muxinc/relay-sdks/issues/136)).
 - The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It cannot
   surface a reset the relay does not forward: a relay may drop a subgroup that was reset upstream
   before it began forwarding it, and then the subscriber sees neither objects nor a reset for that
@@ -178,7 +182,8 @@ Messages are not a compatibility contract; the class and the point of rejection 
   cancels it or the connection ends, and the SDK does not resubscribe on its own.
   It is not a prompt publisher-death detector; the SDK reports it when the relay sends it.
 - Replacing a publisher on the same namespace does not guarantee handoff of existing subscriptions.
-  New subscriptions may also see transient 404s or initial-response timeouts after retract/re-announce.
+  New subscriptions may also see transient fresh-namespace rejections or initial-response timeouts
+  after retract/re-announce.
   Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
 - `subscribe()` returns a `RelaySubscription`: the request handle plus two awaitables. `subscribed`
@@ -610,7 +615,8 @@ and subscribes on the same random namespace, then asserts:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
 2. Once the publisher's `announced` settles, subscriptions to two tracks on the namespace are
-   accepted, retrying a 404 rejection while the announce propagates; the report records the retries.
+   accepted, retrying the fresh-namespace rejection while the announce propagates; the report
+   records the retries.
 3. Binary payloads, an empty payload, and a text payload all arrive intact.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes `LARGEST_OBJECT` from a populated track's `SUBSCRIBE_OK` and receives the next live object.
