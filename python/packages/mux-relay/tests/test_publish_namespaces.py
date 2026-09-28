@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 from core_helpers.raw_peer import solicit_namespace
-from core_helpers.transport_pair import create_transport_pair
+from core_helpers.transport_pair import create_transport_pair, with_server_request_ids
 from core_helpers.waiting import wait_for
 
 from moq_core import MoqtObject, SubscriptionHandlers
@@ -16,7 +16,7 @@ from mux_relay import ConnectingTransport, RelayError, connect_relay_publisher
 @pytest.mark.parametrize("operation", ["write", "open_group"])
 async def test_namespace_demand_deadline_and_recovery(prefix: list[str] | None, operation: str) -> None:
     pair = create_transport_pair()
-    peer = create_moqt_session(pair.server, MoqtSessionConfig())
+    peer = create_moqt_session(with_server_request_ids(pair.server), MoqtSessionConfig())
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     ready.set_result(None)
     publisher = await connect_relay_publisher(
@@ -27,7 +27,8 @@ async def test_namespace_demand_deadline_and_recovery(prefix: list[str] | None, 
     try:
         track = publisher.register_track("events", write_timeout=0.05)
         if prefix is not None:
-            request = await solicit_namespace(pair.server, prefix)
+            # Raw ids clear of the peer session's (1, 3, ...): one session, one request id space (§10.1).
+            request = await solicit_namespace(pair.server, prefix, 101)
             await wait_for(lambda: "request-ok" in request.kinds())
 
         with pytest.raises(RelayError) as failure:
@@ -40,7 +41,7 @@ async def test_namespace_demand_deadline_and_recovery(prefix: list[str] | None, 
         assert not track.closed
 
         if prefix == ["other"]:
-            matching = await solicit_namespace(pair.server, ["testing"], 3)
+            matching = await solicit_namespace(pair.server, ["testing"], 103)
             await wait_for(lambda: "namespace" in matching.kinds())
         objects: list[MoqtObject] = []
         peer.subscribe(
@@ -57,7 +58,7 @@ async def test_namespace_demand_deadline_and_recovery(prefix: list[str] | None, 
 
 async def test_announced_waits_for_a_solicitation_that_covers_the_namespace() -> None:
     pair = create_transport_pair()
-    peer = create_moqt_session(pair.server, MoqtSessionConfig())
+    peer = create_moqt_session(with_server_request_ids(pair.server), MoqtSessionConfig())
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     ready.set_result(None)
     publisher = await connect_relay_publisher(
@@ -73,7 +74,7 @@ async def test_announced_waits_for_a_solicitation_that_covers_the_namespace() ->
         # Solicited, but not for us: the announce has nowhere to go and the fact has not happened.
         assert not publisher.announced.done()
 
-        matching = await solicit_namespace(pair.server, ["testing"], 3)
+        matching = await solicit_namespace(pair.server, ["testing"], 103)
         await wait_for(lambda: "namespace" in matching.kinds())
 
         assert await asyncio.wait_for(publisher.announced, 1) is None
@@ -84,7 +85,7 @@ async def test_announced_waits_for_a_solicitation_that_covers_the_namespace() ->
 
 async def test_announced_stays_pending_for_an_uncovered_namespace_until_the_connection_closes() -> None:
     pair = create_transport_pair()
-    peer = create_moqt_session(pair.server, MoqtSessionConfig())
+    peer = create_moqt_session(with_server_request_ids(pair.server), MoqtSessionConfig())
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     ready.set_result(None)
     publisher = await connect_relay_publisher(
@@ -109,7 +110,7 @@ async def test_announced_stays_pending_for_an_uncovered_namespace_until_the_conn
 
 async def test_namespace_withdrawal_is_shared_with_closure_and_pending_operations() -> None:
     pair = create_transport_pair()
-    peer = create_moqt_session(pair.server, MoqtSessionConfig())
+    peer = create_moqt_session(with_server_request_ids(pair.server), MoqtSessionConfig())
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     ready.set_result(None)
     publisher = await connect_relay_publisher(

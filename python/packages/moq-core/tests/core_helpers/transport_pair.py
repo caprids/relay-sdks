@@ -11,7 +11,8 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
-from moq_core.transport import BidirectionalStream, ReceiveStream, SendStream
+from moq_core.control_messages import MESSAGE_TYPE
+from moq_core.transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
 
 from .streams import Pipe, PushChannel, StreamClosedError
 
@@ -111,3 +112,95 @@ def create_transport_pair() -> TransportPair:
     b = _Side()
     shared = _Shared(a, b)
     return TransportPair(client=PairTransport(a, b, shared), server=PairTransport(b, a, shared))
+
+
+# Request-initiating messages whose body opens with the sender's Request ID (§10.1).
+_REQUEST_ID_MESSAGE_TYPES = frozenset(
+    {
+        MESSAGE_TYPE.SUBSCRIBE,
+        MESSAGE_TYPE.FETCH,
+        MESSAGE_TYPE.TRACK_STATUS,
+        MESSAGE_TYPE.REQUEST_UPDATE,
+        MESSAGE_TYPE.SUBSCRIBE_NAMESPACE,
+        MESSAGE_TYPE.PUBLISH_NAMESPACE,
+        MESSAGE_TYPE.PUBLISH,
+    }
+)
+
+
+def _varint_length(first: int) -> int:
+    return 1 << (first >> 6)
+
+
+def _set_request_id_parity(chunk: bytes) -> bytes:
+    """Copy ``chunk`` with the least significant bit of every request-initiating frame's Request ID set."""
+    data = bytearray(chunk)
+    offset = 0
+
+    while offset < len(data):
+        type_length = _varint_length(data[offset])
+        message_type = int.from_bytes(data[offset : offset + type_length], "big") & ~(0b11 << (8 * type_length - 2))
+        length_at = offset + type_length
+        body_start = length_at + 2
+
+        if message_type in _REQUEST_ID_MESSAGE_TYPES:
+            # A varint value's LSB is its last byte's LSB, and even-to-odd never changes the encoded length.
+            data[body_start + _varint_length(data[body_start]) - 1] |= 1
+
+        offset = body_start + int.from_bytes(data[length_at:body_start], "big")
+
+    return bytes(data)
+
+
+class _ServerRequestIdStream:
+    """A request stream's sending half that rewrites each write with :func:`_set_request_id_parity`."""
+
+    def __init__(self, inner: SendStream) -> None:
+        self._inner = inner
+
+    async def write(self, data: bytes) -> None:
+        await self._inner.write(_set_request_id_parity(data))
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    def abort(self, reason: object = None) -> None:
+        self._inner.abort(reason)
+
+
+class ServerRequestIdTransport:
+    """See :func:`with_server_request_ids`."""
+
+    def __init__(self, inner: MoqtTransport) -> None:
+        self._inner = inner
+
+    def incoming_unidirectional_streams(self) -> AsyncIterator[ReceiveStream]:
+        return self._inner.incoming_unidirectional_streams()
+
+    def incoming_bidirectional_streams(self) -> AsyncIterator[BidirectionalStream]:
+        return self._inner.incoming_bidirectional_streams()
+
+    async def create_unidirectional_stream(self) -> SendStream:
+        return await self._inner.create_unidirectional_stream()
+
+    async def create_bidirectional_stream(self) -> BidirectionalStream:
+        stream = await self._inner.create_bidirectional_stream()
+        return BidirectionalStream(readable=stream.readable, writable=_ServerRequestIdStream(stream.writable))
+
+    def close(self, close_code: int = 0, reason: str = "") -> None:
+        self._inner.close(close_code, reason)
+
+    async def wait_closed(self) -> None:
+        await self._inner.wait_closed()
+
+
+def with_server_request_ids(transport: MoqtTransport) -> ServerRequestIdTransport:
+    """Give the subscribe driver a server's request ids.
+
+    The driver always allocates client (even) ids, and a publish session is always the client too,
+    so it requires the peer's ids to be odd (§10.1). A test that stands the driver in for the relay
+    wraps the driver's transport with this: every request stream the driver opens has each Request
+    ID's least significant bit set on the wire (0 becomes 1, 2 becomes 3). Assumes each write
+    carries whole frames, which is how the driver writes them.
+    """
+    return ServerRequestIdTransport(transport)

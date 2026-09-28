@@ -5,7 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 import pytest
-from core_helpers.transport_pair import create_transport_pair
+from core_helpers.transport_pair import create_transport_pair, with_server_request_ids
 from core_helpers.waiting import wait_for
 from relay_helpers.relay_hub import ObservedNamespaceDone, ObservedSubscribeFin, RelayHub, create_relay_hub
 
@@ -319,7 +319,9 @@ class TestConnectRelayPublisher:
             ),
             connect_relay_subscriber(
                 URL,
-                create_transport=lambda url, protocols: ConnectingTransport(transport=pair.server, ready=completed()),
+                create_transport=lambda url, protocols: ConnectingTransport(
+                    transport=with_server_request_ids(pair.server), ready=completed()
+                ),
             ),
         )
         cleanup.append(subscriber.close)

@@ -6,7 +6,13 @@ from typing import Any
 import pytest
 from core_helpers.raw_peer import RawRequest, open_raw_request, solicit_namespace
 from core_helpers.raw_peer import raw_subscribe as raw_subscribe_to
-from core_helpers.transport_pair import PairTransport, TransportPair, create_transport_pair
+from core_helpers.transport_pair import (
+    CloseInfo,
+    PairTransport,
+    TransportPair,
+    create_transport_pair,
+    with_server_request_ids,
+)
 from core_helpers.waiting import settle, wait_for
 
 from moq_core.control_messages import (
@@ -61,7 +67,7 @@ class Harness:
     def __init__(self, callbacks: MoqtPublishSessionCallbacks | None = None) -> None:
         self.pair: TransportPair = create_transport_pair()
         self.subscriber: MoqtSession = create_moqt_session(
-            self.pair.server, MoqtSessionConfig(unknown_alias_timeout=0.5)
+            with_server_request_ids(self.pair.server), MoqtSessionConfig(unknown_alias_timeout=0.5)
         )
         self.session: MoqtPublishSession = create_moqt_publish_session(
             self.pair.client, MoqtPublishSessionConfig(callbacks=callbacks or MoqtPublishSessionCallbacks())
@@ -286,14 +292,16 @@ class TestCreateMoqtPublishSession:
         register(harness.session, "video")
 
         video = CollectedTrack(harness.subscriber, "video")
+        # The driver's even id reaches the publisher with its low bit set.
+        video_request_id = video.subscription.request_id + 1
 
         # The peer's request ids are session-unique, so they double as the alias: two live request
         # ids sharing an alias is a session-fatal Duplicate on moq-lite-rs.
         await wait_for(
             lambda: (
-                video.aliases == [video.subscription.request_id]
+                video.aliases == [video_request_id]
                 and [s.track_name for s in subscribes] == ["video"]
-                and bindings == [("video", video.subscription.request_id)]
+                and bindings == [("video", video_request_id)]
             )
         )
 
@@ -310,8 +318,8 @@ class TestCreateMoqtPublishSession:
         # The update is attributed to the subscription it rode in on, while consuming a Request ID of
         # its own (§10.1).
         await wait_for(lambda: len(updates) == 1 and len(update_acks) == 1)
-        assert updates[0][0] == updated.request_id
-        assert updates[0][1] != updated.request_id
+        assert updates[0][0] == updated.request_id + 1
+        assert updates[0][1] != updated.request_id + 1
         harness.destroy()
 
     async def test_does_not_declare_a_media_timescale_for_raw_tracks(self) -> None:
@@ -660,10 +668,28 @@ class TestCreateMoqtPublishSession:
         await wait_for(lambda: len(first.received) == 1)
 
         # Aliases ARE the peer's request ids: a reused id would hand two tracks the same alias and
-        # make their subgroup streams indistinguishable. Protocol violation, session-fatal.
+        # make their subgroup streams indistinguishable. Session-fatal with INVALID_REQUEST_ID (§10.1).
         await raw_subscribe(harness.pair.server, "audio", 101)
         await wait_for(lambda: len(closes) == 1)
         assert isinstance(closes[0].error, Exception)
+        assert harness.pair.client._shared.close_info == CloseInfo(
+            SESSION_ERROR.INVALID_REQUEST_ID, "peer reused request id 101"
+        )
+        harness.subscriber.destroy()
+
+    async def test_closes_the_session_when_the_peer_sends_a_request_id_with_the_client_parity(self) -> None:
+        closes: list[Any] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_closed=closes.append))
+
+        await harness.session.ready
+        register(harness.session, "video")
+
+        # The peer is the server, so its request ids are odd (§10.1).
+        await raw_subscribe(harness.pair.server, "video", 100)
+        await wait_for(lambda: len(closes) == 1)
+        assert harness.pair.client._shared.close_info == CloseInfo(
+            SESSION_ERROR.INVALID_REQUEST_ID, "peer sent even request id 100"
+        )
         harness.subscriber.destroy()
 
     async def test_closes_the_session_when_a_request_update_reuses_a_request_id(self) -> None:
@@ -682,6 +708,29 @@ class TestCreateMoqtPublishSession:
         await sub.send(encode_request_update(111, MessageParameters(subscriber_priority=9)))
         await wait_for(lambda: len(closes) == 1)
         assert isinstance(closes[0].error, Exception)
+        assert harness.pair.client._shared.close_info == CloseInfo(
+            SESSION_ERROR.INVALID_REQUEST_ID, "peer reused request id 111"
+        )
+        harness.subscriber.destroy()
+
+    async def test_closes_the_session_when_a_request_update_carries_a_request_id_with_the_client_parity(
+        self,
+    ) -> None:
+        closes: list[Any] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_closed=closes.append))
+
+        await harness.session.ready
+        register(harness.session, "video")
+
+        sub = await raw_subscribe(harness.pair.server, "video", 111)
+
+        await wait_for(lambda: sub.kinds() == ["subscribe-ok"])
+
+        await sub.send(encode_request_update(112, MessageParameters(subscriber_priority=9)))
+        await wait_for(lambda: len(closes) == 1)
+        assert harness.pair.client._shared.close_info == CloseInfo(
+            SESSION_ERROR.INVALID_REQUEST_ID, "peer sent even request id 112"
+        )
         harness.subscriber.destroy()
 
     async def test_reserves_request_ids_across_every_inbound_request_kind(self) -> None:
@@ -703,6 +752,8 @@ class TestCreateMoqtPublishSession:
         # ...so a later SUBSCRIBE cannot reuse it as an alias.
         await raw_subscribe(harness.pair.server, "video", 121)
         await wait_for(lambda: len(closes) == 1)
+        assert harness.pair.client._shared.close_info is not None
+        assert harness.pair.client._shared.close_info.close_code == SESSION_ERROR.INVALID_REQUEST_ID
         harness.subscriber.destroy()
 
     async def test_rejects_a_subscription_update_it_cannot_apply_instead_of_acknowledging_it(self) -> None:
