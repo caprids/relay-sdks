@@ -187,9 +187,24 @@ class WebTransportSessionBase:
             self._peer_closed_session()
 
     def _peer_closed_session(self) -> None:
-        """The peer ended the session cleanly: finish, then close the connection ourselves."""
+        """The peer ended the session: finish, then close the connection ourselves.
+
+        A FIN without a capsule, or a capsule with code 0, is a clean end. A nonzero code is the
+        peer's reason for ending the session (moq-relay refuses credentials with 0x2, "unauthorized"),
+        so the session fails with it instead of reporting a clean close.
+        """
         protocol = self._protocol
-        self._finish(None)
+        code, reason = self.close_info or (0, "")
+        self._finish(
+            None
+            if code == 0
+            else WebTransportError(
+                f"peer closed the WebTransport session: {reason or 'no reason given'} (code 0x{code:x})",
+                code=code,
+                reason=reason,
+                peer_closed=True,
+            )
+        )
 
         if protocol is not None and protocol.terminated is None and not self._closing:
             self._closing = True

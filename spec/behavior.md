@@ -53,6 +53,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. Python only for now (browsers do not expose the relay's refusal, so TypeScript reports `TRANSPORT_ERROR`; see #14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
@@ -71,8 +72,13 @@ operation's phase, so the code alone does not rule out partial delivery.
 
 No code or phase promises safe replay. Account for previous attempts, data freshness, and your
 application's deduplication policy. Successful writes mean transport acceptance, not viewer
-acknowledgment. The SDK does not automatically retry or reconnect. Neither a connection failure nor
-an uncovered namespace proves authentication was denied.
+acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED` is the one code that
+says the relay refused the credentials: the relay closed the session with MOQT session termination
+code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too), in
+any phase. It is Python only until browsers can see the relay's close code, so in TypeScript a
+refusal still arrives as `TRANSPORT_ERROR`. Neither another connection failure nor an uncovered
+namespace proves authentication was denied. A subscription outside the token's grant is refused
+per request, through `onError` / `on_error` (MOQT `UNAUTHORIZED`, 0x1), and leaves the connection open.
 
 Clean connection shutdown still resolves `closed` without an error; subsequent operations fail
 with `CLOSED`. After a failed connection, `closed` and subsequent connection operations expose the

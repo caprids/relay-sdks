@@ -217,6 +217,13 @@ and a transport error that is itself a Relay error (`WebTransportError` is the t
 exception, wrapped as `TRANSPORT_ERROR` at the Relay boundary). Removed without aliases under the
 policy above; reversible before the first release, so no ADR.
 
+`UNAUTHORIZED` names a connection whose credentials the relay refused, after the MOQT session
+termination code the relay closes with (0x2). Both SDKs list it, as both list `TRANSPORT_UNAVAILABLE`,
+which only TypeScript raises; only Python raises `UNAUTHORIZED` until browsers can see the relay's close
+code (#14). Not adopted: `AUTHENTICATION_FAILED` or `FORBIDDEN`. The relay closes with the same code
+for a missing, invalid, expired or out-of-scope token, so one name covers them, and it is the
+protocol's. A subscription refused for its grant stays a MOQT `RequestError` on `onError` / `on_error`.
+
 ## Async subscription consumption
 
 `subscriber.subscribeEvents()` / `subscriber.subscribe_events()` creates a bounded iterator of

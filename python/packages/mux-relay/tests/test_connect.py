@@ -581,6 +581,43 @@ class TestConnectRelay:
 
         assert fake.close_calls == 1
 
+    @pytest.mark.parametrize(
+        ("close_code", "reason"), [(0x2, "unauthorized"), (0x16, "malformed token"), (0x18, "expired token")]
+    )
+    async def test_reports_a_session_the_relay_closed_for_its_credentials_as_unauthorized(
+        self, close_code: int, reason: str
+    ) -> None:
+        fake = create_fake_transport()
+        failed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        cause = WebTransportError("peer closed the session", code=close_code, reason=reason, peer_closed=True)
+        failed.set_exception(cause)
+
+        with pytest.raises(RelayError) as failure:
+            await connect_relay_subscriber(ENDPOINT, create_transport=Factory(fake, failed))
+        assert (failure.value.code, failure.value.phase) == ("UNAUTHORIZED", "connecting")
+        assert str(failure.value) == (
+            f"Relay refused the connection's credentials: {reason} (session closed with code 0x{close_code:x})"
+        )
+        assert failure.value.__cause__ is cause
+
+    @pytest.mark.parametrize(
+        "cause",
+        [
+            # QUIC CONNECTION_REFUSED is 0x2 too, but it is not the peer's session close code.
+            WebTransportError("QUIC connection terminated", code=0x2, reason="refused"),
+            WebTransportError("peer closed the session", code=0x3, reason="protocol violation", peer_closed=True),
+        ],
+    )
+    async def test_other_closures_stay_transport_errors(self, cause: WebTransportError) -> None:
+        fake = create_fake_transport()
+        failed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        failed.set_exception(cause)
+
+        with pytest.raises(RelayError) as failure:
+            await connect_relay_subscriber(ENDPOINT, create_transport=Factory(fake, failed))
+        assert failure.value.code == "TRANSPORT_ERROR"
+        assert failure.value.__cause__ is cause
+
     async def test_rejects_an_already_cancelled_owner_before_minting_tokens_or_creating_a_transport(self) -> None:
         owner = CancellationToken()
         token_calls: list[int] = []
