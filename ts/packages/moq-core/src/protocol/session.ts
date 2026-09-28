@@ -99,7 +99,10 @@ export interface SubscriptionHandlers {
   onObject?(object: MoqtObject): void;
   /** A subgroup stream finished cleanly (FIN). */
   onSubgroupEnd?(info: { groupId: number; subgroupId: number; endOfGroup: boolean }): void;
-  /** A subgroup stream was reset — objects from it may be missing. */
+  /**
+   * A subgroup stream was reset — objects from it may be missing. Reported for every reset the session receives; a
+   * relay that drops a reset instead of forwarding it leaves nothing to report.
+   */
   onSubgroupReset?(info: { groupId: number; error: unknown }): void;
   onDone?(done: PublishDone): void;
   /** Response to a REQUEST_UPDATE sent on this subscription. */

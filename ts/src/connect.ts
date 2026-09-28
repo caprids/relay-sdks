@@ -63,7 +63,11 @@ export interface RelaySubscriptionHandlers {
   onObject?(object: MoqtObject): void;
   /** A subgroup stream finished cleanly (FIN). */
   onSubgroupEnd?(info: { groupId: number; subgroupId: number; endOfGroup: boolean }): void;
-  /** A subgroup stream was reset; objects from it may be missing. */
+  /**
+   * A subgroup stream was reset; objects from it may be missing. Called for every reset the relay
+   * forwards. The relay may drop a reset for a subgroup it had not begun forwarding, so an abandoned
+   * group can arrive as nothing at all, only a gap in group IDs.
+   */
   onSubgroupReset?(info: { groupId: number; error: unknown }): void;
   /**
    * The publisher finished with the track (PUBLISH_DONE). This is a control notification, not the

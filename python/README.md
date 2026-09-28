@@ -191,7 +191,9 @@ the relay serves those from its cache, as far back as it still holds. Both filte
 Object callbacks are plain synchronous callables invoked as streams deliver objects. The SDK adds no
 application queue, ordering across streams, automatic JSON decoding, clock synchronization, or media
 scheduling. Use `subscribe_events` below to await work without blocking delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
-or gap-free delivery promise. `on_publisher_done` is the publisher's control notification: it may
+or gap-free delivery promise. The SDK reports every reset it receives, but the relay may drop a
+reset for a subgroup it had not begun forwarding, so an aborted group can leave no trace except a
+gap in group IDs ([subgroup resets](../spec/relay-interop.md#subgroup-resets)). `on_publisher_done` is the publisher's control notification: it may
 precede trailing objects in transit, and it does not end the subscription. Cancel the subscription
 when you are finished with it.
 

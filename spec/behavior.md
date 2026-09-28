@@ -158,8 +158,12 @@ Messages are not a compatibility contract; the class and the point of rejection 
   announce is rejected the same way. The SDK reports that rejection like any other, through
   `subscribed` and `on_error`, and does not retry a subscribe; the application retries it within its
   own budget rather than treating it as fatal. The examples share one helper per language for this.
-- Subgroup resets and connection closure are surfaced explicitly. There is no exactly-once or
-  gap-free delivery promise.
+- The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It cannot
+  surface a reset the relay does not forward: a relay may drop a subgroup that was reset upstream
+  before it began forwarding it, and then the subscriber sees neither objects nor a reset for that
+  group, only a gap in group IDs that cannot be told apart from a group never published
+  ([subgroup resets](relay-interop.md#subgroup-resets)). There is no exactly-once or gap-free
+  delivery promise.
 - The publisher's done notification is a control message and may arrive before trailing objects
   still in transit. It does not end the subscription: the request stays open until the application
   cancels it or the connection ends, and the SDK does not resubscribe on its own.
@@ -349,7 +353,8 @@ still invokes the gap callback. Publisher completion leaves readers active for t
 - A track writer may open a multi-object group: objects are appended with object IDs 0, 1, 2, ...
   on one stream, and closing the group FINs the stream. Object 0 is the group's random-access point,
   which is how LOC/MSF media (one GOP per group) is published. A group that fails part-way is reset
-  rather than completed, and the track stays open for the next group; only one write or group may
+  rather than completed, and the track stays open for the next group; whether a subscriber learns
+  of the reset depends on the relay (see [Subscribing](#subscribing)); only one write or group may
   be pending per track. The write deadline applies separately to opening a group (including demand),
   each object write, and closing the group. Idle time between operations is unrestricted. Aborting a
   group after it closed cleanly has no effect: the FIN already ended the stream, and a reset after

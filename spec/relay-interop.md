@@ -104,6 +104,22 @@ encoding problem. A late joiner that needs a decodable start or recent history s
 `1` starts at the current group) or with an absolute start. How far back either reaches depends on
 what the relay still holds, and the absolute case above started later than it asked for.
 
+## Subgroup resets
+
+The relay forwards a subgroup reset only when it has already begun forwarding that subgroup.
+Measured against `sjc.relay.mux.global` on 2026-09-15
+([issue #38](https://github.com/muxinc/relay-sdks/issues/38)): a Python publisher wrote two small
+objects to a group and aborted it. A Python subscriber received `on_subgroup_reset` within 0.05 s
+in one run; a TypeScript subscriber in another run received nothing for that group, neither objects
+nor `onSubgroupReset`, and its first group was the next one. In the close path of
+[issue #30](https://github.com/muxinc/relay-sdks/issues/30), where 8 MiB objects had been partly
+forwarded, the relay did propagate the reset. The exact condition (bytes forwarded, time since the
+first object, or cache policy) was not isolated.
+
+A subscriber therefore cannot rely on a reset to learn that a group was abandoned. A missing group
+ID is the only trace, and it is indistinguishable from a group the publisher never sent. An
+application that must detect loss carries its own sequence numbers in payloads.
+
 ## Reproduce against a local relay
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium

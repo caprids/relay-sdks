@@ -99,7 +99,11 @@ class SubgroupEnd:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SubgroupReset:
-    """A subgroup stream was reset; objects from it may be missing."""
+    """A subgroup stream was reset; objects from it may be missing.
+
+    Reported for every reset the session receives. A relay that drops a reset instead of forwarding
+    it leaves nothing to report.
+    """
 
     group_id: int
     error: BaseException
