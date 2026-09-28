@@ -1,19 +1,21 @@
 # moq-relay interoperability
 
 Both SDKs speak only `moqt-20`. Their `LARGEST_OBJECT` message parameter is two bare
-varints (Group, Object), matching moq-relay **0.14.17** and draft-20 §10.2.
-[Upstream fix](https://github.com/moq-dev/moq/pull/3561).
+varints (Group, Object), matching draft-20 §10.2 and moq-relay from **0.14.17** through
+**0.15.8**, the production relay since 2026-09-28 (`SubscribeOk` in `rs/moq-net/src/ietf/subscribe.rs`
+at tag `moq-relay-v0.15.8`). [Upstream fix](https://github.com/moq-dev/moq/pull/3561).
 
 Older moq-relay releases used a length prefix for this parameter. That encoding cannot
 be safely auto-detected: coordinate adoption of these SDK builds with the relay upgrade.
 Old SDK builds fail on subscriptions to populated tracks after the relay upgrade; these
 SDK builds misdecode or reject the old relay's populated-track responses. `INCLUDE_PROPERTIES`
-remains length-prefixed.
+remains length-prefixed on 0.15.8.
 
-Publishers still retain no history and advertise no `LARGEST_OBJECT`. The relay's new
-Next Object + current-group `FILL_PARAMETERS` pull therefore has no cached publisher
+Publishers still retain no history and advertise no `LARGEST_OBJECT`. The relay's
+Next Object + current-group `FILL_PARAMETERS` pull (since 0.14.17, unchanged in 0.15.8's
+`subscribe_join` in `rs/moq-net/src/ietf/subscriber.rs`) therefore has no cached publisher
 content to fill; the publisher serves subsequent writes. Adding publisher retention and
-backfill is a separate feature. The test fixtures now send the 0.14.17 pull parameters.
+backfill is a separate feature. The test fixtures send the pull parameters of 0.14.17 and 0.15.8.
 
 ## Publisher restarts and resubscription
 
@@ -109,41 +111,54 @@ later viewer: write only state that is safe to serve from cache.
 
 ## Late subscribers and location filters
 
-A plain SUBSCRIBE, with no LOCATION_FILTER or an explicit zero-field one, is served from the live
-edge: a subscriber that joins an ongoing track receives only objects published after it joined.
-The relay does retain history, and it reaches into its cache for a relative-group or absolute
-filter. Measured against `sjc.relay.mux.global` on 2026-09-15 with the Python SDK
-([issue #26](https://github.com/muxinc/relay-sdks/issues/26)): a publisher wrote one object per
-second for about 20 s, and each late subscriber joined 8-10 s in (2 of 2 runs).
+A plain SUBSCRIBE, with no LOCATION_FILTER or an explicit zero-field one, starts at the beginning
+of the relay's latest group: a subscriber that joins an ongoing track receives that group's cached
+objects and everything published after, and nothing older. `NextObjectFilter` is stricter and starts
+after the relay's largest object, so it skips the rest of the current group. A relative-group or
+absolute filter reaches further back into the relay's cache. moq-relay 0.15.8 resolves the filters
+this way in `filter_range` (`rs/moq-net/src/ietf/publisher.rs` at tag `moq-relay-v0.15.8`).
+Measured against production on 2026-09-28, on 0.15.8
+([issue #138](https://github.com/muxinc/relay-sdks/issues/138)): a publisher wrote groups up to 19,
+and every late subscriber joined between groups 9 and 10.
 
 | subscriber | filter | groups received |
 | --- | --- | --- |
-| early, before the first write | none | all, `[0..17]` of `[0..17]` |
-| late | none (no LOCATION_FILTER sent) | `[9..17]` of `[0..17]` |
-| late | explicit `NoLocationFilter()` | `[10..19]` of `[0..19]`, the same as sending none |
-| late | `NextObjectFilter` | the same as none |
-| late | `RelativeGroupFilter(groups_before_next=3)` | about 3 groups before the join |
-| late | `AbsoluteLocationFilter(start=group 2)` | from about group 4-8, depending on timing |
+| late | none (no LOCATION_FILTER sent), or explicit `NoLocationFilter()` | `[9..19]` |
+| late | `NextObjectFilter` | `[10..19]` |
+| late | `RelativeGroupFilter(groups_before_next=3)` | `[7..19]` |
+| late | `AbsoluteLocationFilter(start=group 2)` | `[4..19]` |
+
+On 2026-09-15, before production moved to 0.15.8
+([issue #26](https://github.com/muxinc/relay-sdks/issues/26)), `NextObjectFilter` behaved the same
+as no filter; on 0.15.8 it does not.
 
 The draft defines an unfiltered subscription as passing all Objects published or received via
 upstream subscriptions ([behavior.md](behavior.md#subscribing)); it does not require a relay to
-replay what it cached before the subscription, so this is a legitimate reading and not an SDK
-encoding problem. A late joiner that needs a decodable start or recent history subscribes with
-`RelativeGroupFilter` / `{ type: 'relative-group' }` (`groups_before_next` / `groupsBeforeNext` of
-`1` starts at the current group) or with an absolute start. How far back either reaches depends on
-what the relay still holds, and the absolute case above started later than it asked for.
+replay what it cached before the subscription, so starting at the latest group is a legitimate
+reading and not an SDK encoding problem. A late joiner that needs a decodable start or recent
+history subscribes with `RelativeGroupFilter` / `{ type: 'relative-group' }` (`groups_before_next` /
+`groupsBeforeNext` of `1` starts at the current group) or with an absolute start. How far back
+either reaches depends on what the relay still holds, and the absolute case above started later
+than it asked for.
 
 ## Subgroup resets
 
-The relay forwards a subgroup reset only when it has already begun forwarding that subgroup.
-Measured against `sjc.relay.mux.global` on 2026-09-15
-([issue #38](https://github.com/muxinc/relay-sdks/issues/38)): a Python publisher wrote two small
-objects to a group and aborted it. A Python subscriber received `on_subgroup_reset` within 0.05 s
-in one run; a TypeScript subscriber in another run received nothing for that group, neither objects
-nor `onSubgroupReset`, and its first group was the next one. In the close path of
-[issue #30](https://github.com/muxinc/relay-sdks/issues/30), where 8 MiB objects had been partly
-forwarded, the relay did propagate the reset. The exact condition (bytes forwarded, time since the
-first object, or cache policy) was not isolated.
+moq-relay 0.15.8 forwards a subgroup reset once it has begun forwarding that subgroup, but not at
+once. Measured against production on 2026-09-28
+([issue #138](https://github.com/muxinc/relay-sdks/issues/138)): a publisher wrote objects to a
+group and aborted it after the relay had forwarded some of them. All 10 of 10 such aborts reached
+the subscriber as a subgroup reset, and each arrived only when the publisher's next group began:
+about 0.5 s after the abort at the publisher's normal cadence, and 3 s after it when the publisher
+paused 3 s before its next group. A subscriber that must react to an abandoned group sooner than the
+next group cannot rely on the reset's timing.
+
+A reset for a subgroup the relay never began forwarding is unverified on 0.15.8. On 2026-09-15,
+before production moved to 0.15.8 ([issue #38](https://github.com/muxinc/relay-sdks/issues/38)), a publisher
+wrote two small objects to a group and aborted it: one subscriber received the reset, and in another
+run a subscriber received nothing for that group, neither objects nor a reset, and its first group
+was the next one. In the close path of [issue #30](https://github.com/muxinc/relay-sdks/issues/30),
+where 8 MiB objects had been partly forwarded, the relay did propagate the reset. The exact
+condition (bytes forwarded, time since the first object, or cache policy) was not isolated.
 
 A subscriber therefore cannot rely on a reset to learn that a group was abandoned. A missing group
 ID is the only trace, and it is indistinguishable from a group the publisher never sent. An
@@ -215,9 +230,11 @@ in the same pull request that changes both cores.
 ## Reproduce against a local relay
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium
-(`cd ts && pnpm exec playwright install chromium`). Run from the repository root with a
-local Docker daemon. These commands create an anonymous test relay on loopback and a
-short-lived ECDSA certificate trusted explicitly by the test clients.
+(`cd ts && pnpm exec playwright install chromium`). Run from the repository root. These commands
+create an anonymous `moqdev/moq-relay:0.15.8` test relay, the production version, on loopback and
+a short-lived ECDSA certificate trusted explicitly by the test clients. The certificate is copied
+into the container rather than bind-mounted, so the recipe also works when the Docker daemon cannot
+see the local filesystem.
 
 ```sh
 interop_dir=$(mktemp -d)
@@ -225,11 +242,11 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
   -keyout "$interop_dir/key.pem" -out "$interop_dir/cert.pem" -days 7 \
   -subj /CN=localhost -addext subjectAltName=DNS:localhost
 
-docker run -d --name relay-sdk-interop \
-  -p 127.0.0.1:4443:4443/udp -p 127.0.0.1:4443:4443/tcp \
-  -v "$interop_dir:/tls:ro" moqdev/moq-relay:0.14.17 \
-  --server-bind '[::]:4443' --tls-cert /tls/cert.pem --tls-key /tls/key.pem \
-  --web-http-listen '[::]:4443' --auth-public ''
+docker create --name relay-sdk-interop -p 127.0.0.1:4443:4443/udp moqdev/moq-relay:0.15.8 \
+  --listen '[::]:4443' --listen-tls-cert /tls/cert.pem --listen-tls-key /tls/key.pem \
+  --auth-public '**'
+docker cp "$interop_dir/." relay-sdk-interop:/tls
+docker start relay-sdk-interop
 
 export RELAY_ANONYMOUS=1 RELAY_URL=https://localhost:4443
 unset RELAY_TOKEN
@@ -243,17 +260,21 @@ rm -r "$interop_dir"
 unset RELAY_ANONYMOUS RELAY_URL RELAY_CA_FILE RELAY_CERTIFICATE_HASH
 ```
 
+If the Docker daemon runs in another network namespace, such as a sidecar or a VM whose published
+ports do not reach this machine's loopback, replace `-p 127.0.0.1:4443:4443/udp` with
+`--network host`. Both smoke tests passed that way on 2026-09-28, in a workspace whose daemon is a
+sidecar.
+
 Both tests publish binary, text, and empty payloads, then connect a second subscriber
 **after** the relay has received content. They require `SUBSCRIBE_OK` to contain
 `LARGEST_OBJECT` and verify that the late subscriber receives the next live object.
 This exercises the relay's encoder independently of the SDK codecs and in-process hubs.
 Successful output includes `lateSubscriberLargestObject`.
 
-moq-relay 0.15.x renamed the server flags: use `--listen '[::]:4443' --listen-tls-cert
-/tls/cert.pem --listen-tls-key /tls/key.pem`, and `--auth-public '**'` for an anonymous relay
-(0.15.8 rejects `''`). With these, both smoke tests passed against `moqdev/moq-relay:0.15.8` on
-2026-09-28. Current SDK builds need 0.15.4 or later to end a track cleanly (see the PUBLISH_DONE
-row above).
+Current SDK builds need moq-relay 0.15.4 or later to end a track cleanly (see the PUBLISH_DONE row
+above), so the image tag should not go below that. The flags are those of 0.15.x: moq-relay 0.14.17
+took `--server-bind`, `--tls-cert`, `--tls-key` and `--web-http-listen` instead, and `--auth-public ''`
+for an anonymous relay, which 0.15.8 rejects.
 
 `RELAY_ANONYMOUS=1` skips the token prompt; if `RELAY_TOKEN` is set, it is still used.
 `RELAY_CA_FILE` adds the local certificate as a Python trust root.

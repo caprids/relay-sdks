@@ -7,8 +7,8 @@
  * the hub opens a bidi stream and solicits announces (SUBSCRIBE_NAMESPACE, empty prefix, odd server-side request ids)
  * and reads NAMESPACE / NAMESPACE_DONE entries off that stream for the session's lifetime. Tracks are pulled on demand:
  * one upstream SUBSCRIBE per track (downstream demand dedupes onto it), with the publisher's SUBSCRIBE_OK assigning the
- * alias its subgroup data streams carry. A proactive PUBLISH is answered with REQUEST_ERROR 400 "PUBLISH is not
- * supported" exactly like the real relay, so a regression to the old ingest model fails loudly. The publisher ends a
+ * alias its subgroup data streams carry. A proactive PUBLISH is answered with REQUEST_ERROR NOT_SUPPORTED (0x3) "PUBLISH
+ * is not supported" like moq-relay 0.15.8, so a regression to the old ingest model fails loudly. The publisher ends a
  * track by FINing the hub's SUBSCRIBE stream — no PUBLISH_DONE ever arrives — and retracts a namespace with
  * NAMESPACE_DONE; both land in `trackEnds`, the churn signal the source-switch regression tests assert on.
  *
@@ -116,10 +116,11 @@ export interface RelayHub {
 const MAX_BUFFERED_GROUPS = 3;
 
 /**
- * Moq-relay 0.14.7 answers every proactive PUBLISH with this literal code — the draft-19 REQUEST_ERROR_CODE table has
- * no exact entry for it.
+ * moq-relay 0.15.8 declines every proactive PUBLISH as `Error::Unsupported`, which is NOT_SUPPORTED (0x3): see
+ * `run_publish_stream` in `rs/moq-net/src/ietf/subscriber.rs` at tag `moq-relay-v0.15.8`. 0.14.17 already sent 0x3,
+ * and the literal 400 this fixture used to send dates from 0.14.7.
  */
-const PUBLISH_REMOVED_ERROR_CODE = 400;
+const PUBLISH_REJECTED_ERROR_CODE = REQUEST_ERROR_CODE.NOT_SUPPORTED;
 
 /**
  * How long the hub waits between retries when a SUBSCRIBE races the publisher's `registerTrack` and comes back
@@ -311,7 +312,7 @@ export function createRelayHub(): RelayHub {
               requestId,
               trackNamespace,
               trackName,
-              // moq-relay 0.14.17 requests Next Object plus a current-group fill.
+              // moq-relay 0.14.17 and 0.15.8 request Next Object plus a current-group fill.
               // Our publisher advertises no cached content, so the fill settles immediately.
               parameters: {
                 forward: 1,
@@ -432,7 +433,7 @@ export function createRelayHub(): RelayHub {
 
     /**
      * The publisher initiates no request streams under announce-and-serve. Anything arriving here is a regression to
-     * the old proactive model — answer it the way moq-relay 0.14.7 does, so the regression fails loudly instead of
+     * the old proactive model — answer it the way moq-relay 0.15.8 does, so the regression fails loudly instead of
      * being silently ingested.
      */
     const rejectRequestStream = async (stream: BidirectionalStreamLike): Promise<void> => {
@@ -445,7 +446,7 @@ export function createRelayHub(): RelayHub {
 
         await writer.write(
           message.kind === 'publish'
-            ? encodeRequestError(PUBLISH_REMOVED_ERROR_CODE, 'PUBLISH is not supported')
+            ? encodeRequestError(PUBLISH_REJECTED_ERROR_CODE, 'PUBLISH is not supported')
             : encodeRequestError(REQUEST_ERROR_CODE.NOT_SUPPORTED, 'unexpected request stream'),
         );
       } catch {

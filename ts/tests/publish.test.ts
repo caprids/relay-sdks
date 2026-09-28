@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { StreamReader } from '../packages/moq-core/src/protocol/bytes.js';
+import { decodeControlMessage, encodePublish } from '../packages/moq-core/src/protocol/control-messages.js';
 import { createTransportPair, withServerRequestIds } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
 import {
   connectRelayPublisher,
@@ -682,5 +684,28 @@ describe('text and JSON helpers', () => {
     await track.writeText('after');
     await vi.waitFor(() => expect(objects).toHaveLength(3));
     expect(objects.map(readText)).toEqual(['false', 'false', 'after']);
+  });
+});
+
+describe('relay hub', () => {
+  it('declines a proactive PUBLISH with NOT_SUPPORTED (0x3), as moq-relay 0.15.8 does', async () => {
+    const hub = createRelayHub();
+    cleanup.push(() => hub.destroy());
+    const { transport } = hub.connectPublisher(url, []);
+    const stream = await transport.createBidirectionalStream();
+    const writer = stream.writable.getWriter();
+    await writer.write(encodePublish({ requestId: 0, trackNamespace: namespace, trackName: 'video', trackAlias: 1 }));
+
+    const reader = new StreamReader(stream.readable);
+    const type = await reader.readVarint();
+    const length = (await reader.readUint8()) * 256 + (await reader.readUint8());
+    const message = decodeControlMessage({ type, body: await reader.readBytes(length) });
+
+    expect(message).toEqual({
+      kind: 'request-error',
+      errorCode: 0x3,
+      retryInterval: 0,
+      reason: 'PUBLISH is not supported',
+    });
   });
 });

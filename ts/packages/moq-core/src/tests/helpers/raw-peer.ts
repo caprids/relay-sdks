@@ -97,7 +97,7 @@ export function solicitNamespace(server: MoqtTransport, prefix: TrackNamespace, 
   return openRawRequest(server, encodeSubscribeNamespace({ requestId, trackNamespacePrefix: prefix }));
 }
 
-/** The relay's per-track pull, with the parameters moq-relay 0.14.17 sends on draft-20 (Next Object plus current-group fill). */
+/** The relay's per-track pull, with the parameters moq-relay 0.14.17 and 0.15.8 send on draft-20 (Next Object plus current-group fill). */
 export function rawSubscribe(
   server: MoqtTransport,
   trackNamespace: TrackNamespace,

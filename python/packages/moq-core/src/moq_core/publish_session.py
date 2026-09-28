@@ -1136,8 +1136,8 @@ class MoqtPublishSession:
                         else:
                             # The subscribe driver treats REQUEST_OK as the update's completion
                             # (`on_update_ok`). Strictly reactive: a peer that never sends
-                            # REQUEST_UPDATE (moq-lite-rs parks on end-of-stream after SUBSCRIBE_OK)
-                            # never sees a trailing byte.
+                            # REQUEST_UPDATE (moq-relay 0.15.8 writes nothing after SUBSCRIBE until
+                            # it cancels) never sees a trailing byte.
                             spawn(_swallow(writer.write(encode_request_ok())))
                 elif isinstance(message, Goaway):
                     self._received_goaway = True
@@ -1145,9 +1145,10 @@ class MoqtPublishSession:
                 else:
                     raise MoqtProtocolError(f"unexpected {message.kind} on an incoming subscribe stream")
             # The peer FINed its direction while the subscription was still ours to end. moq-relay
-            # pairs that FIN with STOP_SENDING (a cancellation, so the write below fails harmlessly);
-            # a peer that only half-closes still gets the PUBLISH_DONE §3.3.2 requires before our
-            # FIN. No status names this, so it reports the publisher's own limitation.
+            # (0.15.8 `cancel_subscribe`) pairs that FIN with STOP_SENDING (a cancellation, so the
+            # write below fails harmlessly); a peer that only half-closes still gets the PUBLISH_DONE
+            # §3.3.2 requires before our FIN. No status names this, so it reports the publisher's own
+            # limitation.
             if not subscriber.finished:
                 self._end_subscription(
                     track, subscriber, PUBLISH_DONE_STATUS.INTERNAL_ERROR, "subscriber closed its request stream"

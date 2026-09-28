@@ -7,9 +7,17 @@ from typing import Any
 import pytest
 from core_helpers.transport_pair import create_transport_pair, with_server_request_ids
 from core_helpers.waiting import wait_for
-from relay_helpers.relay_hub import ObservedNamespaceDone, ObservedSubscribeFin, RelayHub, create_relay_hub
+from relay_helpers.relay_hub import (
+    ObservedNamespaceDone,
+    ObservedSubscribeFin,
+    RelayHub,
+    create_relay_hub,
+    read_control_frame,
+)
 
 from moq_core import KeyValuePair, MoqtObject
+from moq_core.bytes import StreamReader
+from moq_core.control_messages import Publish, RequestError, encode_publish
 from mux_relay import (
     CancellationToken,
     Closed,
@@ -553,3 +561,18 @@ async def test_helpers_keep_deadlines_concurrency_and_task_cancellation(cleanup:
     await track.write_json(0)
     await wait_for(lambda: len(received.objects) == 1)
     assert read_json(received.objects[0]) == 0
+
+
+async def test_the_hub_declines_a_proactive_publish_with_not_supported_like_moq_relay_0_15_8(cleanup: Cleanup) -> None:
+    hub = create_relay_hub()
+    cleanup.append(hub.destroy)
+    transport = hub.connect_publisher().transport
+    stream = await transport.create_bidirectional_stream()
+    await stream.writable.write(
+        encode_publish(Publish(request_id=0, track_namespace=NAMESPACE, track_name="video", track_alias=1))
+    )
+
+    reader = StreamReader(stream.readable)
+    message = await read_control_frame(reader, await reader.read_varint())
+
+    assert message == RequestError(error_code=0x3, reason="PUBLISH is not supported")

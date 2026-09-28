@@ -11,7 +11,7 @@ hub opens a bidi stream and solicits announces (SUBSCRIBE_NAMESPACE, empty prefi
 request ids) and reads NAMESPACE / NAMESPACE_DONE entries off that stream for the session's lifetime.
 Tracks are pulled on demand: one upstream SUBSCRIBE per track (downstream demand dedupes onto it),
 with the publisher's SUBSCRIBE_OK assigning the alias its subgroup data streams carry. A proactive
-PUBLISH is answered with REQUEST_ERROR 400 "PUBLISH is not supported" exactly like the real relay. The
+PUBLISH is answered with REQUEST_ERROR NOT_SUPPORTED (0x3) "PUBLISH is not supported" like moq-relay 0.15.8. The
 publisher ends a track by FINing the hub's SUBSCRIBE stream (no PUBLISH_DONE ever arrives) and
 retracts a namespace with NAMESPACE_DONE; both land in ``track_ends``.
 
@@ -121,8 +121,12 @@ class ObservedNamespaceDone:
 ObservedTrackEnd = ObservedSubscribeFin | ObservedNamespaceDone
 
 MAX_BUFFERED_GROUPS = 3
-PUBLISH_REMOVED_ERROR_CODE = 400
-"""moq-relay 0.14.7 answers every proactive PUBLISH with this literal code."""
+PUBLISH_REJECTED_ERROR_CODE = REQUEST_ERROR_CODE.NOT_SUPPORTED
+"""moq-relay 0.15.8 declines every proactive PUBLISH as ``Error::Unsupported``, which is NOT_SUPPORTED (0x3).
+
+See ``run_publish_stream`` in ``rs/moq-net/src/ietf/subscriber.rs`` at tag ``moq-relay-v0.15.8``; 0.14.17 already
+sent 0x3, and the literal 400 this fixture used to send dates from 0.14.7.
+"""
 SUBSCRIBE_RETRY_DELAY = 0.025
 """Retry spacing when a SUBSCRIBE races the publisher's register_track and comes back DOES_NOT_EXIST."""
 
@@ -336,7 +340,7 @@ class RelayHub:
                                 request_id=request_id,
                                 track_namespace=track_namespace,
                                 track_name=track_name,
-                                # The exact parameter set moq-relay 0.14.17 sends upstream on draft-20.
+                                # The exact parameter set moq-relay 0.14.17 and 0.15.8 send upstream on draft-20.
                                 parameters=MessageParameters(
                                     forward=1,
                                     subscriber_priority=0,
@@ -447,7 +451,7 @@ class RelayHub:
 
                 if isinstance(message, Publish):
                     await stream.writable.write(
-                        encode_request_error(PUBLISH_REMOVED_ERROR_CODE, "PUBLISH is not supported")
+                        encode_request_error(PUBLISH_REJECTED_ERROR_CODE, "PUBLISH is not supported")
                     )
                 else:
                     await stream.writable.write(

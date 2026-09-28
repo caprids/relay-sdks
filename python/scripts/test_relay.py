@@ -17,7 +17,7 @@ Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt
 (https, without the token), ``RELAY_NAMESPACE_PREFIX`` (a random field is appended). The token is
 never written to disk and is redacted from output. For anonymous local relays, set
 ``RELAY_ANONYMOUS=1``; ``RELAY_CA_FILE`` supplies a local certificate trust root.
-See ``spec/relay-interop.md`` for the moq-relay 0.14.17 reproduction.
+See ``spec/relay-interop.md`` for the local moq-relay 0.15.8 reproduction.
 
     # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
     RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python:test:relay

@@ -305,7 +305,7 @@ function readLocation(reader: ByteReader): Location {
   return { group: reader.readVarint(), object: reader.readVarint() };
 }
 
-/** LARGEST_OBJECT is two bare varints in draft-17 onward (§10.2), matching moq-relay 0.14.17 (moq-dev/moq#3561). */
+/** LARGEST_OBJECT is two bare varints in draft-17 onward (§10.2), matching moq-relay 0.14.17 and 0.15.8 (moq-dev/moq#3561). */
 function writeLocationParameter(writer: ByteWriter, location: Location): void {
   writeLocation(writer, location);
 }
@@ -736,7 +736,7 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
       case PARAMETER_TYPE.INCLUDE_PROPERTIES: {
         // §10.2.21 calls the value a uint8; moq-relay frames it
         // length-prefixed by the odd-type parity rule (moq-dev/moq#3255),
-        // and the codec follows the relay. This remains length-prefixed in moq-relay 0.14.17.
+        // and the codec follows the relay. This remains length-prefixed in moq-relay 0.15.8.
         const value = reader.readBytes(reader.readVarint());
 
         if (value.length !== 1 || value[0]! > 1) {

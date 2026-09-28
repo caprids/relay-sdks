@@ -120,7 +120,7 @@ def solicit_namespace(server: MoqtTransport, prefix: Sequence[str], request_id: 
 def raw_subscribe(
     server: MoqtTransport, track_namespace: Sequence[str], track_name: str, request_id: int
 ) -> asyncio.Future[RawRequest]:
-    """The relay's per-track pull, with the parameters moq-relay 0.14.17 sends on draft-20.
+    """The relay's per-track pull, with the parameters moq-relay 0.14.17 and 0.15.8 send on draft-20.
 
     Next Object plus a current-group fill; our publisher advertises no cached content.
     """

@@ -321,7 +321,7 @@ def _read_location(reader: ByteReader) -> Location:
 
 
 def _write_location_parameter(writer: ByteWriter, location: Location) -> None:
-    # Draft-17 onward (§10.2): two bare varints, matching moq-relay 0.14.17 (moq-dev/moq#3561).
+    # Draft-17 onward (§10.2): two bare varints, matching moq-relay 0.14.17 and 0.15.8 (moq-dev/moq#3561).
     _write_location(writer, location)
 
 
@@ -743,7 +743,7 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
             parameters.track_namespace_prefix = _read_track_namespace(reader)
         elif parameter_type == PARAMETER_TYPE.INCLUDE_PROPERTIES:
             # §10.2.21 calls the value a uint8; moq-relay frames it length-prefixed by the odd-type
-            # parity rule (moq-dev/moq#3255). This remains length-prefixed in moq-relay 0.14.17.
+            # parity rule (moq-dev/moq#3255). This remains length-prefixed in moq-relay 0.15.8.
             value_bytes = reader.read_bytes(reader.read_varint())
 
             if len(value_bytes) != 1 or value_bytes[0] > 1:
