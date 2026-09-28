@@ -29,6 +29,12 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
   const deadline = setTimeout(() => lifetime.abort(new Error(`Run exceeded ${timeoutMs} ms`)), timeoutMs);
   const connections = [];
   const problems = [];
+  // Aborted by the first failure seen in a callback or background task, which wakes a write waiting for demand.
+  const broken = new AbortController();
+  const report = (problem) => {
+    problems.push(problem);
+    broken.abort(new Error(problem));
+  };
   let received = 0;
   let closing = false;
 
@@ -44,7 +50,7 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
     }
     connections.push(connection);
     void connection.closed.then(({ error }) => {
-      if (!closing) problems.push(`${label} connection closed: ${describe(error)}`);
+      if (!closing) report(`${label} connection closed: ${describe(error)}`);
     });
     return connection;
   };
@@ -102,8 +108,8 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
               ...inspect(object.payload),
             });
           },
-          onError: (error) => problems.push(`subscribe rejected: code ${error.errorCode} ${error.reason}`),
-          onSubgroupReset: ({ groupId, error }) => problems.push(`group ${groupId} reset: ${describe(error)}`),
+          onError: (error) => report(`subscribe rejected: code ${error.errorCode} ${error.reason}`),
+          onSubgroupReset: ({ groupId, error }) => report(`group ${groupId} reset: ${describe(error)}`),
           onPublisherDone: (done) => log({ event: 'publisher done', status: done.statusCode, reason: done.reason }),
         },
         {
@@ -112,7 +118,7 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         },
       ).catch((error) => {
         if (lifetime.signal.aborted) return;
-        problems.push(`subscribe failed: ${describe(error)}`);
+        report(`subscribe failed: ${describe(error)}`);
         lifetime.abort(error);
       });
     }
@@ -120,8 +126,11 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
     if (writer) {
       // The SDK waits for demand inside write(), up to the track's write deadline. Only a timeout in
       // that wait proves nothing was sent, so only it writes the same object again.
+      // The SDK can wait for demand for a whole write deadline. A failure recorded meanwhile (a rejected
+      // subscribe, a closed connection) aborts that wait and becomes the run's error, rather than
+      // surfacing a deadline later or hiding behind the run's own timeout.
       const retry = {
-        signal: lifetime.signal,
+        signal: AbortSignal.any([lifetime.signal, broken.signal]),
         onRetry: () => {
           failIfBroken();
           log({
@@ -143,7 +152,12 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
         );
         failIfBroken();
         if (!writer.hasDemand) log({ event: 'waiting', detail: 'no relay demand yet; write() waits for a subscriber' });
-        await writeWithRetry(writer, bytes, retry);
+        try {
+          await writeWithRetry(writer, bytes, retry);
+        } catch (error) {
+          if (broken.signal.aborted && error === broken.signal.reason) failIfBroken();
+          throw error;
+        }
         log({ event: 'published', seq, bytes: bytes.byteLength });
         if (seq < count) await sleep(intervalMs, lifetime.signal);
       }

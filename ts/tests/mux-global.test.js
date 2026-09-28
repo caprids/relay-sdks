@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { runDemo } from '../examples/mux-global/demo.js';
-import { connectRelayPublisher, connectRelaySubscriber, RelayError } from '../src/index.js';
+import { connectRelayPublisher, connectRelaySubscriber, RelayError, SubscriptionRequestError } from '../src/index.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
 const connectors = vi.hoisted(() => ({ connectRelaySubscriber: vi.fn(), connectRelayPublisher: vi.fn() }));
@@ -160,5 +160,29 @@ it('fails without retrying when the track closes while waiting for demand', asyn
   });
   expect(log).not.toHaveBeenCalledWith(expect.objectContaining({ event: 'published' }));
   expect(log).not.toHaveBeenCalledWith(expect.objectContaining({ event: 'write failed' }));
+  await expectClosed();
+});
+
+it('ends the wait for demand promptly with a subscribe rejection recorded meanwhile', async () => {
+  connectors.connectRelaySubscriber.mockImplementation(async (options) => {
+    const subscriber = await connectRelaySubscriber({ ...options, createTransport: hub.connectSubscriber });
+    connections.push(subscriber);
+    vi.spyOn(subscriber, 'subscribe').mockImplementation((_, handlers) => {
+      const rejection = { errorCode: 403, retryInterval: 0, reason: 'forbidden' };
+      const subscribed = new Promise((_, reject) =>
+        setTimeout(() => {
+          handlers.onError(rejection);
+          reject(new SubscriptionRequestError(rejection));
+        }, 10),
+      );
+      subscribed.catch(() => {});
+      return { subscribed, cancel() {} };
+    });
+    return subscriber;
+  });
+  const started = Date.now();
+  // The write deadline is 15 s and the run's 2 s: the recorded rejection must end the wait first.
+  await expect(runDemo(config, vi.fn())).rejects.toThrow('subscribe rejected: code 403 forbidden');
+  expect(Date.now() - started).toBeLessThan(1000);
   await expectClosed();
 });
