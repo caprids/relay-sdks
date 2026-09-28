@@ -184,7 +184,7 @@ async def test_track_closed_while_waiting_for_demand(connected, monkeypatch: pyt
 
     def register_track(self, track, **kwargs):
         writer = original(self, track, **kwargs)
-        asyncio.get_running_loop().call_soon(writer.close)
+        asyncio.get_running_loop().call_later(0.05, writer.close)  # once write() is waiting for demand
         return writer
 
     monkeypatch.setattr(RelayPublisher, "register_track", register_track)
@@ -194,4 +194,19 @@ async def test_track_closed_while_waiting_for_demand(connected, monkeypatch: pyt
     # Nothing was sent, and the closed track is not a demand timeout: no retry, no uncertain delivery.
     assert (caught.value.code, caught.value.phase) == ("CLOSED", "waiting-for-demand")
     assert not any(entry["event"] in ("published", "write failed") for entry in entries)
+    assert all(connection.closed.done() for connection in connected)
+
+
+async def test_background_subscribe_failure_interrupts_the_wait_for_demand(connected, monkeypatch: pytest.MonkeyPatch):
+    async def failing_subscribe(*args: Any, **kwargs: Any):
+        await asyncio.sleep(0.01)
+        raise RuntimeError("subscribe exploded")
+
+    monkeypatch.setattr(demo, "subscribe_with_retry", failing_subscribe)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    # The write deadline is 15 s and the run's 2 s: the recorded failure must end the wait first.
+    with pytest.raises(RuntimeError, match="subscribe failed: RuntimeError: subscribe exploded"):
+        await demo.run_demo(CONFIG, lambda _: None)
+    assert loop.time() - started < 1
     assert all(connection.closed.done() for connection in connected)
