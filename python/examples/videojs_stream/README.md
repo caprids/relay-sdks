@@ -123,11 +123,14 @@ The shutdown path joins the producer and drains both queues so its final encoded
 
 ## Publisher replacement
 
-A stopped or killed publisher can leave an attached viewer silent while its subscriber connection
-stays open, and relay publisher-death notification can be delayed. Starting this script again on
-the same namespace
-does not guarantee immediate recovery for attached viewers. Subscribing soon after an orderly
-retract/re-announce can also fail transiently.
+Starting this script again on the same namespace does not recover attached viewers: moq-relay 0.15.8
+never moves an existing subscription to the replacement publisher. When the script stops and its
+connection closes, whether on `--duration` or Ctrl-C, viewers' subscriptions end within 0.1 s.
+Killing the process (SIGKILL, or a lost host) leaves them silent, with their subscriber connections
+open, until the relay's QUIC idle timeout ends them about 30-35 s later; subscribes in that interval
+are accepted but serve only the killed publisher's cached last object. After a clean stop, new
+subscribes fail with request error 16 `unroutable` until the restarted script announces, and are
+served by it at once from then on.
 
 A player should report stalls using its own media-progress check, retire the old subscription under
 an explicit trailing-data policy, and retry with backoff and a total recovery deadline. After a

@@ -164,10 +164,14 @@ fetch, track status). At the product level it did not say what became ready. `on
 `subscription.subscribed`, the awaitable readiness result, settles on the same event, so the two
 names agree.
 
-`onError` keeps its name: the relay answered the request with REQUEST_ERROR, because it rejected
-the subscription or the request itself failed before acceptance (request timeout, or the request
-stream failing). A REQUEST_ERROR can also arrive after acceptance, for example when the relay
-refuses an `update()`, and it ends the subscription then too ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+`onError` keeps its name: the relay answered the request with REQUEST_ERROR, because it rejected the
+subscription or the request itself failed before acceptance (request timeout, or the request stream
+failing). A REQUEST_ERROR can also arrive after acceptance, when a relay refuses an `update()`, and
+it ends the subscription then too ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+moq-relay sends neither REQUEST_OK nor REQUEST_ERROR for an update: it ends the subscription with
+PUBLISH_DONE instead, so against it `onUpdateOk` / `on_update_ok` never fires and an update reaches
+`onPublisherDone` / `on_publisher_done`, not `onError`
+([relay interop deviation 4](behavior.md#relay-interop-deviations)).
 Connection shutdown and GOAWAY never reach `onError`: a pending subscription ends through
 `subscribed` and `ended` as terminated by the closure, so a lost connection is never mistaken for
 a rejection, and after acceptance closure surfaces as subgroup resets and connection closure.

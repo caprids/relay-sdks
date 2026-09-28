@@ -162,10 +162,13 @@ Messages are not a compatibility contract; the class and the point of rejection 
   An update issued before acceptance is queued in order and sent when SUBSCRIBE_OK arrives; at most
   eight wait, and a further one raises `UPDATE_QUEUE_FULL` without sending anything. A subscription
   that ends before acceptance discards its queue, and its ending is what the application observes.
-  An update on an ended subscription raises `CLOSED`. Each update consumes its own Request ID, and
-  the relay's acknowledgement arrives as `onUpdateOk` / `on_update_ok`; a refused update arrives as
-  REQUEST_ERROR and ends the subscription ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
-  Implemented in both SDKs.
+  An update on an ended subscription raises `CLOSED`. Each update consumes its own Request ID. A
+  relay that acknowledges an update with REQUEST_OK reaches `onUpdateOk` / `on_update_ok`; one that
+  refuses it with REQUEST_ERROR ends the subscription
+  ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
+  Implemented in both SDKs. moq-relay, however, never answers a REQUEST_UPDATE: any byte on the
+  request stream after SUBSCRIBE_OK ends the subscription with PUBLISH_DONE `TRACK_ENDED`, so
+  against it an update ends delivery ([relay interop deviation 4](#relay-interop-deviations)).
 - A subscribe for a namespace the relay has not seen announced is rejected, not parked: moq-relay
   0.15.8 answers request error 16 (0x10, `DOES_NOT_EXIST`) with reason `unroutable`, and moq-relay
   through 0.15.1 answered its literal 404. The same code 16 with reason `not found` means the
@@ -186,10 +189,19 @@ Messages are not a compatibility contract; the class and the point of rejection 
 - The publisher's done notification is a control message and may arrive before trailing objects
   still in transit. It does not end the subscription: the request stays open until the application
   cancels it or the connection ends, and the SDK does not resubscribe on its own.
-  It is not a prompt publisher-death detector; the SDK reports it when the relay sends it.
-- Replacing a publisher on the same namespace does not guarantee handoff of existing subscriptions.
-  New subscriptions may also see transient fresh-namespace rejections or initial-response timeouts
-  after retract/re-announce.
+  It is not a prompt publisher-death detector; the SDK reports it when the relay sends it. On
+  moq-relay 0.15.8 a publisher's clean close, or its connection closing, reaches existing
+  subscriptions within 0.1 s, usually as status 2 and sometimes as 0; a crashed publisher's arrives
+  as status 0 only after the relay's QUIC idle timeout, about 30-35 s.
+- Replacing a publisher on the same namespace does not hand off existing subscriptions: moq-relay
+  0.15.8 never moves them to the replacement. New subscriptions fail with request error 16
+  `unroutable` until the replacement announces, and are served by it at once after that; until
+  then, after a crash, they are instead accepted and served only the old publisher's cached last
+  object.
+  Re-subscribing to a track that finished while its namespace stays announced replays the cached
+  last group and another done, one round trip later each time, because the relay keeps a finished
+  track cached by design; do not re-subscribe to a finished track
+  ([publisher restarts](relay-interop.md#publisher-restarts-and-resubscription)).
   Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
 - `subscribe()` returns a `RelaySubscription`: the request handle plus two awaitables. `subscribed`
@@ -211,9 +223,9 @@ and the `error`. Implemented in both SDKs.
 | pending | REQUEST_ERROR: rejection, request timeout, or the request stream failing before an answer | rejects `SubscriptionRequestError`, preserving the request error | resolves `kind: rejected`, `cause: request-error` | `onError` |
 | pending | connection ends | rejects `SubscriptionConnectionClosedError`, preserving the connection error as its cause when known | resolves `kind: terminated`, `cause: connection-closed`, `accepted: false` | nothing on the subscription; the connection's `closed` carries the reason |
 | pending | `cancel(reason)` | rejects with `reason`, or a `CLOSED` Relay error when none was given | resolves `kind: cancelled`, with the reason as `error` | nothing |
-| accepted | objects, subgroup end or reset, state notify, update acknowledged, GOAWAY on the request stream | settled | stays pending | the matching callback |
+| accepted | objects, subgroup end or reset, state notify, update acknowledged (moq-relay never acknowledges one, see [deviation 4](#relay-interop-deviations)), GOAWAY on the request stream | settled | stays pending | the matching callback |
 | accepted | PUBLISH_DONE | settled | stays pending: publisher completion is not an ending, trailing objects can still arrive | `onPublisherDone` |
-| accepted | REQUEST_ERROR, which is how a refused `update()` is answered ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)) | settled | resolves `kind: terminated`, `cause: request-error`, `accepted: true` | `onError` |
+| accepted | REQUEST_ERROR, which is how a relay refuses an `update()` ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)); moq-relay sends none and ends the subscription with PUBLISH_DONE instead ([deviation 4](#relay-interop-deviations)) | settled | resolves `kind: terminated`, `cause: request-error`, `accepted: true` | `onError` |
 | accepted | connection ends | settled | resolves `kind: terminated`, `cause: connection-closed`, `accepted: true` | nothing on the subscription; the connection's `closed` carries the reason |
 | accepted | `cancel(reason)` | settled | resolves `kind: cancelled` | nothing; trailing objects stop |
 | ended | anything, including a second `cancel()` | settled | settled, unchanged | nothing; `update()` raises `CLOSED`; the events iterator has already raised or reached EOF |
@@ -353,6 +365,14 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   round trip later. It stays pending while no solicitation covers the namespace (the first write
   reports `NAMESPACE_NOT_SOLICITED`), and the connection's closure terminates it if that comes
   first, with the closure's error or `CLOSED` after a clean shutdown.
+- Two publishers may announce the same namespace, and nothing warns either one or any subscriber.
+  On moq-relay 0.15.8 the newest announcer wins for new subscribers only: it gets no demand while
+  only the first publisher's viewers are attached, and gets it as soon as a new subscriber arrives.
+  From then on the namespace is split. Existing viewers stay on the first publisher, and when it
+  retracts they get done status 2 (or, if it crashed, done status 0 about 35 s later) and do not
+  move. Every new viewer goes to the newest announcer, and when that one retracts, new subscribers
+  go back to the first. Neither SDK can detect the split
+  ([issue #37](https://github.com/muxinc/relay-sdks/issues/37)); keep one publisher per namespace.
 - The default write deadline is 10 seconds and covers both waiting for demand and the transport
   write.
 - A timeout, cancellation, transport write failure, or relay subscription change resets the
@@ -444,18 +464,31 @@ MSF and LOC say nothing about an abandoned group. Implemented in both SDKs.
 ### Relay property handling
 
 These are deployment observations, separate from the SDK guarantees above. Tests against
-`sjc.relay.mux.global` running relay 0.14.17 on 2026-09-16 reproduced the following:
+production moq-relay 0.15.8 on 2026-09-28 (3 of 3 runs identical) found the following. The relay
+stores each object as its size and a timestamp only, so no other object property can survive it.
 
-- A track without declared Timescale (`0x08`) arrived with Timescale = 1,000,000 and
-  Default Publisher Group Order (`0x22`, decimal 34) = 2 (descending). The relay stamped its own
-  timestamps on objects, including objects with a publisher-supplied Timestamp (`0x10`).
-- With track Timescale = 1,000,000 declared, supplied Timestamp values were preserved. Objects
-  without a Timestamp still received a relay-generated one. The relay still included Default
-  Publisher Group Order in the track properties.
-- Of the object properties tested, Timestamp was the only type received. Object-level Timescale
-  (`0x08`), Video Config (`0x0D`), and the tested values of types `0x02` and `0x05` were dropped.
-  This is not an exhaustive registry compatibility test or a promise about future relay versions.
-  Object payloads and IDs in these tests were preserved.
+- Of the object properties, only Timestamp (`0x10`) reaches a subscriber. The relay also reads
+  `0x06`, the Timestamp id of draft-ietf-moq-loc-03, as a Timestamp and forwards it as `0x10`.
+  Every other object property tested was dropped, even- and odd-typed alike: Timescale (`0x08`),
+  Video Config (`0x0D`), `0x02`, `0x04`, `0x05`, `0x0B`, and `0x40` to `0x43`. Object payloads and
+  IDs were preserved.
+- Timestamps are rescaled to microseconds using the declared Timescale: with track Timescale 90000,
+  a Timestamp of 123456 arrives as 1371733. An object-level Timescale takes precedence over the
+  track's. With Timescale 1,000,000 a supplied Timestamp passes through unchanged.
+- A track without a declared Timescale gets relay-clock timestamps on every object, replacing any
+  Timestamp the publisher supplied. So does an object without a Timestamp on a declared track.
+- `SUBSCRIBE_OK` carries the relay's own track properties for every track: Timescale (`0x08`) =
+  1,000,000, Default Publisher Priority (`0x0E`) = 128, and Default Publisher Group Order (`0x22`,
+  decimal 34) = 2 (descending). A publisher's own `0x0E` passes through, its `0x22` is replaced
+  with 2, and its other track properties (for example `0x0D`, `0x40`, `0x41`) are dropped.
+- A track registered with a Default Publisher Priority (`0x0E`) above 255 or a Default Publisher
+  Group Order (`0x22`) other than 1 or 2 makes the relay refuse **every** subscribe to it with
+  REQUEST_ERROR 18 `invalid value`. The publisher gets no error; its writes time out waiting for
+  demand. The SDK does not validate these values at registration.
+
+This is not an exhaustive registry compatibility test or a promise about future relay versions.
+Compared with the 0.14.17 and 0.15.1 observations, the `0x0E` in `SUBSCRIBE_OK` and the
+invalid-value refusal are new.
 
 For publisher-defined media timing, declare a track timescale and put timestamps in that unit on
 objects. Interpret received timestamps using the received track timescale; a timestamp's presence
@@ -465,9 +498,11 @@ arrive intact in the payload (or a separate metadata track's payload). For the V
 example, codec configuration is also carried in the catalog's `initDataList`, so decoding does not
 depend on Video Config object-property forwarding.
 
-Evidence and protocol naming: [issue #23](https://github.com/muxinc/relay-sdks/issues/23) and the
-relay release's
-[track property implementation](https://github.com/moq-dev/moq/blob/b2f26b920f617c033ef7a393bcc894f0bb9b350b/rs/moq-net/src/ietf/properties.rs).
+Evidence and protocol naming: [issue #23](https://github.com/muxinc/relay-sdks/issues/23) and, at
+moq-relay 0.15.8, the relay's
+[track property implementation](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b348ae055e70957/rs/moq-net/src/ietf/properties.rs),
+[SUBSCRIBE_OK track properties](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b348ae055e70957/rs/moq-net/src/ietf/publisher.rs#L575-L587)
+and [frame model](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b348ae055e70957/rs/moq-net/src/model/frame.rs).
 
 ## Text and JSON helpers
 
@@ -651,13 +686,13 @@ here when the first SDK gains them.
 
 ### Relay interop deviations
 
-Three choices in the generic cores depend on how moq-relay treats the draft's teardown messages
-and track aliases. All three conform to draft-20; each is recorded because the relay's behavior, and
-for the first one its version, decides whether it works. The relay behavior, the evidence and how
-to re-test are in [relay interoperability](relay-interop.md#draft-20-deviations). Re-test against
-the relay before changing one: on a relay older than 0.15.4 the first one aborts every viewer's
-track. Both SDKs agree on all three, and the core module headers
-(`ts/packages/moq-core/src/protocol/publish-session.ts`,
+Four choices in the generic cores depend on how moq-relay treats the draft's teardown messages,
+track aliases and request updates. All four conform to draft-20; each is recorded because the
+relay's behavior, and for the first one its version, decides whether it works. The relay behavior,
+the evidence and how to re-test are in [relay
+interoperability](relay-interop.md#draft-20-deviations). Re-test against the relay before changing
+one: on a relay older than 0.15.4 the first one aborts every viewer's track. Both SDKs agree on all
+four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-session.ts`,
 `python/packages/moq-core/src/moq_core/publish_session.py`) state the same constraints.
 
 1. **A subscription ends with PUBLISH_DONE, then FIN, which needs moq-relay 0.15.4 or later.**
@@ -728,6 +763,25 @@ track. Both SDKs agree on all three, and the core module headers
    the Relay surface. Nothing needs to change unless the SDK serves concurrent subscriptions to one
    track, which
    [ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md) rules out today.
+4. **`update()` sends REQUEST_UPDATE, which moq-relay does not implement.** Draft-20
+   [Section 10.9](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.9):
+   "The receiver of a REQUEST_UPDATE MUST respond with exactly one REQUEST_OK or REQUEST_ERROR
+   message indicating if the update was successful". This conforms: each `update()` on an accepted
+   subscription writes one REQUEST_UPDATE, with its own Request ID, on that subscription's request
+   stream; a REQUEST_OK reaches `onUpdateOk` / `on_update_ok`, and a REQUEST_ERROR reaches
+   `onError` / `on_error` and ends the subscription. moq-relay answers neither, from 0.14.17 through
+   0.15.8: after SUBSCRIBE_OK it only polls the request stream for closure, any inbound byte counts
+   as a close there, and it then takes its normal end path, dropping its upstream demand and
+   writing PUBLISH_DONE status `TRACK_ENDED` (0x2) `track ended`. A viewer that calls `update()`
+   therefore gets `onPublisherDone` / `on_publisher_done` within one round trip and no further
+   objects, whatever the update carried (a subscriber priority, `forward` 0, or nothing), and
+   `onUpdateOk` / `on_update_ok` never fires. As after any done, the subscription's `ended` stays
+   pending until it is cancelled or the connection closes. The session stays open, and a new
+   subscribe on the same connection works. So against moq-relay a pause is a cancel followed by a
+   new subscribe later, and a changed priority or filter is a new subscription. The SDK sends the
+   update anyway and does not warn; whether it should is open in
+   [issue #94](https://github.com/muxinc/relay-sdks/issues/94), and REQUEST_UPDATE support would be
+   an upstream relay feature.
 
 Both cores pin the second choice for each role: after an orderly close, the control stream of a
 publish session and of a subscribe session carries SETUP and nothing else.

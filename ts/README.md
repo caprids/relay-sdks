@@ -203,17 +203,24 @@ begun forwarding, so an aborted group can leave no trace except a gap in group I
 `onPublisherDone` is the publisher's control notification: it may precede trailing objects in
 transit, and it does not end the subscription. Cancel the subscription when you are finished with it.
 
-`subscription.update(parameters)` changes what an accepted subscription delivers (REQUEST_UPDATE);
-`subscription.update({ forward: 0 })` pauses forwarding, for example, and the relay acknowledges
-through `onUpdateOk`. The protocol allows updates only after acceptance, so an update issued before
-`onSubscribed` is queued in order and sent as soon as the relay accepts; at most eight wait, and a
-further one throws a `RelayError` with code `UPDATE_QUEUE_FULL`. Updating an ended subscription
-throws `CLOSED`. A refused update arrives as `onError` and ends the subscription
+`subscription.update(parameters)` sends REQUEST_UPDATE, the protocol's way to change what an
+accepted subscription delivers. **moq-relay does not implement it**: the relay never acknowledges an
+update, and any update, including `{ forward: 0 }` or an empty one, ends the subscription within one
+round trip with `onPublisherDone` (status 2 `track ended`) and stops delivery; `onUpdateOk` never
+fires. To pause, cancel the subscription and subscribe again later; to change priority or filters,
+open a new subscription ([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)).
+The protocol allows updates only after acceptance, so an update issued before `onSubscribed` is
+queued in order and sent as soon as the relay accepts; at most eight wait, and a further one throws
+a `RelayError` with code `UPDATE_QUEUE_FULL`. Updating an ended subscription throws `CLOSED`. A
+relay that refuses an update with REQUEST_ERROR reaches `onError`, which ends the subscription
 ([#94](https://github.com/muxinc/relay-sdks/issues/94)).
 
-Re-subscribing after `onPublisherDone` creates a new request and can replay cached objects followed
-by another done notification while the publisher is absent. Apply retry backoff to done callbacks
-as well as retryable request errors, and define any continuity policy in the application. See
+Re-subscribing after `onPublisherDone` creates a new request, and it cannot bring back a finished
+track. Once the publisher has gone the relay answers request error 16 `unroutable`; while its
+namespace stays announced, the relay replays the finished track's cached last group followed by
+another done, one round trip later each time. Don't re-subscribe to a finished track until the
+application knows new content exists, apply retry backoff to done callbacks as well as retryable
+request errors, and define any continuity policy in the application. See
 [publisher restarts and resubscription](../spec/relay-interop.md#publisher-restarts-and-resubscription)
 for retry, trailing-object, and publisher-generation guidance.
 
@@ -323,14 +330,17 @@ bytes, or a list whose encoding exceeds 1 MiB, is a `RangeError` at the same poi
 the encoding with the core's own encoder, so an oversized property never opens a stream. The SDK adds
 no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB of payload.
 
-Properties are encoded as supplied, but subscribers see the relay's output. With relay 0.14.17,
-tracks without a declared Timescale (`0x08`) received relay-generated timestamps and a microsecond
-timescale. Declaring `trackProperties: [{ type: 0x08, value: 1_000_000 }]` preserved supplied
-Timestamp (`0x10`) values in the tests; other tested object properties, including Video Config,
-were dropped. Missing timestamps were synthesized even on declared tracks. Keep application
-metadata that must arrive intact in payloads, and read the received track timescale when interpreting
-timestamps. See [Relay property handling](../spec/behavior.md#relay-property-handling) for the
-version-specific observations and media guidance.
+Properties are encoded as supplied, but subscribers see the relay's output. With moq-relay 0.15.8,
+only the object Timestamp (`0x10`, or the older `0x06`) survives, rescaled to microseconds by the
+declared Timescale (`0x08`); every other object property, including Video Config, is dropped. Tracks
+without a declared Timescale, and objects without a Timestamp, get relay-clock timestamps. Declaring
+`trackProperties: [{ type: 0x08, value: 1_000_000 }]` keeps supplied Timestamp values unchanged.
+Every `SUBSCRIBE_OK` carries the relay's track properties (`0x08` = 1,000,000, `0x0E` = 128 unless
+the publisher set it, `0x22` = 2), not the publisher's, and a `0x0E` above 255 or a `0x22` other
+than 1 or 2 in `trackProperties` makes every subscribe fail with request error 18 `invalid value`.
+Keep application metadata that must arrive intact in payloads, and read the received track timescale
+when interpreting timestamps. See [Relay property
+handling](../spec/behavior.md#relay-property-handling) for the observations and media guidance.
 
 `events.close()` cancels an outstanding write and ends that track; other tracks keep running.
 `publisher.close()` ends all tracks, retracts the namespace, and waits for transport shutdown.

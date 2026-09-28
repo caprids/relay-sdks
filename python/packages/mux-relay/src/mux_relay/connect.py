@@ -100,11 +100,19 @@ class RelaySubscriptionHandlers:
 
     A control notification, not the end of the subscription: objects still in transit can arrive
     after it, and the request stays open until ``cancel()`` or connection shutdown. The SDK does not
-    resubscribe; doing so can replay cached objects and another done notification while the
-    publisher is absent.
+    resubscribe, and resubscribing cannot bring back a finished track: against moq-relay, a subscribe
+    after the publisher has gone is refused (request error 16 ``unroutable``), and one while its
+    namespace stays announced replays the track's cached last group and another done one round trip
+    later. Back off, and do not resubscribe to a finished track. After a publisher crash this
+    arrives only at the relay's QUIC idle timeout, about 30 s later. See spec/relay-interop.md,
+    "Publisher restarts".
     """
     on_update_ok: Callable[[], None] | None = None
-    """The relay acknowledged an ``update()`` on this subscription (REQUEST_OK)."""
+    """The relay acknowledged an ``update()`` on this subscription (REQUEST_OK).
+
+    moq-relay never does: it ends the subscription with PUBLISH_DONE on any update (spec/behavior.md,
+    relay interop deviation 4).
+    """
     on_state_notify: Callable[[MessageParameters], None] | None = None
     """The publisher changed the subscription's state on its own (PUBLISH_STATE_NOTIFY).
 

@@ -17,12 +17,54 @@ backfill is a separate feature. The test fixtures now send the 0.14.17 pull para
 
 ## Publisher restarts and resubscription
 
-Against moq-relay 0.14.17, re-subscribing to the same namespace and track after
-`on_publisher_done` / `onPublisherDone` can replay cached objects and immediately receive another
-`PUBLISH_DONE`. An application that re-subscribes from every done callback can
-therefore generate a request loop while the publisher is absent. See
-[issue #21](https://github.com/muxinc/relay-sdks/issues/21) for reproduction evidence
-and relay follow-up.
+Measured against production moq-relay 0.15.8 on 2026-09-28 with the Python SDK, and for the
+resubscription rows with TypeScript too ([issue
+#34](https://github.com/muxinc/relay-sdks/issues/34), [issue
+#21](https://github.com/muxinc/relay-sdks/issues/21), three runs per case). A replacement publisher
+announced the same namespace about 1 s after the first one ended.
+
+| how the publisher ends | existing subscriptions | new subscribes |
+| --- | --- | --- |
+| `close()` on the publisher | done within 0.1 s, status 2 `track ended` on most runs and 0 `internal error` on some | request error 16 `unroutable` until the replacement announces, then served by it at once |
+| its connection closes without MoQ cleanup | done(0) within 0.1 s | the same |
+| the process is killed | silent, then done(0) `internal error` after about 30-35 s, the relay's QUIC idle timeout | accepted, but served only the dead publisher's cached last object until the replacement announces; then served by it at once |
+
+In every case the existing subscriptions are never moved to the replacement: they end with the old
+publisher, and only a new subscribe reaches the new one. In the relay at 0.15.8 a client's route
+pins each subscription to its one source and ends it when that source closes
+(`rs/moq-net/src/model/front.rs:428`, `:456`), new subscribes go to the newest route
+(`model/origin.rs:592-599`), and a crashed peer is noticed only at the QUIC idle timeout
+(`rs/moq-tokio/src/quic.rs:86`, 30 s).
+
+Re-subscribing to a finished track gets one of two answers, depending on whether its publisher is
+still there, and neither delivers new content:
+
+- **The publisher has gone.** Every re-subscribe gets request error 16 `unroutable`, because the
+  relay answers `Unroutable` for an ended broadcast (`rs/moq-net/src/model/broadcast.rs:803-808`).
+  A loop that re-subscribes from the done callback runs only at the application's own retry cadence:
+  over five publisher generations each subscription got exactly one done and every object arrived
+  once (75 / 75), with and without cancelling, at 10 ms and 300 ms retry delays. Against 0.14.17 a
+  closing broadcast still served its tracks, so the same loop replayed cached objects and done at
+  round-trip cadence; that was the storm reported in issue #21.
+- **The publisher stays connected and announced after the track ends cleanly** (its track writer
+  closed). The relay keeps a finished track in a live broadcast cached and serves it again by design
+  ("Publish new content under a new name", `broadcast.rs:814-833`): every re-subscribe gets
+  SUBSCRIBE_OK, the cached last group again, an end-of-track object and PUBLISH_DONE status 2, about
+  one round trip (50 ms) after the OK. Re-subscribing from the done callback, with the publisher
+  held for 3 s over three track generations:
+
+  | SDK | retry delay | dones | objects delivered / published |
+  | --- | --- | --- | --- |
+  | Python | 10 ms | 57 | 99 / 45 |
+  | Python | 300 ms | 21 | 63 / 45 |
+  | TypeScript | 10 ms | 51 | 93 / 45 |
+  | TypeScript | 300 ms | 21 | 63 / 45 |
+
+So a done with status 2 means the track is finished: do not re-subscribe to it. Wait for an
+application signal that new content exists (a new track name in the catalog, a new namespace, or a
+new announce seen through your own discovery) before subscribing again, and back off any
+re-subscribe you do make. Publish restarted content under a new track name rather than reusing the
+finished one.
 
 Each `subscribe()` creates an independent request, including its starting location.
 It does not resume the preceding subscription. The SDK does not retry automatically
@@ -52,10 +94,10 @@ Applications that follow a restarting publisher should apply these policies:
   A new subscription's filter is not an exactly-once resume token across publisher
   generations, and opening another connection is not a cache invalidation guarantee.
 
-Record done status and reason for diagnosis. Both `track ended` (2) and `internal
-error` (0) have been observed around publisher shutdown; neither identifies a new
-publisher generation. Preserve actual errors rather than interpreting all status-0
-responses as harmless shutdowns.
+Record done status and reason for diagnosis. Around a publisher shutdown both `track ended` (2)
+and `internal error` (0) occur, and a crash ends with 0; neither identifies a new publisher
+generation. Preserve actual errors rather than interpreting all status-0 responses as harmless
+shutdowns.
 
 ## Announce propagation
 
@@ -165,6 +207,14 @@ draft-20 Section 3.5 code.
 | PUBLISH_DONE, then FIN | 0.14.17 to 0.15.3: after SUBSCRIBE_OK the relay waits for the request stream to close, and `Reader::closed` returns a decode error if any byte arrives first. 0.15.4 and later (upstream `a342004d9`, #4083): `read_publish_done` expects PUBLISH_DONE, `Error::ProtocolViolation` on a FIN without one, then waits for Stream Count data streams or a grace period; only status `TRACK_ENDED` is a clean end | `ietf/subscriber.rs` `run_subscribe`, `read_publish_done`; `coding/reader.rs` `closed`; `ietf/publish.rs` `PublishDone::end` | up to 0.15.3: a bare FIN finishes the relay's track, and a PUBLISH_DONE, or any other byte, aborts it for every downstream viewer. From 0.15.4: the reverse |
 | no GOAWAY | 0.14.17: a GOAWAY on the client's control stream is decoded and answered with `Error::Unsupported`. 0.15.1 and 0.15.8: it is decoded, logged and recorded, and the relay keeps reading the stream; a second GOAWAY is `Error::ProtocolViolation` | `ietf/session.rs` `run_goaway`; from 0.15.1 also `goaway.rs` `record` | 0.14.17: the session closes with code 17. 0.15.1 and later: the session stays open |
 | alias = request ID | the same at 0.14.17, 0.15.1 and 0.15.8: an alias already active for another request ID is `Error::Duplicate` when the two name different tracks, and `Error::Unsupported` for the new subscription when they name the same track | `ietf/subscriber.rs` `insert_track_alias`, `register_alias` | different tracks: the session closes (code 12 on 0.14.17; PROTOCOL_VIOLATION, 0x3, from 0.15.1); same track: that subscription is cancelled |
+| `update()` sends REQUEST_UPDATE | the same at 0.14.17, 0.15.1 and 0.15.8: after SUBSCRIBE_OK the relay only polls the request stream for closure, and `Reader::poll_closed` counts any inbound byte as a close; it never sends REQUEST_OK or REQUEST_ERROR, and the poll ending takes the normal end path with `TRACK_ENDED` | `ietf/publisher.rs` subscribe serve loop (`poll_closed`, then `PublishDone`); `coding/reader.rs` `poll_closed` | any update ends the subscription: the viewer gets PUBLISH_DONE status 2 `track ended` and no further objects, and the relay drops its upstream demand; the session stays open |
+
+Live check of the REQUEST_UPDATE row against production 0.15.8 on 2026-09-28 (Python, 4 of 4
+runs): with `subscriber_priority=10`, `forward=0` or an empty update, the relay sent PUBLISH_DONE
+status 2 `track ended`, stream count 2, within 50 ms and stopped delivering; the publisher's later
+writes timed out waiting for demand; the session stayed open and a new subscribe on the same
+connection worked. The SDK's `ended` settled only when the connection closed, as after any done
+([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
 
 The alias row refines what the core headers said before 0.15, that any alias bound to two live
 request IDs closes the session. That holds only for two different tracks, which draft-20 Section
@@ -187,8 +237,9 @@ previous behavior, reproduced by making the core's PUBLISH_DONE encode to nothin
 
 The production publisher-close row matches
 [issue #25](https://github.com/muxinc/relay-sdks/issues/25): with a bare FIN the relay wrote status
-2 on some runs and 0 on others. What may follow SUBSCRIBE_OK on a request stream is also the open
-question in [issue #94](https://github.com/muxinc/relay-sdks/issues/94), from the subscriber's side.
+2 on some runs and 0 on others. From the subscriber's side, what may follow SUBSCRIBE_OK on a
+request stream is the REQUEST_UPDATE row: against this relay, nothing that should keep the
+subscription ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
 Both cores' publish-session tests pin the three choices against in-process raw peers: every end
 path writes PUBLISH_DONE with its status and stream count after the data streams close, then FINs,
 an orderly close puts SETUP and nothing else on the control stream, and SUBSCRIBE_OK carries the
@@ -205,6 +256,9 @@ choice, make the one-line change in a scratch build of either core:
   session; from 0.15.1, write GOAWAY (timeout 0, empty URI) on the publisher's control stream
   before NAMESPACE_DONE, and on a subscriber connection's control stream before its transport
   close, then check that each connection's closure carries no error;
+- REQUEST_UPDATE needs no core change: subscribe, call `update()` with `forward` 1 once objects
+  arrive, and check for an update acknowledgement and continued delivery rather than a done
+  notification; only then can the READMEs recommend `update()` against moq-relay;
 - the alias choice needs no re-test while the SDK serves one subscription per track
   ([ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md)); if that changes, check whether
   the relay accepts one alias shared by two subscriptions to the same track.
