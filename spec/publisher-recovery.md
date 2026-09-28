@@ -1,7 +1,8 @@
 # Recovering after a publisher stops or restarts
 
-Replacing a publisher connection restores an upstream source. It does **not** guarantee that
-existing subscribers switch to that source, or that a new subscription succeeds immediately.
+Replacing a publisher connection restores an upstream source for new subscriptions. It does
+**not** move existing subscribers to that source (moq-relay 0.15.8 never does), and a new
+subscription need not succeed immediately.
 These are relay lifecycle limits tracked in [#34](https://github.com/muxinc/relay-sdks/issues/34).
 The SDKs do not automatically reconnect or resubscribe.
 
@@ -19,13 +20,24 @@ The SDKs do not automatically reconnect or resubscribe.
 `SUBSCRIBE_OK` arrives, this timer is disarmed. It is not a time-to-first-object deadline or an
 inactivity detector. Transport keepalive likewise does not prove the publisher is alive.
 
-With mux.global relay 0.14.17, publisher-death notifications can be delayed while the
-subscriber connection stays open. New subscriptions during this interval may receive only the
-old publisher's cached objects. After an orderly retract/re-announce, new subscriptions may
-also encounter transient fresh-namespace rejections (404 on 0.14.17; request error 16 `unroutable`
-on 0.15.8) or initial-response timeouts. See
-[issue #34](https://github.com/muxinc/relay-sdks/issues/34) for measured delays and reproduction
-evidence; these observations do not define a recovery deadline.
+Measured on mux.global's moq-relay 0.15.8 on 2026-09-28
+([publisher restarts](relay-interop.md#publisher-restarts-and-resubscription)):
+
+- A publisher that closes cleanly, or whose connection closes, ends existing subscriptions within
+  0.1 s. The done is usually status 2 `track ended`, sometimes 0 `internal error`.
+- After a publisher crash, existing subscriptions sit silent for about 30-35 s, the relay's QUIC
+  idle timeout, before done(0). The subscriber connection stays open throughout. New subscriptions
+  in that interval are accepted but receive only the dead publisher's cached last object.
+- Existing subscriptions are never moved to a replacement publisher on the same namespace, however
+  the old one ended.
+- After a clean end, new subscriptions fail with request error 16 `unroutable` until the
+  replacement announces, and are served by it at once from then on.
+- While a namespace stays announced after one of its tracks ended cleanly, re-subscribing to that
+  track replays its cached last group followed by another done, one round trip later each time.
+
+See [issue #34](https://github.com/muxinc/relay-sdks/issues/34) and
+[issue #21](https://github.com/muxinc/relay-sdks/issues/21) for the measurements; they do not
+define a recovery deadline.
 
 An orderly publisher close helps the relay learn about shutdown sooner, but neither graceful
 closure nor successful replacement writes promise transparent handoff. Write completion only
@@ -51,8 +63,12 @@ A useful policy is:
    open a replacement connection first. A new connection is not a guaranteed bypass for relay state.
    During a known publisher transition, classify the fresh-namespace rejection (16 `unroutable`, or
    `404` on older relays) and initial-response timeouts as potentially transient and retry within
-   the recovery budget. Authentication, invalid input, and protocol failures need their own handling
-   rather than an unlimited retry loop.
+   the recovery budget. A subscription accepted before the replacement announces may serve only the
+   old publisher's cached object, so check freshness rather than trusting acceptance. Do not
+   re-subscribe to a track the publisher ended while it is still announced: that only replays the
+   finished track. A status-2 done alone does not prove this, because moq-relay sends one after the
+   subscription's own `update()` too; in that case re-subscribing is the recovery. Authentication, invalid input, and protocol failures need their
+   own handling rather than an unlimited retry loop.
 5. Apply backoff and jitter across failed attempts **and accepted-but-stale attempts**. Cached
    objects followed by `on_publisher_done` must not reset the budget or create an immediate resubscribe loop.
    Reset only after meaningful fresh progress. See
