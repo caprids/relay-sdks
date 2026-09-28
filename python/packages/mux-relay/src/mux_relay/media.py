@@ -376,9 +376,11 @@ class CatalogService:
 
     Relay demand is the trigger. ``demand_changes()`` yields the current state first and then every
     new or replacement relay subscription, so a viewer who joins after the relay reconnected gets
-    the document again (the repeated ``True`` the vocabulary describes). A write that fails while
-    the track stays open is retried after ``retry_delay`` seconds for as long as demand remains,
-    keeping only this document. A failure that ends the track ends the service.
+    the document again (the repeated ``True`` the vocabulary describes). Viewers who join during one
+    relay subscription trigger nothing and get the relay's cached copy, so the document must be safe
+    to serve from cache. A write that fails while the track stays open is retried after
+    ``retry_delay`` seconds for as long as demand remains, keeping only this document.
+    A failure that ends the track ends the service.
     """
 
     __slots__ = ("_document", "_failures", "_retry_delay", "_sends", "_track")

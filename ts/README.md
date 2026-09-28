@@ -405,7 +405,7 @@ fans one upstream subscription out to every downstream viewer, so a second viewe
 `true` and is served from the relay's cache; and it keeps the subscription for a while after the
 last viewer leaves (about 30 seconds on the tested relay), so `hasDemand` lags the last viewer and
 `true` does not prove anyone is watching. Write only state that is safe to serve from cache, and do
-not use demand to decide whether to keep encoding.
+not use demand to decide whether to keep encoding. See [relay demand](../spec/relay-interop.md#relay-demand).
 
 Custom transports with asynchronous sink writes or closes must honor the writable controller's
 abort signal to interrupt them and reset their underlying stream, as browser WebTransport does.

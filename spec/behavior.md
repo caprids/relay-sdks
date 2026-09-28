@@ -362,13 +362,17 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   ([draft-20 Section 11.4.3](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.4.3)).
   Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
-  observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
+  observe every change, so a state-shaped track such as a catalog can re-send its document on each
+  relay subscription.
   Demand observers emit the current state first, include replacement subscriptions (a repeated
   "demanded" value), and finish when the track ends. A closed track reports no demand. Demand is
   the relay's single upstream subscription for the track: the relay shares it across every
   downstream viewer, so additional viewers produce no further notification, and it may keep the
   subscription for a period after the last viewer leaves. Demand is therefore neither a viewer
-  count nor a liveness signal. Implemented in both SDKs.
+  count nor a liveness signal. A document re-sent on each demanded value reaches the viewers who
+  join during one relay subscription from the relay's cache, not as a re-send, so a state-shaped
+  track writes only state that is safe to serve from cache
+  ([relay demand](relay-interop.md#relay-demand)). Implemented in both SDKs.
 
 ### Write phases and interruptions
 
@@ -513,7 +517,9 @@ not yet implemented in TypeScript.
 
 - A catalog is a state-shaped track. The catalog service sends its document on the current relay
   demand and again on every later relay subscription, including a replacement subscription (the
-  repeated "demanded" value), so a viewer joining after a relay reconnect receives it. It does not
+  repeated "demanded" value), so a viewer joining after a relay reconnect receives it. A viewer
+  joining while one relay subscription lasts triggers no re-send and is served the relay's cached
+  copy. It does not
   publish on change alone, and a replaceable document is not implemented. Not adopted: MSF's
   publish-on-change with a Joining FETCH from the relay cache. A plain SUBSCRIBE against the tested
   relay is live-edge only ([#26](https://github.com/muxinc/relay-sdks/issues/26)), re-sending is

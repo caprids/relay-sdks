@@ -378,7 +378,8 @@ Demand is the relay's own subscription, not a viewer count and not a liveness si
 fans one upstream subscription out to every downstream viewer, so a second viewer produces no new
 `True` and is served from the relay's cache; and it keeps the subscription for a while after the
 last viewer leaves (about 30 seconds on the tested relay), so `has_demand` lags the last viewer and
-`True` does not prove anyone is watching.
+`True` does not prove anyone is watching. Write only state that is safe to serve from cache, and do
+not use demand to decide whether to keep encoding. See [relay demand](../spec/relay-interop.md#relay-demand).
 
 Both loops above exist ready-made in `mux_relay.media`, the media publishing policy the Video.js
 example runs on. `CatalogService(track, document)` re-sends a document on every relay subscription

@@ -78,6 +78,25 @@ in another process cannot observe the announce at all: the retry belongs to the 
 ([behavior.md](behavior.md#subscribing)). Earlier text said "about a second"; that was the retry
 interval of the original reproduction, not the window.
 
+## Relay demand
+
+A publisher's demand is the relay's one upstream subscription for a track, not a count of
+downstream viewers. Measured against `sjc.relay.mux.global` on 2026-09-15 with the Python SDK
+([issue #24](https://github.com/muxinc/relay-sdks/issues/24), 2 of 2 runs):
+
+| scenario | result |
+| --- | --- |
+| the only subscriber closes its connection | demand stays for 30.07 s, then ends |
+| the only subscriber cancels, connection kept open | demand still present after 20 s |
+| a second subscriber joins while the first is present | no new demanded value; the second receives the catalog from the relay's cache |
+| writes while demanded but no viewer present | succeed and reach no one |
+| 200 subscribe/receive-one/cancel cycles in about 66 s | one demanded value and one release, about 30 s after the churn stopped |
+
+So the relay coalesces viewers into one subscription and releases it about 30 seconds after the
+last one leaves. `has_demand` / `hasDemand` is not a liveness signal and not a reason to keep or
+stop encoding, and a catalog re-sent on each demanded value is what the relay caches for every
+later viewer: write only state that is safe to serve from cache.
+
 ## Late subscribers and location filters
 
 A plain SUBSCRIBE, with no LOCATION_FILTER or an explicit zero-field one, is served from the live
