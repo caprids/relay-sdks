@@ -219,7 +219,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    */
   #pendingNamespacePrefixes = new Set<TrackNamespace>();
   /**
-   * Every inbound request ID ever seen. Reuse is a protocol violation (§10.1), and because aliases ARE the peer's
+   * Every inbound request ID ever seen. Reuse closes the session with INVALID_REQUEST_ID (§10.1), and because aliases ARE the peer's
    * request IDs, a reused ID would hand two subscriptions the same alias and make their subgroup streams
    * indistinguishable — session-fatal, per the draft.
    */
@@ -729,11 +729,16 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
   /**
    * Request IDs are consumed once per session (§10.1) — by every request-initiating message and, since draft-20 gave it
-   * an id of its own, by REQUEST_UPDATE — and a reuse is session-fatal.
+   * an id of its own, by REQUEST_UPDATE. This endpoint is always the client, so the peer's ids are odd; a reused id or
+   * an even one closes the session with INVALID_REQUEST_ID.
    */
   #claimPeerRequestId(requestId: number): void {
+    if (requestId % 2 !== 1) {
+      throw new MoqtProtocolError(`peer sent even request id ${requestId}`, SESSION_ERROR.INVALID_REQUEST_ID);
+    }
+
     if (this.#peerRequestIds.has(requestId)) {
-      throw new MoqtProtocolError(`peer reused request id ${requestId}`);
+      throw new MoqtProtocolError(`peer reused request id ${requestId}`, SESSION_ERROR.INVALID_REQUEST_ID);
     }
 
     this.#peerRequestIds.add(requestId);

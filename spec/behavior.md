@@ -682,8 +682,11 @@ Both SDKs agree on all three, and the core module headers
    simultaneously in the same session." This conforms, and narrows a MAY: every SUBSCRIBE_OK
    carries the SUBSCRIBE's request ID as the alias, which is unique for the session by
    construction, so an alias is never shared between subscriptions, of one track or of two. A
-   request ID the peer reuses closes the session as a protocol error before it can become a
-   duplicate alias. The application never sees an alias on the Relay surface. Nothing needs to
+   request ID the peer reuses, or one with a client's (even) parity, closes the session with
+   `INVALID_REQUEST_ID` before it can become an alias, as
+   [Section 10.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.1)
+   requires. moq-relay allocates server request IDs odd, from 1, so the parity check never fires
+   against it. The application never sees an alias on the Relay surface. Nothing needs to
    change unless the SDK serves concurrent subscriptions to one track, which
    [ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md) rules out today.
 

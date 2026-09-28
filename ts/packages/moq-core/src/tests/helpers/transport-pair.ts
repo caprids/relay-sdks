@@ -3,8 +3,10 @@
  * the peer's incoming stream queues, so a publish session on one side can talk to a subscribe session on the other over
  * real (in-process) WHATWG streams — the same structural seam a `WebTransport` satisfies in production.
  */
+import { MESSAGE_TYPE } from '../../protocol/control-messages.js';
 import type { BidirectionalStreamLike } from '../../protocol/request-stream.js';
 import type { MoqtTransport } from '../../protocol/session.js';
+import { decodeVarint, encodeVarintInto, varintByteLength } from '../../protocol/varint.js';
 
 interface PushChannel<T> {
   stream: ReadableStream<T>;
@@ -82,5 +84,74 @@ export function createTransportPair(): TransportPair {
   return {
     client: makeTransport(a, b, closedPromises[0]!),
     server: makeTransport(b, a, closedPromises[1]!),
+  };
+}
+
+/** Request-initiating messages whose body opens with the sender's Request ID (§10.1). */
+const REQUEST_ID_MESSAGE_TYPES: ReadonlySet<number> = new Set([
+  MESSAGE_TYPE.SUBSCRIBE,
+  MESSAGE_TYPE.FETCH,
+  MESSAGE_TYPE.TRACK_STATUS,
+  MESSAGE_TYPE.REQUEST_UPDATE,
+  MESSAGE_TYPE.SUBSCRIBE_NAMESPACE,
+  MESSAGE_TYPE.PUBLISH_NAMESPACE,
+  MESSAGE_TYPE.PUBLISH,
+]);
+
+/**
+ * Copy `chunk` with the least significant bit of every request-initiating frame's Request ID set. Uses the core's MOQT
+ * varint codec. Every length limit of that encoding is a power of two (2^7, 2^14, ...), so an even value and its odd
+ * successor always encode to the same length and the field is re-encoded in place.
+ */
+export function setRequestIdParity(chunk: Uint8Array): Uint8Array {
+  const bytes = new Uint8Array(chunk);
+  let offset = 0;
+
+  while (offset < bytes.length) {
+    const type = decodeVarint(bytes, offset);
+    const lengthAt = offset + type.byteLength;
+    const bodyStart = lengthAt + 2;
+
+    if (REQUEST_ID_MESSAGE_TYPES.has(type.value)) {
+      const requestId = decodeVarint(bytes, bodyStart);
+      // Arithmetic, not `| 1`: bitwise operators truncate to 32 bits, and request IDs go up to 2^53-1.
+      const odd = requestId.value % 2 === 0 ? requestId.value + 1 : requestId.value;
+
+      if (varintByteLength(odd) !== requestId.byteLength) {
+        throw new Error(`request id ${odd} would change the encoded length`);
+      }
+
+      encodeVarintInto(bytes, bodyStart, odd);
+    }
+
+    offset = bodyStart + ((bytes[lengthAt]! << 8) | bytes[lengthAt + 1]!);
+  }
+
+  return bytes;
+}
+
+/**
+ * Give the subscribe driver a server's request ids. The driver always allocates client (even) ids, and a publish
+ * session is always the client too, so it requires the peer's ids to be odd (§10.1). A test that stands the driver in
+ * for the relay wraps the driver's transport with this: every request stream the driver opens has each Request ID's
+ * least significant bit set on the wire (0 becomes 1, 2 becomes 3). Assumes each write carries whole frames, which is
+ * how the driver writes them.
+ */
+export function withServerRequestIds(transport: MoqtTransport): MoqtTransport {
+  return {
+    incomingUnidirectionalStreams: transport.incomingUnidirectionalStreams,
+    incomingBidirectionalStreams: transport.incomingBidirectionalStreams,
+    createUnidirectionalStream: () => transport.createUnidirectionalStream(),
+    async createBidirectionalStream() {
+      const stream = await transport.createBidirectionalStream();
+      const rewrite = new TransformStream<Uint8Array, Uint8Array>({
+        transform: (chunk, controller) => controller.enqueue(setRequestIdParity(chunk)),
+      });
+
+      void rewrite.readable.pipeTo(stream.writable).catch(() => {});
+      return { readable: stream.readable, writable: rewrite.writable };
+    },
+    close: (closeInfo) => transport.close(closeInfo),
+    closed: transport.closed,
   };
 }

@@ -1,7 +1,7 @@
 import { createMoqtSession, type MoqtObject } from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { solicitNamespace } from '../packages/moq-core/src/tests/helpers/raw-peer.js';
-import { createTransportPair } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
+import { createTransportPair, withServerRequestIds } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
 import { connectRelayPublisher, RelayError } from '../src/index.js';
 
 const namespace = ['live', 'example'];
@@ -13,7 +13,7 @@ afterEach(async () => {
 
 async function connectPublisher() {
   const pair = createTransportPair();
-  const subscriber = createMoqtSession(pair.server);
+  const subscriber = createMoqtSession(withServerRequestIds(pair.server));
   cleanup.push(() => subscriber.destroy());
   const publisher = await connectRelayPublisher({
     url: 'https://relay.example.com/moq',
@@ -44,14 +44,15 @@ describe('publisher namespace coverage', () => {
     '%s distinguishes an uncovered namespace and recovers after a later matching solicitation',
     async (method) => {
       const { pair, subscriber, track } = await connectPublisher();
-      const unrelated = await solicitNamespace(pair.server, ['other']);
+      // Raw ids clear of the subscriber's (1, 3, ...): one session, one request id space (§10.1).
+      const unrelated = await solicitNamespace(pair.server, ['other'], 101);
       await vi.waitFor(() => expect(unrelated.received.map((message) => message.kind)).toEqual(['request-ok']));
 
       const pending = method === 'write' ? track.write(new Uint8Array([1])) : track.openGroup();
       await expect(pending).rejects.toMatchObject({ code: 'NAMESPACE_NOT_SOLICITED', phase: 'waiting-for-demand' });
       expect(track.closed).toBe(false);
 
-      const matching = await solicitNamespace(pair.server, ['live'], 3);
+      const matching = await solicitNamespace(pair.server, ['live'], 103);
       await vi.waitFor(() =>
         expect(matching.received.map((message) => message.kind)).toEqual(['request-ok', 'namespace']),
       );
