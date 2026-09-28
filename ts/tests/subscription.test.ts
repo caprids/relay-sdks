@@ -11,6 +11,7 @@ import {
 } from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  CLOSURE_GRACE_MS,
   createSubscription,
   SubscriptionConnectionClosedError,
   type SubscriptionConsumer,
@@ -21,8 +22,23 @@ import {
   UPDATE_QUEUE_BOUND,
 } from '../src/subscription.js';
 
+/** Failures the core synthesized from a stream event rather than read from a REQUEST_ERROR. */
+const streamFailures = vi.hoisted(() => new WeakSet<object>());
+
+vi.mock('@mux/moq-core', async (importOriginal) => {
+  const core = await importOriginal<typeof import('@mux/moq-core')>();
+  return { ...core, isStreamFailure: (error: RequestError) => streamFailures.has(error) };
+});
+
+function streamFailure(reason: string, errorCode = 0): RequestError {
+  const failure = { errorCode, retryInterval: 0, reason };
+  streamFailures.add(failure);
+  return failure;
+}
+
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 function recorder() {
@@ -51,8 +67,16 @@ function harness(options: { closedAlready?: unknown; subscribeThrows?: unknown; 
     else observer = value;
     return remove;
   });
+  let endTransport!: (error: unknown) => void;
+  const transportClosed = new Promise<unknown>((_, reject) => {
+    endTransport = reject;
+  });
+  // The session observes the transport's closure before the subscription does, as the core does.
+  void transportClosed.catch((error: unknown) => observer?.(error));
   return {
-    deps: { subscribe, observeClosed },
+    deps: { subscribe, observeClosed, transportClosed },
+    /** The transport reports its closure; the session hears it first and reports the connection ended. */
+    endTransport,
     core: () => {
       if (!handlers) throw new Error('core subscribe was not called');
       return handlers;
@@ -196,6 +220,68 @@ describe('subscription: endings', () => {
     await expect(subscription.ended).resolves.toMatchObject({ kind: 'terminated', cause: 'connection-closed' });
   });
 
+  it('leaves a stream failure that precedes the transport closure by several tasks to the closure', async () => {
+    // Chromium fails the request stream of a lost connection a task or more before WebTransport's
+    // closed settles (issue #102); the core reports that as a request failure first.
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    const lost = new Error('Connection lost.');
+    h.core().onError?.(streamFailure('The stream was aborted by the remote server'));
+    for (let task = 0; task < 5; task++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(r.endings).toEqual([]);
+    h.endTransport(lost);
+    await expect(subscription.ended).resolves.toEqual({
+      kind: 'terminated',
+      cause: 'connection-closed',
+      accepted: false,
+      error: lost,
+    });
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionConnectionClosedError);
+    expect(r.endings).toHaveLength(1);
+    expect(h.cancel).toHaveBeenCalledExactlyOnceWith(lost);
+  });
+
+  it('records a stream failure on a connection that stays up as rejected once the closure grace passes', async () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    const failure = streamFailure('request stream closed before a response');
+    h.core().onError?.(failure);
+    await vi.advanceTimersByTimeAsync(CLOSURE_GRACE_MS - 1);
+    expect(r.endings).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(r.endings).toEqual([{ kind: 'rejected', cause: 'request-error', accepted: false, error: failure }]);
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
+    // A closure afterwards changes nothing.
+    h.endTransport(new Error('later'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(r.endings).toHaveLength(1);
+  });
+
+  it('holds a response timeout for one microtask only, like a REQUEST_ERROR', async () => {
+    const h = harness();
+    const r = recorder();
+    createSubscription(h.deps, [r.consumer]);
+    const timeout = streamFailure('no response before the request timeout', 0x2);
+    h.core().onError?.(timeout);
+    await turnEnds();
+    expect(r.endings).toEqual([{ kind: 'rejected', cause: 'request-error', accepted: false, error: timeout }]);
+  });
+
+  it('drops the closure grace when the subscription ends another way', () => {
+    vi.useFakeTimers();
+    const h = harness();
+    const r = recorder();
+    const subscription = createSubscription(h.deps, [r.consumer]);
+    h.core().onError?.(streamFailure('request stream failed'));
+    expect(vi.getTimerCount()).toBe(1);
+    subscription.cancel('stop');
+    expect(vi.getTimerCount()).toBe(0);
+    expect(r.endings).toEqual([{ kind: 'cancelled', cause: 'cancelled', accepted: false, error: 'stop' }]);
+  });
+
   it.each([
     ['before', false],
     ['after', true],
@@ -259,6 +345,7 @@ describe('subscription: endings', () => {
         return { requestId: 1, cancel, update() {} };
       },
       observeClosed: () => () => {},
+      transportClosed: new Promise<unknown>(() => {}),
     };
     const r = recorder();
     const subscription = createSubscription(deps, [r.consumer]);

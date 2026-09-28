@@ -119,6 +119,7 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
     session: connected,
     closed,
     observeClosed,
+    transportClosed,
     assertOpen,
     close,
   } = await openRelaySession(options, (transport, callbacks) =>
@@ -161,7 +162,10 @@ export async function connectRelaySubscriber(options: ConnectRelayOptions): Prom
 
   /** One product subscription per public call; both entry points bind the core the same way. */
   const subscription = (admitted: MoqtSubscribeOptions, consumers: SubscriptionConsumer[]) =>
-    createSubscription({ subscribe: (handlers) => connected.subscribe(admitted, handlers), observeClosed }, consumers);
+    createSubscription(
+      { subscribe: (handlers) => connected.subscribe(admitted, handlers), observeClosed, transportClosed },
+      consumers,
+    );
 
   return {
     closed,

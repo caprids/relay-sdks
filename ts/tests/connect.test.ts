@@ -18,6 +18,7 @@ import {
   SubscriptionConnectionClosedError,
   SubscriptionRequestError,
 } from '../src/index.js';
+import { CLOSURE_GRACE_MS } from '../src/subscription.js';
 import { createFakeTransport, encodeSubgroup } from './helpers/relay.js';
 
 const connections: RelaySubscriber[] = [];
@@ -247,6 +248,40 @@ describe('connectRelaySubscriber', () => {
       error: undefined,
     });
     expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('reports a transport drop as a closure when the request stream fails tasks before closed settles', async () => {
+    // Chromium's order for a connection lost while a request stream opens (issue #102): the stream
+    // is aborted first and WebTransport's closed settles a task or more later.
+    const fake = await connectFake();
+    const onError = vi.fn();
+    const subscription = fake.connection.subscribe({ namespace: ['room'], track: 'pending' }, { onError });
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    request.reset(new Error('The stream was aborted by the remote server'));
+    for (let task = 0; task < 5; task++) await new Promise((resolve) => setTimeout(resolve, 0));
+    fake.dropTransport();
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionConnectionClosedError);
+    await expect(subscription.ended).resolves.toMatchObject({
+      kind: 'terminated',
+      cause: 'connection-closed',
+      accepted: false,
+    });
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('rejects a request stream the relay resets on a live connection once the closure grace passes', async () => {
+    vi.useFakeTimers();
+    const fake = await connectFake();
+    const onError = vi.fn();
+    const subscription = fake.connection.subscribe({ namespace: ['room'], track: 'reset' }, { onError });
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    request.reset(new Error('stream reset'));
+    await vi.advanceTimersByTimeAsync(CLOSURE_GRACE_MS);
+    await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
+    await expect(subscription.ended).resolves.toMatchObject({ kind: 'rejected', cause: 'request-error' });
+    expect(onError).toHaveBeenCalledOnce();
   });
 
   it('keeps quiet data tracks alive after their subscription is accepted', async () => {
