@@ -22,7 +22,6 @@ import {
   type ControlMessage,
   decodeControlMessage,
   encodeFetch,
-  encodeGoaway,
   encodeRequestError,
   encodeRequestOk,
   encodeRequestUpdate,
@@ -269,7 +268,7 @@ export interface MoqtSession {
   subscribe(options: MoqtSubscribeOptions, handlers?: SubscriptionHandlers): Subscription;
   fetch(options: MoqtFetchOptions, handlers?: FetchHandlers): FetchHandle;
   trackStatus(options: MoqtSubscribeOptions, handlers?: TrackStatusHandlers): void;
-  /** Send GOAWAY then close the transport session. */
+  /** Close the transport session. Sends no GOAWAY (spec/behavior.md, "Relay interop deviations"). */
   close(closeCode?: number, reason?: string): void;
   /** End locally; an error also fails requests still awaiting their first response. */
   destroy(error?: unknown): void;
@@ -490,9 +489,9 @@ class MoqtSessionImpl implements MoqtSession {
   #close(closeCode: number, reason: string, error?: unknown): void {
     if (this.#destroyed) return;
 
-    // Best-effort GOAWAY so the peer can stop routing to us first.
-    this.#controlWriter?.write(encodeGoaway(0)).catch(() => {});
-
+    // No GOAWAY: one written as the transport closes gives the peer nothing to act on, and the
+    // session has no drain to offer. The publisher follows the same rule; see spec/behavior.md,
+    // "Relay interop deviations".
     try {
       this.#transport.close({ closeCode, reason });
     } catch {

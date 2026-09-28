@@ -205,6 +205,9 @@ function createFakeTransport() {
 
       return { responses };
     },
+    clientUniStreamCount: () => clientUniStreams.length,
+    /** A client-opened unidirectional stream, read raw (the control stream is index 0). */
+    clientUniStream: (index: number) => clientUniStreams[index]!,
     getCloseInfo: () => closeInfo,
     /** Simulate a transport-side drop (peer/network close, not a local `close()`). */
     dropTransport: () => resolveClosed(undefined),
@@ -717,6 +720,37 @@ describe('createMoqtSession', () => {
       error: expect.objectContaining({ message: 'session closed before server SETUP' }),
     });
     await expect(harness.session.ready).rejects.toThrow('session closed before server SETUP');
+  });
+
+  it('writes nothing on the control stream after SETUP when closed: no GOAWAY', async () => {
+    // A GOAWAY sent as the transport closes gives the peer nothing to act on, so close() sends none;
+    // the fake keeps every written byte.
+    const harness = createSessionHarness();
+    const frames: ControlMessage[] = [];
+
+    void (async () => {
+      await vi.waitFor(() => {
+        if (harness.clientUniStreamCount() === 0) throw new Error('no client uni stream yet');
+      });
+      const reader = harness.clientUniStream(0).getReader();
+      const deframer = new ControlMessageDeframer();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        for (const frame of deframer.push(value)) frames.push(decodeControlMessage(frame));
+      }
+    })();
+
+    harness.sendServerSetup();
+    await harness.session.ready;
+    await vi.waitFor(() => expect(frames).toHaveLength(1));
+
+    harness.session.close();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(frames.map((frame) => frame.kind)).toEqual(['setup']);
+    expect(harness.getCloseInfo()).toEqual({ closeCode: 0, reason: '' });
   });
 
   it('reports a local close() before the server SETUP as a clean close', async () => {

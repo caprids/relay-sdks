@@ -53,7 +53,6 @@ from .control_messages import (
     TrackStatus,
     decode_control_message,
     encode_fetch,
-    encode_goaway,
     encode_request_error,
     encode_request_ok,
     encode_request_update,
@@ -532,17 +531,16 @@ class MoqtSession:
         _call(self._callbacks.on_closed, Closed(close_error))
 
     def close(self, close_code: int = SESSION_ERROR.NO_ERROR, reason: str = "") -> None:
-        """Send GOAWAY then close the transport session."""
+        """Close the transport session. Sends no GOAWAY (spec/behavior.md, "Relay interop deviations")."""
         self._close(close_code, reason)
 
     def _close(self, close_code: int, reason: str, error: BaseException | None = None) -> None:
         if self._destroyed:
             return
 
-        # Best-effort GOAWAY so the peer can stop routing to us first.
-        if self._control_writer is not None:
-            spawn(self._control_writer.write(encode_goaway(0)))
-
+        # No GOAWAY: one written as the transport closes gives the peer nothing to act on, and the
+        # session has no drain to offer. The publisher follows the same rule; see spec/behavior.md,
+        # "Relay interop deviations".
         try:
             self._transport.close(close_code, reason)
         except Exception:  # transport already gone
