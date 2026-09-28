@@ -28,7 +28,8 @@ export interface ConnectRelayOptions {
   url: string;
   /**
    * Resolve a connection token. Relay carries it in the endpoint's jwt query parameter.
-   * An explicit jwt in the URL wins, and the provider is not called in that case.
+   * An explicit jwt in the URL wins, and the provider is not called in that case. An empty jwt
+   * in the URL is a TypeError, raised before the provider or the transport is used.
    */
   getToken?: () => string | undefined | Promise<string | undefined>;
   /** Aborting closes the connection, including after the connect call has resolved. */
@@ -85,6 +86,11 @@ export async function openRelaySession<T extends Session>(
   if (url.protocol !== 'https:') throw new TypeError('Relay endpoints must use HTTPS');
   if (url.hash || url.username || url.password)
     throw new TypeError('Relay endpoints cannot contain fragments or userinfo');
+  // A present jwt wins over getToken, so an empty one would connect with no credential at all.
+  if (url.searchParams.getAll('jwt').some((value) => value.length === 0))
+    throw new TypeError(
+      'Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply getToken',
+    );
 
   const timeoutMs = options.connectTimeoutMs ?? 10_000;
   assertTimeoutMs('connectTimeoutMs', timeoutMs);

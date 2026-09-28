@@ -51,6 +51,17 @@ describe('connectRelayPublisher', () => {
     expect(createTransport).not.toHaveBeenCalled();
   });
 
+  it('rejects an empty jwt on the endpoint before resolving credentials or opening transport', async () => {
+    const getToken = vi.fn(() => 'token');
+    const createTransport = vi.fn();
+    const connecting = connectRelayPublisher({ url: `${url}?jwt=`, namespace: ['room'], getToken, createTransport });
+
+    await expect(connecting).rejects.toThrow(TypeError);
+    await expect(connecting).rejects.toThrow(/empty jwt query parameter/);
+    expect(getToken).not.toHaveBeenCalled();
+    expect(createTransport).not.toHaveBeenCalled();
+  });
+
   it('publishes with 32 namespace fields and diagnoses track-name type separately from emptiness', async () => {
     const hub = createRelayHub();
     cleanup.push(() => hub.destroy());
