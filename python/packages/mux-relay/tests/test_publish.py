@@ -352,6 +352,15 @@ class TestConnectRelayPublisher:
                 URL, namespace=["field"] * 33, get_token=forbidden, create_transport=forbidden
             )
 
+    async def test_rejects_an_empty_jwt_before_token_or_transport(self) -> None:
+        def forbidden(*args: Any) -> Any:
+            pytest.fail("an empty jwt must fail before token or transport")
+
+        with pytest.raises(TypeError, match="empty jwt query parameter"):
+            await connect_relay_publisher(
+                f"{URL}?jwt=", namespace=["room"], get_token=forbidden, create_transport=forbidden
+            )
+
     async def test_publishes_32_fields_after_invalid_track_names(self, cleanup: Cleanup) -> None:
         hub = create_relay_hub()
         cleanup.append(hub.destroy)
