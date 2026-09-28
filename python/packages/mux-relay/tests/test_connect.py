@@ -459,6 +459,16 @@ class TestConnectRelay:
 
         assert factory.calls == [(f"{ENDPOINT}?jwt=explicit", ["moqt-20"])]
 
+    @pytest.mark.parametrize("query", ["?jwt=", "?jwt", "?keep=1&jwt=", "?jwt=&jwt=explicit", "?jwt=explicit&jwt="])
+    async def test_rejects_an_empty_jwt_on_the_endpoint_before_the_token_provider_or_transport(
+        self, query: str
+    ) -> None:
+        def forbidden(*args: Any) -> Any:
+            pytest.fail("an empty jwt must fail before the token provider or transport")
+
+        with pytest.raises(TypeError, match=r"empty jwt query parameter.*supply get_token"):
+            await connect_relay_subscriber(f"{ENDPOINT}{query}", get_token=forbidden, create_transport=forbidden)
+
     async def test_closes_an_established_connection_when_the_owner_cancels_and_closes_the_transport_once(
         self, connections: list[RelaySubscriber]
     ) -> None:

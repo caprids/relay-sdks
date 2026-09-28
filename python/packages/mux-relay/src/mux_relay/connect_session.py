@@ -50,7 +50,8 @@ class ConnectRelayOptions:
     get_token: TokenProvider | None = None
     """Resolve a connection token. Relay carries it in the endpoint's ``jwt`` query parameter.
 
-    An explicit ``jwt`` in the URL wins, and the provider is not called in that case.
+    An explicit ``jwt`` in the URL wins, and the provider is not called in that case. An empty
+    ``jwt`` in the URL is a ``TypeError``, raised before the provider or the transport is used.
     """
     cancellation: CancellationToken | None = None
     """Cancelling closes the connection, including after the connect call has returned."""
@@ -173,7 +174,15 @@ def _parse_endpoint(url: str) -> tuple[str, bool]:
     if not parts.hostname:
         raise TypeError("Relay endpoints must name a host")
 
-    has_jwt = any(key == "jwt" for key, _ in parse_qsl(parts.query, keep_blank_values=True))
+    jwts = [value for key, value in parse_qsl(parts.query, keep_blank_values=True) if key == "jwt"]
+
+    # A present jwt wins over get_token, so an empty one would connect with no credential at all.
+    if "" in jwts:
+        raise TypeError(
+            "Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply get_token"
+        )
+
+    has_jwt = bool(jwts)
     normalized = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
     return normalized, has_jwt
 

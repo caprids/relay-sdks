@@ -370,6 +370,21 @@ describe('connectRelaySubscriber', () => {
     expect(getToken).not.toHaveBeenCalled();
   });
 
+  it.each(['?jwt=', '?jwt', '?keep=1&jwt=', '?jwt=&jwt=explicit', '?jwt=explicit&jwt='])(
+    'rejects an empty jwt on the endpoint before the token provider or transport: %s',
+    async (query) => {
+      const getToken = vi.fn(() => 'token');
+      const createTransport = vi.fn<RelayTransportFactory>();
+
+      const connecting = connectRelaySubscriber({ url: `${endpoint}${query}`, getToken, createTransport });
+
+      await expect(connecting).rejects.toThrow(TypeError);
+      await expect(connecting).rejects.toThrow(/empty jwt query parameter.*supply getToken/);
+      expect(getToken).not.toHaveBeenCalled();
+      expect(createTransport).not.toHaveBeenCalled();
+    },
+  );
+
   it('closes an established connection when the owner aborts and closes the transport only once', async () => {
     const owner = new AbortController();
     const fake = await connectFake({ signal: owner.signal });

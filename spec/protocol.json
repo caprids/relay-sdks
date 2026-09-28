@@ -9,7 +9,7 @@
     "authentication": {
       "scheme": "jwt-query-parameter",
       "parameter": "jwt",
-      "note": "An explicit jwt parameter already present on the URL takes precedence over a token callback."
+      "note": "An explicit jwt parameter already present on the URL takes precedence over a token callback. An empty jwt parameter is rejected as an argument error, not treated as absent."
     }
   },
   "limits": {
