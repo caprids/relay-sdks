@@ -136,11 +136,11 @@ class RelayPublisher:
 
         That is no earlier than the first :meth:`register_track`, and it is the strongest fact the
         publisher has: the relay acknowledges an announce with nothing and routes subscribes for the
-        namespace about a round trip later, so a subscribe that races it is rejected with 404 (see
-        ``spec/behavior.md``). It stays pending while no solicitation covers the namespace, where
-        the first write reports ``NAMESPACE_NOT_SOLICITED``, and the connection's closure terminates
-        it if that comes first: it raises the closure's error, or a ``CLOSED`` :class:`RelayError`
-        after a clean shutdown. Every waiter is isolated, as for ``closed``.
+        namespace about a round trip later, so a subscribe that races it is rejected (request error
+        16 ``unroutable`` on moq-relay 0.15.8; see ``spec/behavior.md``). It stays pending while no
+        solicitation covers the namespace, where the first write reports ``NAMESPACE_NOT_SOLICITED``,
+        and the connection's closure terminates it if that comes first: it raises the closure's
+        error, or a ``CLOSED`` :class:`RelayError` after a clean shutdown. Every waiter is isolated, as for ``closed``.
         """
         return self._announced_awaitable
 

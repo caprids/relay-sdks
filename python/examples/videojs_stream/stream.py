@@ -973,7 +973,8 @@ async def verify(
         tracks.append((AUDIO_TRACK, on_audio))
 
     # Bounded: the run's own duration timer starts only after this returns, and an announce that no
-    # solicitation covers (or a relay that keeps answering 404) would otherwise hold the media back forever.
+    # solicitation covers (or a relay that keeps refusing the namespace) would otherwise hold the
+    # media back forever.
     try:
         async with asyncio.timeout(VERIFY_STARTUP_TIMEOUT):
             await publisher.announced

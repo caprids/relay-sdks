@@ -31,8 +31,8 @@ or suppress objects received by new subscriptions.
 Applications that follow a restarting publisher should apply these policies:
 
 - Keep at most one pending retry per logical track. Schedule retries for done
-  notifications as well as retryable request errors; a delay used only for 404
-  responses does not bound an accepted-subscription/done loop. Cancel pending retries
+  notifications as well as retryable request errors; a delay used only for the
+  fresh-namespace rejection does not bound an accepted-subscription/done loop. Cancel pending retries
   when the application stops, changes source, or closes the connection.
 - Use capped exponential backoff with jitter and an application retry budget. For
   example, start around 500 ms and grow to a 5 s cap. Do not reset backoff solely on
@@ -62,7 +62,7 @@ responses as harmless shutdowns.
 The relay acknowledges a NAMESPACE entry with nothing, and it routes subscribes to the namespace
 only once it has processed the entry. Measured against `sjc.relay.mux.global` on 2026-09-23 with the
 Python SDK: a fresh namespace per trial, the subscriber connection already open, three interleaved
-runs of twelve trials per mode.
+runs of twelve trials per mode. The relay was moq-relay 0.15.1, which answered the race with 404.
 
 | subscribe issued | rejected 404 |
 | --- | --- |
@@ -77,6 +77,16 @@ window after `announced` is about one round trip, no SDK-side fact can close it,
 in another process cannot observe the announce at all: the retry belongs to the application
 ([behavior.md](behavior.md#subscribing)). Earlier text said "about a second"; that was the retry
 interval of the original reproduction, not the window.
+
+moq-relay 0.15.8 (production from 2026-09-28) still races, but answers request error 16 (0x10,
+`DOES_NOT_EXIST`) with reason `unroutable` instead of 404
+([issue #136](https://github.com/muxinc/relay-sdks/issues/136)). It sends the same code with reason
+`not found` for an unknown track in an announced namespace, so only the reason tells the race apart
+from a request no wait can satisfy. Measured on 2026-09-28 with the Python SDK through the examples'
+retry, ten trials per mode: at once after `register_track`, 6 / 10 first attempts were rejected
+`unroutable`; after `announced`, 3 / 10. Every rejected trial was accepted on the second attempt,
+100 ms later, and a subscribe to an unknown track in each namespace came back `not found` once,
+unretried.
 
 ## Relay demand
 

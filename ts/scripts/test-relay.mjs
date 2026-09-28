@@ -151,7 +151,7 @@ try {
         observeClosed('subscriber', subscriber);
         await window.reportPhase({ phase: 'subscriber connected' });
         // Assertion 2. The announce left with the first registered track; the relay routes subscribes to
-        // the namespace about a round trip later, so the subscribe retries the 404 it may still answer.
+        // the namespace about a round trip later, so the subscribe retries the rejection it may still answer.
         await publisher.announced;
         await window.reportPhase({ phase: 'announced' });
         const retries = { events: 0, status: 0 };

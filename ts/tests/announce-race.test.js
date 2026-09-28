@@ -63,7 +63,10 @@ class FakeSubscriber {
   }
 }
 
-const notFound = (subscription) => subscription.reject(404, 'Broadcast not found');
+/** moq-relay 0.15.8's answer to a subscribe that raced the announce: DOES_NOT_EXIST, "unroutable". */
+const unroutable = (subscription) => subscription.reject(0x10, 'unroutable');
+/** moq-relay 0.15.1's answer to the same race. */
+const legacyNotFound = (subscription) => subscription.reject(404, 'Broadcast not found');
 const accepted = (subscription) => subscription.accept();
 
 /** The policy over the fake, with delays short enough for a test. */
@@ -71,8 +74,8 @@ function retry(subscriber, handlers, { initialDelayMs = 1, maxDelayMs = 4, ...re
   return subscribeWithRetry(subscriber, options, handlers, { initialDelayMs, maxDelayMs, ...rest });
 }
 
-it('returns the accepted subscription after retrying a fresh-namespace 404', async () => {
-  const subscriber = new FakeSubscriber(notFound, accepted);
+it('returns the accepted subscription after retrying a fresh-namespace rejection', async () => {
+  const subscriber = new FakeSubscriber(unroutable, accepted);
   const seen = [];
   const retries = [];
 
@@ -102,8 +105,34 @@ it('returns a subscription rejected for another reason without retrying', async 
   await expect(subscription.subscribed).rejects.toMatchObject({ requestError: { errorCode: 500 } });
 });
 
+it("retries the older relays' 404 too", async () => {
+  const subscriber = new FakeSubscriber(legacyNotFound, unroutable, accepted);
+  const seen = [];
+
+  const subscription = await retry(subscriber, { onError: (error) => seen.push(error) });
+
+  expect(subscription).toBe(subscriber.subscriptions[2]);
+  expect(seen).toEqual([]);
+});
+
+it('does not retry DOES_NOT_EXIST for an unknown track in an announced namespace', async () => {
+  // The same code as the race, but no wait makes the track appear: retrying would spin until the budget ran out.
+  const subscriber = new FakeSubscriber((subscription) => subscription.reject(0x10, 'not found'));
+  const seen = [];
+  const onRetry = vi.fn();
+
+  const subscription = await retry(subscriber, { onError: (error) => seen.push(error) }, { onRetry });
+
+  expect(subscription).toBe(subscriber.subscriptions[0]);
+  expect(seen.map((error) => error.reason)).toEqual(['not found']);
+  expect(onRetry).not.toHaveBeenCalled();
+  await expect(subscription.subscribed).rejects.toMatchObject({
+    requestError: { errorCode: 0x10, reason: 'not found' },
+  });
+});
+
 it('doubles the delay up to the cap', async () => {
-  const subscriber = new FakeSubscriber(notFound, notFound, notFound, notFound, accepted);
+  const subscriber = new FakeSubscriber(unroutable, unroutable, unroutable, unroutable, accepted);
   const retries = [];
 
   await retry(subscriber, undefined, { onRetry: (attempt, delayMs) => retries.push([attempt, delayMs]) });
@@ -118,7 +147,7 @@ it('doubles the delay up to the cap', async () => {
 });
 
 it('rejects with the abort reason while waiting and subscribes no further', async () => {
-  const subscriber = new FakeSubscriber(notFound);
+  const subscriber = new FakeSubscriber(unroutable);
   const owner = new AbortController();
   const reason = new Error('run deadline');
 
@@ -155,15 +184,16 @@ it('returns the handle when the connection ends first', async () => {
   await expect(subscription.subscribed).rejects.toBe(closed);
 });
 
-it('lets a 404 after acceptance reach onError', async () => {
+it('lets the fresh-namespace rejection after acceptance reach onError', async () => {
   const subscriber = new FakeSubscriber(accepted);
   const seen = [];
 
   const subscription = await retry(subscriber, { onError: (error) => seen.push(error) });
   // A rejection after acceptance is a different event (a retract, for instance), not the race.
+  subscription.handlers.onError({ errorCode: 0x10, retryInterval: 0, reason: 'unroutable' });
   subscription.handlers.onError({ errorCode: 404, retryInterval: 0, reason: 'dropped' });
 
-  expect(seen.map((error) => error.errorCode)).toEqual([404]);
+  expect(seen.map((error) => error.errorCode)).toEqual([0x10, 404]);
 });
 
 it('returns what the wrapped callbacks return, so the SDK guard still sees a promise-returning handler', async () => {
@@ -199,7 +229,7 @@ it("calls the wrapped callbacks on the caller's object and refuses a declared-as
 });
 
 it('forwards the other handlers and leaves handlers without onError alone', async () => {
-  const subscriber = new FakeSubscriber(notFound, accepted);
+  const subscriber = new FakeSubscriber(unroutable, accepted);
   const infos = [];
   const onObject = vi.fn();
   const handlers = { onSubscribed: (info) => infos.push(info), onObject, onError: () => {} };

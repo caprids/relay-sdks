@@ -86,7 +86,13 @@ class FakeSubscriber:
         return subscription
 
 
-def not_found(subscription: FakeSubscription) -> None:
+def unroutable(subscription: FakeSubscription) -> None:
+    """moq-relay 0.15.8's answer to a subscribe that raced the announce: ``DOES_NOT_EXIST``, ``unroutable``."""
+    subscription.reject(0x10, "unroutable")
+
+
+def legacy_not_found(subscription: FakeSubscription) -> None:
+    """moq-relay 0.15.1's answer to the same race."""
     subscription.reject(404, "Broadcast not found")
 
 
@@ -117,8 +123,8 @@ async def retry(
     return cast(FakeSubscription, subscription)
 
 
-async def test_returns_the_accepted_subscription_after_retrying_a_fresh_namespace_404() -> None:
-    subscriber = FakeSubscriber(not_found, accepted)
+async def test_returns_the_accepted_subscription_after_retrying_a_fresh_namespace_rejection() -> None:
+    subscriber = FakeSubscriber(unroutable, accepted)
     seen: list[RequestError] = []
     retries: list[tuple[int, float]] = []
     parameters = MessageParameters()
@@ -158,8 +164,41 @@ async def test_returns_a_subscription_rejected_for_another_reason_without_retryi
     assert failure.value.request_error.error_code == 500
 
 
+async def test_retries_the_older_relays_404_too() -> None:
+    subscriber = FakeSubscriber(legacy_not_found, unroutable, accepted)
+    seen: list[RequestError] = []
+
+    subscription = await retry(subscriber, RelaySubscriptionHandlers(on_error=seen.append))
+
+    assert subscription is subscriber.subscriptions[2]
+    assert seen == []
+
+
+async def test_does_not_retry_does_not_exist_for_an_unknown_track_in_an_announced_namespace() -> None:
+    # The same code as the race, but no wait makes the track appear: retrying would spin until the
+    # budget ran out.
+    subscriber = FakeSubscriber(lambda subscription: subscription.reject(0x10, "not found"))
+    seen: list[RequestError] = []
+    retries: list[tuple[int, float]] = []
+
+    subscription = await retry(
+        subscriber,
+        RelaySubscriptionHandlers(on_error=seen.append),
+        on_retry=lambda attempt, delay: retries.append((attempt, delay)),
+    )
+
+    assert subscription is subscriber.subscriptions[0]
+    assert [error.reason for error in seen] == ["not found"]
+    assert retries == []
+
+    with pytest.raises(SubscriptionRequestError) as failure:
+        await subscription.subscribed
+
+    assert (failure.value.request_error.error_code, failure.value.request_error.reason) == (0x10, "not found")
+
+
 async def test_doubles_the_delay_up_to_the_cap() -> None:
-    subscriber = FakeSubscriber(not_found, not_found, not_found, not_found, accepted)
+    subscriber = FakeSubscriber(unroutable, unroutable, unroutable, unroutable, accepted)
     retries: list[tuple[int, float]] = []
 
     await retry(subscriber, on_retry=lambda attempt, delay: retries.append((attempt, delay)))
@@ -169,7 +208,7 @@ async def test_doubles_the_delay_up_to_the_cap() -> None:
 
 
 async def test_cancellation_while_waiting_raises_and_subscribes_no_further() -> None:
-    subscriber = FakeSubscriber(not_found)
+    subscriber = FakeSubscriber(unroutable)
 
     with pytest.raises(TimeoutError):
         async with asyncio.timeout(0.02):
@@ -202,15 +241,16 @@ async def test_returns_the_handle_when_the_connection_ends_first() -> None:
         await subscription.subscribed
 
 
-async def test_a_404_after_acceptance_reaches_on_error() -> None:
+async def test_the_fresh_namespace_rejection_after_acceptance_reaches_on_error() -> None:
     subscriber = FakeSubscriber(accepted)
     seen: list[RequestError] = []
 
     subscription = await retry(subscriber, RelaySubscriptionHandlers(on_error=seen.append))
     # A rejection after acceptance is a different event (a retract, for instance), not the race.
+    subscription.reject(0x10, "unroutable")
     subscription.reject(404, "dropped")
 
-    assert [error.error_code for error in seen] == [404]
+    assert [error.error_code for error in seen] == [0x10, 404]
 
 
 async def test_returns_what_the_wrapped_callbacks_return_so_the_sdk_guard_still_sees_an_awaitable() -> None:
@@ -248,7 +288,7 @@ async def test_refuses_a_declared_async_callback_before_subscribing_as_the_sdk_w
 
 
 async def test_forwards_the_other_handlers_and_leaves_handlers_without_on_error_alone() -> None:
-    subscriber = FakeSubscriber(not_found, accepted)
+    subscriber = FakeSubscriber(unroutable, accepted)
     infos: list[SubscribeOk] = []
     objects: list[object] = []
     on_object = objects.append
