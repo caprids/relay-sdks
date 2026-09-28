@@ -683,11 +683,12 @@ track. Both SDKs agree on all three, and the core module headers
    is optional, so omitting it conforms. The SDK sends none because it has no drain behavior: a
    GOAWAY written as the transport closes gives the peer nothing to act on. How the relay treats a
    client GOAWAY depends on its version: moq-relay 0.14.17 closes the whole session, and 0.15.1 and
-   later record it and keep the session. Closing the publisher FINs every subscription, retracts the
+   later record it and keep the session. Closing the publisher ends every subscription with
+   PUBLISH_DONE and a FIN (deviation 1), retracts the
    namespace with NAMESPACE_DONE, gives those writes a bounded window (250 ms) and closes the
    transport. Closing a subscriber connection closes the transport and writes nothing more on the
    control stream. The application observes nothing: the relay learns of the shutdown from the
-   transport close, and from a publisher's FINs and retraction before it. A GOAWAY the relay sends
+   transport close, and from a publisher's PUBLISH_DONEs and retraction before it. A GOAWAY the relay sends
    is still received and handled on both connections. Sending GOAWAY becomes useful once the SDK
    can drain on it, which means giving it time to arrive before the transport closes; on relays
    older than 0.15.1 it would still close the session.
