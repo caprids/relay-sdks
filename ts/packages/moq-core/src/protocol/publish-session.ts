@@ -18,8 +18,10 @@
  * still-open data streams, then writes PUBLISH_DONE (status, the number of data streams opened for it, reason) and FINs
  * the request stream (§3.3.2, §10.12). moq-relay 0.15.4 and later require that PUBLISH_DONE, and treat a bare FIN as a
  * failed request; 0.15.1 to 0.15.3 abort the track on any byte after SUBSCRIBE_OK, PUBLISH_DONE included, so this core
- * needs a relay at 0.15.4 or later for a clean end. The publisher sends no GOAWAY: 0.14.17 closes the session on a
- * client GOAWAY (code 17), 0.15.1 and later record it and keep the session. Aliases are the peer's own request IDs,
+ * needs a relay at 0.15.4 or later for a clean end. An orderly `close()` holds the transport open, bounded, until the
+ * peer closes its side of each ended request stream, which moq-relay does only after it has read the PUBLISH_DONE and
+ * finished the track. The publisher sends no GOAWAY: 0.14.17 closes the session on a client GOAWAY (code 17), 0.15.1
+ * and later record it and keep the session. Aliases are the peer's own request IDs,
  * unique by construction: moq-relay 0.15.x closes the session (PROTOCOL_VIOLATION) when one alias names two different
  * tracks, and cancels the newer subscription when two live subscriptions to one track share an alias.
  *
@@ -147,8 +149,11 @@ export interface MoqtPublishSession {
   openUniStream(trackAlias: number): Promise<WritableStream<Uint8Array>>;
   /**
    * Orderly stop: end every live subscription (PUBLISH_DONE `TRACK_ENDED`, then FIN) and retract the announce
-   * (NAMESPACE_DONE), give those writes a bounded window to reach the wire (closing a WebTransport discards queued data), then close the transport.
-   * Synchronous callers return immediately; the transport closes within roughly {@link CLOSE_FLUSH_TIMEOUT_MS}.
+   * (NAMESPACE_DONE), give those writes a bounded window to reach the wire (closing a WebTransport discards queued
+   * data), then give the peer a bounded window to close each ended subscription's request stream, which it does once it
+   * has consumed the PUBLISH_DONE, and close the transport. Synchronous callers return immediately; the transport closes
+   * within {@link CLOSE_FLUSH_TIMEOUT_MS} plus {@link CLOSE_END_ACK_TIMEOUT_MS}, and sooner against a peer that answers
+   * promptly.
    */
   close(closeCode?: number, reason?: string): void;
   /** Drain outgoing streams, preserving an optional local closure error. */
@@ -162,6 +167,15 @@ const DEFAULT_IMPLEMENTATION_NAME = '@mux/moq-core publisher';
  * from under them.
  */
 export const CLOSE_FLUSH_TIMEOUT_MS = 250;
+
+/**
+ * How long `close()` then waits for the peer to close each ended subscription's request stream. A write reaching the
+ * wire does not mean the peer has read it: moq-relay reads PUBLISH_DONE, waits for Stream Count data streams (or a 1 s
+ * grace when it cannot count them), finishes the track and only then FINs its side. A transport closed before that
+ * aborts the track, which viewers see as PUBLISH_DONE status 0 `internal error`. The bound covers the relay's grace
+ * plus a round trip, so a peer that never closes its side costs at most this much.
+ */
+export const CLOSE_END_ACK_TIMEOUT_MS = 2000;
 
 // =============================================================================
 // Internal records
@@ -187,6 +201,12 @@ interface SubscriberStream {
   dataStreams: Set<() => void>;
   /** Data-stream opens in flight; PUBLISH_DONE waits for them to settle (§10.12). */
   opening: Set<Promise<void>>;
+  /**
+   * Settles once the peer's direction of the request stream ends (FIN or reset) or the session tears it down.
+   * `close()` waits on it, bounded, before closing the transport: the peer ends its side only after it has consumed our
+   * PUBLISH_DONE.
+   */
+  requestEnded: Promise<void>;
 }
 
 /**
@@ -457,6 +477,29 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       ]);
     } finally {
       if (flushTimer !== undefined) clearTimeout(flushTimer);
+    }
+
+    if (this.#destroyed) return;
+
+    // The writes are on the wire, not yet read: a peer that has not consumed a PUBLISH_DONE when the transport closes
+    // aborts the track instead of finishing it (moq-relay 0.15.4 and later report that downstream as status 0). The
+    // peer closes its side of the request stream once it has, so wait for that on every subscription still being
+    // served, bounded for a peer that never does.
+    const requestEnds = [...this.#tracks.values()].flatMap((track) => track.subscribers.map((s) => s.requestEnded));
+
+    if (requestEnds.length > 0) {
+      let endTimer: ReturnType<typeof setTimeout> | undefined;
+
+      try {
+        await Promise.race([
+          Promise.all(requestEnds),
+          new Promise<void>((resolve) => {
+            endTimer = setTimeout(resolve, CLOSE_END_ACK_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (endTimer !== undefined) clearTimeout(endTimer);
+      }
     }
 
     if (this.#destroyed) return;
@@ -1022,12 +1065,17 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // track alias — binding one alias to two live request IDs is a
     // session-fatal Duplicate on moq-lite-rs.
     const trackAlias = subscribe.requestId;
+    let settleRequest!: () => void;
+    const requestEnded = new Promise<void>((resolve) => {
+      settleRequest = resolve;
+    });
     const subscriber: SubscriberStream = {
       requestId: subscribe.requestId,
       trackAlias,
       writer,
       cancel: async () => {
         subscriber.finished = true;
+        settleRequest();
         writer.abort().catch(() => {});
 
         try {
@@ -1045,6 +1093,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       streamCount: 0,
       dataStreams: new Set(),
       opening: new Set(),
+      requestEnded,
     };
 
     track.subscribers.push(subscriber);
@@ -1055,6 +1104,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     } catch {
       // Peer cancelled before the response landed.
       track.subscribers = track.subscribers.filter((s) => s !== subscriber);
+      settleRequest();
       await reader.cancel();
       return;
     }
@@ -1189,6 +1239,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
       subscriber.finished = true;
       track.subscribers = track.subscribers.filter((s) => s !== subscriber);
+      settleRequest();
 
       // The subscription is over both ways — mirror of the namespace
       // stream's cleanup: an unclosed response direction would leak a

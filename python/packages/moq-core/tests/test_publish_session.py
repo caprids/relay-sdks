@@ -17,6 +17,7 @@ from core_helpers.transport_pair import (
 )
 from core_helpers.waiting import settle, wait_for
 
+from moq_core import publish_session
 from moq_core.control_messages import (
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
@@ -1186,6 +1187,8 @@ class TestCreateMoqtPublishSession:
         )
         assert after_subscribe_ok(subscribe, 51) == publish_done_bytes(0x2, 0, "track ended")
         assert [frame.kind for frame in control_frames] == ["setup"]
+        # Like moq-relay once it has consumed the PUBLISH_DONE: FIN back, which releases the close.
+        await subscribe.fin()
 
         await pair.client.wait_closed()
         assert pair.client._shared.close_info is not None
@@ -1220,16 +1223,89 @@ class TestCreateMoqtPublishSession:
         await control.write(encode_goaway(1500))
         await control.close()
 
-        await pair.client.wait_closed()
-        assert pair.client._shared.close_info is not None
-        assert pair.client._shared.close_info.close_code == 0
-        assert pair.client._shared.close_info.reason == ""
         await wait_for(
             lambda: solicitation.kinds() == ["request-ok", "namespace", "namespace-done"] and subscribe.ended()
         )
         assert subscribe.failure() is None
+        await subscribe.fin()
+
+        await pair.client.wait_closed()
+        assert pair.client._shared.close_info is not None
+        assert pair.client._shared.close_info.close_code == 0
+        assert pair.client._shared.close_info.reason == ""
         assert len(closed) == 1
         assert closed[0].error is (error if with_error else None)
+
+    @pytest.mark.parametrize("peer_end", ["fin", "reset"])
+    async def test_close_holds_the_transport_until_the_peer_ends_its_side_of_each_ended_request(
+        self, peer_end: str
+    ) -> None:
+        # moq-relay reads PUBLISH_DONE, finishes the track and only then FINs its side; a transport
+        # closed before that aborts the track (viewers see status 0). The PUBLISH_DONE and FIN reaching
+        # the wire is not enough, so the close waits past CLOSE_FLUSH_TIMEOUT for the peer's own end.
+        harness = Harness()
+        await harness.session.ready
+        register(harness.session, "video")
+        subscribe = await raw_subscribe(harness.pair.server, "video", 21)
+        await wait_for(lambda: harness.session._live_subscription(21) is not None)
+
+        harness.session.close()
+        await wait_for(lambda: subscribe.ended())
+        assert after_subscribe_ok(subscribe, 21) == publish_done_bytes(0x2, 0, "track ended")
+
+        # A peer slow to read the PUBLISH_DONE: well past the write window, the transport stays up.
+        await asyncio.sleep(publish_session.CLOSE_FLUSH_TIMEOUT + 0.25)
+        assert not harness.pair.client._shared.closed
+
+        started = asyncio.get_running_loop().time()
+        if peer_end == "fin":
+            await subscribe.fin()
+        else:
+            subscribe.reset()
+
+        await asyncio.wait_for(harness.pair.client.wait_closed(), 1)
+        assert asyncio.get_running_loop().time() - started < 0.5
+        assert harness.pair.client._shared.close_info == CloseInfo(0, "")
+        harness.subscriber.destroy()
+
+    async def test_close_waits_on_the_peer_only_up_to_the_end_ack_bound(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A peer that never ends its side of the request stream must not hold the close.
+        monkeypatch.setattr(publish_session, "CLOSE_END_ACK_TIMEOUT", 0.3)
+        closed: list[Any] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_closed=closed.append))
+        await harness.session.ready
+        register(harness.session, "video")
+        subscribe = await raw_subscribe(harness.pair.server, "video", 21)
+        await wait_for(lambda: harness.session._live_subscription(21) is not None)
+
+        started = asyncio.get_running_loop().time()
+        harness.session.close()
+        await asyncio.wait_for(harness.pair.client.wait_closed(), 2)
+        elapsed = asyncio.get_running_loop().time() - started
+
+        assert 0.3 <= elapsed < 0.3 + publish_session.CLOSE_FLUSH_TIMEOUT + 0.25
+        assert subscribe.ended()
+        assert after_subscribe_ok(subscribe, 21) == publish_done_bytes(0x2, 0, "track ended")
+        assert harness.pair.client._shared.close_info == CloseInfo(0, "")
+        assert len(closed) == 1 and closed[0].error is None
+        harness.subscriber.destroy()
+
+    async def test_close_does_not_wait_on_a_request_the_peer_already_ended(self) -> None:
+        # A peer that FINs as soon as it reads the PUBLISH_DONE (or ended the request earlier) owes
+        # nothing more: close goes as soon as the writes land.
+        harness = Harness()
+        await harness.session.ready
+        register(harness.session, "video")
+        subscribe = await raw_subscribe(harness.pair.server, "video", 21)
+        await wait_for(lambda: harness.session._live_subscription(21) is not None)
+        subscribe.reset()
+        await wait_for(lambda: harness.session._live_subscription(21) is None)
+
+        started = asyncio.get_running_loop().time()
+        harness.session.close()
+        await asyncio.wait_for(harness.pair.client.wait_closed(), 1)
+        assert asyncio.get_running_loop().time() - started < publish_session.CLOSE_FLUSH_TIMEOUT
+        harness.subscriber.destroy()
 
     async def test_control_eof_is_still_fatal_before_local_close(self) -> None:
         pair = create_transport_pair()

@@ -20,6 +20,8 @@ import {
 import { SESSION_ERROR } from '../protocol/errors.js';
 import type { MoqtObject } from '../protocol/object-stream.js';
 import {
+  CLOSE_END_ACK_TIMEOUT_MS,
+  CLOSE_FLUSH_TIMEOUT_MS,
   createMoqtPublishSession,
   type IncomingSubscribe,
   type MoqtPublishSessionCallbacks,
@@ -1491,6 +1493,8 @@ describe('createMoqtPublishSession', () => {
     });
     expect(afterSubscribeOk(subscribe, 51)).toEqual(publishDoneBytes(0x2, 0, 'track ended'));
     expect(controlFrames.map((m) => m.kind)).toEqual(['setup']);
+    // Like moq-relay once it has consumed the PUBLISH_DONE: FIN back, which releases the close.
+    await subscribe.fin();
     await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
     expect(onClosed).toHaveBeenCalledExactlyOnceWith(withError ? { error } : {});
   });
@@ -1523,9 +1527,7 @@ describe('createMoqtPublishSession', () => {
       await writer.write(encodeGoaway(1500));
       await writer.close();
 
-      await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
       await vi.waitFor(() => {
-        expect(onClosed).toHaveBeenCalledExactlyOnceWith(withError ? { error } : {});
         expect(solicitation.received.map((message) => message.kind)).toEqual([
           'request-ok',
           'namespace',
@@ -1534,8 +1536,98 @@ describe('createMoqtPublishSession', () => {
         expect(subscribe.ended()).toBe(true);
       });
       expect(subscribe.failure()).toBeUndefined();
+      await subscribe.fin();
+
+      await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
+      await vi.waitFor(() => expect(onClosed).toHaveBeenCalledExactlyOnceWith(withError ? { error } : {}));
     }
   );
+
+  it.each(['fin', 'reset'] as const)(
+    'close() holds the transport until the peer ends its side of each ended request (%s)',
+    async (peerEnd) => {
+      // moq-relay reads PUBLISH_DONE, finishes the track and only then FINs its side; a transport closed before that
+      // aborts the track (viewers see status 0). The PUBLISH_DONE and FIN reaching the wire is not enough, so the close
+      // waits past CLOSE_FLUSH_TIMEOUT_MS for the peer's own end.
+      const { pair, session, subscriber } = makePublishHarness();
+      await session.ready;
+      session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+      const subscribe = await rawSubscribe(pair.server, 'video', 21);
+      await vi.waitFor(() => expect(subscribe.received).toHaveLength(1));
+      let closedAt: number | undefined;
+      void pair.client.closed.then(() => {
+        closedAt = performance.now();
+      });
+
+      session.close();
+      await vi.waitFor(() => expect(subscribe.ended()).toBe(true));
+      expect(afterSubscribeOk(subscribe, 21)).toEqual(publishDoneBytes(0x2, 0, 'track ended'));
+
+      // A peer slow to read the PUBLISH_DONE: well past the write window, the transport stays up.
+      await new Promise((resolve) => setTimeout(resolve, CLOSE_FLUSH_TIMEOUT_MS + 250));
+      expect(closedAt).toBeUndefined();
+
+      const started = performance.now();
+      if (peerEnd === 'fin') await subscribe.fin();
+      else await subscribe.reset();
+
+      await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
+      expect(closedAt! - started).toBeLessThan(500);
+      subscriber.destroy();
+    }
+  );
+
+  it('close() waits on the peer only up to CLOSE_END_ACK_TIMEOUT_MS', async () => {
+    // A peer that never ends its side of the request stream must not hold the close.
+    const onClosed = vi.fn();
+    const { pair, session, subscriber } = makePublishHarness({ onClosed });
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+    const subscribe = await rawSubscribe(pair.server, 'video', 21);
+    await vi.waitFor(() => expect(subscribe.received).toHaveLength(1));
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+
+    try {
+      let closed = false;
+      void pair.client.closed.then(() => {
+        closed = true;
+      });
+
+      session.close();
+      // The writes land at once, so the bound runs from about the close itself.
+      await vi.advanceTimersByTimeAsync(CLOSE_END_ACK_TIMEOUT_MS - 50);
+      expect(subscribe.ended()).toBe(true);
+      expect(afterSubscribeOk(subscribe, 21)).toEqual(publishDoneBytes(0x2, 0, 'track ended'));
+      expect(closed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(100);
+      expect(closed).toBe(true);
+      await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
+      expect(onClosed).toHaveBeenCalledExactlyOnceWith({});
+    } finally {
+      vi.useRealTimers();
+    }
+
+    subscriber.destroy();
+  });
+
+  it('close() does not wait on a request the peer already ended', async () => {
+    // A peer that FINs as soon as it reads the PUBLISH_DONE (or ended the request earlier) owes nothing more: close
+    // goes as soon as the writes land.
+    const { pair, session, subscriber } = makePublishHarness();
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+    const subscribe = await rawSubscribe(pair.server, 'video', 21);
+    await vi.waitFor(() => expect(subscribe.received).toHaveLength(1));
+    await subscribe.reset();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const started = performance.now();
+    session.close();
+    await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
+    expect(performance.now() - started).toBeLessThan(CLOSE_FLUSH_TIMEOUT_MS);
+    subscriber.destroy();
+  });
 
   it('still treats control EOF as fatal before a local close starts', async () => {
     const pair = createTransportPair();
