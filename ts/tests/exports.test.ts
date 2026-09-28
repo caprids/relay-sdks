@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import type { RelayPublisher, RelaySubscriber, RelaySubscriptionHandlers, RelayTrackWriter } from '../src/index.js';
+import type {
+  ConnectRelayOptions,
+  ConnectRelayPublisherOptions,
+  ConnectRelaySubscriberOptions,
+  RelayPublisher,
+  RelaySubscriber,
+  RelaySubscriptionHandlers,
+  RelayTrackWriter,
+} from '../src/index.js';
 import * as relay from '../src/index.js';
 
 /**
@@ -65,5 +73,23 @@ describe('public vocabulary', () => {
     expect(publisher).not.toHaveProperty('publish');
     expect(writer).not.toHaveProperty('bound');
     expect(writer).not.toHaveProperty('bindings');
+  });
+
+  it("shares connection options between roles and adds each role's own on top", () => {
+    const shared = {
+      url: true,
+      getToken: true,
+      signal: true,
+      connectTimeoutMs: true,
+      createTransport: true,
+    } satisfies Record<keyof ConnectRelayOptions, true>;
+    const subscriber = { ...shared, requestTimeoutMs: true } satisfies Record<
+      keyof ConnectRelaySubscriberOptions,
+      true
+    >;
+    const publisher = { ...shared, namespace: true } satisfies Record<keyof ConnectRelayPublisherOptions, true>;
+    expect(shared).not.toHaveProperty('requestTimeoutMs');
+    expect(publisher).not.toHaveProperty('requestTimeoutMs');
+    expect(subscriber).not.toHaveProperty('namespace');
   });
 });
