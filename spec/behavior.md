@@ -358,6 +358,8 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   sizes in `protocol.json`.
 - Closing a track writer cancels an outstanding write and ends that track; other tracks continue.
   Closing the publisher ends all tracks, retracts the namespace, and waits for transport shutdown.
+  A track ends by FIN alone, without PUBLISH_DONE, and the publisher sends no GOAWAY
+  ([relay interop deviations](#relay-interop-deviations)).
 - Track names cannot be reused within a publisher connection, including after their writer closes.
 - A track writer may open a multi-object group: objects are appended with object IDs 0, 1, 2, ...
   on one stream, and closing the group FINs the stream. Object 0 is the group's random-access point,
@@ -621,3 +623,58 @@ here when the first SDK gains them.
   The `UNKNOWN_OBJECT_STATUS` stream-reset code has a different meaning: a FETCH publisher cannot
   determine whether an object exists ([Section 3.3.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-3.3.4)).
   Ordinary subgroup transport resets remain per-stream delivery events.
+
+### Relay interop deviations
+
+Three choices in the generic cores exist only because of how moq-relay treats the draft's teardown
+messages. Each is stated here; the relay behavior that forces it, the evidence and how to re-test
+are in [relay interoperability](relay-interop.md#draft-20-deviations). Do not change one to match
+the draft without re-testing against the relay first: the first one breaks every viewer if undone.
+Both SDKs agree on all three, and the core module headers
+(`ts/packages/moq-core/src/protocol/publish-session.ts`,
+`python/packages/moq-core/src/moq_core/publish_session.py`) state the same constraints.
+
+1. **A subscription ends by FIN alone, with no PUBLISH_DONE.** Draft-20
+   [Section 3.3.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-3.3.2):
+   "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN", and
+   "An endpoint that receives a FIN before all required messages have arrived treats the request as
+   failed." This is a deviation from a MUST. The publisher never sends PUBLISH_DONE: closing a track
+   writer, closing the publisher, and a replacement subscription superseding an older one each FIN
+   the subscription's request stream with no bytes after SUBSCRIBE_OK. The only messages a
+   publisher writes after SUBSCRIBE_OK are REQUEST_OK or REQUEST_ERROR answering a REQUEST_UPDATE,
+   which the tested relay does not send. A viewer behind the relay observes a PUBLISH_DONE the relay
+   generates from the FIN, which is why its status code is not meaningful for a normal end
+   ([issue #25](https://github.com/muxinc/relay-sdks/issues/25)); a peer that follows Section 3.3.2
+   and is not that relay would treat the clean end as a failed request. The SDKs can send
+   PUBLISH_DONE (status `TRACK_ENDED`, after closing every data stream as
+   [Section 10.12](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.12)
+   requires) once the relay reads messages after SUBSCRIBE_OK instead of treating any byte as an
+   error.
+2. **The publisher never sends GOAWAY.** Draft-20
+   [Section 10.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.4):
+   "An endpoint sends a GOAWAY message on its control stream to inform the peer it intends to close
+   the session soon", and "A client MUST send a zero-length New Session URI in any GOAWAY". GOAWAY
+   is optional, so omitting it conforms; it is recorded because the relay closes the whole session
+   when a client sends one. Closing the publisher instead FINs every subscription, retracts the
+   namespace with NAMESPACE_DONE, gives those writes a bounded window (250 ms) and closes the
+   transport. The application observes nothing: the relay learns of the shutdown from the FINs,
+   the retraction and the transport close. A subscriber connection's `close()` behaves differently;
+   see the note below the list. Sending GOAWAY becomes possible once the relay accepts a client
+   GOAWAY without closing the session, and becomes useful only when the SDK can drain on it.
+3. **A track alias is the peer's own request ID.** Draft-20
+   [Section 5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1): "A
+   publisher MAY assign the same or different Track Aliases to these subscriptions"; and
+   [Section 11.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.1):
+   "The same Track Alias MUST NOT be used by a publisher to refer to two different Tracks
+   simultaneously in the same session." This conforms, and narrows a MAY: every SUBSCRIBE_OK
+   carries the SUBSCRIBE's request ID as the alias, which is unique for the session by
+   construction, so an alias is never shared between subscriptions, of one track or of two. A
+   request ID the peer reuses closes the session as a protocol error before it can become a
+   duplicate alias. The application never sees an alias on the Relay surface. Nothing needs to
+   change unless the SDK serves concurrent subscriptions to one track, which
+   [ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md) rules out today.
+
+A subscriber connection does write a GOAWAY: its `close()` queues GOAWAY (timeout 0) on the control
+stream and closes the transport in the same turn, in both SDKs. Closing the transport discards
+queued data, so whether the GOAWAY reaches the relay depends on timing, and the session is ending
+either way. This contradicts the publisher's rule above and is an open follow-up, not a contract.
