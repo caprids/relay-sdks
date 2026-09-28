@@ -669,9 +669,13 @@ track. Both SDKs agree on all three, and the core module headers
    are reset ([Section 5.1.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1.1)).
    Once a subscription is ending no data stream opens on its alias, and one that finishes opening
    afterwards is reset and not counted. moq-relay 0.15.4 and later read the PUBLISH_DONE, wait for
-   Stream Count data streams or a grace period, and finish the track: a viewer receives an
-   end-of-track object and PUBLISH_DONE status 2 `track ended`. They treat a FIN without
-   PUBLISH_DONE as a failed request and abort the track. moq-relay 0.15.1 to 0.15.3 do the reverse:
+   Stream Count data streams or a grace period (1 s), finish the track, and only then FIN their side
+   of the request stream: a viewer receives an end-of-track object and PUBLISH_DONE status 2
+   `track ended`. A session that closes before the relay has done so aborts the track, which a
+   viewer sees as status 0 `internal error`, so closing the publisher waits for that FIN (the one
+   Section 3.3.2 says a requester SHOULD send once the responder's FIN completes the request) on
+   every subscription it ended before closing the transport (bounded, see deviation 2). They treat a FIN
+   without PUBLISH_DONE as a failed request and abort the track. moq-relay 0.15.1 to 0.15.3 do the reverse:
    any byte after SUBSCRIBE_OK aborts the track, so every end these SDKs send reaches viewers as
    status 0 `internal error`, where a bare FIN finished the track. No behavior ends cleanly on both,
    and the SDKs cannot tell the versions apart (the relay's SETUP names only `moq-lite-rs`), so they
@@ -685,9 +689,11 @@ track. Both SDKs agree on all three, and the core module headers
    client GOAWAY depends on its version: moq-relay 0.14.17 closes the whole session, and 0.15.1 and
    later record it and keep the session. Closing the publisher ends every subscription with
    PUBLISH_DONE and a FIN (deviation 1), retracts the
-   namespace with NAMESPACE_DONE, gives those writes a bounded window (250 ms) and closes the
-   transport. Closing a subscriber connection closes the transport and writes nothing more on the
-   control stream. The application observes nothing: the relay learns of the shutdown from the
+   namespace with NAMESPACE_DONE, gives those writes a bounded window (250 ms), then waits up to
+   2 s for the relay to FIN its side of each ended subscription's request stream, and closes the
+   transport. The 2 s covers the relay's 1 s grace plus a round trip; against moq-relay the wait
+   ends as soon as the relay has finished every track, typically within a round trip. Closing a
+   subscriber connection closes the transport and writes nothing more on the control stream. The application observes nothing: the relay learns of the shutdown from the
    transport close, and from a publisher's PUBLISH_DONEs and retraction before it. A GOAWAY the relay sends
    is still received and handled on both connections. Sending GOAWAY becomes useful once the SDK
    can drain on it, which means giving it time to arrive before the transport closes; on relays

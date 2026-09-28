@@ -358,8 +358,10 @@ describe('connectRelayPublisher', () => {
         createTransport: () => ({ transport: withServerRequestIds(pair.server), ready: Promise.resolve() }),
       }),
     ]);
-    cleanup.push(() => subscriber.close());
+    // The subscriber goes first: it never FINs its request streams, so a publisher closing ahead of it would wait
+    // out CLOSE_END_ACK_TIMEOUT_MS for the FIN a relay would send.
     cleanup.push(() => publisher.close());
+    cleanup.push(() => subscriber.close());
     const trackProperties = [{ type: 2, value: 90_000 }];
     publisher.registerTrack({ track: 'timed', trackProperties });
     publisher.registerTrack({ track: 'raw' });
@@ -536,8 +538,10 @@ describe('connectRelayPublisher', () => {
         createTransport: () => ({ transport: withServerRequestIds(pair.server), ready: Promise.resolve() }),
       }),
     ]);
-    cleanup.push(() => subscriber.close());
+    // The subscriber goes first: it never FINs its request streams, so a publisher closing ahead of it would wait
+    // out CLOSE_END_ACK_TIMEOUT_MS for the FIN a relay would send.
     cleanup.push(() => publisher.close());
+    cleanup.push(() => subscriber.close());
     const track = publisher.registerTrack({ track: 'events' });
     const demand = track.demandChanges();
     expect(await demand.next()).toEqual({ done: false, value: false });
@@ -572,8 +576,10 @@ describe('connectRelayPublisher', () => {
         createTransport: () => ({ transport: withServerRequestIds(pair.server), ready: Promise.resolve() }),
       }),
     ]);
-    cleanup.push(() => subscriber.close());
+    // The subscriber goes first: it never FINs its request streams, so a publisher closing ahead of it would wait
+    // out CLOSE_END_ACK_TIMEOUT_MS for the FIN a relay would send.
     cleanup.push(() => publisher.close());
+    cleanup.push(() => subscriber.close());
     const track = publisher.registerTrack({ track: 'events' });
     const demand = track.demandChanges();
     expect(await demand.next()).toEqual({ done: false, value: false });

@@ -324,8 +324,10 @@ class TestConnectRelayPublisher:
                 ),
             ),
         )
-        cleanup.append(subscriber.close)
+        # The subscriber goes first: it never FINs its request streams, so a publisher closing
+        # ahead of it would wait out CLOSE_END_ACK_TIMEOUT for the FIN a relay would send.
         cleanup.append(publisher.close)
+        cleanup.append(subscriber.close)
         track_properties = [KeyValuePair(2, 90_000)]
         publisher.register_track("timed", track_properties=track_properties)
         publisher.register_track("raw")

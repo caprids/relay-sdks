@@ -21,8 +21,10 @@ the subscription's still-open data streams, then writes PUBLISH_DONE (status, th
 streams opened for it, reason) and FINs the request stream (§3.3.2, §10.12). moq-relay 0.15.4 and
 later require that PUBLISH_DONE, and treat a bare FIN as a failed request; 0.15.1 to 0.15.3 abort
 the track on any byte after SUBSCRIBE_OK, PUBLISH_DONE included, so this core needs a relay at
-0.15.4 or later for a clean end. The publisher sends no GOAWAY: 0.14.17 closes the session on a
-client GOAWAY (code 17), 0.15.1 and later record it and keep the session. Aliases are the peer's
+0.15.4 or later for a clean end. An orderly ``close()`` holds the transport open, bounded, until
+the peer closes its side of each ended request stream, which moq-relay does only after it has read
+the PUBLISH_DONE and finished the track. The publisher sends no GOAWAY: 0.14.17 closes the session
+on a client GOAWAY (code 17), 0.15.1 and later record it and keep the session. Aliases are the peer's
 own request IDs, unique by construction: moq-relay 0.15.x closes the session (PROTOCOL_VIOLATION)
 when one alias names two different tracks, and cancels the newer subscription when two live
 subscriptions to one track share an alias.
@@ -147,6 +149,16 @@ CLOSE_FLUSH_TIMEOUT = 0.25
 After that the transport closes out from under them.
 """
 
+CLOSE_END_ACK_TIMEOUT = 2.0
+"""Seconds ``close()`` then waits for the peer to close each ended subscription's request stream.
+
+A write reaching the wire does not mean the peer has read it: moq-relay reads PUBLISH_DONE, waits
+for Stream Count data streams (or a 1 s grace when it cannot count them), finishes the track and
+only then FINs its side. A transport closed before that aborts the track, which viewers see as
+PUBLISH_DONE status 0 ``internal error``. The bound covers the relay's grace plus a round trip, so
+a peer that never closes its side costs at most this much.
+"""
+
 
 @dataclass(slots=True, kw_only=True)
 class MoqtPublishSessionConfig:
@@ -210,6 +222,16 @@ class _SubscriberStream:
     """Data streams opened for this subscription that the caller has not closed yet."""
     opening: set[asyncio.Future[None]] = field(default_factory=set)
     """Data-stream opens in flight; PUBLISH_DONE waits for them to settle (§10.12)."""
+    request_ended: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
+    """Settles once the peer's direction of the request stream ends (FIN or reset) or the session tears it down.
+
+    ``close()`` waits on it, bounded, before closing the transport: the peer ends its side only
+    after it has consumed our PUBLISH_DONE.
+    """
+
+    def settle_request(self) -> None:
+        if not self.request_ended.done():
+            self.request_ended.set_result(None)
 
     def reset_data_streams(self) -> None:
         for data_stream in list(self.data_streams):
@@ -219,6 +241,7 @@ class _SubscriberStream:
         self.finished = True
         self.writer.abort()
         self.reader.cancel()
+        self.settle_request()
 
 
 class _DataStreamReset(Exception):
@@ -435,10 +458,11 @@ class MoqtPublishSession:
         """Orderly stop.
 
         End every live subscription (PUBLISH_DONE ``TRACK_ENDED``, then FIN) and retract the announce
-        (NAMESPACE_DONE), give those
-        writes a bounded window to reach the wire (closing a WebTransport discards queued data), then
-        close the transport. Returns immediately; the transport closes within roughly
-        :data:`CLOSE_FLUSH_TIMEOUT`.
+        (NAMESPACE_DONE), give those writes a bounded window to reach the wire (closing a WebTransport
+        discards queued data), then give the peer a bounded window to close each ended subscription's
+        request stream, which it does once it has consumed the PUBLISH_DONE, and close the transport.
+        Returns immediately; the transport closes within :data:`CLOSE_FLUSH_TIMEOUT` plus
+        :data:`CLOSE_END_ACK_TIMEOUT`, and sooner against a peer that answers promptly.
         """
         self._close(close_code, reason)
 
@@ -483,6 +507,24 @@ class MoqtPublishSession:
 
         if writes:
             await asyncio.wait(writes, timeout=CLOSE_FLUSH_TIMEOUT)
+
+        if self._destroyed:
+            return
+
+        # The writes are on the wire, not yet read: a peer that has not consumed a PUBLISH_DONE when
+        # the transport closes aborts the track instead of finishing it (moq-relay 0.15.4 and later
+        # report that downstream as status 0). The peer closes its side of the request stream once it
+        # has, so wait for that on every subscription still being served, bounded for a peer that
+        # never does.
+        request_ends = {
+            subscriber.request_ended
+            for track in self._tracks.values()
+            for subscriber in track.subscribers
+            if not subscriber.request_ended.done()
+        }
+
+        if request_ends:
+            await asyncio.wait(request_ends, timeout=CLOSE_END_ACK_TIMEOUT)
 
         if self._destroyed:
             return
@@ -1001,6 +1043,7 @@ class MoqtPublishSession:
         except Exception:  # peer cancelled before the response landed
             track.subscribers = [s for s in track.subscribers if s is not subscriber]
             reader.cancel()
+            subscriber.settle_request()
             return
 
         # Overlapping same-track subscriptions settle their SUBSCRIBE_OK writes independently, so a
@@ -1119,6 +1162,7 @@ class MoqtPublishSession:
             already_ending = subscriber.finished
             subscriber.finished = True
             track.subscribers = [s for s in track.subscribers if s is not subscriber]
+            subscriber.settle_request()
 
             if not already_ending:
                 # The subscription is over both ways, mirror of the namespace stream's cleanup: an
@@ -1173,6 +1217,7 @@ def create_moqt_publish_session(
 
 
 __all__ = [
+    "CLOSE_END_ACK_TIMEOUT",
     "CLOSE_FLUSH_TIMEOUT",
     "DEFAULT_IMPLEMENTATION_NAME",
     "AnnounceEnded",
