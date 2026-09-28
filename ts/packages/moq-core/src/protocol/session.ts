@@ -285,7 +285,22 @@ const DEFAULT_IMPLEMENTATION_NAME = '@mux/moq-core';
  * regardless of how the request died.
  */
 function streamFailure(reason: string, errorCode: number = REQUEST_ERROR_CODE.INTERNAL_ERROR): RequestError {
-  return { errorCode, retryInterval: 0, reason };
+  const failure = { errorCode, retryInterval: 0, reason };
+
+  streamFailures.add(failure);
+  return failure;
+}
+
+const streamFailures = new WeakSet<RequestError>();
+
+/**
+ * Whether the session synthesized this request failure from a stream event (FIN before any response, a stream reset,
+ * a failed stream open, the response timeout, or the session ending) rather than receiving a REQUEST_ERROR message.
+ * A real transport can fail a request's stream some tasks before it reports its own closure, so a consumer that wants
+ * to tell a lost connection from a rejection waits for `closed` before trusting such a failure.
+ */
+export function isStreamFailure(error: RequestError): boolean {
+  return streamFailures.has(error);
 }
 
 // ============================================================================

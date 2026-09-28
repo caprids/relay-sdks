@@ -12,9 +12,11 @@
 import {
   encodeRequestUpdate,
   type Goaway,
+  isStreamFailure,
   type MessageParameters,
   type MoqtObject,
   type PublishDone,
+  REQUEST_ERROR_CODE,
   type RequestError,
   type SubscribeOk,
   type Subscription,
@@ -88,6 +90,13 @@ export interface SubscriptionDependencies {
    */
   observeClosed(observer: (error?: unknown) => void): () => void;
 }
+
+/**
+ * How long a pre-acceptance stream failure waits for the transport to report closure before it is
+ * recorded as a rejection. Chromium reports closure well under a millisecond after it fails the
+ * stream (issue #102); this only bounds the wait on a connection that stays up.
+ */
+export const CLOSURE_GRACE_MS = 250;
 
 /** The product subscription as its consumers see it: the public handle plus the attach point. */
 export interface ProductSubscription extends RelaySubscription {
@@ -190,6 +199,7 @@ export function createSubscription(
   let end: SubscriptionEnd | undefined;
   let core: Subscription | undefined;
   let removeClosed: () => void = () => {};
+  let cancelGrace: () => void = () => {};
   const queuedUpdates: MessageParameters[] = [];
 
   let resolveSubscribed!: (info: SubscribeOk) => void;
@@ -210,6 +220,7 @@ export function createSubscription(
     end = next;
     queuedUpdates.length = 0;
     removeClosed();
+    cancelGrace();
     if (!accepted) rejectSubscribed(endError(next));
     resolveEnded(next);
     // Every ending cancels the core handle: after a REQUEST_ERROR or closure the core has already
@@ -224,10 +235,7 @@ export function createSubscription(
       finish({ kind: 'terminated', cause: 'request-error', accepted: true, error });
       return;
     }
-    // The core fails a pending request before it reports the closure that killed it, in the same
-    // turn. Hold the failure until the turn ends, so a closure that follows is the ending this
-    // subscription describes; a genuine rejection is recorded one microtask later.
-    queueMicrotask(() => {
+    const reject = () => {
       if (ending()) return;
       try {
         finish({ kind: 'rejected', cause: 'request-error', accepted: false, error });
@@ -235,7 +243,21 @@ export function createSubscription(
         // Inside the core's request reader a throwing callback is caught and dropped. This runs
         // outside it, so contain the throw the same way rather than let it escape the microtask.
       }
-    });
+    };
+    // The core fails a pending request before it reports the closure that killed it, in the same
+    // turn. Hold the failure until the turn ends, so a closure that follows is the ending this
+    // subscription describes; a genuine rejection is recorded one microtask later.
+    if (!isStreamFailure(error) || error.errorCode === REQUEST_ERROR_CODE.TIMEOUT) {
+      queueMicrotask(reject);
+      return;
+    }
+    // A stream that failed without a REQUEST_ERROR may be the first sign of a lost transport: a
+    // browser can fail the stream tasks before `closed` settles. The session reports the closure
+    // from its own reaction to `closed`, through the observer this subscription already holds, so
+    // leave the ending to that unless the connection is still up once the grace has passed. Any
+    // ending clears the timer, so nothing outlives the subscription.
+    const grace = setTimeout(reject, CLOSURE_GRACE_MS);
+    cancelGrace = () => clearTimeout(grace);
   };
   const connectionClosed = (error: unknown) =>
     finish({ kind: 'terminated', cause: 'connection-closed', accepted, error });

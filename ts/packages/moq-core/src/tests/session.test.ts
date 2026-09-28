@@ -18,7 +18,12 @@ import {
 } from '../protocol/control-messages.js';
 import type { MoqtObject } from '../protocol/object-stream.js';
 import type { BidirectionalStreamLike } from '../protocol/request-stream.js';
-import { createMoqtSession, type MoqtSessionCallbacks, type MoqtTransport } from '../protocol/session.js';
+import {
+  createMoqtSession,
+  isStreamFailure,
+  type MoqtSessionCallbacks,
+  type MoqtTransport,
+} from '../protocol/session.js';
 
 // ============================================================================
 // In-memory transport fake — the same seam pattern as SPF's fetch injection.
@@ -352,6 +357,7 @@ describe('createMoqtSession', () => {
     expect(onError).toHaveBeenCalledWith(
       expect.objectContaining({ errorCode: REQUEST_ERROR_CODE.DOES_NOT_EXIST, reason: 'no such track' })
     );
+    expect(isStreamFailure(onError.mock.calls[0]![0])).toBe(false);
     harness.session.destroy();
   });
 
@@ -431,6 +437,7 @@ describe('createMoqtSession', () => {
 
     await vi.waitFor(() => expect(onError).toHaveBeenCalled());
     expect(onError).toHaveBeenCalledWith(expect.objectContaining({ errorCode: REQUEST_ERROR_CODE.TIMEOUT }));
+    expect(isStreamFailure(onError.mock.calls[0]![0])).toBe(true);
     session.destroy();
   });
 

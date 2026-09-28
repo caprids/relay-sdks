@@ -206,6 +206,15 @@ the closure is the ending the subscription describes, with the connection error 
 genuine rejection reaches `subscribed`, `ended` and `onError` one turn after the core delivers it.
 A REQUEST_ERROR after acceptance is recorded at once.
 
+Python asks the transport whether it has already ended. A browser's WebTransport reports its end
+only through the `closed` promise, and Chromium settles it a task or more after it aborts the
+request stream of a connection lost while that stream opens
+([issue #102](https://github.com/muxinc/relay-sdks/issues/102)). So TypeScript holds a
+pre-acceptance failure the core synthesized from a stream event (FIN before a response, a stream
+reset, a failed stream open; not the response timeout) until the transport's `closed` settles, and
+records it as a rejection only if the connection is still up 250 ms later. A REQUEST_ERROR message
+and the response timeout keep the one-turn hold.
+
 A readiness awaitable nobody awaits cannot surface as an unhandled rejection: the SDK pre-handles
 it. Awaiting it later still observes the same result.
 
