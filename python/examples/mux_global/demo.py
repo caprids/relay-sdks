@@ -20,7 +20,7 @@ import json
 import os
 import sys
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from getpass import getpass
@@ -33,6 +33,7 @@ from mux_relay import (
     Closed,
     MoqtObject,
     RelayAwaitable,
+    RelayError,
     RelayPublisher,
     RelaySubscriptionHandlers,
     RelayTrackWriter,
@@ -47,6 +48,7 @@ if EXAMPLES not in sys.path:
     sys.path.insert(0, EXAMPLES)
 
 from shared.announce_race import subscribe_with_retry  # noqa: E402
+from shared.demand_timeout import write_with_retry  # noqa: E402
 
 Log = Callable[[dict[str, Any]], None]
 
@@ -66,14 +68,20 @@ class Config:
 async def run_demo(config: Config, log: Log) -> dict[str, int]:
     background_tasks: list[asyncio.Task[Any]] = []
     problems: list[str] = []
+    broken = asyncio.Event()
     received = 0
     closing = False
+
+    # A failure seen in a callback or background task: recorded, and it wakes a write waiting for demand.
+    def report(problem: str) -> None:
+        problems.append(problem)
+        broken.set()
 
     # Both connection kinds expose `closed`; a connection ending before we close it is a failure.
     def watch(label: str, closed: RelayAwaitable[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
             if not closing:
-                problems.append(f"{label} connection closed: {describe(future.result().error)}")
+                report(f"{label} connection closed: {describe(future.result().error)}")
 
         closed.add_done_callback(done)
 
@@ -88,13 +96,32 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
             error = finished.exception()
 
             if error is not None:
-                problems.append(f"subscribe failed: {describe(error)}")
+                report(f"subscribe failed: {describe(error)}")
 
         task.add_done_callback(done)
 
     def fail_if_broken() -> None:
         if problems:
             raise RuntimeError("; ".join(problems))
+
+    # The SDK can wait for demand for a whole write deadline. A failure recorded meanwhile (a rejected
+    # subscribe, a closed connection) cancels that wait and becomes the run's error, rather than
+    # surfacing a deadline later or hiding behind the run's own timeout.
+    async def unless_broken(write: Coroutine[Any, Any, None]) -> None:
+        writing = asyncio.ensure_future(write)
+        interrupted = asyncio.ensure_future(broken.wait())
+
+        try:
+            await asyncio.wait({writing, interrupted}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            interrupted.cancel()
+            writing.cancel()
+            await asyncio.gather(writing, interrupted, return_exceptions=True)
+
+        if writing.cancelled():
+            fail_if_broken()
+
+        writing.result()
 
     # The standard timeout cancels pending work; context managers close every acquired connection.
     deadline = asyncio.timeout(config.timeout)
@@ -177,10 +204,10 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                                     }
                                 ),
                                 on_object=on_object,
-                                on_error=lambda error: problems.append(
+                                on_error=lambda error: report(
                                     f"subscribe rejected: code {error.error_code} {error.reason}"
                                 ),
-                                on_subgroup_reset=lambda reset: problems.append(
+                                on_subgroup_reset=lambda reset: report(
                                     f"group {reset.group_id} reset: {describe(reset.error)}"
                                 ),
                                 on_publisher_done=lambda done: log(
@@ -196,6 +223,27 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                     watch_background(subscribe_task)
 
                 if writer is not None:
+                    # The SDK waits for demand inside write(), up to the track's write deadline. Only a
+                    # timeout in that wait proves nothing was sent, so only it writes the same object again.
+                    def on_demand_timeout(attempt: int, error: RelayError) -> None:
+                        fail_if_broken()
+                        log(
+                            {
+                                "event": "waiting",
+                                "detail": "no relay demand within the write deadline; nothing was sent, writing again",
+                            }
+                        )
+
+                    def on_uncertain_write(error: RelayError) -> None:
+                        log(
+                            {
+                                "event": "write failed",
+                                "code": error.code,
+                                "phase": error.phase,
+                                "detail": "sending had started; the relay may hold the object, so it is not resent",
+                            }
+                        )
+
                     for seq in range(1, config.count + 1):
                         payload = json.dumps(
                             {
@@ -204,7 +252,16 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                                 "message": f"tick {seq} from the mux-relay example",
                             }
                         ).encode("utf-8")
-                        await write_when_demanded(writer, payload, fail_if_broken, log)
+                        fail_if_broken()
+
+                        if not writer.has_demand:
+                            log({"event": "waiting", "detail": "no relay demand yet; write() waits for a subscriber"})
+
+                        await unless_broken(
+                            write_with_retry(
+                                writer, payload, on_retry=on_demand_timeout, on_uncertain=on_uncertain_write
+                            )
+                        )
                         log({"event": "published", "seq": seq, "bytes": len(payload)})
 
                         if seq < config.count:
@@ -225,22 +282,6 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
         if deadline.expired():
             raise TimeoutError(f"Run exceeded {config.timeout:g} s") from error
         raise
-
-
-async def write_when_demanded(
-    writer: RelayTrackWriter, payload: bytes, fail_if_broken: Callable[[], None], log: Log
-) -> None:
-    """Wait without sending; once write() starts, failure may mean partial delivery. Never replay it."""
-    if not writer.has_demand:
-        log({"event": "waiting", "detail": "no relay demand yet; waiting before writing"})
-    while not writer.has_demand:
-        fail_if_broken()
-        if writer.closed:
-            raise RuntimeError("Published track closed while waiting for demand")
-        await asyncio.sleep(0.1)
-    fail_if_broken()
-    # Demand can disappear after the check; let the SDK's write deadline bound that race.
-    await writer.write(payload)
 
 
 def inspect(payload: bytes) -> dict[str, Any]:

@@ -60,13 +60,32 @@ async def test_one_object_round_trip_closes_connections(connected):
         assert (await connection.closed).error is None
 
 
-async def test_deadline_waiting_for_demand_never_attempts_write(connected, monkeypatch: pytest.MonkeyPatch):
-    write = AsyncMock()
-    monkeypatch.setattr(RelayTrackWriter, "write", write)
+async def test_deadline_ends_the_wait_for_demand_before_anything_is_sent(connected):
+    entries = []
     with pytest.raises(TimeoutError, match=r"Run exceeded 0\.05 s"):
-        await demo.run_demo(replace(CONFIG, mode="publish", timeout=0.05), lambda _: None)
-    write.assert_not_awaited()
+        await demo.run_demo(replace(CONFIG, mode="publish", timeout=0.05), entries.append)
+    # The SDK was still waiting for a subscriber inside write() when the run deadline cancelled it.
+    assert {"event": "waiting", "detail": "no relay demand yet; write() waits for a subscriber"} in entries
+    assert not any(entry["event"] == "published" for entry in entries)
     assert all(connection.closed.done() for connection in connected)
+
+
+async def test_demand_timeout_writes_the_same_object_again(connected, monkeypatch: pytest.MonkeyPatch):
+    original = RelayTrackWriter.write
+    payloads = []
+
+    async def write(self, payload, **kwargs):
+        payloads.append(payload)
+        if len(payloads) == 1:  # The write deadline expired before any subscriber asked for the track.
+            raise RelayError("no demand", code="WRITE_TIMEOUT", phase="waiting-for-demand")
+        await original(self, payload, **kwargs)
+
+    monkeypatch.setattr(RelayTrackWriter, "write", write)
+    entries = []
+    assert await demo.run_demo(CONFIG, entries.append) == {"published": 1, "received": 1}
+    assert len(payloads) == 2 and payloads[0] == payloads[1]
+    assert any("nothing was sent" in entry.get("detail", "") for entry in entries)
+    assert not any(entry["event"] == "write failed" for entry in entries)
 
 
 async def test_partial_delivery_timeout_is_not_replayed(connected, monkeypatch: pytest.MonkeyPatch):
@@ -81,10 +100,19 @@ async def test_partial_delivery_timeout_is_not_replayed(connected, monkeypatch: 
         raise failure
 
     monkeypatch.setattr(RelayTrackWriter, "write", partial_write)
+    entries = []
     with pytest.raises(RelayError) as caught:
-        await demo.run_demo(CONFIG, lambda _: None)
+        await demo.run_demo(CONFIG, entries.append)
     assert caught.value is failure
     assert attempts == 1
+    assert [entry for entry in entries if entry["event"] == "write failed"] == [
+        {
+            "event": "write failed",
+            "code": "WRITE_TIMEOUT",
+            "phase": "writing",
+            "detail": "sending had started; the relay may hold the object, so it is not resent",
+        }
+    ]
     assert all(connection.closed.done() for connection in connected)
 
 
@@ -153,16 +181,32 @@ async def test_track_closed_while_waiting_for_demand(connected, monkeypatch: pyt
     from mux_relay import RelayPublisher
 
     original = RelayPublisher.register_track
-    write = AsyncMock()
-    monkeypatch.setattr(RelayTrackWriter, "write", write)
 
     def register_track(self, track, **kwargs):
         writer = original(self, track, **kwargs)
-        asyncio.get_running_loop().call_soon(writer.close)
+        asyncio.get_running_loop().call_later(0.05, writer.close)  # once write() is waiting for demand
         return writer
 
     monkeypatch.setattr(RelayPublisher, "register_track", register_track)
-    with pytest.raises(RuntimeError, match="Published track closed while waiting for demand"):
-        await demo.run_demo(replace(CONFIG, mode="publish"), lambda _: None)
-    write.assert_not_awaited()
+    entries = []
+    with pytest.raises(RelayError) as caught:
+        await demo.run_demo(replace(CONFIG, mode="publish"), entries.append)
+    # Nothing was sent, and the closed track is not a demand timeout: no retry, no uncertain delivery.
+    assert (caught.value.code, caught.value.phase) == ("CLOSED", "waiting-for-demand")
+    assert not any(entry["event"] in ("published", "write failed") for entry in entries)
+    assert all(connection.closed.done() for connection in connected)
+
+
+async def test_background_subscribe_failure_interrupts_the_wait_for_demand(connected, monkeypatch: pytest.MonkeyPatch):
+    async def failing_subscribe(*args: Any, **kwargs: Any):
+        await asyncio.sleep(0.01)
+        raise RuntimeError("subscribe exploded")
+
+    monkeypatch.setattr(demo, "subscribe_with_retry", failing_subscribe)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    # The write deadline is 15 s and the run's 2 s: the recorded failure must end the wait first.
+    with pytest.raises(RuntimeError, match="subscribe failed: RuntimeError: subscribe exploded"):
+        await demo.run_demo(CONFIG, lambda _: None)
+    assert loop.time() - started < 1
     assert all(connection.closed.done() for connection in connected)

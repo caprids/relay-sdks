@@ -16,21 +16,31 @@ before collecting diagnostics.
 
 ## Startup and retry policy
 
-A publisher registers a track, then **waits for a matching subscriber** to create relay demand
-before calling `write()`. In combined mode (`both`, the default), the demo starts both sides.
-In separate processes, the namespace fields and track must match exactly. A subscriber started
-before the namespace announcement is visible can receive `404 Broadcast not found`; the demo
-retries that rejection with backoff starting at 500 ms and capped at 2 seconds, through
-`subscribe_with_retry` in `examples/shared/announce_race.py`, the one copy of that policy the
-examples and the live smoke test share. In combined mode it first awaits `publisher.announced`, the
-announce reaching the wire, which removes most of the race; the relay still needs about a round trip
-after it. Other rejections fail the run. The overall `--timeout` bounds waiting, retries, and
-reception.
+A publisher registers a track and calls `write()`, which **waits for a matching subscriber** to
+create relay demand before it sends anything. In combined mode (`both`, the default), the demo
+starts both sides. In separate processes, the namespace fields and track must match exactly. A
+subscriber started before the namespace announcement is visible can receive
+`404 Broadcast not found`; the demo retries that rejection with backoff starting at 500 ms and
+capped at 2 seconds, through `subscribe_with_retry` in `examples/shared/announce_race.py`, the one
+copy of that policy the examples and the live smoke test share. In combined mode it first awaits
+`publisher.announced`, the announce reaching the wire, which removes most of the race; the relay
+still needs about a round trip after it. Other rejections fail the run. The overall `--timeout`
+bounds waiting, retries, and reception.
 
-Once a write starts, any failure ends the run: transport writes and closes can time out after
-partial delivery. The demo does not infer the phase from error text or resend the same payload.
-Demand can disappear between the initial check and the write; that failure also propagates.
-The broader structured error/phase policy is tracked in [#67](https://github.com/muxinc/relay-sdks/issues/67).
+The write deadline (15 seconds in the demo) covers that wait and the transport steps after it.
+The demo writes through `write_with_retry` in `examples/shared/demand_timeout.py`, which branches on
+the error's structured `code` and `phase`, never on its message:
+
+- `WRITE_TIMEOUT` in phase `waiting-for-demand` means no subscriber asked for the track in time and
+  nothing was sent. The demo logs `waiting` ("nothing was sent, writing again") and writes the same
+  object again, until the overall `--timeout` cancels the wait.
+- A failure in a sending phase (`opening-stream`, `writing`, `closing`) may follow partial or even
+  complete delivery. The demo logs `write failed` with the code and phase, does not resend the
+  payload, and ends the run through its failure path. Choosing fresh data or a new group instead is
+  the application's decision.
+- Anything else, such as `CLOSED` or `NAMESPACE_NOT_SOLICITED` while waiting, ends the run without a
+  retry.
+
 A successful write means transport acceptance, not viewer acknowledgment. The combined run waits
 for the requested object count to come back through the subscriber before reporting success.
 
