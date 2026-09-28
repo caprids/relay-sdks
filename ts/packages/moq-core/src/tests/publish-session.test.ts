@@ -6,9 +6,12 @@ import {
   decodeControlMessage,
   encodeGoaway,
   encodePublish,
+  encodePublishDone,
   encodeRequestUpdate,
   encodeSetup,
   encodeSubscribe,
+  encodeSubscribeOk,
+  PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
   type TrackNamespace,
 } from '../protocol/control-messages.js';
@@ -19,9 +22,14 @@ import {
   type IncomingSubscribe,
   type MoqtPublishSessionCallbacks,
 } from '../protocol/publish-session.js';
-import { createMoqtSession, type MoqtSession } from '../protocol/session.js';
-import { openRawRequest, rawSubscribe as rawSubscribeTo, solicitNamespace } from './helpers/raw-peer.js';
-import { createTransportPair } from './helpers/transport-pair.js';
+import { createMoqtSession, type MoqtSession, type MoqtTransport, type PublishDone } from '../protocol/session.js';
+import {
+  openRawRequest,
+  type RawRequest,
+  rawSubscribe as rawSubscribeTo,
+  solicitNamespace,
+} from './helpers/raw-peer.js';
+import { createTransportPair, type PipeEvent } from './helpers/transport-pair.js';
 
 const NAMESPACE = ['live', 'abc123'];
 
@@ -31,11 +39,45 @@ function rawSubscribe(server: Parameters<typeof rawSubscribeTo>[0], trackName: s
 }
 
 function makePublishHarness(callbacks: MoqtPublishSessionCallbacks = {}) {
-  const pair = createTransportPair();
+  const events: PipeEvent[] = [];
+  const pair = createTransportPair({ events });
   const subscriber = createMoqtSession(pair.server, { unknownAliasTimeoutMs: 500 });
   const session = createMoqtPublishSession(pair.client, { callbacks });
 
-  return { pair, session, subscriber };
+  return { pair, session, subscriber, events };
+}
+
+/** PUBLISH_DONE spelled out byte by byte (§10.12), for statuses and counts under 64. */
+function publishDoneBytes(status: number, streamCount: number, reason: string): number[] {
+  const encoded = [...new TextEncoder().encode(reason)];
+  const body = [status, streamCount, encoded.length, ...encoded];
+
+  return [0x0b, 0x00, body.length, ...body];
+}
+
+/** What the publisher wrote on a subscription's request stream after SUBSCRIBE_OK. */
+function afterSubscribeOk(request: RawRequest, trackAlias: number): number[] {
+  const raw = request.raw();
+  const subscribeOk = encodeSubscribeOk(trackAlias, {}, []);
+
+  expect([...raw.subarray(0, subscribeOk.length)]).toEqual([...subscribeOk]);
+  return [...raw.subarray(subscribeOk.length)];
+}
+
+const PUBLISH_DONE_TYPE = 0x0b;
+
+/** Collect, in order, the pair-level writables under the data streams the publisher opens on `transport`. */
+function recordDataStreams(transport: MoqtTransport): WritableStream<Uint8Array>[] {
+  const streams: WritableStream<Uint8Array>[] = [];
+  const create = transport.createUnidirectionalStream.bind(transport);
+
+  transport.createUnidirectionalStream = async () => {
+    const stream = await create();
+
+    streams.push(stream);
+    return stream;
+  };
+  return streams;
 }
 
 function collectTrack(
@@ -399,7 +441,7 @@ describe('createMoqtPublishSession', () => {
     subscriber.destroy();
   });
 
-  it('ends a track by FINing its subscription streams with no trailing message', async () => {
+  it('ends a track with PUBLISH_DONE TRACK_ENDED, then FIN', async () => {
     const endedRequests: number[] = [];
     const bindings: (number | undefined)[] = [];
     const { pair, session, subscriber } = makePublishHarness({
@@ -425,10 +467,14 @@ describe('createMoqtPublishSession', () => {
     await vi.waitFor(() => {
       expect(subscribe.ended()).toBe(true);
     });
-    // A bare FIN is the clean track end. Any byte after
-    // SUBSCRIBE_OK — the old PUBLISH_DONE — makes moq-lite-rs abort the
-    // track for every downstream viewer instead of finishing it.
-    expect(subscribe.received.map((m) => m.kind)).toEqual(['subscribe-ok']);
+    // PUBLISH_DONE before the FIN (§3.3.2): TRACK_ENDED, no data streams
+    // opened, then the FIN. moq-relay 0.15.4 and later treat a FIN
+    // without it as a failed request.
+    expect(subscribe.failure()).toBeUndefined();
+    expect(afterSubscribeOk(subscribe, 21)).toEqual(publishDoneBytes(0x2, 0, 'track ended'));
+    expect(afterSubscribeOk(subscribe, 21)).toEqual([
+      ...encodePublishDone(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, 'track ended'),
+    ]);
 
     // The peer closing its side afterwards must not double-report.
     void subscribe.fin();
@@ -459,10 +505,10 @@ describe('createMoqtPublishSession', () => {
 
     await vi.waitFor(() => {
       expect(second.received).toHaveLength(1);
-      // The replaced subscription ends cleanly (FIN, no trailing bytes).
+      // The replaced subscription ends cleanly: PUBLISH_DONE TRACK_ENDED, then FIN.
       expect(first.ended()).toBe(true);
     });
-    expect(first.received.map((m) => m.kind)).toEqual(['subscribe-ok']);
+    expect(afterSubscribeOk(first, 31)).toEqual(publishDoneBytes(0x2, 0, 'superseded by a newer subscription'));
     // The relay closes its own side after seeing ours; only then does the
     // replaced subscription's stream fully end.
     void first.fin();
@@ -876,10 +922,18 @@ describe('createMoqtPublishSession', () => {
     // peer believing its new range is in effect.
     await sub.send(encodeRequestUpdate(113, { locationFilter: { type: 'relative-group', groupsBeforeNext: 0 } }));
     await vi.waitFor(() => {
-      expect(sub.received.map((m) => m.kind)).toEqual(['subscribe-ok', 'request-error']);
+      expect(sub.received.map((m) => m.kind)).toEqual(['subscribe-ok', 'request-error', 'publish-done']);
       expect(sub.ended()).toBe(true);
       expect(endedRequests).toEqual([111]);
       expect(bindings.at(-1)).toBeUndefined();
+    });
+    // A failed update terminates the subscription with PUBLISH_DONE
+    // UPDATE_FAILED (§10.9.1).
+    expect(sub.received.at(-1)).toEqual({
+      kind: 'publish-done',
+      statusCode: PUBLISH_DONE_STATUS.UPDATE_FAILED,
+      streamCount: 0,
+      reason: 'unsupported subscription update',
     });
     session.destroy();
     subscriber.destroy();
@@ -939,6 +993,200 @@ describe('createMoqtPublishSession', () => {
       // must not leak a half-open stream.
       expect(subscribe.ended()).toBe(true);
     });
+    // The subscription was Established, so PUBLISH_DONE precedes that FIN
+    // (§3.3.2).
+    expect(afterSubscribeOk(subscribe, 41)).toEqual(publishDoneBytes(0x0, 0, 'subscriber closed its request stream'));
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('sends no PUBLISH_DONE for a cancelled subscription and resets its data streams', async () => {
+    const bindings: (number | undefined)[] = [];
+    const { pair, session, subscriber, events } = makePublishHarness({
+      onTrackBinding: ({ trackAlias }) => bindings.push(trackAlias),
+    });
+
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    const subscribe = await rawSubscribe(pair.server, 'video', 43);
+
+    await vi.waitFor(() => {
+      expect(bindings).toEqual([43]);
+    });
+    const dataStreams = recordDataStreams(pair.client);
+
+    await session.openUniStream(43);
+
+    // A reset is a cancellation (§3.3.3): no PUBLISH_DONE, and open data
+    // streams are reset (§5.1.1).
+    void subscribe.reset();
+    await vi.waitFor(() => {
+      expect(bindings).toEqual([43, undefined]);
+      expect(subscribe.ended()).toBe(true);
+    });
+    expect(afterSubscribeOk(subscribe, 43)).toEqual([]);
+    expect(events.filter((event) => event.stream === dataStreams[0]).map((event) => event.kind)).toEqual(['abort']);
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('counts the data streams and closes every one before PUBLISH_DONE', async () => {
+    const { pair, session, subscriber, events } = makePublishHarness();
+
+    await session.ready;
+    const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    const subscribe = await rawSubscribe(pair.server, 'video', 61);
+
+    await vi.waitFor(() => {
+      expect(subscribe.received).toHaveLength(1);
+    });
+
+    const dataStreams = recordDataStreams(pair.client);
+    const before = events.length;
+    const finished = await session.openUniStream(61);
+    const stillOpen = await session.openUniStream(61);
+    const [finishedStream, stillOpenStream] = dataStreams;
+    const stillOpenWriter = stillOpen.getWriter();
+
+    await finished.close();
+    track.end();
+    await vi.waitFor(() => {
+      expect(subscribe.ended()).toBe(true);
+    });
+    expect(afterSubscribeOk(subscribe, 61)).toEqual(publishDoneBytes(0x2, 2, 'track ended'));
+
+    // In issue order: the caller's FIN, the session's reset of the stream
+    // still open, then PUBLISH_DONE and the request stream's FIN (§10.12:
+    // "MUST NOT send PUBLISH_DONE until it has closed all streams").
+    const requestStream = events.find((event) => event.bytes[0] === PUBLISH_DONE_TYPE)?.stream;
+    const label = new Map([
+      [finishedStream, 'finished'],
+      [stillOpenStream, 'still open'],
+      [requestStream, 'request'],
+    ]);
+    const steps = events
+      .slice(before)
+      .filter((event) => label.has(event.stream))
+      .map((event) => [label.get(event.stream), event.kind]);
+
+    expect(steps).toEqual([
+      ['finished', 'close'],
+      ['still open', 'abort'],
+      ['request', 'write'],
+      ['request', 'close'],
+    ]);
+
+    // The stream the session reset is gone for the caller too.
+    await expect(stillOpenWriter.write(new Uint8Array([1]))).rejects.toBeDefined();
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('opens data streams only for a live subscription', async () => {
+    const { pair, session, subscriber } = makePublishHarness();
+
+    await session.ready;
+    const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    await expect(session.openUniStream(81)).rejects.toThrow('no live subscription');
+
+    const subscribe = await rawSubscribe(pair.server, 'video', 81);
+
+    await vi.waitFor(() => {
+      expect(subscribe.received).toHaveLength(1);
+    });
+    await session.openUniStream(81);
+
+    track.end();
+    // Ended: its PUBLISH_DONE already carries the count, so no further
+    // stream may join it.
+    await expect(session.openUniStream(81)).rejects.toThrow('no live subscription');
+    await vi.waitFor(() => {
+      expect(subscribe.ended()).toBe(true);
+    });
+    expect(afterSubscribeOk(subscribe, 81)).toEqual(publishDoneBytes(0x2, 1, 'track ended'));
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('resets a data stream that finishes opening after its subscription ended', async () => {
+    const { pair, session, subscriber, events } = makePublishHarness();
+
+    await session.ready;
+    const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    const subscribe = await rawSubscribe(pair.server, 'video', 91);
+
+    await vi.waitFor(() => {
+      expect(subscribe.received).toHaveLength(1);
+    });
+
+    // Hold the open in flight across the end.
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const create = pair.client.createUnidirectionalStream.bind(pair.client);
+
+    pair.client.createUnidirectionalStream = async () => {
+      await released;
+      return create();
+    };
+    const before = events.length;
+    const opening = session.openUniStream(91);
+
+    track.end();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // PUBLISH_DONE waits for the open to settle.
+    expect(subscribe.ended()).toBe(false);
+
+    release();
+    await expect(opening).rejects.toThrow('ended');
+    await vi.waitFor(() => {
+      expect(subscribe.ended()).toBe(true);
+    });
+    // The late stream was reset before PUBLISH_DONE and is not counted.
+    const kinds = events
+      .slice(before)
+      .filter((event) => event.kind === 'abort' || event.bytes[0] === PUBLISH_DONE_TYPE)
+      .map((event) => event.kind);
+
+    expect(kinds).toEqual(['abort', 'write']);
+    expect(afterSubscribeOk(subscribe, 91)).toEqual(publishDoneBytes(0x2, 0, 'track ended'));
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('the subscriber driver reports the PUBLISH_DONE of an ended track', async () => {
+    const subscribes: IncomingSubscribe[] = [];
+    const { session, subscriber } = makePublishHarness({ onSubscribe: (s) => subscribes.push(s) });
+
+    await session.ready;
+    const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    const done: PublishDone[] = [];
+    const subscription = subscriber.subscribe(
+      { trackNamespace: NAMESPACE, trackName: 'video' },
+      { onDone: (d) => done.push(d) }
+    );
+
+    await vi.waitFor(() => {
+      expect(subscribes).toHaveLength(1);
+    });
+    const data = await session.openUniStream(subscription.requestId);
+
+    await data.close();
+    track.end();
+    await vi.waitFor(() => {
+      expect(done).toHaveLength(1);
+    });
+    expect(done[0]).toMatchObject({
+      statusCode: PUBLISH_DONE_STATUS.TRACK_ENDED,
+      streamCount: 1,
+      reason: 'track ended',
+    });
     session.destroy();
     subscriber.destroy();
   });
@@ -946,8 +1194,9 @@ describe('createMoqtPublishSession', () => {
   it.each([false, true])('drains FINs and NAMESPACE_DONE, including destroy with an error: %s', async (withError) => {
     const pair = createTransportPair();
     // A fully raw peer: complete SETUP and record every frame on the
-    // publisher's control stream — it must carry SETUP and nothing else
-    // (a client GOAWAY closes a moq-lite-rs session, code 17).
+    // publisher's control stream — it must carry SETUP and nothing else:
+    // the publisher sends no GOAWAY (moq-relay 0.14.17 closes the session
+    // on a client GOAWAY, code 17; 0.15.1 and later keep it).
     const controlFrames: ControlMessage[] = [];
 
     void (async () => {
@@ -987,12 +1236,12 @@ describe('createMoqtPublishSession', () => {
     if (withError) session.destroy(error);
     else session.close();
     await vi.waitFor(() => {
-      // The announce is retracted and the subscription FINed cleanly
-      // before the transport goes away.
+      // The announce is retracted and the subscription ended cleanly
+      // (PUBLISH_DONE, then FIN) before the transport goes away.
       expect(solicitation.received.map((m) => m.kind)).toEqual(['request-ok', 'namespace', 'namespace-done']);
       expect(subscribe.ended()).toBe(true);
     });
-    expect(subscribe.received.map((m) => m.kind)).toEqual(['subscribe-ok']);
+    expect(afterSubscribeOk(subscribe, 51)).toEqual(publishDoneBytes(0x2, 0, 'track ended'));
     expect(controlFrames.map((m) => m.kind)).toEqual(['setup']);
     await expect(pair.client.closed).resolves.toEqual({ closeCode: 0, reason: '' });
     expect(onClosed).toHaveBeenCalledExactlyOnceWith(withError ? { error } : {});
