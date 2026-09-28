@@ -7,6 +7,7 @@
  */
 import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
 import { subscribeWithRetry } from '../shared/announce-race.js';
+import { writeWithRetry } from '../shared/demand-timeout.js';
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -117,11 +118,32 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
     }
 
     if (writer) {
+      // The SDK waits for demand inside write(), up to the track's write deadline. Only a timeout in
+      // that wait proves nothing was sent, so only it writes the same object again.
+      const retry = {
+        signal: lifetime.signal,
+        onRetry: () => {
+          failIfBroken();
+          log({
+            event: 'waiting',
+            detail: 'no relay demand within the write deadline; nothing was sent, writing again',
+          });
+        },
+        onUncertain: (error) =>
+          log({
+            event: 'write failed',
+            code: error.code,
+            phase: error.phase,
+            detail: 'sending had started; the relay may hold the object, so it is not resent',
+          }),
+      };
       for (let seq = 1; seq <= count; seq += 1) {
         const bytes = encoder.encode(
           JSON.stringify({ seq, sentAt: new Date().toISOString(), message: `tick ${seq} from the @mux/relay example` }),
         );
-        await writeWhenDemanded(writer, bytes, failIfBroken, lifetime.signal, log);
+        failIfBroken();
+        if (!writer.hasDemand) log({ event: 'waiting', detail: 'no relay demand yet; write() waits for a subscriber' });
+        await writeWithRetry(writer, bytes, retry);
         log({ event: 'published', seq, bytes: bytes.byteLength });
         if (seq < count) await sleep(intervalMs, lifetime.signal);
       }
@@ -144,20 +166,6 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
       lifetime.abort();
     }
   }
-}
-
-/** Wait without sending; once write() starts, failure may mean partial delivery. Never replay it. */
-async function writeWhenDemanded(writer, bytes, failIfBroken, signal, log) {
-  if (!writer.hasDemand) log({ event: 'waiting', detail: 'no relay demand yet; waiting before writing' });
-  while (!writer.hasDemand) {
-    failIfBroken();
-    if (writer.closed) throw new Error('Published track closed while waiting for demand');
-    await sleep(100, signal);
-  }
-  failIfBroken();
-  // Demand can disappear after the check. The SDK bounds that race with its write deadline.
-  // Even a timeout is propagated: this API cannot prove that no bytes were sent.
-  await writer.write(bytes);
 }
 
 /** The SDK delivers raw bytes. This expects the JSON written above and shows anything else as text. */
