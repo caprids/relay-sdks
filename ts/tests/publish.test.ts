@@ -62,6 +62,38 @@ describe('connectRelayPublisher', () => {
     expect(createTransport).not.toHaveBeenCalled();
   });
 
+  it('validates the shared connection deadline before resolving credentials or opening transport', async () => {
+    const getToken = vi.fn();
+    const createTransport = vi.fn();
+    const connecting = connectRelayPublisher({ url, namespace, connectTimeoutMs: 0, getToken, createTransport });
+
+    await expect(connecting).rejects.toThrow(RangeError);
+    await expect(connecting).rejects.toThrow('connectTimeoutMs must be between 0 (exclusive) and 2147483647');
+    expect(getToken).not.toHaveBeenCalled();
+    expect(createTransport).not.toHaveBeenCalled();
+  });
+
+  it('has no request deadline: a stray requestTimeoutMs is a type error and is ignored at runtime', async () => {
+    const hub = createRelayHub();
+    cleanup.push(() => hub.destroy());
+    // An out-of-range value would be a RangeError on a subscriber; a publisher never reads it.
+    const publisher = await connectRelayPublisher({
+      url,
+      namespace,
+      createTransport: hub.connectPublisher,
+      // @ts-expect-error requestTimeoutMs is subscriber-only (issue #72).
+      requestTimeoutMs: -1,
+    });
+    cleanup.push(() => publisher.close());
+    const events = publisher.registerTrack({ track: 'events' });
+    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
+    cleanup.push(() => subscriber.close());
+    const { objects } = receive(subscriber, 'events');
+
+    await events.write(new Uint8Array([1]));
+    await vi.waitFor(() => expect(objects).toHaveLength(1));
+  });
+
   it('publishes with 32 namespace fields and diagnoses track-name type separately from emptiness', async () => {
     const hub = createRelayHub();
     cleanup.push(() => hub.destroy());

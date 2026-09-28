@@ -19,9 +19,10 @@ export type RelayTransportFactory = (
 ) => { transport: MoqtTransport; ready: Promise<void> };
 
 /**
- * Connection options shared by connectRelaySubscriber and connectRelayPublisher: endpoint,
- * token, lifetime signal, deadlines, and transport injection. Issue #72 separates the
- * subscriber-only requestTimeoutMs from this shared shape.
+ * Connection options shared by connectRelaySubscriber and connectRelayPublisher: endpoint, token,
+ * lifetime signal, connection deadline, and transport injection. Each role's options extend this
+ * with what only that role uses: {@link ConnectRelaySubscriberOptions} and
+ * `ConnectRelayPublisherOptions`.
  */
 export interface ConnectRelayOptions {
   /** Relay's HTTPS WebTransport endpoint, including any endpoint path. */
@@ -36,9 +37,13 @@ export interface ConnectRelayOptions {
   signal?: AbortSignal;
   /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
   connectTimeoutMs?: number;
+  createTransport?: RelayTransportFactory;
+}
+
+/** Options for connectRelaySubscriber: the shared connection options plus the request deadline. */
+export interface ConnectRelaySubscriberOptions extends ConnectRelayOptions {
   /** Deadline for an initial subscription response, not for silence on an accepted track. Default 10 seconds, maximum 2147483647. */
   requestTimeoutMs?: number;
-  createTransport?: RelayTransportFactory;
 }
 
 interface Session {
@@ -77,7 +82,10 @@ function createBrowserTransport(url: string, protocols: string[]) {
   return { transport, ready: transport.ready };
 }
 
-/** Shared transport/auth lifetime for the subscribe and publish session drivers. */
+/**
+ * Shared transport/auth lifetime for the subscribe and publish session drivers. It validates only
+ * the shared options; each role checks its own options before calling it.
+ */
 export async function openRelaySession<T extends Session>(
   options: ConnectRelayOptions,
   createSession: (transport: MoqtTransport, callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>) => T,
@@ -94,7 +102,6 @@ export async function openRelaySession<T extends Session>(
 
   const timeoutMs = options.connectTimeoutMs ?? 10_000;
   assertTimeoutMs('connectTimeoutMs', timeoutMs);
-  assertTimeoutMs('requestTimeoutMs', options.requestTimeoutMs ?? 10_000);
 
   options.signal?.throwIfAborted();
 

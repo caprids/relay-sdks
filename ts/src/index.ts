@@ -14,6 +14,7 @@ export type {
 } from '@mux/moq-core';
 export type {
   ConnectRelayOptions,
+  ConnectRelaySubscriberOptions,
   RelaySubscriber,
   RelaySubscriptionHandlers,
   RelayTrackOptions,

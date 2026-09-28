@@ -211,6 +211,13 @@ over `getToken`, matching the current Relay connection authentication convention
 between 0 (exclusive) and 2147483647 milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError`
 rather than a deadline that fires immediately.
 
+Both roles take the same connection options, `ConnectRelayOptions`: `url`, `getToken`, `signal`,
+`connectTimeoutMs`, and `createTransport`. `ConnectRelaySubscriberOptions` adds `requestTimeoutMs`,
+the deadline for a subscription's initial response. `ConnectRelayPublisherOptions` adds `namespace`
+and has no request deadline: each track's `writeTimeoutMs` bounds its wait for demand and its
+writes. Passing `requestTimeoutMs` to `connectRelayPublisher` is a type error; untyped JavaScript
+that passes it anyway has it ignored, like any other option the call does not take.
+
 Namespaces are arrays of 1–32 non-empty string fields, sent verbatim without splitting on `/`; a
 single string is a `TypeError`, not a one-field namespace. The 32-field protocol limit is pinned in
 [protocol.json](../spec/protocol.json) and exceeding it is a `RangeError`. Track names must be

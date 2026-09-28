@@ -9,7 +9,7 @@ import {
   REQUEST_ERROR_CODE,
 } from '../packages/moq-core/src/protocol/control-messages.js';
 import {
-  type ConnectRelayOptions,
+  type ConnectRelaySubscriberOptions,
   connectRelaySubscriber,
   type MoqtObject,
   RelayError,
@@ -29,7 +29,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-async function connectFake(options: Partial<ConnectRelayOptions> = {}) {
+async function connectFake(options: Partial<ConnectRelaySubscriberOptions> = {}) {
   const fake = createFakeTransport();
   const createTransport = vi.fn<RelayTransportFactory>(() => ({ transport: fake.transport, ready: Promise.resolve() }));
   const connecting = connectRelaySubscriber({ url: endpoint, createTransport, ...options });

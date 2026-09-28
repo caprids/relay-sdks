@@ -57,8 +57,6 @@ class ConnectRelayOptions:
     """Cancelling closes the connection, including after the connect call has returned."""
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT
     """Seconds for token resolution, transport connection, and protocol SETUP together."""
-    request_timeout: float = DEFAULT_REQUEST_TIMEOUT
-    """Seconds for an initial subscription response, not for silence on an accepted track."""
     create_transport: RelayTransportFactory | None = None
 
 
@@ -153,7 +151,8 @@ class RelaySessionLifetime(Generic[T]):
         await self._transport.wait_closed()
 
 
-def _validate_timeout(name: str, value: float) -> None:
+def validate_timeout(name: str, value: float) -> None:
+    """Reject a deadline that is not a positive finite number of seconds."""
     if not isinstance(value, int | float) or isinstance(value, bool) or math.isnan(value) or value <= 0:
         raise ValueError(f"{name} must be a positive finite number of seconds")
 
@@ -205,8 +204,7 @@ async def open_relay_session(
 ) -> RelaySessionLifetime[T]:
     """Resolve the token, connect the transport, run SETUP, and bind the session to the lifetime."""
     url, has_jwt = _parse_endpoint(options.url)
-    _validate_timeout("connect_timeout", options.connect_timeout)
-    _validate_timeout("request_timeout", options.request_timeout)
+    validate_timeout("connect_timeout", options.connect_timeout)
 
     cancellation = options.cancellation
     if cancellation is not None:
@@ -395,4 +393,5 @@ __all__ = [
     "RelayTransportFactory",
     "TokenProvider",
     "open_relay_session",
+    "validate_timeout",
 ]

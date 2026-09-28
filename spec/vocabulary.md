@@ -39,6 +39,9 @@ without a row here is a bug.
 | Borrowed protocol-level track access for integrations | `subscriber.trackSource` (a `MoqTrackSource`) | `subscriber.track_source` (a `MoqTrackSource`) |
 | The connection ended, and why | `connection.closed` resolves `{ error? }` | `await connection.closed` returns `Closed(error=...)` |
 | Cancel a connection's whole lifetime from outside | `AbortSignal` (platform), given as `signal` | `CancellationToken`, given as `cancellation=`; `Cancelled` is the reason it raises when `cancel()` was given none |
+| Options every connection takes: endpoint, token provider, lifetime cancellation, connection deadline, transport | `ConnectRelayOptions` (`url`, `getToken`, `signal`, `connectTimeoutMs`, `createTransport`) | the shared keyword arguments of both entry points (`url`, `get_token`, `cancellation`, `connect_timeout`, `create_transport`) |
+| Options only a subscriber connection takes | `ConnectRelaySubscriberOptions`: the shared options plus `requestTimeoutMs` | `connect_relay_subscriber`'s shared keyword arguments plus `request_timeout` |
+| Options only a publisher connection takes | `ConnectRelayPublisherOptions`: the shared options plus `namespace`; no request deadline | `connect_relay_publisher`'s shared keyword arguments plus `namespace`; no request deadline |
 | Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready)` (`RelayTransportFactory`); `connect_webtransport`, the aioquic factory, by default |
 | Consume one subscription as an async iterator | `subscriber.subscribeEvents(options)` returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
 | One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
@@ -66,9 +69,21 @@ Not adopted: keeping `connectRelay` as the short, default entry point (subscribi
 fundamental than publishing, and the asymmetry is what caused the confusion); `RelayConnection` as a
 shared base type (the two roles share a lifetime implementation, not an API).
 
-The connection options types are not part of this decision. Publisher options currently extend
-the subscriber options; separating shared connection options from subscriber-only ones is
-[issue #72](https://github.com/muxinc/relay-sdks/issues/72).
+The connection options follow the same split
+([issue #72](https://github.com/muxinc/relay-sdks/issues/72)). `ConnectRelayOptions` is what both
+roles take: endpoint, token provider, lifetime signal, connection deadline, and transport. Each
+role's type extends it with what only that role uses. `ConnectRelaySubscriberOptions` adds
+`requestTimeoutMs`, the deadline for a subscription's initial response.
+`ConnectRelayPublisherOptions` adds `namespace` and no request deadline, because a publisher sends
+no request that deadline would bound; each track's `writeTimeoutMs` bounds waiting for demand and
+writing. A `requestTimeoutMs` given to a publisher is a compile-time error and is ignored at
+runtime, as is any other key the call does not take.
+
+Not adopted: renaming the shared type `RelayConnectionOptions` (that is the shared-base name the
+role decision above set aside, and the two roles share a lifetime, not an API); keeping
+`requestTimeoutMs` on the shared type (a publisher would advertise, and validate, a deadline that
+changes nothing); rejecting a stray `requestTimeoutMs` on a publisher at runtime (the SDK checks
+the options a call uses, not the absence of others).
 
 ## Track registration is not sending: `registerTrack`, `write`
 
@@ -267,8 +282,8 @@ TypeScript).
 ## Names considered and left alone
 
 - `RelayTrackOptions`, the subscribe request shape (`namespace`, `track`, `parameters`), and
-  `ConnectRelayOptions`, the connection options shared by both roles. Issue #72 separates the
-  options types by role and can rename them then.
+  `ConnectRelayOptions`, the connection options shared by both roles: issue #72 kept the name for
+  the shared shape and added the role types beside it.
 - `SubscriptionEnd`'s field names `kind`, `cause`, `accepted`, `error`: plain words for a value most
   callers only log or branch on once.
 - `RelayTrackWriter`, `RelayGroupWriter`, `write`, `openGroup`, `close`, `abort`: these say what

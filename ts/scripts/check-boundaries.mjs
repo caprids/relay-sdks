@@ -67,4 +67,9 @@ assert.deepEqual(Object.keys(sdkExports).sort(), [
   'readJSON',
   'readText',
 ]);
+// Generated declarations name the shared connection options and each role's own (issue #72).
+const declarations = await readFile(resolve(root, 'dist/index.d.ts'), 'utf8');
+for (const name of ['ConnectRelayOptions', 'ConnectRelaySubscriberOptions', 'ConnectRelayPublisherOptions']) {
+  assert.match(declarations, new RegExp(`\\b${name}\\b`), `${name} must be exported from the built declarations`);
+}
 console.log('Built SDK and media formats import only the generic core; core has no runtime package imports.');
