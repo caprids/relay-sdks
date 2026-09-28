@@ -161,7 +161,9 @@ demultiplex subscriptions with identical filters. Unique aliases avoid both.
 
 Downstream, a viewer of a track that ended by FIN receives a PUBLISH_DONE the relay writes itself,
 with status 2 `track ended` on some runs and 0 `internal error` on others
-([issue #25](https://github.com/muxinc/relay-sdks/issues/25)). Both cores' publish-session tests
+([issue #25](https://github.com/muxinc/relay-sdks/issues/25)). What may follow SUBSCRIBE_OK on a
+request stream is also the open question in
+[issue #94](https://github.com/muxinc/relay-sdks/issues/94), from the subscriber's side. Both cores' publish-session tests
 pin the three choices against in-process raw peers: a track end FINs its subscription streams with
 no trailing message, an orderly close puts SETUP and nothing else on the control stream, and
 SUBSCRIBE_OK carries the request ID as the alias.
