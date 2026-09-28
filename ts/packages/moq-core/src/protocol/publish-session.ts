@@ -51,6 +51,7 @@ import { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './errors.
 import { isSubgroupHeaderType, STREAM_TYPE } from './object-stream.js';
 import type { BidirectionalStreamLike } from './request-stream.js';
 import type { Goaway, MoqtTransport } from './session.js';
+import { streamResetReason } from './stream-reset.js';
 
 // =============================================================================
 // Driver types
@@ -188,9 +189,12 @@ interface SubscriberStream {
   opening: Set<Promise<void>>;
 }
 
-/** The reason handed to a data stream the session resets when its subscription ends (§3.3.4 CANCELLED). */
-function dataStreamReset(): Error {
-  return Object.assign(new Error('the subscription ended'), { streamErrorCode: STREAM_RESET_CODE.CANCELLED });
+/**
+ * The reason handed to a data stream the session resets when its subscription ends (§3.3.4 CANCELLED): a
+ * WebTransportError in a browser, which is the only form WebTransport reads the code from.
+ */
+function dataStreamReset(): unknown {
+  return streamResetReason(STREAM_RESET_CODE.CANCELLED, 'the subscription ended');
 }
 
 function resetDataStreams(subscriber: SubscriberStream): void {

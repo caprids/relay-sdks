@@ -14,6 +14,7 @@ import {
   encodeSubscribeOk,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
+  STREAM_RESET_CODE,
   type TrackNamespace,
 } from '../protocol/control-messages.js';
 import { SESSION_ERROR } from '../protocol/errors.js';
@@ -1348,6 +1349,64 @@ describe('createMoqtPublishSession', () => {
     expect(requestSteps.map((event) => event.kind)).toEqual(['write', 'close']);
     expect(requestSteps.every((event) => event.index < transportClosedAt!)).toBe(true);
     subscriber.destroy();
+  });
+
+  it("resets a superseded subscription's data streams with a WebTransportError carrying CANCELLED", async () => {
+    // Spec-shaped: WebTransport reads a reset's code only from this native type's `streamErrorCode`.
+    class FakeWebTransportError extends Error {
+      readonly source: string;
+      readonly streamErrorCode: number | null;
+      constructor(message = '', options: { source?: string; streamErrorCode?: number } = {}) {
+        super(message);
+        this.source = options.source ?? 'stream';
+        this.streamErrorCode = options.streamErrorCode ?? null;
+      }
+    }
+    vi.stubGlobal('WebTransportError', FakeWebTransportError);
+
+    try {
+      const { pair, session, subscriber } = makePublishHarness();
+
+      await session.ready;
+      session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+      const older = await rawSubscribe(pair.server, 'video', 97);
+
+      await vi.waitFor(() => {
+        expect(older.received).toHaveLength(1);
+      });
+
+      const reasons: unknown[] = [];
+      const create = pair.client.createUnidirectionalStream.bind(pair.client);
+
+      pair.client.createUnidirectionalStream = async () => {
+        const inner = (await create()).getWriter();
+
+        return new WritableStream<Uint8Array>({
+          write: (chunk) => inner.write(chunk),
+          close: () => inner.close(),
+          abort: (reason) => {
+            reasons.push(reason);
+            return inner.abort(reason);
+          },
+        });
+      };
+      await session.openUniStream(97);
+
+      // A newer subscription supersedes the older one; the caller never closed its data stream.
+      await rawSubscribe(pair.server, 'video', 99);
+      await vi.waitFor(() => {
+        expect(older.ended()).toBe(true);
+      });
+
+      expect(reasons).toHaveLength(1);
+      expect(reasons[0]).toBeInstanceOf(FakeWebTransportError);
+      expect(reasons[0]).toMatchObject({ source: 'stream', streamErrorCode: STREAM_RESET_CODE.CANCELLED });
+      session.destroy();
+      subscriber.destroy();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it('the subscriber driver reports the PUBLISH_DONE of an ended track', async () => {
