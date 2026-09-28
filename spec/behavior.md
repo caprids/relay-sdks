@@ -102,14 +102,21 @@ container, copied once, and only then used. Both roles apply the same rules, so 
 publisher accepts is one the subscriber accepts. Arguments are checked before connection or slot
 state at every entry point: a bad argument is reported the same way on a closed connection or a busy
 track, and it never reaches the token provider, the transport factory, a request id or a stream. The
-portable cases live in `vectors/arguments.json` and run in every SDK's suite.
+portable cases live in `vectors/arguments.json` and run in every SDK's suite. The table also lists
+the local checks that stay where they are consumed (deadlines, track registration, object status,
+event capacity); they follow the same class rule, and only track registration is checked after
+connection state, because it depends on the connection's registry.
 
 | Argument | Rule | `TypeError` in both languages | `RangeError` (TypeScript) / `ValueError` (Python) | Checked at |
 | --- | --- | --- | --- | --- |
 | Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe` |
 | Track name | A non-empty string, in both roles. | anything else | | `registerTrack` / `register_track`; the three subscriber entry points |
 | Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length) and the encoded list at most `limits.maxObjectPropertiesBytes`; the SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds the object bound | `registerTrack` / `register_track`; `write` on a track or group writer |
-| Endpoint | An `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. | another scheme; a fragment or userinfo; no host; an empty `jwt` parameter | | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
+| Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. | not a string; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
+| Deadline | A number in (0, 2147483647] milliseconds in TypeScript, (0, 2147483.647] seconds in Python: the largest delay a JavaScript timer holds, and the same bound in both SDKs. The connection, request and write deadlines share one check. | not a number, including a boolean | zero, negative, NaN, infinite, or above the bound | `connectTimeoutMs` / `connect_timeout` on both connect calls; `requestTimeoutMs` / `request_timeout`; `writeTimeoutMs` / `write_timeout` on `registerTrack` / `register_track` |
+| Track registration | A track name not yet registered on this publisher connection, including after its writer closed. Checked after the track name, properties and deadline, and after connection state. | | a name already registered | `registerTrack` / `register_track` |
+| Object status | `normal`, `end-of-group` or `end-of-track`; defaults to `normal`. | not a string | any other string | `write`, `writeText`, `writeJSON` on a group writer |
+| Event capacity | A positive integer (a safe integer in TypeScript); defaults to 64. | not a number, including a boolean | zero, negative, fractional, NaN, or infinite | `subscribeEvents` / `subscribe_events` |
 | Payload | A byte sequence: any `ArrayBufferView` in TypeScript; any object supporting the buffer protocol in Python (`bytes`, `bytearray`, `memoryview`, ...). Copied once. At most `limits.maxObjectPayloadBytes`. | a string, an `ArrayBuffer`, a list of integers, anything else | longer than the object payload limit | `write`, `writeText`, `writeJSON` on a track or group writer |
 
 Messages are not a compatibility contract; the class and the point of rejection are.
@@ -276,6 +283,8 @@ shared connection merely to stop this consumer. Publisher completion never auto-
 resubscribes; choose a timeout or explicit application policy if no more data is expected.
 
 Only one pending iterator read is supported; a concurrent read fails without disrupting the first.
+It is a state error, not an argument error: a plain `Error` in TypeScript and a `RuntimeError` in
+Python, and not a `RelayError`.
 There is no background consumer task. TS `for await` calls `return()` on `break` or a
 consumer-body exception. Use a `finally { events.close(); }` if cancelling while the body awaits
 other work. A per-iterator `signal` can also interrupt a pending read. Python **requires `async
