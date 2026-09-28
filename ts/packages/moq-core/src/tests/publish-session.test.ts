@@ -10,6 +10,7 @@ import {
   encodeRequestUpdate,
   encodeSetup,
   encodeSubscribe,
+  encodeSubscribeNamespace,
   encodeSubscribeOk,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
@@ -29,7 +30,12 @@ import {
   rawSubscribe as rawSubscribeTo,
   solicitNamespace,
 } from './helpers/raw-peer.js';
-import { createTransportPair, type PipeEvent } from './helpers/transport-pair.js';
+import {
+  createTransportPair,
+  type PipeEvent,
+  setRequestIdParity,
+  withServerRequestIds,
+} from './helpers/transport-pair.js';
 
 const NAMESPACE = ['live', 'abc123'];
 
@@ -41,7 +47,7 @@ function rawSubscribe(server: Parameters<typeof rawSubscribeTo>[0], trackName: s
 function makePublishHarness(callbacks: MoqtPublishSessionCallbacks = {}) {
   const events: PipeEvent[] = [];
   const pair = createTransportPair({ events });
-  const subscriber = createMoqtSession(pair.server, { unknownAliasTimeoutMs: 500 });
+  const subscriber = createMoqtSession(withServerRequestIds(pair.server), { unknownAliasTimeoutMs: 500 });
   const session = createMoqtPublishSession(pair.client, { callbacks });
 
   return { pair, session, subscriber, events };
@@ -95,6 +101,10 @@ function collectTrack(
   );
 
   return { objects, aliases, subscription };
+}
+
+function decodeFrames(bytes: Uint8Array): ControlMessage[] {
+  return new ControlMessageDeframer().push(bytes).map(decodeControlMessage);
 }
 
 describe('createMoqtPublishSession', () => {
@@ -368,13 +378,16 @@ describe('createMoqtPublishSession', () => {
 
     const video = collectTrack(subscriber, 'video');
 
+    // The driver's even id reaches the publisher with its low bit set.
+    const videoRequestId = video.subscription.requestId + 1;
+
     await vi.waitFor(() => {
       // The peer's request ids are session-unique, so they double as the
       // alias — two live request ids sharing an alias is a session-fatal
       // Duplicate on moq-lite-rs.
-      expect(video.aliases).toEqual([video.subscription.requestId]);
+      expect(video.aliases).toEqual([videoRequestId]);
       expect(subscribes.map((s) => s.trackName)).toEqual(['video']);
-      expect(bindings).toEqual([{ trackName: 'video', trackAlias: video.subscription.requestId }]);
+      expect(bindings).toEqual([{ trackName: 'video', trackAlias: videoRequestId }]);
     });
 
     // The ack lands as the driver's update completion (`onUpdateOk` sits
@@ -392,12 +405,68 @@ describe('createMoqtPublishSession', () => {
     await vi.waitFor(() => {
       // The update is attributed to the subscription it rode in on, while
       // consuming a Request ID of its own (§10.1).
-      expect(updates).toEqual([{ requestId: updated.requestId, updateRequestId: expect.any(Number) }]);
-      expect(updates[0]?.updateRequestId).not.toBe(updated.requestId);
+      expect(updates).toEqual([{ requestId: updated.requestId + 1, updateRequestId: expect.any(Number) }]);
+      expect(updates[0]?.updateRequestId).not.toBe(updated.requestId + 1);
       expect(updateAcks).toHaveLength(1);
     });
     session.destroy();
     subscriber.destroy();
+  });
+
+  it('gives the subscribe driver odd request ids past the one-byte varint range', async () => {
+    const closes: unknown[] = [];
+    const { session, subscriber } = makePublishHarness({ onClosed: (info) => closes.push(info) });
+
+    await session.ready;
+
+    // 70 subscriptions take the driver's ids 0..138, past 128, the one-byte MOQT varint limit.
+    const names = Array.from({ length: 70 }, (_, index) => `track-${index}`);
+
+    for (const trackName of names) session.registerTrack({ trackNamespace: NAMESPACE, trackName });
+
+    const tracks = names.map((trackName) => collectTrack(subscriber, trackName));
+
+    await vi.waitFor(() => {
+      expect(tracks.map((track) => track.aliases)).toEqual(tracks.map((track) => [track.subscription.requestId + 1]));
+    });
+    expect(tracks.at(-1)?.subscription.requestId).toBe(138);
+    expect(closes).toEqual([]);
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('sets only the request id bit, at every MOQT varint length boundary', () => {
+    for (const requestId of [
+      0,
+      62,
+      64,
+      126,
+      128,
+      16_382,
+      16_384,
+      2 ** 21 - 2,
+      2 ** 21,
+      2 ** 31,
+      2 ** 32 + 2 ** 28,
+      2 ** 53 - 2,
+    ]) {
+      const [subscribe] = decodeFrames(
+        setRequestIdParity(encodeSubscribe({ requestId, trackNamespace: NAMESPACE, trackName: 'video' }))
+      );
+
+      expect(subscribe).toMatchObject({ kind: 'subscribe', requestId: requestId + 1, trackName: 'video' });
+    }
+
+    // SUBSCRIBE_NAMESPACE's type (0x50) takes two bytes in MOQT's encoding.
+    const [solicitation] = decodeFrames(
+      setRequestIdParity(encodeSubscribeNamespace({ requestId: 64, trackNamespacePrefix: NAMESPACE }))
+    );
+
+    expect(solicitation).toMatchObject({
+      kind: 'subscribe-namespace',
+      requestId: 65,
+      trackNamespacePrefix: NAMESPACE,
+    });
   });
 
   it('does not declare a media timescale for raw tracks', async () => {
@@ -839,12 +908,37 @@ describe('createMoqtPublishSession', () => {
 
     // Aliases ARE the peer's request ids: a reused id would hand two
     // tracks the same alias and make their subgroup streams
-    // indistinguishable — protocol violation, session-fatal.
+    // indistinguishable — session-fatal with INVALID_REQUEST_ID (§10.1).
     await rawSubscribe(pair.server, 'audio', 101);
     await vi.waitFor(() => {
       expect(closes).toHaveLength(1);
     });
     expect((closes[0] as { error?: unknown }).error).toBeInstanceOf(Error);
+    await expect(pair.client.closed).resolves.toEqual({
+      closeCode: SESSION_ERROR.INVALID_REQUEST_ID,
+      reason: 'peer reused request id 101',
+    });
+    subscriber.destroy();
+  });
+
+  it('closes the session when the peer sends a request id with the client parity', async () => {
+    const closes: unknown[] = [];
+    const { pair, session, subscriber } = makePublishHarness({
+      onClosed: (info) => closes.push(info),
+    });
+
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    // The peer is the server, so its request ids are odd (§10.1).
+    await rawSubscribe(pair.server, 'video', 100);
+    await vi.waitFor(() => {
+      expect(closes).toHaveLength(1);
+    });
+    await expect(pair.client.closed).resolves.toEqual({
+      closeCode: SESSION_ERROR.INVALID_REQUEST_ID,
+      reason: 'peer sent even request id 100',
+    });
     subscriber.destroy();
   });
 
@@ -870,6 +964,36 @@ describe('createMoqtPublishSession', () => {
       expect(closes).toHaveLength(1);
     });
     expect((closes[0] as { error?: unknown }).error).toBeInstanceOf(Error);
+    await expect(pair.client.closed).resolves.toEqual({
+      closeCode: SESSION_ERROR.INVALID_REQUEST_ID,
+      reason: 'peer reused request id 111',
+    });
+    subscriber.destroy();
+  });
+
+  it('closes the session when a REQUEST_UPDATE carries a request id with the client parity', async () => {
+    const closes: unknown[] = [];
+    const { pair, session, subscriber } = makePublishHarness({
+      onClosed: (info) => closes.push(info),
+    });
+
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    const sub = await rawSubscribe(pair.server, 'video', 111);
+
+    await vi.waitFor(() => {
+      expect(sub.received.map((m) => m.kind)).toEqual(['subscribe-ok']);
+    });
+
+    await sub.send(encodeRequestUpdate(112, { subscriberPriority: 9 }));
+    await vi.waitFor(() => {
+      expect(closes).toHaveLength(1);
+    });
+    await expect(pair.client.closed).resolves.toEqual({
+      closeCode: SESSION_ERROR.INVALID_REQUEST_ID,
+      reason: 'peer sent even request id 112',
+    });
     subscriber.destroy();
   });
 
@@ -898,6 +1022,7 @@ describe('createMoqtPublishSession', () => {
     await vi.waitFor(() => {
       expect(closes).toHaveLength(1);
     });
+    await expect(pair.client.closed).resolves.toMatchObject({ closeCode: SESSION_ERROR.INVALID_REQUEST_ID });
     subscriber.destroy();
   });
 
@@ -1167,15 +1292,13 @@ describe('createMoqtPublishSession', () => {
     const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
 
     const done: PublishDone[] = [];
-    const subscription = subscriber.subscribe(
-      { trackNamespace: NAMESPACE, trackName: 'video' },
-      { onDone: (d) => done.push(d) }
-    );
+    subscriber.subscribe({ trackNamespace: NAMESPACE, trackName: 'video' }, { onDone: (d) => done.push(d) });
 
     await vi.waitFor(() => {
       expect(subscribes).toHaveLength(1);
     });
-    const data = await session.openUniStream(subscription.requestId);
+    // The alias is the request ID the relay-side driver put on the wire.
+    const data = await session.openUniStream(subscribes[0]!.requestId);
 
     await data.close();
     track.end();

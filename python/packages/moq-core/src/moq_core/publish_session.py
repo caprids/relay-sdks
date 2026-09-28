@@ -322,7 +322,7 @@ class MoqtPublishSession:
         # registration happens only after the REQUEST_OK write settles, so an overlapping solicitation
         # racing that await must be refused off this reservation, not just off the registered set.
         self._pending_namespace_prefixes: list[TrackNamespace] = []
-        # Every inbound request ID ever seen. Reuse is a protocol violation (§10.1), and because
+        # Every inbound request ID ever seen. Reuse closes the session with INVALID_REQUEST_ID (§10.1), and because
         # aliases ARE the peer's request IDs, a reused ID would hand two subscriptions the same alias
         # and make their subgroup streams indistinguishable: session-fatal, per the draft.
         self._peer_request_ids: set[int] = set()
@@ -818,13 +818,17 @@ class MoqtPublishSession:
         reader.cancel()
 
     def _claim_peer_request_id(self, request_id: int) -> None:
-        """Request IDs are consumed once per session (§10.1) and a reuse is session-fatal.
+        """Request IDs are consumed once per session (§10.1); a reused or wrong-parity one is session-fatal.
 
         Every request-initiating message consumes one, and since draft-20 gave it an id of its own,
-        so does REQUEST_UPDATE.
+        so does REQUEST_UPDATE. This endpoint is always the client, so the peer's ids are odd; a
+        reused id or an even one closes the session with INVALID_REQUEST_ID.
         """
+        if request_id % 2 != 1:
+            raise MoqtProtocolError(f"peer sent even request id {request_id}", SESSION_ERROR.INVALID_REQUEST_ID)
+
         if request_id in self._peer_request_ids:
-            raise MoqtProtocolError(f"peer reused request id {request_id}")
+            raise MoqtProtocolError(f"peer reused request id {request_id}", SESSION_ERROR.INVALID_REQUEST_ID)
 
         self._peer_request_ids.add(request_id)
 

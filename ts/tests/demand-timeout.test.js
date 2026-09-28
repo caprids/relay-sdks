@@ -2,6 +2,7 @@
 import { expect, it, vi } from 'vitest';
 import { isDemandTimeout, writeWithRetry } from '../examples/shared/demand-timeout.js';
 import { RelayError } from '../src/index.js';
+import { createWriteSlot } from '../src/write-slot.js';
 
 // The policy imports the SDK by its package name, as the demo does; everything is real.
 vi.mock('@mux/relay', () => vi.importActual('../src/index.js'));
@@ -97,6 +98,29 @@ it.each([
   await expect(writeWithRetry(writer, payload, seen)).rejects.toBe(failure);
 
   expect(writer.attempts).toBe(1);
+  expect(seen.retries).toEqual([]);
+  expect(seen.uncertain).toEqual([]);
+});
+
+it('rejects a write on an ended track without retrying or reporting uncertain delivery', async () => {
+  // The SDK's own track writer, not a fake: a refusal that sent nothing must not look like a sending phase.
+  const openSubgroup = vi.fn();
+  const { writer } = createWriteSlot({
+    openSubgroup,
+    namespaceSolicited: () => undefined,
+    assertOpen() {},
+    endTrack() {},
+    writeTimeoutMs: 1_000,
+  });
+  writer.close();
+  const seen = recorder();
+
+  await expect(writeWithRetry(writer, payload, seen)).rejects.toMatchObject({
+    code: 'CLOSED',
+    phase: 'waiting-for-demand',
+  });
+
+  expect(openSubgroup).not.toHaveBeenCalled();
   expect(seen.retries).toEqual([]);
   expect(seen.uncertain).toEqual([]);
 });

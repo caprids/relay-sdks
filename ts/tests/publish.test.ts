@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createTransportPair } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
+import { createTransportPair, withServerRequestIds } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
 import {
   connectRelayPublisher,
   connectRelaySubscriber,
@@ -186,7 +186,7 @@ describe('connectRelayPublisher', () => {
     await two.write(new Uint8Array([3]));
     await vi.waitFor(() => expect(receivedTwo.objects).toHaveLength(2));
     expect(hub.trackEnds).toContainEqual({ kind: 'subscribe-fin', trackName: 'one' });
-    await expect(one.write(new Uint8Array([4]))).rejects.toMatchObject({ code: 'CLOSED', phase: 'writing' });
+    await expect(one.write(new Uint8Array([4]))).rejects.toMatchObject({ code: 'CLOSED', phase: 'waiting-for-demand' });
   });
 
   it('bounds a write waiting for demand and can publish a later write after the timeout', async () => {
@@ -353,7 +353,10 @@ describe('connectRelayPublisher', () => {
         namespace,
         createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
       }),
-      connectRelaySubscriber({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
+      connectRelaySubscriber({
+        url,
+        createTransport: () => ({ transport: withServerRequestIds(pair.server), ready: Promise.resolve() }),
+      }),
     ]);
     cleanup.push(() => subscriber.close());
     cleanup.push(() => publisher.close());
@@ -528,7 +531,10 @@ describe('connectRelayPublisher', () => {
         namespace,
         createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
       }),
-      connectRelaySubscriber({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
+      connectRelaySubscriber({
+        url,
+        createTransport: () => ({ transport: withServerRequestIds(pair.server), ready: Promise.resolve() }),
+      }),
     ]);
     cleanup.push(() => subscriber.close());
     cleanup.push(() => publisher.close());
@@ -561,7 +567,10 @@ describe('connectRelayPublisher', () => {
         namespace,
         createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
       }),
-      connectRelaySubscriber({ url, createTransport: () => ({ transport: pair.server, ready: Promise.resolve() }) }),
+      connectRelaySubscriber({
+        url,
+        createTransport: () => ({ transport: withServerRequestIds(pair.server), ready: Promise.resolve() }),
+      }),
     ]);
     cleanup.push(() => subscriber.close());
     cleanup.push(() => publisher.close());
