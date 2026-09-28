@@ -250,7 +250,10 @@ describe('write slot: waiting for demand', () => {
     expect(writer.closed).toBe(true);
     expect(writer.hasDemand).toBe(false);
     expect(opened).toHaveLength(0);
-    await expect(writer.write(bytes(2))).rejects.toMatchObject({ code: 'CLOSED' });
+    // Refused before any operation started: nothing sent, so not a sending phase.
+    await expect(writer.write(bytes(2))).rejects.toMatchObject({ code: 'CLOSED', phase: 'waiting-for-demand' });
+    await expect(writer.openGroup()).rejects.toMatchObject({ code: 'CLOSED', phase: 'waiting-for-demand' });
+    expect(opened).toHaveLength(0);
   });
 
   it.each([
@@ -491,7 +494,10 @@ describe('write slot: groups', () => {
     await group.close();
     expect(group.closed).toBe(true);
     expect(opened[0]?.finCalls).toBe(1);
-    await expect(group.write(bytes(9))).rejects.toMatchObject({ code: 'CLOSED' });
+    // The FIN already went out: the refused write sent nothing.
+    await expect(group.write(bytes(9))).rejects.toMatchObject({ code: 'CLOSED', phase: 'waiting-for-demand' });
+    expect(group.objectCount).toBe(3);
+    expect(opened[0]?.objects).toHaveLength(3);
     await writer.write(bytes(3));
     expect(opened[1]?.groupId).toBe(1);
   });

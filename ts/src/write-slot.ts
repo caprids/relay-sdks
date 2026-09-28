@@ -123,7 +123,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     watchers.clear();
   };
   const close = (
-    error: unknown = new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'writing'),
+    error: unknown = new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'waiting-for-demand'),
     code: ResetCode = RESET_CODE.CANCELLED,
   ): void => {
     if (ended) return;
@@ -132,7 +132,8 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
   };
   const assertWritable = () => {
     assertOpen();
-    if (ended) throw new RelayError('CLOSED', 'Published track is closed', active?.phase ?? 'writing');
+    // Refused before an operation starts: nothing of this write was sent (spec/behavior.md).
+    if (ended) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
     if (active)
       throw new RelayError(
         'WRITE_PENDING',
@@ -338,7 +339,8 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       let complete = false;
       const assertGroup = () => {
         check(operation);
-        if (complete) throw new RelayError('CLOSED', 'Group is closed', 'writing');
+        // The FIN already went out, so nothing of the refused call is sent.
+        if (complete) throw new RelayError('CLOSED', 'Group is closed', 'waiting-for-demand');
         if (pending) throw new RelayError('WRITE_PENDING', 'A group write or close is already pending', 'writing');
       };
       const groupWriter: RelayGroupWriter = {
