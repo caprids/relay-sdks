@@ -183,9 +183,20 @@ An accepted data subscription has no application inactivity deadline. The reques
 bounds its initial response. An idle connection still depends on peer traffic or transport-provided
 keepalive; the SDK does not schedule its own keepalive. Subscriptions have independent cancellation; the application owns connection shutdown.
 
+A subscription without a location filter (no `parameters.locationFilter`, or `{ type: 'none' }`)
+starts at the live edge on Relay: a subscriber that joins an ongoing track receives only the objects
+published after it joined, although the relay still holds earlier ones. To reach back, pass
+`parameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: N } }` (`1` starts at the
+current group, `N` at N-1 groups before it) or `{ type: 'absolute', start }` with an explicit start;
+the relay serves those from its cache, as far back as it still holds. See
+[late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters).
+
 Object callbacks run synchronously as streams deliver objects. The SDK adds no application queue,
 ordering across streams, automatic JSON decoding, clock synchronization, or media scheduling. Handle subgroup
 resets and connection closure explicitly; this API makes no exactly-once or gap-free delivery promise.
+The SDK reports every reset it receives, but the relay may drop a reset for a subgroup it had not
+begun forwarding, so an aborted group can leave no trace except a gap in group IDs
+([subgroup resets](../spec/relay-interop.md#subgroup-resets)).
 `onPublisherDone` is the publisher's control notification: it may precede trailing objects in
 transit, and it does not end the subscription. Cancel the subscription when you are finished with it.
 
@@ -401,7 +412,7 @@ fans one upstream subscription out to every downstream viewer, so a second viewe
 `true` and is served from the relay's cache; and it keeps the subscription for a while after the
 last viewer leaves (about 30 seconds on the tested relay), so `hasDemand` lags the last viewer and
 `true` does not prove anyone is watching. Write only state that is safe to serve from cache, and do
-not use demand to decide whether to keep encoding.
+not use demand to decide whether to keep encoding. See [relay demand](../spec/relay-interop.md#relay-demand).
 
 Custom transports with asynchronous sink writes or closes must honor the writable controller's
 abort signal to interrupt them and reset their underlying stream, as browser WebTransport does.

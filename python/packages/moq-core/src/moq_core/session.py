@@ -99,7 +99,11 @@ class SubgroupEnd:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SubgroupReset:
-    """A subgroup stream was reset; objects from it may be missing."""
+    """A subgroup stream was reset; objects from it may be missing.
+
+    Reported for every reset the session receives. A relay that drops a reset instead of forwarding
+    it leaves nothing to report.
+    """
 
     group_id: int
     error: BaseException
@@ -237,7 +241,8 @@ MoqtFetchOptions: TypeAlias = MoqtSubscribeOptions
 """FETCH (§10.13) takes the SUBSCRIBE shape.
 
 The range is ``parameters.location_filter``, read with fetch rules (§5.1.2): a relative start counts
-back from Largest Object, an omitted end stops there, no filter means the whole track.
+back from Largest Object, an omitted end stops there, no filter means ``{0,0}`` up to Largest Object.
+A subscription reads the same filter with subscription rules; see ``NoLocationFilter``.
 """
 
 

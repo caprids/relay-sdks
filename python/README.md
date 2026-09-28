@@ -180,10 +180,20 @@ the SDK does not schedule its own keepalive. The Python transport uses aioquic's
 local idle timeout, subject to peer negotiation.
 Subscriptions have independent cancellation; the application owns connection shutdown.
 
+A subscription without a location filter (no `parameters`, or `NoLocationFilter()`) starts at the
+live edge on Relay: a subscriber that joins an ongoing track receives only the objects published
+after it joined, although the relay still holds earlier ones. To reach back, pass
+`MessageParameters(location_filter=RelativeGroupFilter(groups_before_next=N))` (`1` starts at the
+current group, `N` at N-1 groups before it) or an `AbsoluteLocationFilter` with an explicit start;
+the relay serves those from its cache, as far back as it still holds. Both filters come from
+`moq_core`. See [late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters).
+
 Object callbacks are plain synchronous callables invoked as streams deliver objects. The SDK adds no
 application queue, ordering across streams, automatic JSON decoding, clock synchronization, or media
 scheduling. Use `subscribe_events` below to await work without blocking delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once
-or gap-free delivery promise. `on_publisher_done` is the publisher's control notification: it may
+or gap-free delivery promise. The SDK reports every reset it receives, but the relay may drop a
+reset for a subgroup it had not begun forwarding, so an aborted group can leave no trace except a
+gap in group IDs ([subgroup resets](../spec/relay-interop.md#subgroup-resets)). `on_publisher_done` is the publisher's control notification: it may
 precede trailing objects in transit, and it does not end the subscription. Cancel the subscription
 when you are finished with it.
 
@@ -368,7 +378,8 @@ Demand is the relay's own subscription, not a viewer count and not a liveness si
 fans one upstream subscription out to every downstream viewer, so a second viewer produces no new
 `True` and is served from the relay's cache; and it keeps the subscription for a while after the
 last viewer leaves (about 30 seconds on the tested relay), so `has_demand` lags the last viewer and
-`True` does not prove anyone is watching.
+`True` does not prove anyone is watching. Write only state that is safe to serve from cache, and do
+not use demand to decide whether to keep encoding. See [relay demand](../spec/relay-interop.md#relay-demand).
 
 Both loops above exist ready-made in `mux_relay.media`, the media publishing policy the Video.js
 example runs on. `CatalogService(track, document)` re-sends a document on every relay subscription

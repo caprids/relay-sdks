@@ -90,7 +90,11 @@ class RelaySubscriptionHandlers:
     on_subgroup_end: Callable[[SubgroupEnd], None] | None = None
     """A subgroup stream finished cleanly (FIN)."""
     on_subgroup_reset: Callable[[SubgroupReset], None] | None = None
-    """A subgroup stream was reset; objects from it may be missing."""
+    """A subgroup stream was reset; objects from it may be missing.
+
+    Called for every reset the relay forwards. The relay may drop a reset for a subgroup it had not
+    begun forwarding, so an abandoned group can arrive as nothing at all, only a gap in group IDs.
+    """
     on_publisher_done: Callable[[PublishDone], None] | None = None
     """The publisher finished with the track (PUBLISH_DONE).
 

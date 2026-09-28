@@ -400,7 +400,14 @@ def decode_key_value_pairs(reader: ByteReader, end_offset: int) -> list[KeyValue
 
 @dataclass(frozen=True, slots=True)
 class NoLocationFilter:
-    """Zero fields. Unfiltered: the whole track for a subscription, ``{0,0}`` up to Largest Object for a fetch."""
+    """Zero fields: no location constraint, and the same as sending no LOCATION_FILTER at all.
+
+    A fetch covers ``{0,0}`` up to Largest Object. A subscription passes all objects published or
+    received via upstream subscriptions (§5.1.2); the draft does not say whether that reaches back
+    into objects a relay cached before the subscription, so what an ongoing track delivers is the
+    relay's choice, and a relay may start at the live edge. :class:`RelativeGroupFilter` and
+    :class:`AbsoluteLocationFilter` ask for earlier groups explicitly.
+    """
 
     type: ClassVar[Literal["none"]] = "none"
 

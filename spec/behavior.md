@@ -129,6 +129,15 @@ Messages are not a compatibility contract; the class and the point of rejection 
   Relay caching and location filters can deliver the same object again across subscriptions,
   including after a publisher restart. Applications own retry backoff and any cross-subscription
   continuity policy; see [publisher restarts and resubscription](relay-interop.md#publisher-restarts-and-resubscription).
+- A subscription without a location filter, whether it sends no LOCATION_FILTER or an explicit
+  zero-field one, carries the draft's meaning: it passes all Objects published or received via
+  upstream subscriptions
+  ([draft-20 Section 5.1.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1.2)).
+  Whether that reaches back into what a relay cached before the subscription is the relay's
+  choice, and a relay may serve an ongoing track from the live edge; the Mux relay does
+  ([late subscribers](relay-interop.md#late-subscribers-and-location-filters)). A subscriber that
+  needs earlier groups asks for them with a relative-group or absolute filter. The SDK sends the
+  filter it is given and adds none.
 - The request timeout bounds only the subscription's initial response. An accepted subscription
   has no application inactivity deadline. Keeping an idle transport connected depends on peer
   traffic or transport-provided keepalive; the SDK does not schedule its own keepalive. The Python
@@ -149,8 +158,12 @@ Messages are not a compatibility contract; the class and the point of rejection 
   announce is rejected the same way. The SDK reports that rejection like any other, through
   `subscribed` and `on_error`, and does not retry a subscribe; the application retries it within its
   own budget rather than treating it as fatal. The examples share one helper per language for this.
-- Subgroup resets and connection closure are surfaced explicitly. There is no exactly-once or
-  gap-free delivery promise.
+- The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It cannot
+  surface a reset the relay does not forward: a relay may drop a subgroup that was reset upstream
+  before it began forwarding it, and then the subscriber sees neither objects nor a reset for that
+  group, only a gap in group IDs that cannot be told apart from a group never published
+  ([subgroup resets](relay-interop.md#subgroup-resets)). There is no exactly-once or gap-free
+  delivery promise.
 - The publisher's done notification is a control message and may arrive before trailing objects
   still in transit. It does not end the subscription: the request stays open until the application
   cancels it or the connection ends, and the SDK does not resubscribe on its own.
@@ -340,7 +353,8 @@ still invokes the gap callback. Publisher completion leaves readers active for t
 - A track writer may open a multi-object group: objects are appended with object IDs 0, 1, 2, ...
   on one stream, and closing the group FINs the stream. Object 0 is the group's random-access point,
   which is how LOC/MSF media (one GOP per group) is published. A group that fails part-way is reset
-  rather than completed, and the track stays open for the next group; only one write or group may
+  rather than completed, and the track stays open for the next group; whether a subscriber learns
+  of the reset depends on the relay (see [Subscribing](#subscribing)); only one write or group may
   be pending per track. The write deadline applies separately to opening a group (including demand),
   each object write, and closing the group. Idle time between operations is unrestricted. Aborting a
   group after it closed cleanly has no effect: the FIN already ended the stream, and a reset after
@@ -348,13 +362,17 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   ([draft-20 Section 11.4.3](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.4.3)).
   Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
-  observe every change, so state-shaped tracks such as a catalog can be re-sent on each subscribe.
+  observe every change, so a state-shaped track such as a catalog can re-send its document on each
+  relay subscription.
   Demand observers emit the current state first, include replacement subscriptions (a repeated
   "demanded" value), and finish when the track ends. A closed track reports no demand. Demand is
   the relay's single upstream subscription for the track: the relay shares it across every
   downstream viewer, so additional viewers produce no further notification, and it may keep the
   subscription for a period after the last viewer leaves. Demand is therefore neither a viewer
-  count nor a liveness signal. Implemented in both SDKs.
+  count nor a liveness signal. A document re-sent on each demanded value reaches the viewers who
+  join during one relay subscription from the relay's cache, not as a re-send, so a state-shaped
+  track writes only state that is safe to serve from cache
+  ([relay demand](relay-interop.md#relay-demand)). Implemented in both SDKs.
 
 ### Write phases and interruptions
 
@@ -499,7 +517,9 @@ not yet implemented in TypeScript.
 
 - A catalog is a state-shaped track. The catalog service sends its document on the current relay
   demand and again on every later relay subscription, including a replacement subscription (the
-  repeated "demanded" value), so a viewer joining after a relay reconnect receives it. It does not
+  repeated "demanded" value), so a viewer joining after a relay reconnect receives it. A viewer
+  joining while one relay subscription lasts triggers no re-send and is served the relay's cached
+  copy. It does not
   publish on change alone, and a replaceable document is not implemented. Not adopted: MSF's
   publish-on-change with a Joining FETCH from the relay cache. A plain SUBSCRIBE against the tested
   relay is live-edge only ([#26](https://github.com/muxinc/relay-sdks/issues/26)), re-sending is
