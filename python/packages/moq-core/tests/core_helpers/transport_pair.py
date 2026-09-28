@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 from moq_core.transport import BidirectionalStream, ReceiveStream, SendStream
 
-from .streams import Pipe, PushChannel, StreamClosedError
+from .streams import Pipe, PipeEvent, PushChannel, StreamClosedError
 
 
 @dataclass(slots=True)
@@ -73,9 +73,11 @@ class _Shared:
         self._pipes: list[Pipe] = []
         self.closed = False
         self.close_info: CloseInfo | None = None
+        self.events: list[PipeEvent] = []
+        """Every writer-side step on every pipe, in the order it was issued."""
 
     def pipe(self) -> Pipe:
-        pipe = Pipe()
+        pipe = Pipe(self.events.append)
         self._pipes.append(pipe)
         return pipe
 
@@ -103,6 +105,11 @@ class _Shared:
 class TransportPair:
     client: PairTransport
     server: PairTransport
+
+    @property
+    def events(self) -> list[PipeEvent]:
+        """Writer-side steps on both transports' streams, in issue order (see :class:`Pipe`)."""
+        return self.client._shared.events
 
 
 def create_transport_pair() -> TransportPair:

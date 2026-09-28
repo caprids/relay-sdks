@@ -6,16 +6,19 @@ from typing import Any
 import pytest
 from core_helpers.raw_peer import RawRequest, open_raw_request, solicit_namespace
 from core_helpers.raw_peer import raw_subscribe as raw_subscribe_to
+from core_helpers.streams import StreamClosedError
 from core_helpers.transport_pair import PairTransport, TransportPair, create_transport_pair
 from core_helpers.waiting import settle, wait_for
 
 from moq_core.control_messages import (
+    PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
     ControlMessage,
     ControlMessageDeframer,
     MessageParameters,
     Namespace,
     Publish,
+    PublishDone,
     RelativeGroupFilter,
     RequestError,
     Subscribe,
@@ -23,9 +26,11 @@ from moq_core.control_messages import (
     decode_control_message,
     encode_goaway,
     encode_publish,
+    encode_publish_done,
     encode_request_update,
     encode_setup,
     encode_subscribe,
+    encode_subscribe_ok,
 )
 from moq_core.errors import SESSION_ERROR
 from moq_core.object_stream import MoqtObject
@@ -55,6 +60,34 @@ def raw_subscribe(server: PairTransport, track_name: str, request_id: int) -> as
 
 def register(session: MoqtPublishSession, track_name: str) -> Any:
     return session.register_track(RegisterTrackOptions(track_namespace=NAMESPACE, track_name=track_name))
+
+
+def publish_done_bytes(status: int, stream_count: int, reason: str) -> bytes:
+    """PUBLISH_DONE spelled out byte by byte (§10.12), for statuses and counts under 64."""
+    encoded = reason.encode()
+    body = bytes([status, stream_count, len(encoded)]) + encoded
+    return bytes([0x0B, 0x00, len(body)]) + body
+
+
+def record_data_pipes(transport: PairTransport) -> list[Any]:
+    """Collect, in order, the pipes under the data streams the publisher opens on ``transport``."""
+    pipes: list[Any] = []
+    create = transport.create_unidirectional_stream
+
+    async def recording() -> Any:
+        pipe = await create()
+        pipes.append(pipe)
+        return pipe
+
+    setattr(transport, "create_unidirectional_stream", recording)  # noqa: B010 - replaces a method in place
+    return pipes
+
+
+def after_subscribe_ok(request: RawRequest, track_alias: int) -> bytes:
+    """What the publisher wrote on a subscription's request stream after SUBSCRIBE_OK."""
+    subscribe_ok = encode_subscribe_ok(track_alias, MessageParameters(), [])
+    assert bytes(request.raw[: len(subscribe_ok)]) == subscribe_ok
+    return bytes(request.raw[len(subscribe_ok) :])
 
 
 class Harness:
@@ -342,7 +375,7 @@ class TestCreateMoqtPublishSession:
         await wait_for(lambda: errors == [REQUEST_ERROR_CODE.DOES_NOT_EXIST])
         harness.destroy()
 
-    async def test_ends_a_track_by_fining_its_subscription_streams_with_no_trailing_message(self) -> None:
+    async def test_ends_a_track_with_publish_done_track_ended_then_fin(self) -> None:
         ended_requests: list[int] = []
         bindings: list[int | None] = []
         harness = Harness(
@@ -365,9 +398,13 @@ class TestCreateMoqtPublishSession:
         assert ended_requests == [21]
         assert bindings[-1] is None
         await wait_for(lambda: subscribe.ended())
-        # A bare FIN is the clean track end. Any byte after SUBSCRIBE_OK (the old PUBLISH_DONE) makes
-        # moq-lite-rs abort the track for every downstream viewer instead of finishing it.
-        assert subscribe.kinds() == ["subscribe-ok"]
+        # PUBLISH_DONE before the FIN (§3.3.2): TRACK_ENDED, no data streams opened, then the FIN.
+        # moq-relay 0.15.4 and later treat a FIN without it as a failed request.
+        assert subscribe.failure() is None
+        assert after_subscribe_ok(subscribe, 21) == publish_done_bytes(0x2, 0, "track ended")
+        assert after_subscribe_ok(subscribe, 21) == encode_publish_done(
+            PUBLISH_DONE_STATUS.TRACK_ENDED, 0, "track ended"
+        )
 
         # The peer closing its side afterwards must not double-report.
         await subscribe.fin()
@@ -394,9 +431,9 @@ class TestCreateMoqtPublishSession:
 
         second = await raw_subscribe(harness.pair.server, "video", 33)
 
-        # The replaced subscription ends cleanly (FIN, no trailing bytes).
+        # The replaced subscription ends cleanly: PUBLISH_DONE TRACK_ENDED, then FIN.
         await wait_for(lambda: len(second.received) == 1 and first.ended())
-        assert first.kinds() == ["subscribe-ok"]
+        assert after_subscribe_ok(first, 31) == publish_done_bytes(0x2, 0, "superseded by a newer subscription")
         # The relay closes its own side after seeing ours; only then does the replaced subscription's
         # stream fully end.
         await first.fin()
@@ -729,11 +766,15 @@ class TestCreateMoqtPublishSession:
         )
         await wait_for(
             lambda: (
-                sub.kinds() == ["subscribe-ok", "request-error"]
+                sub.kinds() == ["subscribe-ok", "request-error", "publish-done"]
                 and sub.ended()
                 and ended_requests == [111]
                 and bindings[-1] is None
             )
+        )
+        # A failed update terminates the subscription with PUBLISH_DONE UPDATE_FAILED (§10.9.1).
+        assert sub.received[-1] == PublishDone(
+            status_code=PUBLISH_DONE_STATUS.UPDATE_FAILED, stream_count=0, reason="unsupported subscription update"
         )
         harness.destroy()
 
@@ -779,8 +820,153 @@ class TestCreateMoqtPublishSession:
 
         await subscribe.fin()
         # The response direction closes too: a peer-initiated unsubscribe must not leak a half-open
-        # stream.
+        # stream. The subscription was Established, so PUBLISH_DONE precedes that FIN (§3.3.2).
         await wait_for(lambda: bindings == [41, None] and subscribe.ended())
+        assert after_subscribe_ok(subscribe, 41) == publish_done_bytes(0x0, 0, "subscriber closed its request stream")
+        harness.destroy()
+
+    async def test_sends_no_publish_done_for_a_cancelled_subscription_and_resets_its_data_streams(self) -> None:
+        bindings: list[int | None] = []
+        harness = Harness(
+            MoqtPublishSessionCallbacks(on_track_binding=lambda binding: bindings.append(binding.track_alias))
+        )
+
+        await harness.session.ready
+        register(harness.session, "video")
+
+        subscribe = await raw_subscribe(harness.pair.server, "video", 43)
+
+        await wait_for(lambda: bindings == [43])
+        pipes = record_data_pipes(harness.pair.client)
+        await harness.session.open_uni_stream(43)
+
+        # A reset is a cancellation (§3.3.3): no PUBLISH_DONE, and open data streams are reset (§5.1.1).
+        subscribe.reset()
+        await wait_for(lambda: bindings == [43, None] and subscribe.ended())
+        assert after_subscribe_ok(subscribe, 43) == b""
+        assert (pipes[0], "abort", b"") in harness.pair.events
+        harness.destroy()
+
+    async def test_counts_the_data_streams_and_closes_every_one_before_publish_done(self) -> None:
+        harness = Harness()
+
+        await harness.session.ready
+        track = register(harness.session, "video")
+
+        subscribe = await raw_subscribe(harness.pair.server, "video", 61)
+
+        await wait_for(lambda: len(subscribe.received) == 1)
+
+        pipes = record_data_pipes(harness.pair.client)
+        finished = await harness.session.open_uni_stream(61)
+        still_open = await harness.session.open_uni_stream(61)
+        await finished.close()
+
+        track.end()
+        await wait_for(lambda: subscribe.ended())
+        assert after_subscribe_ok(subscribe, 61) == publish_done_bytes(0x2, 2, "track ended")
+
+        # In issue order: the caller's FIN, the session's reset of the stream still open, then
+        # PUBLISH_DONE and the request stream's FIN (§10.12: "MUST NOT send PUBLISH_DONE until it
+        # has closed all streams").
+        underlying = {pipes[0]: "finished", pipes[1]: "still open"}
+        request_pipe = next(pipe for pipe, kind, data in harness.pair.events if data[:1] == b"\x0b")
+        steps = [
+            (underlying.get(pipe, "request" if pipe is request_pipe else None), kind)
+            for pipe, kind, data in harness.pair.events
+            if pipe in underlying or (pipe is request_pipe and data[:1] != b"\x04")
+        ]
+        assert steps == [
+            ("finished", "close"),
+            ("still open", "abort"),
+            ("request", "write"),
+            ("request", "close"),
+        ]
+
+        # The stream the session reset is gone for the caller too.
+        with pytest.raises(StreamClosedError):
+            await still_open.write(b"late")
+        harness.destroy()
+
+    async def test_opens_data_streams_only_for_a_live_subscription(self) -> None:
+        harness = Harness()
+
+        await harness.session.ready
+        track = register(harness.session, "video")
+
+        with pytest.raises(RuntimeError, match="no live subscription"):
+            await harness.session.open_uni_stream(81)
+
+        subscribe = await raw_subscribe(harness.pair.server, "video", 81)
+
+        await wait_for(lambda: len(subscribe.received) == 1)
+        await harness.session.open_uni_stream(81)
+
+        track.end()
+        # Ended: its PUBLISH_DONE already carries the count, so no further stream may join it.
+        with pytest.raises(RuntimeError, match="no live subscription"):
+            await harness.session.open_uni_stream(81)
+
+        await wait_for(lambda: subscribe.ended())
+        assert after_subscribe_ok(subscribe, 81) == publish_done_bytes(0x2, 1, "track ended")
+        harness.destroy()
+
+    async def test_resets_a_data_stream_that_finishes_opening_after_its_subscription_ended(self) -> None:
+        harness = Harness()
+
+        await harness.session.ready
+        track = register(harness.session, "video")
+
+        subscribe = await raw_subscribe(harness.pair.server, "video", 91)
+
+        await wait_for(lambda: len(subscribe.received) == 1)
+
+        # Hold the open in flight across the end.
+        release: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        create = harness.pair.client.create_unidirectional_stream
+
+        async def held_open() -> Any:
+            await release
+            return await create()
+
+        setattr(harness.pair.client, "create_unidirectional_stream", held_open)  # noqa: B010 - holds the open
+        opening = asyncio.ensure_future(harness.session.open_uni_stream(91))
+        await settle()
+
+        track.end()
+        await settle()
+        # PUBLISH_DONE waits for the open to settle.
+        assert not subscribe.ended()
+
+        release.set_result(None)
+        with pytest.raises(RuntimeError, match="ended"):
+            await opening
+
+        await wait_for(lambda: subscribe.ended())
+        # The late stream was reset before PUBLISH_DONE and is not counted.
+        kinds = [kind for _, kind, data in harness.pair.events if kind == "abort" or data[:1] == b"\x0b"]
+        assert kinds == ["abort", "write"]
+        assert after_subscribe_ok(subscribe, 91) == publish_done_bytes(0x2, 0, "track ended")
+        harness.destroy()
+
+    async def test_the_subscriber_driver_reports_the_publish_done_of_an_ended_track(self) -> None:
+        harness = Harness()
+
+        await harness.session.ready
+        track = register(harness.session, "video")
+
+        done: list[PublishDone] = []
+        subscription = harness.subscriber.subscribe(
+            MoqtSubscribeOptions(track_namespace=NAMESPACE, track_name="video"),
+            SubscriptionHandlers(on_done=done.append),
+        )
+        await wait_for(lambda: harness.session._live_subscription(subscription.request_id) is not None)
+        data = await harness.session.open_uni_stream(subscription.request_id)
+        await data.close()
+
+        track.end()
+        await wait_for(lambda: len(done) == 1)
+        assert done[0] == PublishDone(status_code=PUBLISH_DONE_STATUS.TRACK_ENDED, stream_count=1, reason="track ended")
         harness.destroy()
 
     @pytest.mark.parametrize("with_error", [False, True])
@@ -789,7 +975,8 @@ class TestCreateMoqtPublishSession:
     ) -> None:
         pair = create_transport_pair()
         # A fully raw peer: complete SETUP and record every frame on the publisher's control stream.
-        # It must carry SETUP and nothing else (a client GOAWAY closes a moq-lite-rs session, code 17).
+        # It must carry SETUP and nothing else: the publisher sends no GOAWAY (moq-relay 0.14.17
+        # closes the session on a client GOAWAY, code 17; 0.15.1 and later keep it).
         control_frames: list[ControlMessage] = []
 
         async def raw_server() -> None:
@@ -830,11 +1017,12 @@ class TestCreateMoqtPublishSession:
             session.destroy(error)
         else:
             session.close()
-        # The announce is retracted and the subscription FINed cleanly before the transport goes away.
+        # The announce is retracted and the subscription ended cleanly (PUBLISH_DONE, then FIN) before
+        # the transport goes away.
         await wait_for(
             lambda: solicitation.kinds() == ["request-ok", "namespace", "namespace-done"] and subscribe.ended()
         )
-        assert subscribe.kinds() == ["subscribe-ok"]
+        assert after_subscribe_ok(subscribe, 51) == publish_done_bytes(0x2, 0, "track ended")
         assert [frame.kind for frame in control_frames] == ["setup"]
 
         await pair.client.wait_closed()
@@ -971,12 +1159,15 @@ class TestCreateMoqtPublishSession:
     async def test_open_uni_stream_refuses_once_closing(self) -> None:
         harness = Harness()
         await harness.session.ready
-        stream = await harness.session.open_uni_stream()
+        register(harness.session, "video")
+        await raw_subscribe(harness.pair.server, "video", 21)
+        await wait_for(lambda: harness.session._live_subscription(21) is not None)
+        stream = await harness.session.open_uni_stream(21)
         assert stream is not None
         harness.session.close()
 
         try:
-            await harness.session.open_uni_stream()
+            await harness.session.open_uni_stream(21)
         except RuntimeError as error:
             assert "closed" in str(error)
         else:

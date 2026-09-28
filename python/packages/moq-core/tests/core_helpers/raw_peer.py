@@ -32,6 +32,8 @@ from moq_core.transport import MoqtTransport, ReceiveStream, SendStream
 class RawRequest:
     received: list[ControlMessage] = field(default_factory=list)
     """Control frames the publisher wrote back, in order."""
+    raw: bytearray = field(default_factory=bytearray)
+    """The exact bytes the publisher wrote back, before its FIN."""
     _ended: bool = False
     _failure: BaseException | None = None
     _writer: SendStream | None = None
@@ -93,6 +95,7 @@ async def open_raw_request(server: MoqtTransport, message: bytes) -> RawRequest:
                 if chunk is None:
                     break
 
+                request.raw.extend(chunk)
                 for frame in deframer.push(chunk):
                     request.received.append(decode_control_message(frame))
         except Exception as error:

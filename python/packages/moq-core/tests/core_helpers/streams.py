@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from collections.abc import Callable
 from typing import Generic, TypeVar
 
 T = TypeVar("T")
@@ -24,8 +25,13 @@ class StreamClosedError(Exception):
         self.reason = reason
 
 
+PipeEvent = tuple["Pipe", str, bytes]
+"""One writer-side step as issued: the pipe, ``"write"``/``"close"``/``"abort"``, and the bytes written."""
+
+
 class Pipe:
-    def __init__(self) -> None:
+    def __init__(self, log: Callable[[PipeEvent], None] | None = None) -> None:
+        self._log = log
         self._chunks: deque[tuple[bytes, asyncio.Future[None]]] = deque()
         self._reader_waiter: asyncio.Future[None] | None = None
         self._closed = False
@@ -53,6 +59,9 @@ class Pipe:
         if len(data) == 0:
             return
 
+        if self._log is not None:
+            self._log((self, "write", bytes(data)))
+
         accepted: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self._chunks.append((bytes(data), accepted))
         self._wake_reader()
@@ -60,6 +69,9 @@ class Pipe:
 
     async def close(self) -> None:
         self._check_writable()
+
+        if self._log is not None:
+            self._log((self, "close", b""))
 
         # Like WritableStreamDefaultWriter.close(): settle after every queued write.
         while self._chunks:
@@ -75,6 +87,9 @@ class Pipe:
     def abort(self, reason: object = None) -> None:
         if self._closed or self._error is not None or self._broken is not None:
             return
+
+        if self._log is not None:
+            self._log((self, "abort", b""))
 
         self._error = reason if isinstance(reason, BaseException) else StreamClosedError("stream reset", reason)
         self._fail_pending(StreamClosedError("stream was aborted", reason))
