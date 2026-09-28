@@ -608,6 +608,11 @@ class TestConnectRelay:
         with pytest.raises(ValueError, match="positive finite"):
             await connect_relay_subscriber(ENDPOINT, connect_timeout=connect_timeout)
 
+    @pytest.mark.parametrize("request_timeout", [0, -1, math.nan, math.inf])
+    async def test_rejects_invalid_request_deadlines(self, request_timeout: float) -> None:
+        with pytest.raises(ValueError, match="request_timeout must be a positive finite"):
+            await connect_relay_subscriber(ENDPOINT, request_timeout=request_timeout)
+
     @pytest.mark.parametrize(
         "url",
         ["http://relay.example.com/moq", "https://relay.example.com/moq#frag", "https://user@relay.example.com/moq"],

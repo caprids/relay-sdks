@@ -53,6 +53,7 @@ from .connect_session import (
     RelayTransportFactory,
     TokenProvider,
     open_relay_session,
+    validate_timeout,
 )
 from .subscription_events import SubscriptionEvents
 
@@ -319,12 +320,14 @@ async def connect_relay_subscriber(
     precedence over ``get_token``, matching the Relay authentication convention; an empty one is a
     ``TypeError``. Publishing uses a separate connection; see :func:`connect_relay_publisher`.
     """
+    # The request deadline is subscriber-only, so the subscriber checks it; the shared opener checks
+    # the rest before anything connects.
+    validate_timeout("request_timeout", request_timeout)
     options = ConnectRelayOptions(
         url=url,
         get_token=get_token,
         cancellation=cancellation,
         connect_timeout=connect_timeout,
-        request_timeout=request_timeout,
         create_transport=create_transport,
     )
 
@@ -333,7 +336,7 @@ async def connect_relay_subscriber(
             transport,
             MoqtSessionConfig(
                 implementation_name=IMPLEMENTATION_NAME,
-                request_timeout=options.request_timeout,
+                request_timeout=request_timeout,
                 callbacks=MoqtSessionCallbacks(on_closed=callbacks.on_closed, on_goaway=callbacks.on_goaway),
             ),
         )
