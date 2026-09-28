@@ -351,7 +351,7 @@ class TestCreateMoqtPublishSession:
         harness.destroy()
 
     def test_sets_only_the_request_id_bit_at_every_moqt_varint_length_boundary(self) -> None:
-        for request_id in (0, 62, 64, 126, 128, 16_382, 16_384, 2**21 - 2, 2**21):
+        for request_id in (0, 62, 64, 126, 128, 16_382, 16_384, 2**21 - 2, 2**21, 2**31, 2**32 + 2**28, 2**53 - 2):
             rewritten = decode_frames(
                 set_request_id_parity(
                     encode_subscribe(Subscribe(request_id=request_id, track_namespace=NAMESPACE, track_name="video"))

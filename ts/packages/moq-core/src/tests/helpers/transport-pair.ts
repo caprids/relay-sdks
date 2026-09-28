@@ -114,7 +114,8 @@ export function setRequestIdParity(chunk: Uint8Array): Uint8Array {
 
     if (REQUEST_ID_MESSAGE_TYPES.has(type.value)) {
       const requestId = decodeVarint(bytes, bodyStart);
-      const odd = requestId.value | 1;
+      // Arithmetic, not `| 1`: bitwise operators truncate to 32 bits, and request IDs go up to 2^53-1.
+      const odd = requestId.value % 2 === 0 ? requestId.value + 1 : requestId.value;
 
       if (varintByteLength(odd) !== requestId.byteLength) {
         throw new Error(`request id ${odd} would change the encoded length`);

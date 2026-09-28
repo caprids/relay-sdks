@@ -389,7 +389,20 @@ describe('createMoqtPublishSession', () => {
   });
 
   it('sets only the request id bit, at every MOQT varint length boundary', () => {
-    for (const requestId of [0, 62, 64, 126, 128, 16_382, 16_384, 2 ** 21 - 2, 2 ** 21]) {
+    for (const requestId of [
+      0,
+      62,
+      64,
+      126,
+      128,
+      16_382,
+      16_384,
+      2 ** 21 - 2,
+      2 ** 21,
+      2 ** 31,
+      2 ** 32 + 2 ** 28,
+      2 ** 53 - 2,
+    ]) {
       const [subscribe] = decodeFrames(
         setRequestIdParity(encodeSubscribe({ requestId, trackNamespace: NAMESPACE, trackName: 'video' }))
       );
