@@ -218,8 +218,10 @@ relay that refuses an update with REQUEST_ERROR reaches `onError`, which ends th
 Re-subscribing after `onPublisherDone` creates a new request, and it cannot bring back a finished
 track. Once the publisher has gone the relay answers request error 16 `unroutable`; while its
 namespace stays announced, the relay replays the finished track's cached last group followed by
-another done, one round trip later each time. Don't re-subscribe to a finished track until the
-application knows new content exists, apply retry backoff to done callbacks as well as retryable
+another done, one round trip later each time. Don't re-subscribe to a track the publisher ended
+until the application knows new content exists; a status-2 done alone does not show that, since
+moq-relay also sends one after this subscription's own `update()`, and then re-subscribing is the
+way to apply the change. Apply retry backoff to done callbacks as well as retryable
 request errors, and define any continuity policy in the application. See
 [publisher restarts and resubscription](../spec/relay-interop.md#publisher-restarts-and-resubscription)
 for retry, trailing-object, and publisher-generation guidance.

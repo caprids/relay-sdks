@@ -80,8 +80,10 @@ export interface RelaySubscriptionHandlers {
    * cannot bring back a finished track: against moq-relay, a subscribe after the publisher has gone
    * is refused (request error 16 `unroutable`), and one while its namespace stays announced replays
    * the track's cached last group and another done one round trip later. Back off, and do not
-   * resubscribe to a finished track. After a publisher crash this arrives only at the relay's QUIC
-   * idle timeout, about 30 s later. See spec/relay-interop.md, "Publisher restarts".
+   * resubscribe to a track the publisher ended. A done that follows this subscription's own
+   * `update()` is different: moq-relay ends the subscription on any update, the track is still live,
+   * and resubscribing is how to apply the change. After a publisher crash the done arrives only at
+   * the relay's QUIC idle timeout, about 30 s later. See spec/relay-interop.md, "Publisher restarts".
    */
   onPublisherDone?(info: PublishDone): void;
   /**

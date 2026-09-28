@@ -60,11 +60,18 @@ still there, and neither delivers new content:
   | TypeScript | 10 ms | 51 | 93 / 45 |
   | TypeScript | 300 ms | 21 | 63 / 45 |
 
-So a done with status 2 means the track is finished: do not re-subscribe to it. Wait for an
-application signal that new content exists (a new track name in the catalog, a new namespace, or a
-new announce seen through your own discovery) before subscribing again, and back off any
-re-subscribe you do make. Publish restarted content under a new track name rather than reusing the
-finished one.
+A done with status 2 does not say on its own why the subscription ended: moq-relay also sends it
+when this viewer calls `update()` on a live track
+([deviation 4](behavior.md#relay-interop-deviations)). Tell the two apart by what the application
+knows:
+
+- **The done followed this subscription's own `update()`.** The track is still live; re-subscribe
+  with the new parameters. That is the documented way to change them against moq-relay.
+- **The publisher ended the track** (the application knows from the publisher side, its catalog or
+  its own discovery). Do not re-subscribe to it: wait for a signal that new content exists (a new
+  track name in the catalog, a new namespace, or a new announce seen through your own discovery),
+  and back off any re-subscribe you do make. Publish restarted content under a new track name rather
+  than reusing the finished one.
 
 Each `subscribe()` creates an independent request, including its starting location.
 It does not resume the preceding subscription. The SDK does not retry automatically

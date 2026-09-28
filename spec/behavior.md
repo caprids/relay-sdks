@@ -200,7 +200,9 @@ Messages are not a compatibility contract; the class and the point of rejection 
   object.
   Re-subscribing to a track that finished while its namespace stays announced replays the cached
   last group and another done, one round trip later each time, because the relay keeps a finished
-  track cached by design; do not re-subscribe to a finished track
+  track cached by design; do not re-subscribe to a track the publisher ended. A done that followed
+  the subscription's own `update()` is different: the track is live, and re-subscribing is how to
+  apply the change against moq-relay
   ([publisher restarts](relay-interop.md#publisher-restarts-and-resubscription)).
   Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.

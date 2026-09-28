@@ -65,8 +65,9 @@ A useful policy is:
    `404` on older relays) and initial-response timeouts as potentially transient and retry within
    the recovery budget. A subscription accepted before the replacement announces may serve only the
    old publisher's cached object, so check freshness rather than trusting acceptance. Do not
-   re-subscribe to a track that ended with status 2 while its publisher is still announced: that
-   only replays the finished track. Authentication, invalid input, and protocol failures need their
+   re-subscribe to a track the publisher ended while it is still announced: that only replays the
+   finished track. A status-2 done alone does not prove this, because moq-relay sends one after the
+   subscription's own `update()` too; in that case re-subscribing is the recovery. Authentication, invalid input, and protocol failures need their
    own handling rather than an unlimited retry loop.
 5. Apply backoff and jitter across failed attempts **and accepted-but-stale attempts**. Cached
    objects followed by `on_publisher_done` must not reset the budget or create an immediate resubscribe loop.
