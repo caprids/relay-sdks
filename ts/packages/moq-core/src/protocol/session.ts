@@ -255,7 +255,8 @@ export interface MoqtSubscribeOptions {
 
 /**
  * FETCH (§10.13) takes the SUBSCRIBE shape; the range is `parameters.locationFilter`, read with fetch rules (§5.1.2): a
- * relative start counts back from Largest Object, an omitted end stops there, no filter means the whole track.
+ * relative start counts back from Largest Object, an omitted end stops there, no filter means `{0,0}` up to Largest
+ * Object. A subscription reads the same filter with subscription rules; see `LocationFilter` in control-messages.ts.
  */
 export type MoqtFetchOptions = MoqtSubscribeOptions;
 

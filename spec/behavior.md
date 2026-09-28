@@ -129,6 +129,15 @@ Messages are not a compatibility contract; the class and the point of rejection 
   Relay caching and location filters can deliver the same object again across subscriptions,
   including after a publisher restart. Applications own retry backoff and any cross-subscription
   continuity policy; see [publisher restarts and resubscription](relay-interop.md#publisher-restarts-and-resubscription).
+- A subscription without a location filter, whether it sends no LOCATION_FILTER or an explicit
+  zero-field one, carries the draft's meaning: it passes all Objects published or received via
+  upstream subscriptions
+  ([draft-20 Section 5.1.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1.2)).
+  Whether that reaches back into what a relay cached before the subscription is the relay's
+  choice, and a relay may serve an ongoing track from the live edge; the Mux relay does
+  ([late subscribers](relay-interop.md#late-subscribers-and-location-filters)). A subscriber that
+  needs earlier groups asks for them with a relative-group or absolute filter. The SDK sends the
+  filter it is given and adds none.
 - The request timeout bounds only the subscription's initial response. An accepted subscription
   has no application inactivity deadline. Keeping an idle transport connected depends on peer
   traffic or transport-provided keepalive; the SDK does not schedule its own keepalive. The Python

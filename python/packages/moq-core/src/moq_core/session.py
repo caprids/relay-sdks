@@ -237,7 +237,8 @@ MoqtFetchOptions: TypeAlias = MoqtSubscribeOptions
 """FETCH (§10.13) takes the SUBSCRIBE shape.
 
 The range is ``parameters.location_filter``, read with fetch rules (§5.1.2): a relative start counts
-back from Largest Object, an omitted end stops there, no filter means the whole track.
+back from Largest Object, an omitted end stops there, no filter means ``{0,0}`` up to Largest Object.
+A subscription reads the same filter with subscription rules; see ``NoLocationFilter``.
 """
 
 

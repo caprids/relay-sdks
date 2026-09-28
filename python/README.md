@@ -180,6 +180,14 @@ the SDK does not schedule its own keepalive. The Python transport uses aioquic's
 local idle timeout, subject to peer negotiation.
 Subscriptions have independent cancellation; the application owns connection shutdown.
 
+A subscription without a location filter (no `parameters`, or `NoLocationFilter()`) starts at the
+live edge on Relay: a subscriber that joins an ongoing track receives only the objects published
+after it joined, although the relay still holds earlier ones. To reach back, pass
+`MessageParameters(location_filter=RelativeGroupFilter(groups_before_next=N))` (`1` starts at the
+current group, `N` at N-1 groups before it) or an `AbsoluteLocationFilter` with an explicit start;
+the relay serves those from its cache, as far back as it still holds. Both filters come from
+`moq_core`. See [late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters).
+
 Object callbacks are plain synchronous callables invoked as streams deliver objects. The SDK adds no
 application queue, ordering across streams, automatic JSON decoding, clock synchronization, or media
 scheduling. Use `subscribe_events` below to await work without blocking delivery. Handle subgroup resets and connection closure explicitly; this API makes no exactly-once

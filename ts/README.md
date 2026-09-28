@@ -183,6 +183,14 @@ An accepted data subscription has no application inactivity deadline. The reques
 bounds its initial response. An idle connection still depends on peer traffic or transport-provided
 keepalive; the SDK does not schedule its own keepalive. Subscriptions have independent cancellation; the application owns connection shutdown.
 
+A subscription without a location filter (no `parameters.locationFilter`, or `{ type: 'none' }`)
+starts at the live edge on Relay: a subscriber that joins an ongoing track receives only the objects
+published after it joined, although the relay still holds earlier ones. To reach back, pass
+`parameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: N } }` (`1` starts at the
+current group, `N` at N-1 groups before it) or `{ type: 'absolute', start }` with an explicit start;
+the relay serves those from its cache, as far back as it still holds. See
+[late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters).
+
 Object callbacks run synchronously as streams deliver objects. The SDK adds no application queue,
 ordering across streams, automatic JSON decoding, clock synchronization, or media scheduling. Handle subgroup
 resets and connection closure explicitly; this API makes no exactly-once or gap-free delivery promise.

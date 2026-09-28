@@ -78,6 +78,32 @@ in another process cannot observe the announce at all: the retry belongs to the 
 ([behavior.md](behavior.md#subscribing)). Earlier text said "about a second"; that was the retry
 interval of the original reproduction, not the window.
 
+## Late subscribers and location filters
+
+A plain SUBSCRIBE, with no LOCATION_FILTER or an explicit zero-field one, is served from the live
+edge: a subscriber that joins an ongoing track receives only objects published after it joined.
+The relay does retain history, and it reaches into its cache for a relative-group or absolute
+filter. Measured against `sjc.relay.mux.global` on 2026-09-15 with the Python SDK
+([issue #26](https://github.com/muxinc/relay-sdks/issues/26)): a publisher wrote one object per
+second for about 20 s, and each late subscriber joined 8-10 s in (2 of 2 runs).
+
+| subscriber | filter | groups received |
+| --- | --- | --- |
+| early, before the first write | none | all, `[0..17]` of `[0..17]` |
+| late | none (no LOCATION_FILTER sent) | `[9..17]` of `[0..17]` |
+| late | explicit `NoLocationFilter()` | `[10..19]` of `[0..19]`, the same as sending none |
+| late | `NextObjectFilter` | the same as none |
+| late | `RelativeGroupFilter(groups_before_next=3)` | about 3 groups before the join |
+| late | `AbsoluteLocationFilter(start=group 2)` | from about group 4-8, depending on timing |
+
+The draft defines an unfiltered subscription as passing all Objects published or received via
+upstream subscriptions ([behavior.md](behavior.md#subscribing)); it does not require a relay to
+replay what it cached before the subscription, so this is a legitimate reading and not an SDK
+encoding problem. A late joiner that needs a decodable start or recent history subscribes with
+`RelativeGroupFilter` / `{ type: 'relative-group' }` (`groups_before_next` / `groupsBeforeNext` of
+`1` starts at the current group) or with an absolute start. How far back either reaches depends on
+what the relay still holds, and the absolute case above started later than it asked for.
+
 ## Reproduce against a local relay
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium

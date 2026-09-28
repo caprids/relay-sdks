@@ -383,8 +383,11 @@ export function decodeKeyValuePairs(reader: ByteReader, endOffset: number): KeyV
  * Which Objects a subscription or fetch covers. On the wire the LOCATION_FILTER value is up to four varints —
  * StartGroup, StartObject, EndGroupDelta, EndObject — and how many are present selects the meaning:
  *
- * - `none` — zero fields. Unfiltered: the whole track for a subscription, `{0,0}` up to Largest Object for a fetch; in
- *   REQUEST_UPDATE it clears the filter.
+ * - `none` — zero fields: no location constraint, the same as sending no LOCATION_FILTER at all. A fetch covers `{0,0}`
+ *   up to Largest Object. A subscription passes all Objects published or received via upstream subscriptions; the draft
+ *   does not say whether that reaches back into Objects a relay cached before the subscription, so what an ongoing track
+ *   delivers is the relay's choice, and a relay may start at the live edge. `relative-group` and `absolute` ask for
+ *   earlier groups explicitly. In REQUEST_UPDATE it clears the filter.
  * - `relative-group` — one field. Start at `{Largest.Group + 1 − groupsBeforeNext, 0}`, open-ended: `0` is the next
  *   group, `1` the start of the current group (a decodable join), `N` N−1 groups before it.
  * - `next-object` — the two-field spelling `{0,0}`: `{Largest.Group, Largest.Object + 1}`, the live edge, which can begin
