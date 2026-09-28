@@ -46,6 +46,7 @@ from moq_core.session import (
     TrackStatusHandlers,
     create_moqt_session,
 )
+from moq_core.transport import SendStream
 
 # The fetch range playback would ask for if it fetched: the current group from its start.
 CURRENT_GROUP = RelativeGroupFilter(groups_before_next=1)
@@ -102,6 +103,35 @@ def fetch_stream_bytes(request_id: int, payload: bytes = b'{"version":"1"}') -> 
 def decode_chunks(chunks: list[bytes]) -> list[ControlMessage]:
     deframer = ControlMessageDeframer()
     return [decode_control_message(frame) for chunk in chunks for frame in deframer.push(chunk)]
+
+
+class _RecordingSendStream:
+    """A ``SendStream`` that records every write attempted on it, including ones that then fail."""
+
+    def __init__(self, inner: SendStream, writes: list[bytes]) -> None:
+        self._inner = inner
+        self._writes = writes
+
+    async def write(self, data: bytes) -> None:
+        self._writes.append(bytes(data))
+        await self._inner.write(data)
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    def abort(self, reason: object = None) -> None:
+        self._inner.abort(reason)
+
+
+class _WriteRecordingTransport(FakeTransport):
+    """A fake whose client-opened unidirectional streams (the control stream) record their writes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.uni_writes: list[bytes] = []
+
+    async def create_unidirectional_stream(self) -> SendStream:
+        return _RecordingSendStream(await super().create_unidirectional_stream(), self.uni_writes)
 
 
 class TestCreateMoqtSession:
@@ -501,6 +531,23 @@ class TestCreateMoqtSession:
         assert str(closed.error) == "session closed before server SETUP"
         with pytest.raises(Exception, match="session closed before server SETUP"):
             await harness.session.ready
+
+    async def test_writes_nothing_on_the_control_stream_after_setup_when_closed_no_goaway(self) -> None:
+        # A client GOAWAY closes a moq-relay 0.14.17 session (code 17), and one sent in the same turn
+        # as the transport close gives the peer nothing to act on. The fake breaks its pipes on
+        # close, so record every write the session attempts, not what arrives.
+        fake = _WriteRecordingTransport()
+        attempted = fake.uni_writes
+        session = create_moqt_session(fake, MoqtSessionConfig())
+        fake.send_server_setup()
+        await session.ready
+        await wait_for(lambda: len(attempted) > 0)
+
+        session.close()
+        await settle()
+        assert [type(message) for message in decode_chunks(attempted)] == [Setup]
+        assert fake.close_info is not None
+        assert fake.close_info.close_code == 0
 
     async def test_reports_a_local_close_before_the_server_setup_as_a_clean_close(self) -> None:
         on_closed = Recorder()

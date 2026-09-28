@@ -20,7 +20,8 @@
     "Varints cover the full 64-bit wire range because Python integers are exact; the TypeScript 2^53-1 ceiling and its guards are not needed.",
     "Timers use the asyncio event loop; durations in the SDK API are seconds rather than milliseconds.",
     "The default SETUP implementation identifier names moq-core (Python). The MoqtProtocolError type is the identity test for session-fatal codec errors.",
-    "Publish session extraction excludes the SPF actor and accepts explicit track properties instead of imposing the LOC microsecond timescale."
+    "Publish session extraction excludes the SPF actor and accepts explicit track properties instead of imposing the LOC microsecond timescale.",
+    "The subscribe session's close sends no GOAWAY, unlike the upstream driver's best-effort GOAWAY(0): moq-relay 0.14.17 closes the session on a client GOAWAY (code 17), and the publish session already sends none (spec/behavior.md, \"Relay interop deviations\"; issue #128). Receiving GOAWAY is unchanged."
   ],
   "migration": "Port of the initial extraction snapshot. Keep the two cores in lockstep through spec/; do not let the ports drift into separately maintained protocol implementations."
 }
