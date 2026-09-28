@@ -267,11 +267,12 @@ class _TrackRecord:
     subscribers: list[_SubscriberStream] = field(default_factory=list)
     done: bool = False
     pending_ends: list[asyncio.Task[None]] = field(default_factory=list)
-    """Replacement ends (PUBLISH_DONE + FIN) still in flight (pruned as they settle).
+    """Subscription ends (PUBLISH_DONE + FIN) still in flight, from any end path (pruned as they settle).
 
-    ``end()`` folds them into ``done_flushed``: a swept predecessor is already ``finished``, so it
-    would otherwise be skipped and its queued end discarded by the transport close, turning the
-    clean replacement into an abrupt reset.
+    ``_end_track`` folds them into ``done_flushed``, which ``close()`` drains. An ended subscription
+    is already ``finished``, and one whose peer closed its request stream has left ``subscribers``,
+    so without this list its queued end would be skipped and discarded by the transport close,
+    turning a clean end into an abrupt one.
     """
     done_flushed: asyncio.Task[None] | None = None
     """Settles when the ends queued by ``end()`` land."""
@@ -465,9 +466,14 @@ class MoqtPublishSession:
         for track in self._tracks.values():
             self._end_track(track)
 
-        writes: set[asyncio.Future[None]] = {
-            track.done_flushed for track in self._tracks.values() if track.done_flushed is not None
-        }
+        writes: set[asyncio.Future[None]] = set()
+
+        for track in self._tracks.values():
+            if track.done_flushed is not None:
+                writes.add(track.done_flushed)
+
+            # An end started after the track's own end (none should, but a stray one must not be cut off).
+            writes.update(track.pending_ends)
 
         for stream in self._namespace_streams:
             for suffix in stream.announced:
@@ -609,12 +615,11 @@ class MoqtPublishSession:
             return
 
         track.done = True
-        writes: list[asyncio.Future[None]] = list(track.pending_ends)
         had_reported = False
 
         for subscriber in track.subscribers:
             if not subscriber.finished:
-                writes.append(self._end_subscription(subscriber, PUBLISH_DONE_STATUS.TRACK_ENDED, "track ended"))
+                self._end_subscription(track, subscriber, PUBLISH_DONE_STATUS.TRACK_ENDED, "track ended")
 
             # The local end is authoritative: report each live subscription ended NOW rather than
             # when the peer eventually closes its request direction. Otherwise the subscriber count
@@ -631,6 +636,8 @@ class MoqtPublishSession:
         if had_reported and not self._destroyed:
             _call(self._callbacks.on_track_binding, TrackBinding(track_name=track.track_name, track_alias=None))
 
+        writes: list[asyncio.Task[None]] = list(track.pending_ends)
+
         async def flushed() -> None:
             if writes:
                 await asyncio.wait(writes)
@@ -638,15 +645,16 @@ class MoqtPublishSession:
         track.done_flushed = spawn(flushed())
 
     def _end_subscription(
-        self, subscriber: _SubscriberStream, status: int, reason: str, *, preceding: bytes = b""
-    ) -> asyncio.Task[None]:
+        self, track: _TrackRecord, subscriber: _SubscriberStream, status: int, reason: str, *, preceding: bytes = b""
+    ) -> None:
         """End an Established subscription from the publisher side (§3.3.2, §10.12).
 
         Marks it finished at once, so no new data stream opens on its alias. Then, in order: wait for
         data-stream opens in flight, reset every data stream the caller has not closed (a caller that
         follows the binding has closed them already), write ``preceding`` (a REQUEST_ERROR answering
         a failed update) and PUBLISH_DONE with the subscription's Stream Count, and FIN. The task
-        settles when the FIN lands or the stream fails.
+        settles when the FIN lands or the stream fails, and stays in ``track.pending_ends`` until then,
+        so ``close()`` drains it whichever path started it.
         """
         subscriber.finished = True
 
@@ -658,7 +666,14 @@ class MoqtPublishSession:
             await subscriber.writer.write(preceding + encode_publish_done(status, subscriber.stream_count, reason))
             await subscriber.writer.close()
 
-        return spawn(_swallow(end()))
+        ended = spawn(_swallow(end()))
+        track.pending_ends.append(ended)
+
+        def prune(_: asyncio.Future[None]) -> None:
+            if ended in track.pending_ends:
+                track.pending_ends.remove(ended)
+
+        ended.add_done_callback(prune)
 
     def _live_subscription(self, track_alias: int) -> _SubscriberStream | None:
         for track in self._tracks.values():
@@ -1010,18 +1025,9 @@ class MoqtPublishSession:
 
                 # No status names a replacement. TRACK_ENDED is the one the relay finishes a track
                 # on (anything else aborts it), and the newer subscription carries the track on.
-                ended = self._end_subscription(
-                    other, PUBLISH_DONE_STATUS.TRACK_ENDED, "superseded by a newer subscription"
+                self._end_subscription(
+                    track, other, PUBLISH_DONE_STATUS.TRACK_ENDED, "superseded by a newer subscription"
                 )
-                track.pending_ends.append(ended)
-
-                def prune(
-                    done: asyncio.Future[None], ended: asyncio.Task[None] = ended, track: _TrackRecord = track
-                ) -> None:
-                    if ended in track.pending_ends:
-                        track.pending_ends.remove(ended)
-
-                ended.add_done_callback(prune)
 
             _call(
                 self._callbacks.on_track_binding,
@@ -1071,6 +1077,7 @@ class MoqtPublishSession:
                             # ours too); anything else ends this request honestly: the update's
                             # REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED (§10.9.1).
                             self._end_subscription(
+                                track,
                                 subscriber,
                                 PUBLISH_DONE_STATUS.UPDATE_FAILED,
                                 "unsupported subscription update",
@@ -1100,7 +1107,7 @@ class MoqtPublishSession:
             # FIN. No status names this, so it reports the publisher's own limitation.
             if not subscriber.finished:
                 self._end_subscription(
-                    subscriber, PUBLISH_DONE_STATUS.INTERNAL_ERROR, "subscriber closed its request stream"
+                    track, subscriber, PUBLISH_DONE_STATUS.INTERNAL_ERROR, "subscriber closed its request stream"
                 )
         except MoqtProtocolError:
             raise

@@ -1048,6 +1048,67 @@ class TestCreateMoqtPublishSession:
         assert after_subscribe_ok(subscribe, 91) == publish_done_bytes(0x2, 0, "track ended")
         harness.destroy()
 
+    async def test_drains_a_peer_initiated_end_still_waiting_on_a_data_stream_open_before_closing(self) -> None:
+        bindings: list[int | None] = []
+        harness = Harness(
+            MoqtPublishSessionCallbacks(on_track_binding=lambda binding: bindings.append(binding.track_alias))
+        )
+
+        await harness.session.ready
+        register(harness.session, "video")
+
+        subscribe = await raw_subscribe(harness.pair.server, "video", 95)
+
+        await wait_for(lambda: bindings == [95])
+
+        # Hold a data-stream open in flight, and mark where the transport closes in the event log.
+        release: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        create = harness.pair.client.create_unidirectional_stream
+        close_transport = harness.pair.client.close
+        closed_at: list[int] = []
+
+        async def held_open() -> Any:
+            await release
+            return await create()
+
+        def marked_close(close_code: int = 0, reason: str = "") -> None:
+            closed_at.append(len(harness.pair.events))
+            close_transport(close_code, reason)
+
+        setattr(harness.pair.client, "create_unidirectional_stream", held_open)  # noqa: B010 - holds the open
+        setattr(harness.pair.client, "close", marked_close)  # noqa: B010 - marks the transport close
+        opening = asyncio.ensure_future(harness.session.open_uni_stream(95))
+        await settle()
+
+        # The subscriber FINs while the open is pending: its end waits on the open, and the
+        # subscription leaves the track.
+        await subscribe.fin()
+        await wait_for(lambda: bindings == [95, None])
+
+        harness.session.close()
+        await settle(0.01)
+        # The close drain waits for that end instead of cutting it off.
+        assert closed_at == []
+
+        release.set_result(None)
+        with pytest.raises(RuntimeError):
+            await opening
+
+        await wait_for(lambda: bool(closed_at))
+        assert subscribe.ended()
+        assert after_subscribe_ok(subscribe, 95) == publish_done_bytes(0x0, 0, "subscriber closed its request stream")
+
+        # PUBLISH_DONE and the request stream's FIN both precede the transport close.
+        request_pipe = next(pipe for pipe, kind, data in harness.pair.events if data[:1] == b"\x0b")
+        steps = [
+            (index, kind)
+            for index, (pipe, kind, data) in enumerate(harness.pair.events)
+            if pipe is request_pipe and (kind == "close" or data[:1] == b"\x0b")
+        ]
+        assert [kind for _, kind in steps] == ["write", "close"]
+        assert all(index < closed_at[0] for index, _ in steps)
+        harness.subscriber.destroy()
+
     async def test_the_subscriber_driver_reports_the_publish_done_of_an_ended_track(self) -> None:
         subscribes: list[Subscribe] = []
         harness = Harness(MoqtPublishSessionCallbacks(on_subscribe=subscribes.append))
