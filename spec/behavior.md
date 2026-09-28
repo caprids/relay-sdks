@@ -64,8 +64,10 @@ sent. Opening a group can start sending its header before the first object write
 the failure's origin, and a later call on the failed handle can report that same error.
 
 For `WRITE_PENDING` and calls rejected because a handle is already closed, phase describes the
-refused operation; that call sends nothing. `CLOSED` can also interrupt an operation already in
-flight, so the code alone does not rule out partial delivery.
+refused operation; that call sends nothing. A write or group refused with `CLOSED` because its
+track or group is already closed reports phase `waiting-for-demand`, the phase that means nothing
+was sent. `CLOSED` can also interrupt an operation already in flight; it then carries that
+operation's phase, so the code alone does not rule out partial delivery.
 
 No code or phase promises safe replay. Account for previous attempts, data freshness, and your
 application's deduplication policy. Successful writes mean transport acceptance, not viewer
@@ -417,6 +419,7 @@ unless stated otherwise.
 | opening-stream, writing, closing | relay subscription replaced or ended | `SUBSCRIPTION_CHANGED`; the current phase | stream reset, code `CANCELLED` (0x1) | open; the next write waits for the new demand | §5.1.1: the publisher MUST reset open streams of a cancelled subscription; treating a new SUBSCRIBE as a replacement rather than a concurrent subscription is SDK policy (§5.1, ADR-0001) |
 | opening-stream, writing, closing | track closed | `CLOSED`; the current phase | stream reset, code `CANCELLED` (0x1) | ended | §10.12: every stream is closed or reset before the track ends |
 | opening-stream, writing, closing | connection ends | the connection's own error (phase `connection`), or `CLOSED` | streams end with the session; a reset that is still sent carries `SESSION_CLOSED` (0x3), or `GOING_AWAY` (0x4) after GOAWAY | ended | §3.5; §15.11.4 for the codes |
+| none: refused before an operation starts | a write or group on a track that already ended, or a write on a group already closed with its FIN | `CLOSED`, phase `waiting-for-demand` | nothing sent | unchanged | SDK policy: the phase that means nothing was sent |
 | any | a second write or group is started | `WRITE_PENDING`, phase `writing`; the active operation is unaffected | nothing sent | unchanged | SDK policy: one pending operation per track |
 | after a clean group close | `abort()` | nothing; `closed` stays true and a repeated `close()` returns | nothing sent | open | §11.4.3: a reset after all data and the FIN is ignorable |
 
