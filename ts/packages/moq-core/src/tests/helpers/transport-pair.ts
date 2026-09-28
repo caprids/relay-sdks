@@ -3,6 +3,7 @@
  * the peer's incoming stream queues, so a publish session on one side can talk to a subscribe session on the other over
  * real (in-process) WHATWG streams — the same structural seam a `WebTransport` satisfies in production.
  */
+import { MESSAGE_TYPE } from '../../protocol/control-messages.js';
 import type { BidirectionalStreamLike } from '../../protocol/request-stream.js';
 import type { MoqtTransport } from '../../protocol/session.js';
 
@@ -82,5 +83,78 @@ export function createTransportPair(): TransportPair {
   return {
     client: makeTransport(a, b, closedPromises[0]!),
     server: makeTransport(b, a, closedPromises[1]!),
+  };
+}
+
+/** Request-initiating messages whose body opens with the sender's Request ID (§10.1). */
+const REQUEST_ID_MESSAGE_TYPES: ReadonlySet<number> = new Set([
+  MESSAGE_TYPE.SUBSCRIBE,
+  MESSAGE_TYPE.FETCH,
+  MESSAGE_TYPE.TRACK_STATUS,
+  MESSAGE_TYPE.REQUEST_UPDATE,
+  MESSAGE_TYPE.SUBSCRIBE_NAMESPACE,
+  MESSAGE_TYPE.PUBLISH_NAMESPACE,
+  MESSAGE_TYPE.PUBLISH,
+]);
+
+/** Encoded length of the QUIC varint whose first byte is `first`. */
+function varintLength(first: number): number {
+  return 1 << (first >> 6);
+}
+
+/** Read the QUIC varint at `offset` (the message types read here stay far below 2^53). */
+function readVarint(bytes: Uint8Array, offset: number): { value: number; length: number } {
+  const length = varintLength(bytes[offset]!);
+  let value = bytes[offset]! & 0x3f;
+
+  for (let i = 1; i < length; i++) value = value * 256 + bytes[offset + i]!;
+
+  return { value, length };
+}
+
+/** Copy `chunk` with the least significant bit of every request-initiating frame's Request ID set. */
+function setRequestIdParity(chunk: Uint8Array): Uint8Array {
+  const bytes = new Uint8Array(chunk);
+  let offset = 0;
+
+  while (offset < bytes.length) {
+    const type = readVarint(bytes, offset);
+    const lengthAt = offset + type.length;
+    const bodyStart = lengthAt + 2;
+
+    if (REQUEST_ID_MESSAGE_TYPES.has(type.value)) {
+      // A varint value's LSB is its last byte's LSB, and even-to-odd never changes the encoded length.
+      bytes[bodyStart + varintLength(bytes[bodyStart]!) - 1]! |= 1;
+    }
+
+    offset = bodyStart + ((bytes[lengthAt]! << 8) | bytes[lengthAt + 1]!);
+  }
+
+  return bytes;
+}
+
+/**
+ * Give the subscribe driver a server's request ids. The driver always allocates client (even) ids, and a publish
+ * session is always the client too, so it requires the peer's ids to be odd (§10.1). A test that stands the driver in
+ * for the relay wraps the driver's transport with this: every request stream the driver opens has each Request ID's
+ * least significant bit set on the wire (0 becomes 1, 2 becomes 3). Assumes each write carries whole frames, which is
+ * how the driver writes them.
+ */
+export function withServerRequestIds(transport: MoqtTransport): MoqtTransport {
+  return {
+    incomingUnidirectionalStreams: transport.incomingUnidirectionalStreams,
+    incomingBidirectionalStreams: transport.incomingBidirectionalStreams,
+    createUnidirectionalStream: () => transport.createUnidirectionalStream(),
+    async createBidirectionalStream() {
+      const stream = await transport.createBidirectionalStream();
+      const rewrite = new TransformStream<Uint8Array, Uint8Array>({
+        transform: (chunk, controller) => controller.enqueue(setRequestIdParity(chunk)),
+      });
+
+      void rewrite.readable.pipeTo(stream.writable).catch(() => {});
+      return { readable: stream.readable, writable: rewrite.writable };
+    },
+    close: (closeInfo) => transport.close(closeInfo),
+    closed: transport.closed,
   };
 }
