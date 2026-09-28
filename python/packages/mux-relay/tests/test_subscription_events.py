@@ -236,9 +236,15 @@ async def test_overflow_during_construction_still_cancels_the_subscription() -> 
         await anext(events)
 
 
-@pytest.mark.parametrize("capacity", [0, -1, 1.2, True, float("inf")])
+@pytest.mark.parametrize("capacity", [0, -1, 1.2, float("inf"), float("nan")])
 async def test_invalid_capacity(capacity: Any) -> None:
-    with pytest.raises(ValueError, match="capacity"):
+    with pytest.raises(ValueError, match="capacity must be a positive integer"):
+        harness(capacity)
+
+
+@pytest.mark.parametrize("capacity", ["64", None, True])
+async def test_capacity_that_is_not_a_number_is_a_type_error(capacity: Any) -> None:
+    with pytest.raises(TypeError, match="capacity must be a number"):
         harness(capacity)
 
 

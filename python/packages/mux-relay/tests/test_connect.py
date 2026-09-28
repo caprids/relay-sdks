@@ -466,7 +466,7 @@ class TestConnectRelay:
         def forbidden(*args: Any) -> Any:
             pytest.fail("an empty jwt must fail before the token provider or transport")
 
-        with pytest.raises(TypeError, match=r"empty jwt query parameter.*supply get_token"):
+        with pytest.raises(ValueError, match=r"empty jwt query parameter.*supply get_token"):
             await connect_relay_subscriber(f"{ENDPOINT}{query}", get_token=forbidden, create_transport=forbidden)
 
     async def test_closes_an_established_connection_when_the_owner_cancels_and_closes_the_transport_once(
@@ -603,23 +603,58 @@ class TestConnectRelay:
             await connect_relay_subscriber("https://127.0.0.1:9/moq", connect_timeout=0.3)
         assert failure.value.code == "CONNECTION_TIMEOUT"
 
-    @pytest.mark.parametrize("connect_timeout", [0, -1, math.nan, math.inf])
+    @pytest.mark.parametrize("connect_timeout", [0, -1, math.nan, math.inf, 2_147_483.648])
     async def test_rejects_invalid_connection_deadlines(self, connect_timeout: float) -> None:
-        with pytest.raises(ValueError, match="positive finite"):
+        with pytest.raises(
+            ValueError, match=r"connect_timeout must be between 0 \(exclusive\) and 2147483.647 seconds"
+        ):
             await connect_relay_subscriber(ENDPOINT, connect_timeout=connect_timeout)
 
-    @pytest.mark.parametrize("request_timeout", [0, -1, math.nan, math.inf])
+    @pytest.mark.parametrize("request_timeout", [0, -1, math.nan, math.inf, 2_147_483.648])
     async def test_rejects_invalid_request_deadlines(self, request_timeout: float) -> None:
-        with pytest.raises(ValueError, match="request_timeout must be a positive finite"):
+        with pytest.raises(
+            ValueError, match=r"request_timeout must be between 0 \(exclusive\) and 2147483.647 seconds"
+        ):
             await connect_relay_subscriber(ENDPOINT, request_timeout=request_timeout)
+
+    @pytest.mark.parametrize("name", ["connect_timeout", "request_timeout"])
+    @pytest.mark.parametrize("value", ["10", None, True])
+    async def test_rejects_a_deadline_that_is_not_a_number_as_a_type_error(self, name: str, value: Any) -> None:
+        def forbidden(*args: Any) -> Any:
+            pytest.fail("a bad deadline must fail before the transport")
+
+        with pytest.raises(TypeError, match=f"{name} must be a number of seconds"):
+            await connect_relay_subscriber(ENDPOINT, create_transport=forbidden, **{name: value})
+
+    async def test_accepts_the_largest_deadline_the_typescript_timers_can_hold(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        await connect_fake(connections, connect_timeout=2_147_483.647, request_timeout=2_147_483.647)
 
     @pytest.mark.parametrize(
         "url",
-        ["http://relay.example.com/moq", "https://relay.example.com/moq#frag", "https://user@relay.example.com/moq"],
+        [
+            "http://relay.example.com/moq",
+            "wss://relay.example.com/moq",
+            "https://relay.example.com/moq#frag",
+            "https://user@relay.example.com/moq",
+            "https://user:pass@relay.example.com/moq",
+        ],
     )
-    async def test_rejects_endpoints_that_are_not_plain_https(self, url: str) -> None:
+    async def test_rejects_endpoints_relay_does_not_accept_as_a_value_error(self, url: str) -> None:
+        def forbidden(*args: Any) -> Any:
+            pytest.fail("a bad endpoint must fail before the token provider or transport")
+
+        with pytest.raises(ValueError, match="Relay endpoints"):
+            await connect_relay_subscriber(url, get_token=forbidden, create_transport=forbidden)
+
+    @pytest.mark.parametrize("url", ["relay.example.com/moq", "https://", "https:///moq", "https://[::1/moq", 7, b"x"])
+    async def test_rejects_endpoints_that_are_not_url_strings_as_a_type_error(self, url: Any) -> None:
+        def forbidden(*args: Any) -> Any:
+            pytest.fail("a bad endpoint must fail before the transport")
+
         with pytest.raises(TypeError, match="Relay endpoints"):
-            await connect_relay_subscriber(url)
+            await connect_relay_subscriber(url, create_transport=forbidden)
 
     async def test_is_an_async_context_manager_that_closes_on_exit(self, connections: list[RelaySubscriber]) -> None:
         _, connection, _ = await connect_fake(connections)

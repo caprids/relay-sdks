@@ -508,6 +508,9 @@ class TestGroups:
             await group.write(b"\x01", properties=[KeyValuePair(3, 3)])
         with pytest.raises(ValueError, match="Unknown object status"):
             await group.write(b"", status=unknown_status)
+        not_a_status: Any = 7
+        with pytest.raises(TypeError, match="Object status must be a string"):
+            await group.write(b"", status=not_a_status)
         await group.write(b"\x01")
         await group.write(b"\x02", properties=[KeyValuePair(2, 7)])
         await group.write(b"", status="end-of-group")

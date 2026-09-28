@@ -413,7 +413,7 @@ describe('connectRelaySubscriber', () => {
 
       const connecting = connectRelaySubscriber({ url: `${endpoint}${query}`, getToken, createTransport });
 
-      await expect(connecting).rejects.toThrow(TypeError);
+      await expect(connecting).rejects.toThrow(RangeError);
       await expect(connecting).rejects.toThrow(/empty jwt query parameter.*supply getToken/);
       expect(getToken).not.toHaveBeenCalled();
       expect(createTransport).not.toHaveBeenCalled();
@@ -575,7 +575,9 @@ describe('connectRelaySubscriber', () => {
       const rejected = connectRelaySubscriber({ url: endpoint, connectTimeoutMs, createTransport });
 
       await expect(rejected).rejects.toThrow(RangeError);
-      await expect(rejected).rejects.toThrow('connectTimeoutMs must be between 0 (exclusive) and 2147483647');
+      await expect(rejected).rejects.toThrow(
+        'connectTimeoutMs must be between 0 (exclusive) and 2147483647 milliseconds',
+      );
       expect(createTransport).not.toHaveBeenCalled();
     },
   );
@@ -588,10 +590,51 @@ describe('connectRelaySubscriber', () => {
       const rejected = connectRelaySubscriber({ url: endpoint, requestTimeoutMs, createTransport });
 
       await expect(rejected).rejects.toThrow(RangeError);
-      await expect(rejected).rejects.toThrow('requestTimeoutMs must be between 0 (exclusive) and 2147483647');
+      await expect(rejected).rejects.toThrow(
+        'requestTimeoutMs must be between 0 (exclusive) and 2147483647 milliseconds',
+      );
       expect(createTransport).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['connectTimeoutMs', 'requestTimeoutMs'])(
+    'rejects a %s that is not a number as a TypeError',
+    async (name) => {
+      const createTransport = vi.fn<RelayTransportFactory>();
+      const rejected = connectRelaySubscriber({ url: endpoint, [name]: '100', createTransport });
+
+      await expect(rejected).rejects.toThrow(TypeError);
+      await expect(rejected).rejects.toThrow(`${name} must be a number of milliseconds`);
+      expect(createTransport).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'http://relay.example.com/moq',
+    'wss://relay.example.com/moq',
+    'https://relay.example.com/moq#frag',
+    'https://user@relay.example.com/moq',
+    'https://user:pass@relay.example.com/moq',
+  ])('rejects an endpoint Relay does not accept as a RangeError before anything connects: %s', async (url) => {
+    const getToken = vi.fn(() => 'token');
+    const createTransport = vi.fn<RelayTransportFactory>();
+
+    await expect(connectRelaySubscriber({ url, getToken, createTransport })).rejects.toThrow(RangeError);
+    expect(getToken).not.toHaveBeenCalled();
+    expect(createTransport).not.toHaveBeenCalled();
+  });
+
+  it.each<[string, unknown]>([
+    ['a relative URL', 'relay.example.com/moq'],
+    ['an https URL with no host', 'https://'],
+    ['a number', 7],
+    ['a URL object', new URL(endpoint)],
+  ])('rejects an endpoint that is not a URL string as a TypeError: %s', async (_label, url) => {
+    const createTransport = vi.fn<RelayTransportFactory>();
+
+    await expect(connectRelaySubscriber({ url: url as string, createTransport })).rejects.toThrow(TypeError);
+    expect(createTransport).not.toHaveBeenCalled();
+  });
 
   it('accepts the largest deadline a timer can hold rather than firing it on the next tick', async () => {
     vi.useFakeTimers();

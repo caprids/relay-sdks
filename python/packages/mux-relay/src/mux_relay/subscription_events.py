@@ -80,7 +80,9 @@ class SubscriptionEvents:
         capacity: int = 64,
         cancellation: CancellationToken | None = None,
     ) -> None:
-        if isinstance(capacity, bool) or not isinstance(capacity, int) or capacity <= 0:
+        if isinstance(capacity, bool) or not isinstance(capacity, int | float):
+            raise TypeError("capacity must be a number")
+        if not isinstance(capacity, int) or capacity <= 0:
             raise ValueError("capacity must be a positive integer")
         self._capacity = capacity
         self._queue: deque[SubscriptionEvent] = deque()

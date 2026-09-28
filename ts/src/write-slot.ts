@@ -359,8 +359,9 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
           const bytes = payloadBytes(payload);
           const properties = propertyPairs(writeOptions.properties);
           const status = writeOptions.status ?? 'normal';
+          if (typeof status !== 'string') throw new TypeError('Object status must be a string');
           if (!['normal', 'end-of-group', 'end-of-track'].includes(status))
-            throw new TypeError('Unknown object status');
+            throw new RangeError('Unknown object status');
           assertGroup();
           pending = true;
           try {

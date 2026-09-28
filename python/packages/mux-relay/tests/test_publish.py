@@ -356,7 +356,7 @@ class TestConnectRelayPublisher:
         def forbidden(*args: Any) -> Any:
             pytest.fail("an empty jwt must fail before token or transport")
 
-        with pytest.raises(TypeError, match="empty jwt query parameter"):
+        with pytest.raises(ValueError, match="empty jwt query parameter"):
             await connect_relay_publisher(
                 f"{URL}?jwt=", namespace=["room"], get_token=forbidden, create_transport=forbidden
             )
@@ -393,8 +393,15 @@ class TestConnectRelayPublisher:
         with pytest.raises(TypeError, match="non-empty"):
             publisher.register_track("")
 
-        with pytest.raises(ValueError, match="write_timeout"):
+        with pytest.raises(ValueError, match=r"write_timeout must be between 0 \(exclusive\) and 2147483.647 seconds"):
             publisher.register_track("events", write_timeout=0)
+
+        with pytest.raises(ValueError, match="write_timeout"):
+            publisher.register_track("events", write_timeout=2_147_483.648)
+
+        not_a_number: Any = "10"
+        with pytest.raises(TypeError, match="write_timeout must be a number of seconds"):
+            publisher.register_track("events", write_timeout=not_a_number)
 
     async def test_announced_settles_once_the_first_registered_track_puts_the_announce_on_the_wire(
         self, cleanup: Cleanup

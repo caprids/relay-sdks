@@ -215,8 +215,12 @@ for retry, trailing-object, and publisher-generation guidance.
 handshakes. The optional `CancellationToken` controls the connection's entire lifetime: cancelling
 it closes an established connection, and the `closed` future carries the reason. An explicit `jwt`
 query parameter takes precedence over `get_token`, matching the current Relay connection
-authentication convention. An empty one (`?jwt=`) is a `TypeError` before anything connects: put a
-token in it, or drop it and use `get_token`. In-flight operations re-raise the application's exact cancellation reason;
+authentication convention. An empty one (`?jwt=`) is a `ValueError` before anything connects: put a
+token in it, or drop it and use `get_token`. So is an endpoint with another scheme, a fragment, or
+userinfo; an endpoint that is not a string holding an absolute URL with a host is a `TypeError`.
+Every deadline (`connect_timeout`, `request_timeout`, and `write_timeout`) must be between 0
+(exclusive) and 2147483.647 seconds, the same bound the TypeScript SDK's timers impose. A value
+outside it is a `ValueError`; a value that is not a number (including a `bool`) is a `TypeError`. In-flight operations re-raise the application's exact cancellation reason;
 with `cancel()` this is `Cancelled`, which is not a `RelayError`. Handle lifetime cancellation
 separately from SDK errors (compare the exception to your application's `CancellationToken.reason` when stopping normally).
 `RelaySubscriber` is also an async context manager that closes on exit.
@@ -264,7 +268,7 @@ subscription and raises `SubscriptionOverflowError`. Request failures raise
 for a clean connection close, because closure does not prove all objects arrived, and before
 acceptance as well as after it. Errors propagate out of the loop for the caller to handle. `publisher_done` is an event, never EOF. Arrival order is preserved without ordering
 across streams or transport-wide backpressure. Early exit releases the owned subscription and
-observers without closing `subscriber` or other consumers. Only one pending `anext()` is supported. See
+observers without closing `subscriber` or other consumers. Only one pending `anext()` is supported; a concurrent one raises `RuntimeError`. See
 the [complete event and ownership contract](../spec/behavior.md#async-subscription-consumption).
 
 Passing an `async def` subscription callback raises `TypeError` before sending. A synchronous

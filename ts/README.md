@@ -217,10 +217,12 @@ for retry, trailing-object, and publisher-generation guidance.
 `connectRelaySubscriber` has a deadline covering token resolution and both handshakes. Its optional abort
 signal controls the connection's entire lifetime. An explicit `jwt` query parameter takes precedence
 over `getToken`, matching the current Relay connection authentication convention. An empty one
-(`?jwt=`) is a `TypeError` before anything connects: put a token in it, or drop it and use
-`getToken`. Every deadline (`connectTimeoutMs`, `requestTimeoutMs`, and `writeTimeoutMs`) must be
-between 0 (exclusive) and 2147483647 milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError`
-rather than a deadline that fires immediately.
+(`?jwt=`) is a `RangeError` before anything connects: put a token in it, or drop it and use
+`getToken`. So is an endpoint with another scheme, a fragment, or userinfo; an endpoint that is not
+a string holding an absolute URL is a `TypeError`. Every deadline (`connectTimeoutMs`,
+`requestTimeoutMs`, and `writeTimeoutMs`) must be between 0 (exclusive) and 2147483647
+milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError` rather
+than a deadline that fires immediately; a value that is not a number is a `TypeError`.
 
 Both roles take the same connection options, `ConnectRelayOptions`: `url`, `getToken`, `signal`,
 `connectTimeoutMs`, and `createTransport`. `ConnectRelaySubscriberOptions` adds `requestTimeoutMs`,
@@ -265,7 +267,7 @@ subscription and throws `SubscriptionOverflowError`. Request failures throw
 for a clean connection close, because closure does not prove all objects arrived, and before
 acceptance as well as after it. Errors propagate out of the loop for the caller to handle. `publisherDone` is an event, never EOF. Arrival order is preserved without ordering across
 streams or transport-wide backpressure. Early exit releases the owned subscription and observers
-without closing `subscriber` or other consumers. Only one pending `next()` is supported. `Promise.race`
+without closing `subscriber` or other consumers. Only one pending `next()` is supported; a concurrent one rejects with a plain `Error`. `Promise.race`
 with a timeout leaves the losing `next()` pending: use the iterator's abort signal to end
 consumption, or retain and await that same read before starting another. Python's
 `asyncio.timeout`/`wait_for` instead cancels the read and its subscription when the deadline

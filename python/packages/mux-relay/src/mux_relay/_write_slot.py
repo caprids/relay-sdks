@@ -282,6 +282,9 @@ class RelayGroupWriter:
         data = payload_bytes(payload)
         object_properties = property_pairs(properties)
 
+        if not isinstance(status, str):
+            raise TypeError("Object status must be a string")
+
         if status not in ("normal", "end-of-group", "end-of-track"):
             raise ValueError("Unknown object status")
 

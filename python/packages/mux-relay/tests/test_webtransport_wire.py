@@ -65,6 +65,9 @@ class TestWireHelpers:
         with pytest.raises(ValueError, match="HTTPS"):
             _parse_url("http://relay.example.com")
 
+        with pytest.raises(TypeError, match="host"):
+            _parse_url("https:///moq")
+
     async def test_close_capsule_from_the_peer_ends_the_session_cleanly(self) -> None:
         session = WebTransportSessionBase()
         capsule = encode_close_session_capsule(7, "bye")

@@ -43,7 +43,7 @@ def _parse_url(url: str) -> _Endpoint:
 
     host = parts.hostname
     if not host:
-        raise ValueError("WebTransport endpoints must name a host")
+        raise TypeError("WebTransport endpoints must name a host")
 
     port = parts.port or _DEFAULT_PORT
     authority = host if port == _DEFAULT_PORT else f"{host}:{port}"
