@@ -117,9 +117,10 @@ what the relay asks for on its own behalf; it is not a count of viewers and not 
 
 - The relay fans one upstream subscription out to every downstream viewer. A second viewer joining
   produces no new `true`; later viewers are served from the relay's cache of the last objects.
-- The relay keeps its upstream subscription for a while after the last viewer leaves (about 30
-  seconds against the tested relay; see [issue #24](https://github.com/muxinc/relay-sdks/issues/24)).
-  `hasDemand` therefore lags the last viewer, and `true` does not prove anyone is watching.
+- The relay decides when its upstream subscription ends. moq-relay 0.15.x cancels it about one
+  round trip after the last viewer leaves; relays before 0.15 held it for about 30 seconds (see
+  [relay demand](relay-interop.md#relay-demand)). `true` does not prove anyone is watching, and
+  `false` says only that the relay stopped forwarding.
 - A replacement subscription, such as the relay re-subscribing after its own reconnect, is a new
   relay subscription: `demandChanges()` yields `true` again even though `hasDemand` never became
   `false`. A write in flight when that happens fails, because its bytes were addressed to the old

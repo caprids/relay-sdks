@@ -24,3 +24,12 @@ add interface and state for a case the relay never produces.
   session, not in the product write slot.
 - Revisit if a relay is observed holding two live subscriptions to one track on one publisher
   connection, or if `demandChanges()` consumers need to distinguish "replaced" from "added".
+
+## Amendment (2026-09-28)
+
+The 30-second hold in the rationale no longer applies: moq-relay 0.15.x (production from
+2026-09-28) cancels its upstream subscription about 50 ms after the last viewer leaves
+([issue #137](https://github.com/muxinc/relay-sdks/issues/137); measurements in
+[relay demand](../../spec/relay-interop.md#relay-demand)). The decision stands on the coalescing
+argument alone, which was re-measured: a second viewer still produces no new subscription, so the
+relay still never presents two live subscriptions to one track.

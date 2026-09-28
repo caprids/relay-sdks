@@ -361,8 +361,8 @@ class RelayTrackWriter:
     def has_demand(self) -> bool:
         """Whether the relay currently has an upstream subscription for this track, so a write would proceed at once.
 
-        Demand is the relay's own subscription, shared by every downstream viewer and kept for a
-        while after the last viewer leaves: it is neither a viewer count nor a liveness signal.
+        Demand is the relay's own subscription, shared by every downstream viewer and ended when
+        the relay chooses: it is neither a viewer count nor a liveness signal.
         Always ``False`` once the track has ended, whatever the relay asks for; read ``closed`` to
         tell a track that ended apart from one the relay has not subscribed to.
         """

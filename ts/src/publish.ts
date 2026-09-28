@@ -73,8 +73,7 @@ export interface RelayTrackWriter {
   /**
    * Whether the relay currently has an upstream subscription for this track, so a write would
    * proceed at once. Demand is the relay's own subscription, shared by every downstream viewer
-   * and kept for a while after the last viewer leaves: it is neither a viewer count nor a
-   * liveness signal. Always false once the track is closed.
+   * and ended when the relay chooses: it is neither a viewer count nor a liveness signal. Always false once the track is closed.
    */
   readonly hasDemand: boolean;
   /** True once the application closed the track or the publisher connection ended. */

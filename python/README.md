@@ -397,10 +397,12 @@ async for demanded in catalog.demand_changes():
 
 Demand is the relay's own subscription, not a viewer count and not a liveness signal. The relay
 fans one upstream subscription out to every downstream viewer, so a second viewer produces no new
-`True` and is served from the relay's cache; and it keeps the subscription for a while after the
-last viewer leaves (about 30 seconds on the tested relay), so `has_demand` lags the last viewer and
-`True` does not prove anyone is watching. Write only state that is safe to serve from cache, and do
-not use demand to decide whether to keep encoding. See [relay demand](../spec/relay-interop.md#relay-demand).
+`True` and is served from the relay's cache. moq-relay 0.15.x cancels the subscription about one
+round trip after the last viewer leaves, so the next viewer brings a new `True` and a re-send, and a
+viewer that resubscribes on the same connection within about 30 seconds can receive the relay's
+cached copy before the re-sent one. `True` does not prove anyone is watching. Write only state that
+is safe to serve from cache and to receive more than once, and do not use demand to decide whether
+to keep encoding. See [relay demand](../spec/relay-interop.md#relay-demand).
 
 Both loops above exist ready-made in `mux_relay.media`, the media publishing policy the Video.js
 example runs on. `CatalogService(track, document)` re-sends a document on every relay subscription
