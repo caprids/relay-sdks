@@ -234,8 +234,10 @@ describe('connectRelayPublisher', () => {
     const { publisher } = await connectHub();
     const events = publisher.registerTrack({ track: 'events' });
 
+    expect(() => publisher.registerTrack({ track: 'events' })).toThrow(RangeError);
     expect(() => publisher.registerTrack({ track: 'events' })).toThrow(/already registered/);
     events.close();
+    expect(() => publisher.registerTrack({ track: 'events' })).toThrow(RangeError);
     expect(() => publisher.registerTrack({ track: 'events' })).toThrow(/already registered/);
   });
 

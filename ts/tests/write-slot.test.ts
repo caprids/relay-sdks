@@ -475,7 +475,9 @@ describe('write slot: groups', () => {
     await expect(writer.openGroup()).rejects.toMatchObject({ code: 'WRITE_PENDING' });
     await expect(group.write('bad' as unknown as ArrayBufferView)).rejects.toThrow(TypeError);
     await expect(group.write(bytes(1), { properties: [{ type: 3, value: 2 }] })).rejects.toThrow(TypeError);
-    await expect(group.write(bytes(), { status: 'later' as never })).rejects.toThrow(TypeError);
+    await expect(group.write(bytes(), { status: 'later' as never })).rejects.toThrow(RangeError);
+    await expect(group.write(bytes(), { status: 'later' as never })).rejects.toThrow('Unknown object status');
+    await expect(group.write(bytes(), { status: 7 as never })).rejects.toThrow(TypeError);
     await group.write(bytes(1));
     await group.write(bytes(2), { properties: [{ type: 2, value: 7 }] });
     await group.write(bytes(), { status: 'end-of-group' });

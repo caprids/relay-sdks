@@ -204,7 +204,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
       lifetime.assertOpen();
       if (closing) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');
-      if (tracks.has(name)) throw new TypeError('Track name is already registered on this publisher connection');
+      if (tracks.has(name)) throw new RangeError('Track name is already registered on this publisher connection');
 
       const registered = session.registerTrack({
         trackNamespace: namespace,
