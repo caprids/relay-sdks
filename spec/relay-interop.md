@@ -166,7 +166,8 @@ request stream is also the open question in
 [issue #94](https://github.com/muxinc/relay-sdks/issues/94), from the subscriber's side. Both cores' publish-session tests
 pin the three choices against in-process raw peers: a track end FINs its subscription streams with
 no trailing message, an orderly close puts SETUP and nothing else on the control stream, and
-SUBSCRIBE_OK carries the request ID as the alias.
+SUBSCRIBE_OK carries the request ID as the alias. Both cores' session tests pin the same control
+stream contents for a subscriber connection's close.
 
 Source reading of moq-dev/moq `main` at `2a5b6e23d` suggests one of the three has moved: its
 `run_goaway` records a client GOAWAY and keeps the session, while bytes after SUBSCRIBE_OK still
@@ -179,8 +180,9 @@ deviation, make the one-line change in a scratch build of either core:
 - send PUBLISH_DONE (status `TRACK_ENDED`, stream count, then FIN) from the track-end path, then
   check that a subscriber still receives every object and a done notification rather than a reset
   or an early end;
-- write GOAWAY (timeout 0, empty URI) on the publisher's control stream before NAMESPACE_DONE, then
-  check that the connection's closure carries no error;
+- write GOAWAY (timeout 0, empty URI) on the publisher's control stream before NAMESPACE_DONE, and
+  on a subscriber connection's control stream before its transport close, then check that each
+  connection's closure carries no error;
 - the alias choice needs no re-test while the SDK serves one subscription per track
   ([ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md)); if that changes, check whether
   the relay accepts one alias shared by two subscriptions to the same track.
