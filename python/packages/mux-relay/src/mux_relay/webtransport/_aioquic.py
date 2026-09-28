@@ -1,13 +1,14 @@
 """What aioquic 1.3 does not expose: every private member the adapter reads or writes, each behind one name.
 
-The send half's backpressure, the close drain, stream pruning and the dropped-FIN retry depend on state
-aioquic's public API does not expose: ``QuicStreamSender._pending``, ``_pending_eof``, ``_buffer``,
-``_buffer_fin``, ``_acked_fin`` and ``_reset_error_code`` (with the public ``buffer_is_empty`` and
-``is_finished``), ``QuicStreamReceiver.is_finished``, ``QuicConnection._streams``, ``H3Connection._stream``
-and ``H3Connection._get_or_create_stream``. This module is the only place that names them, so a rename in
-a later aioquic 1.x fails in ``tests/test_webtransport_aioquic.py`` (which pins every member and the
-behaviour of every function here) before it can fail silently under load, as a write that never settles
-or a FIN that is never re-armed. The package pins ``aioquic>=1.3,<1.4`` for the same reason; widen it
+The send half's backpressure, the close drain, stream pruning, the dropped-FIN retry and the held
+control-stream FIN depend on state aioquic's public API does not expose: ``QuicStreamSender._pending``,
+``_pending_eof``, ``_buffer``, ``_buffer_fin``, ``_acked_fin`` and ``_reset_error_code`` (with the public
+``buffer_is_empty`` and ``is_finished``), ``QuicStreamReceiver.is_finished``, ``QuicConnection._streams``,
+``H3Connection._stream``, ``H3Connection._get_or_create_stream`` and ``H3Connection._peer_control_stream_id``.
+This module is the only place that names them, so a rename in a later aioquic 1.x fails in
+``tests/test_webtransport_aioquic.py`` (which pins every member and the behaviour of every function here)
+before it can fail silently under load, as a write that never settles or a FIN that is never re-armed.
+The package pins ``aioquic>=1.3,<1.4`` for the same reason; widen it
 after re-running that test module against the new minor.
 
 The asyncio glue our own :class:`WebTransportProtocol` subclass reaches on its base class (``_quic``,
@@ -108,3 +109,12 @@ def forget_h3_stream(h3: H3Connection, stream_id: int) -> None:
     WebTransport streams whose bytes bypass it: every incoming one, and our bidirectional ones.
     """
     h3._stream.pop(stream_id, None)
+
+
+def peer_control_stream_id(h3: H3Connection) -> int | None:
+    """The peer's HTTP/3 control stream, once its stream type has been read; ``None`` before that.
+
+    The protocol needs it to recognise the peer ending that stream (see ``WebTransportProtocol``),
+    which aioquic otherwise turns into a connection close before later events in the same flight.
+    """
+    return h3._peer_control_stream_id

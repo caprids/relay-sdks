@@ -68,17 +68,39 @@ class TestWireHelpers:
         with pytest.raises(TypeError, match="host"):
             _parse_url("https:///moq")
 
-    async def test_close_capsule_from_the_peer_ends_the_session_cleanly(self) -> None:
+    async def test_a_close_capsule_with_code_zero_ends_the_session_cleanly(self) -> None:
         session = WebTransportSessionBase()
-        capsule = encode_close_session_capsule(7, "bye")
+        capsule = encode_close_session_capsule(0, "done")
 
         assert capsule[:2] == bytes([0x68, 0x43])  # 0x2843 as a two-byte QUIC varint
         # Split across two DATA frames: the capsule parser buffers partial input.
         session._on_connect_data(capsule[:3], False)
         assert not session._closed.done()
         session._on_connect_data(capsule[3:], False)
-        assert session.close_info == (7, "bye")
+        assert session.close_info == (0, "done")
         await session.wait_closed()
+
+    async def test_a_fin_without_a_capsule_ends_the_session_cleanly(self) -> None:
+        session = WebTransportSessionBase()
+        session._on_connect_data(b"", True)
+        assert session.close_info is None
+        await session.wait_closed()
+
+    async def test_a_close_capsule_with_a_nonzero_code_fails_the_session_with_that_code(self) -> None:
+        session = WebTransportSessionBase()
+        # The bytes moq-relay 0.15.8 sends when it refuses a connection's credentials.
+        capsule = bytes.fromhex("68431000000002756e617574686f72697a6564")
+        assert capsule == encode_close_session_capsule(2, "unauthorized")
+
+        session._on_connect_data(capsule, True)
+        assert session.close_info == (2, "unauthorized")
+
+        with pytest.raises(WebTransportError) as failure:
+            await session.wait_closed()
+
+        assert failure.value.peer_closed
+        assert (failure.value.code, failure.value.reason) == (2, "unauthorized")
+        assert str(failure.value) == "peer closed the WebTransport session: unauthorized (code 0x2)"
 
     def test_the_close_capsule_type_is_the_registered_value(self) -> None:
         assert CAPSULE_CLOSE_WEBTRANSPORT_SESSION == 0x2843

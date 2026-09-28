@@ -13,6 +13,7 @@ from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
 import pytest
+from aioquic.h3.connection import ErrorCode
 from aioquic.h3.events import HeadersReceived, WebTransportStreamDataReceived
 from aioquic.quic import events as quic_events
 from aioquic.quic.configuration import QuicConfiguration
@@ -31,6 +32,7 @@ from mux_relay import (
     Closed,
     ConnectingTransport,
     RelayAwaitable,
+    RelayError,
     RelaySubscriptionHandlers,
     connect_relay_publisher,
     connect_relay_subscriber,
@@ -38,6 +40,7 @@ from mux_relay import (
 from mux_relay.webtransport import WebTransportError, connect_webtransport
 from mux_relay.webtransport._client import WebTransportSession
 from mux_relay.webtransport._protocol import WebTransportProtocol
+from mux_relay.webtransport._wire import encode_close_session_capsule
 
 NAMESPACE = ["loopback", "data"]
 
@@ -703,3 +706,182 @@ class TestReceivePruning:
             await asyncio.wait_for(transport.wait_closed(), 5)
             server.close()
             await asyncio.sleep(0.05)
+
+
+class TestPeerRefusal:
+    """The peer refuses a session the way moq-relay 0.15.8 refuses credentials (#14).
+
+    After ``:status 200`` and the client's SETUP, the relay sends CLOSE_WEBTRANSPORT_SESSION (code
+    0x2, "unauthorized") with FIN on the CONNECT stream, FIN on its HTTP/3 control stream, and
+    STOP_SENDING on the client's streams, all in one flight. aioquic on its own turns the control-stream
+    FIN into a 0x104 connection close and drops the capsule; the adapter must surface the capsule.
+    """
+
+    @staticmethod
+    async def _refuse(session: WebTransportServerSession, order: str) -> None:
+        # Like the relay, answer only once the client's control stream (its SETUP) has arrived.
+        async for _control in session.incoming_unidirectional_streams():
+            break
+
+        protocol = session._protocol
+        assert protocol is not None
+        quic = protocol._quic
+        control_stream_id = protocol.h3._local_control_stream_id
+        assert control_stream_id is not None
+
+        def send_capsule() -> None:
+            protocol.h3.send_data(session.session_id, encode_close_session_capsule(2, "unauthorized"), end_stream=True)
+
+        def end_control_stream() -> None:
+            quic.send_stream_data(control_stream_id, b"", end_stream=True)
+
+        def stop_client_streams() -> None:
+            for stream_id in list(session._receives):
+                quic.stop_stream(stream_id, 0)
+
+        if order == "control stream first":  # two datagrams, in this order
+            end_control_stream()
+            stop_client_streams()
+            protocol.transmit()
+            send_capsule()
+            protocol.transmit()
+        elif order == "capsule first":  # two datagrams, in this order
+            send_capsule()
+            protocol.transmit()
+            stop_client_streams()
+            end_control_stream()
+            protocol.transmit()
+        elif order == "one datagram":
+            send_capsule()
+            stop_client_streams()
+            end_control_stream()
+            protocol.transmit()
+        elif order == "control stream only":  # a genuine control-stream closure: no capsule follows
+            end_control_stream()
+            protocol.transmit()
+        else:
+            raise AssertionError(order)
+
+    async def _serve_refusing(self, order: str) -> tuple[LoopbackWebTransportServer, list[WebTransportSession]]:
+        refusals: list[asyncio.Task[None]] = []
+        server = await start_webtransport_server(
+            lambda session: refusals.append(asyncio.ensure_future(self._refuse(session, order)))
+        )
+        self._refusals = refusals  # keep the tasks referenced
+        return server, []
+
+    @staticmethod
+    def _capturing_factory(server: LoopbackWebTransportServer, created: list[WebTransportSession]):
+        def create_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
+            connecting = connect_webtransport(url, protocols, configuration=server.client_configuration())
+            assert isinstance(connecting.transport, WebTransportSession)
+            created.append(connecting.transport)
+            return connecting
+
+        return create_transport
+
+    @pytest.mark.parametrize("order", ["control stream first", "capsule first", "one datagram"])
+    async def test_a_refused_subscriber_reports_unauthorized(self, order: str) -> None:
+        server, created = await self._serve_refusing(order)
+
+        try:
+            with pytest.raises(RelayError) as failure:
+                await connect_relay_subscriber(
+                    server.url_for("/subscribe"),
+                    create_transport=self._capturing_factory(server, created),
+                    connect_timeout=5,
+                )
+
+            error = failure.value
+            assert (error.code, error.phase) == ("UNAUTHORIZED", "connecting")
+            assert (
+                str(error) == "Relay refused the connection's credentials: unauthorized (session closed with code 0x2)"
+            )
+            cause = error.__cause__
+            assert isinstance(cause, WebTransportError)
+            assert (cause.peer_closed, cause.code, cause.reason) == (True, 2, "unauthorized")
+
+            session = created[0]
+            assert session.close_info == (2, "unauthorized")
+            protocol = session._protocol
+            assert protocol is not None
+
+            if order == "control stream first":
+                # The FIN really was held for the capsule, and the capsule settled it.
+                assert protocol._control_stream_fin is not None
+                assert protocol._control_stream_fin.cancelled()
+
+            # The client closed the connection itself, cleanly: the held FIN never became a 0x104 close.
+            await asyncio.wait_for(protocol.terminated_event.wait(), 5)
+            assert protocol.terminated is not None
+            assert protocol.terminated.error_code == ErrorCode.H3_NO_ERROR
+        finally:
+            server.close()
+
+    async def test_a_refused_publisher_reports_unauthorized(self) -> None:
+        server, created = await self._serve_refusing("control stream first")
+
+        try:
+            with pytest.raises(RelayError) as failure:
+                await connect_relay_publisher(
+                    server.url_for("/publish"),
+                    namespace=NAMESPACE,
+                    create_transport=self._capturing_factory(server, created),
+                    connect_timeout=5,
+                )
+
+            assert (failure.value.code, failure.value.phase) == ("UNAUTHORIZED", "connecting")
+        finally:
+            server.close()
+
+    async def test_a_control_stream_closed_without_a_capsule_still_fails_the_connection(self) -> None:
+        server, created = await self._serve_refusing("control stream only")
+
+        try:
+            with pytest.raises(RelayError) as failure:
+                await connect_relay_subscriber(
+                    server.url_for("/subscribe"),
+                    create_transport=self._capturing_factory(server, created),
+                    connect_timeout=5,
+                )
+
+            error = failure.value
+            assert (error.code, error.phase) == ("TRANSPORT_ERROR", "connecting")
+            assert "Closing control stream is not allowed (code 0x104)" in str(error)
+            cause = error.__cause__
+            assert isinstance(cause, WebTransportError)
+            assert not cause.peer_closed
+            assert cause.code == ErrorCode.H3_CLOSED_CRITICAL_STREAM
+        finally:
+            server.close()
+
+    async def test_a_session_closed_with_code_0x2_after_setup_reports_unauthorized(
+        self, loopback: tuple[LoopbackWebTransportServer, RelayHub, list[WebTransportServerSession]]
+    ) -> None:
+        server, _, sessions = loopback
+        subscriber = await connect_relay_subscriber(
+            server.url_for("/subscribe"), create_transport=factory_for(server), connect_timeout=5
+        )
+        await wait_for(lambda: len(sessions) == 1)
+
+        sessions[0].close(2, "unauthorized")
+        closed = await asyncio.wait_for(subscriber.closed, 5)
+
+        assert isinstance(closed.error, RelayError)
+        assert (closed.error.code, closed.error.phase) == ("UNAUTHORIZED", "connection")
+
+    async def test_a_session_closed_with_another_code_is_a_transport_error(
+        self, loopback: tuple[LoopbackWebTransportServer, RelayHub, list[WebTransportServerSession]]
+    ) -> None:
+        server, _, sessions = loopback
+        subscriber = await connect_relay_subscriber(
+            server.url_for("/subscribe"), create_transport=factory_for(server), connect_timeout=5
+        )
+        await wait_for(lambda: len(sessions) == 1)
+
+        sessions[0].close(0x3, "protocol violation")
+        closed = await asyncio.wait_for(subscriber.closed, 5)
+
+        assert isinstance(closed.error, RelayError)
+        assert (closed.error.code, closed.error.phase) == ("TRANSPORT_ERROR", "connection")
+        assert str(closed.error) == "peer closed the WebTransport session: protocol violation (code 0x3)"

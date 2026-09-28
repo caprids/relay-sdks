@@ -8,9 +8,10 @@ real aioquic objects one state transition at a time.
 import asyncio
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol
-from aioquic.h3.connection import FrameType, H3Connection, H3Stream
+from aioquic.h3.connection import ErrorCode, FrameType, H3Connection, H3Stream
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
+from aioquic.quic.events import StreamDataReceived
 from aioquic.quic.packet_builder import QuicDeliveryState
 from aioquic.quic.rangeset import RangeSet
 from aioquic.quic.stream import QuicStream, QuicStreamReceiver, QuicStreamSender
@@ -22,6 +23,7 @@ from mux_relay.webtransport._aioquic import (
     forget_h3_stream,
     live_stream,
     mark_webtransport_stream,
+    peer_control_stream_id,
     rearm_fin,
     reset_pending,
     transmitted,
@@ -110,6 +112,7 @@ class TestAioquicInternals:
         with h3._get_or_create_stream(stream_id) as h3_stream:
             assert isinstance(h3_stream, H3Stream)
         assert stream_id in h3._stream
+        assert h3._peer_control_stream_id is None  # set once the peer's control stream type is read
 
         # QuicConnectionProtocol: the asyncio glue the adapter drives transmits through.
         protocol = QuicConnectionProtocol(connection)
@@ -257,3 +260,20 @@ class TestAioquicFunctions:
 
         assert stream_id not in h3._stream
         forget_h3_stream(h3, stream_id)  # already gone: nothing to do
+
+    def test_peer_control_stream_id_names_the_stream_once_its_type_is_read(self) -> None:
+        quic = self._connection()
+        h3 = H3Connection(quic, enable_webtransport=True)
+        assert peer_control_stream_id(h3) is None
+
+        h3.handle_event(StreamDataReceived(data=b"\x00", end_stream=False, stream_id=3))  # stream type CONTROL
+
+        assert peer_control_stream_id(h3) == 3
+
+        # What the protocol holds that stream's FIN back from: aioquic closes the connection with
+        # H3_CLOSED_CRITICAL_STREAM at once and ignores every later event (#14).
+        h3.handle_event(StreamDataReceived(data=b"", end_stream=True, stream_id=3))
+
+        assert quic._close_event is not None
+        assert quic._close_event.error_code == ErrorCode.H3_CLOSED_CRITICAL_STREAM
+        assert h3.handle_event(StreamDataReceived(data=b"\x00\x00", end_stream=False, stream_id=0)) == []

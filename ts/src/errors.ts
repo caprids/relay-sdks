@@ -12,7 +12,13 @@ export type RelayErrorCode =
   | 'UPDATE_QUEUE_FULL'
   | 'GOAWAY'
   | 'TRANSPORT_ERROR'
-  | 'TRANSPORT_UNAVAILABLE';
+  | 'TRANSPORT_UNAVAILABLE'
+  /**
+   * The relay refused the connection's credentials. Shared with the Python SDK, which reports it today. TypeScript
+   * does not produce it yet: browsers do not expose moq-relay's CLOSE_WEBTRANSPORT_SESSION code, so a refusal
+   * arrives as `TRANSPORT_ERROR` until the relay lets the capsule through (muxinc/relay-sdks#14).
+   */
+  | 'UNAUTHORIZED';
 
 /** Where the failure originated, not a delivery acknowledgment or a safe-retry flag. */
 export type RelayErrorPhase =
