@@ -189,7 +189,7 @@ class FrameWriter(Generic[F]):
         """
         if self._closed:
             # The application's own close wins over everything, a retirement seen earlier included.
-            raise RelayError("Frame writer is closed", code="CLOSED", phase="writing")
+            raise RelayError("Frame writer is closed", code="CLOSED", phase="waiting-for-demand")
 
         if self._ended is not None:
             return FrameOutcome("ended", error=self._ended)
@@ -197,7 +197,7 @@ class FrameWriter(Generic[F]):
         if self._track.closed:
             # The track ended while nothing was in flight (the connection closed, or the application
             # closed the track itself). No operation failed, so the state is named instead.
-            self._ended = RelayError("Published track is closed", code="CLOSED", phase="writing")
+            self._ended = RelayError("Published track is closed", code="CLOSED", phase="waiting-for-demand")
             self._group = None
             return FrameOutcome("ended", error=self._ended)
 

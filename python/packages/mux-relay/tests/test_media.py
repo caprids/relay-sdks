@@ -239,7 +239,7 @@ class TestKeyframeGrouping:
         assert track.groups[0].finished and writer.closed
         with pytest.raises(RelayError) as caught:
             await writer.write(key(2))
-        assert caught.value.code == "CLOSED"
+        assert (caught.value.code, caught.value.phase) == ("CLOSED", "waiting-for-demand"), "nothing was sent"
 
         await writer.close()
         assert len(track.groups) == 1
@@ -741,6 +741,7 @@ class TestOverTheRelayHub:
         catalog_track.close()
 
         outcome = await video.write(key(0))
-        assert outcome.kind == "ended" and outcome.error is not None and outcome.error.code == "CLOSED"
+        assert outcome.kind == "ended" and outcome.error is not None
+        assert (outcome.error.code, outcome.error.phase) == ("CLOSED", "waiting-for-demand"), "nothing was sent"
         assert video.ended is outcome.error
         assert await asyncio.wait_for(serving, 1) is None, "the track ended quietly: no write failed"
