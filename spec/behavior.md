@@ -401,11 +401,12 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   Demand observers emit the current state first, include replacement subscriptions (a repeated
   "demanded" value), and finish when the track ends. A closed track reports no demand. Demand is
   the relay's single upstream subscription for the track: the relay shares it across every
-  downstream viewer, so additional viewers produce no further notification, and it may keep the
-  subscription for a period after the last viewer leaves. Demand is therefore neither a viewer
+  downstream viewer, so additional viewers produce no further notification, and when it ends is
+  the relay's choice (moq-relay 0.15.x cancels it about one round trip after the last viewer
+  leaves; earlier relays held it for about 30 seconds). Demand is therefore neither a viewer
   count nor a liveness signal. A document re-sent on each demanded value reaches the viewers who
   join during one relay subscription from the relay's cache, not as a re-send, so a state-shaped
-  track writes only state that is safe to serve from cache
+  track writes only state that is safe to serve from cache and to receive more than once
   ([relay demand](relay-interop.md#relay-demand)). Implemented in both SDKs.
 
 ### Write phases and interruptions

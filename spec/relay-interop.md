@@ -91,21 +91,31 @@ unretried.
 ## Relay demand
 
 A publisher's demand is the relay's one upstream subscription for a track, not a count of
-downstream viewers. Measured against `sjc.relay.mux.global` on 2026-09-15 with the Python SDK
-([issue #24](https://github.com/muxinc/relay-sdks/issues/24), 2 of 2 runs):
+downstream viewers. Measured against `sjc.relay.mux.global` (moq-relay 0.15.8) on 2026-09-28 with
+the Python SDK ([issue #137](https://github.com/muxinc/relay-sdks/issues/137)):
 
 | scenario | result |
 | --- | --- |
-| the only subscriber closes its connection | demand stays for 30.07 s, then ends |
-| the only subscriber cancels, connection kept open | demand still present after 20 s |
+| the only subscriber cancels, connection kept open | demand ends 50-51 ms later (3 of 3) |
+| the only subscriber closes its connection | demand ends 50-51 ms later (3 of 3) |
 | a second subscriber joins while the first is present | no new demanded value; the second receives the catalog from the relay's cache |
-| writes while demanded but no viewer present | succeed and reach no one |
-| 200 subscribe/receive-one/cancel cycles in about 66 s | one demanded value and one release, about 30 s after the churn stopped |
+| the first of two subscribers leaves | demand stays; it ends 50 ms after the second leaves |
+| a subscriber joins 2-35 s after the last one left | a new demanded value, so the catalog is re-sent (12 of 12) |
+| the same connection resubscribes within about 30 s of cancelling | it receives the previous group from the relay's cache, then the re-sent one (6 of 6 at gaps of 2-20 s; 0 of 2 at 35 s; 0 of 4 from a new connection) |
+| 200 subscribe/receive-one/cancel cycles in 19.3 s on one connection | 185 demanded values and 185 releases; the last release 51 ms after the last cancel |
 
-So the relay coalesces viewers into one subscription and releases it about 30 seconds after the
-last one leaves. `has_demand` / `hasDemand` is not a liveness signal and not a reason to keep or
-stop encoding, and a catalog re-sent on each demanded value is what the relay caches for every
-later viewer: write only state that is safe to serve from cache.
+So the relay coalesces concurrent viewers into one subscription and cancels it as soon as the last
+one leaves, about one round trip later. moq-net 0.15.0 removed the hold: the relay's front drops
+the source track when its last reader leaves, and its 30-second `TRACK_IDLE_LINGER` now keeps only
+a cached copy of delivered groups, holding no upstream subscription (`rs/moq-net/src/model/origin.rs`
+at `moq-relay-v0.15.8`). `has_demand` / `hasDemand` is not a liveness signal and not a reason to
+keep or stop encoding, and a catalog re-sent on each demanded value is what the relay caches for
+every later viewer: write only state that is safe to serve from cache, and expect a viewer to see
+a document more than once.
+
+Relays before 0.15 held the upstream subscription for about 30 seconds after the last viewer left
+(measured against the same endpoint on 2026-09-15, [issue #24](https://github.com/muxinc/relay-sdks/issues/24));
+that is no longer the case.
 
 ## Late subscribers and location filters
 
