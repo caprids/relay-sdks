@@ -67,16 +67,12 @@ function harness(options: { closedAlready?: unknown; subscribeThrows?: unknown; 
     else observer = value;
     return remove;
   });
-  let endTransport!: (error: unknown) => void;
-  const transportClosed = new Promise<unknown>((_, reject) => {
-    endTransport = reject;
-  });
-  // The session observes the transport's closure before the subscription does, as the core does.
-  void transportClosed.catch((error: unknown) => observer?.(error));
   return {
-    deps: { subscribe, observeClosed, transportClosed },
-    /** The transport reports its closure; the session hears it first and reports the connection ended. */
-    endTransport,
+    deps: { subscribe, observeClosed },
+    /** The transport's closed settles; the session reacts and reports the connection ended. */
+    endTransport: (error: unknown) => {
+      void Promise.reject(error).catch((reason: unknown) => observer?.(reason));
+    },
     core: () => {
       if (!handlers) throw new Error('core subscribe was not called');
       return handlers;
@@ -85,6 +81,7 @@ function harness(options: { closedAlready?: unknown; subscribeThrows?: unknown; 
     cancel,
     update,
     remove,
+    observeClosed,
     subscribe,
   };
 }
@@ -254,6 +251,10 @@ describe('subscription: endings', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(r.endings).toEqual([{ kind: 'rejected', cause: 'request-error', accepted: false, error: failure }]);
     await expect(subscription.subscribed).rejects.toBeInstanceOf(SubscriptionRequestError);
+    // Nothing outlives the rejection on a connection that stays up: no timer, no closure observer.
+    expect(vi.getTimerCount()).toBe(0);
+    expect(h.remove).toHaveBeenCalledOnce();
+    expect(h.observeClosed).toHaveBeenCalledOnce();
     // A closure afterwards changes nothing.
     h.endTransport(new Error('later'));
     await vi.advanceTimersByTimeAsync(0);
@@ -345,7 +346,6 @@ describe('subscription: endings', () => {
         return { requestId: 1, cancel, update() {} };
       },
       observeClosed: () => () => {},
-      transportClosed: new Promise<unknown>(() => {}),
     };
     const r = recorder();
     const subscription = createSubscription(deps, [r.consumer]);

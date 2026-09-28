@@ -89,11 +89,6 @@ export interface SubscriptionDependencies {
    * core synthesizes while tearing down. The returned function removes the observer.
    */
   observeClosed(observer: (error?: unknown) => void): () => void;
-  /**
-   * The transport's own closure, which a real transport can report some tasks after it has failed
-   * a request's stream. Settles (either way) once the transport has ended.
-   */
-  transportClosed: Promise<unknown>;
 }
 
 /**
@@ -257,16 +252,12 @@ export function createSubscription(
       return;
     }
     // A stream that failed without a REQUEST_ERROR may be the first sign of a lost transport: a
-    // browser can fail the stream tasks before `closed` settles. Leave the ending to the closure
-    // unless the transport is still up once the grace has passed. The core observes `closed`
-    // before this does, so by the time this reaction runs the closure has been recorded.
+    // browser can fail the stream tasks before `closed` settles. The session reports the closure
+    // from its own reaction to `closed`, through the observer this subscription already holds, so
+    // leave the ending to that unless the connection is still up once the grace has passed. Any
+    // ending clears the timer, so nothing outlives the subscription.
     const grace = setTimeout(reject, CLOSURE_GRACE_MS);
-    const settled = () => {
-      clearTimeout(grace);
-      queueMicrotask(reject);
-    };
     cancelGrace = () => clearTimeout(grace);
-    void deps.transportClosed.then(settled, settled);
   };
   const connectionClosed = (error: unknown) =>
     finish({ kind: 'terminated', cause: 'connection-closed', accepted, error });
