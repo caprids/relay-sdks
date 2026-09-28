@@ -348,7 +348,7 @@ describe('encodeMessageParameters', () => {
   });
 
   // Upstream draft-20 vector from moq-dev/moq#3561, independent of our encoder.
-  it('frames LARGEST_OBJECT as two bare varints, byte-for-byte with moq-relay 0.14.17', () => {
+  it('frames LARGEST_OBJECT as two bare varints, byte-for-byte with moq-relay 0.14.17 and 0.15.8', () => {
     const bytes = Uint8Array.of(0x01, 0x09, 0x80, 0xff, 0x80, 0x80);
     const parameters = { largestObject: { group: 255, object: 128 } };
 

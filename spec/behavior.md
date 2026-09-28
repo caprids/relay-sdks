@@ -149,7 +149,8 @@ Messages are not a compatibility contract; the class and the point of rejection 
   upstream subscriptions
   ([draft-20 Section 5.1.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1.2)).
   Whether that reaches back into what a relay cached before the subscription is the relay's
-  choice, and a relay may serve an ongoing track from the live edge; the Mux relay does
+  choice. The Mux relay (moq-relay 0.15.8) starts it at the beginning of its latest group, and
+  starts a Next Object filter after its largest object, skipping the rest of that group
   ([late subscribers](relay-interop.md#late-subscribers-and-location-filters)). A subscriber that
   needs earlier groups asks for them with a relative-group or absolute filter. The SDK sends the
   filter it is given and adds none.
@@ -180,10 +181,13 @@ Messages are not a compatibility contract; the class and the point of rejection 
   application retries it within its own budget rather than treating it as fatal. The examples share
   one helper per language for this; it retries 16 `unroutable` and the older 404 only, never
   16 `not found` ([issue #136](https://github.com/muxinc/relay-sdks/issues/136)).
-- The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It cannot
-  surface a reset the relay does not forward: a relay may drop a subgroup that was reset upstream
-  before it began forwarding it, and then the subscriber sees neither objects nor a reset for that
-  group, only a gap in group IDs that cannot be told apart from a group never published
+- The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It surfaces
+  a reset when the relay forwards it, which may be well after the publisher's abort: moq-relay 0.15.8
+  forwarded each one only when the publisher's next group began, about 0.5 s later, or 3 s after a
+  3 s publisher pause. It cannot surface a reset the relay does not forward: a relay may drop a
+  subgroup that was reset upstream before it began forwarding it (seen before 0.15.8, unverified on
+  it), and then the subscriber sees neither objects nor a reset for that group, only a gap in group
+  IDs that cannot be told apart from a group never published
   ([subgroup resets](relay-interop.md#subgroup-resets)). There is no exactly-once or gap-free
   delivery promise.
 - The publisher's done notification is a control message and may arrive before trailing objects
@@ -667,7 +671,7 @@ and subscribes on the same random namespace, then asserts:
 6. All connections close cleanly once the test closes them.
 
 Adding an assertion here means adding it to every SDK's smoke test.
-See [relay interoperability](relay-interop.md) for a local moq-relay 0.14.17 test.
+See [relay interoperability](relay-interop.md#reproduce-against-a-local-relay) for a local moq-relay 0.15.8 test.
 
 ## Not yet specified
 

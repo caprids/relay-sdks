@@ -1202,8 +1202,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
             } else {
               // The subscribe driver treats REQUEST_OK as the update's
               // completion (`onUpdateOk`). Strictly reactive: a peer that
-              // never sends REQUEST_UPDATE (moq-lite-rs parks on end-of-
-              // stream after SUBSCRIBE_OK) never sees a trailing byte.
+              // never sends REQUEST_UPDATE (moq-relay 0.15.8 writes nothing
+              // after SUBSCRIBE until it cancels) never sees a trailing byte.
               void writer.write(encodeRequestOk()).catch(() => {});
             }
           }
@@ -1216,10 +1216,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       }
 
       // The peer FINed its direction while the subscription was still ours
-      // to end. moq-relay pairs that FIN with STOP_SENDING (a cancellation,
-      // so the write fails harmlessly); a peer that only half-closes still
-      // gets the PUBLISH_DONE §3.3.2 requires before our FIN. No status
-      // names this, so it reports the publisher's own limitation.
+      // to end. moq-relay (0.15.8 `cancel_subscribe`) pairs that FIN with
+      // STOP_SENDING (a cancellation, so the write fails harmlessly); a
+      // peer that only half-closes still gets the PUBLISH_DONE §3.3.2
+      // requires before our FIN. No status names this, so it reports the
+      // publisher's own limitation.
       if (!subscriber.finished) {
         this.#endSubscription(
           track,
