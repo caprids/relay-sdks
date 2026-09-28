@@ -22,7 +22,6 @@ import {
   type ControlMessage,
   decodeControlMessage,
   encodeFetch,
-  encodeGoaway,
   encodeRequestError,
   encodeRequestOk,
   encodeRequestUpdate,
@@ -269,7 +268,7 @@ export interface MoqtSession {
   subscribe(options: MoqtSubscribeOptions, handlers?: SubscriptionHandlers): Subscription;
   fetch(options: MoqtFetchOptions, handlers?: FetchHandlers): FetchHandle;
   trackStatus(options: MoqtSubscribeOptions, handlers?: TrackStatusHandlers): void;
-  /** Send GOAWAY then close the transport session. */
+  /** Close the transport session. Sends no GOAWAY (spec/behavior.md, "Relay interop deviations"). */
   close(closeCode?: number, reason?: string): void;
   /** End locally; an error also fails requests still awaiting their first response. */
   destroy(error?: unknown): void;
@@ -490,9 +489,9 @@ class MoqtSessionImpl implements MoqtSession {
   #close(closeCode: number, reason: string, error?: unknown): void {
     if (this.#destroyed) return;
 
-    // Best-effort GOAWAY so the peer can stop routing to us first.
-    this.#controlWriter?.write(encodeGoaway(0)).catch(() => {});
-
+    // No GOAWAY: moq-relay 0.14.17 closes the session on a client GOAWAY (code 17), and one written
+    // in the same turn as the transport close gives the peer nothing to act on. The publisher follows
+    // the same rule; see spec/behavior.md, "Relay interop deviations".
     try {
       this.#transport.close({ closeCode, reason });
     } catch {
