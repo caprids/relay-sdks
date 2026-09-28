@@ -367,7 +367,8 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   sizes in `protocol.json`.
 - Closing a track writer cancels an outstanding write and ends that track; other tracks continue.
   Closing the publisher ends all tracks, retracts the namespace, and waits for transport shutdown.
-  A track ends by FIN alone, without PUBLISH_DONE, and neither connection sends GOAWAY
+  A track's subscription ends with PUBLISH_DONE (`TRACK_ENDED`) after its data streams close, then
+  a FIN, which needs moq-relay 0.15.4 or later; neither connection sends GOAWAY
   ([relay interop deviations](#relay-interop-deviations)).
 - Track names cannot be reused within a publisher connection, including after their writer closes.
 - A track writer may open a multi-object group: objects are appended with object IDs 0, 1, 2, ...
@@ -635,30 +636,43 @@ here when the first SDK gains them.
 
 ### Relay interop deviations
 
-Three choices in the generic cores exist only because of how moq-relay treats the draft's teardown
-messages. Each is stated here; the relay behavior that forces it, the evidence and how to re-test
-are in [relay interoperability](relay-interop.md#draft-20-deviations). Do not change one to match
-the draft without re-testing against the relay first: the first one breaks every viewer if undone.
-Both SDKs agree on all three, and the core module headers
+Three choices in the generic cores depend on how moq-relay treats the draft's teardown messages
+and track aliases. All three conform to draft-20; each is recorded because the relay's behavior, and
+for the first one its version, decides whether it works. The relay behavior, the evidence and how
+to re-test are in [relay interoperability](relay-interop.md#draft-20-deviations). Re-test against
+the relay before changing one: on a relay older than 0.15.4 the first one aborts every viewer's
+track. Both SDKs agree on all three, and the core module headers
 (`ts/packages/moq-core/src/protocol/publish-session.ts`,
 `python/packages/moq-core/src/moq_core/publish_session.py`) state the same constraints.
 
-1. **A subscription ends by FIN alone, with no PUBLISH_DONE.** Draft-20
-   [Section 3.3.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-3.3.2):
-   "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN", and
-   "An endpoint that receives a FIN before all required messages have arrived treats the request as
-   failed." This is a deviation from a MUST. The publisher never sends PUBLISH_DONE: closing a track
-   writer, closing the publisher, and a replacement subscription superseding an older one each FIN
-   the subscription's request stream with no bytes after SUBSCRIBE_OK. The only messages a
-   publisher writes after SUBSCRIBE_OK are REQUEST_OK or REQUEST_ERROR answering a REQUEST_UPDATE,
-   which the tested relay does not send. A viewer behind the relay observes a PUBLISH_DONE the relay
-   generates from the FIN, which is why its status code is not meaningful for a normal end
-   ([issue #25](https://github.com/muxinc/relay-sdks/issues/25)); a peer that follows Section 3.3.2
-   and is not that relay would treat the clean end as a failed request. The SDKs can send
-   PUBLISH_DONE (status `TRACK_ENDED`, after closing every data stream as
-   [Section 10.12](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.12)
-   requires) once the relay reads messages after SUBSCRIBE_OK instead of treating any byte as an
-   error.
+1. **A subscription ends with PUBLISH_DONE, then FIN, which needs moq-relay 0.15.4 or later.**
+   Draft-20 [Section 3.3.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-3.3.2):
+   "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN"; and
+   [Section 10.12](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.12):
+   "A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will ever open". This
+   conforms. Every end the publisher chooses resets the subscription's data streams that are still
+   open, writes PUBLISH_DONE with Stream Count set to the data streams opened for that
+   subscription, and FINs the request stream:
+
+   | end | PUBLISH_DONE status | reason |
+   | --- | --- | --- |
+   | closing a track writer, or the publisher | `TRACK_ENDED` (0x2) | `track ended` |
+   | a replacement subscription supersedes an older one | `TRACK_ENDED` (0x2) | `superseded by a newer subscription` |
+   | an unsupported REQUEST_UPDATE, after its REQUEST_ERROR ([Section 10.9.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.9.1)) | `UPDATE_FAILED` (0x8) | `unsupported subscription update` |
+   | the subscriber FINs its direction while the subscription is live | `INTERNAL_ERROR` (0x0) | `subscriber closed its request stream` |
+
+   No status names a replacement, and the relay finishes a track only on `TRACK_ENDED`. A
+   subscription the subscriber cancels (a reset) gets no PUBLISH_DONE, and its open data streams
+   are reset ([Section 5.1.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1.1)).
+   Once a subscription is ending no data stream opens on its alias, and one that finishes opening
+   afterwards is reset and not counted. moq-relay 0.15.4 and later read the PUBLISH_DONE, wait for
+   Stream Count data streams or a grace period, and finish the track: a viewer receives an
+   end-of-track object and PUBLISH_DONE status 2 `track ended`. They treat a FIN without
+   PUBLISH_DONE as a failed request and abort the track. moq-relay 0.15.1 to 0.15.3 do the reverse:
+   any byte after SUBSCRIBE_OK aborts the track, so every end these SDKs send reaches viewers as
+   status 0 `internal error`, where a bare FIN finished the track. No behavior ends cleanly on both,
+   and the SDKs cannot tell the versions apart (the relay's SETUP names only `moq-lite-rs`), so they
+   require 0.15.4 or later.
 2. **Neither connection sends GOAWAY.** Draft-20
    [Section 10.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.4):
    "An endpoint sends a GOAWAY message on its control stream to inform the peer it intends to close
@@ -683,8 +697,11 @@ Both SDKs agree on all three, and the core module headers
    carries the SUBSCRIBE's request ID as the alias, which is unique for the session by
    construction, so an alias is never shared between subscriptions, of one track or of two. A
    request ID the peer reuses closes the session as a protocol error before it can become a
-   duplicate alias. The application never sees an alias on the Relay surface. Nothing needs to
-   change unless the SDK serves concurrent subscriptions to one track, which
+   duplicate alias. moq-relay 0.15.1 and 0.15.8 close the session with PROTOCOL_VIOLATION when one
+   alias names two different tracks, and cancel the newer subscription when two live subscriptions
+   to one track share an alias; unique aliases avoid both. The application never sees an alias on
+   the Relay surface. Nothing needs to change unless the SDK serves concurrent subscriptions to one
+   track, which
    [ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md) rules out today.
 
 Both cores pin the second choice for each role: after an orderly close, the control stream of a

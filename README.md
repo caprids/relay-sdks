@@ -58,8 +58,10 @@ which SDK versions speak which draft:
 | `@mux/relay` (`ts/`) | unreleased | `moqt-20` |
 | `mux-relay` (`python/`) | unreleased | `moqt-20` |
 
-For the moq-relay 0.14.17 compatibility boundary and a reproducible local test, see
-[relay interoperability](spec/relay-interop.md). SDK adoption and the relay upgrade must be coordinated.
+Publishers end a track with PUBLISH_DONE, which needs moq-relay 0.15.4 or later: on 0.15.1 to
+0.15.3 every track end reaches viewers as an aborted track. For that boundary, the 0.14.17 one, and
+a reproducible local test, see [relay interoperability](spec/relay-interop.md). SDK adoption and
+the relay upgrade must be coordinated.
 
 ## Package boundaries
 
