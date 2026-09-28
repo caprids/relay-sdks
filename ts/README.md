@@ -205,9 +205,10 @@ for retry, trailing-object, and publisher-generation guidance.
 
 `connectRelaySubscriber` has a deadline covering token resolution and both handshakes. Its optional abort
 signal controls the connection's entire lifetime. An explicit `jwt` query parameter takes precedence
-over `getToken`, matching the current Relay connection authentication convention. Every deadline
-(`connectTimeoutMs`, `requestTimeoutMs`, and `writeTimeoutMs`) must be between 0 (exclusive) and
-2147483647 milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError`
+over `getToken`, matching the current Relay connection authentication convention. An empty one
+(`?jwt=`) is a `TypeError` before anything connects: put a token in it, or drop it and use
+`getToken`. Every deadline (`connectTimeoutMs`, `requestTimeoutMs`, and `writeTimeoutMs`) must be
+between 0 (exclusive) and 2147483647 milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError`
 rather than a deadline that fires immediately.
 
 Namespaces are arrays of 1–32 non-empty string fields, sent verbatim without splitting on `/`; a
