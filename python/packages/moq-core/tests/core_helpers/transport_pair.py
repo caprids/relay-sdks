@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 from moq_core.control_messages import MESSAGE_TYPE
 from moq_core.transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
+from moq_core.varint import decode_varint, encode_varint
 
 from .streams import Pipe, PushChannel, StreamClosedError
 
@@ -128,24 +129,29 @@ _REQUEST_ID_MESSAGE_TYPES = frozenset(
 )
 
 
-def _varint_length(first: int) -> int:
-    return 1 << (first >> 6)
+def set_request_id_parity(chunk: bytes) -> bytes:
+    """Copy ``chunk`` with the least significant bit of every request-initiating frame's Request ID set.
 
-
-def _set_request_id_parity(chunk: bytes) -> bytes:
-    """Copy ``chunk`` with the least significant bit of every request-initiating frame's Request ID set."""
+    Uses the core's MOQT varint codec. Every length limit of that encoding is a power of two (2^7,
+    2^14, ...), so an even value and its odd successor always encode to the same length and the
+    field is re-encoded in place.
+    """
     data = bytearray(chunk)
     offset = 0
 
     while offset < len(data):
-        type_length = _varint_length(data[offset])
-        message_type = int.from_bytes(data[offset : offset + type_length], "big") & ~(0b11 << (8 * type_length - 2))
+        message_type, type_length = decode_varint(data, offset)
         length_at = offset + type_length
         body_start = length_at + 2
 
         if message_type in _REQUEST_ID_MESSAGE_TYPES:
-            # A varint value's LSB is its last byte's LSB, and even-to-odd never changes the encoded length.
-            data[body_start + _varint_length(data[body_start]) - 1] |= 1
+            request_id, id_length = decode_varint(data, body_start)
+            encoded = encode_varint(request_id | 1)
+
+            if len(encoded) != id_length:
+                raise AssertionError(f"request id {request_id | 1} would change the encoded length")
+
+            data[body_start : body_start + id_length] = encoded
 
         offset = body_start + int.from_bytes(data[length_at:body_start], "big")
 
@@ -153,13 +159,13 @@ def _set_request_id_parity(chunk: bytes) -> bytes:
 
 
 class _ServerRequestIdStream:
-    """A request stream's sending half that rewrites each write with :func:`_set_request_id_parity`."""
+    """A request stream's sending half that rewrites each write with :func:`set_request_id_parity`."""
 
     def __init__(self, inner: SendStream) -> None:
         self._inner = inner
 
     async def write(self, data: bytes) -> None:
-        await self._inner.write(_set_request_id_parity(data))
+        await self._inner.write(set_request_id_parity(data))
 
     async def close(self) -> None:
         await self._inner.close()

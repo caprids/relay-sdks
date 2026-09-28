@@ -11,6 +11,7 @@ from core_helpers.transport_pair import (
     PairTransport,
     TransportPair,
     create_transport_pair,
+    set_request_id_parity,
     with_server_request_ids,
 )
 from core_helpers.waiting import settle, wait_for
@@ -25,6 +26,7 @@ from moq_core.control_messages import (
     RelativeGroupFilter,
     RequestError,
     Subscribe,
+    SubscribeNamespace,
     SubscribeOk,
     decode_control_message,
     encode_goaway,
@@ -32,6 +34,7 @@ from moq_core.control_messages import (
     encode_request_update,
     encode_setup,
     encode_subscribe,
+    encode_subscribe_namespace,
 )
 from moq_core.errors import SESSION_ERROR
 from moq_core.object_stream import MoqtObject
@@ -86,6 +89,10 @@ class CollectedTrack:
             MoqtSubscribeOptions(track_namespace=NAMESPACE, track_name=track_name),
             SubscriptionHandlers(on_ok=lambda ok: self.aliases.append(ok.track_alias), on_object=self.objects.append),
         )
+
+
+def decode_frames(data: bytes) -> list[ControlMessage]:
+    return [decode_control_message(frame) for frame in ControlMessageDeframer().push(data)]
 
 
 class TestCreateMoqtPublishSession:
@@ -321,6 +328,47 @@ class TestCreateMoqtPublishSession:
         assert updates[0][0] == updated.request_id + 1
         assert updates[0][1] != updated.request_id + 1
         harness.destroy()
+
+    async def test_gives_the_subscribe_driver_odd_request_ids_past_the_one_byte_varint_range(self) -> None:
+        closes: list[Any] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_closed=closes.append))
+
+        await harness.session.ready
+
+        # 70 subscriptions take the driver's ids 0..138, past 128, the one-byte MOQT varint limit.
+        names = [f"track-{index}" for index in range(70)]
+
+        for name in names:
+            register(harness.session, name)
+
+        tracks = [CollectedTrack(harness.subscriber, name) for name in names]
+
+        await wait_for(
+            lambda: [track.aliases for track in tracks] == [[track.subscription.request_id + 1] for track in tracks]
+        )
+        assert tracks[-1].subscription.request_id == 138
+        assert closes == []
+        harness.destroy()
+
+    def test_sets_only_the_request_id_bit_at_every_moqt_varint_length_boundary(self) -> None:
+        for request_id in (0, 62, 64, 126, 128, 16_382, 16_384, 2**21 - 2, 2**21):
+            rewritten = decode_frames(
+                set_request_id_parity(
+                    encode_subscribe(Subscribe(request_id=request_id, track_namespace=NAMESPACE, track_name="video"))
+                )
+            )
+
+            assert len(rewritten) == 1
+            assert isinstance(rewritten[0], Subscribe)
+            assert rewritten[0].request_id == request_id + 1
+            assert rewritten[0].track_name == "video"
+
+        # SUBSCRIBE_NAMESPACE's type (0x50) takes two bytes in MOQT's encoding.
+        assert decode_frames(
+            set_request_id_parity(
+                encode_subscribe_namespace(SubscribeNamespace(request_id=64, track_namespace_prefix=NAMESPACE))
+            )
+        ) == [SubscribeNamespace(request_id=65, track_namespace_prefix=NAMESPACE)]
 
     async def test_does_not_declare_a_media_timescale_for_raw_tracks(self) -> None:
         harness = Harness()
