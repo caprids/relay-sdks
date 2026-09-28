@@ -21,7 +21,8 @@
     "Publish protocol tests exclude media-engine integration and actor tests; raw tracks assert no implicit timescale.",
     "SDK relay-hub test helper is derived from Video.js publish tests and adapted to local protocol imports.",
     "The package index additionally re-exports ByteWriter, encodeKeyValuePairs and MAX_OBJECT_PROPERTIES_LENGTH so the SDK can measure encoded properties with the core's own encoder before a write starts; the protocol modules are unchanged.",
-    "The subscribe session's close sends no GOAWAY, unlike the upstream driver's best-effort GOAWAY(0): one written as the transport closes gives the peer nothing to act on and the session has no drain to offer, and the publish session already sends none (spec/behavior.md, \"Relay interop deviations\"; issue #128). Receiving GOAWAY is unchanged."
+    "The subscribe session's close sends no GOAWAY, unlike the upstream driver's best-effort GOAWAY(0): one written as the transport closes gives the peer nothing to act on and the session has no drain to offer, and the publish session already sends none (spec/behavior.md, \"Relay interop deviations\"; issue #128). Receiving GOAWAY is unchanged.",
+    "The publish session ends each Established subscription it ends with PUBLISH_DONE (a status, and a Stream Count of the data streams opened for it) after closing that subscription's data streams, then FIN, instead of the upstream FIN alone. `openUniStream(trackAlias)` names the subscription a data stream serves, so the session can count it and reset it if still open. This needs moq-relay 0.15.4 or later (spec/behavior.md, \"Relay interop deviations\"; issue #TBD)."
   ],
   "migration": "Initial extraction snapshot. Video.js still contains the original modules; migrating it to this independently versioned package is a separate integration step. Do not maintain divergent protocol implementations."
 }
