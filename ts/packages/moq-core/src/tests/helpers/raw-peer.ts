@@ -18,6 +18,8 @@ import type { MoqtTransport } from '../../protocol/session.js';
 export interface RawRequest {
   /** Control frames the publisher wrote back, in order. */
   received: ControlMessage[];
+  /** The exact bytes the publisher wrote back, before its FIN. */
+  raw: () => Uint8Array;
   /** True once the publisher FINed (or reset) its side. */
   ended: () => boolean;
   /**
@@ -44,6 +46,7 @@ export async function openRawRequest(server: MoqtTransport, message: Uint8Array)
 
   await writer.write(message);
   const received: ControlMessage[] = [];
+  const chunks: Uint8Array[] = [];
   let ended = false;
   let failure: unknown;
   const reader = stream.readable.getReader();
@@ -55,6 +58,7 @@ export async function openRawRequest(server: MoqtTransport, message: Uint8Array)
       const { done, value } = await reader.read();
       if (done) break;
 
+      chunks.push(value);
       for (const frame of deframer.push(value)) received.push(decodeControlMessage(frame));
     }
   })().then(
@@ -68,6 +72,17 @@ export async function openRawRequest(server: MoqtTransport, message: Uint8Array)
   );
   return {
     received,
+    raw: () => {
+      const bytes = new Uint8Array(chunks.reduce((length, chunk) => length + chunk.length, 0));
+      let offset = 0;
+
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+
+      return bytes;
+    },
     ended: () => ended,
     failure: () => failure,
     send: (bytes) => writer.write(bytes).catch(() => {}),

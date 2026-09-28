@@ -14,11 +14,18 @@ PUBLISH-based ingest (every PUBLISH is answered with a request error), and it so
 itself: one SUBSCRIBE_NAMESPACE per authorized prefix, sent immediately after SETUP. Announcing rides
 the solicitation stream as NAMESPACE entries (suffix-relative, parameterless; the relay treats even
 an empty parameter count as malformed); data flows only on aliases bound by our own SUBSCRIBE_OKs,
-per subscription. Three hard-won peer constraints shape the teardown paths: a subscription ends by
-FIN alone (any byte after SUBSCRIBE_OK, a PUBLISH_DONE say, makes the relay abort the track for every
-viewer instead of finishing it), a client-sent GOAWAY closes the whole session (code 17), and a track
-alias bound to two live request IDs closes it too (code 12), so aliases are the peer's own request
-IDs, unique by construction.
+per subscription.
+
+Teardown follows draft-20: every end of an Established subscription the publisher chooses resets
+the subscription's still-open data streams, then writes PUBLISH_DONE (status, the number of data
+streams opened for it, reason) and FINs the request stream (§3.3.2, §10.12). moq-relay 0.15.4 and
+later require that PUBLISH_DONE, and treat a bare FIN as a failed request; 0.15.1 to 0.15.3 abort
+the track on any byte after SUBSCRIBE_OK, PUBLISH_DONE included, so this core needs a relay at
+0.15.4 or later for a clean end. The publisher sends no GOAWAY: 0.14.17 closes the session on a
+client GOAWAY (code 17), 0.15.1 and later record it and keep the session. Aliases are the peer's
+own request IDs, unique by construction: moq-relay 0.15.x closes the session (PROTOCOL_VIOLATION)
+when one alias names two different tracks, and cancels the newer subscription when two live
+subscriptions to one track share an alias.
 
 Deliberately callback-shaped, mirroring the subscribe driver. Must be created inside a running
 asyncio event loop.
@@ -34,8 +41,10 @@ from ._tasks import observe, spawn
 from .bytes import StreamReader, utf8_encode
 from .control_messages import (
     MESSAGE_TYPE,
+    PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
     SETUP_OPTION,
+    STREAM_RESET_CODE,
     ControlMessage,
     ControlMessageFrame,
     Fetch,
@@ -53,6 +62,7 @@ from .control_messages import (
     decode_control_message,
     encode_namespace,
     encode_namespace_done,
+    encode_publish_done,
     encode_request_error,
     encode_request_ok,
     encode_setup,
@@ -77,10 +87,11 @@ class AnnounceEnded:
 class TrackBinding:
     """A track's effective alias binding changed.
 
-    The most recent live subscription wins the binding (a replaced one is FINed, a clean end for
-    that request, covering the peer's resubscribe races), and only while its Forward State permits
-    data (``forward=0`` subscribes without authorizing it; REQUEST_UPDATE toggles it). ``None`` means
-    no live forwarding subscription, so no data streams may be opened for the track.
+    The most recent live subscription wins the binding (a replaced one ends with PUBLISH_DONE
+    ``TRACK_ENDED``, a clean end for that request, covering the peer's resubscribe races), and only
+    while its Forward State permits data (``forward=0`` subscribes without authorizing it;
+    REQUEST_UPDATE toggles it). ``None`` means no live forwarding subscription, so no data streams
+    may be opened for the track.
     """
 
     track_name: str
@@ -121,7 +132,7 @@ class MoqtPublishSessionCallbacks:
     on_subscribe: Callable[[Subscribe], None] | None = None
     """The peer subscribed to a registered track (already answered SUBSCRIBE_OK)."""
     on_subscribe_end: Callable[[int], None] | None = None
-    """A subscriber's request stream ended (FIN, reset, or track done); the argument is its request id."""
+    """A subscription ended (the peer's FIN or reset, or our PUBLISH_DONE); the argument is its request id."""
     on_track_binding: Callable[[TrackBinding], None] | None = None
     on_request_update: Callable[[IncomingRequestUpdate], None] | None = None
     on_closed: Callable[[Closed], None] | None = None
@@ -131,7 +142,7 @@ class MoqtPublishSessionCallbacks:
 DEFAULT_IMPLEMENTATION_NAME = "moq-core (Python) publisher"
 
 CLOSE_FLUSH_TIMEOUT = 0.25
-"""Seconds ``close()`` waits for the subscription FINs / NAMESPACE_DONE writes to drain.
+"""Seconds ``close()`` waits for the PUBLISH_DONE + FIN / NAMESPACE_DONE writes to drain.
 
 After that the transport closes out from under them.
 """
@@ -157,8 +168,9 @@ class RegisterTrackOptions:
 class RegisteredTrack:
     """One servable track.
 
-    ``end()`` FINs every live subscription's request stream (a FIN with no trailing bytes is the
-    clean track end) and refuses future SUBSCRIBEs with DOES_NOT_EXIST. Idempotent.
+    ``end()`` ends every live subscription (its data streams closed, then PUBLISH_DONE
+    ``TRACK_ENDED`` and a FIN on its request stream) and refuses future SUBSCRIBEs with
+    DOES_NOT_EXIST. Idempotent.
     """
 
     __slots__ = ("_end", "track_name")
@@ -191,14 +203,60 @@ class _SubscriberStream:
     forwarding: bool = True
     """Forward State (SUBSCRIBE ``forward``, togglable via REQUEST_UPDATE); data flows only while true."""
     finished: bool = False
+    """The subscription is ending or over; no new data stream may open on its alias."""
+    stream_count: int = 0
+    """Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§10.12)."""
+    data_streams: set[_DataStream] = field(default_factory=set)
+    """Data streams opened for this subscription that the caller has not closed yet."""
+    opening: set[asyncio.Future[None]] = field(default_factory=set)
+    """Data-stream opens in flight; PUBLISH_DONE waits for them to settle (§10.12)."""
 
-    async def fin(self) -> None:
-        await self.writer.close()
+    def reset_data_streams(self) -> None:
+        for data_stream in list(self.data_streams):
+            data_stream.abort(_DataStreamReset())
 
     def cancel(self) -> None:
         self.finished = True
         self.writer.abort()
         self.reader.cancel()
+
+
+class _DataStreamReset(Exception):
+    """The reason handed to a data stream the session resets when its subscription ends.
+
+    Transports read ``stream_error_code`` from it (§3.3.4 CANCELLED).
+    """
+
+    stream_error_code = STREAM_RESET_CODE.CANCELLED
+
+    def __init__(self) -> None:
+        super().__init__("the subscription ended")
+
+
+class _DataStream:
+    """A data stream as handed to the caller: it leaves its subscription's open set once closed or reset."""
+
+    __slots__ = ("_stream", "_subscriber")
+
+    def __init__(self, stream: SendStream, subscriber: _SubscriberStream) -> None:
+        self._stream = stream
+        self._subscriber = subscriber
+
+    def _settle(self) -> None:
+        self._subscriber.data_streams.discard(self)
+
+    async def write(self, data: bytes) -> None:
+        await self._stream.write(data)
+
+    async def close(self) -> None:
+        # The FIN is issued now as far as PUBLISH_DONE's ordering goes: it queues behind the
+        # accepted writes on this stream, and no later write can join it.
+        self._settle()
+        await self._stream.close()
+
+    def abort(self, reason: object = None) -> None:
+        self._settle()
+        self._stream.abort(reason)
 
 
 @dataclass(slots=True, kw_only=True)
@@ -208,15 +266,16 @@ class _TrackRecord:
     track_name: str
     subscribers: list[_SubscriberStream] = field(default_factory=list)
     done: bool = False
-    pending_fins: list[asyncio.Task[None]] = field(default_factory=list)
-    """Replacement FINs still in flight (pruned as they settle).
+    pending_ends: list[asyncio.Task[None]] = field(default_factory=list)
+    """Subscription ends (PUBLISH_DONE + FIN) still in flight, from any end path (pruned as they settle).
 
-    ``end()`` folds them into ``done_flushed``: a swept predecessor is already ``finished``, so it
-    would otherwise be skipped and its queued FIN discarded by the transport close, turning the clean
-    replacement into an abrupt reset.
+    ``_end_track`` folds them into ``done_flushed``, which ``close()`` drains. An ended subscription
+    is already ``finished``, and one whose peer closed its request stream has left ``subscribers``,
+    so without this list its queued end would be skipped and discarded by the transport close,
+    turning a clean end into an abrupt one.
     """
     done_flushed: asyncio.Task[None] | None = None
-    """Settles when the FINs queued by ``end()`` land."""
+    """Settles when the ends queued by ``end()`` land."""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -375,7 +434,8 @@ class MoqtPublishSession:
     def close(self, close_code: int = SESSION_ERROR.NO_ERROR, reason: str = "") -> None:
         """Orderly stop.
 
-        FIN every live subscription's stream and retract the announce (NAMESPACE_DONE), give those
+        End every live subscription (PUBLISH_DONE ``TRACK_ENDED``, then FIN) and retract the announce
+        (NAMESPACE_DONE), give those
         writes a bounded window to reach the wire (closing a WebTransport discards queued data), then
         close the transport. Returns immediately; the transport closes within roughly
         :data:`CLOSE_FLUSH_TIMEOUT`.
@@ -391,11 +451,10 @@ class MoqtPublishSession:
         spawn(self._drain_and_close(close_code, reason, error))
 
     async def _drain_and_close(self, close_code: int, reason: str, error: BaseException | None = None) -> None:
-        # Orderly close: closing the transport discards queued data, so the subscription FINs and
-        # NAMESPACE_DONE retractions must be given a bounded window to land first. A peer should
-        # observe every track ending cleanly, not an abrupt transport end. Neither GOAWAY nor
-        # PUBLISH_DONE is sent: moq-lite-rs closes the session on a client GOAWAY, and treats any
-        # post-SUBSCRIBE_OK byte on a subscribe stream as an error that aborts the track.
+        # Orderly close: closing the transport discards queued data, so the subscription ends
+        # (PUBLISH_DONE + FIN) and NAMESPACE_DONE retractions must be given a bounded window to land
+        # first. A peer should observe every track ending cleanly, not an abrupt transport end. No
+        # GOAWAY is sent (see the module doc).
         #
         # One loop beat before the last-resort sweep below: track owners tearing down in the same
         # turn get to end their tracks themselves.
@@ -407,9 +466,14 @@ class MoqtPublishSession:
         for track in self._tracks.values():
             self._end_track(track)
 
-        writes: set[asyncio.Future[None]] = {
-            track.done_flushed for track in self._tracks.values() if track.done_flushed is not None
-        }
+        writes: set[asyncio.Future[None]] = set()
+
+        for track in self._tracks.values():
+            if track.done_flushed is not None:
+                writes.add(track.done_flushed)
+
+            # An end started after the track's own end (none should, but a stray one must not be cut off).
+            writes.update(track.pending_ends)
 
         for stream in self._namespace_streams:
             for suffix in stream.announced:
@@ -542,23 +606,20 @@ class MoqtPublishSession:
         return RegisteredTrack(options.track_name, lambda: self._end_track(track))
 
     def _end_track(self, track: _TrackRecord) -> None:
-        """FIN every live subscription's request stream and refuse future SUBSCRIBEs.
+        """End every live subscription with PUBLISH_DONE ``TRACK_ENDED`` and refuse future SUBSCRIBEs.
 
-        A FIN with no trailing bytes is the clean track end. The aggregated write completion lands on
-        ``track.done_flushed`` so ``close()`` can hold the transport open until the FINs reach the
-        wire.
+        The aggregated write completion lands on ``track.done_flushed`` so ``close()`` can hold the
+        transport open until the PUBLISH_DONEs and FINs reach the wire.
         """
         if track.done:
             return
 
         track.done = True
-        writes: list[asyncio.Future[None]] = list(track.pending_fins)
         had_reported = False
 
         for subscriber in track.subscribers:
             if not subscriber.finished:
-                subscriber.finished = True
-                writes.append(spawn(_swallow(subscriber.fin())))
+                self._end_subscription(track, subscriber, PUBLISH_DONE_STATUS.TRACK_ENDED, "track ended")
 
             # The local end is authoritative: report each live subscription ended NOW rather than
             # when the peer eventually closes its request direction. Otherwise the subscriber count
@@ -575,20 +636,89 @@ class MoqtPublishSession:
         if had_reported and not self._destroyed:
             _call(self._callbacks.on_track_binding, TrackBinding(track_name=track.track_name, track_alias=None))
 
+        writes: list[asyncio.Task[None]] = list(track.pending_ends)
+
         async def flushed() -> None:
             if writes:
                 await asyncio.wait(writes)
 
         track.done_flushed = spawn(flushed())
 
-    async def open_uni_stream(self) -> SendStream:
-        """Open a unidirectional data stream (for a track publisher's subgroups)."""
+    def _end_subscription(
+        self, track: _TrackRecord, subscriber: _SubscriberStream, status: int, reason: str, *, preceding: bytes = b""
+    ) -> None:
+        """End an Established subscription from the publisher side (§3.3.2, §10.12).
+
+        Marks it finished at once, so no new data stream opens on its alias. Then, in order: wait for
+        data-stream opens in flight, reset every data stream the caller has not closed (a caller that
+        follows the binding has closed them already), write ``preceding`` (a REQUEST_ERROR answering
+        a failed update) and PUBLISH_DONE with the subscription's Stream Count, and FIN. The task
+        settles when the FIN lands or the stream fails, and stays in ``track.pending_ends`` until then,
+        so ``close()`` drains it whichever path started it.
+        """
+        subscriber.finished = True
+
+        async def end() -> None:
+            if subscriber.opening:
+                await asyncio.wait(set(subscriber.opening))
+
+            subscriber.reset_data_streams()
+            await subscriber.writer.write(preceding + encode_publish_done(status, subscriber.stream_count, reason))
+            await subscriber.writer.close()
+
+        ended = spawn(_swallow(end()))
+        track.pending_ends.append(ended)
+
+        def prune(_: asyncio.Future[None]) -> None:
+            if ended in track.pending_ends:
+                track.pending_ends.remove(ended)
+
+        ended.add_done_callback(prune)
+
+    def _live_subscription(self, track_alias: int) -> _SubscriberStream | None:
+        for track in self._tracks.values():
+            for subscriber in track.subscribers:
+                if subscriber.track_alias == track_alias and subscriber.accepted and not subscriber.finished:
+                    return subscriber
+
+        return None
+
+    async def open_uni_stream(self, track_alias: int) -> SendStream:
+        """Open a unidirectional data stream for the live subscription bound to ``track_alias``.
+
+        The stream counts toward that subscription's PUBLISH_DONE Stream Count, and a stream still
+        open when the subscription ends is reset before PUBLISH_DONE is written (§10.12). Raises
+        ``RuntimeError`` once the session is closing, when no live subscription holds the alias, and
+        when the subscription ends while the stream is opening (the stream is reset first).
+        """
         # Refuse rather than touch the transport once the session is going away: encoders keep
         # producing frames for a beat after a peer kills the session.
         if self._destroyed or self._closing:
             raise RuntimeError("moq publish session: closed")
 
-        return await self._transport.create_unidirectional_stream()
+        subscriber = self._live_subscription(track_alias)
+        if subscriber is None:
+            raise RuntimeError(f"moq publish session: no live subscription for track alias {track_alias}")
+
+        opening: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        subscriber.opening.add(opening)
+
+        try:
+            stream = await self._transport.create_unidirectional_stream()
+
+            if subscriber.finished:
+                # The subscription ended while this stream was opening. Its PUBLISH_DONE waits on
+                # `opening`, so the reset lands before it and the stream is not counted.
+                stream.abort(_DataStreamReset())
+                raise RuntimeError(f"moq publish session: the subscription for track alias {track_alias} ended")
+
+            data_stream = _DataStream(stream, subscriber)
+            subscriber.data_streams.add(data_stream)
+            subscriber.stream_count += 1
+            return data_stream
+        finally:
+            subscriber.opening.discard(opening)
+            opening.set_result(None)
 
     # ---------------------------------------------------------------------------
     # Incoming unidirectional streams (control, padding)
@@ -893,17 +1023,11 @@ class MoqtPublishSession:
                 if other.finished:
                     continue
 
-                other.finished = True
-                fin = spawn(_swallow(other.fin()))
-                track.pending_fins.append(fin)
-
-                def prune(
-                    done: asyncio.Future[None], fin: asyncio.Task[None] = fin, track: _TrackRecord = track
-                ) -> None:
-                    if fin in track.pending_fins:
-                        track.pending_fins.remove(fin)
-
-                fin.add_done_callback(prune)
+                # No status names a replacement. TRACK_ENDED is the one the relay finishes a track
+                # on (anything else aborts it), and the newer subscription carries the track on.
+                self._end_subscription(
+                    track, other, PUBLISH_DONE_STATUS.TRACK_ENDED, "superseded by a newer subscription"
+                )
 
             _call(
                 self._callbacks.on_track_binding,
@@ -950,18 +1074,17 @@ class MoqtPublishSession:
                             # Acknowledging an update we did not apply would leave the peer serving
                             # stale expectations (a filter or range it believes is in effect). Forward
                             # State is applied above and priority is advisory (the known relays discard
-                            # ours too); anything else ends this request honestly.
-                            subscriber.finished = True
-
-                            async def reject_and_close() -> None:
-                                await writer.write(
-                                    encode_request_error(
-                                        REQUEST_ERROR_CODE.NOT_SUPPORTED, "unsupported subscription update"
-                                    )
-                                )
-                                await writer.close()
-
-                            spawn(_swallow(reject_and_close()))
+                            # ours too); anything else ends this request honestly: the update's
+                            # REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED (§10.9.1).
+                            self._end_subscription(
+                                track,
+                                subscriber,
+                                PUBLISH_DONE_STATUS.UPDATE_FAILED,
+                                "unsupported subscription update",
+                                preceding=encode_request_error(
+                                    REQUEST_ERROR_CODE.NOT_SUPPORTED, "unsupported subscription update"
+                                ),
+                            )
 
                             if subscriber.reported:
                                 subscriber.reported = False
@@ -978,17 +1101,31 @@ class MoqtPublishSession:
                     _call(self._callbacks.on_goaway, message)
                 else:
                     raise MoqtProtocolError(f"unexpected {message.kind} on an incoming subscribe stream")
+            # The peer FINed its direction while the subscription was still ours to end. moq-relay
+            # pairs that FIN with STOP_SENDING (a cancellation, so the write below fails harmlessly);
+            # a peer that only half-closes still gets the PUBLISH_DONE §3.3.2 requires before our
+            # FIN. No status names this, so it reports the publisher's own limitation.
+            if not subscriber.finished:
+                self._end_subscription(
+                    track, subscriber, PUBLISH_DONE_STATUS.INTERNAL_ERROR, "subscriber closed its request stream"
+                )
         except MoqtProtocolError:
             raise
         except Exception:  # reset: the subscriber cancelled (§3.3.3); ordinary end-of-request
-            pass
+            # A cancelled subscription gets no PUBLISH_DONE, and its open data streams are reset
+            # (§5.1.1).
+            subscriber.reset_data_streams()
         finally:
+            already_ending = subscriber.finished
             subscriber.finished = True
             track.subscribers = [s for s in track.subscribers if s is not subscriber]
-            # The subscription is over both ways, mirror of the namespace stream's cleanup: when the
-            # peer FINed first, an unclosed response direction would leak a half-open stream per
-            # unsubscribe until the transport closes. Already-FINed/aborted writers fail harmlessly.
-            spawn(_swallow(writer.close()))
+
+            if not already_ending:
+                # The subscription is over both ways, mirror of the namespace stream's cleanup: an
+                # unclosed response direction would leak a half-open stream per cancelled request
+                # until the transport closes. An already-aborted writer fails harmlessly. A
+                # subscription this side ended closes its writer after PUBLISH_DONE instead.
+                spawn(_swallow(writer.close()))
 
             if not self._destroyed and subscriber.reported:
                 _call(self._callbacks.on_subscribe_end, subscribe.request_id)

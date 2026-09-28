@@ -144,42 +144,52 @@ application that must detect loss carries its own sequence numbers in payloads.
 The relay behavior behind the [relay interop deviations](behavior.md#relay-interop-deviations).
 The constraints came into this repository with the Video.js core extraction
 ([`UPSTREAM.json`](../ts/packages/moq-core/UPSTREAM.json)) as findings against moq-lite-rs, without
-a recorded relay version. On 2026-09-28 they were checked by reading the moq-relay **0.14.17**
-source (tag `moq-relay-v0.14.17`, commit `b2f26b92`, crate `rs/moq-net`); they were not re-measured
-live. Close codes are moq-net's own `Error::to_code` values, not draft-20 Section 3.5 codes.
+a recorded relay version. On 2026-09-28 they were checked by reading the moq-relay source (crate
+`rs/moq-net`) at tags `moq-relay-v0.14.17` (commit `b2f26b92`), `moq-relay-v0.15.1` and
+`moq-relay-v0.15.8`. The PUBLISH_DONE row was also measured live the same day, below. Close codes
+for 0.14.17 are moq-net's own `Error::to_code` values; from 0.15.1 a session close carries the
+draft-20 Section 3.5 code.
 
-| SDK choice | relay behavior in 0.14.17 | where | effect |
+| SDK choice | relay behavior by version | where | effect |
 | --- | --- | --- | --- |
-| FIN without PUBLISH_DONE | after SUBSCRIBE_OK, the relay waits for the request stream to close; `Reader::closed` returns a decode error if any byte arrives first | `ietf/subscriber.rs` `run_subscribe`, `coding/reader.rs` `closed` | a clean FIN finishes the relay's track; a PUBLISH_DONE, or any other byte, aborts it for every downstream viewer |
+| PUBLISH_DONE, then FIN | 0.14.17 to 0.15.3: after SUBSCRIBE_OK the relay waits for the request stream to close, and `Reader::closed` returns a decode error if any byte arrives first. 0.15.4 and later (upstream `a342004d9`, #4083): `read_publish_done` expects PUBLISH_DONE, `Error::ProtocolViolation` on a FIN without one, then waits for Stream Count data streams or a grace period; only status `TRACK_ENDED` is a clean end | `ietf/subscriber.rs` `run_subscribe`, `read_publish_done`; `coding/reader.rs` `closed`; `ietf/publish.rs` `PublishDone::end` | up to 0.15.3: a bare FIN finishes the relay's track, and a PUBLISH_DONE, or any other byte, aborts it for every downstream viewer. From 0.15.4: the reverse |
 | no GOAWAY | 0.14.17: a GOAWAY on the client's control stream is decoded and answered with `Error::Unsupported`. 0.15.1 and 0.15.8: it is decoded, logged and recorded, and the relay keeps reading the stream; a second GOAWAY is `Error::ProtocolViolation` | `ietf/session.rs` `run_goaway`; from 0.15.1 also `goaway.rs` `record` | 0.14.17: the session closes with code 17. 0.15.1 and later: the session stays open |
-| alias = request ID | an alias already active for another request ID is `Error::Duplicate` when the two name different tracks, and `Error::Unsupported` for the new subscription when they name the same track | `ietf/subscriber.rs` `insert_track_alias`, `register_alias` | different tracks: the session closes with code 12; same track: that subscription is cancelled |
+| alias = request ID | the same at 0.14.17, 0.15.1 and 0.15.8: an alias already active for another request ID is `Error::Duplicate` when the two name different tracks, and `Error::Unsupported` for the new subscription when they name the same track | `ietf/subscriber.rs` `insert_track_alias`, `register_alias` | different tracks: the session closes (code 12 on 0.14.17; PROTOCOL_VIOLATION, 0x3, from 0.15.1); same track: that subscription is cancelled |
 
-The alias row refines the core headers, which say any alias bound to two live request IDs closes
-the session (code 12). On 0.14.17 that holds only for two different tracks, which draft-20 Section
+The alias row refines what the core headers said before 0.15, that any alias bound to two live
+request IDs closes the session. That holds only for two different tracks, which draft-20 Section
 11.1 makes fatal anyway; for one track the relay cancels the newer subscription, because it cannot
 demultiplex subscriptions with identical filters. Unique aliases avoid both.
 
-Downstream, a viewer of a track that ended by FIN receives a PUBLISH_DONE the relay writes itself,
-with status 2 `track ended` on some runs and 0 `internal error` on others
-([issue #25](https://github.com/muxinc/relay-sdks/issues/25)). What may follow SUBSCRIBE_OK on a
-request stream is also the open question in
-[issue #94](https://github.com/muxinc/relay-sdks/issues/94), from the subscriber's side. Both cores' publish-session tests
-pin the three choices against in-process raw peers: a track end FINs its subscription streams with
-no trailing message, an orderly close puts SETUP and nothing else on the control stream, and
-SUBSCRIBE_OK carries the request ID as the alias. Both cores' session tests pin the same control
-stream contents for a subscriber connection's close.
+Live check of the PUBLISH_DONE row on 2026-09-28: a publisher wrote three objects, then closed the
+track writer or the publisher, and a subscriber on the same relay recorded what reached it. Both
+SDKs gave the same results (Python over aioquic, TypeScript in Chromium 147). "Bare FIN" is the
+previous behavior, reproduced by making the core's PUBLISH_DONE encode to nothing.
 
-Source reading of moq-dev/moq `main` at `2a5b6e23d` suggests one of the three has moved: its
-`run_goaway` records a client GOAWAY and keeps the session, while bytes after SUBSCRIBE_OK still
-abort the track. Which release first carries that, and whether `sjc.relay.mux.global` runs it, has
-not been checked.
+| relay | publisher sends | the viewer receives |
+| --- | --- | --- |
+| local `moqdev/moq-relay:0.15.8` | PUBLISH_DONE, then FIN | an end-of-track object, then PUBLISH_DONE status 2 `track ended`, stream count 4 |
+| local `moqdev/moq-relay:0.15.8` | bare FIN | PUBLISH_DONE status 0 `internal error` |
+| local `moqdev/moq-relay:0.15.1` | PUBLISH_DONE, then FIN | PUBLISH_DONE status 0 `internal error` |
+| local `moqdev/moq-relay:0.15.1` | bare FIN | PUBLISH_DONE status 2 `track ended` |
+| `sjc.relay.mux.global` (0.15.1) | PUBLISH_DONE, then FIN | PUBLISH_DONE status 0 `internal error` |
+| `sjc.relay.mux.global` (0.15.1) | bare FIN | status 2 after a writer close; status 0 after a publisher close |
+
+The production publisher-close row matches
+[issue #25](https://github.com/muxinc/relay-sdks/issues/25): with a bare FIN the relay wrote status
+2 on some runs and 0 on others. What may follow SUBSCRIBE_OK on a request stream is also the open
+question in [issue #94](https://github.com/muxinc/relay-sdks/issues/94), from the subscriber's side.
+Both cores' publish-session tests pin the three choices against in-process raw peers: every end
+path writes PUBLISH_DONE with its status and stream count after the data streams close, then FINs,
+an orderly close puts SETUP and nothing else on the control stream, and SUBSCRIBE_OK carries the
+request ID as the alias. Both cores' session tests pin the same control stream contents for a
+subscriber connection's close.
 
 To re-test after a relay upgrade, run the local relay below at the new version and, for each
-deviation, make the one-line change in a scratch build of either core:
+choice, make the one-line change in a scratch build of either core:
 
-- send PUBLISH_DONE (status `TRACK_ENDED`, stream count, then FIN) from the track-end path, then
-  check that a subscriber still receives every object and a done notification rather than a reset
-  or an early end;
+- for PUBLISH_DONE, close a track writer and check that a subscriber receives every object, then an
+  end-of-track object and a done notification with status 2, rather than status 0 or a reset;
 - GOAWAY is not sent because the SDK has no drain behavior, not because of the relay alone, so
   dropping this deviation means adding a drain. Against 0.14.17 any client GOAWAY closes the
   session; from 0.15.1, write GOAWAY (timeout 0, empty URI) on the publisher's control stream
@@ -228,6 +238,12 @@ Both tests publish binary, text, and empty payloads, then connect a second subsc
 `LARGEST_OBJECT` and verify that the late subscriber receives the next live object.
 This exercises the relay's encoder independently of the SDK codecs and in-process hubs.
 Successful output includes `lateSubscriberLargestObject`.
+
+moq-relay 0.15.x renamed the server flags: use `--listen '[::]:4443' --listen-tls-cert
+/tls/cert.pem --listen-tls-key /tls/key.pem`, and `--auth-public '**'` for an anonymous relay
+(0.15.8 rejects `''`). With these, both smoke tests passed against `moqdev/moq-relay:0.15.8` on
+2026-09-28. Current SDK builds need 0.15.4 or later to end a track cleanly (see the PUBLISH_DONE
+row above).
 
 `RELAY_ANONYMOUS=1` skips the token prompt; if `RELAY_TOKEN` is set, it is still used.
 `RELAY_CA_FILE` adds the local certificate as a Python trust root.

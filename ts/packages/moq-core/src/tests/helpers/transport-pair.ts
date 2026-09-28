@@ -29,8 +29,43 @@ export interface TransportPair {
   server: MoqtTransport;
 }
 
-/** Create two transports wired back-to-back. */
-export function createTransportPair(): TransportPair {
+/** One writer-side step as issued: the stream, `write`/`close`/`abort`, and the bytes written. */
+export interface PipeEvent {
+  stream: WritableStream<Uint8Array>;
+  kind: 'write' | 'close' | 'abort';
+  bytes: Uint8Array;
+}
+
+/** A pipe's writable that records each step into `events` as it is issued; an abort is recorded (and forwarded) at once. */
+function recordedWritable(pipe: WritableStream<Uint8Array>, events: PipeEvent[]): WritableStream<Uint8Array> {
+  const inner = pipe.getWriter();
+  const stream: WritableStream<Uint8Array> = new WritableStream<Uint8Array>({
+    start(controller) {
+      controller.signal.addEventListener('abort', () => {
+        events.push({ stream, kind: 'abort', bytes: new Uint8Array() });
+        inner.abort(controller.signal.reason).catch(() => {});
+      });
+    },
+    write(chunk) {
+      events.push({ stream, kind: 'write', bytes: chunk });
+      return inner.write(chunk);
+    },
+    close() {
+      events.push({ stream, kind: 'close', bytes: new Uint8Array() });
+      return inner.close();
+    },
+  });
+
+  return stream;
+}
+
+/**
+ * Create two transports wired back-to-back. With `events`, every writable either side creates records its steps there,
+ * in issue order.
+ */
+export function createTransportPair({ events }: { events?: PipeEvent[] } = {}): TransportPair {
+  const writable = (pipe: TransformStream<Uint8Array, Uint8Array>) =>
+    events ? recordedWritable(pipe.writable, events) : pipe.writable;
   const makeSide = () => ({
     incomingUni: pushChannel<ReadableStream<Uint8Array>>(),
     incomingBidi: pushChannel<BidirectionalStreamLike>(),
@@ -64,7 +99,7 @@ export function createTransportPair(): TransportPair {
       const pipe = new TransformStream<Uint8Array, Uint8Array>();
 
       remote.incomingUni.push(pipe.readable);
-      return pipe.writable;
+      return writable(pipe);
     },
     async createBidirectionalStream() {
       if (closed) throw new Error('transport closed');
@@ -72,8 +107,8 @@ export function createTransportPair(): TransportPair {
       const localToRemote = new TransformStream<Uint8Array, Uint8Array>();
       const remoteToLocal = new TransformStream<Uint8Array, Uint8Array>();
 
-      remote.incomingBidi.push({ readable: localToRemote.readable, writable: remoteToLocal.writable });
-      return { readable: remoteToLocal.readable, writable: localToRemote.writable };
+      remote.incomingBidi.push({ readable: localToRemote.readable, writable: writable(remoteToLocal) });
+      return { readable: remoteToLocal.readable, writable: writable(localToRemote) };
     },
     close(closeInfo) {
       closeBoth(closeInfo);

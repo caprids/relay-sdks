@@ -213,7 +213,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       });
       const slot = createWriteSlot({
         openSubgroup: async (trackAlias, groupId) =>
-          createSubgroupWriter(await session.openUniStream(), { trackAlias, groupId, hasProperties: true }),
+          createSubgroupWriter(await session.openUniStream(trackAlias), { trackAlias, groupId, hasProperties: true }),
         namespaceSolicited: () => session.namespaceSolicited,
         assertOpen: lifetime.assertOpen,
         endTrack: () => registered.end(),

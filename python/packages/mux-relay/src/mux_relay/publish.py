@@ -190,7 +190,7 @@ class RelayPublisher:
         )
 
         async def open_subgroup(track_alias: int, group_id: int) -> SubgroupWriter:
-            stream = await session.open_uni_stream()
+            stream = await session.open_uni_stream(track_alias)
             return create_subgroup_writer(stream, track_alias=track_alias, group_id=group_id, has_properties=True)
 
         writer = RelayTrackWriter(

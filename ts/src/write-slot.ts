@@ -13,7 +13,7 @@
  * the track in the core. Tests drive a slot with an in-memory subgroup writer and fake timers; the
  * "Write phases and interruptions" table in spec/behavior.md is the list they cover.
  */
-import type { SubgroupWriter } from '@mux/moq-core';
+import { type SubgroupWriter, streamResetReason } from '@mux/moq-core';
 import { RelayError, type RelayErrorPhase, transportError } from './errors.js';
 import { encodeJSON, encodeText } from './payload.js';
 import type { RelayGroupWriter, RelayTrackWriter } from './publish.js';
@@ -71,17 +71,8 @@ export class StreamReset extends Error {
 }
 
 function resetReason(code: ResetCode, cause: unknown): unknown {
-  if (typeof WebTransportError !== 'undefined') {
-    const message = cause instanceof Error ? cause.message : 'Publish operation reset';
-    try {
-      return new WebTransportError(message, { source: 'stream', streamErrorCode: code });
-    } catch (error) {
-      if (!(error instanceof TypeError)) throw error;
-      // Chromium still implements the earlier dictionary constructor; current DOM types use two arguments.
-      return Reflect.construct(WebTransportError, [{ message, streamErrorCode: code }]);
-    }
-  }
-  return new StreamReset(code, cause);
+  const message = cause instanceof Error ? cause.message : 'Publish operation reset';
+  return streamResetReason(code, message, () => new StreamReset(code, cause));
 }
 
 /** The code for a reset caused by the connection ending. */

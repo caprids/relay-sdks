@@ -37,6 +37,7 @@ export type {
   SubscriptionHandlers,
 } from './protocol/session.js';
 export { createMoqtSession, isStreamFailure } from './protocol/session.js';
+export { streamResetReason } from './protocol/stream-reset.js';
 export type { SubgroupWriter } from './protocol/subgroup-writer.js';
 export { createSubgroupWriter } from './protocol/subgroup-writer.js';
 export type { MoqTrackSource } from './track-source.js';
