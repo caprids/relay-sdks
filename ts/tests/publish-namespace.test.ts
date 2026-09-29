@@ -19,10 +19,8 @@ async function connectPublisher() {
     namespace,
     createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
   });
-  cleanup.push(() => publisher.close());
-  // The subscriber goes first: it never FINs its request streams, so a publisher closing ahead of it would wait out
-  // CLOSE_END_ACK_TIMEOUT_MS for the FIN a relay would send.
   cleanup.push(() => subscriber.destroy());
+  cleanup.push(() => publisher.close());
   const track = publisher.registerTrack({ track: 'events', writeTimeoutMs: 100 });
   return { pair, subscriber, publisher, track };
 }

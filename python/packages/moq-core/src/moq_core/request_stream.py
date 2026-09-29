@@ -86,8 +86,14 @@ class RequestStream:
                 self._handlers.on_error(error)
 
     async def send(self, data: bytes) -> None:
-        """Send a follow-up message (e.g. REQUEST_UPDATE) on the request stream."""
+        """Send a follow-up message (e.g. REQUEST_UPDATE) on the request stream.
+
+        Nothing is written once our direction has ended (FIN or cancellation).
+        """
         await self._first_write
+        if self._finished:
+            return
+
         await self._stream.writable.write(data)
 
     async def fin_write(self) -> None:

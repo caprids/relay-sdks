@@ -332,10 +332,8 @@ class TestConnectRelayPublisher:
                 ),
             ),
         )
-        # The subscriber goes first: it never FINs its request streams, so a publisher closing
-        # ahead of it would wait out CLOSE_END_ACK_TIMEOUT for the FIN a relay would send.
-        cleanup.append(publisher.close)
         cleanup.append(subscriber.close)
+        cleanup.append(publisher.close)
         track_properties = [KeyValuePair(2, 90_000)]
         publisher.register_track("timed", track_properties=track_properties)
         publisher.register_track("raw")
@@ -347,6 +345,42 @@ class TestConnectRelayPublisher:
         await wait_for(lambda: len(on_raw) == 1 and len(on_timed) == 1)
         assert on_timed[0].track_properties == track_properties
         assert on_raw[0].track_properties == []
+
+    async def test_closes_ahead_of_an_sdk_subscriber_without_waiting_out_the_end_ack_bound(
+        self, cleanup: Cleanup
+    ) -> None:
+        pair = create_transport_pair()
+        publisher, subscriber = await asyncio.gather(
+            connect_relay_publisher(
+                URL,
+                namespace=NAMESPACE,
+                create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=completed()),
+            ),
+            connect_relay_subscriber(
+                URL,
+                create_transport=lambda url, protocols: ConnectingTransport(
+                    transport=with_server_request_ids(pair.server), ready=completed()
+                ),
+            ),
+        )
+        cleanup.append(subscriber.close)
+        publisher.register_track("events")
+        on_subscribed: list[Any] = []
+        on_publisher_done: list[Any] = []
+        subscriber.subscribe(
+            NAMESPACE,
+            "events",
+            RelaySubscriptionHandlers(on_subscribed=on_subscribed.append, on_publisher_done=on_publisher_done.append),
+        )
+        await wait_for(lambda: len(on_subscribed) == 1)
+
+        # The subscriber FINs back once the publisher's FIN follows PUBLISH_DONE, which is what the
+        # publisher's close waits for (bounded by CLOSE_END_ACK_TIMEOUT, 2 s).
+        started = asyncio.get_running_loop().time()
+        await publisher.close()
+
+        assert asyncio.get_running_loop().time() - started < 0.5
+        assert len(on_publisher_done) == 1
 
     async def test_rejects_oversized_objects_before_waiting_for_demand(self, cleanup: Cleanup) -> None:
         _, publisher, _ = await connect_hub(cleanup)

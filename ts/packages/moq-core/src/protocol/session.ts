@@ -324,6 +324,8 @@ interface SubscriptionRecord extends RequestRecordBase {
   requestId: number;
   handlers: SubscriptionHandlers;
   trackAlias?: number;
+  /** PUBLISH_DONE arrived, so the publisher's FIN that follows completes the request. */
+  publisherDone?: boolean;
 }
 
 interface FetchRecord extends RequestRecordBase {
@@ -537,6 +539,11 @@ class MoqtSessionImpl implements MoqtSession {
       (error) => {
         this.#removeSubscription(record);
         handlers.onError?.(error);
+      },
+      () => {
+        // §3.3.2: once the publisher's FIN after PUBLISH_DONE completes the request, the requester
+        // SHOULD FIN too. A publisher closing waits for it before closing the transport.
+        if (record.publisherDone) record.stream?.finWrite().catch(() => {});
       }
     );
 
@@ -628,13 +635,14 @@ class MoqtSessionImpl implements MoqtSession {
    * that judgement here, since only the session knows which messages a given request kind requires. It fires for a FIN
    * before any response, a non-protocol stream error (transport reset), and the response timeout; a protocol error
    * still kills the whole session. Once `record.settled` is set the same events are ordinary end-of-request signals and
-   * are ignored.
+   * are ignored, except that a FIN calls `onEnd`.
    */
   async #openRequest(
     message: Uint8Array,
     record: RequestRecordBase,
     onMessage: (message: ControlMessage) => void,
-    onFailure: (error: RequestError) => void
+    onFailure: (error: RequestError) => void,
+    onEnd?: () => void
   ): Promise<void> {
     const fail = (error: RequestError): void => {
       if (record.settled || record.cancelled || this.#destroyed) return;
@@ -673,7 +681,13 @@ class MoqtSessionImpl implements MoqtSession {
 
     record.stream = openRequestStream(stream, message, {
       onMessage,
-      onFin: () => fail(streamFailure('request stream closed before a response')),
+      onFin: () => {
+        if (!record.settled) {
+          fail(streamFailure('request stream closed before a response'));
+        } else if (!record.cancelled && !this.#destroyed) {
+          onEnd?.();
+        }
+      },
       onError: (error) => {
         if (isMoqtProtocolError(error)) {
           this.#fatal(error);
@@ -747,6 +761,7 @@ class MoqtSessionImpl implements MoqtSession {
         // Data streams may still be inbound; the alias route stays until
         // the subscription is cancelled or the session ends, so late
         // subgroups still deliver (§10.12 leaves the timing policy to us).
+        record.publisherDone = true;
         record.handlers.onDone?.(message);
         break;
       case 'publish-state-notify':
