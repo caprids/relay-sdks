@@ -32,7 +32,7 @@ export interface RequestStreamHandlers {
 }
 
 export interface RequestStream {
-  /** Send a follow-up message (e.g. REQUEST_UPDATE) on the request stream. */
+  /** Send a follow-up message (e.g. REQUEST_UPDATE) on the request stream; nothing once our direction has ended. */
   send(bytes: Uint8Array): Promise<void>;
   /** Gracefully close our sending direction (FIN). Not a cancellation. */
   finWrite(): Promise<void>;
@@ -100,6 +100,7 @@ export function openRequestStream(
   return {
     async send(bytes: Uint8Array): Promise<void> {
       await firstWrite;
+      if (finished) return;
       await writer.write(bytes);
     },
 

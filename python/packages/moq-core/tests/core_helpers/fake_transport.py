@@ -9,6 +9,7 @@ import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from typing import Literal
 
 from moq_core.bytes import ByteWriter, StreamReader
 from moq_core.control_messages import (
@@ -32,6 +33,8 @@ class ServerRequestStream:
     """Decoded control messages received from the client, in order."""
     first_message: asyncio.Future[ControlMessage]
     """Resolves when the first client message has been decoded."""
+    client_end: asyncio.Future[Literal["fin", "reset"]]
+    """Resolves when the client's direction ends: ``"fin"`` for a clean FIN, ``"reset"`` for a reset."""
     _writer: Pipe
 
     async def send(self, data: bytes) -> None:
@@ -103,6 +106,7 @@ class FakeTransport:
         server_to_client = self._pipe()
         messages: list[ControlMessage] = []
         first_message: asyncio.Future[ControlMessage] = asyncio.get_running_loop().create_future()
+        client_end: asyncio.Future[Literal["fin", "reset"]] = asyncio.get_running_loop().create_future()
 
         async def pump() -> None:
             deframer = ControlMessageDeframer()
@@ -111,6 +115,7 @@ class FakeTransport:
                 while True:
                     chunk = await client_to_server.read()
                     if chunk is None:
+                        client_end.set_result("fin")
                         break
 
                     for frame in deframer.push(chunk):
@@ -120,12 +125,12 @@ class FakeTransport:
                         if len(messages) == 1 and not first_message.done():
                             first_message.set_result(message)
             except Exception:  # client reset its sending direction
-                pass
+                client_end.set_result("reset")
 
         task = asyncio.get_running_loop().create_task(pump())
         self._pumps.append(task)
 
-        server_stream = ServerRequestStream(messages, first_message, server_to_client)
+        server_stream = ServerRequestStream(messages, first_message, client_end, server_to_client)
 
         if self._request_waiters:
             self._request_waiters.popleft().set_result(server_stream)

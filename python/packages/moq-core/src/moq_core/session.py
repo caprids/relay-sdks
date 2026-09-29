@@ -325,6 +325,8 @@ class _SubscriptionRecord(_RequestRecord):
     readers: set[StreamReader] = field(default_factory=set)
     handlers: SubscriptionHandlers
     track_alias: int | None = None
+    publisher_done: bool = False
+    """PUBLISH_DONE arrived, so the publisher's FIN that follows completes the request."""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -579,8 +581,16 @@ class MoqtSession:
             self._remove_subscription(record)
             _call(handlers.on_error, error)
 
+        def on_end() -> None:
+            # §3.3.2: once the publisher's FIN after PUBLISH_DONE completes the request, the
+            # requester SHOULD FIN too. A publisher closing waits for it before closing the transport.
+            if record.publisher_done and record.stream is not None:
+                spawn(record.stream.fin_write())
+
         spawn(
-            self._open_request(message, record, lambda msg: self._handle_subscription_message(record, msg), on_failure)
+            self._open_request(
+                message, record, lambda msg: self._handle_subscription_message(record, msg), on_failure, on_end
+            )
         )
 
         return Subscription(self, record)
@@ -654,6 +664,7 @@ class MoqtSession:
         record: _RequestRecord,
         on_message: Callable[[ControlMessage], None],
         on_failure: Callable[[RequestError], None],
+        on_end: Callable[[], None] | None = None,
     ) -> None:
         """Open a request stream and bind its lifecycle to ``record``.
 
@@ -662,7 +673,7 @@ class MoqtSession:
         given request kind requires. It fires for a FIN before any response, a non-protocol stream
         error (transport reset), and the response timeout; a protocol error still kills the whole
         session. Once ``record.settled`` is set the same events are ordinary end-of-request signals
-        and are ignored.
+        and are ignored, except that a FIN calls ``on_end``.
         """
 
         def fail(error: RequestError) -> None:
@@ -707,12 +718,18 @@ class MoqtSession:
 
             fail(_stream_failure(_describe(error, "request stream failed")))
 
+        def on_fin() -> None:
+            if not record.settled:
+                fail(_stream_failure("request stream closed before a response"))
+            elif on_end is not None and not record.cancelled and not self._destroyed:
+                on_end()
+
         record.stream = open_request_stream(
             stream,
             message,
             RequestStreamHandlers(
                 on_message=on_message,
-                on_fin=lambda: fail(_stream_failure("request stream closed before a response")),
+                on_fin=on_fin,
                 on_error=on_error,
             ),
         )
@@ -766,6 +783,7 @@ class MoqtSession:
                 # Data streams may still be inbound; the alias route stays until the subscription is
                 # cancelled or the session ends, so late subgroups still deliver (§10.12 leaves the
                 # timing policy to us).
+                record.publisher_done = True
                 _call(record.handlers.on_done, message)
             case PublishStateNotify(parameters=parameters):
                 # Unilateral (§10.10): no REQUEST_OK back, and it does not count against

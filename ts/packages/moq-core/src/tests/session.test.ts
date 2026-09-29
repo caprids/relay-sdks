@@ -56,6 +56,8 @@ interface ServerRequestStream {
   messages: ControlMessage[];
   /** Resolves when the first client message has been decoded. */
   firstMessage: Promise<ControlMessage>;
+  /** Resolves when the client's direction ends: `fin` for a clean FIN, `reset` for a reset. */
+  clientEnd: Promise<'fin' | 'reset'>;
   send(bytes: Uint8Array): Promise<void>;
   fin(): Promise<void>;
   reset(reason?: unknown): void;
@@ -92,6 +94,10 @@ function createFakeTransport() {
       const firstMessage = new Promise<ControlMessage>((resolve) => {
         resolveFirst = resolve;
       });
+      let resolveClientEnd!: (end: 'fin' | 'reset') => void;
+      const clientEnd = new Promise<'fin' | 'reset'>((resolve) => {
+        resolveClientEnd = resolve;
+      });
 
       // Server-side read pump for the client's messages.
       void (async () => {
@@ -101,7 +107,10 @@ function createFakeTransport() {
         try {
           while (true) {
             const { done, value } = await reader.read();
-            if (done) break;
+            if (done) {
+              resolveClientEnd('fin');
+              break;
+            }
 
             for (const frame of deframer.push(value)) {
               const message = decodeControlMessage(frame);
@@ -113,12 +122,14 @@ function createFakeTransport() {
           }
         } catch {
           // client reset its sending direction
+          resolveClientEnd('reset');
         }
       })();
 
       const serverStream: ServerRequestStream = {
         messages,
         firstMessage,
+        clientEnd,
         send: (bytes) => writer.write(bytes),
         fin: () => writer.close(),
         reset: (reason) => {
@@ -538,6 +549,66 @@ describe('createMoqtSession', () => {
     await vi.waitFor(() => expect(objects).toHaveLength(1));
 
     subscription.cancel();
+    harness.session.destroy();
+  });
+
+  it("FINs its request stream once the publisher's FIN follows PUBLISH_DONE", async () => {
+    const harness = createSessionHarness();
+
+    harness.sendServerSetup();
+
+    const objects: MoqtObject[] = [];
+    const subscription = harness.session.subscribe(
+      { trackNamespace: ['live'], trackName: 'video' },
+      { onObject: (object) => objects.push(object) }
+    );
+    const request = await harness.nextRequestStream();
+    let clientEnd: 'fin' | 'reset' | undefined;
+
+    void request.clientEnd.then((end) => {
+      clientEnd = end;
+    });
+    await request.firstMessage;
+    await request.send(encodeSubscribeOk(7));
+    await request.send(encodePublishDone(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, 'ended'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // PUBLISH_DONE alone does not complete the request (§3.3.2): the publisher's FIN does.
+    expect(clientEnd).toBeUndefined();
+
+    await request.fin();
+    await vi.waitFor(() => expect(clientEnd).toBe('fin'));
+
+    // Late data still routes, and an update() after the FIN writes nothing.
+    harness.openDataStream(encodeSubgroup(7, 1, utf8Encode('late')));
+    await vi.waitFor(() => expect(objects).toHaveLength(1));
+    subscription.update({ forward: 0 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(request.messages).toHaveLength(1);
+
+    subscription.cancel();
+    harness.session.destroy();
+  });
+
+  it('does not FIN back for a publisher FIN without PUBLISH_DONE', async () => {
+    const harness = createSessionHarness();
+
+    harness.sendServerSetup();
+    harness.session.subscribe({ trackNamespace: ['live'], trackName: 'video' });
+
+    const request = await harness.nextRequestStream();
+    let clientEnd: 'fin' | 'reset' | undefined;
+
+    void request.clientEnd.then((end) => {
+      clientEnd = end;
+    });
+    await request.firstMessage;
+    await request.send(encodeSubscribeOk(7));
+    await request.fin();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(clientEnd).toBeUndefined();
+
     harness.session.destroy();
   });
 

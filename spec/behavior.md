@@ -728,8 +728,10 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    `track ended`. A session that closes before the relay has done so aborts the track, which a
    viewer sees as status 0 `internal error`, so closing the publisher waits for that FIN (the one
    Section 3.3.2 says a requester SHOULD send once the responder's FIN completes the request) on
-   every subscription it ended before closing the transport (bounded, see deviation 2). They treat a FIN
-   without PUBLISH_DONE as a failed request and abort the track. moq-relay 0.15.1 to 0.15.3 do the reverse:
+   every subscription it ended before closing the transport (bounded, see deviation 2). The SDK
+   subscriber sends that FIN too, once the publisher's FIN follows PUBLISH_DONE, so an SDK publisher
+   facing an SDK subscriber directly closes without waiting out the bound. moq-relay 0.15.4 and later
+   treat a FIN without PUBLISH_DONE as a failed request and abort the track. moq-relay 0.15.1 to 0.15.3 do the reverse:
    any byte after SUBSCRIBE_OK aborts the track, so every end these SDKs send reaches viewers as
    status 0 `internal error`, where a bare FIN finished the track. No behavior ends cleanly on both,
    and the SDKs cannot tell the versions apart (the relay's SETUP names only `moq-lite-rs`), so they

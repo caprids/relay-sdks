@@ -52,10 +52,8 @@ async def test_namespace_demand_deadline_and_recovery(prefix: list[str] | None, 
         await wait_for(lambda: len(objects) == 1)
         assert objects[0].payload == b"after"
     finally:
-        # The peer goes first: it never FINs its request streams, so a publisher closing ahead of it
-        # would wait out CLOSE_END_ACK_TIMEOUT for the FIN a relay would send.
-        peer.destroy()
         await publisher.close()
+        peer.destroy()
 
 
 async def test_announced_waits_for_a_solicitation_that_covers_the_namespace() -> None:

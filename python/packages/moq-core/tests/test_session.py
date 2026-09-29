@@ -400,6 +400,54 @@ class TestCreateMoqtSession:
         subscription.cancel()
         harness.session.destroy()
 
+    async def test_fins_its_request_stream_once_the_publishers_fin_follows_publish_done(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+
+        objects: list[MoqtObject] = []
+        subscription = harness.session.subscribe(
+            options(["live"], "video"), SubscriptionHandlers(on_object=objects.append)
+        )
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_subscribe_ok(7))
+        await request.send(encode_publish_done(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, "ended"))
+        await settle()
+
+        # PUBLISH_DONE alone does not complete the request (§3.3.2): the publisher's FIN does.
+        assert not request.client_end.done()
+
+        await request.fin()
+
+        assert await asyncio.wait_for(request.client_end, 1) == "fin"
+
+        # Late data still routes, and an update() after the FIN writes nothing.
+        harness.fake.open_data_stream(encode_subgroup(7, 1, utf8_encode("late")))
+        await wait_for(lambda: len(objects) == 1)
+        subscription.update(MessageParameters(forward=0))
+        await settle()
+        assert len(request.messages) == 1
+
+        subscription.cancel()
+        harness.session.destroy()
+
+    async def test_does_not_fin_back_for_a_publisher_fin_without_publish_done(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+
+        harness.session.subscribe(options(["live"], "video"))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_subscribe_ok(7))
+        await request.fin()
+        await settle()
+
+        assert not request.client_end.done()
+
+        harness.session.destroy()
+
     async def test_allocates_even_request_ids_starting_at_0(self) -> None:
         harness = create_session_harness()
         harness.fake.send_server_setup()
