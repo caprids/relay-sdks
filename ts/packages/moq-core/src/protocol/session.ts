@@ -356,6 +356,8 @@ class MoqtSessionImpl implements MoqtSession {
   #callbacks: MoqtSessionCallbacks;
 
   #nextRequestId = 0; // client request IDs: even, starting at 0 (§10.1)
+  /** Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§10.1). */
+  #peerRequestIds = new Set<number>();
   #subscriptions = new Map<number, SubscriptionRecord>();
   #fetches = new Map<number, FetchRecord>();
   #trackStatuses = new Map<number, TrackStatusRecord>();
@@ -516,6 +518,23 @@ class MoqtSessionImpl implements MoqtSession {
 
     this.#nextRequestId += 2;
     return id;
+  }
+
+  /**
+   * Request IDs are consumed once per session (§10.1), by every request-initiating message, accepted or not. This
+   * endpoint is always the client, so the peer's ids are odd; a reused id or an even one closes the session with
+   * INVALID_REQUEST_ID.
+   */
+  #claimPeerRequestId(requestId: number): void {
+    if (requestId % 2 !== 1) {
+      throw new MoqtProtocolError(`peer sent even request id ${requestId}`, SESSION_ERROR.INVALID_REQUEST_ID);
+    }
+
+    if (this.#peerRequestIds.has(requestId)) {
+      throw new MoqtProtocolError(`peer reused request id ${requestId}`, SESSION_ERROR.INVALID_REQUEST_ID);
+    }
+
+    this.#peerRequestIds.add(requestId);
   }
 
   subscribe(options: MoqtSubscribeOptions, callbacks: SubscriptionHandlers = {}): Subscription {
@@ -1064,6 +1083,19 @@ class MoqtSessionImpl implements MoqtSession {
     const reader = new StreamReader(stream.readable);
     const type = await reader.readVarint();
     const message = await this.#readControlFrame(reader, type);
+    const initiatingRequestId =
+      message.kind === 'fetch'
+        ? message.request.requestId
+        : message.kind === 'subscribe' ||
+            message.kind === 'subscribe-namespace' ||
+            message.kind === 'publish' ||
+            message.kind === 'publish-namespace' ||
+            message.kind === 'track-status'
+          ? message.requestId
+          : undefined;
+
+    // Before answering: a request this client rejects still consumes its id.
+    if (initiatingRequestId !== undefined) this.#claimPeerRequestId(initiatingRequestId);
 
     const respond = async (bytes: Uint8Array) => {
       const writer = stream.writable.getWriter();

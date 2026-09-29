@@ -765,8 +765,9 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    request ID the peer reuses, or one with a client's (even) parity, closes the session with
    `INVALID_REQUEST_ID` before it can become an alias, as
    [Section 10.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.1)
-   requires. moq-relay allocates server request IDs odd, from 1, so the parity check never fires
-   against it. moq-relay 0.15.1 and 0.15.8 close the session with PROTOCOL_VIOLATION when one
+   requires. The subscriber connection applies the same check to every request the relay opens,
+   including the ones it rejects, before answering. moq-relay allocates server request IDs odd,
+   from 1, so the parity check never fires against it. moq-relay 0.15.1 and 0.15.8 close the session with PROTOCOL_VIOLATION when one
    alias names two different tracks, and cancel the newer subscription when two live subscriptions
    to one track share an alias; unique aliases avoid both. The application never sees an alias on
    the Relay surface. Nothing needs to change unless the SDK serves concurrent subscriptions to one

@@ -17,6 +17,7 @@ from moq_core.control_messages import (
     Fetch,
     Location,
     MessageParameters,
+    Publish,
     PublishNamespace,
     RelativeGroupFilter,
     RequestError,
@@ -25,6 +26,7 @@ from moq_core.control_messages import (
     Subscribe,
     SubscribeOk,
     decode_control_message,
+    encode_publish,
     encode_publish_done,
     encode_publish_namespace,
     encode_publish_state_notify,
@@ -33,6 +35,7 @@ from moq_core.control_messages import (
     encode_setup,
     encode_subscribe_ok,
 )
+from moq_core.errors import SESSION_ERROR
 from moq_core.object_stream import FetchObject, FetchStreamEntry, MoqtObject
 from moq_core.session import (
     Closed,
@@ -103,6 +106,20 @@ def fetch_stream_bytes(request_id: int, payload: bytes = b'{"version":"1"}') -> 
 def decode_chunks(chunks: list[bytes]) -> list[ControlMessage]:
     deframer = ControlMessageDeframer()
     return [decode_control_message(frame) for chunk in chunks for frame in deframer.push(chunk)]
+
+
+def _publish(request_id: int) -> bytes:
+    return encode_publish(Publish(request_id=request_id, track_namespace=["live"], track_name="offered", track_alias=9))
+
+
+def _publish_namespace(request_id: int) -> bytes:
+    return encode_publish_namespace(PublishNamespace(request_id=request_id, track_namespace=["anon"]))
+
+
+async def _expect_invalid_request_id(fake: FakeTransport, reason: str) -> None:
+    await wait_for(lambda: fake.close_info is not None)
+    assert fake.close_info is not None
+    assert (fake.close_info.close_code, fake.close_info.reason) == (SESSION_ERROR.INVALID_REQUEST_ID, reason)
 
 
 class _RecordingSendStream:
@@ -748,6 +765,61 @@ class TestCreateMoqtSession:
         assert isinstance(messages[0], RequestError)
         assert messages[0].error_code == REQUEST_ERROR_CODE.NOT_SUPPORTED
 
+        harness.session.destroy()
+
+    async def test_closes_with_invalid_request_id_on_an_even_publish_id_before_offering_it(self) -> None:
+        seen: list[Any] = []
+        harness = create_session_harness(MoqtSessionCallbacks(on_incoming_publish=lambda p, r: seen.append(p)))
+        harness.fake.send_server_setup()
+
+        harness.fake.open_incoming_bidi(_publish(2))
+
+        await _expect_invalid_request_id(harness.fake, "peer sent even request id 2")
+        assert seen == []
+
+    async def test_closes_with_invalid_request_id_on_a_reused_publish_id(self) -> None:
+        seen: list[Any] = []
+
+        def on_incoming_publish(publish: Any, responder: Any) -> None:
+            seen.append(publish)
+            responder.accept()
+
+        harness = create_session_harness(MoqtSessionCallbacks(on_incoming_publish=on_incoming_publish))
+        harness.fake.send_server_setup()
+
+        await harness.fake.open_incoming_bidi(_publish(1))
+        harness.fake.open_incoming_bidi(_publish(1))
+
+        await _expect_invalid_request_id(harness.fake, "peer reused request id 1")
+        assert len(seen) == 1
+
+    async def test_closes_with_invalid_request_id_on_an_even_id_of_a_kind_it_rejects(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+
+        harness.fake.open_incoming_bidi(_publish_namespace(4))
+
+        await _expect_invalid_request_id(harness.fake, "peer sent even request id 4")
+
+    async def test_counts_a_rejected_request_as_consuming_its_id(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+
+        await harness.fake.open_incoming_bidi(_publish_namespace(1))
+        harness.fake.open_incoming_bidi(_publish(1))
+
+        await _expect_invalid_request_id(harness.fake, "peer reused request id 1")
+
+    async def test_answers_distinct_odd_request_ids_and_stays_open(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+
+        await harness.fake.open_incoming_bidi(_publish(1))
+        messages = decode_chunks(await harness.fake.open_incoming_bidi(_publish_namespace(3)))
+
+        assert isinstance(messages[0], RequestError)
+        assert messages[0].error_code == REQUEST_ERROR_CODE.NOT_SUPPORTED
+        assert harness.fake.close_info is None
         harness.session.destroy()
 
     async def test_closes_the_session_when_an_incoming_request_frame_has_a_truncated_body(self) -> None:
