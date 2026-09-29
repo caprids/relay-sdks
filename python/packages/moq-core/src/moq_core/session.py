@@ -44,11 +44,13 @@ from .control_messages import (
     MessageParameters,
     Publish,
     PublishDone,
+    PublishNamespace,
     PublishStateNotify,
     RequestError,
     RequestOk,
     Setup,
     Subscribe,
+    SubscribeNamespace,
     SubscribeOk,
     TrackStatus,
     decode_control_message,
@@ -403,6 +405,8 @@ class MoqtSession:
         self._callbacks = self._config.callbacks
 
         self._next_request_id = 0  # client request IDs: even, starting at 0 (§10.1)
+        # Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§10.1).
+        self._peer_request_ids: set[int] = set()
         self._subscriptions: dict[int, _SubscriptionRecord] = {}
         self._fetches: dict[int, _FetchRecord] = {}
         self._track_statuses: dict[int, _TrackStatusRecord] = {}
@@ -560,6 +564,21 @@ class MoqtSession:
         request_id = self._next_request_id
         self._next_request_id += 2
         return request_id
+
+    def _claim_peer_request_id(self, request_id: int) -> None:
+        """Request IDs are consumed once per session (§10.1); a reused or wrong-parity one is session-fatal.
+
+        Every request-initiating message consumes one, accepted or not. This endpoint is always the
+        client, so the peer's ids are odd; a reused id or an even one closes the session with
+        INVALID_REQUEST_ID.
+        """
+        if request_id % 2 != 1:
+            raise MoqtProtocolError(f"peer sent even request id {request_id}", SESSION_ERROR.INVALID_REQUEST_ID)
+
+        if request_id in self._peer_request_ids:
+            raise MoqtProtocolError(f"peer reused request id {request_id}", SESSION_ERROR.INVALID_REQUEST_ID)
+
+        self._peer_request_ids.add(request_id)
 
     def subscribe(self, options: MoqtSubscribeOptions, handlers: SubscriptionHandlers | None = None) -> Subscription:
         handlers = _synchronous_subscription_handlers(handlers or SubscriptionHandlers())
@@ -1007,6 +1026,10 @@ class MoqtSession:
         reader = StreamReader(stream.readable)
         message_type = await reader.read_varint()
         message = await self._read_control_frame(reader, message_type)
+
+        # Before answering: a request this client rejects still consumes its id.
+        if isinstance(message, Subscribe | SubscribeNamespace | Publish | PublishNamespace | TrackStatus | Fetch):
+            self._claim_peer_request_id(message.request_id)
 
         async def respond(data: bytes) -> None:
             try:

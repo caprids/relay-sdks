@@ -5,6 +5,7 @@ import {
   type ControlMessage,
   ControlMessageDeframer,
   decodeControlMessage,
+  encodePublish,
   encodePublishDone,
   encodePublishNamespace,
   encodePublishStateNotify,
@@ -16,6 +17,7 @@ import {
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
 } from '../protocol/control-messages.js';
+import { SESSION_ERROR } from '../protocol/errors.js';
 import type { MoqtObject } from '../protocol/object-stream.js';
 import type { BidirectionalStreamLike } from '../protocol/request-stream.js';
 import {
@@ -915,6 +917,74 @@ describe('createMoqtSession', () => {
     expect(messages[0]).toMatchObject({ kind: 'request-error', errorCode: REQUEST_ERROR_CODE.NOT_SUPPORTED });
 
     harness.session.destroy();
+  });
+
+  describe('inbound request IDs (§10.1)', () => {
+    const publish = (requestId: number) =>
+      encodePublish({ requestId, trackNamespace: ['live'], trackName: 'offered', trackAlias: 9 });
+    const publishNamespace = (requestId: number) => encodePublishNamespace({ requestId, trackNamespace: ['anon'] });
+
+    async function expectInvalidRequestId(harness: ReturnType<typeof createSessionHarness>, reason: string) {
+      await vi.waitFor(() => expect(harness.getCloseInfo()).toBeDefined());
+      expect(harness.getCloseInfo()).toEqual({ closeCode: SESSION_ERROR.INVALID_REQUEST_ID, reason });
+    }
+
+    it('closes with INVALID_REQUEST_ID on an even PUBLISH id, before offering it', async () => {
+      const onIncomingPublish = vi.fn();
+      const harness = createSessionHarness({ onIncomingPublish });
+
+      harness.sendServerSetup();
+      harness.openIncomingBidi(publish(2));
+
+      await expectInvalidRequestId(harness, 'peer sent even request id 2');
+      expect(onIncomingPublish).not.toHaveBeenCalled();
+    });
+
+    it('closes with INVALID_REQUEST_ID on a reused PUBLISH id', async () => {
+      const onIncomingPublish = vi.fn((_publish, responder) => responder.accept());
+      const harness = createSessionHarness({ onIncomingPublish });
+
+      harness.sendServerSetup();
+      await harness.openIncomingBidi(publish(1)).responses;
+      harness.openIncomingBidi(publish(1));
+
+      await expectInvalidRequestId(harness, 'peer reused request id 1');
+      expect(onIncomingPublish).toHaveBeenCalledTimes(1);
+    });
+
+    it('closes with INVALID_REQUEST_ID on an even id of a kind it rejects', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+      harness.openIncomingBidi(publishNamespace(4));
+
+      await expectInvalidRequestId(harness, 'peer sent even request id 4');
+    });
+
+    it('counts a rejected request as consuming its id', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+      await harness.openIncomingBidi(publishNamespace(1)).responses;
+      harness.openIncomingBidi(publish(1));
+
+      await expectInvalidRequestId(harness, 'peer reused request id 1');
+    });
+
+    it('answers distinct odd ids and stays open', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+      await harness.openIncomingBidi(publish(1)).responses;
+      const chunks = await harness.openIncomingBidi(publishNamespace(3)).responses;
+      const deframer = new ControlMessageDeframer();
+      const messages = chunks.flatMap((chunk) => deframer.push(chunk)).map(decodeControlMessage);
+
+      expect(messages[0]).toMatchObject({ kind: 'request-error', errorCode: REQUEST_ERROR_CODE.NOT_SUPPORTED });
+      expect(harness.getCloseInfo()).toBeUndefined();
+
+      harness.session.destroy();
+    });
   });
 
   it('closes the session when an incoming request frame has a truncated body', async () => {
