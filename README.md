@@ -80,6 +80,18 @@ Publishers end a track with PUBLISH_DONE, which needs moq-relay 0.15.4 or later:
 a reproducible local test, see [relay interoperability](spec/relay-interop.md). SDK adoption and
 the relay upgrade must be coordinated.
 
+The package READMEs (`ts/README.md` for npm, `python/packages/mux-relay/README.md` for PyPI) use
+relative links while the repository is private. Those links do not resolve on a registry page, and
+the linked files are not in either package, so each must become an absolute URL before the first
+release:
+
+- `ts/README.md`: `GUIDE.md`, `GUIDE.md#first-round-trip`,
+  `GUIDE.md#use-the-local-packages-in-your-application`, `GUIDE.md#errors-and-recovery`, and
+  `../spec/README.md`.
+- `python/packages/mux-relay/README.md`: `../../README.md`, `../../README.md#first-round-trip`,
+  `../../README.md#use-the-local-packages-in-your-application`, `../../README.md#errors-and-recovery`,
+  and `../../../spec/README.md`.
+
 ## Package boundaries
 
 The same shape applies in every language:
