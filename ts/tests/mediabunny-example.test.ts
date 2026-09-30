@@ -61,7 +61,10 @@ function recordingPublisher(
 ) {
   const tracks = new Map<
     string,
-    { writer: RelayTrackWriter; groups: { properties: readonly PublishProperty[]; timeMs: number }[][] }
+    {
+      writer: RelayTrackWriter;
+      groups: { payload: ArrayBufferView; properties: readonly PublishProperty[]; timeMs: number }[][];
+    }
   >();
   const unused = async () => {
     throw new Error('Unused text/JSON method');
@@ -76,7 +79,7 @@ function recordingPublisher(
         end = resolve;
       });
       let closed = false;
-      const groups: { properties: readonly PublishProperty[]; timeMs: number }[][] = [];
+      const groups: { payload: ArrayBufferView; properties: readonly PublishProperty[]; timeMs: number }[][] = [];
       const writer: RelayTrackWriter = {
         get closed() {
           return closed;
@@ -94,7 +97,7 @@ function recordingPublisher(
         },
         async openGroup() {
           if (!writer.hasDemand) throw new Error('Opened a group without demand');
-          const frames: { properties: readonly PublishProperty[]; timeMs: number }[] = [];
+          const frames: { payload: ArrayBufferView; properties: readonly PublishProperty[]; timeMs: number }[] = [];
           groups.push(frames);
           let groupClosed = false;
           const group: RelayGroupWriter = {
@@ -105,10 +108,10 @@ function recordingPublisher(
             get closed() {
               return groupClosed;
             },
-            async write(_payload, options) {
+            async write(payload, options) {
               if (controls.failVideo && track === 'video') throw new Error('Video write failed');
               if (closed || groupClosed) throw new Error('Writer closed');
-              frames.push({ properties: options?.properties ?? [], timeMs: performance.now() });
+              frames.push({ payload, properties: options?.properties ?? [], timeMs: performance.now() });
               if (track === 'video') controls.onVideoWrite?.();
             },
             async close() {
@@ -150,6 +153,11 @@ it('publishes the file in keyframe groups and ends the catalog service at EOF', 
   const { publisher, tracks } = recordingPublisher();
   await publishVideoFile(file, publisher, ['demo']);
   expect(tracks.get('catalog')!.groups.map((group) => group.length)).toEqual([1]);
+  const catalog = JSON.parse(new TextDecoder().decode(tracks.get('catalog')!.groups[0]![0]!.payload));
+  expect(Number.isInteger(catalog.tracks[0].bitrate)).toBe(true);
+  expect(catalog.tracks[0].bitrate).toBeGreaterThan(0);
+  expect(catalog.tracks[0].framerate).toBeGreaterThan(0);
+  expect(Math.round(catalog.tracks[0].framerate * 1000)).toBeCloseTo(catalog.tracks[0].framerate * 1000, 6);
   expect(tracks.get('video')!.groups.map((group) => group.length)).toEqual([2, 2]);
   for (const group of tracks.get('video')!.groups) {
     expect(group[0]!.properties.some((property) => property.type === 0x0d)).toBe(true);
