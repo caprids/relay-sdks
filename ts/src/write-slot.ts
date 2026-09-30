@@ -23,7 +23,7 @@ import { type SubgroupWriter, streamResetReason } from '@mux/moq-core';
 import { RelayError, type RelayErrorPhase, transportError } from './errors.js';
 import { encodeJSON, encodeText } from './payload.js';
 import type { RelayGroupWriter, RelayTrackWriter } from './publish.js';
-import type { GroupReservation, SettlingGroups } from './settling-groups.js';
+import type { SettlingGroups } from './settling-groups.js';
 import { payloadBytes, propertyPairs } from './validation.js';
 
 /**
@@ -44,7 +44,7 @@ export type ResetCode = (typeof RESET_CODE)[keyof typeof RESET_CODE];
 export interface WriteSlotDependencies {
   /** Open a subgroup stream for one group of this track. Rejects when the transport refuses. */
   openSubgroup(trackAlias: number, groupId: number): Promise<SubgroupWriter>;
-  /** The connection's settling groups: each operation reserves a place before opening its stream. */
+  /** The connection's settling groups: an operation waits for room before opening its stream. */
   settlingGroups: SettlingGroups;
   /** Whether a current relay solicitation covers the namespace; undefined before any arrived. */
   namespaceSolicited(): boolean | undefined;
@@ -93,8 +93,6 @@ interface Operation {
   kind: 'write' | 'group';
   alias: number | undefined;
   writer: SubgroupWriter | undefined;
-  /** Its place under the connection's settling-group limit, from opening-stream until it ends. */
-  reservation: GroupReservation | undefined;
   cancelled: boolean;
   failure: unknown;
   code: ResetCode;
@@ -166,7 +164,6 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       phase: 'waiting-for-demand',
       alias: undefined,
       writer: undefined,
-      reservation: undefined,
       cancelled: false,
       failure: undefined,
       code: RESET_CODE.INTERNAL_ERROR,
@@ -175,8 +172,6 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       wake,
       cleanup() {
         signal?.removeEventListener('abort', abort);
-        operation.reservation?.release();
-        operation.reservation = undefined;
       },
       cancel(error, code) {
         if (operation.cancelled) return;
@@ -253,10 +248,10 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     operation.phase = 'opening-stream';
     // At the settling-group limit this waits under the write deadline, which reports it as a
     // WRITE_TIMEOUT in this phase rather than letting the transport refuse the stream.
-    const reservation = settlingGroups.tryReserve() ?? (await settlingGroups.reserve(operation.interrupted));
-    if (operation.cancelled) reservation.release();
-    else operation.reservation = reservation;
-    check(operation);
+    if (!settlingGroups.hasRoom()) {
+      await settlingGroups.waitForRoom(operation.interrupted);
+      check(operation);
+    }
     const subgroup = await openSubgroup(operation.alias, groupId);
     if (operation.cancelled) {
       // The stream opened after the failure: reset it without sending payload bytes (§11.4.3).
@@ -273,8 +268,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
   // The operation is complete: its FIN was handed over, so the group settles on the connection's
   // account and the slot is free.
   const completeOperation = (operation: Operation, subgroup: SubgroupWriter) => {
-    operation.reservation?.settle(subgroup.fin());
-    operation.reservation = undefined;
+    settlingGroups.add(subgroup.fin());
     release(operation);
   };
 

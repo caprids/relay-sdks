@@ -7,6 +7,7 @@
 import type { SubgroupWriter } from '@mux/moq-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
+import type { RelayGroupWriter } from '../src/publish.js';
 import { createSettlingGroups, SETTLING_GROUP_LIMIT, type SettlingGroups } from '../src/settling-groups.js';
 import { createWriteSlot, RESET_CODE, StreamReset } from '../src/write-slot.js';
 
@@ -738,14 +739,40 @@ describe('write slot: settling groups', () => {
     expect(opened[SETTLING_GROUP_LIMIT]).toMatchObject({ groupId: SETTLING_GROUP_LIMIT + 1, finCalls: 1 });
   });
 
-  it('frees a place when an operation fails before handing its FIN over', async () => {
-    const settlingGroups = createSettlingGroups(1);
-    const { slot, writer } = harness({ stall: 'write', settlingGroups, writeTimeoutMs: 100 });
+  it('reports a stream that failed before the FIN was handed over, rather than dropping it', async () => {
+    const { slot, writer, opened } = harness({ stall: 'fin' });
     slot.bind(1);
-    const rejected = expect(writer.write(bytes(1))).rejects.toMatchObject({ code: 'WRITE_TIMEOUT', phase: 'writing' });
-    await elapse(100);
+    const group = await writer.openGroup();
+    await group.write(bytes(1));
+    const failure = new Error('STOP_SENDING before the FIN');
+    const rejected = expect(group.close()).rejects.toMatchObject({
+      code: 'TRANSPORT_ERROR',
+      phase: 'closing',
+      cause: failure,
+    });
+    await flush();
+    opened[0]?.fail(failure);
     await rejected;
-    expect(settlingGroups.tryReserve()).toBeDefined();
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.INTERNAL_ERROR)]);
+    expect(group.closed).toBe(true);
+    expect(writer.closed).toBe(false);
+  });
+
+  it('counts settling groups only: open groups on many tracks never make another track wait', async () => {
+    const settlingGroups = createSettlingGroups();
+    const tracks = Array.from({ length: SETTLING_GROUP_LIMIT + 1 }, () =>
+      harness({ manualSettle: true, settlingGroups }),
+    );
+    for (const track of tracks) track.slot.bind(1);
+    const groups: RelayGroupWriter[] = [];
+    for (const track of tracks) groups.push(await track.writer.openGroup());
+    const extra = harness({ manualSettle: true, settlingGroups });
+    extra.slot.bind(1);
+    await extra.writer.write(bytes(2));
+    expect(extra.opened).toHaveLength(1);
+    // Closing every open group may take the count past the limit for a moment; nothing is refused.
+    for (const group of groups) await group.close();
+    expect(settlingGroups.size).toBe(SETTLING_GROUP_LIMIT + 2);
   });
 });
 

@@ -400,10 +400,10 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   for its settling groups. In TypeScript a settling group is never reset when the relay
   subscription changes or ends, and one that fails later (STOP_SENDING, a reset, the session
   ending) is dropped without an error on the track: the cause surfaces as demand, a new relay
-  subscription, or the connection's closure. A TypeScript publisher connection holds at most 64
-  streams at once, open and settling; at that limit the next write or group waits in
-  `opening-stream` under its write deadline, so a stall is a `WRITE_TIMEOUT`, not a transport
-  failure. In TypeScript `publisher.close()` waits for the connection's settling groups for up to
+  subscription, or the connection's closure. While a TypeScript publisher connection has 64
+  settling groups, the next write or group waits in `opening-stream` under its write deadline
+  before opening its stream, so a stall is a `WRITE_TIMEOUT`, not a transport failure; open groups
+  do not count toward that limit. In TypeScript `publisher.close()` waits for the connection's settling groups for up to
   the largest write deadline among its tracks, then closes the transport; groups still
   unacknowledged by then may be lost, and the close still succeeds. Python's close does not wait
   for them yet ([issue #161](https://github.com/muxinc/relay-sdks/issues/161)).
