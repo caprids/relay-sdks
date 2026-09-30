@@ -60,7 +60,7 @@ with credential handling, the subscribe retry, a deadline, and cleanup on failur
 ## Documentation
 
 - [Python guide](../../README.md): the quickstart, subscription and publishing lifecycles, async
-  consumption, and the live smoke test.
+  consumption, the aioquic transport, and the Video.js media example.
 - API reference: run `mise run python:docs` to build it from the source.
 - [Errors and recovery](../../README.md#errors-and-recovery): stable `RelayError.code` and `phase`
   values, preserved exception subclasses and transport causes, and recovering without assuming
