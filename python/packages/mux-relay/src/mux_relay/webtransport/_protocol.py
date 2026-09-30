@@ -17,7 +17,7 @@ from moq_core._tasks import observe
 
 from ._aioquic import live_stream, packets_sent, peer_control_stream_id, serve_resets_first
 from ._fin_retry import DroppedFinRetry
-from ._udp import report_refusals
+from ._udp import drain_errors, report_refusals
 
 if TYPE_CHECKING:
     from ._session import WebTransportSessionBase
@@ -95,6 +95,8 @@ class WebTransportProtocol(QuicConnectionProtocol):
         self._ping_uid = 0
         self._handshake_completed = False
         self.refused: ConnectionRefusedError | None = None
+        self._reporting_refusals = owns_transport
+        """The client socket reports ICMP errors (see ``_udp``) until the handshake ends, however it ends."""
         """The OS reported the peer's port unreachable before the handshake completed (a client only)."""
 
     async def wait_connected(self) -> None:
@@ -192,27 +194,43 @@ class WebTransportProtocol(QuicConnectionProtocol):
         so may a batched read that meets the error mid-batch. Once the connection is established the
         reports are off, and one that was already pending changes nothing: QUIC's loss recovery and
         idle timeout decide.
+
+        Every report also waits on the socket's error queue, which keeps the event loop's reader
+        waking until it is read, so the queue is drained here even for an error that is ignored.
         """
+        sock = self._socket() if self._reporting_refusals else None
+
+        if sock is not None:
+            drain_errors(sock)
+
         if not isinstance(exc, ConnectionRefusedError) or self._handshake_completed or self.refused is not None:
             return
 
         self.refused = exc
+        self._stop_reporting_refusals()  # the connect fails now; its teardown must not be reported on
         waiter = self._connected_waiter
 
         if waiter is not None and not waiter.done():
             self._connected_waiter = None
             waiter.set_exception(exc)
 
-    def _stop_reporting_refusals(self) -> None:
+    def _socket(self) -> Any:
         transport = self._transport
+        return transport.get_extra_info("socket") if transport is not None and not transport.is_closing() else None
 
-        if self.owns_transport and transport is not None:
-            sock = transport.get_extra_info("socket")
+    def _stop_reporting_refusals(self) -> None:
+        """Turn the socket's ICMP reports off, which also discards any still queued."""
+        if not self._reporting_refusals:
+            return
 
-            if sock is not None:
-                report_refusals(sock, False)
+        sock = self._socket()
+
+        if sock is not None:
+            self._reporting_refusals = False
+            report_refusals(sock, False)
 
     def connection_lost(self, exc: Exception | None) -> None:
+        self._reporting_refusals = False
         self.fin_retry.stop()
         self._stop_keepalive()
         self.transport_closed.set()
@@ -242,6 +260,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
             self._draining.clear()
             self.fin_retry.stop()
             self._stop_keepalive()
+            self._stop_reporting_refusals()
             self._cancel_control_stream_fin()
 
             for session in list(self.sessions.values()):
@@ -393,6 +412,8 @@ class WebTransportProtocol(QuicConnectionProtocol):
 
     def close(self, error_code: int = QuicErrorCode.NO_ERROR, reason_phrase: str = "") -> None:
         self._stop_keepalive()  # the connection is closing: nothing is left to keep alive
+        # However the handshake ended (failed, timed out, cancelled, closed), its reports end with it.
+        self._stop_reporting_refusals()
         super().close(error_code=error_code, reason_phrase=reason_phrase)
 
     def close_after_drain(self, error_code: int = ErrorCode.H3_NO_ERROR, reason_phrase: str = "") -> None:

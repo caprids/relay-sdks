@@ -8,7 +8,9 @@ codecs are covered in ``test_webtransport_wire.py`` and the aioquic internals th
 """
 
 import asyncio
+import errno
 import gc
+import select
 import socket
 import sys
 import warnings
@@ -728,6 +730,13 @@ def _cause_chain(error: BaseException) -> list[BaseException]:
     return chain
 
 
+def _polls_errored(sock: Any) -> bool:
+    """Whether the socket polls as errored, which would wake the event loop's reader again and again."""
+    poller = select.poll()
+    poller.register(sock.fileno(), 0)  # POLLERR is reported whatever is registered
+    return any(events & select.POLLERR for _, events in poller.poll(0))
+
+
 class TestClosedPort:
     """A connect to a UDP port nobody listens on fails at once, as ``TRANSPORT_ERROR`` / ``connecting`` (#163)."""
 
@@ -795,6 +804,61 @@ class TestClosedPort:
             transport.close()
             await transport.wait_closed()
             server.close()
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
+    async def test_a_refused_connect_leaves_no_error_report_to_spin_on(self) -> None:
+        created = connect_webtransport(f"https://127.0.0.1:{_closed_udp_port()}", ["moqt-20"])
+
+        with pytest.raises(WebTransportError):
+            await asyncio.wait_for(created.ready, 2)
+
+        transport: Any = created.transport
+        protocol = transport._transport_protocol()
+        sock = protocol._transport.get_extra_info("socket")
+        # The teardown's CONNECTION_CLOSE draws another port unreachable; with reporting off it queues nothing.
+        await asyncio.sleep(0.1)
+
+        try:
+            assert protocol._transport is not None and not protocol._transport.is_closing()
+            assert not reports_refusals(sock)
+            assert not _polls_errored(sock)
+        finally:
+            await asyncio.wait_for(protocol.transport_closed.wait(), 5)
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
+    async def test_an_error_ignored_during_the_handshake_is_drained(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as blackhole:
+            blackhole.bind(("127.0.0.1", 0))
+            created = connect_webtransport(f"https://127.0.0.1:{blackhole.getsockname()[1]}", ["moqt-20"])
+            transport: Any = created.transport
+            await wait_for(lambda: transport._transport_protocol() is not None, timeout=2)
+            protocol = transport._transport_protocol()
+            sock = protocol._transport.get_extra_info("socket")
+
+            # Queue a real ICMP report on the client socket without letting the loop read it, then hand
+            # the protocol an error it ignores (as a host unreachable would be).
+            closed = ("127.0.0.1", _closed_udp_port())
+            if sock.family == socket.AF_INET6:
+                closed = ("::ffff:127.0.0.1", closed[1], 0, 0)
+
+            with socket.fromfd(sock.fileno(), sock.family, socket.SOCK_DGRAM) as same_socket:
+                same_socket.sendto(b"x", closed)
+
+            poller = select.poll()
+            poller.register(sock.fileno(), 0)
+            assert poller.poll(500), "the port unreachable should have been queued"  # blocks the loop on purpose
+            protocol.error_received(OSError(errno.EHOSTUNREACH, "No route to host"))
+
+            try:
+                assert not _polls_errored(sock)
+                assert reports_refusals(sock)  # still in the handshake: a real refusal must still be heard
+                assert protocol.refused is None and not transport.ready.done()
+            finally:
+                transport.close()
+                with pytest.raises(WebTransportError):
+                    await created.ready
+                assert not reports_refusals(sock)  # closing a pending handshake turns reporting off
+                await asyncio.wait_for(protocol.transport_closed.wait(), 5)
 
     async def test_a_refusal_after_the_handshake_changes_nothing(self) -> None:
         sessions: list[Any] = []
