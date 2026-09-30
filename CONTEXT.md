@@ -30,8 +30,15 @@ _Avoid_: in-flight slot, lock, mutex, binding
 **Operation**:
 One pending write or open group occupying a track's write slot, from the moment it begins until it
 completes or fails. Its steps are the phases `spec/behavior.md` records: waiting-for-demand,
-opening-stream, writing, closing.
+opening-stream, writing, closing. It completes once the transport has taken the group's FIN, not
+once the relay has acknowledged it.
 _Avoid_: request, job, transaction, publish
+
+**Settling group**:
+A group whose operation has completed, so it no longer holds the write slot, but whose FIN the
+relay has not yet acknowledged. It can still be lost if the connection closes before the
+acknowledgment.
+_Avoid_: in-flight group, draining stream, unacked group
 
 ### Announcing
 

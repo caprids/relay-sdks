@@ -397,7 +397,19 @@ still invokes the gap callback. Publisher completion leaves readers active for t
 - Each write copies its bytes and sends one independent group containing one object. Only one
   write may be pending per track; a concurrent write is rejected rather than queued.
 - Write completion means the transport accepted the complete group, not that any viewer received
-  it.
+  it. The transport accepted the group once its FIN was handed to the transport, not once the relay
+  acknowledged it, so a track is not limited to one group per round trip. Until that
+  acknowledgment the group is a settling group (see `CONTEXT.md`); closing a track does not wait
+  for its settling groups. In TypeScript a settling group is never reset when the relay
+  subscription changes or ends, and one that fails later (STOP_SENDING, a reset, the session
+  ending) is dropped without an error on the track: the cause surfaces as demand, a new relay
+  subscription, or the connection's closure. While a TypeScript publisher connection has 64
+  settling groups, the next write or group waits in `opening-stream` under its write deadline
+  before opening its stream, so a stall is a `WRITE_TIMEOUT`, not a transport failure; open groups
+  do not count toward that limit. In TypeScript `publisher.close()` waits for the connection's settling groups for up to
+  the largest write deadline among its tracks, then closes the transport; groups still
+  unacknowledged by then may be lost, and the close still succeeds. Python's close does not wait
+  for them yet ([issue #161](https://github.com/muxinc/relay-sdks/issues/161)).
 - There is no publisher-side retention or replay. Late-subscriber behavior depends on relay caching
   and subscription filters.
 - A failed write may have delivered partial data. There is no automatic retry.
@@ -455,7 +467,7 @@ unless stated otherwise.
 | waiting-for-demand | track closed | `CLOSED`, phase `waiting-for-demand` | nothing sent | ended | SDK policy |
 | waiting-for-demand | connection ends | the connection's own error (phase `connection`), or `CLOSED` after a clean shutdown | nothing sent | ended | §3.5: streams and subscriptions end with the session |
 | opening-stream | write deadline expires or caller cancels | `WRITE_TIMEOUT` or the caller's reason; phase `opening-stream` | a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) or `CANCELLED` (0x1); its header may precede the reset (RESET_STREAM_AT) | open; the next write uses a new group ID | §11.4.3: a stream closed before all objects are delivered MUST be reset, and the reset SHOULD include the header; the deadline itself is SDK policy |
-| writing, closing | write deadline expires | `WRITE_TIMEOUT`, phase `writing` or `closing`; object bytes may have been delivered, and `closing` can fail after all of them were | stream reset, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §11.4.3 MUST reset; §8 and §15.11.4 for the code; the deadline is SDK policy |
+| writing, closing | write deadline expires | `WRITE_TIMEOUT`, phase `writing` or `closing`; object bytes may have been delivered, and `closing` can fail after all of them were. In TypeScript `closing` can only fail before the FIN is handed to the transport; Python's `closing` can still wait on transport backpressure | stream reset, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §11.4.3 MUST reset; §8 and §15.11.4 for the code; the deadline is SDK policy |
 | opening-stream, writing, closing | caller cancels (AbortSignal, task cancellation, or `group.abort()`) | the caller's reason unwrapped, or `CLOSED` when `abort()` gave none; the current phase | stream reset, code `CANCELLED` (0x1) | open | §11.4.3 MUST reset; code choice is SDK policy (§3.3.4 SHOULD be relevant) |
 | opening-stream, writing, closing | the transport refuses the stream or fails a write | `TRANSPORT_ERROR` with the cause preserved; the current phase | stream reset, code `INTERNAL_ERROR` (0x0), when a stream exists | open | SDK policy |
 | opening-stream, writing, closing | relay subscription replaced or ended | `SUBSCRIPTION_CHANGED`; the current phase | stream reset, code `CANCELLED` (0x1) | open; the next write waits for the new demand | §5.1.1: the publisher MUST reset open streams of a cancelled subscription; treating a new SUBSCRIBE as a replacement rather than a concurrent subscription is SDK policy (§5.1, ADR-0001) |

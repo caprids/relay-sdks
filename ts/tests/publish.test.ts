@@ -652,6 +652,124 @@ describe('connectRelayPublisher', () => {
   });
 });
 
+/**
+ * A publisher transport whose data streams take the FIN at once but settle their close only when the
+ * test acknowledges it, as Chromium settles a WebTransport close only once the relay acknowledged
+ * the FIN. The control stream (the first one) is left alone.
+ */
+function heldAcknowledgments(factory: RelayTransportFactory) {
+  const pending: (() => void)[] = [];
+  const state = { transportClosed: false };
+  let streams = 0;
+  const createTransport: RelayTransportFactory = (endpoint, protocols) => {
+    const { transport, ready } = factory(endpoint, protocols);
+    return {
+      ready,
+      transport: {
+        incomingUnidirectionalStreams: transport.incomingUnidirectionalStreams,
+        incomingBidirectionalStreams: transport.incomingBidirectionalStreams,
+        createBidirectionalStream: () => transport.createBidirectionalStream(),
+        async createUnidirectionalStream() {
+          const stream = await transport.createUnidirectionalStream();
+          if (streams++ === 0) return stream;
+          const writer = stream.getWriter();
+          return new WritableStream<Uint8Array>({
+            write: (chunk) => writer.write(chunk),
+            async close() {
+              await writer.close();
+              await new Promise<void>((resolve) => pending.push(resolve));
+            },
+            abort: (reason) => writer.abort(reason),
+          });
+        },
+        close(info) {
+          state.transportClosed = true;
+          transport.close(info);
+        },
+        closed: transport.closed,
+      },
+    };
+  };
+  return {
+    createTransport,
+    state,
+    unacknowledged: () => pending.length,
+    acknowledgeAll: () => {
+      for (const acknowledge of pending.splice(0)) acknowledge();
+    },
+  };
+}
+
+describe('settling groups', () => {
+  async function connectHeld(writeTimeoutMs = 10_000) {
+    const hub = createRelayHub();
+    cleanup.push(() => hub.destroy());
+    const held = heldAcknowledgments(hub.connectPublisher);
+    const publisher = await connectRelayPublisher({ url, namespace, createTransport: held.createTransport });
+    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
+    cleanup.push(() => subscriber.close());
+    cleanup.push(() => publisher.close());
+    const events = publisher.registerTrack({ track: 'events', writeTimeoutMs });
+    const received = receive(subscriber, 'events');
+    return { hub, held, publisher, events, received };
+  }
+
+  it('completes writes and groups once their FIN is handed over, before the relay acknowledges it', async () => {
+    const { held, events, received } = await connectHeld();
+
+    await events.write(new Uint8Array([1]));
+    await events.write(new Uint8Array([2]));
+    const group = await events.openGroup();
+    await group.write(new Uint8Array([3]));
+    await group.close();
+    await events.write(new Uint8Array([4]));
+
+    await vi.waitFor(() => expect(received.objects).toHaveLength(4));
+    expect(received.objects.map((object) => [object.groupId, object.payload[0]])).toEqual([
+      [0, 1],
+      [1, 2],
+      [2, 3],
+      [3, 4],
+    ]);
+    expect(held.unacknowledged()).toBe(4);
+    held.acknowledgeAll();
+  });
+
+  it('ends a track without waiting for its settling groups; closing the publisher waits for them', async () => {
+    const { hub, held, publisher, events, received } = await connectHeld();
+
+    await events.write(new Uint8Array([1]));
+    events.close();
+    await vi.waitFor(() => expect(received.onPublisherDone).toHaveBeenCalled());
+    expect(hub.trackEnds).toContainEqual({ kind: 'subscribe-fin', trackName: 'events' });
+    expect(held.unacknowledged()).toBe(1);
+
+    let closed = false;
+    const closing = publisher.close().then(() => {
+      closed = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(held.state.transportClosed).toBe(false);
+    expect(closed).toBe(false);
+    held.acknowledgeAll();
+    await closing;
+    expect(held.state.transportClosed).toBe(true);
+  });
+
+  it('closes the publisher after the largest write deadline when settling groups never settle', async () => {
+    const { held, publisher, events } = await connectHeld(150);
+    publisher.registerTrack({ track: 'short', writeTimeoutMs: 10 });
+
+    await events.write(new Uint8Array([1]));
+    const started = performance.now();
+    await publisher.close();
+
+    expect(performance.now() - started).toBeGreaterThanOrEqual(140);
+    expect(held.state.transportClosed).toBe(true);
+    await expect(publisher.closed).resolves.toEqual({});
+  });
+});
+
 describe('text and JSON helpers', () => {
   it('round-trips Unicode, empty text, and JSON on tracks and groups with metadata', async () => {
     const { publisher, subscriber } = await connectHub();

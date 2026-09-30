@@ -6,6 +6,11 @@
  * objects follow serially with delta-encoded object IDs, and `fin()` closes the stream to mark the group complete.
  * `abort()` resets the stream instead — the drop path for a publisher falling behind transport backpressure.
  *
+ * Closing has two moments: the FIN is handed to the transport (`handOverFin()`), and the transport completes it
+ * (`fin()`). Chromium completes a WebTransport close only once the peer has acknowledged all data and the FIN, about a
+ * round trip later; a publisher that waits for that finishes one group per round trip. `abort()` still resets a
+ * stream whose close is in flight.
+ *
  * The MSF/LOC shape this engine publishes is one subgroup per group at subgroup ID 0, so the writer pins
  * SUBGROUP_ID_MODE to `0b00` (no explicit subgroup-id field) and sets END_OF_GROUP: on FIN the subgroup contains the
  * group's largest object by construction.
@@ -60,8 +65,16 @@ export interface SubgroupWriter {
   readonly groupId: number;
   /** Serialize one object. Resolves when the transport accepted the bytes. */
   writeObject(object: SubgroupObjectInput): Promise<void>;
-  /** FIN the stream — the group is complete. */
+  /**
+   * FIN the stream — the group is complete. Resolves once the transport completes the FIN (in Chromium, once the peer
+   * acknowledged it); rejects if the stream is reset or fails first.
+   */
   fin(): Promise<void>;
+  /**
+   * Start the FIN as `fin()` does, and resolve once it is handed to the transport: the header write has settled and
+   * the stream's close call is made. `fin()` still reports how the FIN settles.
+   */
+  handOverFin(): Promise<void>;
   /** Reset the stream — delivered objects may be incomplete (drop path). */
   abort(reason?: unknown): void;
 }
@@ -146,7 +159,7 @@ export function createSubgroupWriter(
   const writer = stream.getWriter();
   let previousObjectId: number | undefined;
   let finished = false;
-  let finishing: Promise<void> | undefined;
+  let closing: { handedOver: Promise<void>; settled: Promise<void> } | undefined;
 
   // Header errors surface on the first awaited write/fin — an errored
   // stream rejects everything queued after it.
@@ -154,11 +167,35 @@ export function createSubgroupWriter(
 
   headerWrite.catch(() => {});
 
+  const close = (): { handedOver: Promise<void>; settled: Promise<void> } => {
+    let closed!: Promise<void>;
+    const handedOver = (async () => {
+      await headerWrite;
+      // A stream that already failed never hands the FIN over: close() would reject without reaching
+      // the sink. The Streams spec makes `desiredSize` null exactly while the stream is erroring or
+      // errored, and `closed` then rejects with the stream's stored error.
+      if (writer.desiredSize === null) await writer.closed;
+      closed = writer.close();
+    })();
+    const settled = (async () => {
+      try {
+        await handedOver;
+        await closed;
+      } finally {
+        finished = true;
+      }
+    })();
+
+    // A caller that only hands the FIN over may never look at how it settles.
+    settled.catch(() => {});
+    return { handedOver, settled };
+  };
+
   return {
     groupId: options.groupId,
 
     async writeObject(object: SubgroupObjectInput): Promise<void> {
-      if (finished || finishing) throw new MoqtProtocolError('subgroup stream already finished');
+      if (finished || closing) throw new MoqtProtocolError('subgroup stream already finished');
 
       const bytes = encodeObject(object, previousObjectId, hasProperties);
 
@@ -168,18 +205,17 @@ export function createSubgroupWriter(
     },
 
     fin(): Promise<void> {
-      if (finishing) return finishing;
-      if (finished) return Promise.resolve();
+      if (!closing && finished) return Promise.resolve();
 
-      finishing = (async () => {
-        try {
-          await headerWrite;
-          await writer.close();
-        } finally {
-          finished = true;
-        }
-      })();
-      return finishing;
+      closing ??= close();
+      return closing.settled;
+    },
+
+    handOverFin(): Promise<void> {
+      if (!closing && finished) return Promise.resolve();
+
+      closing ??= close();
+      return closing.handedOver;
     },
 
     abort(reason?: unknown): void {

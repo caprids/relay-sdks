@@ -1,6 +1,7 @@
 import { createMoqtPublishSession, createSubgroupWriter, type ObjectStatus } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 import { RelayError } from './errors.js';
+import { createSettlingGroups } from './settling-groups.js';
 import { namespaceFields, propertyPairs, trackName } from './validation.js';
 import { createWriteSlot, type WriteSlot } from './write-slot.js';
 
@@ -47,7 +48,10 @@ export interface RelayGroupWriter {
     payload: ArrayBufferView,
     options?: { properties?: readonly PublishProperty[]; status?: ObjectStatus },
   ): Promise<void>;
-  /** FIN the group within writeTimeoutMs. Idempotent after successful completion. */
+  /**
+   * FIN the group within writeTimeoutMs. Resolves once the FIN is handed to the transport, not once
+   * the relay acknowledges it. Idempotent after successful completion.
+   */
   close(): Promise<void>;
   /**
    * Reset this group and free the track for the next random-access point. After a clean `close()`
@@ -134,7 +138,11 @@ export interface RelayPublisher {
   readonly announced: Promise<void>;
   /** Ends when the connection shuts down. Errors are returned as data; this never rejects. */
   readonly closed: Promise<{ error?: unknown }>;
-  /** End all tracks, retract the namespace, and wait for transport shutdown. Idempotent. */
+  /**
+   * End all tracks, retract the namespace, and wait for transport shutdown. First waits, for up to
+   * the largest writeTimeoutMs among the tracks, for completed groups the relay has not yet
+   * acknowledged; any still unacknowledged after that may be lost. Idempotent.
+   */
   close(): Promise<void>;
 }
 
@@ -151,6 +159,10 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   // One write slot per registered track; the session's binding callback and the connection's end
   // reach the slots through here.
   const tracks = new Map<string, WriteSlot>();
+  // Groups whose FIN the transport took but the relay has not acknowledged, shared by every track.
+  const settlingGroups = createSettlingGroups();
+  // What closing waits for them: the largest write deadline among the tracks.
+  let drainMs = 0;
   // Settled by the session's onAnnounced callback; a closure that comes first terminates it.
   let announce: () => void = () => {};
   let abandonAnnounce: (reason: unknown) => void = () => {};
@@ -176,6 +188,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   );
   const { session } = lifetime;
   let closing = false;
+  let shutdown: Promise<void> | undefined;
 
   session.announce(namespace);
   void lifetime.closed.then(({ error }) => {
@@ -213,19 +226,27 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       const slot = createWriteSlot({
         openSubgroup: async (trackAlias, groupId) =>
           createSubgroupWriter(await session.openUniStream(trackAlias), { trackAlias, groupId, hasProperties: true }),
+        settlingGroups,
         namespaceSolicited: () => session.namespaceSolicited,
         assertOpen: lifetime.assertOpen,
         endTrack: () => registered.end(),
         writeTimeoutMs,
       });
       tracks.set(track, slot);
+      drainMs = Math.max(drainMs, writeTimeoutMs);
       return slot.writer;
     },
-    async close() {
-      closing = true;
-      for (const slot of tracks.values()) slot.writer.close();
-      lifetime.close();
-      await closed;
+    close() {
+      shutdown ??= (async () => {
+        closing = true;
+        for (const slot of tracks.values()) slot.writer.close();
+        // Chromium resets every stream still awaiting its acknowledgment when the session closes,
+        // so give the last groups up to one write deadline to settle; after that they may be lost.
+        await settlingGroups.drain(drainMs, lifetime.closed);
+        lifetime.close();
+        await closed;
+      })();
+      return shutdown;
     },
   };
 }

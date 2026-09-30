@@ -238,6 +238,9 @@ function trackDataStream(stream: WritableStream<Uint8Array>, subscriber: Subscri
   return new WritableStream<Uint8Array>({
     start(controller) {
       controller.signal.addEventListener('abort', () => reset(controller.signal.reason));
+      // A transport failure (STOP_SENDING, a reset) errors this side too, so a FIN the caller has not handed over yet
+      // sees the failure instead of a close that only fails later.
+      inner.closed.catch((error: unknown) => controller.error(error));
     },
     write: (chunk) => inner.write(chunk),
     close: () => {

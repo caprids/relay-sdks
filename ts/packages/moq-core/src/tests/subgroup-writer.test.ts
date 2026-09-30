@@ -267,4 +267,90 @@ describe('createSubgroupWriter', () => {
     await rejected;
     await vi.waitFor(() => expect(abort).toHaveBeenCalledWith(reason));
   });
+
+  describe('handing the FIN over', () => {
+    /** A send stream whose close settles only when the test says, as Chromium's waits for the peer's ack. */
+    function acknowledgingStream() {
+      let closeStarted = false;
+      let settle!: { resolve(): void; reject(reason: unknown): void };
+      const abort = vi.fn();
+      const stream = new WritableStream<Uint8Array>({
+        start(controller) {
+          controller.signal.addEventListener('abort', () => {
+            abort(controller.signal.reason);
+            settle?.reject(controller.signal.reason);
+          });
+        },
+        close() {
+          closeStarted = true;
+          return new Promise<void>((resolve, reject) => {
+            settle = { resolve, reject };
+          });
+        },
+        abort,
+      });
+
+      return { stream, abort, closeStarted: () => closeStarted, settle: () => settle };
+    }
+
+    it('resolves once the close call is made, leaving fin() to report the acknowledgment', async () => {
+      const sink = acknowledgingStream();
+      const writer = createSubgroupWriter(sink.stream, { trackAlias: 1, groupId: 0 });
+      await writer.writeObject({ objectId: 0, payload: new Uint8Array([1]) });
+      const handedOver = writer.handOverFin();
+      expect(writer.handOverFin()).toBe(handedOver);
+      await handedOver;
+      let acknowledged = false;
+      const settled = writer.fin().then(() => {
+        acknowledged = true;
+      });
+      await vi.waitFor(() => expect(sink.closeStarted()).toBe(true));
+      expect(acknowledged).toBe(false);
+      await expect(writer.writeObject({ objectId: 1, payload: new Uint8Array([2]) })).rejects.toThrow(/finished/);
+      sink.settle().resolve();
+      await settled;
+      expect(acknowledged).toBe(true);
+    });
+
+    it('pre-handles a late failure nobody asked about, and fin() reports it', async () => {
+      const sink = acknowledgingStream();
+      const writer = createSubgroupWriter(sink.stream, { trackAlias: 1, groupId: 0 });
+      await writer.handOverFin();
+      await vi.waitFor(() => expect(sink.closeStarted()).toBe(true));
+      const failure = new Error('STOP_SENDING');
+      sink.settle().reject(failure);
+      // An unhandled rejection would fail the run; asking afterwards still sees the failure.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await expect(writer.fin()).rejects.toBe(failure);
+    });
+
+    it('rejects the hand-over when the stream failed before it', async () => {
+      let controller!: WritableStreamDefaultController;
+      const close = vi.fn();
+      const stream = new WritableStream<Uint8Array>({
+        start(c) {
+          controller = c;
+        },
+        close,
+      });
+      const writer = createSubgroupWriter(stream, { trackAlias: 1, groupId: 0 });
+      await writer.writeObject({ objectId: 0, payload: new Uint8Array([1]) });
+      const failure = new Error('STOP_SENDING before the FIN');
+      controller.error(failure);
+      await expect(writer.handOverFin()).rejects.toBe(failure);
+      await expect(writer.fin()).rejects.toBe(failure);
+      expect(close).not.toHaveBeenCalled();
+    });
+
+    it('still resets a stream whose handed-over FIN is not yet acknowledged', async () => {
+      const sink = acknowledgingStream();
+      const writer = createSubgroupWriter(sink.stream, { trackAlias: 1, groupId: 0 });
+      await writer.handOverFin();
+      await vi.waitFor(() => expect(sink.closeStarted()).toBe(true));
+      const reason = new Error('reset after hand-over');
+      writer.abort(reason);
+      await expect(writer.fin()).rejects.toBe(reason);
+      expect(sink.abort).toHaveBeenCalledWith(reason);
+    });
+  });
 });

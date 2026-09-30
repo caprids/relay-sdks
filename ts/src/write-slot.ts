@@ -8,15 +8,22 @@
  * inbound calls, `bind()` when the relay's binding changes and `disconnect()` when the connection
  * ends.
  *
+ * An operation completes once the transport has taken its group's FIN, not once the relay has
+ * acknowledged it: the slot hands the FIN over, frees itself, and passes the group on to the
+ * connection as a settling group (see CONTEXT.md). Nothing resets a settling group, and nothing
+ * reports how it ends.
+ *
  * Everything the slot borrows enters through {@link WriteSlotDependencies}: how to open a subgroup
- * stream, whether the namespace is solicited, whether the connection is still open, and how to end
- * the track in the core. Tests drive a slot with an in-memory subgroup writer and fake timers; the
- * "Write phases and interruptions" table in spec/behavior.md is the list they cover.
+ * stream, the connection's settling-group limit, whether the namespace is solicited, whether the
+ * connection is still open, and how to end the track in the core. Tests drive a slot with an
+ * in-memory subgroup writer and fake timers; the "Write phases and interruptions" table in
+ * spec/behavior.md is the list they cover.
  */
 import { type SubgroupWriter, streamResetReason } from '@mux/moq-core';
 import { RelayError, type RelayErrorPhase, transportError } from './errors.js';
 import { encodeJSON, encodeText } from './payload.js';
 import type { RelayGroupWriter, RelayTrackWriter } from './publish.js';
+import type { SettlingGroups } from './settling-groups.js';
 import { payloadBytes, propertyPairs } from './validation.js';
 
 /**
@@ -37,6 +44,8 @@ export type ResetCode = (typeof RESET_CODE)[keyof typeof RESET_CODE];
 export interface WriteSlotDependencies {
   /** Open a subgroup stream for one group of this track. Rejects when the transport refuses. */
   openSubgroup(trackAlias: number, groupId: number): Promise<SubgroupWriter>;
+  /** The connection's settling groups: an operation waits for room before opening its stream. */
+  settlingGroups: SettlingGroups;
   /** Whether a current relay solicitation covers the namespace; undefined before any arrived. */
   namespaceSolicited(): boolean | undefined;
   /** Throws the connection's closing error once the connection has ended. */
@@ -96,7 +105,7 @@ interface Operation {
 }
 
 export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
-  const { openSubgroup, namespaceSolicited, assertOpen, endTrack, writeTimeoutMs } = deps;
+  const { openSubgroup, settlingGroups, namespaceSolicited, assertOpen, endTrack, writeTimeoutMs } = deps;
   let alias: number | undefined;
   let ended = false;
   let nextGroupId = 0;
@@ -237,6 +246,12 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     operation.alias = alias;
     const groupId = nextGroupId++;
     operation.phase = 'opening-stream';
+    // At the settling-group limit this waits under the write deadline, which reports it as a
+    // WRITE_TIMEOUT in this phase rather than letting the transport refuse the stream.
+    if (!settlingGroups.hasRoom()) {
+      await settlingGroups.waitForRoom(operation.interrupted);
+      check(operation);
+    }
     const subgroup = await openSubgroup(operation.alias, groupId);
     if (operation.cancelled) {
       // The stream opened after the failure: reset it without sending payload bytes (§11.4.3).
@@ -249,6 +264,12 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
   const release = (operation: Operation) => {
     if (active === operation) active = undefined;
     operation.cleanup();
+  };
+  // The operation is complete: its FIN was handed over, so the group settles on the connection's
+  // account and the slot is free.
+  const completeOperation = (operation: Operation, subgroup: SubgroupWriter) => {
+    settlingGroups.add(subgroup.fin());
+    release(operation);
   };
 
   const writer: RelayTrackWriter = {
@@ -309,14 +330,16 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       assertWritable();
       const operation = begin('write', writeOptions.signal);
       try {
-        await run(operation, async () => {
-          const subgroup = await openStream(operation);
+        const subgroup = await run(operation, async () => {
+          const opened = await openStream(operation);
           operation.phase = 'writing';
-          await subgroup.writeObject({ objectId: 0, properties, payload: bytes });
+          await opened.writeObject({ objectId: 0, properties, payload: bytes });
           check(operation);
           operation.phase = 'closing';
-          await subgroup.fin();
+          await opened.handOverFin();
+          return opened;
         });
+        completeOperation(operation, subgroup);
       } finally {
         release(operation);
       }
@@ -373,9 +396,9 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
           pending = true;
           try {
             operation.phase = 'closing';
-            await run(operation, () => subgroup.fin());
+            await run(operation, () => subgroup.handOverFin());
             complete = true;
-            release(operation);
+            completeOperation(operation, subgroup);
           } finally {
             pending = false;
           }
