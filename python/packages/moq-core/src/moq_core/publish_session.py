@@ -73,7 +73,7 @@ from .control_messages import (
 from .errors import SESSION_ERROR, MoqtProtocolError, is_moqt_protocol_error
 from .object_stream import STREAM_TYPE, is_subgroup_header_type
 from .session import Closed, _call, _describe
-from .transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
+from .transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream, transport_ended
 
 # =============================================================================
 # Driver types
@@ -585,7 +585,7 @@ class MoqtPublishSession:
         async def write_entry() -> None:
             try:
                 await stream.writer.write(encode_namespace(suffix))
-            except Exception:  # the response half died alone
+            except Exception as error:  # the response half died alone
                 # A reset the request half may never mirror: the entry never reached the peer, no
                 # future write can, and the read loop may stay open forever. The carrier is dead.
                 # Deregister it so the peer's replacement solicitation is a fresh start rather than a
@@ -597,7 +597,7 @@ class MoqtPublishSession:
                 self._namespace_streams.remove(stream)
                 stream.announced = [existing for existing in stream.announced if existing is not suffix]
                 spawn(_swallow(stream.writer.close()))
-                self._report_announce_loss()
+                self._report_announce_loss(error)
                 return
 
             if self._destroyed or self._announced_fired:
@@ -608,22 +608,25 @@ class MoqtPublishSession:
 
         spawn(write_entry())
 
-    def _report_announce_loss(self) -> None:
+    def _report_announce_loss(self, cause: BaseException | None) -> None:
         """Fire ``on_announce_ended`` when no solicitation carries the announce anymore.
 
-        Shared by the read-loop cleanup and the response-write failure path. Silent while closing,
-        destroyed, or migrating (a GOAWAY makes the peer's streams ending the orderly drain).
+        Shared by the read-loop cleanup and the response-write failure path; ``cause`` is the stream
+        failure that ended the carrier. Silent while closing, destroyed, or migrating (a GOAWAY makes
+        the peer's streams ending the orderly drain), and once the transport has ended: an ended
+        transport fails every stream before the session learns of it, and that is connection loss,
+        which ``_handle_closed`` reports, not a withdrawal. The transport's own flag decides, not
+        which of the two wakes first.
         """
-        if self._destroyed or self._closing or self._received_goaway:
+        if self._destroyed or self._closing or self._received_goaway or transport_ended(self._transport):
             return
 
         if any(len(stream.announced) > 0 for stream in self._namespace_streams):
             return
 
-        _call(
-            self._callbacks.on_announce_ended,
-            AnnounceEnded(error=MoqtProtocolError("the namespace solicitation carrying the announce ended")),
-        )
+        error = MoqtProtocolError("the namespace solicitation carrying the announce ended")
+        error.__cause__ = cause
+        _call(self._callbacks.on_announce_ended, AnnounceEnded(error=error))
 
     def register_track(self, options: RegisterTrackOptions) -> RegisteredTrack:
         """Register one servable track; the peer's SUBSCRIBEs are answered from this registry."""
@@ -950,6 +953,7 @@ class MoqtPublishSession:
 
         # Hold the stream. The known peers write nothing further on it.
         failed_update = False
+        cause: BaseException | None = None
 
         try:
             while not await reader.at_end():
@@ -994,8 +998,8 @@ class MoqtPublishSession:
             # A protocol violation is session-fatal; _handle_closed sweeps the carrier state with
             # everything else.
             raise
-        except Exception:  # reset: the peer withdrew the namespace subscription
-            pass
+        except Exception as error:  # reset: the peer withdrew the namespace subscription
+            cause = error
 
         # Withdrawal (reset) or a failed update: the carrier is over.
         if record in self._namespace_streams:
@@ -1004,7 +1008,7 @@ class MoqtPublishSession:
         spawn(_swallow(writer.close()))
 
         if len(record.announced) > 0:
-            self._report_announce_loss()
+            self._report_announce_loss(cause)
 
     async def _handle_incoming_subscribe(
         self, stream: BidirectionalStream, reader: StreamReader, subscribe: Subscribe

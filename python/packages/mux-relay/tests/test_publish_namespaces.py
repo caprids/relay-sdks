@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 from core_helpers.raw_peer import solicit_namespace
+from core_helpers.streams import StreamClosedError
 from core_helpers.transport_pair import create_transport_pair, with_server_request_ids
 from core_helpers.waiting import wait_for
 
@@ -130,6 +131,8 @@ async def test_namespace_withdrawal_is_shared_with_closure_and_pending_operation
         assert closed.error.code == "NAMESPACE_ENDED"
         assert closed.error.phase == "connection"
         assert isinstance(closed.error.__cause__, Exception)
+        # The withdrawal carries the peer's reset as its cause.
+        assert isinstance(closed.error.__cause__.__cause__, StreamClosedError)
         with pytest.raises(RelayError) as failure:
             await pending
         assert failure.value is closed.error
@@ -139,6 +142,44 @@ async def test_namespace_withdrawal_is_shared_with_closure_and_pending_operation
         with pytest.raises(RelayError) as failure:
             publisher.register_track("another")
         assert failure.value is closed.error
+    finally:
+        await publisher.close()
+        peer.destroy()
+
+
+@pytest.mark.parametrize("release_after_turns", [0, 5])
+async def test_transport_end_with_a_live_announce_is_a_transport_error(release_after_turns: int) -> None:
+    # Issue #159: an idle timeout fails the solicitation stream with the transport's error. That is
+    # connection loss, not the relay withdrawing the namespace, whichever of the stream failure and
+    # the closure the session sees first.
+    pair = create_transport_pair()
+    pair.client.release_after_turns = release_after_turns
+    peer = create_moqt_session(with_server_request_ids(pair.server), MoqtSessionConfig())
+    ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+    ready.set_result(None)
+    publisher = await connect_relay_publisher(
+        "https://relay.example.com",
+        namespace=["testing", "data"],
+        create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=ready),
+    )
+    try:
+        publisher.register_track("events")
+        solicitation = await solicit_namespace(pair.server, ["testing"])
+        await wait_for(lambda: "namespace" in solicitation.kinds())
+        await publisher.announced
+
+        idle = ConnectionError("QUIC connection terminated: Idle timeout (code 0x1)")
+        pair.client.terminate(idle)
+        closed = await asyncio.wait_for(publisher.closed, 1)
+        assert isinstance(closed.error, RelayError)
+        assert closed.error.code == "TRANSPORT_ERROR"
+        assert closed.error.phase == "connection"
+        causes: list[BaseException] = []
+        cause = closed.error.__cause__
+        while cause is not None:
+            causes.append(cause)
+            cause = cause.__cause__
+        assert idle in causes
     finally:
         await publisher.close()
         peer.destroy()

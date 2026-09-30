@@ -1,4 +1,4 @@
-import { createMoqtSession, type MoqtObject } from '@mux/moq-core';
+import { type BidirectionalStreamLike, createMoqtSession, type MoqtObject, type MoqtTransport } from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { solicitNamespace } from '../packages/moq-core/src/tests/helpers/raw-peer.js';
 import { createTransportPair, withServerRequestIds } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
@@ -25,16 +25,122 @@ async function connectPublisher() {
   return { pair, subscriber, publisher, track };
 }
 
+type EndOrder =
+  /** `closed` rejects, then the streams fail, in one turn. */
+  | 'closed-first'
+  /** The streams fail, then `closed` rejects, in one turn: the WebTransport cleanup order. */
+  | 'streams-first'
+  /** As `streams-first`, but handlers attached to `closed` before the end hear of it only a timer later. */
+  | 'closed-handlers-late'
+  /** The streams fail, and `closed` rejects only a timer later. */
+  | 'closed-later';
+
+/**
+ * `inner` with its end under the test's control, as a QUIC idle timeout ends it: every incoming stream's readable fails
+ * with `streamError` and `closed` rejects with `closedError`, in `order`.
+ */
+function terminableTransport(inner: MoqtTransport, order: EndOrder) {
+  const readables: TransformStreamDefaultController<Uint8Array>[] = [];
+  let rejectClosed!: (error: unknown) => void;
+  const closed = new Promise<never>((_, reject) => {
+    rejectClosed = reject;
+  });
+  const late = closed.catch((error: unknown) => new Promise<never>((_, reject) => setTimeout(() => reject(error), 20)));
+  late.catch(() => {});
+  let ended = false;
+
+  const transport: MoqtTransport = {
+    incomingUnidirectionalStreams: inner.incomingUnidirectionalStreams,
+    incomingBidirectionalStreams: inner.incomingBidirectionalStreams.pipeThrough(
+      new TransformStream<BidirectionalStreamLike, BidirectionalStreamLike>({
+        transform(stream, controller) {
+          const gate = new TransformStream<Uint8Array, Uint8Array>({
+            start: (readable) => void readables.push(readable),
+          });
+          void stream.readable.pipeTo(gate.writable).catch(() => {});
+          controller.enqueue({ readable: gate.readable, writable: stream.writable });
+        },
+      }),
+    ),
+    createUnidirectionalStream: () => inner.createUnidirectionalStream(),
+    createBidirectionalStream: () => inner.createBidirectionalStream(),
+    close: (closeInfo) => inner.close(closeInfo),
+    get closed() {
+      return order === 'closed-handlers-late' && !ended ? late : closed;
+    },
+  };
+
+  const failStreams = (error: unknown) => {
+    for (const readable of readables) readable.error(error);
+  };
+
+  return {
+    transport,
+    terminate(streamError: unknown, closedError: unknown) {
+      ended = true;
+      if (order === 'closed-first') {
+        rejectClosed(closedError);
+        failStreams(streamError);
+      } else if (order === 'closed-later') {
+        failStreams(streamError);
+        setTimeout(() => rejectClosed(closedError), 20);
+      } else {
+        failStreams(streamError);
+        rejectClosed(closedError);
+      }
+    },
+  };
+}
+
+describe('publisher transport end with a live announce', () => {
+  // Issue #159: a transport end fails the solicitation stream too. That is connection loss, not the relay withdrawing
+  // the namespace, whichever of the stream failure and the `closed` handler the session sees first.
+  it.each([
+    ['closed-first', 'a plain stream error'],
+    ['streams-first', 'a plain stream error'],
+    ['closed-handlers-late', 'a plain stream error'],
+    ['closed-later', "a WebTransportError with source 'session'"],
+  ] as const)('reports TRANSPORT_ERROR when %s, with %s', async (order, streamErrorKind) => {
+    const pair = createTransportPair();
+    const terminable = terminableTransport(pair.client, order);
+    const subscriber = createMoqtSession(withServerRequestIds(pair.server));
+    const publisher = await connectRelayPublisher({
+      url: 'https://relay.example.com/moq',
+      namespace,
+      createTransport: () => ({ transport: terminable.transport, ready: Promise.resolve() }),
+    });
+    cleanup.push(() => subscriber.destroy());
+    cleanup.push(() => publisher.close());
+    publisher.registerTrack({ track: 'events' });
+    const solicitation = await solicitNamespace(pair.server, ['live']);
+    await vi.waitFor(() => expect(solicitation.received).toHaveLength(2));
+    await publisher.announced;
+
+    const idle = new Error('Connection lost: idle timeout');
+    const streamError =
+      streamErrorKind === 'a plain stream error'
+        ? idle
+        : Object.assign(new Error('The session is closed.'), { name: 'WebTransportError', source: 'session' });
+    terminable.terminate(streamError, idle);
+
+    const { error } = await publisher.closed;
+    expect(error).toBeInstanceOf(RelayError);
+    expect(error).toMatchObject({ code: 'TRANSPORT_ERROR', phase: 'connection', cause: idle });
+  });
+});
+
 describe('publisher namespace coverage', () => {
   it('shares namespace withdrawal with closure and pending operations', async () => {
     const { pair, publisher, track } = await connectPublisher();
     const solicitation = await solicitNamespace(pair.server, ['live']);
     await vi.waitFor(() => expect(solicitation.received).toHaveLength(2));
     const pending = track.write(new Uint8Array([1])).catch((error: unknown) => error);
-    await solicitation.reset();
+    const reset = new Error('peer reset');
+    await solicitation.reset(reset);
     const { error } = await publisher.closed;
     expect(error).toBeInstanceOf(RelayError);
-    expect(error).toMatchObject({ code: 'NAMESPACE_ENDED', phase: 'connection', cause: expect.any(Error) });
+    // The withdrawal carries the peer's reset as its cause.
+    expect(error).toMatchObject({ code: 'NAMESPACE_ENDED', phase: 'connection', cause: { cause: reset } });
     expect(await pending).toBe(error);
     await expect(track.write(new Uint8Array([2]))).rejects.toBe(error);
     expect(() => publisher.registerTrack({ track: 'another' })).toThrow(error as RelayError);
