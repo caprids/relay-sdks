@@ -171,6 +171,10 @@ export function createSubgroupWriter(
     let closed!: Promise<void>;
     const handedOver = (async () => {
       await headerWrite;
+      // A stream that already failed never hands the FIN over: close() would reject without reaching
+      // the sink. The Streams spec makes `desiredSize` null exactly while the stream is erroring or
+      // errored, and `closed` then rejects with the stream's stored error.
+      if (writer.desiredSize === null) await writer.closed;
       closed = writer.close();
     })();
     const settled = (async () => {

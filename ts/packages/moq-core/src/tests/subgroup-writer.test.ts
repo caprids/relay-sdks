@@ -324,6 +324,24 @@ describe('createSubgroupWriter', () => {
       await expect(writer.fin()).rejects.toBe(failure);
     });
 
+    it('rejects the hand-over when the stream failed before it', async () => {
+      let controller!: WritableStreamDefaultController;
+      const close = vi.fn();
+      const stream = new WritableStream<Uint8Array>({
+        start(c) {
+          controller = c;
+        },
+        close,
+      });
+      const writer = createSubgroupWriter(stream, { trackAlias: 1, groupId: 0 });
+      await writer.writeObject({ objectId: 0, payload: new Uint8Array([1]) });
+      const failure = new Error('STOP_SENDING before the FIN');
+      controller.error(failure);
+      await expect(writer.handOverFin()).rejects.toBe(failure);
+      await expect(writer.fin()).rejects.toBe(failure);
+      expect(close).not.toHaveBeenCalled();
+    });
+
     it('still resets a stream whose handed-over FIN is not yet acknowledged', async () => {
       const sink = acknowledgingStream();
       const writer = createSubgroupWriter(sink.stream, { trackAlias: 1, groupId: 0 });
