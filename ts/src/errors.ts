@@ -43,6 +43,18 @@ export class RelayError extends Error {
   }
 }
 
+/**
+ * Whether a send-stream failure is the peer's STOP_SENDING: Chromium rejects the write with a `WebTransportError`
+ * whose `source` is `'stream'` ("Received STOP_SENDING."). A session failure has `source` `'session'`.
+ */
+export function isStreamStop(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    error.name === 'WebTransportError' &&
+    (error as Error & { source?: unknown }).source === 'stream'
+  );
+}
+
 /** Wrap only transport/session failures, preserving their original cause. */
 export function transportError(error: unknown, phase: RelayErrorPhase): RelayError {
   if (error instanceof RelayError) return error;

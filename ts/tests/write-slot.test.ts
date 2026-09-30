@@ -162,6 +162,25 @@ function harness(options: HarnessOptions = {}) {
   };
 }
 
+/**
+ * A send-stream failure as Chromium reports it: a `WebTransportError` whose `source` says whether the
+ * peer stopped the stream (`'stream'`, from STOP_SENDING) or the session failed (`'session'`).
+ */
+class FakeWebTransportError extends Error {
+  override readonly name = 'WebTransportError';
+  readonly source: 'stream' | 'session';
+  readonly streamErrorCode: number | null;
+
+  constructor(message: string, source: 'stream' | 'session', streamErrorCode: number | null = null) {
+    super(message);
+    this.source = source;
+    this.streamErrorCode = streamErrorCode;
+  }
+}
+
+/** The relay's STOP_SENDING on a data stream, as the rejected write or FIN carries it. */
+const stopSending = () => new FakeWebTransportError('Received STOP_SENDING.', 'stream', 0);
+
 const bytes = (...values: number[]) => new Uint8Array(values);
 const flush = () => vi.advanceTimersByTimeAsync(0);
 const elapse = (ms: number) => vi.advanceTimersByTimeAsync(ms);
@@ -462,6 +481,82 @@ describe('write slot: writing and closing a single write', () => {
     expect(writer.hasDemand).toBe(nextAlias !== undefined);
   });
 
+  it.each([
+    ['write', 'writing'],
+    ['fin', 'closing'],
+  ] as const)(
+    'reports a relay stop of the %s as SUBSCRIPTION_CHANGED before the subscription ends, reporting nothing more',
+    async (stall, phase) => {
+      const { slot, writer, opened } = harness({ stall });
+      slot.bind(1);
+      const stop = stopSending();
+      const outcome = writer.write(bytes(1)).catch((error: unknown) => error);
+      await flush();
+      opened[0]?.fail(stop);
+      expect(await outcome).toMatchObject({ code: 'SUBSCRIPTION_CHANGED', phase, cause: stop });
+      expect(() => slot.bind(undefined)).not.toThrow();
+      expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.CANCELLED)]);
+      expect(writer.closed).toBe(false);
+      expect(writer.hasDemand).toBe(false);
+      // The subscription ended, so the next write waits for new demand.
+      const next = writer.write(bytes(2));
+      await flush();
+      expect(opened).toHaveLength(1);
+      slot.bind(2);
+      await next;
+      expect(opened[1]).toMatchObject({ trackAlias: 2, groupId: 1, finCalls: 1 });
+    },
+  );
+
+  it('reports a relay stop as SUBSCRIPTION_CHANGED while the subscription goes on, and writes on at once', async () => {
+    const { slot, writer, opened } = harness({ stall: 'write' });
+    slot.bind(1);
+    const stop = stopSending();
+    const rejected = expect(writer.write(bytes(1))).rejects.toMatchObject({
+      code: 'SUBSCRIPTION_CHANGED',
+      phase: 'writing',
+      cause: stop,
+    });
+    await flush();
+    opened[0]?.fail(stop);
+    await rejected;
+    expect(writer.hasDemand).toBe(true);
+    await writer.write(bytes(2));
+    expect(opened[1]).toMatchObject({ trackAlias: 1, groupId: 1, finCalls: 1 });
+  });
+
+  it('keeps the binding change as the reason when the relay stop arrives after it', async () => {
+    const { slot, writer, opened } = harness({ stall: 'write' });
+    slot.bind(1);
+    const outcome = writer.write(bytes(1)).catch((error: unknown) => error);
+    await flush();
+    slot.bind(undefined);
+    opened[0]?.fail(stopSending());
+    const error = await outcome;
+    expect(error).toMatchObject({ code: 'SUBSCRIPTION_CHANGED', phase: 'writing' });
+    expect(error).toHaveProperty(
+      'message',
+      'Relay subscription changed during a write or group; objects may be incomplete',
+    );
+    expect(error).not.toHaveProperty('cause');
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.CANCELLED)]);
+  });
+
+  it('still reports a session failure on the stream as TRANSPORT_ERROR', async () => {
+    const { slot, writer, opened } = harness({ stall: 'write' });
+    slot.bind(1);
+    const failure = new FakeWebTransportError('Connection lost.', 'session');
+    const rejected = expect(writer.write(bytes(1))).rejects.toMatchObject({
+      code: 'TRANSPORT_ERROR',
+      phase: 'writing',
+      cause: failure,
+    });
+    await flush();
+    opened[0]?.fail(failure);
+    await rejected;
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.INTERNAL_ERROR)]);
+  });
+
   it('cancels an in-flight write with CLOSED when the track closes and resets with CANCELLED', async () => {
     const { slot, writer, opened, endTrack } = harness({ stall: 'write' });
     slot.bind(1);
@@ -588,6 +683,31 @@ describe('write slot: groups', () => {
     },
   );
 
+  it.each([
+    ['write', 'second-write', 'writing'],
+    ['close', 'fin', 'closing'],
+  ] as const)(
+    'reports a relay stop of a group %s as SUBSCRIPTION_CHANGED and permits the next group',
+    async (mode, stall, phase) => {
+      const { slot, writer, opened } = harness({ stall });
+      slot.bind(1);
+      const group = await writer.openGroup();
+      await group.write(bytes(1));
+      const stop = stopSending();
+      const pending = mode === 'write' ? group.write(bytes(2)) : group.close();
+      const rejected = expect(pending).rejects.toMatchObject({ code: 'SUBSCRIPTION_CHANGED', phase, cause: stop });
+      await flush();
+      opened[0]?.fail(stop);
+      await rejected;
+      expect(group.closed).toBe(true);
+      slot.bind(undefined);
+      expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.CANCELLED)]);
+      slot.bind(2);
+      const next = await writer.openGroup();
+      expect(next.groupId).toBe(1);
+    },
+  );
+
   it('aborts an idle group explicitly or through its signal, resetting with CANCELLED, and frees the slot', async () => {
     const { slot, writer, opened } = harness();
     slot.bind(1);
@@ -683,7 +803,7 @@ describe('write slot: settling groups', () => {
     await writer.write(bytes(1));
     const group = await writer.openGroup();
     await group.close();
-    opened[0]?.failSettle(new Error('STOP_SENDING'));
+    opened[0]?.failSettle(stopSending());
     opened[1]?.failSettle(new Error('reset by the relay'));
     await flush();
     group.abort(new Error('late abort'));

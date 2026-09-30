@@ -20,7 +20,7 @@
  * spec/behavior.md is the list they cover.
  */
 import { type SubgroupWriter, streamResetReason } from '@mux/moq-core';
-import { RelayError, type RelayErrorPhase, transportError } from './errors.js';
+import { isStreamStop, RelayError, type RelayErrorPhase, transportError } from './errors.js';
 import { encodeJSON, encodeText } from './payload.js';
 import type { RelayGroupWriter, RelayTrackWriter } from './publish.js';
 import type { SettlingGroups } from './settling-groups.js';
@@ -220,7 +220,18 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
         // Closure can precede the callback that cancels this track. Preserve its reason
         // even when the send continuation runs before that callback.
         check(operation);
-        failure = transportError(error, operation.phase);
+        if (operation.writer && isStreamStop(error)) {
+          // The relay stopped this operation's own stream: the group is no longer of interest
+          // (§11.4), whether or not its subscription is ending too. The binding alone decides
+          // whether the next write waits for demand; a later binding change finds no operation.
+          failure = new RelayError(
+            'SUBSCRIPTION_CHANGED',
+            'Relay stopped the stream during a write or group; objects may be incomplete',
+            operation.phase,
+            { cause: error },
+          );
+          code = RESET_CODE.CANCELLED;
+        } else failure = transportError(error, operation.phase);
       } catch (interrupted) {
         failure = interrupted;
         code = connectionResetCode(interrupted);
