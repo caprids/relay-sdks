@@ -2,6 +2,7 @@
 
 import asyncio
 import math
+import sys
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 from urllib.parse import parse_qs, urlsplit
@@ -633,8 +634,9 @@ class TestConnectRelay:
         assert token_calls == []
         assert factory.calls == []
 
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
     async def test_uses_the_aioquic_webtransport_client_by_default(self) -> None:
-        # Nothing listens here, so the default transport's connected UDP socket hears the port
+        # Nothing listens here, so the default transport hears the port
         # unreachable and the handshake fails at once, well before the deadline (#163).
         with pytest.raises(RelayError, match="Connection refused") as failure:
             await connect_relay_subscriber("https://127.0.0.1:9/moq", connect_timeout=5)

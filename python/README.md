@@ -227,10 +227,10 @@ request errors, and define any continuity policy in the application. See
 for retry, trailing-object, and publisher-generation guidance.
 
 `connect_relay_subscriber` has one deadline (`connect_timeout`, seconds) covering token resolution and both
-handshakes. A relay address that refuses the connection (nothing listens on its UDP port) fails at
-once with `TRANSPORT_ERROR` / `connecting` and the OS's `ConnectionRefusedError` in the `__cause__`
-chain, as in TypeScript; an address that never answers waits out the deadline and fails with
-`CONNECTION_TIMEOUT`. The optional `CancellationToken` controls the connection's entire lifetime: cancelling
+handshakes. On Linux, a relay address that refuses the connection (nothing listens on its UDP port)
+fails at once with `TRANSPORT_ERROR` / `connecting` and the OS's `ConnectionRefusedError` in the
+`__cause__` chain, as in TypeScript. Elsewhere (macOS, for one), and for an address that never
+answers, the attempt waits out the deadline and fails with `CONNECTION_TIMEOUT`. The optional `CancellationToken` controls the connection's entire lifetime: cancelling
 it closes an established connection, and the `closed` future carries the reason. An explicit `jwt`
 query parameter takes precedence over `get_token`, matching the current Relay connection
 authentication convention. An empty one (`?jwt=`) is a `ValueError` before anything connects: put a

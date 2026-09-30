@@ -17,6 +17,7 @@ from moq_core._tasks import observe
 
 from ._aioquic import live_stream, packets_sent, peer_control_stream_id, serve_resets_first
 from ._fin_retry import DroppedFinRetry
+from ._udp import report_refusals
 
 if TYPE_CHECKING:
     from ._session import WebTransportSessionBase
@@ -185,10 +186,12 @@ class WebTransportProtocol(QuicConnectionProtocol):
     def error_received(self, exc: Exception) -> None:
         """A socket error: only a refusal during the handshake counts, and it fails the connect at once.
 
-        The client's socket is connected to the relay address, so Linux reports an ICMP port
-        unreachable as ``ConnectionRefusedError``. Before the handshake completes that means nothing
-        listens there, and waiting out the connect deadline would only hide it. Once the connection is
-        established a transient ICMP error changes nothing: QUIC's loss recovery and idle timeout decide.
+        While the handshake is pending the client's socket reports ICMP errors (see ``_udp``), so a port
+        unreachable arrives here as ``ConnectionRefusedError``: nothing listens there, and waiting out
+        the connect deadline would only hide it. Asyncio calls this for a failed receive or send, and
+        so may a batched read that meets the error mid-batch. Once the connection is established the
+        reports are off, and one that was already pending changes nothing: QUIC's loss recovery and
+        idle timeout decide.
         """
         if not isinstance(exc, ConnectionRefusedError) or self._handshake_completed or self.refused is not None:
             return
@@ -199,6 +202,15 @@ class WebTransportProtocol(QuicConnectionProtocol):
         if waiter is not None and not waiter.done():
             self._connected_waiter = None
             waiter.set_exception(exc)
+
+    def _stop_reporting_refusals(self) -> None:
+        transport = self._transport
+
+        if self.owns_transport and transport is not None:
+            sock = transport.get_extra_info("socket")
+
+            if sock is not None:
+                report_refusals(sock, False)
 
     def connection_lost(self, exc: Exception | None) -> None:
         self.fin_retry.stop()
@@ -240,6 +252,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
 
         if isinstance(event, quic_events.HandshakeCompleted):
             self._handshake_completed = True
+            self._stop_reporting_refusals()
             self._arm_keepalive(self._last_sent_at + _KEEPALIVE_INTERVAL)
 
         if isinstance(event, quic_events.StreamDataReceived) and self._hold_control_stream_fin(event):

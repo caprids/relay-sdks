@@ -7,6 +7,7 @@ import pytest
 from mux_relay.webtransport import WebTransportError
 from mux_relay.webtransport._client import _open_socket, _parse_url
 from mux_relay.webtransport._session import WebTransportSessionBase
+from mux_relay.webtransport._udp import reports_refusals
 from mux_relay.webtransport._wire import (
     CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
     encode_close_session_capsule,
@@ -125,7 +126,7 @@ class TestWireHelpers:
         try:
             assert sock.family == socket_module.AF_INET
             assert address == ("192.0.2.1", 443)
-            assert sock.getpeername() == address  # connected, so a refusal reaches the protocol
+            _assert_unconnected_and_reporting(sock)
         finally:
             sock.close()
 
@@ -140,6 +141,16 @@ class TestWireHelpers:
 
         try:
             assert address == ("::ffff:192.0.2.1", 443, 0, 0)
-            assert sock.getpeername() == address
+            _assert_unconnected_and_reporting(sock)
         finally:
             sock.close()
+
+
+def _assert_unconnected_and_reporting(sock: Any) -> None:
+    import sys
+
+    # Unconnected, so the kernel picks the source address per packet; ICMP reports on for the handshake.
+    with pytest.raises(OSError):
+        sock.getpeername()
+
+    assert reports_refusals(sock) is sys.platform.startswith("linux")

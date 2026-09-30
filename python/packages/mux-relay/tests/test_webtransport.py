@@ -10,6 +10,7 @@ codecs are covered in ``test_webtransport_wire.py`` and the aioquic internals th
 import asyncio
 import gc
 import socket
+import sys
 import warnings
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -42,6 +43,7 @@ from mux_relay import (
 from mux_relay.webtransport import WebTransportError, connect_webtransport
 from mux_relay.webtransport._client import WebTransportSession
 from mux_relay.webtransport._protocol import WebTransportProtocol
+from mux_relay.webtransport._udp import reports_refusals
 from mux_relay.webtransport._wire import encode_close_session_capsule
 
 NAMESPACE = ["loopback", "data"]
@@ -729,6 +731,7 @@ def _cause_chain(error: BaseException) -> list[BaseException]:
 class TestClosedPort:
     """A connect to a UDP port nobody listens on fails at once, as ``TRANSPORT_ERROR`` / ``connecting`` (#163)."""
 
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
     @pytest.mark.parametrize(
         "connect", [connect_relay_publisher, connect_relay_subscriber], ids=["publisher", "subscriber"]
     )
@@ -771,6 +774,27 @@ class TestClosedPort:
 
             assert loop.time() - started >= 0.5
             assert (failure.value.code, failure.value.phase) == ("CONNECTION_TIMEOUT", "connecting")
+
+    async def test_the_socket_stays_unconnected_and_stops_reporting_after_the_handshake(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        created = connect_webtransport(
+            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        transport: Any = created.transport
+        sock = transport._protocol._transport.get_extra_info("socket")
+
+        try:
+            # No peer association: a change of the client's own address still lets the relay migrate.
+            with pytest.raises(OSError):
+                sock.getpeername()
+
+            assert not reports_refusals(sock)
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
 
     async def test_a_refusal_after_the_handshake_changes_nothing(self) -> None:
         sessions: list[Any] = []

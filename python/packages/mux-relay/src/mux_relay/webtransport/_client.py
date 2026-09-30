@@ -20,6 +20,7 @@ from ..connect_session import ConnectingTransport
 from ._errors import WebTransportError
 from ._protocol import WebTransportProtocol
 from ._session import WebTransportSessionBase
+from ._udp import report_refusals
 from ._wire import parse_sf_string, sf_list_of_strings
 
 H3_ALPN = "h3"
@@ -230,14 +231,13 @@ class WebTransportSession(WebTransportSessionBase):
 
 
 def _open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, tuple[Any, ...]]:
-    """Open a UDP socket, pick the resolved address it can reach, and connect the socket to it.
+    """Bind a UDP socket and pick the resolved address it can reach.
 
     Like aioquic's client: a dual-stack IPv6 socket when the host offers one (IPv4 addresses are
     mapped onto it), otherwise an IPv4 socket with the first IPv4 address the resolver returned.
-    Connecting the socket makes the kernel deliver it only the relay's datagrams and report an ICMP
-    port unreachable as an error, so a closed port fails the connect at once (see
-    ``WebTransportProtocol.error_received``). A NAT rebinding in front of the client is unaffected: it
-    changes only the address the relay sees, which the relay learns from the next packet (#158).
+    The socket stays unconnected, so the kernel picks the source address per packet and the relay can
+    migrate the connection when the client's address changes. Until the handshake completes it
+    reports ICMP errors (see ``_udp``), so a closed port fails the connect at once.
     """
     if not addresses:
         raise WebTransportError("no addresses to connect to")
@@ -258,20 +258,17 @@ def _open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, t
                 "the host resolves only to IPv6 addresses, but IPv6 sockets are unavailable"
             ) from None
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # connect() binds it
-        address = ipv4[0]
-    else:
-        address = addresses[0]
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(("0.0.0.0", 0))
+        report_refusals(sock, True)
+        return sock, ipv4[0]
 
-        if len(address) == 2:
-            address = ("::ffff:" + address[0], address[1], 0, 0)
+    address = addresses[0]
 
-    try:
-        sock.connect(address)
-    except OSError:
-        sock.close()
-        raise
+    if len(address) == 2:
+        address = ("::ffff:" + address[0], address[1], 0, 0)
 
+    report_refusals(sock, True)
     return sock, address
 
 
