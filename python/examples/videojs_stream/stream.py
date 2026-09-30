@@ -21,12 +21,12 @@ import sys
 import threading
 import time
 import uuid
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from getpass import getpass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit
 
 import av
@@ -34,6 +34,7 @@ import numpy as np
 from av.audio.fifo import AudioFifo
 from av.audio.resampler import AudioResampler
 from av.codec.context import Flags
+from av.video.frame import PictureType
 
 from moq_media import (
     AUDIO_TRACK,
@@ -208,7 +209,10 @@ class LiveQueue(asyncio.Queue[EncodedSample | None]):
 
 
 class VideoEncoder:
-    """libx264 configured for LOC: no B-frames, fixed GOP, parameter sets out of band (avcC)."""
+    """libx264 configured for LOC: no B-frames, fixed GOP, parameter sets out of band (avcC).
+
+    ``encode(frame, keyframe=True)`` forces an IDR on demand; x264 counts the next GOP from it.
+    """
 
     def __init__(
         self, width: int, height: int, fps: int, bitrate: int, gop_seconds: float, rate_control: str = "abr"
@@ -226,6 +230,8 @@ class VideoEncoder:
             "tune": "zerolatency",
             "profile": "baseline",
             "x264-params": f"keyint={keyint}:min-keyint={keyint}:scenecut=0:bframes=0",
+            # A frame marked I becomes an IDR, a point a new subscription can start decoding from.
+            "forced-idr": "1",
         }
         if rate_control == "cbr":
             # x264's VBV units are kbit/s and kbit. HRD CBR includes filler NALs even for
@@ -242,7 +248,10 @@ class VideoEncoder:
         self.width = width
         self.height = height
 
-    def encode(self, frame: av.VideoFrame) -> list[EncodedSample]:
+    def encode(self, frame: av.VideoFrame, *, keyframe: bool = False) -> list[EncodedSample]:
+        # Always set: a frame decoded from a file carries its source's picture type, and with
+        # forced-idr every source I-frame would otherwise restart the GOP.
+        frame.pict_type = PictureType.I if keyframe else PictureType.NONE
         return [self._sample(packet) for packet in self._context.encode(frame)]
 
     def flush(self) -> list[EncodedSample]:
@@ -480,6 +489,8 @@ class Producer:
         self._loop = loop
         self._queues = queues
         self._stop = threading.Event()
+        # Set from the event loop by request_keyframes when a relay subscription starts.
+        self.keyframe_requested = threading.Event()
         self.video = VideoEncoder(
             config.width, config.height, config.fps, config.bitrate, config.gop_seconds, config.rate_control
         )
@@ -559,7 +570,14 @@ class Producer:
                     break
 
                 if isinstance(frame, av.VideoFrame):
-                    self._emit(self.video.encode(frame))
+                    # Frames already queued still go first; the writer skips the deltas ahead of
+                    # this keyframe, so the wait stays within the video queue's max_lag.
+                    keyframe = self.keyframe_requested.is_set()
+
+                    if keyframe:
+                        self.keyframe_requested.clear()
+
+                    self._emit(self.video.encode(frame, keyframe=keyframe))
                 elif self.audio is not None:
                     self._emit(self.audio.encode(frame, timestamp_us))
 
@@ -568,6 +586,26 @@ class Producer:
             self.error = error
         finally:
             self._handoff(None)
+
+
+class DemandSource(Protocol):
+    def demand_changes(self) -> AsyncIterator[bool]: ...
+
+
+async def request_keyframes(track: DemandSource, requested: threading.Event) -> None:
+    """Ask the producer for a keyframe whenever the relay subscribes to ``track``, as the TS webcodecs example does.
+
+    The video writer opens a group only at a keyframe, so without this a new subscription waits for
+    the encoder's next scheduled one: up to a whole GOP. The initial snapshot needs none (the
+    encoder starts with a keyframe), and ``False`` needs none; a repeated ``True`` is a replacement
+    subscription and gets its own.
+    """
+    changes = track.demand_changes()
+    await anext(changes, None)
+
+    async for demanded in changes:
+        if demanded:
+            requested.set()
 
 
 def _interleave(
@@ -1087,6 +1125,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     tasks = [
         asyncio.ensure_future(serve_catalog(catalog, stats, on_track_end)),
+        asyncio.ensure_future(request_keyframes(video_track, producer.keyframe_requested)),
         asyncio.ensure_future(publish_live_media(queues, writers, catalog, stats, log, on_track_end, lifetime)),
     ]
     verifier: Any = None
@@ -1098,7 +1137,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     stats.started = time.monotonic()
     producer.start()
     deadline = loop.call_later(config.duration, lambda: lifetime.cancel()) if config.duration else None
-    media_task = tasks[1]
+    media_task = tasks[-1]
 
     try:
         await asyncio.wait([stopped, media_task], return_when=asyncio.FIRST_COMPLETED)

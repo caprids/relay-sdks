@@ -86,10 +86,14 @@ through this relay relies on the catalog's `initDataList` for decoder configurat
 [Relay property handling](../../../spec/behavior.md#relay-property-handling).
 
 All three tracks declare Timescale = 1,000,000 as a track property, matching the Video.js publisher.
-Video is written only while the relay has a live subscription for the track; each new subscription
-starts at the next keyframe, and a subscription that changes mid-GOP resets that group and resumes
-at the next keyframe. The encoder runs `libx264` `veryfast` / `zerolatency` with a fixed GOP and no
-B-frames so timestamps are monotonic.
+Video is written only while the relay has a live subscription for the track. Each new upstream
+subscription, including one that replaces the relay's previous subscription, makes the encoder force
+its next frame to an IDR, so the subscription starts at a keyframe produced for it rather than
+waiting up to a whole GOP; this mirrors the TypeScript `webcodecs` example. Frames already queued
+go first and the writer skips the deltas ahead of the forced keyframe. A subscription that changes
+mid-GOP resets that group and resumes at that keyframe. The encoder runs `libx264` `veryfast` /
+`zerolatency` with a fixed GOP and no B-frames so timestamps are monotonic; each forced IDR restarts
+the GOP count, so the keyframe cadence shifts with every new upstream subscription.
 
 ## Recovering from a slow or interrupted uplink
 

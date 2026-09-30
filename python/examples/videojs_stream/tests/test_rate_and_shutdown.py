@@ -1,6 +1,7 @@
 """Real encoder bitrate and deterministic deadline/error ordering for the video example."""
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -82,6 +83,7 @@ async def test_duration_drains_before_classifying_failures(
             )
             self.audio = None
             self.error: BaseException | None = None
+            self.keyframe_requested = threading.Event()
 
         def start(self) -> None:
             pass
@@ -128,6 +130,7 @@ async def test_duration_drains_before_classifying_failures(
     monkeypatch.setattr(stream, "connect_relay_publisher", connect)
     monkeypatch.setattr(stream, "serve_catalog", catalog)
     monkeypatch.setattr(stream, "publish_live_media", media)
+    monkeypatch.setattr(stream, "request_keyframes", catalog)
     monkeypatch.setenv("RELAY_TOKEN", "test")
     config = stream.parse_args(["--duration", "0.001", "--audio", "off"])
     stats = stream.Stats()
