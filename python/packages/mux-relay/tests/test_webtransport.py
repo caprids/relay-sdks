@@ -708,6 +708,77 @@ class TestReceivePruning:
             await asyncio.sleep(0.05)
 
 
+class TestReceiveBatching:
+    """Datagrams already waiting on the client's socket are taken in together, with one transmit (#162)."""
+
+    async def test_waiting_datagrams_share_one_transmit_and_are_still_acknowledged(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        created = connect_webtransport(
+            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        transport: Any = created.transport
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+        protocol: WebTransportProtocol = transport._protocol
+        peer: WebTransportProtocol = sessions[0]._protocol
+        udp: Any = protocol._transport  # a selector datagram transport, which can pause its reads
+        assert udp is not None
+        received: list[bytes] = []
+
+        async def read_all() -> None:
+            async for stream in transport.incoming_unidirectional_streams():
+                while (chunk := await stream.read()) is not None:
+                    received.append(chunk)
+
+        reader = asyncio.ensure_future(read_all())
+        calls: list[tuple[int, int]] = []
+        """(datagrams taken in, transmits) per ``datagram_received`` call."""
+        counts = [0, 0]
+        receive_datagram = protocol._quic.receive_datagram
+        transmit = protocol.transmit
+        datagram_received = protocol.datagram_received
+
+        def counting_receive(*args: Any, **kwargs: Any) -> None:
+            counts[0] += 1
+            receive_datagram(*args, **kwargs)
+
+        def counting_transmit() -> None:
+            counts[1] += 1
+            transmit()
+
+        def recording_datagram_received(data: bytes | str, addr: Any) -> None:
+            counts[:] = [0, 0]
+            datagram_received(data, addr)
+            calls.append((counts[0], counts[1]))
+
+        try:
+            # Hold the client's reads so the peer's packets pile up on its socket, as they do under load.
+            udp.pause_reading()
+            sender = await sessions[0].create_unidirectional_stream()
+            await sender.write(b"\1" * 8000)  # several full-size packets, well inside the initial window
+            await asyncio.sleep(0.1)
+            assert peer._quic._loss.bytes_in_flight > 0
+
+            protocol._quic.receive_datagram = counting_receive  # ty: ignore[invalid-assignment]
+            protocol.transmit = counting_transmit  # ty: ignore[invalid-assignment]
+            protocol.datagram_received = recording_datagram_received  # ty: ignore[invalid-assignment]
+            udp.resume_reading()
+
+            await wait_for(lambda: sum(len(chunk) for chunk in received) == 8000, timeout=5)
+            taken, transmits = calls[0]
+            assert taken > 1
+            assert transmits == 1
+            # The one transmit (or the ACK timer it armed) still acknowledges everything.
+            await wait_for(lambda: peer._quic._loss.bytes_in_flight == 0, timeout=5)
+        finally:
+            reader.cancel()
+            transport.close()
+            await asyncio.wait_for(transport.wait_closed(), 5)
+            server.close()
+            await asyncio.sleep(0.05)
+
+
 class TestPeerRefusal:
     """The peer refuses a session the way moq-relay 0.15.8 refuses credentials (#14).
 

@@ -546,6 +546,21 @@ subscriber = await connect_relay_subscriber(
 )
 ```
 
+### Receive throughput
+
+The QUIC stack is pure Python, so a subscriber's receive rate is bound by CPU on the event loop's one
+core, not by the network. On an idle host, a connection receiving 1 MiB objects from
+`sjc.relay.mux.global` spends about 25 ms of CPU per MB, a ceiling of roughly **40 MB/s** (measured
+2026-09-30, aioquic 1.3). A host whose CPU is contended, or an application that does its own work on
+the same loop, gets much less. The adapter takes in every datagram already waiting on the socket
+before it transmits (#162). Most of the remaining cost is aioquic's per-packet receive work.
+
+Media bitrates are far below this ceiling; bulk data transfers may not be. A subscriber that falls
+behind gets no signal. The relay keeps queueing toward it, and the only symptoms are growing
+end-to-end latency and growing subscriber memory. The SDK has no transport-wide backpressure: the
+async consumption limits bound local buffering only (see
+[async subscription consumption](../spec/behavior.md#async-subscription-consumption)).
+
 `packages/mux-relay/tests/test_webtransport.py` runs the full smoke-test assertion list over a real
 QUIC loopback: a WebTransport server on `127.0.0.1` (aioquic, self-signed certificate) fronting the
 in-memory relay hub, so the transport adapter is exercised end to end in `python:check`. The stream
