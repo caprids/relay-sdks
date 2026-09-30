@@ -119,18 +119,32 @@ class FetchReset:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TrackStatusOk:
+    """The answer to TRACK_STATUS (a REQUEST_OK): the track's current parameters and properties."""
+
     parameters: MessageParameters
     track_properties: list[KeyValuePair]
 
 
 @dataclass(slots=True, kw_only=True)
 class SubscriptionHandlers:
+    """Callbacks for one subscription. Every one is optional and must be synchronous.
+
+    An async callback raises ``TypeError`` at subscribe time; a callback that returns an awaitable
+    has it discarded with a ``RuntimeWarning``. Relay's ``subscribe_events()`` is the async way in.
+    """
+
     on_ok: Callable[[SubscribeOk], None] | None = None
+    """The publisher accepted the subscription."""
     on_error: Callable[[RequestError], None] | None = None
+    """The request failed: a REQUEST_ERROR, or a stream failure or timeout in the same shape."""
     on_object: Callable[[MoqtObject], None] | None = None
+    """An object arrived on one of the subscription's data streams."""
     on_subgroup_end: Callable[[SubgroupEnd], None] | None = None
+    """A subgroup stream finished cleanly."""
     on_subgroup_reset: Callable[[SubgroupReset], None] | None = None
+    """A subgroup stream was reset; see :class:`SubgroupReset`."""
     on_done: Callable[[PublishDone], None] | None = None
+    """PUBLISH_DONE arrived: the publisher finished the subscription."""
     on_update_ok: Callable[[], None] | None = None
     """Response to a REQUEST_UPDATE sent on this subscription."""
     on_state_notify: Callable[[MessageParameters], None] | None = None
@@ -145,19 +159,30 @@ class SubscriptionHandlers:
 
 @dataclass(slots=True, kw_only=True)
 class FetchHandlers:
+    """Callbacks for one fetch. Every one is optional."""
+
     on_ok: Callable[[FetchOk], None] | None = None
+    """The publisher accepted the fetch."""
     on_error: Callable[[RequestError], None] | None = None
+    """The request failed: a REQUEST_ERROR, or a stream failure or timeout in the same shape."""
     on_entry: Callable[[FetchStreamEntry], None] | None = None
+    """An object or End of Range marker arrived on the fetch data stream."""
     on_end: Callable[[], None] | None = None
     """The fetch data stream finished cleanly (FIN)."""
     on_reset: Callable[[FetchReset], None] | None = None
+    """The fetch data stream was reset; see :class:`FetchReset`."""
     on_goaway: Callable[[Goaway], None] | None = None
+    """GOAWAY on this request stream: re-issue the request (possibly elsewhere)."""
 
 
 @dataclass(slots=True, kw_only=True)
 class TrackStatusHandlers:
+    """Callbacks for one TRACK_STATUS request. Both are optional."""
+
     on_ok: Callable[[TrackStatusOk], None] | None = None
+    """The publisher answered with the track's status."""
     on_error: Callable[[RequestError], None] | None = None
+    """The request failed: a REQUEST_ERROR, or a stream failure or timeout in the same shape."""
 
 
 class PublishResponder:
@@ -183,6 +208,7 @@ class PublishResponder:
         self._respond(encode_request_ok())
 
     def reject(self, error_code: int = REQUEST_ERROR_CODE.UNINTERESTED, reason: str = "") -> None:
+        """Send REQUEST_ERROR with ``error_code`` (UNINTERESTED by default) and ``reason``."""
         if self._responded:
             return
 
@@ -192,6 +218,8 @@ class PublishResponder:
 
 @dataclass(slots=True, kw_only=True)
 class MoqtSessionCallbacks:
+    """Synchronous callbacks a subscribe-side session calls as its state changes. Every one is optional."""
+
     on_ready: Callable[[list[KeyValuePair]], None] | None = None
     """The server's SETUP arrived; the session is fully established."""
     on_goaway: Callable[[Goaway], None] | None = None
@@ -212,6 +240,8 @@ DEFAULT_IMPLEMENTATION_NAME = "moq-core (Python)"
 
 @dataclass(slots=True, kw_only=True)
 class MoqtSessionConfig:
+    """How :func:`create_moqt_session` sets up a subscribe-side session."""
+
     setup_options: Sequence[KeyValuePair] = ()
     """Extra Setup Options to send (an implementation identifier is added automatically)."""
     implementation_name: str = DEFAULT_IMPLEMENTATION_NAME
@@ -233,9 +263,16 @@ class MoqtSessionConfig:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class MoqtSubscribeOptions:
+    """The track a SUBSCRIBE, FETCH or TRACK_STATUS names, and the request's parameters.
+
+    ``MoqtFetchOptions`` is the same class: for FETCH, ``parameters.location_filter`` is the range,
+    read with fetch rules (§5.1.2).
+    """
+
     track_namespace: Sequence[str]
     track_name: str
     parameters: MessageParameters | None = None
+    """``None`` is the same as an empty :class:`MessageParameters`."""
 
 
 MoqtFetchOptions: TypeAlias = MoqtSubscribeOptions
@@ -362,6 +399,7 @@ class Subscription:
 
     @property
     def request_id(self) -> int:
+        """The Request ID the SUBSCRIBE carried (§10.1)."""
         return self._record.request_id
 
     def update(self, parameters: MessageParameters) -> None:
@@ -379,6 +417,8 @@ class Subscription:
 
 
 class FetchHandle:
+    """A live fetch request; its entries arrive through the :class:`FetchHandlers` it was given."""
+
     __slots__ = ("_record", "_session")
 
     def __init__(self, session: MoqtSession, record: _FetchRecord) -> None:
@@ -387,9 +427,11 @@ class FetchHandle:
 
     @property
     def request_id(self) -> int:
+        """The Request ID the FETCH carried (§10.1)."""
         return self._record.request_id
 
     def cancel(self, reason: object = None) -> None:
+        """Stop the fetch: its request stream is cancelled and no further callbacks run. Idempotent."""
         self._session._cancel_fetch(self._record, reason)
 
 
@@ -583,6 +625,10 @@ class MoqtSession:
         self._peer_request_ids.add(request_id)
 
     def subscribe(self, options: MoqtSubscribeOptions, handlers: SubscriptionHandlers | None = None) -> Subscription:
+        """Send SUBSCRIBE (§10.7) on a new request stream and return its handle at once.
+
+        Results arrive through ``handlers``, which must be synchronous (``TypeError`` otherwise).
+        """
         handlers = _synchronous_subscription_handlers(handlers or SubscriptionHandlers())
         request_id = self._allocate_request_id()
         message = encode_subscribe(
@@ -615,6 +661,11 @@ class MoqtSession:
         return Subscription(self, record)
 
     def fetch(self, options: MoqtSubscribeOptions, handlers: FetchHandlers | None = None) -> FetchHandle:
+        """Send FETCH (§10.13) on a new request stream and return its handle at once.
+
+        The range is ``options.parameters.location_filter``, read with fetch rules; results and entries
+        arrive through ``handlers``.
+        """
         handlers = handlers or FetchHandlers()
         request_id = self._allocate_request_id()
         parameters = options.parameters or MessageParameters()
@@ -640,6 +691,7 @@ class MoqtSession:
         return FetchHandle(self, record)
 
     def track_status(self, options: MoqtSubscribeOptions, handlers: TrackStatusHandlers | None = None) -> None:
+        """Send TRACK_STATUS (§10.15) on a new request stream; the answer arrives through ``handlers``."""
         handlers = handlers or TrackStatusHandlers()
         request_id = self._allocate_request_id()
         message = encode_track_status(

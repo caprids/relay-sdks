@@ -352,6 +352,11 @@ class RelaySubscription(Subscription):
 
     @property
     def request_id(self) -> int:
+        """The Request ID the SUBSCRIBE carried.
+
+        Raises when the subscription ended before its request was sent (the connection had already
+        ended): the error it ended with, or a ``CLOSED`` :class:`RelayError`.
+        """
         return self._handle().request_id
 
     def update(self, parameters: MessageParameters) -> None:
