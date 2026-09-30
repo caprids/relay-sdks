@@ -11,11 +11,13 @@ from aioquic.h3.connection import ErrorCode, H3Connection
 from aioquic.h3.events import DataReceived, H3Event, HeadersReceived, WebTransportStreamDataReceived
 from aioquic.quic import events as quic_events
 from aioquic.quic.connection import QuicConnection
+from aioquic.quic.packet import QuicErrorCode
 
 from moq_core._tasks import observe
 
-from ._aioquic import live_stream, peer_control_stream_id, serve_resets_first
+from ._aioquic import live_stream, packets_sent, peer_control_stream_id, serve_resets_first
 from ._fin_retry import DroppedFinRetry
+from ._udp import drain_errors, report_refusals
 
 if TYPE_CHECKING:
     from ._session import WebTransportSessionBase
@@ -32,13 +34,24 @@ about 64 full-size packets, or a few milliseconds of CPU."""
 
 _MAX_DATAGRAM_SIZE = 65535
 
+_KEEPALIVE_INTERVAL = 5.0
+"""Seconds of send silence after which an established connection sends a QUIC PING.
+
+Draft-20 §13.6.1 leaves idle-connection keepalive to the transport (QUIC PING frames among the
+options). aioquic has none, and a receive-only client sends nothing when nothing reaches it, so after a
+NAT rebinding the relay would keep sending to the old address until its idle timeout. The next PING
+leaves from the new address and the relay migrates (RFC 9000 §9.3). Chromium does the same for the
+TypeScript SDK.
+"""
+
 
 class WebTransportProtocol(QuicConnectionProtocol):
     """An aioquic connection protocol that drives HTTP/3 with WebTransport enabled.
 
     Routes HTTP/3 and QUIC stream events to the :class:`WebTransportSessionBase` that owns them and
     hands request headers that belong to no session (a server's incoming CONNECT) to the
-    :meth:`_on_request_headers` hook, which only a server role overrides.
+    :meth:`_on_request_headers` hook, which only a server role overrides. With ``keepalive``, an
+    established connection sends a QUIC PING once it has sent nothing for ``_KEEPALIVE_INTERVAL``.
     """
 
     def __init__(
@@ -48,6 +61,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
         *,
         owns_transport: bool = False,
         receive_socket: socket.socket | None = None,
+        keepalive: bool = False,
     ) -> None:
         super().__init__(quic, stream_handler)
         self._receive_socket = receive_socket
@@ -72,8 +86,23 @@ class WebTransportProtocol(QuicConnectionProtocol):
         self._draining: list[WebTransportSessionBase] = []
         self._control_stream_fin: asyncio.TimerHandle | None = None
         """The peer's control-stream FIN, held back a moment (see ``_hold_control_stream_fin``)."""
+        self._keepalive: asyncio.TimerHandle | None = None
+        """The next keepalive check, armed once the handshake completes and dropped when the connection closes."""
+        self._keepalive_stopped = not keepalive
+        """No keepalive: a server role never had one, and a client's stops once its connection closes."""
+        self._packets_sent = 0
+        self._last_sent_at = self._loop.time()
+        self._ping_uid = 0
+        self._handshake_completed = False
+        self.refused: ConnectionRefusedError | None = None
+        self._reporting_refusals = owns_transport
+        """The client socket reports ICMP errors (see ``_udp``) until the handshake ends, however it ends."""
+        """The OS reported the peer's port unreachable before the handshake completed (a client only)."""
 
     async def wait_connected(self) -> None:
+        if self.refused is not None:
+            raise self.refused
+
         try:
             await super().wait_connected()
         finally:
@@ -136,6 +165,12 @@ class WebTransportProtocol(QuicConnectionProtocol):
         serve_resets_first(self._quic)
         super().transmit()
 
+        sent = packets_sent(self._quic)
+
+        if sent != self._packets_sent:
+            self._packets_sent = sent
+            self._last_sent_at = self._loop.time()
+
         # Everything that moves a stream along (a flight sent, an ACK or STOP_SENDING processed, a
         # timer) ends in a transmit, so this is the one place to settle waiting writers and drains.
         if self._settling or self._draining:
@@ -150,8 +185,54 @@ class WebTransportProtocol(QuicConnectionProtocol):
             if session._check_drained():
                 self._draining.remove(session)
 
+    def error_received(self, exc: Exception) -> None:
+        """A socket error: only a refusal during the handshake counts, and it fails the connect at once.
+
+        While the handshake is pending the client's socket reports ICMP errors (see ``_udp``), so a port
+        unreachable arrives here as ``ConnectionRefusedError``: nothing listens there, and waiting out
+        the connect deadline would only hide it. Asyncio calls this for a failed receive or send, and
+        so may a batched read that meets the error mid-batch. Once the connection is established the
+        reports are off, and one that was already pending changes nothing: QUIC's loss recovery and
+        idle timeout decide.
+
+        Every report also waits on the socket's error queue, which keeps the event loop's reader
+        waking until it is read, so the queue is drained here even for an error that is ignored.
+        """
+        sock = self._socket() if self._reporting_refusals else None
+
+        if sock is not None:
+            drain_errors(sock)
+
+        if not isinstance(exc, ConnectionRefusedError) or self._handshake_completed or self.refused is not None:
+            return
+
+        self.refused = exc
+        self._stop_reporting_refusals()  # the connect fails now; its teardown must not be reported on
+        waiter = self._connected_waiter
+
+        if waiter is not None and not waiter.done():
+            self._connected_waiter = None
+            waiter.set_exception(exc)
+
+    def _socket(self) -> Any:
+        transport = self._transport
+        return transport.get_extra_info("socket") if transport is not None and not transport.is_closing() else None
+
+    def _stop_reporting_refusals(self) -> None:
+        """Turn the socket's ICMP reports off, which also discards any still queued."""
+        if not self._reporting_refusals:
+            return
+
+        sock = self._socket()
+
+        if sock is not None:
+            self._reporting_refusals = False
+            report_refusals(sock, False)
+
     def connection_lost(self, exc: Exception | None) -> None:
+        self._reporting_refusals = False
         self.fin_retry.stop()
+        self._stop_keepalive()
         self.transport_closed.set()
 
     def quic_event_received(self, event: quic_events.QuicEvent) -> None:
@@ -178,6 +259,8 @@ class WebTransportProtocol(QuicConnectionProtocol):
             self._settling.clear()
             self._draining.clear()
             self.fin_retry.stop()
+            self._stop_keepalive()
+            self._stop_reporting_refusals()
             self._cancel_control_stream_fin()
 
             for session in list(self.sessions.values()):
@@ -186,11 +269,49 @@ class WebTransportProtocol(QuicConnectionProtocol):
             self._close_transport_soon()
             return
 
+        if isinstance(event, quic_events.HandshakeCompleted):
+            self._handshake_completed = True
+            self._stop_reporting_refusals()
+            self._arm_keepalive(self._last_sent_at + _KEEPALIVE_INTERVAL)
+
         if isinstance(event, quic_events.StreamDataReceived) and self._hold_control_stream_fin(event):
             return
 
         for h3_event in self.h3.handle_event(event):
             self._handle_h3_event(h3_event)
+
+    # ------------------------------------------------------------------ keepalive
+
+    def _arm_keepalive(self, when: float) -> None:
+        if not self._keepalive_stopped and self._keepalive is None:
+            self._keepalive = self._loop.call_at(when, self._keepalive_due)
+
+    def _keepalive_due(self) -> None:
+        """PING if nothing was sent for ``_KEEPALIVE_INTERVAL``; otherwise check again that long after the last send.
+
+        Checking lazily keeps a busy connection at one timer per interval instead of one per transmit.
+        """
+        self._keepalive = None
+        now = self._loop.time()
+        due = self._last_sent_at + _KEEPALIVE_INTERVAL
+
+        # The loop may run a timer a clock tick early; a PING a few milliseconds early does no harm.
+        if now < due - 0.01:
+            self._arm_keepalive(due)
+            return
+
+        self._ping_uid += 1
+        self._quic.send_ping(self._ping_uid)
+        self.transmit()
+        # From now, not from the last send: a PING that could not leave must not re-arm in the past.
+        self._arm_keepalive(now + _KEEPALIVE_INTERVAL)
+
+    def _stop_keepalive(self) -> None:
+        self._keepalive_stopped = True
+
+        if self._keepalive is not None:
+            self._keepalive.cancel()
+            self._keepalive = None
 
     # ------------------------------------------------------------------ the peer's control-stream FIN
 
@@ -288,6 +409,12 @@ class WebTransportProtocol(QuicConnectionProtocol):
         else:
             # A server connection shares its listener's socket; there is nothing of ours to release.
             self.transport_closed.set()
+
+    def close(self, error_code: int = QuicErrorCode.NO_ERROR, reason_phrase: str = "") -> None:
+        self._stop_keepalive()  # the connection is closing: nothing is left to keep alive
+        # However the handshake ended (failed, timed out, cancelled, closed), its reports end with it.
+        self._stop_reporting_refusals()
+        super().close(error_code=error_code, reason_phrase=reason_phrase)
 
     def close_after_drain(self, error_code: int = ErrorCode.H3_NO_ERROR, reason_phrase: str = "") -> None:
         """Close the QUIC connection, and make sure the UDP socket is released even if the peer never answers."""

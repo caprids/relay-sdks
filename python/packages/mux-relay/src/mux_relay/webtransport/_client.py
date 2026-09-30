@@ -20,6 +20,7 @@ from ..connect_session import ConnectingTransport
 from ._errors import WebTransportError
 from ._protocol import WebTransportProtocol
 from ._session import WebTransportSessionBase
+from ._udp import report_refusals
 from ._wire import parse_sf_string, sf_list_of_strings
 
 H3_ALPN = "h3"
@@ -93,7 +94,8 @@ class WebTransportSession(WebTransportSessionBase):
             connection = QuicConnection(configuration=configuration)
             sock, addr = _open_socket([info[4] for info in infos])
             udp_transport, protocol = await loop.create_datagram_endpoint(
-                lambda: WebTransportProtocol(connection, owns_transport=True, receive_socket=sock), sock=sock
+                lambda: WebTransportProtocol(connection, owns_transport=True, receive_socket=sock, keepalive=True),
+                sock=sock,
             )
             assert isinstance(protocol, WebTransportProtocol)
             self._pending_protocol = protocol
@@ -114,11 +116,13 @@ class WebTransportSession(WebTransportSessionBase):
             protocol.transmit()
         except BaseException as error:
             if not self.ready.done():
-                self.ready.set_exception(
-                    error
-                    if isinstance(error, WebTransportError)
-                    else WebTransportError(f"WebTransport connect failed: {error}")
-                )
+                if isinstance(error, WebTransportError):
+                    self.ready.set_exception(error)
+                else:
+                    # The cause stays reachable: a refused port surfaces as the OS error behind TRANSPORT_ERROR.
+                    failure = WebTransportError(f"WebTransport connect failed: {error}")
+                    failure.__cause__ = error
+                    self.ready.set_exception(failure)
 
             self._finish(self.ready.exception() if not self.ready.cancelled() else None)
             self._teardown_connection()
@@ -231,6 +235,9 @@ def _open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, t
 
     Like aioquic's client: a dual-stack IPv6 socket when the host offers one (IPv4 addresses are
     mapped onto it), otherwise an IPv4 socket with the first IPv4 address the resolver returned.
+    The socket stays unconnected, so the kernel picks the source address per packet and the relay can
+    migrate the connection when the client's address changes. Until the handshake completes it
+    reports ICMP errors (see ``_udp``), so a closed port fails the connect at once.
     """
     if not addresses:
         raise WebTransportError("no addresses to connect to")
@@ -253,6 +260,7 @@ def _open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, t
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", 0))
+        report_refusals(sock, True)
         return sock, ipv4[0]
 
     address = addresses[0]
@@ -260,6 +268,7 @@ def _open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, t
     if len(address) == 2:
         address = ("::ffff:" + address[0], address[1], 0, 0)
 
+    report_refusals(sock, True)
     return sock, address
 
 

@@ -8,7 +8,12 @@ codecs are covered in ``test_webtransport_wire.py`` and the aioquic internals th
 """
 
 import asyncio
+import errno
 import gc
+import select
+import socket
+import sys
+import warnings
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -40,6 +45,7 @@ from mux_relay import (
 from mux_relay.webtransport import WebTransportError, connect_webtransport
 from mux_relay.webtransport._client import WebTransportSession
 from mux_relay.webtransport._protocol import WebTransportProtocol
+from mux_relay.webtransport._udp import reports_refusals
 from mux_relay.webtransport._wire import encode_close_session_capsule
 
 NAMESPACE = ["loopback", "data"]
@@ -603,6 +609,280 @@ class TestCancelledHandshake:
             assert errors == []
         finally:
             loop.set_exception_handler(previous_handler)
+
+
+class TestKeepalive:
+    """A client connection sends a QUIC PING after ``_KEEPALIVE_INTERVAL`` without sending anything (#158)."""
+
+    INTERVAL = 0.3
+
+    @pytest.fixture(autouse=True)
+    def _short_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mux_relay.webtransport import _protocol
+
+        assert _protocol._KEEPALIVE_INTERVAL == 5.0
+        monkeypatch.setattr(_protocol, "_KEEPALIVE_INTERVAL", self.INTERVAL)
+
+    async def _connect(self, server: LoopbackWebTransportServer) -> tuple[Any, list[float]]:
+        created = connect_webtransport(
+            server.url_for("/idle"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        transport: Any = created.transport
+        protocol = transport._protocol
+        loop = asyncio.get_running_loop()
+        pings: list[float] = []
+        send_ping = protocol._quic.send_ping
+
+        def record(uid: int) -> None:
+            pings.append(loop.time() - protocol._last_sent_at)
+            send_ping(uid)
+
+        protocol._quic.send_ping = record
+        return transport, pings
+
+    async def test_an_idle_connection_pings_after_the_interval_without_sending(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport, pings = await self._connect(server)
+        protocol = transport._protocol
+
+        try:
+            await asyncio.sleep(self.INTERVAL * 3.5)
+            # Nothing flows either way but the PINGs and their ACKs: one per interval of send silence.
+            assert 2 <= len(pings) <= 4
+            assert all(self.INTERVAL - 0.02 <= silence <= self.INTERVAL * 1.5 for silence in pings)
+            assert protocol.terminated is None
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
+
+    async def test_a_connection_that_keeps_sending_sends_no_ping(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport, pings = await self._connect(server)
+
+        try:
+            stream = await transport.create_unidirectional_stream()
+
+            for _ in range(16):
+                await stream.write(b"x" * 32)
+                await asyncio.sleep(self.INTERVAL / 4)
+
+            assert pings == []
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
+
+    async def test_close_leaves_no_keepalive_timer_or_resource_warning(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport, pings = await self._connect(server)
+        protocol = transport._protocol
+        assert protocol._keepalive is not None
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            transport.close()
+            await transport.wait_closed()
+            assert protocol._keepalive is None
+            await asyncio.sleep(self.INTERVAL * 2)
+            server.close()
+            await asyncio.sleep(0.05)
+            del transport
+            gc.collect()
+
+        assert protocol._keepalive is None
+        assert pings == []
+        assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
+
+    async def test_a_server_connection_does_not_ping(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport, _ = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+
+        try:
+            assert sessions[0]._protocol._keepalive is None
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
+
+
+def _closed_udp_port() -> int:
+    """A loopback UDP port nothing listens on (free a moment ago; the kernel does not hand it out again at once)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _cause_chain(error: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+
+    while current is not None:
+        chain.append(current)
+        current = current.__cause__
+
+    return chain
+
+
+def _polls_errored(sock: Any) -> bool:
+    """Whether the socket polls as errored, which would wake the event loop's reader again and again."""
+    poller = select.poll()
+    poller.register(sock.fileno(), 0)  # POLLERR is reported whatever is registered
+    return any(events & select.POLLERR for _, events in poller.poll(0))
+
+
+class TestClosedPort:
+    """A connect to a UDP port nobody listens on fails at once, as ``TRANSPORT_ERROR`` / ``connecting`` (#163)."""
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
+    @pytest.mark.parametrize(
+        "connect", [connect_relay_publisher, connect_relay_subscriber], ids=["publisher", "subscriber"]
+    )
+    @pytest.mark.parametrize("ipv6_sockets", [True, False], ids=["dual-stack", "ipv4-fallback"])
+    async def test_a_refused_handshake_fails_fast_with_the_os_error_as_cause(
+        self, connect: Any, ipv6_sockets: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        if not ipv6_sockets:
+            real_socket = socket.socket
+
+            def no_ipv6(family: int = socket.AF_INET, *args: Any, **kwargs: Any) -> Any:
+                if family == socket.AF_INET6:
+                    raise OSError("IPv6 is unavailable")
+
+                return real_socket(family, *args, **kwargs)
+
+            monkeypatch.setattr(socket, "socket", no_ipv6)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        kwargs: dict[str, Any] = {"namespace": NAMESPACE} if connect is connect_relay_publisher else {}
+
+        with pytest.raises(RelayError) as failure:
+            await connect(f"https://127.0.0.1:{_closed_udp_port()}", connect_timeout=2, **kwargs)
+
+        assert loop.time() - started < 1
+        assert (failure.value.code, failure.value.phase) == ("TRANSPORT_ERROR", "connecting")
+        assert any(isinstance(cause, ConnectionRefusedError) for cause in _cause_chain(failure.value))
+
+    async def test_an_address_that_never_answers_still_times_out(self) -> None:
+        # A blackhole: the datagrams arrive and nothing comes back, not even a refusal.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as blackhole:
+            blackhole.bind(("127.0.0.1", 0))
+            port = blackhole.getsockname()[1]
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+
+            with pytest.raises(RelayError) as failure:
+                await connect_relay_subscriber(f"https://127.0.0.1:{port}", connect_timeout=0.5)
+
+            assert loop.time() - started >= 0.5
+            assert (failure.value.code, failure.value.phase) == ("CONNECTION_TIMEOUT", "connecting")
+
+    async def test_the_socket_stays_unconnected_and_stops_reporting_after_the_handshake(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        created = connect_webtransport(
+            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        transport: Any = created.transport
+        sock = transport._protocol._transport.get_extra_info("socket")
+
+        try:
+            # No peer association: a change of the client's own address still lets the relay migrate.
+            with pytest.raises(OSError):
+                sock.getpeername()
+
+            assert not reports_refusals(sock)
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
+    async def test_a_refused_connect_leaves_no_error_report_to_spin_on(self) -> None:
+        created = connect_webtransport(f"https://127.0.0.1:{_closed_udp_port()}", ["moqt-20"])
+
+        with pytest.raises(WebTransportError):
+            await asyncio.wait_for(created.ready, 2)
+
+        transport: Any = created.transport
+        protocol = transport._transport_protocol()
+        sock = protocol._transport.get_extra_info("socket")
+        # The teardown's CONNECTION_CLOSE draws another port unreachable; with reporting off it queues nothing.
+        await asyncio.sleep(0.1)
+
+        try:
+            assert protocol._transport is not None and not protocol._transport.is_closing()
+            assert not reports_refusals(sock)
+            assert not _polls_errored(sock)
+        finally:
+            await asyncio.wait_for(protocol.transport_closed.wait(), 5)
+
+    @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
+    async def test_an_error_ignored_during_the_handshake_is_drained(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as blackhole:
+            blackhole.bind(("127.0.0.1", 0))
+            created = connect_webtransport(f"https://127.0.0.1:{blackhole.getsockname()[1]}", ["moqt-20"])
+            transport: Any = created.transport
+            await wait_for(lambda: transport._transport_protocol() is not None, timeout=2)
+            protocol = transport._transport_protocol()
+            sock = protocol._transport.get_extra_info("socket")
+
+            # Queue a real ICMP report on the client socket without letting the loop read it, then hand
+            # the protocol an error it ignores (as a host unreachable would be).
+            closed = ("127.0.0.1", _closed_udp_port())
+            if sock.family == socket.AF_INET6:
+                closed = ("::ffff:127.0.0.1", closed[1], 0, 0)
+
+            with socket.fromfd(sock.fileno(), sock.family, socket.SOCK_DGRAM) as same_socket:
+                same_socket.sendto(b"x", closed)
+
+            poller = select.poll()
+            poller.register(sock.fileno(), 0)
+            assert poller.poll(500), "the port unreachable should have been queued"  # blocks the loop on purpose
+            protocol.error_received(OSError(errno.EHOSTUNREACH, "No route to host"))
+
+            try:
+                assert not _polls_errored(sock)
+                assert reports_refusals(sock)  # still in the handshake: a real refusal must still be heard
+                assert protocol.refused is None and not transport.ready.done()
+            finally:
+                transport.close()
+                with pytest.raises(WebTransportError):
+                    await created.ready
+                assert not reports_refusals(sock)  # closing a pending handshake turns reporting off
+                await asyncio.wait_for(protocol.transport_closed.wait(), 5)
+
+    async def test_a_refusal_after_the_handshake_changes_nothing(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        created = connect_webtransport(
+            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        transport: Any = created.transport
+        protocol = transport._protocol
+
+        try:
+            # A transient ICMP error on an established connection: QUIC's own recovery decides, not the socket.
+            protocol.error_received(ConnectionRefusedError(111, "Connection refused"))
+            assert protocol.refused is None
+            stream = await transport.create_unidirectional_stream()
+            await stream.write(b"still here")
+            await stream.close()
+            await wait_for(lambda: len(sessions) == 1, timeout=5)
+            assert protocol.terminated is None and not transport.ended
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
 
 
 class TestReceivePruning:

@@ -158,9 +158,14 @@ Messages are not a compatibility contract; the class and the point of rejection 
   needs earlier groups asks for them with a relative-group or absolute filter. The SDK sends the
   filter it is given and adds none.
 - The request timeout bounds only the subscription's initial response. An accepted subscription
-  has no application inactivity deadline. Keeping an idle transport connected depends on peer
-  traffic or transport-provided keepalive; the SDK does not schedule its own keepalive. The Python
-  transport uses aioquic's default 60-second local idle timeout, subject to peer negotiation.
+  has no application inactivity deadline. The SDK schedules no application-level keepalive: keeping
+  the transport connected is left to peer traffic and the transport's own keepalive, which
+  [draft-20 Section 13.6.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-13.6.1)
+  names as one way to keep an idle session open. In TypeScript that is Chromium's own QUIC PING. In
+  Python the aioquic adapter sends a QUIC PING once it has sent nothing for 5 seconds, which also
+  lets a receive-only connection survive a NAT rebinding: the relay learns the new address from
+  that packet. The Python transport uses aioquic's default 60-second local idle timeout, subject to
+  peer negotiation.
 - `update()` sends REQUEST_UPDATE, which the draft allows only on an accepted subscription
   ([draft-20 Section 5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1)).
   An update issued before acceptance is queued in order and sent when SUBSCRIBE_OK arrives; at most
