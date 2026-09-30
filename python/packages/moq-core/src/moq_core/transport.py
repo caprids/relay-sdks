@@ -87,4 +87,21 @@ class MoqtTransport(Protocol):
         ...
 
 
-__all__ = ["BidirectionalStream", "MoqtTransport", "ReceiveStream", "SendStream"]
+@runtime_checkable
+class _EndAware(Protocol):
+    @property
+    def ended(self) -> bool: ...
+
+
+def transport_ended(transport: MoqtTransport) -> bool:
+    """Whether the transport has already ended, ahead of ``wait_closed`` returning.
+
+    A transport may expose this as an optional synchronous ``ended`` property that turns true before
+    it fails its streams, as the native transport does: a stream failure seen while it is true is the
+    closure's doing, not a reset the peer sent. ``False`` for a transport that cannot say; its
+    closure then arrives only through ``wait_closed``.
+    """
+    return isinstance(transport, _EndAware) and transport.ended
+
+
+__all__ = ["BidirectionalStream", "MoqtTransport", "ReceiveStream", "SendStream", "transport_ended"]

@@ -12,7 +12,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
 from moq_core.control_messages import MESSAGE_TYPE
-from moq_core.transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream
+from moq_core.transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream, transport_ended
 from moq_core.varint import decode_varint, encode_varint
 
 from .streams import Pipe, PipeEvent, PushChannel, StreamClosedError
@@ -38,6 +38,13 @@ class PairTransport:
         self._local = local
         self._remote = remote
         self._shared = shared
+        self.release_after_turns = 0
+        """Extra loop turns ``wait_closed`` takes after the end, like the native transport's socket release."""
+
+    @property
+    def ended(self) -> bool:
+        """True once the pair has ended, before any stream fails, like the native transport."""
+        return self._shared.closed
 
     def incoming_unidirectional_streams(self) -> AsyncIterator[ReceiveStream]:
         return self._local.incoming_uni
@@ -66,7 +73,19 @@ class PairTransport:
         self._shared.close_both(CloseInfo(close_code, reason))
 
     async def wait_closed(self) -> None:
-        await self._local.closed
+        try:
+            await self._local.closed
+        finally:
+            for _ in range(self.release_after_turns):
+                await asyncio.sleep(0)
+
+    def terminate(self, error: BaseException) -> None:
+        """End the connection under both sides with ``error``, as a QUIC idle timeout does.
+
+        Unlike a peer's RESET_STREAM, every stream fails with the transport's own error, and
+        ``wait_closed`` raises it.
+        """
+        self._shared.end_both(error)
 
 
 class _Shared:
@@ -87,12 +106,22 @@ class _Shared:
         if self.closed:
             return
 
-        self.closed = True
         self.close_info = info
+        self.end_both(None)
+
+    def end_both(self, error: BaseException | None) -> None:
+        if self.closed:
+            return
+
+        self.closed = True
 
         for side in self._sides:
             if not side.closed.done():
-                side.closed.set_result(None)
+                if error is None:
+                    side.closed.set_result(None)
+                else:
+                    side.closed.set_exception(error)
+                    side.closed.add_done_callback(lambda future: future.exception())
 
             side.incoming_uni.close()
             side.incoming_bidi.close()
@@ -100,7 +129,7 @@ class _Shared:
         # A real transport tears its streams down with the session; leaving them open would strand
         # every read loop forever.
         for pipe in self._pipes:
-            pipe.break_pipe(StreamClosedError("transport closed"))
+            pipe.break_pipe(error if error is not None else StreamClosedError("transport closed"))
 
 
 @dataclass(slots=True)
@@ -205,6 +234,10 @@ class ServerRequestIdTransport:
 
     async def wait_closed(self) -> None:
         await self._inner.wait_closed()
+
+    @property
+    def ended(self) -> bool:
+        return transport_ended(self._inner)
 
 
 def with_server_request_ids(transport: MoqtTransport) -> ServerRequestIdTransport:
