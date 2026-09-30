@@ -57,7 +57,7 @@ run = "pnpm check"
 description = "Generate the TypeScript API reference with TypeDoc into ts/docs-api/"
 depends = ["ts:install"]
 dir = "ts"
-run = "pnpm docs"
+run = "pnpm run docs"
 
 [tasks."ts:test:relay"]
 description = "Opt-in live smoke test against a real Relay (RELAY_TOKEN or hidden prompt)"
