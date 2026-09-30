@@ -16,7 +16,7 @@ from typing import Any, Protocol
 
 from moq_core._tasks import observe
 
-from ._errors import WebTransportError, _error_code_of
+from ._errors import StreamStopped, WebTransportError, _error_code_of
 
 
 class _StreamLink(Protocol):
@@ -168,7 +168,7 @@ class _SendHalf:
             raise WebTransportError("stream is closed")
 
         if self._stopped is not None:
-            raise WebTransportError("peer stopped the stream", code=self._stopped)
+            raise StreamStopped("peer stopped the stream", code=self._stopped)
 
         self._link.check_live()
 
@@ -201,7 +201,7 @@ class _SendHalf:
         """The peer sent STOP_SENDING: queued bytes will never go out (aioquic answers with a reset of its own)."""
         if self._stopped is None:
             self._stopped = code
-            self.fail_transmit(WebTransportError("peer stopped the stream", code=code))
+            self.fail_transmit(StreamStopped("peer stopped the stream", code=code))
 
     def fail(self, error: BaseException) -> None:
         """The session ended, or the stream is gone: the pending transmission fails, and so does every later write."""

@@ -18,6 +18,7 @@ from relay_helpers.stream_link import StreamLink
 
 from moq_core.transport import ReceiveStream, SendStream
 from mux_relay.webtransport import WebTransportError
+from mux_relay.webtransport._errors import StreamStopped
 from mux_relay.webtransport._streams import _StreamQueue
 
 STREAM_ID = 4
@@ -240,12 +241,12 @@ class TestSendHalf:
 
         send.stopped(9)
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(StreamStopped) as failure:
             await pending
 
         assert failure.value.code == 9
 
-        with pytest.raises(WebTransportError) as refused:
+        with pytest.raises(StreamStopped) as refused:
             await send.write(b"y")
 
         assert refused.value.code == 9
