@@ -181,6 +181,10 @@ class FakeWebTransportError extends Error {
 /** The relay's STOP_SENDING on a data stream, as the rejected write or FIN carries it. */
 const stopSending = () => new FakeWebTransportError('Received STOP_SENDING.', 'stream', 0);
 
+/** The same stop when Chromium learns first that the network side closed the stream: a NetworkError DOMException. */
+const remoteAbort = () =>
+  Object.assign(new Error('The stream was aborted by the remote server'), { name: 'NetworkError' });
+
 const bytes = (...values: number[]) => new Uint8Array(values);
 const flush = () => vi.advanceTimersByTimeAsync(0);
 const elapse = (ms: number) => vi.advanceTimersByTimeAsync(ms);
@@ -508,22 +512,28 @@ describe('write slot: writing and closing a single write', () => {
     },
   );
 
-  it('reports a relay stop as SUBSCRIPTION_CHANGED while the subscription goes on, and writes on at once', async () => {
-    const { slot, writer, opened } = harness({ stall: 'write' });
-    slot.bind(1);
-    const stop = stopSending();
-    const rejected = expect(writer.write(bytes(1))).rejects.toMatchObject({
-      code: 'SUBSCRIPTION_CHANGED',
-      phase: 'writing',
-      cause: stop,
-    });
-    await flush();
-    opened[0]?.fail(stop);
-    await rejected;
-    expect(writer.hasDemand).toBe(true);
-    await writer.write(bytes(2));
-    expect(opened[1]).toMatchObject({ trackAlias: 1, groupId: 1, finCalls: 1 });
-  });
+  it.each([
+    ['WebTransportError', stopSending],
+    ['NetworkError', remoteAbort],
+  ])(
+    'reports a relay stop (%s) as SUBSCRIPTION_CHANGED while the subscription goes on, and writes on at once',
+    async (_, stopped) => {
+      const { slot, writer, opened } = harness({ stall: 'write' });
+      slot.bind(1);
+      const stop = stopped();
+      const rejected = expect(writer.write(bytes(1))).rejects.toMatchObject({
+        code: 'SUBSCRIPTION_CHANGED',
+        phase: 'writing',
+        cause: stop,
+      });
+      await flush();
+      opened[0]?.fail(stop);
+      await rejected;
+      expect(writer.hasDemand).toBe(true);
+      await writer.write(bytes(2));
+      expect(opened[1]).toMatchObject({ trackAlias: 1, groupId: 1, finCalls: 1 });
+    },
+  );
 
   it('keeps the binding change as the reason when the relay stop arrives after it', async () => {
     const { slot, writer, opened } = harness({ stall: 'write' });
