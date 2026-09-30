@@ -73,7 +73,14 @@ from .control_messages import (
 from .errors import SESSION_ERROR, MoqtProtocolError, is_moqt_protocol_error
 from .object_stream import STREAM_TYPE, is_subgroup_header_type
 from .session import Closed, _call, _describe
-from .transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream, transport_ended
+from .transport import (
+    BidirectionalStream,
+    MoqtTransport,
+    ReceiveStream,
+    SendStream,
+    transport_ended,
+    wait_acknowledged,
+)
 
 # =============================================================================
 # Driver types
@@ -281,6 +288,9 @@ class _DataStream:
         self._settle()
         self._stream.abort(reason)
 
+    async def wait_acknowledged(self) -> None:
+        await wait_acknowledged(self._stream)
+
 
 @dataclass(slots=True, kw_only=True)
 class _TrackRecord:
@@ -367,6 +377,8 @@ class MoqtPublishSession:
         self._closing = False
         self._close_error: BaseException | None = None
         self._destroyed = False
+        self._end_acknowledgements: set[asyncio.Task[None]] = set()
+        """One task per subscription end whose PUBLISH_DONE and FIN the peer has not acknowledged yet."""
 
         spawn(self._start())
 
@@ -463,6 +475,12 @@ class MoqtPublishSession:
         request stream, which it does once it has consumed the PUBLISH_DONE, and close the transport.
         Returns immediately; the transport closes within :data:`CLOSE_FLUSH_TIMEOUT` plus
         :data:`CLOSE_END_ACK_TIMEOUT`, and sooner against a peer that answers promptly.
+
+        Neither bound waits for acknowledgement, so the writes can still be in flight when the
+        transport closes. A caller that has ended its tracks and must not close while their data
+        streams or ends are unacknowledged waits first, for as long as it chooses, on
+        :meth:`wait_ends_acknowledged` and on its data streams; the relay publisher does, for up to its
+        largest write deadline.
         """
         self._close(close_code, reason)
 
@@ -703,13 +721,17 @@ class MoqtPublishSession:
         """
         subscriber.finished = True
 
+        fin_written = False
+
         async def end() -> None:
+            nonlocal fin_written
             if subscriber.opening:
                 await asyncio.wait(set(subscriber.opening))
 
             subscriber.reset_data_streams()
             await subscriber.writer.write(preceding + encode_publish_done(status, subscriber.stream_count, reason))
             await subscriber.writer.close()
+            fin_written = True
 
         ended = spawn(_swallow(end()))
         track.pending_ends.append(ended)
@@ -719,6 +741,26 @@ class MoqtPublishSession:
                 track.pending_ends.remove(ended)
 
         ended.add_done_callback(prune)
+
+        async def acknowledged() -> None:
+            await ended
+
+            if fin_written:
+                await wait_acknowledged(subscriber.writer)
+
+        acknowledging = spawn(_swallow(acknowledged()))
+        self._end_acknowledgements.add(acknowledging)
+        acknowledging.add_done_callback(self._end_acknowledgements.discard)
+
+    async def wait_ends_acknowledged(self) -> None:
+        """Return once the peer acknowledged every subscription end queued so far: its PUBLISH_DONE and FIN.
+
+        An end that failed, or whose stream was reset, counts as done. On a transport that does not
+        report acknowledgement, an end counts once its FIN was written. Never raises; the caller bounds
+        the wait.
+        """
+        if self._end_acknowledgements:
+            await asyncio.wait(set(self._end_acknowledgements))
 
     def _live_subscription(self, track_alias: int) -> _SubscriberStream | None:
         for track in self._tracks.values():

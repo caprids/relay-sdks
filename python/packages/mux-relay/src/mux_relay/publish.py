@@ -33,6 +33,7 @@ from moq_core import (
 )
 
 from ._awaitable import RelayAwaitable
+from ._settling_groups import SettlingGroups
 from ._validation import namespace_fields, property_pairs, track_name
 from ._write_slot import RelayGroupWriter, RelayTrackWriter, WriteSlotDependencies, _observe
 from .cancellation import CancellationToken
@@ -64,8 +65,11 @@ class RelayPublisher:
         "_closed",
         "_closed_awaitable",
         "_closing",
+        "_drain_timeout",
         "_lifetime",
         "_namespace",
+        "_settling_groups",
+        "_shutdown",
         "_tracks",
         "_watcher",
     )
@@ -81,6 +85,11 @@ class RelayPublisher:
         # One write slot per registered track; the session's binding callback and the connection's
         # end reach the slots through here.
         self._tracks: dict[str, RelayTrackWriter] = {}
+        # Groups whose FIN the transport took but the relay has not acknowledged, shared by every track.
+        self._settling_groups = SettlingGroups()
+        # How long closing waits for them: the largest write deadline among the tracks.
+        self._drain_timeout = 0.0
+        self._shutdown: asyncio.Future[None] | None = None
         self._closing = False
         self._closed: asyncio.Future[Closed] = asyncio.get_running_loop().create_future()
         self._closed_awaitable: RelayAwaitable[Closed] = RelayAwaitable(self._closed)
@@ -197,6 +206,7 @@ class RelayPublisher:
             name,
             WriteSlotDependencies(
                 open_subgroup=open_subgroup,
+                settling_groups=self._settling_groups,
                 namespace_solicited=lambda: session.namespace_solicited,
                 assert_open=self._lifetime.assert_open,
                 end_track=registered.end,
@@ -204,15 +214,35 @@ class RelayPublisher:
             ),
         )
         self._tracks[name] = writer
+        self._drain_timeout = max(self._drain_timeout, write_timeout)
         return writer
 
     async def close(self) -> None:
-        """End all tracks, retract the namespace, and wait for transport shutdown. Idempotent."""
-        self._closing = True
+        """End all tracks, retract the namespace, and wait for transport shutdown. Idempotent.
 
-        for track in list(self._tracks.values()):
-            track.close()
+        Before the session ends it waits, for up to the largest ``write_timeout`` among the tracks,
+        for the relay to acknowledge the groups that completed and each track's end; any still
+        unacknowledged after that may be lost, and the close still succeeds. Cancelling the caller
+        does not stop the shutdown.
+        """
+        if self._shutdown is None:
+            self._closing = True
 
+            for track in list(self._tracks.values()):
+                track.close()
+
+            self._shutdown = asyncio.ensure_future(self._drain_and_close())
+            _observe(self._shutdown)
+
+        await asyncio.shield(self._shutdown)
+
+    async def _drain_and_close(self) -> None:
+        # Closing the session sends the close capsule and then the transport close, and the relay
+        # aborts a track whose data or PUBLISH_DONE it has not received by then (viewers see status 0).
+        # So give the last groups and the ends up to one write deadline to be acknowledged first.
+        await self._settling_groups.drain(
+            self._drain_timeout, self._lifetime.closed, self._lifetime.session.wait_ends_acknowledged()
+        )
         self._lifetime.close()
         await self._closed
 

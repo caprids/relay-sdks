@@ -14,6 +14,7 @@ from core_helpers.waiting import settle, wait_for
 from moq_core import KeyValuePair, ObjectStatus
 from moq_core.control_messages import STREAM_RESET_CODE
 from mux_relay import RelayError
+from mux_relay._settling_groups import SETTLING_GROUP_LIMIT, SettlingGroups
 from mux_relay._write_slot import RelayTrackWriter, StreamReset, WriteSlotDependencies
 from mux_relay.webtransport import WebTransportError
 from mux_relay.webtransport._errors import StreamStopped
@@ -26,7 +27,7 @@ SHORT = 0.05
 class FakeSubgroup:
     """One subgroup stream as the slot sees it: records objects, FIN and abort reasons, and can stall or fail."""
 
-    def __init__(self, track_alias: int, group_id: int, stall: Stall) -> None:
+    def __init__(self, track_alias: int, group_id: int, stall: Stall, acknowledge: bool) -> None:
         self.track_alias = track_alias
         self.group_id = group_id
         self.objects: list[dict[str, Any]] = []
@@ -34,6 +35,10 @@ class FakeSubgroup:
         self.fin_calls = 0
         self._stall = stall
         self._waiting: asyncio.Future[None] | None = None
+        self.acknowledgement: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        """The relay's acknowledgement of the whole stream; settled at once unless the harness holds it."""
+        if acknowledge:
+            self.acknowledgement.set_result(None)
 
     async def write_object(
         self,
@@ -50,6 +55,16 @@ class FakeSubgroup:
     async def fin(self) -> None:
         self.fin_calls += 1
         await self._settle(self._stall == "fin")
+
+    async def wait_acknowledged(self) -> None:
+        await self.acknowledgement
+
+    def acknowledge(self, error: BaseException | None = None) -> None:
+        """The relay acknowledges the stream, or, given ``error``, it never will."""
+        if error is None:
+            self.acknowledgement.set_result(None)
+        else:
+            self.acknowledgement.set_exception(error)
 
     def abort(self, reason: object = None) -> None:
         self.aborts.append(reason)
@@ -91,12 +106,16 @@ class Harness:
         solicited: bool | None = None,
         stall: Stall = "none",
         open: Literal["ok", "hold", "reject"] = "ok",
+        acknowledge: bool = True,
+        settling_groups: SettlingGroups | None = None,
     ) -> None:
         self.opened: list[FakeSubgroup] = []
         self.open_failure = ConnectionError("data stream failed")
         self.end_track_calls = 0
         self._stall = stall
         self._open = open
+        self._acknowledge = acknowledge
+        self.settling_groups = settling_groups if settling_groups is not None else SettlingGroups()
         self._holds: list[asyncio.Future[FakeSubgroup]] = []
         self._connection_closed = False
         self._connection_error: BaseException | None = None
@@ -104,6 +123,7 @@ class Harness:
             "events",
             WriteSlotDependencies(
                 open_subgroup=self._open_subgroup,
+                settling_groups=self.settling_groups,
                 namespace_solicited=lambda: solicited,
                 assert_open=self._assert_open,
                 end_track=self._end_track,
@@ -115,7 +135,7 @@ class Harness:
         if self._open == "reject":
             raise self.open_failure
         # Only the first stream stalls, so the recovery write after a failure can complete.
-        subgroup = FakeSubgroup(track_alias, group_id, self._stall if not self.opened else "none")
+        subgroup = FakeSubgroup(track_alias, group_id, self._stall if not self.opened else "none", self._acknowledge)
         self.opened.append(subgroup)
         if self._open == "hold":
             held: asyncio.Future[FakeSubgroup] = asyncio.get_running_loop().create_future()
@@ -785,6 +805,97 @@ class TestDemandObservers:
         assert not h.writer.has_demand
         with pytest.raises(StopAsyncIteration):
             await anext(changes)
+
+
+class TestSettlingGroups:
+    """A completed group settles on the connection's account until the relay acknowledges its FIN (#160)."""
+
+    async def fill(self, h: Harness) -> None:
+        for _ in range(SETTLING_GROUP_LIMIT):
+            await h.writer.write(b"\x01")
+        assert h.settling_groups.size == SETTLING_GROUP_LIMIT
+
+    async def test_a_write_and_a_group_complete_before_the_acknowledgement_and_settle_on_it(self) -> None:
+        h = Harness(acknowledge=False)
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        group = await h.writer.open_group()
+        await group.write(b"\x02")
+        await group.close()
+        assert h.settling_groups.size == 2
+        h.opened[0].acknowledge()
+        h.opened[1].acknowledge(stop_sending())  # a late failure settles too, silently
+        await wait_for(lambda: h.settling_groups.size == 0)
+        assert [subgroup.aborts for subgroup in h.opened] == [[], []]
+        assert not h.writer.closed
+
+    async def test_at_the_limit_the_next_write_waits_in_opening_stream_and_proceeds_when_one_settles(self) -> None:
+        h = Harness(acknowledge=False)
+        h.writer._bind(1)
+        await self.fill(h)
+        writing = await started(h.writer.write(b"\x02"))
+        await settle()
+        assert not writing.done()
+        assert len(h.opened) == SETTLING_GROUP_LIMIT  # its stream is not opened yet
+        h.opened[0].acknowledge()
+        await writing
+        assert len(h.opened) == SETTLING_GROUP_LIMIT + 1
+        assert h.opened[-1].group_id == SETTLING_GROUP_LIMIT
+
+    async def test_at_the_limit_a_write_that_never_gets_room_times_out_in_opening_stream(self) -> None:
+        h = Harness(write_timeout=SHORT, acknowledge=False)
+        h.writer._bind(1)
+        await self.fill(h)
+        with pytest.raises(RelayError) as failure:
+            await h.writer.open_group()
+        assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", "opening-stream")
+        assert len(h.opened) == SETTLING_GROUP_LIMIT
+        # The timed-out wait gave up its place: the next write takes the room that frees up.
+        writing = await started(h.writer.write(b"\x03"))
+        h.opened[0].acknowledge()
+        await writing
+        assert len(h.opened) == SETTLING_GROUP_LIMIT + 1
+
+    async def test_waiters_on_several_tracks_go_on_in_arrival_order(self) -> None:
+        shared = SettlingGroups(limit=1)
+        first, second, third = (Harness(acknowledge=False, settling_groups=shared) for _ in range(3))
+        for h in (first, second, third):
+            h.writer._bind(1)
+        await first.writer.write(b"\x01")
+        order: list[str] = []
+
+        async def write(h: Harness, name: str) -> None:
+            await h.writer.write(b"\x02")
+            order.append(name)
+
+        waiting = [await started(write(second, "second")), await started(write(third, "third"))]
+        await settle()
+        assert order == []
+        first.opened[0].acknowledge()
+        await asyncio.gather(*waiting)
+        assert order == ["second", "third"]
+
+    async def test_open_groups_do_not_count_so_more_tracks_than_the_limit_each_open_one_at_once(self) -> None:
+        shared = SettlingGroups()
+        tracks = [Harness(acknowledge=False, settling_groups=shared) for _ in range(SETTLING_GROUP_LIMIT + 1)]
+        for h in tracks:
+            h.writer._bind(1)
+        groups = [await asyncio.wait_for(h.writer.open_group(), SHORT) for h in tracks]
+        assert shared.size == 0
+        for group in groups:
+            await group.close()
+        assert shared.size == SETTLING_GROUP_LIMIT + 1  # the count can exceed the limit by the open groups
+
+    async def test_a_subscription_change_or_track_close_never_resets_a_settling_group(self) -> None:
+        h = Harness(acknowledge=False)
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        h.writer._bind(2)
+        h.writer._bind(None)
+        h.writer.close()
+        h.disconnect()
+        assert h.opened[0].aborts == []
+        assert h.settling_groups.size == 1
 
 
 def test_stream_reset_carries_the_moqt_code_and_the_cause() -> None:

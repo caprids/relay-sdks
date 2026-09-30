@@ -212,3 +212,38 @@ class TestCreateSubgroupWriter:
 
         with pytest.raises(ConnectionError, match="stream gone"):
             await writer.write_object(object_id=0, properties=[], payload=bytes([1]))
+
+
+class AcknowledgingStream(CollectingStream):
+    """A ``CollectingStream`` whose transport reports the peer's acknowledgement when the test says so."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.acknowledgement: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+
+    async def wait_acknowledged(self) -> None:
+        await self.acknowledgement
+
+
+class TestWaitAcknowledged:
+    async def test_counts_a_stream_without_acknowledgement_reporting_as_acknowledged_once_finned(self) -> None:
+        writer = create_subgroup_writer(CollectingStream(), track_alias=1, group_id=0)
+        await writer.fin()
+        await asyncio.wait_for(writer.wait_acknowledged(), 1)
+
+    async def test_waits_for_the_transports_acknowledgement_and_raises_its_failure(self) -> None:
+        sink = AcknowledgingStream()
+        writer = create_subgroup_writer(sink, track_alias=1, group_id=0)
+        await writer.fin()
+        waiting = asyncio.ensure_future(writer.wait_acknowledged())
+        await asyncio.sleep(0.01)
+        assert not waiting.done()
+        sink.acknowledgement.set_result(None)
+        await asyncio.wait_for(waiting, 1)
+
+        failed = AcknowledgingStream()
+        writer = create_subgroup_writer(failed, track_alias=1, group_id=1)
+        await writer.fin()
+        failed.acknowledgement.set_exception(ConnectionError("reset"))
+        with pytest.raises(ConnectionError):
+            await writer.wait_acknowledged()

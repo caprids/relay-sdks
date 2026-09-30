@@ -387,6 +387,46 @@ class TestSendBackpressure:
         server.close()
         await asyncio.sleep(0.05)
 
+    async def test_wait_acknowledged_settles_on_the_peers_acknowledgement_not_on_transmission(self) -> None:
+        # A settling group (#160, #161): the FIN has been handed to the wire, so close() returns, but
+        # the acknowledgement arrives only once the uplink is back. A reset stream never settles cleanly.
+        received: list[int] = []
+        sessions: list[Any] = []
+        drainers: list[asyncio.Task[None]] = []
+
+        def on_session(session: Any) -> None:
+            sessions.append(session)
+            drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+
+        try:
+            sessions[0].impair(paused=True)
+            stream = await transport.create_unidirectional_stream()
+            await asyncio.wait_for(stream.write(b"\1" * 1000), 5)
+            await asyncio.wait_for(stream.close(), 5)
+            acknowledged = asyncio.ensure_future(stream.wait_acknowledged())
+            await asyncio.sleep(0.3)
+            assert not acknowledged.done()
+
+            sessions[0].impair()
+            await asyncio.wait_for(acknowledged, 5)
+            await wait_for(lambda: received == [1000], timeout=5)
+            await stream.wait_acknowledged()  # settled for later waiters too
+
+            aborted = await transport.create_unidirectional_stream()
+            await aborted.write(b"\2")
+            aborted.abort()
+            with pytest.raises(WebTransportError):
+                await asyncio.wait_for(aborted.wait_acknowledged(), 5)
+        finally:
+            transport.close()
+            await asyncio.wait_for(transport.wait_closed(), 5)
+            server.close()
+            await asyncio.sleep(0.05)
+
     async def test_per_stream_state_is_pruned_as_streams_finish(self) -> None:
         # Every single-object write is one stream; finished streams must leave no permanent per-stream
         # state in the adapter's maps or in aioquic's live stream table (#4).
