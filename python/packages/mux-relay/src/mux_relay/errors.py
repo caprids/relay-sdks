@@ -100,4 +100,12 @@ def _credential_refusal(error: Exception) -> WebTransportError | None:
     return None
 
 
+def _stream_stopped(error: BaseException) -> bool:
+    """Whether a send-stream failure is the peer's STOP_SENDING on that stream, not a session failure."""
+    # Imported here for the same reason as in `_credential_refusal`.
+    from .webtransport._errors import StreamStopped
+
+    return isinstance(error, StreamStopped)
+
+
 __all__ = ["RelayError", "RelayErrorCode", "RelayErrorPhase"]

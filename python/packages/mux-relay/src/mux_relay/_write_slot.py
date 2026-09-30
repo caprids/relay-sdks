@@ -27,6 +27,7 @@ from ._validation import payload_bytes, property_pairs
 from .errors import (
     RelayError,
     RelayErrorPhase,
+    _stream_stopped,
     _transport_error,
 )
 from .payload import _encode_json, _encode_text
@@ -167,8 +168,9 @@ class _Operation:
 
         Cancellation and closure win over a transport result that lands in the same event-loop
         turn, and the failure the caller sees keeps its identity: task cancellation stays a
-        ``CancelledError``, a connection failure stays the connection's error, and only a bare
-        transport exception is wrapped as ``TRANSPORT_ERROR``.
+        ``CancelledError``, a connection failure stays the connection's error, a peer stop of the
+        operation's own stream becomes ``SUBSCRIPTION_CHANGED``, and only another bare transport
+        exception is wrapped as ``TRANSPORT_ERROR``.
         """
         timer = asyncio.get_running_loop().call_later(self._slot._deps.write_timeout, self._expire)
         sending = asyncio.ensure_future(send())
@@ -201,6 +203,17 @@ class _Operation:
         except BaseException as interrupted:
             code = self.code if self.cancelled else _connection_reset_code(interrupted)
             return interrupted, code
+        if self.writer is not None and _stream_stopped(error):
+            # The relay stopped this operation's own stream: the group is no longer of interest
+            # (§11.4), whether or not its subscription is ending too. The binding alone decides
+            # whether the next write waits for demand; a later binding change finds no operation.
+            stopped = RelayError(
+                "Relay stopped the stream during a write or group; objects may be incomplete",
+                code="SUBSCRIPTION_CHANGED",
+                phase=self.phase,
+            )
+            stopped.__cause__ = error
+            return stopped, STREAM_RESET_CODE.CANCELLED
         return _transport_error(error, self.phase), STREAM_RESET_CODE.INTERNAL_ERROR
 
     def _expire(self) -> None:

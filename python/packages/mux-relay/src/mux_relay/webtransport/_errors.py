@@ -22,6 +22,15 @@ class WebTransportError(Exception):
         self.peer_closed = peer_closed
 
 
+class StreamStopped(WebTransportError):
+    """The peer sent STOP_SENDING on a send stream: nothing more written to it will be delivered.
+
+    ``code`` is the peer's application error code. A Relay write that fails this way on its own
+    stream raises ``SUBSCRIPTION_CHANGED``, not ``TRANSPORT_ERROR``: the relay stops a subgroup
+    stream when its group is no longer of interest (draft-ietf-moq-transport-20 §11.4).
+    """
+
+
 def _error_code_of(reason: object) -> int:
     if isinstance(reason, WebTransportError) and reason.code is not None:
         return reason.code

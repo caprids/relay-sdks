@@ -15,6 +15,8 @@ from moq_core import KeyValuePair, ObjectStatus
 from moq_core.control_messages import STREAM_RESET_CODE
 from mux_relay import RelayError
 from mux_relay._write_slot import RelayTrackWriter, StreamReset, WriteSlotDependencies
+from mux_relay.webtransport import WebTransportError
+from mux_relay.webtransport._errors import StreamStopped
 
 Stall = Literal["none", "write", "second-write", "fin"]
 SHORT = 0.05
@@ -153,6 +155,11 @@ class Harness:
 def reset_code(reason: object) -> int:
     assert isinstance(reason, StreamReset)
     return reason.stream_error_code
+
+
+def stop_sending() -> StreamStopped:
+    """The relay's STOP_SENDING on a data stream, as the SDK transport fails the pending write or FIN with it."""
+    return StreamStopped("peer stopped the stream", code=0)
 
 
 async def started(coroutine: Any) -> asyncio.Task[Any]:
@@ -441,6 +448,76 @@ class TestWritingAndClosingASingleWrite:
         assert not h.writer.closed
         assert h.writer.has_demand is (next_alias is not None)
 
+    @pytest.mark.parametrize(("stall", "phase"), [("write", "writing"), ("fin", "closing")])
+    async def test_reports_a_relay_stop_as_subscription_changed_before_the_subscription_ends_reporting_nothing_more(
+        self, stall: Stall, phase: str
+    ) -> None:
+        h = Harness(stall=stall)
+        h.writer._bind(1)
+        writing = await started(h.writer.write(b"\x01"))
+        await wait_for(lambda: h.opened[0].stalled)
+        stop = stop_sending()
+        h.opened[0].fail(stop)
+        with pytest.raises(RelayError) as failure:
+            await writing
+        assert (failure.value.code, failure.value.phase) == ("SUBSCRIPTION_CHANGED", phase)
+        assert failure.value.__cause__ is stop
+        h.writer._bind(None)
+        assert [reset_code(reason) for reason in h.opened[0].aborts] == [STREAM_RESET_CODE.CANCELLED]
+        assert not h.writer.closed
+        assert not h.writer.has_demand
+        # The subscription ended, so the next write waits for new demand.
+        following = await started(h.writer.write(b"\x02"))
+        await settle()
+        assert len(h.opened) == 1
+        h.writer._bind(2)
+        await following
+        assert (h.opened[1].track_alias, h.opened[1].group_id, h.opened[1].fin_calls) == (2, 1, 1)
+
+    async def test_reports_a_relay_stop_as_subscription_changed_while_the_subscription_goes_on_and_writes_on_at_once(
+        self,
+    ) -> None:
+        h = Harness(stall="write")
+        h.writer._bind(1)
+        writing = await started(h.writer.write(b"\x01"))
+        await wait_for(lambda: h.opened[0].stalled)
+        stop = stop_sending()
+        h.opened[0].fail(stop)
+        with pytest.raises(RelayError) as failure:
+            await writing
+        assert (failure.value.code, failure.value.phase) == ("SUBSCRIPTION_CHANGED", "writing")
+        assert failure.value.__cause__ is stop
+        assert h.writer.has_demand
+        await h.writer.write(b"\x02")
+        assert (h.opened[1].track_alias, h.opened[1].group_id, h.opened[1].fin_calls) == (1, 1, 1)
+
+    async def test_keeps_the_binding_change_as_the_reason_when_the_relay_stop_arrives_after_it(self) -> None:
+        h = Harness(stall="write")
+        h.writer._bind(1)
+        writing = await started(h.writer.write(b"\x01"))
+        await wait_for(lambda: h.opened[0].stalled)
+        h.writer._bind(None)
+        h.opened[0].fail(stop_sending())
+        with pytest.raises(RelayError) as failure:
+            await writing
+        assert (failure.value.code, failure.value.phase) == ("SUBSCRIPTION_CHANGED", "writing")
+        assert str(failure.value) == "Relay subscription changed during a write or group; objects may be incomplete"
+        assert failure.value.__cause__ is None
+        assert [reset_code(reason) for reason in h.opened[0].aborts] == [STREAM_RESET_CODE.CANCELLED]
+
+    async def test_still_reports_a_session_failure_on_the_stream_as_transport_error(self) -> None:
+        h = Harness(stall="write")
+        h.writer._bind(1)
+        writing = await started(h.writer.write(b"\x01"))
+        await wait_for(lambda: h.opened[0].stalled)
+        cause = WebTransportError("session closed", code=0)
+        h.opened[0].fail(cause)
+        with pytest.raises(RelayError) as failure:
+            await writing
+        assert (failure.value.code, failure.value.phase) == ("TRANSPORT_ERROR", "writing")
+        assert failure.value.__cause__ is cause
+        assert [reset_code(reason) for reason in h.opened[0].aborts] == [STREAM_RESET_CODE.INTERNAL_ERROR]
+
     async def test_cancels_an_in_flight_write_with_closed_when_the_track_closes_and_resets_with_cancelled(self) -> None:
         h = Harness(stall="write")
         h.writer._bind(1)
@@ -578,6 +655,31 @@ class TestGroups:
         assert following.group_id == 1
         await following.write(b"\x04")
         await following.close()
+
+    @pytest.mark.parametrize(
+        ("mode", "stall", "phase"), [("write", "second-write", "writing"), ("close", "fin", "closing")]
+    )
+    async def test_reports_a_relay_stop_of_a_group_step_as_subscription_changed_and_permits_the_next_group(
+        self, mode: str, stall: Stall, phase: str
+    ) -> None:
+        h = Harness(stall=stall)
+        h.writer._bind(1)
+        group = await h.writer.open_group()
+        await group.write(b"\x01")
+        pending = await started(group.write(b"\x02") if mode == "write" else group.close())
+        await wait_for(lambda: h.opened[0].stalled)
+        stop = stop_sending()
+        h.opened[0].fail(stop)
+        with pytest.raises(RelayError) as failure:
+            await pending
+        assert (failure.value.code, failure.value.phase) == ("SUBSCRIPTION_CHANGED", phase)
+        assert failure.value.__cause__ is stop
+        assert group.closed
+        h.writer._bind(None)
+        assert [reset_code(r) for r in h.opened[0].aborts] == [STREAM_RESET_CODE.CANCELLED]
+        h.writer._bind(2)
+        following = await h.writer.open_group()
+        assert following.group_id == 1
 
     async def test_aborts_an_idle_group_resetting_with_cancelled_and_frees_the_slot(self) -> None:
         h = Harness()
