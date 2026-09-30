@@ -6,14 +6,18 @@ present, with [behavior.md](behavior.md#media-helpers) as their contract. Of the
 piece below, the catalog service and the frame writer exist as `mux_relay.media` (`CatalogService`,
 `FrameWriter`), with [behavior.md](behavior.md#media-publishing) as their contract and the Video.js
 example as their first caller; the `register_media` handle that would compose them with the catalog
-builder, `update()` of a served document, and the public readers (stage 3) remain proposals. Public
-names for the implemented stages are recorded in [vocabulary.md](vocabulary.md).
+builder and `update()` of a served document remain proposals. Of the readers (stage 3), the
+catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_catalog`
+([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
+`--verify` logs its track list; the object-to-frame reader remains a proposal. Public names for the
+implemented stages are recorded in [vocabulary.md](vocabulary.md).
 
 This design was written 2026-09-18. Its before/after sketches describe the eventual API; they are
 not runnable stage 1 examples. See the format packages' READMEs for current usage. Stage 1 retains
 `VideoTrackInfo` / `AudioTrackInfo`, adds `DataTrackInfo`, and uses `build_msf_catalog` /
-`buildMsfCatalog` for UTF-8 bytes. The internal TypeScript parser supports builder round-trip tests;
-player presentation projection and delta updates are not part of this extraction.
+`buildMsfCatalog` for UTF-8 bytes. The TypeScript catalog reader is the Video.js parser's
+independent-catalog path, promoted to `parseMsfCatalog`; player presentation projection and delta
+updates are not part of this extraction.
 
 ## TypeScript input integration
 
@@ -223,7 +227,8 @@ The example's `--verify` mode and any non-browser consumer do the inverse by han
 symmetric with `read_text` and `read_json`:
 
 - Parse a catalog object into track descriptions (the independent catalog form; delta updates can
-  wait until a publisher in this repository emits them).
+  wait until a publisher in this repository emits them). Shipped as `parseMsfCatalog` /
+  `parse_msf_catalog`; see [behavior.md](behavior.md#media-helpers).
 - Turn an object plus the track's received timescale into a frame: payload, timestamp in
   microseconds, keyframe flag from object ID 0, and any config property that survived the relay.
   Video.js's `toLocFrame` is the reference, including its acceptance of the draft-03 timestamp ID.

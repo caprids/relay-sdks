@@ -1,10 +1,11 @@
-"""Independent MSF draft-01 catalog construction."""
+"""Independent MSF draft-01 catalog construction and reading."""
 
 from __future__ import annotations
 
 import base64
 import json
 import math
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
@@ -158,3 +159,165 @@ def _encode_json(value: object) -> str:
             return f"{mantissa}e{int(exponent)}"
         return text
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+
+
+# ---------------------------------------------------------------------------------------------------
+# Reading
+# ---------------------------------------------------------------------------------------------------
+
+# msf-01 §5.1.1: a subscriber MUST NOT parse a catalog version it does not understand. Versions follow
+# the "draft-XX" convention; the bare "1" is a lenient alias deployed producers emit.
+_SUPPORTED_MSF_VERSIONS = frozenset({"draft-01", "1"})
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MsfCatalogTrack:
+    """One track object of an independent MSF catalog (msf-01 §5.2), as ``parse_msf_catalog`` reads it."""
+
+    namespace: tuple[str, ...]
+    """The track's own slash-joined ``namespace`` split into fields, else the catalog track's."""
+    name: str
+    packaging: str
+    """Payload encapsulation as declared (``loc``, or e.g. moq-rs ``cmaf``/``legacy``); empty when absent."""
+    is_live: bool
+    """``False`` when absent."""
+    role: str | None = None
+    codec: str | None = None
+    width: int | None = None
+    height: int | None = None
+    framerate: float | None = None
+    samplerate: int | None = None
+    channel_config: str | None = None
+    bitrate: int | None = None
+    init_data: bytes | None = None
+    """Decoder init data, resolved from ``initRef`` through the catalog's inline ``initDataList``."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MsfCatalog:
+    """An independent MSF catalog (msf-01 §5.1), as ``parse_msf_catalog`` reads it."""
+
+    version: str
+    tracks: tuple[MsfCatalogTrack, ...]
+    generated_at_ms: int | None = None
+    is_complete: bool = False
+    """``True`` only when the catalog declares the broadcast complete (§5.1.3)."""
+
+
+def parse_msf_catalog(payload: bytes, *, catalog_namespace: Sequence[str]) -> MsfCatalog:
+    """Read an independent MSF catalog object's payload into its track descriptions.
+
+    ``catalog_namespace`` is the namespace of the catalog track itself, which tracks that declare
+    none inherit (§5.2.2). Raises ``ValueError`` on a payload that is not a UTF-8 JSON object, a
+    missing or unsupported ``version``, a missing ``tracks`` array, or a delta update
+    (``deltaUpdate``, not supported). Everything else is lenient, as msf-01 requires: unknown fields
+    and fields of the wrong type are ignored, track entries without a string ``name`` are skipped,
+    and packaging is returned as declared, not interpreted.
+    """
+    if isinstance(catalog_namespace, str):
+        raise ValueError("catalog_namespace must be a sequence of fields, not a string")
+    raw = json.loads(payload.decode("utf-8"), parse_constant=_reject_constant)
+    if not isinstance(raw, dict):
+        raise ValueError("MSF catalog is not a JSON object")
+    if "deltaUpdate" in raw:
+        raise ValueError("MSF delta updates are not supported")
+    version = raw.get("version")
+    if not isinstance(version, str):
+        raise ValueError("MSF catalog is missing its version")
+    if version not in _SUPPORTED_MSF_VERSIONS:
+        raise ValueError(f"unsupported MSF catalog version {version}")
+    entries = raw.get("tracks")
+    if not isinstance(entries, list):
+        raise ValueError("MSF catalog is missing its tracks array")
+
+    init_data_list = _parse_init_data_list(raw.get("initDataList"))
+    inherited = tuple(catalog_namespace)
+    tracks = tuple(
+        track
+        for entry in entries
+        if isinstance(entry, dict) and (track := _parse_track(entry, inherited, init_data_list)) is not None
+    )
+
+    return MsfCatalog(
+        version=version,
+        tracks=tracks,
+        generated_at_ms=_integer(raw.get("generatedAt")),
+        is_complete=raw.get("isComplete") is True,
+    )
+
+
+def _reject_constant(name: str) -> object:
+    # JSON.parse rejects NaN and Infinity; so does this reader.
+    raise ValueError(f"MSF catalog is not valid JSON: {name}")
+
+
+def _parse_track(
+    raw: dict[str, object], inherited: tuple[str, ...], init_data_list: dict[str, bytes]
+) -> MsfCatalogTrack | None:
+    name = raw.get("name")
+    if not isinstance(name, str):
+        return None
+
+    # msf-01 leaves the tuple's spelling open; this dialect (Video.js, and build_msf_catalog) joins
+    # the fields with "/", which the builder therefore rejects inside a field. Empty fields are dropped.
+    namespace = raw.get("namespace")
+    init_ref = _string(raw.get("initRef"))
+
+    return MsfCatalogTrack(
+        namespace=tuple(field for field in namespace.split("/") if field) if isinstance(namespace, str) else inherited,
+        name=name,
+        packaging=_string(raw.get("packaging")) or "",
+        is_live=raw.get("isLive") is True,
+        role=_string(raw.get("role")),
+        codec=_string(raw.get("codec")),
+        width=_integer(raw.get("width")),
+        height=_integer(raw.get("height")),
+        framerate=_number(raw.get("framerate")),
+        samplerate=_integer(raw.get("samplerate")),
+        channel_config=_string(raw.get("channelConfig")),
+        bitrate=_integer(raw.get("bitrate")),
+        init_data=None if init_ref is None else init_data_list.get(init_ref),
+    )
+
+
+def _parse_init_data_list(raw: object) -> dict[str, bytes]:
+    init_data: dict[str, bytes] = {}
+    if not isinstance(raw, list):
+        return init_data
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        identifier, kind, data = entry.get("id"), entry.get("type", "inline"), entry.get("data")
+        if isinstance(identifier, str) and isinstance(data, str) and kind == "inline":
+            init_data[identifier] = _forgiving_base64(data)
+    return init_data
+
+
+_BASE64 = re.compile(r"[A-Za-z0-9+/]*")
+
+
+def _forgiving_base64(text: str) -> bytes:
+    """Decode base64 as the WHATWG ``atob`` does: ASCII whitespace ignored, padding optional."""
+    data = re.sub(r"[\t\n\f\r ]", "", text)
+    if len(data) % 4 == 0:
+        data = data.removesuffix("==") if data.endswith("==") else data.removesuffix("=")
+    if len(data) % 4 == 1 or not _BASE64.fullmatch(data):
+        raise ValueError("MSF catalog init data is not base64")
+    return base64.b64decode(data + "=" * (-len(data) % 4))
+
+
+def _string(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _number(value: object) -> float | None:
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _integer(value: object) -> int | None:
+    """Counts (pixels, bits per second, hertz, milliseconds) are read only when integral."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and not value.is_integer():
+        return None
+    return int(value)

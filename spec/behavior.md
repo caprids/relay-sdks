@@ -548,7 +548,8 @@ and [frame model](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b
 
 The optional `@mux/moq-media` / `moq-media` packages implement pure format helpers. Raw Relay
 writers keep their existing byte/group behavior; no automatic media packaging is added to them.
-The media pins in `protocol.json` and exact bytes in `vectors/media.json` apply to both languages.
+The media pins in `protocol.json` and exact bytes and parsed values in `vectors/media.json` apply
+to both languages.
 
 - LOC track properties declare a timescale (default 1,000,000). Object properties carry Timestamp
   (0x10), Timescale (0x08), and explicitly supplied Video Config (0x0D) / Audio Config (0x0F).
@@ -595,11 +596,26 @@ The media pins in `protocol.json` and exact bytes in `vectors/media.json` apply 
   to normalize negative timestamps; input timestamps must be safe integers and the final timestamp
   follows the LOC nonnegative safe-integer contract. The adapter retains compatibility re-exports
   of the config mappers and `LocFrame` type from the media package.
+- The catalog reader (`parseMsfCatalog` / `parse_msf_catalog`) takes a catalog object's payload
+  and the catalog track's namespace, and returns the version, generation time, completeness, and
+  track descriptions in document order. It reads the independent form only. It rejects a payload
+  that is not a UTF-8 JSON object (no byte-order mark, no `NaN`/`Infinity`), a missing or
+  non-string `version`, a version other than `draft-01` or the deployed alias `1` (msf-01 §5.1.1:
+  a subscriber MUST NOT parse a version it does not understand), a missing `tracks` array, a
+  `deltaUpdate`, and init data that is not base64 (decoded as WHATWG `atob` does). Everything else
+  is ignored when not understood, as msf-01 requires: unknown fields, fields of the wrong JSON type,
+  non-integral widths, heights, sample rates, bitrates and generation times, track entries that are
+  not objects or have no string name, and init entries whose type is not `inline`. A track's
+  slash-joined `namespace` is split back into fields, dropping empty ones (the builder's dialect);
+  a track without one inherits the catalog track's namespace (§5.2.2). Packaging is returned as
+  declared, `loc` or otherwise, and payloads are not interpreted. Absent packaging reads as the
+  empty string and absent `isLive` as false. `initRef` resolves through `initDataList` to bytes;
+  an unresolved reference leaves the track without init data. Every builder document must read
+  back as its vector's `parsed` value.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below,
-  implemented in Python; a `register_media` publishing handle and public readers are not
-  implemented. The TypeScript package keeps an internal independent Video.js catalog parser
-  extraction for builder compatibility tests.
+  implemented in Python; a `register_media` publishing handle and the object-to-frame reader are
+  not implemented.
 
 ## Media publishing
 

@@ -1,7 +1,7 @@
 /** Independent LOC/MSF catalogs, adapted from Video.js build-catalog.ts. */
 import { avcCodecString } from './h264.js';
 import { AUDIO_TRACK, VIDEO_TRACK } from './loc.js';
-/** Version emitted — the newest version `parse-catalog.ts` accepts. */
+/** Version emitted — the newest version `parseMsfCatalog` accepts. */
 export const MSF_CATALOG_VERSION = 'draft-01';
 
 export interface VideoTrackInfo {
@@ -61,7 +61,7 @@ function pruneUndefined(value: Record<string, unknown>): Record<string, unknown>
   return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
 }
 
-/** Inverse of `parse-catalog.ts`'s `base64ToBytes`. */
+/** Inverse of `parseMsfCatalog`'s `base64ToBytes`. */
 function bytesToBase64(bytes: Uint8Array): string {
   let binary = '';
 
@@ -93,9 +93,9 @@ function registerInitData(entries: MsfInitDataEntry[], name: string, initData: U
 /**
  * Build the publisher's independent MSF catalog JSON.
  *
- * Namespaces are emitted explicitly per track as the path-joined string form `parse-catalog.ts` splits back into tuple
- * fields — the same (interop-pending) encoding the parser assumes, so the pair stays self-consistent whatever the
- * drafts settle on.
+ * Namespaces are emitted explicitly per track as the slash-joined string form `parseMsfCatalog` splits back into
+ * tuple fields — the catalog dialect's encoding, which msf-01 leaves open, so the pair stays self-consistent whatever
+ * the drafts settle on.
  */
 export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
   if (input.namespace.length === 0 || input.namespace.some((field) => !field || field.includes('/')))

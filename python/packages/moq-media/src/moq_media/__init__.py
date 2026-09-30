@@ -4,8 +4,11 @@ from .catalog import (
     MSF_CATALOG_VERSION,
     AudioTrackInfo,
     DataTrackInfo,
+    MsfCatalog,
+    MsfCatalogTrack,
     VideoTrackInfo,
     build_msf_catalog,
+    parse_msf_catalog,
 )
 from .h264 import (
     H264Config,
@@ -53,6 +56,8 @@ __all__ = [
     "AudioTrackInfo",
     "DataTrackInfo",
     "H264Config",
+    "MsfCatalog",
+    "MsfCatalogTrack",
     "VideoTrackInfo",
     "annexb_to_avcc",
     "avc_codec_string",
@@ -66,4 +71,5 @@ __all__ = [
     "loc_properties",
     "loc_track_properties",
     "nal_unit_type",
+    "parse_msf_catalog",
 ]

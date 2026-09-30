@@ -10,6 +10,7 @@
   "adaptations": [
     "Python format implementation extracted from python/examples/videojs_stream/moq_media.py at relay-sdks c67293ed7e5ea7fe4c58f294dfc245ea90cf0c86.",
     "Catalog validation, Opus defaults, URL validation and H.264 bounds match @mux/moq-media through shared spec vectors.",
+    "parse_msf_catalog ports the TypeScript parseMsfCatalog; both readers are held to the catalog read vectors.",
     "The Video.js file hashes identify the TypeScript reference; this package is a Python port, not a verbatim snapshot."
   ],
   "migration": "Attributed extraction for reuse by Video.js. Changes to format behavior should migrate upstream."

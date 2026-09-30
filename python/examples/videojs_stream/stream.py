@@ -50,6 +50,7 @@ from moq_media import (
     build_msf_catalog,
     compose_player_url,
     loc_properties,
+    parse_msf_catalog,
 )
 from mux_relay import (
     DEFAULT_ENDPOINT,
@@ -927,7 +928,28 @@ async def verify(
     def on_catalog(obj: MoqtObject) -> None:
         if obj.status == "normal" and obj.payload:
             result.catalog = obj.payload
-            log("verify: catalog received", {"bytes": len(obj.payload), "group": obj.group_id})
+            try:
+                catalog = parse_msf_catalog(obj.payload, catalog_namespace=config.namespace)
+            except ValueError as error:
+                problems.append(f"catalog: {error}")
+                return
+
+            tracks = [
+                {
+                    key: value
+                    for key, value in {
+                        "name": track.name,
+                        "packaging": track.packaging,
+                        "codec": track.codec,
+                        "size": f"{track.width}x{track.height}" if track.width and track.height else None,
+                        "samplerate": track.samplerate,
+                        "initBytes": len(track.init_data) if track.init_data else None,
+                    }.items()
+                    if value is not None
+                }
+                for track in catalog.tracks
+            ]
+            log("verify: catalog received", {"bytes": len(obj.payload), "group": obj.group_id, "tracks": tracks})
 
     def on_video(obj: MoqtObject) -> None:
         if obj.status != "normal":

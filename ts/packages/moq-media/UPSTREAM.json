@@ -12,7 +12,7 @@
     "webcodecs.ts is original SDK code: standard decoder-config mapping and encoded-chunk to LOC conversion, independent of media engines.",
     "Catalog building has one video track, default names and Opus defaults, validation, and avcC-derived H.264 codec strings. It emits UTF-8 bytes.",
     "Source composition accepts explicit https/moqt URLs and namespace tuples, with RFC 3986 token escaping.",
-    "The internal catalog parser retains the independent-catalog path for builder round-trip tests; player presentation types, variable substitution, and delta updates are omitted. It is not a public reader API.",
+    "The catalog parser retains the independent-catalog path, public as parseMsfCatalog over UTF-8 payload bytes. Its types are renamed MsfCatalog/MsfCatalogTrack and trimmed to the fields both SDKs read; integral-count fields ignore non-integral values. Player presentation types, variable substitution, and delta updates are omitted.",
     "LOC properties are ported from the Relay Python example, with validation shared through spec vectors. TypeScript consumes supplied avcC records and retains only codec-header inspection; Annex B conversion remains Python-only."
   ],
   "migration": "Attributed extraction for reuse by Video.js. Changes to format behavior should migrate upstream."

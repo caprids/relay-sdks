@@ -22,6 +22,12 @@ export {
   MSF_DOCUMENT,
   VIDEO_TRACK,
 } from './loc.js';
+export {
+  type MsfCatalog,
+  type MsfCatalogTrack,
+  type ParseMsfCatalogOptions,
+  parseMsfCatalog,
+} from './parse-catalog.js';
 export { type ComposeMoqSourceOptions, composeMoqSource, encodeNameComponent, encodeNamespaceName } from './source.js';
 export {
   audioTrackFromDecoderConfig,
