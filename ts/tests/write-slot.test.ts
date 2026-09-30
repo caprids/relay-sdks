@@ -7,12 +7,17 @@
 import type { SubgroupWriter } from '@mux/moq-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
+import { createSettlingGroups, SETTLING_GROUP_LIMIT, type SettlingGroups } from '../src/settling-groups.js';
 import { createWriteSlot, RESET_CODE, StreamReset } from '../src/write-slot.js';
 
 type ObjectInput = Parameters<SubgroupWriter['writeObject']>[0];
 type Stall = 'none' | 'write' | 'second-write' | 'fin';
 
-/** One subgroup stream as the slot sees it: records objects, FIN and abort reasons, and can stall or fail. */
+/**
+ * One subgroup stream as the slot sees it: records objects, FIN and abort reasons, and can stall or
+ * fail. `fin` stalls the FIN's hand-over; how the handed-over FIN settles is separate, and with
+ * `manualSettle` it waits for `acknowledge()` or `failSettle()`, as Chromium waits for the relay.
+ */
 class FakeSubgroup implements SubgroupWriter {
   readonly trackAlias: number;
   readonly groupId: number;
@@ -20,22 +25,44 @@ class FakeSubgroup implements SubgroupWriter {
   readonly aborts: unknown[] = [];
   finCalls = 0;
   readonly #stall: Stall;
+  readonly #manualSettle: boolean;
   #waiting: { resolve(): void; reject(error: unknown): void } | undefined;
+  readonly #settled: Promise<void>;
+  #settle!: { resolve(): void; reject(error: unknown): void };
 
-  constructor(trackAlias: number, groupId: number, stall: Stall) {
+  constructor(trackAlias: number, groupId: number, stall: Stall, manualSettle = false) {
     this.trackAlias = trackAlias;
     this.groupId = groupId;
     this.#stall = stall;
+    this.#manualSettle = manualSettle;
+    this.#settled = new Promise((resolve, reject) => {
+      this.#settle = { resolve, reject };
+    });
   }
 
   writeObject(object: ObjectInput): Promise<void> {
     this.objects.push(object);
-    return this.#settle(this.#stall === 'write' || (this.#stall === 'second-write' && this.objects.length === 2));
+    return this.#stallStep(this.#stall === 'write' || (this.#stall === 'second-write' && this.objects.length === 2));
   }
 
   fin(): Promise<void> {
+    return this.#settled;
+  }
+
+  handOverFin(): Promise<void> {
     this.finCalls++;
-    return this.#settle(this.#stall === 'fin');
+    if (!this.#manualSettle) this.#settle.resolve();
+    return this.#stallStep(this.#stall === 'fin');
+  }
+
+  /** The relay acknowledges the handed-over FIN. */
+  acknowledge(): void {
+    this.#settle.resolve();
+  }
+
+  /** The handed-over FIN fails late: STOP_SENDING, a reset, or session teardown. */
+  failSettle(error: unknown): void {
+    this.#settle.reject(error);
   }
 
   abort(reason?: unknown): void {
@@ -60,7 +87,7 @@ class FakeSubgroup implements SubgroupWriter {
     return this.#waiting !== undefined;
   }
 
-  #settle(stall: boolean): Promise<void> {
+  #stallStep(stall: boolean): Promise<void> {
     if (!stall) return Promise.resolve();
     return new Promise((resolve, reject) => {
       this.#waiting = { resolve, reject };
@@ -73,6 +100,10 @@ interface HarnessOptions {
   solicited?: boolean | undefined;
   stall?: Stall;
   open?: 'ok' | 'hold' | 'reject';
+  /** Handed-over FINs settle only when the test says so. */
+  manualSettle?: boolean;
+  /** The connection's settling groups, shared when several slots stand for one connection. */
+  settlingGroups?: SettlingGroups;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -85,7 +116,12 @@ function harness(options: HarnessOptions = {}) {
     async openSubgroup(trackAlias, groupId) {
       if (options.open === 'reject') throw openFailure;
       // Only the first stream stalls, so the recovery write after a failure can complete.
-      const subgroup = new FakeSubgroup(trackAlias, groupId, opened.length === 0 ? (options.stall ?? 'none') : 'none');
+      const subgroup = new FakeSubgroup(
+        trackAlias,
+        groupId,
+        opened.length === 0 ? (options.stall ?? 'none') : 'none',
+        options.manualSettle,
+      );
       opened.push(subgroup);
       if (options.open === 'hold') {
         return new Promise<FakeSubgroup>((resolve) => {
@@ -94,6 +130,7 @@ function harness(options: HarnessOptions = {}) {
       }
       return subgroup;
     },
+    settlingGroups: options.settlingGroups ?? createSettlingGroups(),
     namespaceSolicited: () => options.solicited,
     assertOpen() {
       if (connection.closed)
@@ -616,6 +653,99 @@ describe('write slot: groups', () => {
     expect(writer.closed).toBe(true);
     await expect(group.close()).rejects.toBe(error);
     expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.SESSION_CLOSED)]);
+  });
+});
+
+describe('write slot: settling groups', () => {
+  it('completes a write once its FIN is handed over and accepts the next write before any acknowledgment', async () => {
+    const { slot, writer, opened } = harness({ manualSettle: true });
+    slot.bind(1);
+    await writer.write(bytes(1));
+    await writer.write(bytes(2));
+    const group = await writer.openGroup();
+    await group.write(bytes(3));
+    await group.close();
+    expect(group.closed).toBe(true);
+    const next = await writer.openGroup();
+    await next.close();
+    expect(opened.map((subgroup) => [subgroup.groupId, subgroup.finCalls, subgroup.aborts.length])).toEqual([
+      [0, 1, 0],
+      [1, 1, 0],
+      [2, 1, 0],
+      [3, 1, 0],
+    ]);
+  });
+
+  it('drops a settling group that fails late: nothing reported, the track stays usable', async () => {
+    const { slot, writer, opened } = harness({ manualSettle: true });
+    slot.bind(1);
+    await writer.write(bytes(1));
+    const group = await writer.openGroup();
+    await group.close();
+    opened[0]?.failSettle(new Error('STOP_SENDING'));
+    opened[1]?.failSettle(new Error('reset by the relay'));
+    await flush();
+    group.abort(new Error('late abort'));
+    await writer.write(bytes(2));
+    expect(writer.closed).toBe(false);
+    expect(opened[2]).toMatchObject({ groupId: 2, finCalls: 1 });
+    expect(opened.flatMap((subgroup) => subgroup.aborts)).toEqual([]);
+  });
+
+  it('never resets a settling group when the relay subscription changes or ends', async () => {
+    const { slot, writer, opened } = harness({ manualSettle: true });
+    slot.bind(1);
+    const owner = new AbortController();
+    await writer.write(bytes(1), { signal: owner.signal });
+    slot.bind(2);
+    slot.bind(undefined);
+    owner.abort(new Error('caller moved on'));
+    await flush();
+    expect(opened[0]?.aborts).toEqual([]);
+  });
+
+  it('waits in opening-stream at the connection limit and proceeds when a group settles', async () => {
+    const settlingGroups = createSettlingGroups();
+    const first = harness({ manualSettle: true, settlingGroups });
+    const second = harness({ manualSettle: true, settlingGroups });
+    first.slot.bind(1);
+    second.slot.bind(1);
+    for (let i = 0; i < SETTLING_GROUP_LIMIT; i++) await first.writer.write(bytes(i % 256));
+    const waiting = second.writer.write(bytes(1));
+    await flush();
+    expect(second.opened).toHaveLength(0);
+    await expect(second.writer.write(bytes(2))).rejects.toMatchObject({ code: 'WRITE_PENDING' });
+    first.opened[5]?.acknowledge();
+    await waiting;
+    expect(second.opened).toHaveLength(1);
+  });
+
+  it('fails WRITE_TIMEOUT in opening-stream when no group settles within the deadline', async () => {
+    const { slot, writer, opened } = harness({ manualSettle: true, writeTimeoutMs: 100 });
+    slot.bind(1);
+    for (let i = 0; i < SETTLING_GROUP_LIMIT; i++) await writer.write(bytes(1));
+    const rejected = expect(writer.write(bytes(2))).rejects.toMatchObject({
+      code: 'WRITE_TIMEOUT',
+      phase: 'opening-stream',
+    });
+    await elapse(100);
+    await rejected;
+    expect(opened).toHaveLength(SETTLING_GROUP_LIMIT);
+    expect(writer.closed).toBe(false);
+    // The timed-out wait gave up its turn: the next place goes to the next write.
+    opened[0]?.acknowledge();
+    await writer.write(bytes(3));
+    expect(opened[SETTLING_GROUP_LIMIT]).toMatchObject({ groupId: SETTLING_GROUP_LIMIT + 1, finCalls: 1 });
+  });
+
+  it('frees a place when an operation fails before handing its FIN over', async () => {
+    const settlingGroups = createSettlingGroups(1);
+    const { slot, writer } = harness({ stall: 'write', settlingGroups, writeTimeoutMs: 100 });
+    slot.bind(1);
+    const rejected = expect(writer.write(bytes(1))).rejects.toMatchObject({ code: 'WRITE_TIMEOUT', phase: 'writing' });
+    await elapse(100);
+    await rejected;
+    expect(settlingGroups.tryReserve()).toBeDefined();
   });
 });
 

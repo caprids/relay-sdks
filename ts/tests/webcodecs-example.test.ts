@@ -2,6 +2,7 @@ import { LOC_TIMESTAMP, LOC_VIDEO_CONFIG } from '@mux/moq-media';
 import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@mux/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { publishCanvas } from '../examples/webcodecs/publish-canvas.js';
+import { createSettlingGroups } from '../src/settling-groups.js';
 import { createWriteSlot } from '../src/write-slot.js';
 
 vi.mock('@mux/relay', async () => import('../src/index.js'));
@@ -88,6 +89,7 @@ function recordingPublisher(
   const closed = new Promise<{ error?: Error }>((resolve) => {
     disconnect = resolve;
   });
+  const settlingGroups = createSettlingGroups();
   const publisher: RelayPublisher = {
     announced: Promise.resolve(),
     closed,
@@ -96,6 +98,7 @@ function recordingPublisher(
       const objects: RecordedObject[][] = [];
       let alias = 1;
       const slot = createWriteSlot({
+        settlingGroups,
         namespaceSolicited: () => true,
         assertOpen() {},
         endTrack() {},
@@ -105,6 +108,12 @@ function recordingPublisher(
           objects.push(group);
           let rejectWrite: ((error: unknown) => void) | undefined;
           let finished = false;
+          const fin = async () => {
+            if (!finished) {
+              finished = true;
+              record.finished++;
+            }
+          };
           return {
             groupId,
             async writeObject(object) {
@@ -116,12 +125,8 @@ function recordingPublisher(
               }
               group.push({ bytes: object.payload.slice(), properties: object.properties ?? [] });
             },
-            async fin() {
-              if (!finished) {
-                finished = true;
-                record.finished++;
-              }
-            },
+            fin,
+            handOverFin: fin,
             abort(reason) {
               if (!finished) {
                 finished = true;
