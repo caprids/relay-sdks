@@ -49,7 +49,9 @@ arrive afterward. The demo observes connection closure, does not treat publisher
 all data received, and does not automatically resubscribe on completion. Additional readiness and
 termination APIs are tracked in [#68](https://github.com/muxinc/relay-sdks/issues/68).
 
-This example does not reconnect after the connection ends, for example after a network outage longer than about 5 s in Chromium. See [publisher recovery](../../../spec/publisher-recovery.md) for what a replacement publisher can and cannot restore.
+This example does not reconnect after the connection ends, for example after a network outage
+longer than about 5 s in Chromium. See [publisher recovery](../../../spec/publisher-recovery.md)
+for what a replacement publisher can and cannot restore.
 
 ## Run it
 
