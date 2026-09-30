@@ -55,8 +55,12 @@ for what a replacement publisher can and cannot restore.
 
 ## Run it
 
-After the quickstart's setup, run from the repository root. These prompts request actual deployment
-values, not example credentials:
+After the quickstart's setup, run from the repository root. The launcher drives Playwright's
+Chromium, installed once with `mise exec -- pnpm --dir ts exec playwright install chromium`. On
+Linux, if Chromium reports missing system libraries, provision Playwright's system dependencies for
+your machine (`playwright install-deps chromium`) first.
+
+These prompts request actual deployment values, not example credentials:
 
 ```sh
 read -r -p 'Relay HTTPS endpoint: ' RELAY_URL

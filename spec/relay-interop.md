@@ -298,6 +298,28 @@ choice, make the one-line change in a scratch build of either core:
 A change that passes can drop its deviation from [behavior.md](behavior.md#relay-interop-deviations)
 in the same pull request that changes both cores.
 
+## Browser QUIC limits
+
+These are limits of the browser's QUIC stack, not of moq-relay, recorded here with the other
+transport findings. The TypeScript guide's
+[browser transport limits](../ts/GUIDE.md#browser-transport-limits) gives the application-facing
+rules. Observed in Chromium 147 (2026-09); they may change between versions, and other browsers are
+untested.
+
+- **Handshake idle timeout, about 4 s.** The effective connect deadline is the smaller of
+  `connectTimeoutMs` and about 4 s of silence, so a longer `connectTimeoutMs` never fires on a
+  silent path ([#157](https://github.com/muxinc/relay-sdks/issues/157)).
+- **Blackhole detection, about 5 s.** A connection with data outstanding that hears nothing for
+  about 5 s is closed even if the path has come back. Chromium logs `Network blackhole detected`
+  (QUIC error 85); the page's `WebTransportError` carries no QUIC code
+  ([#148](https://github.com/muxinc/relay-sdks/issues/148)).
+- **1250-byte Initial datagrams.** Chromium's QUIC Initial packets are 1250 bytes, so a path that
+  carries only the 1200-byte minimum from RFC 9000 section 14 never connects. A cap applied after
+  the connection is up does not end it.
+
+The Python SDK's aioquic transport behaves differently: it survives outages until the relay's 30 s
+idle timeout, waits out the full connect deadline, and sends 1200-byte Initials.
+
 ## Reproduce against a local relay
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium

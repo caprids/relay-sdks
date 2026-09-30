@@ -46,8 +46,8 @@ subscriber.close();
 await publisher.close();
 ```
 
-The [guide's first round trip](GUIDE.md#first-round-trip) runs the complete version of this in
-headless Chromium, with credential handling, the subscribe retry, a deadline, and cleanup on failure.
+The [guide's first round trip](GUIDE.md#first-round-trip) runs the complete version of this in a
+browser, with credential handling, the subscribe retry, a deadline, and cleanup on failure.
 
 ## Documentation
 
