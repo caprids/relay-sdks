@@ -370,6 +370,7 @@ class TestAioquicFunctions:
         assert quic.datagrams_to_send(now=0.0) == []
         assert packets_sent(quic) == before  # nothing built, nothing counted
 
+
 class _Transport:
     def __init__(self) -> None:
         self.sent: list[bytes] = []
