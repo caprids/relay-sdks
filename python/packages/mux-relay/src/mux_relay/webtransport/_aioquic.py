@@ -1,10 +1,13 @@
 """What aioquic 1.3 does not expose: every private member the adapter reads or writes, each behind one name.
 
-The send half's backpressure, the close drain, stream pruning, the dropped-FIN retry and the held
-control-stream FIN depend on state aioquic's public API does not expose: ``QuicStreamSender._pending``,
-``_pending_eof``, ``_buffer``, ``_buffer_fin``, ``_acked_fin`` and ``_reset_error_code`` (with the public
-``buffer_is_empty`` and ``is_finished``), ``QuicStreamReceiver.is_finished``, ``QuicConnection._streams``,
-``H3Connection._stream``, ``H3Connection._get_or_create_stream`` and ``H3Connection._peer_control_stream_id``.
+The send half's backpressure, the close drain, stream pruning, the dropped-FIN retry, resets served
+first and the held control-stream FIN depend on state aioquic's public API does not expose:
+``QuicStreamSender._pending``, ``_pending_eof``, ``_buffer``, ``_buffer_fin``, ``_acked_fin`` and
+``_reset_error_code`` (with the public ``buffer_is_empty``, ``is_finished`` and ``reset_pending``),
+``QuicStreamReceiver.is_finished`` and ``stop_pending``, ``QuicConnection._streams``,
+``_streams_queue`` and ``_loss`` (its ``spaces``, their ``sent_packets`` and each packet's
+``delivery_handlers``), ``H3Connection._stream``, ``H3Connection._get_or_create_stream`` and
+``H3Connection._peer_control_stream_id``.
 This module is the only place that names them, so a rename in a later aioquic 1.x fails in
 ``tests/test_webtransport_aioquic.py`` (which pins every member and the behaviour of every function here)
 before it can fail silently under load, as a write that never settles or a FIN that is never re-armed.
@@ -18,9 +21,11 @@ The asyncio glue our own :class:`WebTransportProtocol` subclass reaches on its b
 
 from __future__ import annotations
 
+from collections.abc import Collection
+
 from aioquic.h3.connection import FrameType, H3Connection
 from aioquic.quic.connection import QuicConnection
-from aioquic.quic.stream import QuicStream
+from aioquic.quic.stream import QuicStream, QuicStreamSender
 
 
 def live_stream(quic: QuicConnection, stream_id: int) -> QuicStream | None:
@@ -54,12 +59,37 @@ def reset_pending(stream: QuicStream) -> bool:
     return sender._reset_error_code is not None and not sender.is_finished
 
 
-def fin_unsent(stream: QuicStream) -> bool:
-    """A FIN aioquic consumed for a packet but never put on the wire, as far as anyone can tell.
+def fins_in_flight(quic: QuicConnection) -> set[QuicStreamSender]:
+    """The stream senders whose FIN is in a sent packet aioquic has not yet seen acknowledged or declared lost.
+
+    A packet's delivery handlers are what aioquic calls on its acknowledgement or loss; a STREAM frame
+    registers its sender's ``on_data_delivery`` with ``(start, stop, fin)``. One pass over every packet
+    in flight, so a caller asking about many streams asks once.
+    """
+    senders: set[QuicStreamSender] = set()
+
+    for space in quic._loss.spaces:
+        for packet in space.sent_packets.values():
+            for handler, args in packet.delivery_handlers:
+                if getattr(handler, "__func__", None) is not QuicStreamSender.on_data_delivery:
+                    continue
+
+                _start, _stop, fin = args
+
+                if fin:
+                    senders.add(handler.__self__)  # ty: ignore[unresolved-attribute]
+
+    return senders
+
+
+def fin_unsent(stream: QuicStream, in_flight: Collection[QuicStreamSender]) -> bool:
+    """A FIN aioquic consumed for a packet but never put on the wire.
 
     ``get_frame`` hands back a FIN-only frame even when the packet has no room for it, and the following
-    ``start_frame`` then rejects it with nothing to reschedule the FIN. This is also what a healthy FIN in
-    flight looks like until its acknowledgement arrives, which is why the retry waits an interval first.
+    ``start_frame`` then rejects it with nothing to reschedule the FIN. A FIN in no packet in flight
+    (``in_flight``, from :func:`fins_in_flight`) is that one: a sent FIN is either still in a packet or,
+    once acknowledged or declared lost, finished or queued again. Without that check a FIN in flight on a
+    dead link looks the same, and re-arming it fills every probe packet with FINs (#160).
     """
     sender = stream.sender
     return (
@@ -68,6 +98,7 @@ def fin_unsent(stream: QuicStream) -> bool:
         and not sender._pending_eof
         and sender._reset_error_code is None
         and not sender.is_finished
+        and sender not in in_flight
     )
 
 
@@ -76,6 +107,27 @@ def rearm_fin(stream: QuicStream) -> None:
     sender = stream.sender
     sender._pending_eof = True
     sender.buffer_is_empty = False
+
+
+def serve_resets_first(quic: QuicConnection) -> None:
+    """Move the streams with a RESET_STREAM or STOP_SENDING to send to the front of aioquic's service order.
+
+    ``_write_application`` writes those frames with ``start_frame``, which raises ``QuicPacketBuilderStop``
+    when the packet has no room left, and that ends the whole ``datagrams_to_send`` call, not just the
+    packet. Queued behind streams with data to send, the packet is always full by the time the loop reaches
+    such a stream, so every transmit sends one packet, one per ACK, until the data ahead of it drains
+    (#160). At the front the frame goes first into a fresh packet, and the rest of the call is unaffected.
+    """
+    queue = quic._streams_queue
+
+    def urgent(stream: QuicStream) -> bool:
+        return stream.sender.reset_pending or stream.receiver.stop_pending
+
+    if not any(urgent(stream) for stream in queue):
+        return
+
+    first = [stream for stream in queue if urgent(stream)]
+    quic._streams_queue = first + [stream for stream in queue if not urgent(stream)]
 
 
 def finish_receiving_half(quic: QuicConnection, stream_id: int) -> None:
