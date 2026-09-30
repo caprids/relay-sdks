@@ -92,8 +92,14 @@ class WebTransportProtocol(QuicConnectionProtocol):
         self._packets_sent = 0
         self._last_sent_at = self._loop.time()
         self._ping_uid = 0
+        self._handshake_completed = False
+        self.refused: ConnectionRefusedError | None = None
+        """The OS reported the peer's port unreachable before the handshake completed (a client only)."""
 
     async def wait_connected(self) -> None:
+        if self.refused is not None:
+            raise self.refused
+
         try:
             await super().wait_connected()
         finally:
@@ -176,6 +182,24 @@ class WebTransportProtocol(QuicConnectionProtocol):
             if session._check_drained():
                 self._draining.remove(session)
 
+    def error_received(self, exc: Exception) -> None:
+        """A socket error: only a refusal during the handshake counts, and it fails the connect at once.
+
+        The client's socket is connected to the relay address, so Linux reports an ICMP port
+        unreachable as ``ConnectionRefusedError``. Before the handshake completes that means nothing
+        listens there, and waiting out the connect deadline would only hide it. Once the connection is
+        established a transient ICMP error changes nothing: QUIC's loss recovery and idle timeout decide.
+        """
+        if not isinstance(exc, ConnectionRefusedError) or self._handshake_completed or self.refused is not None:
+            return
+
+        self.refused = exc
+        waiter = self._connected_waiter
+
+        if waiter is not None and not waiter.done():
+            self._connected_waiter = None
+            waiter.set_exception(exc)
+
     def connection_lost(self, exc: Exception | None) -> None:
         self.fin_retry.stop()
         self._stop_keepalive()
@@ -215,6 +239,7 @@ class WebTransportProtocol(QuicConnectionProtocol):
             return
 
         if isinstance(event, quic_events.HandshakeCompleted):
+            self._handshake_completed = True
             self._arm_keepalive(self._last_sent_at + _KEEPALIVE_INTERVAL)
 
         if isinstance(event, quic_events.StreamDataReceived) and self._hold_control_stream_fin(event):

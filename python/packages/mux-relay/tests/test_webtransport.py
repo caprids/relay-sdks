@@ -9,6 +9,7 @@ codecs are covered in ``test_webtransport_wire.py`` and the aioquic internals th
 
 import asyncio
 import gc
+import socket
 import warnings
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
@@ -701,6 +702,95 @@ class TestKeepalive:
 
         try:
             assert sessions[0]._protocol._keepalive is None
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
+
+
+def _closed_udp_port() -> int:
+    """A loopback UDP port nothing listens on (free a moment ago; the kernel does not hand it out again at once)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def _cause_chain(error: BaseException) -> list[BaseException]:
+    chain: list[BaseException] = []
+    current: BaseException | None = error
+
+    while current is not None:
+        chain.append(current)
+        current = current.__cause__
+
+    return chain
+
+
+class TestClosedPort:
+    """A connect to a UDP port nobody listens on fails at once, as ``TRANSPORT_ERROR`` / ``connecting`` (#163)."""
+
+    @pytest.mark.parametrize(
+        "connect", [connect_relay_publisher, connect_relay_subscriber], ids=["publisher", "subscriber"]
+    )
+    @pytest.mark.parametrize("ipv6_sockets", [True, False], ids=["dual-stack", "ipv4-fallback"])
+    async def test_a_refused_handshake_fails_fast_with_the_os_error_as_cause(
+        self, connect: Any, ipv6_sockets: bool, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        if not ipv6_sockets:
+            real_socket = socket.socket
+
+            def no_ipv6(family: int = socket.AF_INET, *args: Any, **kwargs: Any) -> Any:
+                if family == socket.AF_INET6:
+                    raise OSError("IPv6 is unavailable")
+
+                return real_socket(family, *args, **kwargs)
+
+            monkeypatch.setattr(socket, "socket", no_ipv6)
+
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        kwargs: dict[str, Any] = {"namespace": NAMESPACE} if connect is connect_relay_publisher else {}
+
+        with pytest.raises(RelayError) as failure:
+            await connect(f"https://127.0.0.1:{_closed_udp_port()}", connect_timeout=2, **kwargs)
+
+        assert loop.time() - started < 1
+        assert (failure.value.code, failure.value.phase) == ("TRANSPORT_ERROR", "connecting")
+        assert any(isinstance(cause, ConnectionRefusedError) for cause in _cause_chain(failure.value))
+
+    async def test_an_address_that_never_answers_still_times_out(self) -> None:
+        # A blackhole: the datagrams arrive and nothing comes back, not even a refusal.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as blackhole:
+            blackhole.bind(("127.0.0.1", 0))
+            port = blackhole.getsockname()[1]
+            loop = asyncio.get_running_loop()
+            started = loop.time()
+
+            with pytest.raises(RelayError) as failure:
+                await connect_relay_subscriber(f"https://127.0.0.1:{port}", connect_timeout=0.5)
+
+            assert loop.time() - started >= 0.5
+            assert (failure.value.code, failure.value.phase) == ("CONNECTION_TIMEOUT", "connecting")
+
+    async def test_a_refusal_after_the_handshake_changes_nothing(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        created = connect_webtransport(
+            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        transport: Any = created.transport
+        protocol = transport._protocol
+
+        try:
+            # A transient ICMP error on an established connection: QUIC's own recovery decides, not the socket.
+            protocol.error_received(ConnectionRefusedError(111, "Connection refused"))
+            assert protocol.refused is None
+            stream = await transport.create_unidirectional_stream()
+            await stream.write(b"still here")
+            await stream.close()
+            await wait_for(lambda: len(sessions) == 1, timeout=5)
+            assert protocol.terminated is None and not transport.ended
         finally:
             transport.close()
             await transport.wait_closed()

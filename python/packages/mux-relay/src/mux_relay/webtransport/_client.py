@@ -115,11 +115,13 @@ class WebTransportSession(WebTransportSessionBase):
             protocol.transmit()
         except BaseException as error:
             if not self.ready.done():
-                self.ready.set_exception(
-                    error
-                    if isinstance(error, WebTransportError)
-                    else WebTransportError(f"WebTransport connect failed: {error}")
-                )
+                if isinstance(error, WebTransportError):
+                    self.ready.set_exception(error)
+                else:
+                    # The cause stays reachable: a refused port surfaces as the OS error behind TRANSPORT_ERROR.
+                    failure = WebTransportError(f"WebTransport connect failed: {error}")
+                    failure.__cause__ = error
+                    self.ready.set_exception(failure)
 
             self._finish(self.ready.exception() if not self.ready.cancelled() else None)
             self._teardown_connection()
@@ -228,10 +230,14 @@ class WebTransportSession(WebTransportSessionBase):
 
 
 def _open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, tuple[Any, ...]]:
-    """Bind a UDP socket and pick the resolved address it can reach.
+    """Open a UDP socket, pick the resolved address it can reach, and connect the socket to it.
 
     Like aioquic's client: a dual-stack IPv6 socket when the host offers one (IPv4 addresses are
     mapped onto it), otherwise an IPv4 socket with the first IPv4 address the resolver returned.
+    Connecting the socket makes the kernel deliver it only the relay's datagrams and report an ICMP
+    port unreachable as an error, so a closed port fails the connect at once (see
+    ``WebTransportProtocol.error_received``). A NAT rebinding in front of the client is unaffected: it
+    changes only the address the relay sees, which the relay learns from the next packet (#158).
     """
     if not addresses:
         raise WebTransportError("no addresses to connect to")
@@ -252,14 +258,19 @@ def _open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, t
                 "the host resolves only to IPv6 addresses, but IPv6 sockets are unavailable"
             ) from None
 
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.bind(("0.0.0.0", 0))
-        return sock, ipv4[0]
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)  # connect() binds it
+        address = ipv4[0]
+    else:
+        address = addresses[0]
 
-    address = addresses[0]
+        if len(address) == 2:
+            address = ("::ffff:" + address[0], address[1], 0, 0)
 
-    if len(address) == 2:
-        address = ("::ffff:" + address[0], address[1], 0, 0)
+    try:
+        sock.connect(address)
+    except OSError:
+        sock.close()
+        raise
 
     return sock, address
 

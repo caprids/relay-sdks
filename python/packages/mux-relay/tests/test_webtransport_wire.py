@@ -125,6 +125,7 @@ class TestWireHelpers:
         try:
             assert sock.family == socket_module.AF_INET
             assert address == ("192.0.2.1", 443)
+            assert sock.getpeername() == address  # connected, so a refusal reaches the protocol
         finally:
             sock.close()
 
@@ -139,5 +140,6 @@ class TestWireHelpers:
 
         try:
             assert address == ("::ffff:192.0.2.1", 443, 0, 0)
+            assert sock.getpeername() == address
         finally:
             sock.close()

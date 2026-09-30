@@ -227,7 +227,10 @@ request errors, and define any continuity policy in the application. See
 for retry, trailing-object, and publisher-generation guidance.
 
 `connect_relay_subscriber` has one deadline (`connect_timeout`, seconds) covering token resolution and both
-handshakes. The optional `CancellationToken` controls the connection's entire lifetime: cancelling
+handshakes. A relay address that refuses the connection (nothing listens on its UDP port) fails at
+once with `TRANSPORT_ERROR` / `connecting` and the OS's `ConnectionRefusedError` in the `__cause__`
+chain, as in TypeScript; an address that never answers waits out the deadline and fails with
+`CONNECTION_TIMEOUT`. The optional `CancellationToken` controls the connection's entire lifetime: cancelling
 it closes an established connection, and the `closed` future carries the reason. An explicit `jwt`
 query parameter takes precedence over `get_token`, matching the current Relay connection
 authentication convention. An empty one (`?jwt=`) is a `ValueError` before anything connects: put a
@@ -354,7 +357,10 @@ for the observations and media guidance.
 
 `events.close()` cancels an outstanding write and ends that track; other tracks
 keep running. `await publisher.close()` ends all tracks, retracts the namespace, and waits for
-transport shutdown. Track names cannot be reused within a publisher connection, including after
+transport shutdown. That includes QUIC's closing period after CONNECTION_CLOSE (RFC 9000 §10.2),
+about three probe timeouts, roughly 0.3 s against a relay 50 ms away: waiting for it means a process
+that exits right after `close()` leaves no UDP socket open and sees no `ResourceWarning` (#8).
+TypeScript returns sooner because the browser keeps its closing period to itself. Track names cannot be reused within a publisher connection, including after
 their writer closes.
 
 ### Advanced media groups
