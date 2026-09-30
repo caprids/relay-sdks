@@ -25,6 +25,7 @@ from mux_relay.webtransport._aioquic import (
     forget_h3_stream,
     live_stream,
     mark_webtransport_stream,
+    packets_sent,
     peer_control_stream_id,
     rearm_fin,
     reset_pending,
@@ -125,6 +126,9 @@ class TestAioquicInternals:
         sender = pair.client._streams[fin_stream].sender
         assert (sender.on_data_delivery, (0, 10, True)) in handlers
         assert isinstance(packets[0], QuicSentPacket)
+
+        # QuicConnection._packet_number: the keepalive's send clock, one per packet built.
+        assert connection._packet_number == 0
 
         # H3Connection: the per-stream record the adapter drops once both halves are done.
         assert isinstance(h3._stream, dict)
@@ -356,6 +360,15 @@ class TestAioquicFunctions:
         assert quic._close_event.error_code == ErrorCode.H3_CLOSED_CRITICAL_STREAM
         assert h3.handle_event(StreamDataReceived(data=b"\x00\x00", end_stream=False, stream_id=0)) == []
 
+    def test_packets_sent_counts_every_packet_built(self) -> None:
+        quic = self._connection()
+        assert packets_sent(quic) == 0
+        quic.connect(("127.0.0.1", 4433), now=0.0)
+        datagrams = quic.datagrams_to_send(now=0.0)
+        assert datagrams and packets_sent(quic) >= len(datagrams)
+        before = packets_sent(quic)
+        assert quic.datagrams_to_send(now=0.0) == []
+        assert packets_sent(quic) == before  # nothing built, nothing counted
 
 class _Transport:
     def __init__(self) -> None:

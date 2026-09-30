@@ -1,12 +1,12 @@
 """What aioquic 1.3 does not expose: every private member the adapter reads or writes, each behind one name.
 
 The send half's backpressure, the close drain, stream pruning, the dropped-FIN retry, resets served
-first and the held control-stream FIN depend on state aioquic's public API does not expose:
-``QuicStreamSender._pending``, ``_pending_eof``, ``_buffer``, ``_buffer_fin``, ``_acked_fin`` and
+first, the held control-stream FIN and the keepalive depend on state aioquic's public API does not
+expose: ``QuicStreamSender._pending``, ``_pending_eof``, ``_buffer``, ``_buffer_fin``, ``_acked_fin`` and
 ``_reset_error_code`` (with the public ``buffer_is_empty``, ``is_finished`` and ``reset_pending``),
 ``QuicStreamReceiver.is_finished`` and ``stop_pending``, ``QuicConnection._streams``,
-``_streams_queue`` and ``_loss`` (its ``spaces``, their ``sent_packets`` and each packet's
-``delivery_handlers``), ``H3Connection._stream``, ``H3Connection._get_or_create_stream`` and
+``_streams_queue``, ``_packet_number`` and ``_loss`` (its ``spaces``, their ``sent_packets`` and each
+packet's ``delivery_handlers``), ``H3Connection._stream``, ``H3Connection._get_or_create_stream`` and
 ``H3Connection._peer_control_stream_id``.
 This module is the only place that names them, so a rename in a later aioquic 1.x fails in
 ``tests/test_webtransport_aioquic.py`` (which pins every member and the behaviour of every function here)
@@ -170,3 +170,12 @@ def peer_control_stream_id(h3: H3Connection) -> int | None:
     which aioquic otherwise turns into a connection close before later events in the same flight.
     """
     return h3._peer_control_stream_id
+
+
+def packets_sent(quic: QuicConnection) -> int:
+    """How many QUIC packets the connection has built so far, ACK-only ones included.
+
+    The number grows by one for every packet ``datagrams_to_send`` returns, so a change across a
+    transmit means something left for the peer. The keepalive measures send silence with it.
+    """
+    return quic._packet_number

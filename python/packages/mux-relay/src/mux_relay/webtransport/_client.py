@@ -93,7 +93,8 @@ class WebTransportSession(WebTransportSessionBase):
             connection = QuicConnection(configuration=configuration)
             sock, addr = _open_socket([info[4] for info in infos])
             udp_transport, protocol = await loop.create_datagram_endpoint(
-                lambda: WebTransportProtocol(connection, owns_transport=True, receive_socket=sock), sock=sock
+                lambda: WebTransportProtocol(connection, owns_transport=True, receive_socket=sock, keepalive=True),
+                sock=sock,
             )
             assert isinstance(protocol, WebTransportProtocol)
             self._pending_protocol = protocol

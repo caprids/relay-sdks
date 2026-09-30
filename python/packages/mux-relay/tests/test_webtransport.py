@@ -9,6 +9,7 @@ codecs are covered in ``test_webtransport_wire.py`` and the aioquic internals th
 
 import asyncio
 import gc
+import warnings
 from collections.abc import AsyncIterator, Sequence
 from typing import Any
 
@@ -603,6 +604,107 @@ class TestCancelledHandshake:
             assert errors == []
         finally:
             loop.set_exception_handler(previous_handler)
+
+
+class TestKeepalive:
+    """A client connection sends a QUIC PING after ``_KEEPALIVE_INTERVAL`` without sending anything (#158)."""
+
+    INTERVAL = 0.3
+
+    @pytest.fixture(autouse=True)
+    def _short_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mux_relay.webtransport import _protocol
+
+        assert _protocol._KEEPALIVE_INTERVAL == 5.0
+        monkeypatch.setattr(_protocol, "_KEEPALIVE_INTERVAL", self.INTERVAL)
+
+    async def _connect(self, server: LoopbackWebTransportServer) -> tuple[Any, list[float]]:
+        created = connect_webtransport(
+            server.url_for("/idle"), ["moqt-20"], configuration=server.client_configuration()
+        )
+        await asyncio.wait_for(created.ready, 5)
+        transport: Any = created.transport
+        protocol = transport._protocol
+        loop = asyncio.get_running_loop()
+        pings: list[float] = []
+        send_ping = protocol._quic.send_ping
+
+        def record(uid: int) -> None:
+            pings.append(loop.time() - protocol._last_sent_at)
+            send_ping(uid)
+
+        protocol._quic.send_ping = record
+        return transport, pings
+
+    async def test_an_idle_connection_pings_after_the_interval_without_sending(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport, pings = await self._connect(server)
+        protocol = transport._protocol
+
+        try:
+            await asyncio.sleep(self.INTERVAL * 3.5)
+            # Nothing flows either way but the PINGs and their ACKs: one per interval of send silence.
+            assert 2 <= len(pings) <= 4
+            assert all(self.INTERVAL - 0.02 <= silence <= self.INTERVAL * 1.5 for silence in pings)
+            assert protocol.terminated is None
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
+
+    async def test_a_connection_that_keeps_sending_sends_no_ping(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport, pings = await self._connect(server)
+
+        try:
+            stream = await transport.create_unidirectional_stream()
+
+            for _ in range(16):
+                await stream.write(b"x" * 32)
+                await asyncio.sleep(self.INTERVAL / 4)
+
+            assert pings == []
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
+
+    async def test_close_leaves_no_keepalive_timer_or_resource_warning(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport, pings = await self._connect(server)
+        protocol = transport._protocol
+        assert protocol._keepalive is not None
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            transport.close()
+            await transport.wait_closed()
+            assert protocol._keepalive is None
+            await asyncio.sleep(self.INTERVAL * 2)
+            server.close()
+            await asyncio.sleep(0.05)
+            del transport
+            gc.collect()
+
+        assert protocol._keepalive is None
+        assert pings == []
+        assert [w for w in caught if issubclass(w.category, ResourceWarning)] == []
+
+    async def test_a_server_connection_does_not_ping(self) -> None:
+        sessions: list[Any] = []
+        server = await start_webtransport_server(sessions.append)
+        transport, _ = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+
+        try:
+            assert sessions[0]._protocol._keepalive is None
+        finally:
+            transport.close()
+            await transport.wait_closed()
+            server.close()
 
 
 class TestReceivePruning:

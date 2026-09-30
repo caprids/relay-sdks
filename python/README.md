@@ -178,9 +178,11 @@ or the deadline. The full state table is in the
 Namespace fields are preserved verbatim. Known tracks can be subscribed to directly; the SDK neither
 interprets the payload nor assumes that a track contains audio, video, or timestamps. An accepted
 data subscription has no application inactivity deadline. The request timeout only bounds its
-initial response. An idle connection still depends on peer traffic or transport-provided keepalive;
-the SDK does not schedule its own keepalive. The Python transport uses aioquic's default 60-second
-local idle timeout, subject to peer negotiation.
+initial response. The SDK schedules no application-level keepalive, but the aioquic transport sends
+a QUIC PING once it has sent nothing for 5 seconds, on publisher and subscriber connections alike.
+That keeps an idle connection open, and lets a receive-only subscriber survive a NAT rebinding: the
+relay keeps sending to the old address until a packet from the new one arrives. The Python transport
+uses aioquic's default 60-second local idle timeout, subject to peer negotiation.
 Subscriptions have independent cancellation; the application owns connection shutdown.
 
 A subscription without a location filter (no `parameters`, or `NoLocationFilter()`) starts at the
