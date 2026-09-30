@@ -7,10 +7,15 @@ the demand observers behind ``has_demand`` and ``demand_changes()``. Its public 
 through two inbound calls, ``_bind()`` when the relay's binding changes and ``_disconnect()`` when the
 connection ends.
 
+An operation completes once the transport has taken its group's FIN, not once the relay has
+acknowledged it: the slot frees itself and passes the group on to the connection as a settling group
+(see ``CONTEXT.md`` and ``_settling_groups.py``). Nothing resets a settling group, and nothing reports
+how it ends.
+
 Everything the slot borrows enters through :class:`WriteSlotDependencies`: how to open a subgroup
-stream, whether the namespace is solicited, whether the connection is still open, and how to end the
-track in the core. Tests drive a slot with an in-memory subgroup writer; the "Write phases and
-interruptions" table in ``spec/behavior.md`` is the list they cover.
+stream, the connection's settling groups, whether the namespace is solicited, whether the connection
+is still open, and how to end the track in the core. Tests drive a slot with an in-memory subgroup
+writer; the "Write phases and interruptions" table in ``spec/behavior.md`` is the list they cover.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from typing import Any, Literal, Protocol, TypeVar
 from moq_core import KeyValuePair, ObjectStatus
 from moq_core.control_messages import STREAM_RESET_CODE
 
+from ._settling_groups import SettlingGroups
 from ._validation import payload_bytes, property_pairs
 from .errors import (
     RelayError,
@@ -76,6 +82,8 @@ class SubgroupStream(Protocol):
 
     async def fin(self) -> None: ...
 
+    async def wait_acknowledged(self) -> None: ...
+
     def abort(self, reason: object = None) -> None: ...
 
 
@@ -92,6 +100,8 @@ class WriteSlotDependencies:
 
     open_subgroup: Callable[[int, int], Awaitable[SubgroupStream]]
     """Open a subgroup stream for one group of this track, given the alias and group ID."""
+    settling_groups: SettlingGroups
+    """The connection's settling groups: an operation waits for room before opening its stream."""
     namespace_solicited: Callable[[], bool | None]
     """Whether a current relay solicitation covers the namespace; ``None`` before any arrived."""
     assert_open: Callable[[], None]
@@ -154,6 +164,11 @@ class _Operation:
         """Free the slot if this operation still holds it."""
         if self._slot._active is self:
             self._slot._active = None
+
+    def complete(self, writer: SubgroupStream) -> None:
+        """The FIN was handed over: the group settles on the connection's account and the slot is free."""
+        self._slot._deps.settling_groups.add(writer.wait_acknowledged())
+        self.release()
 
     def check(self) -> None:
         """Raise this operation's failure, or the connection's, before or after a step."""
@@ -328,7 +343,7 @@ class RelayGroupWriter:
             self._operation.phase = "closing"
             await self._operation.run(self._writer.fin)
             self._complete = True
-            self._operation.release()
+            self._operation.complete(self._writer)
         finally:
             self._pending = False
 
@@ -525,7 +540,8 @@ class RelayTrackWriter:
 
         operation = self._begin("write")
         try:
-            await operation.run(lambda: self._send(operation, data, object_properties))
+            writer = await operation.run(lambda: self._send(operation, data, object_properties))
+            operation.complete(writer)
         finally:
             operation.release()
 
@@ -567,6 +583,14 @@ class RelayTrackWriter:
         group_id = self._next_group_id
         self._next_group_id += 1
         operation.phase = "opening-stream"
+        settling_groups = self._deps.settling_groups
+
+        if not settling_groups.has_room():
+            # At the settling-group limit this waits under the write deadline, which reports a stall
+            # as a WRITE_TIMEOUT in this phase.
+            await settling_groups.wait_for_room(operation.interrupted)
+            operation.check()
+
         writer = await self._deps.open_subgroup(alias, group_id)
 
         if operation.cancelled:
@@ -577,7 +601,7 @@ class RelayTrackWriter:
         operation.writer = writer
         return writer
 
-    async def _send(self, operation: _Operation, data: bytes, properties: list[KeyValuePair]) -> None:
+    async def _send(self, operation: _Operation, data: bytes, properties: list[KeyValuePair]) -> SubgroupStream:
         writer = await self._open_stream(operation)
         operation.phase = "writing"
         await writer.write_object(object_id=0, properties=properties, payload=data)
@@ -585,6 +609,7 @@ class RelayTrackWriter:
         operation.phase = "closing"
         await writer.fin()
         operation.check()
+        return writer
 
 
 __all__ = [

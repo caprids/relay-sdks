@@ -405,16 +405,17 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   it. The transport accepted the group once its FIN was handed to the transport, not once the relay
   acknowledged it, so a track is not limited to one group per round trip. Until that
   acknowledgment the group is a settling group (see `CONTEXT.md`); closing a track does not wait
-  for its settling groups. In TypeScript a settling group is never reset when the relay
-  subscription changes or ends, and one that fails later (STOP_SENDING, a reset, the session
-  ending) is dropped without an error on the track: the cause surfaces as demand, a new relay
-  subscription, or the connection's closure. While a TypeScript publisher connection has 64
-  settling groups, the next write or group waits in `opening-stream` under its write deadline
-  before opening its stream, so a stall is a `WRITE_TIMEOUT`, not a transport failure; open groups
-  do not count toward that limit. In TypeScript `publisher.close()` waits for the connection's settling groups for up to
-  the largest write deadline among its tracks, then closes the transport; groups still
-  unacknowledged by then may be lost, and the close still succeeds. Python's close does not wait
-  for them yet ([issue #161](https://github.com/muxinc/relay-sdks/issues/161)). A write that
+  for its settling groups. A settling group is never reset when the relay subscription changes or
+  ends, and one that fails later (STOP_SENDING, a reset, the session ending) is dropped without an
+  error on the track: the cause surfaces as demand, a new relay subscription, or the connection's
+  closure. While a publisher connection has 64 settling groups, the next write or group waits in
+  `opening-stream` under its write deadline before opening its stream, so a stall is a
+  `WRITE_TIMEOUT`, not a transport failure; open groups do not count toward that limit. This also
+  bounds how much a Python publisher accepts into a dead uplink, since its writes complete once
+  the transport has sent the FIN. `publisher.close()` waits for the connection's settling groups for
+  up to the largest write deadline among its tracks before it ends the session; in Python the same
+  wait also covers each ended track's PUBLISH_DONE (see deviation 2). Groups still unacknowledged
+  by then may be lost, and the close still succeeds. A write that
   completed just before the relay ended its subscription may reach no viewer, and no error follows.
 - There is no publisher-side retention or replay. Late-subscriber behavior depends on relay caching
   and subscription filters.
@@ -781,10 +782,13 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    GOAWAY written as the transport closes gives the peer nothing to act on. How the relay treats a
    client GOAWAY depends on its version: moq-relay 0.14.17 closes the whole session, and 0.15.1 and
    later record it and keep the session. Closing the publisher ends every subscription with
-   PUBLISH_DONE and a FIN (deviation 1), retracts the
-   namespace with NAMESPACE_DONE, gives those writes a bounded window (250 ms), then waits up to
-   2 s for the relay to FIN its side of each ended subscription's request stream, and closes the
-   transport. The 2 s covers the relay's 1 s grace plus a round trip; against moq-relay the wait
+   PUBLISH_DONE and a FIN (deviation 1). It then waits, for up to the largest write deadline among
+   its tracks, for the relay to acknowledge the connection's settling groups; Python also waits for
+   the PUBLISH_DONEs and FINs to be acknowledged, so a short uplink outage at close does not send the
+   session close while they are still in flight. After that it retracts the namespace with
+   NAMESPACE_DONE, gives those writes a bounded window (250 ms), then waits up to 2 s for the relay
+   to FIN its side of each ended subscription's request stream, and ends the session. None of these
+   bounds reports an error when it expires. The 2 s covers the relay's 1 s grace plus a round trip; against moq-relay the wait
    ends as soon as the relay has finished every track, typically within a round trip. Closing a
    subscriber connection closes the transport and writes nothing more on the control stream. The application observes nothing: the relay learns of the shutdown from the
    transport close, and from a publisher's PUBLISH_DONEs and retraction before it. A GOAWAY the relay sends

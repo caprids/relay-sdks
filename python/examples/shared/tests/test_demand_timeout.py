@@ -11,6 +11,7 @@ from relay_helpers.fake_track_writer import FakeTrackWriter, closed_error, timeo
 from shared.demand_timeout import is_demand_timeout, write_with_retry
 
 from mux_relay import KeyValuePair, RelayError, RelayErrorPhase, RelayTrackWriter
+from mux_relay._settling_groups import SettlingGroups
 from mux_relay._write_slot import WriteSlotDependencies
 
 PAYLOAD = b'{"seq": 1}'
@@ -137,6 +138,7 @@ async def test_a_write_on_an_ended_track_is_raised_without_retrying_or_uncertain
         "events",
         WriteSlotDependencies(
             open_subgroup=open_subgroup,
+            settling_groups=SettlingGroups(),
             namespace_solicited=lambda: None,
             assert_open=lambda: None,
             end_track=lambda: None,

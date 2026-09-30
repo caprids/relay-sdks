@@ -4,8 +4,9 @@ The publish-direction complement to the reader in ``object_stream``.
 
 One writer owns one unidirectional stream carrying one subgroup of one group: the SUBGROUP_HEADER
 goes out first, objects follow serially with delta-encoded object IDs, and :meth:`SubgroupWriter.fin`
-closes the stream to mark the group complete. :meth:`SubgroupWriter.abort` resets the stream instead:
-the drop path for a publisher falling behind transport backpressure.
+closes the stream to mark the group complete, and :meth:`SubgroupWriter.wait_acknowledged` then waits
+for the peer to acknowledge it. :meth:`SubgroupWriter.abort` resets the stream instead: the drop path
+for a publisher falling behind transport backpressure.
 
 The shape this SDK publishes is one subgroup per group at subgroup ID 0, so the writer pins
 SUBGROUP_ID_MODE to ``0b00`` (no explicit subgroup-id field) and sets END_OF_GROUP: on FIN the subgroup
@@ -25,7 +26,7 @@ from .bytes import ByteWriter
 from .control_messages import KeyValuePair, encode_key_value_pairs
 from .errors import MoqtProtocolError
 from .object_stream import MAX_OBJECT_PAYLOAD_LENGTH, MAX_OBJECT_PROPERTIES_LENGTH, ObjectStatus
-from .transport import SendStream
+from .transport import SendStream, wait_acknowledged
 
 _SUBGROUP_TYPE_BASE = 0x10
 _SUBGROUP_TYPE_PROPERTIES = 0x01
@@ -182,6 +183,14 @@ class SubgroupWriter:
 
         self._finishing = False
         self._finished = True
+
+    async def wait_acknowledged(self) -> None:
+        """After :meth:`fin`: return once the peer acknowledged the whole stream, FIN included.
+
+        On a transport that does not report acknowledgement this returns at once. Raises when the
+        stream was reset or stopped, or the session ended, before the acknowledgement.
+        """
+        await wait_acknowledged(self._stream)
 
     def abort(self, reason: object = None) -> None:
         """Reset the stream; delivered objects may be incomplete (drop path).

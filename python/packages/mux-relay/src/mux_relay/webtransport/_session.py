@@ -317,7 +317,8 @@ class WebTransportSessionBase:
         A write and the FIN both settle once their bytes have been handed to the wire (nothing left
         pending on the stream), so a caller is not held for a full round trip on a healthy link. A
         closed send half stays watched until aioquic discards the stream, though: that discard is how
-        the session learns the FIN was acknowledged and the per-stream state can go. (The dropped-FIN
+        the session learns the FIN was acknowledged, tells the half (which is what a settling group's
+        acknowledgement waits on), and the per-stream state can go. (The dropped-FIN
         retry in ``_fin_retry`` watches those FINs on its own and re-queues one aioquic consumed without
         sending; ``close()`` on the session waits for the acknowledgement before tearing the connection down.)
 
@@ -337,6 +338,8 @@ class WebTransportSessionBase:
                 else:
                     send.fail_transmit(WebTransportError("stream is closed"))
 
+                send.finished()
+
             self._forget_stream(stream_id)
             return False
 
@@ -348,6 +351,9 @@ class WebTransportSessionBase:
                 send.settled()
             else:
                 send.fail_transmit(WebTransportError("stream is closed"))
+
+            # The FIN (or a reset) is acknowledged: a settling group settles here (see CONTEXT.md).
+            send.finished()
 
             # Watch on only while the discard is imminent; a bidirectional stream whose receive half
             # is still live re-registers itself when that half ends.

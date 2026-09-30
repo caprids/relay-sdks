@@ -12,6 +12,9 @@ Stream semantics follow QUIC and the WHATWG streams the TypeScript core is writt
 - :meth:`ReceiveStream.cancel` is STOP_SENDING: the reader wants no more bytes.
 - :meth:`SendStream.write` returns once the transport accepted the bytes (not when the peer read
   them); :meth:`SendStream.close` FINs the stream; :meth:`SendStream.abort` is RESET_STREAM.
+- A send stream may also report when the peer acknowledged it (:class:`AcknowledgedSendStream`).
+  That is optional: :func:`wait_acknowledged` treats a stream without it as acknowledged once
+  written, which is all an in-memory transport can say.
 """
 
 from __future__ import annotations
@@ -52,6 +55,29 @@ class SendStream(Protocol):
     def abort(self, reason: object = None) -> None:
         """Reset the stream (RESET_STREAM); queued bytes may never arrive."""
         ...
+
+
+@runtime_checkable
+class AcknowledgedSendStream(SendStream, Protocol):
+    """A send stream that can tell when the peer acknowledged everything sent on it."""
+
+    async def wait_acknowledged(self) -> None:
+        """Return once the peer acknowledged every byte and the FIN.
+
+        Raises when that can no longer happen: the stream was reset or stopped, or the session ended
+        first. Meaningful only after ``close()``.
+        """
+        ...
+
+
+async def wait_acknowledged(stream: SendStream) -> None:
+    """Wait until the peer acknowledged ``stream``, FIN included, where its transport can tell.
+
+    A stream that does not report acknowledgement counts as acknowledged at once. Raises as
+    :meth:`AcknowledgedSendStream.wait_acknowledged` does.
+    """
+    if isinstance(stream, AcknowledgedSendStream):
+        await stream.wait_acknowledged()
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,4 +130,12 @@ def transport_ended(transport: MoqtTransport) -> bool:
     return isinstance(transport, _EndAware) and transport.ended
 
 
-__all__ = ["BidirectionalStream", "MoqtTransport", "ReceiveStream", "SendStream", "transport_ended"]
+__all__ = [
+    "AcknowledgedSendStream",
+    "BidirectionalStream",
+    "MoqtTransport",
+    "ReceiveStream",
+    "SendStream",
+    "transport_ended",
+    "wait_acknowledged",
+]

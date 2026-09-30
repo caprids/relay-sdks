@@ -3,7 +3,8 @@
 A half never touches QUIC. It asks its :class:`_StreamLink` to queue bytes or a FIN, to reset or stop a
 stream, and whether the session is still live; the link drives the half back through
 :meth:`_ReceiveHalf.feed` and :meth:`_ReceiveHalf.fail`, and :meth:`_SendHalf.settled`,
-:meth:`_SendHalf.fail_transmit`, :meth:`_SendHalf.stopped` and :meth:`_SendHalf.fail`.
+:meth:`_SendHalf.fail_transmit`, :meth:`_SendHalf.finished`, :meth:`_SendHalf.stopped` and
+:meth:`_SendHalf.fail`.
 ``WebTransportSessionBase`` is the production link; the tests connect a send half to a receive half
 directly (``relay_helpers/stream_link.py``).
 """
@@ -127,9 +128,24 @@ class _SendHalf:
     allow, so ``write()`` and ``close()`` settle only once everything queued on the stream so far
     has been handed to the network. That is the backpressure a browser ``WritableStream`` applies:
     a slow link is felt as a slow write, and a caller's deadline covers the transport write.
+
+    :meth:`wait_acknowledged` waits one step further, for the peer's acknowledgement of the whole
+    stream, which the link reports through :meth:`finished`. It satisfies
+    :class:`~moq_core.transport.AcknowledgedSendStream`.
     """
 
-    __slots__ = ("_aborted", "_closed", "_error", "_link", "_stopped", "_stream_id", "_transmitted")
+    __slots__ = (
+        "_aborted",
+        "_acknowledged",
+        "_closed",
+        "_delivery",
+        "_delivery_error",
+        "_error",
+        "_link",
+        "_stopped",
+        "_stream_id",
+        "_transmitted",
+    )
 
     def __init__(self, link: _StreamLink, stream_id: int) -> None:
         self._link = link
@@ -140,6 +156,11 @@ class _SendHalf:
         self._error: BaseException | None = None
         self._transmitted: asyncio.Future[None] | None = None
         """Pending while queued bytes (or the FIN) await transmission; ``None`` when nothing is waiting."""
+        self._acknowledged = False
+        self._delivery_error: BaseException | None = None
+        """Why the stream will never be acknowledged, once that is known."""
+        self._delivery: asyncio.Future[None] | None = None
+        """What :meth:`wait_acknowledged` waits on; created by the first waiter."""
 
     @property
     def stream_id(self) -> int:
@@ -183,12 +204,27 @@ class _SendHalf:
         self._closed = True
         await self._link.send(self, b"", True)
 
+    async def wait_acknowledged(self) -> None:
+        """Return once the peer acknowledged every byte and the FIN of this stream.
+
+        Raises when that can no longer happen: the stream was reset or stopped, or the session ended
+        first. Meaningful only after ``close()``.
+        """
+        if self._delivery is None:
+            self._delivery = asyncio.get_running_loop().create_future()
+            observe(self._delivery)
+            self._settle_delivery()
+
+        # Shielded: one waiter giving up must not cancel the future every other waiter shares.
+        await asyncio.shield(self._delivery)
+
     def abort(self, reason: object = None) -> None:
         # A FIN that already went out is a complete stream at the peer; a reset now would only destroy it.
         if self._aborted or self._error is not None or (self._closed and self._transmitted is None):
             return
 
         self._aborted = True
+        self._end_delivery(reason if isinstance(reason, BaseException) else WebTransportError("stream was aborted"))
         # Fail a pending write with the caller's reason before resetting: `reset_stream` transmits,
         # and the reset branch of the session's settlement would otherwise settle the waiter first with
         # a generic "stream was aborted", masking a `write_timeout`'s WRITE_TIMEOUT error.
@@ -201,14 +237,49 @@ class _SendHalf:
         """The peer sent STOP_SENDING: queued bytes will never go out (aioquic answers with a reset of its own)."""
         if self._stopped is None:
             self._stopped = code
-            self.fail_transmit(StreamStopped("peer stopped the stream", code=code))
+            stopped = StreamStopped("peer stopped the stream", code=code)
+            self._end_delivery(stopped)
+            self.fail_transmit(stopped)
 
     def fail(self, error: BaseException) -> None:
         """The session ended, or the stream is gone: the pending transmission fails, and so does every later write."""
         if self._error is None and not self._closed and not self._aborted:
             self._error = error
 
+        self._end_delivery(error)
         self.fail_transmit(error)
+
+    def finished(self) -> None:
+        """aioquic is done with the sending side: the FIN or a reset was acknowledged, or the stream discarded.
+
+        For a closed half that was never reset or stopped, that is the peer's acknowledgement of the whole stream.
+        """
+        if not self._closed or self._aborted or self._stopped is not None:
+            self._end_delivery(WebTransportError("stream was reset"))
+            return
+
+        if self._delivery_error is None and not self._acknowledged:
+            self._acknowledged = True
+            self._settle_delivery()
+
+    def _end_delivery(self, error: BaseException) -> None:
+        """The stream can no longer be acknowledged. The first reason sticks; an acknowledgement already seen wins."""
+        if self._acknowledged or self._delivery_error is not None:
+            return
+
+        self._delivery_error = error
+        self._settle_delivery()
+
+    def _settle_delivery(self) -> None:
+        delivery = self._delivery
+
+        if delivery is None or delivery.done():
+            return
+
+        if self._acknowledged:
+            delivery.set_result(None)
+        elif self._delivery_error is not None:
+            delivery.set_exception(self._delivery_error)
 
     def transmit_waiter(self) -> asyncio.Future[None]:
         """The future the link settles once everything queued so far went out; concurrent writers share it."""
