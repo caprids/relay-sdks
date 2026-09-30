@@ -48,7 +48,9 @@ writes, and keeps an eight-chunk hard cap for bursts of internally buffered enco
 not silently drop encoded deltas to relieve transport backpressure.
 Subscription changes reset video to the next keyframe and re-serve the catalog on replacement
 demand. Other write errors, encoder errors, and cancellation close its tracks and encoder; the caller
-closes the connection. There is no audio, automatic reconnection, or adaptive bitrate policy in this example.
+closes the connection. There is no audio, automatic reconnection, or adaptive bitrate policy in this example. After the
+connection ends, for example after a network outage longer than about 5 s in Chromium, nothing
+reconnects; see [publisher recovery](../../../spec/publisher-recovery.md).
 
 For your own encoder callback, import `videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`,
 and `chunkToLocFrame` from `@mux/moq-media`. `chunkToLocFrame` accepts native video or audio chunks,

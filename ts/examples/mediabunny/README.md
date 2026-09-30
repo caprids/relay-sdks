@@ -31,6 +31,10 @@ Use a browser with WebTransport support on localhost or HTTPS and a fresh author
 The caller owns credentials and connection shutdown. This example contains no UI, server, or player;
 see the [existing browser launcher](../mux-global/README.md) for the repository's WebTransport setup.
 
+This example does not reconnect after the connection ends, for example after a network outage
+longer than about 5 s in Chromium. See [publisher recovery](../../../spec/publisher-recovery.md)
+for what a replacement publisher can and cannot restore.
+
 The file must contain AVC video with decoder configuration and four-byte NAL lengths. The example
 publishes its primary video track once and ignores audio. Timestamps must be nonnegative. Each
 keyframe opens a group; deltas append to it. Packets stay in decode order and are paced by their
