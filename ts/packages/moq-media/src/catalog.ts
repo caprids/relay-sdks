@@ -4,13 +4,22 @@ import { AUDIO_TRACK, VIDEO_TRACK } from './loc.js';
 /** Version emitted — the newest version `parseMsfCatalog` accepts. */
 export const MSF_CATALOG_VERSION = 'draft-01';
 
+/**
+ * The video track {@link buildMsfCatalog} advertises. An H.264 (`avc1`/`avc3`) track without `initData` is left out
+ * of the catalog, since its codec string is derived from the avcC record.
+ */
 export interface VideoTrackInfo {
+  /** Track name. Default {@link VIDEO_TRACK}. */
   name?: string;
   /** WebCodecs registry codec string, e.g. `'avc1.42E01F'` or `'vp8'`. */
   codec: string;
+  /** Coded width in pixels. */
   width?: number;
+  /** Coded height in pixels. */
   height?: number;
+  /** Frames per second. */
   framerate?: number;
+  /** Bits per second. */
   bitrate?: number;
   /**
    * Decoder init data (WebCodecs `decoderConfig.description`, e.g. avcC for `avc`-format H.264) — emitted as an inline
@@ -19,20 +28,25 @@ export interface VideoTrackInfo {
   initData?: Uint8Array;
 }
 
+/** The audio track {@link buildMsfCatalog} advertises. Unset fields default to Opus, 48 kHz, stereo. */
 export interface AudioTrackInfo {
+  /** Track name. Default {@link AUDIO_TRACK}. */
   name?: string;
   /** WebCodecs registry codec string, e.g. `'opus'`. */
   codec?: string;
-  /** Output sample rate (§5.2.20). */
+  /** Output sample rate (§5.2.20). Always 48000 for Opus. */
   samplerate?: number;
   /** Channel config string (§5.2.21), e.g. `'2'` or `'5.1'`. */
   channelConfig?: string;
+  /** Bits per second. */
   bitrate?: number;
   /** Decoder init data, e.g. an AAC AudioSpecificConfig — Opus carries none. */
   initData?: Uint8Array;
 }
 
+/** A non-media track {@link buildMsfCatalog} advertises, such as application data. */
 export interface DataTrackInfo {
+  /** Track name, unique within the catalog. */
   name: string;
   /**
    * MSF role label (§5.2.6) classifying the non-media track for consumers, e.g. `'data'` or `'metadata'`. MUST NOT be a
@@ -42,10 +56,13 @@ export interface DataTrackInfo {
   role?: string;
 }
 
+/** What {@link buildMsfCatalog} advertises: the namespace and the tracks published under it. */
 export interface MsfCatalogInput {
   /** Track namespace tuple every track is published under. */
   namespace: readonly string[];
+  /** The video track, if any. */
   video?: VideoTrackInfo;
+  /** The audio track, if any. */
   audio?: AudioTrackInfo;
   /**
    * Application data tracks published beside the media — advertised so consumers can discover and subscribe to them,

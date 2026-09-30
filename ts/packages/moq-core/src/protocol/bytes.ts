@@ -95,6 +95,7 @@ export class ByteWriter {
     this.#buffer = new Uint8Array(initialCapacity);
   }
 
+  /** Number of bytes written so far. */
   get length(): number {
     return this.#length;
   }
@@ -109,22 +110,26 @@ export class ByteWriter {
     this.#buffer = grown;
   }
 
+  /** Appends a MOQT varint (§1.4.1). Throws `RangeError` unless `value` is a non-negative safe integer. */
   writeVarint(value: number): void {
     this.#ensure(varintByteLength(value));
     this.#length += encodeVarintInto(this.#buffer, this.#length, value);
   }
 
+  /** Appends the low 8 bits of `value`. */
   writeUint8(value: number): void {
     this.#ensure(1);
     this.#buffer[this.#length++] = value & 0xff;
   }
 
+  /** Appends the low 16 bits of `value`, big-endian. */
   writeUint16(value: number): void {
     this.#ensure(2);
     this.#buffer[this.#length++] = (value >> 8) & 0xff;
     this.#buffer[this.#length++] = value & 0xff;
   }
 
+  /** Appends `bytes` as-is, with no length prefix. */
   writeBytes(bytes: Uint8Array): void {
     this.#ensure(bytes.length);
     this.#buffer.set(bytes, this.#length);

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "name": "Relay TypeScript SDK",
+  "entryPointStrategy": "packages",
+  "entryPoints": [".", "packages/moq-core", "packages/moq-media", "packages/moq-mediabunny"],
+  "packageOptions": {
+    "excludePrivate": true,
+    "excludeInternal": true,
+    "validation": { "notExported": true, "invalidLink": true, "notDocumented": true }
+  },
+  "out": "docs-api",
+  "readme": "none",
+  "validation": { "notExported": true, "invalidLink": true, "notDocumented": true },
+  "treatWarningsAsErrors": true
+}

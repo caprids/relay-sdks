@@ -108,36 +108,63 @@ export const TRACK_PROPERTY = {
 
 /** REQUEST_ERROR codes (§15.11.2). */
 export const REQUEST_ERROR_CODE = {
+  /** An implementation-specific or otherwise unclassified error. */
   INTERNAL_ERROR: 0x0,
+  /** The requester is not authorized for this request. */
   UNAUTHORIZED: 0x1,
+  /** The responder could not complete the request in time. */
   TIMEOUT: 0x2,
+  /** The responder does not support this request. */
   NOT_SUPPORTED: 0x3,
+  /** An authorization token could not be parsed. */
   MALFORMED_AUTH_TOKEN: 0x4,
+  /** An authorization token has expired. */
   EXPIRED_AUTH_TOKEN: 0x5,
+  /** The responder is going away and takes no new requests. */
   GOING_AWAY: 0x6,
+  /** The responder is overloaded. */
   EXCESSIVE_LOAD: 0x9,
+  /** The requested track or namespace does not exist (yet). */
   DOES_NOT_EXIST: 0x10,
+  /** The requested range is invalid. */
   INVALID_RANGE: 0x11,
+  /** The track is malformed and cannot be served as requested. */
   MALFORMED_TRACK: 0x12,
+  /** The responder is not interested in what was offered. */
   UNINTERESTED: 0x20,
+  /** The namespace prefix overlaps one already requested. */
   PREFIX_OVERLAP: 0x30,
+  /** The track namespace is too large. */
   NAMESPACE_TOO_LARGE: 0x31,
+  /** The request needs an extension the responder does not support. */
   UNSUPPORTED_EXTENSION: 0x33,
+  /** The request should be made elsewhere; REQUEST_ERROR carries a {@link Redirect}. */
   REDIRECT: 0x34,
+  /** The request's filters conflict with each other. */
   CONFLICTING_FILTERS: 0x35,
+  /** A filter in the request is invalid. */
   INVALID_FILTER: 0x36,
 } as const;
 
 /** PUBLISH_DONE status codes (§10.12). */
 export const PUBLISH_DONE_STATUS = {
+  /** An implementation-specific or otherwise unclassified error. */
   INTERNAL_ERROR: 0x0,
+  /** The subscriber is no longer authorized. */
   UNAUTHORIZED: 0x1,
+  /** The track ended. */
   TRACK_ENDED: 0x2,
+  /** The publisher or relay is going away. */
   GOING_AWAY: 0x4,
+  /** The subscriber fell too far behind the track. */
   TOO_FAR_BEHIND: 0x5,
+  /** The subscription expired. */
   EXPIRED: 0x6,
+  /** A REQUEST_UPDATE for the subscription could not be applied. */
   UPDATE_FAILED: 0x8,
+  /** The publisher or relay is overloaded. */
   EXCESSIVE_LOAD: 0x9,
+  /** The track is malformed. */
   MALFORMED_TRACK: 0x12,
 } as const;
 
@@ -211,6 +238,7 @@ export const STREAM_RESET_CODE = {
 /** Maximum body size — the frame length field is 16 bits. */
 export const MAX_CONTROL_MESSAGE_LENGTH = 0xffff;
 
+/** Most fields a track namespace may have; the codec rejects longer namespaces with `MoqtProtocolError`. */
 export const MAX_NAMESPACE_FIELDS = 32;
 const MAX_FULL_TRACK_NAME_LENGTH = 4096;
 const MAX_REASON_PHRASE_LENGTH = 1024;
@@ -224,7 +252,9 @@ const MAX_LOCATION_FILTER_FIELDS = 4;
 
 /** A particular Object in a Group within a Track (§1.4.2). */
 export interface Location {
+  /** Group ID. */
   group: number;
+  /** Object ID within the group. */
   object: number;
 }
 
@@ -323,7 +353,9 @@ function readLocationParameter(reader: ByteReader): Location {
  * Track/Object Properties (message parameters use per-type encodings instead — see `MessageParameters`).
  */
 export interface KeyValuePair {
+  /** Key type; its parity selects the value form. */
   type: number;
+  /** A varint `number` for an even `type`, a byte field for an odd one. */
   value: number | Uint8Array;
 }
 
@@ -397,10 +429,30 @@ export function decodeKeyValuePairs(reader: ByteReader, endOffset: number): KeyV
  *   encodes as `none` — its two-field spelling would read as `next-object`.
  */
 export type LocationFilter =
-  | { type: 'none' }
-  | { type: 'next-object' }
-  | { type: 'relative-group'; groupsBeforeNext: number }
-  | { type: 'absolute'; start: Location; endGroupDelta?: number; endObject?: number };
+  | {
+      /** No location constraint. */
+      type: 'none';
+    }
+  | {
+      /** Start at the live edge, the Object after Largest Object. */
+      type: 'next-object';
+    }
+  | {
+      /** Start a number of groups back from the next group. */
+      type: 'relative-group';
+      /** `0` for the next group, `1` for the start of the current group, `N` for N−1 groups before it. */
+      groupsBeforeNext: number;
+    }
+  | {
+      /** Start at an explicit Location. */
+      type: 'absolute';
+      /** First Location covered. */
+      start: Location;
+      /** End group as a delta from `start.group`; absent leaves the filter open-ended. */
+      endGroupDelta?: number;
+      /** Last Object ID covered in the end group; requires `endGroupDelta`. Absent covers the whole end group. */
+      endObject?: number;
+    };
 
 /** Serialize a filter as the LOCATION_FILTER parameter's value (without its length prefix). */
 export function encodeLocationFilter(filter: LocationFilter): Uint8Array {
@@ -476,6 +528,7 @@ export function decodeLocationFilter(bytes: Uint8Array): LocationFilter {
 // Message Parameters (§10.2)
 // ============================================================================
 
+/** GROUP_ORDER: the order in which the publisher delivers groups. */
 export type GroupOrder = 'ascending' | 'descending';
 
 /**
@@ -484,17 +537,27 @@ export type GroupOrder = 'ascending' | 'descending';
  * (parameters cannot be skipped — the block is bounded by count, not length).
  */
 export interface MessageParameters {
+  /** OBJECT_DELIVERY_TIMEOUT value. */
   objectDeliveryTimeout?: number;
+  /** SUBGROUP_DELIVERY_TIMEOUT value. */
   subgroupDeliveryTimeout?: number;
+  /** RENDEZVOUS_TIMEOUT value. */
   rendezvousTimeout?: number;
+  /** FILL_TIMEOUT value. */
   fillTimeout?: number;
   /** Serialized Token structures (§10.2.2). May repeat. */
   authorizationTokens?: Uint8Array[];
+  /** EXPIRES value. */
   expires?: number;
+  /** LARGEST_OBJECT: the largest Location the responder has for the track. */
   largestObject?: Location;
+  /** FORWARD: `1` to send Objects for the subscription, `0` to hold them. */
   forward?: 0 | 1;
+  /** SUBSCRIBER_PRIORITY, a single byte. */
   subscriberPriority?: number;
+  /** LOCATION_FILTER: which Objects the request covers. */
   locationFilter?: LocationFilter;
+  /** GROUP_ORDER: the order the requester wants groups delivered in. */
   groupOrder?: GroupOrder;
   /**
    * FILL_PARAMETERS (§10.2.15): asks the publisher to deliver a fill range on a fetch stream alongside the subscription
@@ -502,9 +565,16 @@ export interface MessageParameters {
    * omitted entries inherit the subscription's own values.
    */
   fillParameters?: FillParameters;
+  /** NEW_GROUP_REQUEST value. */
   newGroupRequest?: number;
   /** Range-filter parameters (§5.1.4), kept opaque — the engine never sends or interprets them. */
-  rangeFilters?: { type: number; value: Uint8Array }[];
+  rangeFilters?: {
+    /** Parameter type. */
+    type: number;
+    /** Encoded parameter value, without its length prefix. */
+    value: Uint8Array;
+  }[];
+  /** TRACK_NAMESPACE_PREFIX: the namespace prefix the request applies to. */
   trackNamespacePrefix?: TrackNamespace;
   /** INCLUDE_PROPERTIES (§10.2.21): `0` asks the responder to send empty Track Properties. Default `1`. */
   includeProperties?: 0 | 1;
@@ -1107,9 +1177,13 @@ export function encodeNamespaceDone(trackNamespaceSuffix: TrackNamespace): Uint8
 // Decoders (publisher → subscriber)
 // ============================================================================
 
+/** Where a REQUEST_ERROR with code `REDIRECT` sends the requester. */
 export interface Redirect {
+  /** URI of the endpoint to make the request to. */
   connectUri: string;
+  /** Track namespace to request there. */
   trackNamespace: TrackNamespace;
+  /** Track name to request there. */
   trackName: string;
 }
 

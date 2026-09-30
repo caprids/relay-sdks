@@ -19,6 +19,7 @@ export {
   SubscriptionRequestError,
 } from './subscription.js';
 
+/** Options for `subscribeEvents`: the iterator's queue bound and its own cancellation. */
 export interface SubscriptionEventOptions {
   /** Maximum queued events (including lifecycle events). Positive integer; default 64. */
   capacity?: number;
@@ -30,6 +31,7 @@ export interface SubscriptionEventOptions {
 export interface SubscriptionEvents extends AsyncIterableIterator<SubscriptionEvent> {
   /** Discard queued events and settle pending reads as EOF. Idempotent. */
   close(): void;
+  /** Called by `for await` on `break` or a throw: discards queued events, cancels the subscription, resolves done. */
   return(): Promise<IteratorResult<SubscriptionEvent>>;
 }
 

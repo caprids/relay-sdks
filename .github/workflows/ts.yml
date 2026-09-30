@@ -20,3 +20,9 @@ jobs:
         with:
           install_args: node pnpm
       - run: mise run ts:check
+      - run: mise run ts:docs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ts-api-reference
+          path: ts/docs-api/
+          if-no-files-found: error

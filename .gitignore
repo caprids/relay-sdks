@@ -1,6 +1,8 @@
 node_modules/
 dist/
 coverage/
+# Generated TypeScript API reference (mise run ts:docs)
+ts/docs-api/
 *.tsbuildinfo
 .env
 .env.*

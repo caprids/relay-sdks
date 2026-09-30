@@ -16,14 +16,26 @@ export function encodeNameComponent(value: string): string {
   return out;
 }
 
+/**
+ * The MSF string form of a full track name: each namespace field encoded with {@link encodeNameComponent} and joined
+ * with `-`, then `--` and the encoded track name.
+ */
 export function encodeNamespaceName(namespace: readonly string[], trackName: string): string {
   return `${namespace.map(encodeNameComponent).join('-')}--${encodeNameComponent(trackName)}`;
 }
 
+/** Options for {@link composeMoqSource}. */
 export interface ComposeMoqSourceOptions {
+  /** The track the source names. Default {@link CATALOG_TRACK}. */
   trackName?: string;
+  /** A token for the player to present, carried percent-encoded in the fragment's `c4m` parameter. */
   token?: string;
 }
+/**
+ * Compose the `moqt://` source URL a MoQ player takes: the relay URL with its scheme switched to `moqt:` (authority,
+ * path and query kept), and a `#msf:` fragment naming the namespace and track. The relay URL must be an absolute
+ * `https://` or `moqt://` URL with no credentials or fragment; namespace fields must be non-empty.
+ */
 export function composeMoqSource(
   origin: string,
   namespace: readonly string[],

@@ -45,14 +45,19 @@ export function audioTrackFromDecoderConfig(config: AudioDecoderConfig): AudioTr
   };
 }
 
+/** One encoded frame ready to publish as a LOC object: `write(payload, { properties })`. */
 export interface LocFrame {
   /** Chunk helpers copy these bytes; packet adapters may borrow them. Keep stable until the write completes. */
   payload: Uint8Array;
+  /** Presentation time in microseconds, after any timestamp offset. */
   timestampUs: number;
+  /** Whether the frame is a key frame; start a new group on one. */
   key: boolean;
+  /** The LOC object properties: Timestamp and Timescale, plus decoder configuration on key frames when supplied. */
   properties: ReturnType<typeof locProperties>;
 }
 
+/** Options for {@link chunkToLocFrame}. Decoder configuration is attached to key chunks only. */
 export interface ChunkToLocFrameOptions extends LocPropertiesOptions {
   /** Added to the chunk timestamp. Use one shared offset across tracks to normalize negative timestamps. */
   timestampOffsetUs?: number;

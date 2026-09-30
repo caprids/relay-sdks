@@ -4,6 +4,7 @@ import type { EncodedPacket } from 'mediabunny';
 // Compatibility exports. New code should import the WebCodecs helpers/types from @mux/moq-media.
 export { audioTrackFromDecoderConfig, type LocFrame, videoTrackFromDecoderConfig } from '@mux/moq-media';
 
+/** Options for {@link packetToLocFrame}. Decoder configuration is attached to key packets only. */
 export interface PacketToLocFrameOptions extends LocPropertiesOptions {
   /** Added to the packet timestamp. Use one shared offset for all tracks with negative file timestamps. */
   timestampOffsetUs?: number;

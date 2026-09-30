@@ -32,10 +32,19 @@ export type RelayErrorPhase =
 
 /** Caller cancellation reasons and argument errors are not converted to RelayError. */
 export class RelayError extends Error {
+  /** `'RelayError'`, or the subclass name for the three subscription errors. */
   override readonly name: string = 'RelayError';
+  /** The stable failure category; branch on this, not on `message` or the class. */
   readonly code: RelayErrorCode;
+  /** The step that was running when the failure happened. */
   readonly phase: RelayErrorPhase;
 
+  /**
+   * @param code The stable failure category.
+   * @param message Diagnostic text; not a compatibility contract.
+   * @param phase The step that was running when the failure happened.
+   * @param options `cause` carries the wrapped transport or session failure.
+   */
   constructor(code: RelayErrorCode, message: string, phase: RelayErrorPhase, options?: ErrorOptions) {
     super(message, options);
     this.code = code;

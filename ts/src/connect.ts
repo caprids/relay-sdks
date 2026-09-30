@@ -32,9 +32,11 @@ export type {
   RelayTransportFactory,
 } from './connect-session.js';
 
+/** Which track to subscribe to, and how: what {@link RelaySubscriber.subscribe} and `subscribeEvents` take. */
 export interface RelayTrackOptions {
   /** Namespace tuple; fields are preserved without splitting or joining on slashes. */
   namespace: readonly string[];
+  /** Track name within the namespace. */
   track: string;
   /** Protocol subscription controls, including the location filter and priority. */
   parameters?: MessageParameters;
@@ -126,7 +128,10 @@ export interface RelaySubscriber {
    */
   readonly trackSource: MoqTrackSource;
   /** Resolves once for local shutdown, peer closure, or failure. It never rejects. */
-  readonly closed: Promise<{ error?: unknown }>;
+  readonly closed: Promise<{
+    /** The failure that ended the connection; absent after a clean shutdown. */
+    error?: unknown;
+  }>;
   /** Close this connection and all requests on it. Idempotent. */
   close(): void;
 }
