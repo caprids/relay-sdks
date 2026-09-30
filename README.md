@@ -49,6 +49,30 @@ Formatting and linting are configured in `ts/biome.jsonc`, and every package ext
 compiler options in `ts/tsconfig.base.json`. `pnpm lint` fails on warnings, so a clean check prints
 nothing.
 
+### TypeScript live Relay smoke test
+
+This opt-in Chromium test publishes and subscribes against a real relay. It is excluded from
+`pnpm check` and needs a token authorized for both operations. The token can be supplied through
+hidden stdin input or the `RELAY_TOKEN` environment variable; it is never written to a file.
+
+Set `RELAY_URL` and `RELAY_NAMESPACE` using the [quickstart prompts](ts/GUIDE.md#install-and-run) first. Your token must
+authorize both operations under that namespace prefix, including children: the test appends a
+random UUID. Running this command explicitly opts into contacting that endpoint.
+
+```sh
+mise exec -- pnpm --dir ts exec playwright install chromium   # once
+RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:test:relay
+```
+
+The test waits for the publisher's `announced`, subscribes through the examples' announce-race
+retry and reports how often it retried, checks binary and empty payloads plus independent track
+closure, then closes both connections. It defaults to
+`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
+the SDK are absolute: include the token's root prefix when required by the relay.
+
+The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
+on `status`, with the second status object delivered after the events track closed.
+
 ## How the SDKs stay in lockstep
 
 Alignment comes from `spec/`, not from shared version numbers:

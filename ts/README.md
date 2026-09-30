@@ -52,7 +52,7 @@ headless Chromium, with credential handling, the subscribe retry, a deadline, an
 ## Documentation
 
 - [TypeScript guide](GUIDE.md): the quickstart, subscription and publishing lifecycles, async
-  consumption, and the live smoke test.
+  consumption, and publishing media.
 - API reference: run `mise run ts:docs` to build it from the source.
 - [Errors and recovery](GUIDE.md#errors-and-recovery): stable `RelayError` codes and phases, and
   recovering without assuming delivery or safe replay.

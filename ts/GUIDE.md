@@ -475,6 +475,16 @@ Run the data-only publishing/subscribing integration test without a live relay:
 cd ts && mise exec -- pnpm test tests/publish.test.ts
 ```
 
+## Publishing media
+
+The optional [@mux/moq-media format package](packages/moq-media/README.md) provides LOC properties,
+independent MSF catalogs, source URLs, and native WebCodecs chunk/config mapping. It depends only
+on `@mux/moq-core`; install it alongside `@mux/relay` when publishing media. Start with the
+[direct WebCodecs example](examples/webcodecs/README.md) for live browser video: encoded chunks
+become LOC payloads without a muxer or media engine. For existing media files, the optional
+[Mediabunny adapter](packages/moq-mediabunny/README.md) maps demuxed packets; see the
+[file publishing example](examples/mediabunny/README.md).
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:
@@ -571,39 +581,7 @@ resource discovery, and a Video.js adapter are not implemented yet. A GOAWAY end
 callers can open a replacement. A custom `createTransport`
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
 
-## Live Relay smoke test
-
-This opt-in Chromium test publishes and subscribes against a real relay. It is excluded from
-`pnpm check` and needs a token authorized for both operations. The token can be supplied through
-hidden stdin input or the `RELAY_TOKEN` environment variable; it is never written to a file.
-
-Set `RELAY_URL` and `RELAY_NAMESPACE` using the quickstart prompts first. Your token must
-authorize both operations under that namespace prefix, including children: the test appends a
-random UUID. Running this command explicitly opts into contacting that endpoint.
-
-```sh
-mise exec -- pnpm --dir ts exec playwright install chromium   # once
-RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:test:relay
-```
-
-The test waits for the publisher's `announced`, subscribes through the examples' announce-race
-retry and reports how often it retried, checks binary and empty payloads plus independent track
-closure, then closes both connections. It defaults to
-`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
-the SDK are absolute: include the token's root prefix when required by the relay.
-
-The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
-on `status`, with the second status object delivered after the events track closed.
-
-The optional [@mux/moq-media format package](packages/moq-media/README.md) provides LOC properties,
-independent MSF catalogs, source URLs, and native WebCodecs chunk/config mapping. It depends only
-on `@mux/moq-core`; install it alongside `@mux/relay` when publishing media. Start with the
-[direct WebCodecs example](examples/webcodecs/README.md) for live browser video: encoded chunks
-become LOC payloads without a muxer or media engine. For existing media files, the optional
-[Mediabunny adapter](packages/moq-mediabunny/README.md) maps demuxed packets; see the
-[file publishing example](examples/mediabunny/README.md).
-
 ## Development
 
-Contributor setup, checks, and formatting for this workspace are in the root
-[README](../README.md#development).
+Contributor setup, checks, formatting, and the opt-in live Relay smoke test for this workspace are
+in the root [README](../README.md#development).
