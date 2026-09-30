@@ -118,6 +118,7 @@ class TestAioquicInternals:
         protocol = QuicConnectionProtocol(connection)
         assert protocol._quic is connection
         assert callable(protocol._transmit_soon)
+        assert callable(protocol._process_events)  # the batched receive feeds datagrams without its transmit
         assert protocol._connected_waiter is None
         assert protocol._transport is None
         assert protocol._loop is asyncio.get_running_loop()

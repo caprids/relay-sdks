@@ -12,8 +12,8 @@ The package pins ``aioquic>=1.3,<1.4`` for the same reason; widen it
 after re-running that test module against the new minor.
 
 The asyncio glue our own :class:`WebTransportProtocol` subclass reaches on its base class (``_quic``,
-``_loop``, ``_transport``, ``_transmit_soon``, ``_connected_waiter``) stays in ``_protocol``; the pin
-test covers those names too.
+``_loop``, ``_transport``, ``_transmit_soon``, ``_process_events``, ``_connected_waiter``) stays in
+``_protocol``; the pin test covers those names too.
 """
 
 from __future__ import annotations

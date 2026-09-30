@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any
+import socket
+from typing import TYPE_CHECKING, Any, cast
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.h3.connection import ErrorCode, H3Connection
@@ -25,6 +26,12 @@ _CONTROL_STREAM_FIN_GRACE = 1.0
 Long enough for a capsule sent in the same flight to arrive even after a lost packet's retransmission.
 """
 
+_RECEIVE_BATCH = 64
+"""Most datagrams taken in per transmit. Bounds how long one receive holds the loop (and delays ACKs):
+about 64 full-size packets, or a few milliseconds of CPU."""
+
+_MAX_DATAGRAM_SIZE = 65535
+
 
 class WebTransportProtocol(QuicConnectionProtocol):
     """An aioquic connection protocol that drives HTTP/3 with WebTransport enabled.
@@ -34,8 +41,20 @@ class WebTransportProtocol(QuicConnectionProtocol):
     :meth:`_on_request_headers` hook, which only a server role overrides.
     """
 
-    def __init__(self, quic: QuicConnection, stream_handler: Any = None, *, owns_transport: bool = False) -> None:
+    def __init__(
+        self,
+        quic: QuicConnection,
+        stream_handler: Any = None,
+        *,
+        owns_transport: bool = False,
+        receive_socket: socket.socket | None = None,
+    ) -> None:
         super().__init__(quic, stream_handler)
+        self._receive_socket = receive_socket
+        """The connection's own non-blocking UDP socket, read dry on each receive (see ``datagram_received``).
+
+        ``None`` for a connection on a listener's shared socket, which keeps aioquic's one transmit per datagram.
+        """
         self.h3 = H3Connection(quic, enable_webtransport=True)
         self.sessions: dict[int, WebTransportSessionBase] = {}
         self.stream_owners: dict[int, WebTransportSessionBase] = {}
@@ -76,6 +95,40 @@ class WebTransportProtocol(QuicConnectionProtocol):
     def watch_drain(self, session: WebTransportSessionBase) -> None:
         if session not in self._draining:
             self._draining.append(session)
+
+    def datagram_received(self, data: bytes | str, addr: Any) -> None:
+        """Take in this datagram and any others already waiting on the socket, then transmit once.
+
+        aioquic transmits after every datagram, and each transmit walks every open stream to raise its
+        MAX_STREAM_DATA (#162), so with many streams open the receive path is bound by that walk. asyncio
+        reads one datagram per loop turn, so deferring the transmit to a later turn would not batch
+        anything; the batch comes from reading the socket dry here (up to ``_RECEIVE_BATCH``
+        datagrams). ACKs still leave in this turn, and the settling that follows every transmit still runs.
+        """
+        self._receive(data, addr)
+        sock = self._receive_socket
+
+        if sock is not None:
+            for _ in range(_RECEIVE_BATCH - 1):
+                if self.terminated is not None:
+                    break
+
+                try:
+                    data, addr = sock.recvfrom(_MAX_DATAGRAM_SIZE)
+                except (BlockingIOError, InterruptedError):
+                    break
+                except OSError as exc:
+                    # What asyncio's own read would do with it.
+                    self.error_received(exc)
+                    break
+
+                self._receive(data, addr)
+
+        self.transmit()
+
+    def _receive(self, data: bytes | str, addr: Any) -> None:
+        self._quic.receive_datagram(cast(bytes, data), addr, now=self._loop.time())
+        self._process_events()
 
     def transmit(self) -> None:
         super().transmit()
