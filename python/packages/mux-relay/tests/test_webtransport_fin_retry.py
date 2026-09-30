@@ -6,6 +6,7 @@ from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet_builder import QuicDeliveryState
 from aioquic.quic.stream import QuicStream
+from relay_helpers.quic_pair import QuicPair
 
 from mux_relay.webtransport._aioquic import fin_unsent, live_stream
 from mux_relay.webtransport._fin_retry import DroppedFinRetry
@@ -48,11 +49,11 @@ class TestDroppedFinRetry:
         stream_id = harness.fin_only_stream()
         harness.retry.watch(stream_id)
         harness.consume(stream_id)
-        assert fin_unsent(harness.stream(stream_id))
+        assert fin_unsent(harness.stream(stream_id), set())
 
         harness.retry.sweep()
 
-        assert not fin_unsent(harness.stream(stream_id))  # queued again
+        assert not fin_unsent(harness.stream(stream_id), set())  # queued again
         assert harness.stream(stream_id).sender._pending_eof is True
         assert harness.transmits == 1
         assert not harness.retry.idle  # until the FIN is acknowledged
@@ -115,8 +116,30 @@ class TestDroppedFinRetry:
         harness.retry.sweep()
 
         assert harness.transmits == 1
-        assert not fin_unsent(harness.stream(first)) and not fin_unsent(harness.stream(second))
+        assert not fin_unsent(harness.stream(first), set()) and not fin_unsent(harness.stream(second), set())
         harness.retry.stop()
+
+    async def test_a_fin_in_a_packet_in_flight_is_left_to_loss_recovery(self) -> None:
+        # A dead link (#160): the FIN left in a packet that is never acknowledged. Re-arming it would put
+        # FIN-only frames into every probe packet and starve the data of the write waiting behind them.
+        pair = QuicPair()
+        transmits: list[None] = []
+        retry = DroppedFinRetry(asyncio.get_running_loop(), pair.client, lambda: transmits.append(None))
+        [in_flight] = pair.open_streams(1, 100, fin=True)
+        retry.watch(in_flight)
+        pair.send_unpaced()  # sent, never delivered
+        # One FIN aioquic consumed without a packet, the bug the sweep exists for.
+        [dropped] = pair.open_streams(1, 0, fin=True)
+        retry.watch(dropped)
+        frame = pair.client._streams[dropped].sender.get_frame(1200)
+        assert frame is not None and frame.fin
+
+        retry.sweep()
+
+        assert pair.client._streams[in_flight].sender._pending_eof is False  # left alone
+        assert pair.client._streams[dropped].sender._pending_eof is True  # re-armed
+        assert len(transmits) == 1
+        retry.stop()
 
     async def test_stop_cancels_the_sweep_and_ignores_later_watches(self) -> None:
         harness = Harness()
@@ -131,7 +154,7 @@ class TestDroppedFinRetry:
         harness.retry.sweep()
 
         assert harness.transmits == 0
-        assert fin_unsent(harness.stream(stream_id))  # nothing re-armed after stop
+        assert fin_unsent(harness.stream(stream_id), set())  # nothing re-armed after stop
 
     async def test_the_timer_runs_the_sweep_at_the_interval(self) -> None:
         harness = Harness(interval=0.01)

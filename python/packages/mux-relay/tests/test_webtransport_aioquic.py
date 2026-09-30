@@ -12,22 +12,26 @@ from aioquic.h3.connection import ErrorCode, FrameType, H3Connection, H3Stream
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.events import StreamDataReceived
-from aioquic.quic.packet_builder import QuicDeliveryState
+from aioquic.quic.packet_builder import QuicDeliveryState, QuicSentPacket
 from aioquic.quic.rangeset import RangeSet
 from aioquic.quic.stream import QuicStream, QuicStreamReceiver, QuicStreamSender
+from relay_helpers.quic_pair import QuicPair
 
 from mux_relay.webtransport._aioquic import (
     acknowledged,
     fin_unsent,
     finish_receiving_half,
+    fins_in_flight,
     forget_h3_stream,
     live_stream,
     mark_webtransport_stream,
     peer_control_stream_id,
     rearm_fin,
     reset_pending,
+    serve_resets_first,
     transmitted,
 )
+from mux_relay.webtransport._protocol import WebTransportProtocol
 
 
 class TestAioquicInternals:
@@ -86,9 +90,13 @@ class TestAioquicInternals:
         rearmed.reset(0)
         assert rearmed._reset_error_code == 0
 
+        # Resets served first (#160) read this flag and the receiver's `stop_pending`.
+        assert rearmed.reset_pending is True
+
         # QuicStreamReceiver: the half `_finish_receiving_half` marks done on a send-only stream.
         receiver = QuicStreamReceiver(stream_id=2, readable=False)
         assert receiver.is_finished is False  # aioquic ignores `readable` here; the adapter sets it
+        assert receiver.stop_pending is False
         receiver.is_finished = True
 
         # The mirror image, which the adapter relies on and does not set: the unused send half of a
@@ -106,6 +114,17 @@ class TestAioquicInternals:
         assert isinstance(stream, QuicStream)
         assert isinstance(stream.sender, QuicStreamSender)
         assert isinstance(stream.receiver, QuicStreamReceiver)
+        # The per-packet stream service order, and the sent packets whose delivery handlers show a FIN in flight.
+        assert stream in connection._streams_queue
+        assert isinstance(connection._loss.spaces, list)
+        pair = QuicPair()
+        [fin_stream] = pair.open_streams(1, 10, fin=True)
+        pair.send_unpaced()
+        packets = [packet for space in pair.client._loss.spaces for packet in space.sent_packets.values()]
+        handlers = [(handler, args) for packet in packets for handler, args in packet.delivery_handlers]
+        sender = pair.client._streams[fin_stream].sender
+        assert (sender.on_data_delivery, (0, 10, True)) in handlers
+        assert isinstance(packets[0], QuicSentPacket)
 
         # H3Connection: the per-stream record the adapter drops once both halves are done.
         assert isinstance(h3._stream, dict)
@@ -201,15 +220,15 @@ class TestAioquicFunctions:
 
     def test_fin_unsent_names_a_consumed_unacknowledged_fin_and_rearm_requeues_it(self) -> None:
         stream = self._stream_with(self._connection(), b"", fin=True)
-        assert not fin_unsent(stream)  # queued, not yet consumed
+        assert not fin_unsent(stream, set())  # queued, not yet consumed
 
         frame = stream.sender.get_frame(1024)
         assert frame is not None and frame.fin
-        assert fin_unsent(stream)
+        assert fin_unsent(stream, set())
 
         rearm_fin(stream)
 
-        assert not fin_unsent(stream)
+        assert not fin_unsent(stream, set())
         assert stream.sender._pending_eof is True
         assert stream.sender.buffer_is_empty is False
         again = stream.sender.get_frame(1024)
@@ -217,16 +236,74 @@ class TestAioquicFunctions:
 
         stream.sender.on_data_delivery(QuicDeliveryState.ACKED, 0, 0, True)
 
-        assert not fin_unsent(stream)
+        assert not fin_unsent(stream, set())
 
     def test_fin_unsent_is_false_once_the_stream_is_reset(self) -> None:
         stream = self._stream_with(self._connection(), b"", fin=True)
         assert stream.sender.get_frame(1024) is not None
-        assert fin_unsent(stream)
+        assert fin_unsent(stream, set())
 
         stream.sender.reset(0)
 
-        assert not fin_unsent(stream)
+        assert not fin_unsent(stream, set())
+
+    def test_fins_in_flight_names_a_sent_fin_until_it_is_acknowledged(self) -> None:
+        pair = QuicPair()
+        with_fin = pair.open_streams(2, 100, fin=True)
+        [without_fin] = pair.open_streams(1, 100)
+        assert fins_in_flight(pair.client) == set()  # queued, not yet in a packet
+
+        pair.send_unpaced()
+
+        streams = [pair.client._streams[stream_id] for stream_id in with_fin]
+        assert fins_in_flight(pair.client) == {stream.sender for stream in streams}
+        assert pair.client._streams[without_fin].sender not in fins_in_flight(pair.client)
+        assert not fin_unsent(streams[0], fins_in_flight(pair.client))  # sent, so not a dropped FIN
+
+        pair.deliver()  # the server acknowledges them
+
+        assert fins_in_flight(pair.client) == set()
+
+    def test_a_reset_behind_queued_data_holds_a_transmit_to_one_packet_until_served_first(self) -> None:
+        # What aioquic 1.3 does (#160): the RESET_STREAM's `start_frame` raises QuicPacketBuilderStop in a
+        # full packet, which ends the whole transmit. If this starts sending more, aioquic fixed it.
+        stalled = QuicPair()
+        stream_ids = stalled.open_streams(40, 1000)
+        stalled.client.reset_stream(stream_ids[-1], 0)
+
+        assert stalled.send_unpaced() == 1
+
+        # Served first, the same transmit fills the congestion window.
+        served = QuicPair()
+        stream_ids = served.open_streams(40, 1000)
+        served.client.reset_stream(stream_ids[-1], 0)
+
+        serve_resets_first(served.client)
+
+        assert served.client._streams_queue[0].stream_id == stream_ids[-1]
+        assert served.send_unpaced() > 5
+        assert served.client._loss.congestion_window - served.client._loss.bytes_in_flight < 1200
+
+    def test_a_stop_sending_is_served_first_too(self) -> None:
+        pair = QuicPair()
+        pair.open_streams(40, 1000)
+        stream_id = pair.client.get_next_available_stream_id()
+        pair.client.send_stream_data(stream_id, b"")
+        pair.client.stop_stream(stream_id, 0)
+
+        serve_resets_first(pair.client)
+
+        assert pair.client._streams_queue[0].stream_id == stream_id
+        assert pair.send_unpaced() > 5
+
+    def test_serve_resets_first_keeps_the_order_when_nothing_is_urgent(self) -> None:
+        pair = QuicPair()
+        pair.open_streams(3, 10)
+        before = list(pair.client._streams_queue)
+
+        serve_resets_first(pair.client)
+
+        assert pair.client._streams_queue == before
 
     def test_finish_receiving_half_marks_our_unidirectional_stream_done(self) -> None:
         quic = self._connection()
@@ -277,3 +354,30 @@ class TestAioquicFunctions:
         assert quic._close_event is not None
         assert quic._close_event.error_code == ErrorCode.H3_CLOSED_CRITICAL_STREAM
         assert h3.handle_event(StreamDataReceived(data=b"\x00\x00", end_stream=False, stream_id=0)) == []
+
+
+class _Transport:
+    def __init__(self) -> None:
+        self.sent: list[bytes] = []
+
+    def sendto(self, data: bytes, address: object) -> None:
+        self.sent.append(data)
+
+
+class TestProtocolTransmit:
+    async def test_every_transmit_serves_a_queued_reset_first(self) -> None:
+        # The live symptom (#160): a write's deadline resets its stream while a backlog is queued, and
+        # without the reorder each transmit sends one packet, so the backlog drains one packet per ACK.
+        pair = QuicPair()
+        stream_ids = pair.open_streams(40, 1000)
+        pair.client.reset_stream(stream_ids[-1], 0)
+        transport = _Transport()
+        protocol = WebTransportProtocol(pair.client)
+        protocol.connection_made(transport)  # ty: ignore[invalid-argument-type]
+        pair.client._loss._pacer.packet_time = None  # count what the congestion window allows
+
+        protocol.transmit()
+
+        assert len(transport.sent) > 5
+        assert not pair.client._streams[stream_ids[-1]].sender.reset_pending  # the RESET_STREAM went out
+        protocol.fin_retry.stop()

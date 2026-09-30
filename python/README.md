@@ -549,10 +549,12 @@ subscriber = await connect_relay_subscriber(
 `packages/mux-relay/tests/test_webtransport.py` runs the full smoke-test assertion list over a real
 QUIC loopback: a WebTransport server on `127.0.0.1` (aioquic, self-signed certificate) fronting the
 in-memory relay hub, so the transport adapter is exercised end to end in `python:check`. The stream
-halves and the dropped-FIN retry also have in-process tests that need no certificate or socket
+halves and the dropped-FIN retry also have in-process tests that need no socket
 (`test_webtransport_streams.py`, which holds the halves to the same expectations as the core's in-memory
 `Pipe`, and `test_webtransport_fin_retry.py`), and `test_webtransport_aioquic.py` pins the aioquic
-internals the adapter reaches into, all named in `mux_relay/webtransport/_aioquic.py`. The package pins
+internals the adapter reaches into, all named in `mux_relay/webtransport/_aioquic.py`, along with the
+aioquic behaviour its workarounds exist for. Where a test needs real packets it handshakes a client and
+server `QuicConnection` in memory (`tests/relay_helpers/quic_pair.py`). The package pins
 `aioquic>=1.3,<1.4` until that list is re-verified against a newer minor.
 
 ## Video.js media example

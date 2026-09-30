@@ -7,15 +7,16 @@ nothing reschedules it: the peer never sees the stream end and a group is never 
 class sweeps the streams whose FIN was queued and re-arms any that aioquic consumed without sending.
 
 A time-based sweep, not a per-transmit one: a FIN can be dropped and the window then open before the next
-transmit, so a congestion-gated retry would miss it, while re-queuing on every transmit would resend a
-healthy in-flight FIN each round. On a healthy link a FIN is acknowledged within the interval and is never
-re-queued; a genuinely dropped one is retried until it lands. A duplicate FIN, if the frame did leave, is
-harmless: the peer's final size is unchanged.
+transmit, so a congestion-gated retry would miss it. A FIN that is in a packet still in flight is left to
+aioquic's own loss recovery, which queues it again if that packet is lost; only a FIN in no packet at all
+is re-armed. On a dead link that matters: re-arming in-flight FINs every interval would fill each probe
+packet with FIN-only frames, starve the data of a blocked write and let its deadline fire (#160). A
+duplicate FIN, if one ever leaves, is harmless: the peer's final size is unchanged.
 
 To remove the workaround once a fixed aioquic is the floor, delete this module, its construction and
 :meth:`DroppedFinRetry.stop` calls in ``_protocol``, the :meth:`DroppedFinRetry.watch` call in
-``_session`` where a FIN is queued, ``tests/test_webtransport_fin_retry.py``, and ``fin_unsent`` and
-``rearm_fin`` in ``_aioquic`` with their block of the pin test.
+``_session`` where a FIN is queued, ``tests/test_webtransport_fin_retry.py``, and ``fin_unsent``,
+``fins_in_flight`` and ``rearm_fin`` in ``_aioquic`` with their block of the pin test.
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from collections.abc import Callable
 
 from aioquic.quic.connection import QuicConnection
 
-from ._aioquic import acknowledged, fin_unsent, live_stream, rearm_fin, reset_pending
+from ._aioquic import acknowledged, fin_unsent, fins_in_flight, live_stream, rearm_fin, reset_pending
 
 _FIN_RETRY_INTERVAL = 0.25
 """Seconds between sweeps."""
@@ -83,13 +84,14 @@ class DroppedFinRetry:
             return
 
         rearmed = False
+        in_flight = fins_in_flight(self._quic) if self._watched else set()
 
         for stream_id in list(self._watched):
             stream = live_stream(self._quic, stream_id)
 
             if stream is None or reset_pending(stream) or acknowledged(stream):
                 self._watched.discard(stream_id)
-            elif fin_unsent(stream):
+            elif fin_unsent(stream, in_flight):
                 rearm_fin(stream)
                 rearmed = True
 

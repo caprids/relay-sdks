@@ -13,7 +13,7 @@ from aioquic.quic.connection import QuicConnection
 
 from moq_core._tasks import observe
 
-from ._aioquic import live_stream, peer_control_stream_id
+from ._aioquic import live_stream, peer_control_stream_id, serve_resets_first
 from ._fin_retry import DroppedFinRetry
 
 if TYPE_CHECKING:
@@ -78,6 +78,9 @@ class WebTransportProtocol(QuicConnectionProtocol):
             self._draining.append(session)
 
     def transmit(self) -> None:
+        # aioquic 1.3 sends one packet per transmit while a reset or STOP_SENDING waits behind streams
+        # with data (see `serve_resets_first`); every transmit comes through here, so reorder first.
+        serve_resets_first(self._quic)
         super().transmit()
 
         # Everything that moves a stream along (a flight sent, an ACK or STOP_SENDING processed, a
