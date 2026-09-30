@@ -33,6 +33,7 @@ def iter_annexb_nal_units(data: bytes) -> Iterator[bytes]:
 
 
 def nal_unit_type(nal: bytes) -> int:
+    """The ``nal_unit_type`` of a NAL unit without its start code: 7 for SPS, 8 for PPS, 5 for IDR."""
     return nal[0] & 0x1F
 
 
@@ -116,11 +117,17 @@ class H264Config:
 
     @classmethod
     def from_annexb(cls, data: bytes) -> H264Config:
+        """Build the record from the SPS and PPS in Annex B bytes (an encoder's extradata or a keyframe).
+
+        Raises ``ValueError`` as :func:`build_avcc` does.
+        """
         return cls(build_avcc(*extract_parameter_sets(data)))
 
     @property
     def codec(self) -> str:
+        """The ``avc1.PPCCLL`` codec string the record declares."""
         return avc_codec_string(self.avcc)
 
     def to_avcc(self, data: bytes) -> bytes:
+        """Re-frame an Annex B access unit for this configuration, dropping in-band SPS/PPS and AUDs."""
         return annexb_to_avcc(data)

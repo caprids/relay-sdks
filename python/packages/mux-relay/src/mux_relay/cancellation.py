@@ -26,6 +26,7 @@ class CancellationToken:
 
     @property
     def cancelled(self) -> bool:
+        """Whether :meth:`cancel` has been called."""
         return self._cancelled
 
     @property
@@ -46,6 +47,7 @@ class CancellationToken:
             callback(self._reason)
 
     def throw_if_cancelled(self) -> None:
+        """Raise the recorded :attr:`reason` if the token has been cancelled; return otherwise."""
         if self._cancelled:
             assert self._reason is not None
             raise self._reason
@@ -56,6 +58,7 @@ class CancellationToken:
             self._callbacks.append(callback)
 
     def remove_callback(self, callback: Callable[[BaseException], None]) -> None:
+        """Unregister a callback added with :meth:`add_callback`. No-op if it is not registered."""
         try:
             self._callbacks.remove(callback)
         except ValueError:

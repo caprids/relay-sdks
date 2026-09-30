@@ -20,3 +20,9 @@ jobs:
         with:
           install_args: python uv
       - run: mise run python:check
+      - run: mise run python:docs
+      - uses: actions/upload-artifact@v5
+        with:
+          name: python-api-reference
+          path: python/api-docs/
+          if-no-files-found: error

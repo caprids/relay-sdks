@@ -21,7 +21,7 @@ from moq_core.transport import transport_ended
 from .cancellation import CancellationToken
 from .errors import RelayError, _transport_error
 
-TokenProvider = Callable[[], "str | Awaitable[str | None] | None"]
+TokenProvider = Callable[[], str | Awaitable[str | None] | None]
 """Resolve a connection token, synchronously or asynchronously. ``None`` or ``""`` sends no token."""
 
 

@@ -171,6 +171,7 @@ class SubscriptionEvents:
         self._finish()
 
     async def aclose(self) -> None:
+        """:meth:`close` as a coroutine, for ``contextlib.aclosing`` and other async-iterator cleanup."""
         self.close()
 
     async def __aenter__(self) -> Self:
