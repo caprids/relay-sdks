@@ -74,7 +74,7 @@ dir = "python"
 run = "uv run pytest"
 
 [tasks."python:check"]
-description = "Lint, format-check, import-boundary-check, type-check, and test the Python SDK"
+description = "Lint, format-check, import-boundary-check, type-check, docstring-check, and test the Python SDK"
 dir = "python"
 run = [
   "uv sync --locked",
@@ -82,8 +82,10 @@ run = [
   "uv run ruff format --check .",
   "uv run lint-imports",
   "uv run ty check",
+  "uv run python scripts/check_docstrings.py",
   "uv run pytest",
 ]
+
 
 [tasks."python:test:relay"]
 description = "Opt-in live smoke test against a real Relay (RELAY_TOKEN or hidden prompt)"
