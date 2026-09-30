@@ -83,7 +83,7 @@ export interface MoqtTransport {
  * {@link isStreamFailure}).
  */
 export interface RequestError {
-  /** A {@link REQUEST_ERROR_CODE} value; the session uses `INTERNAL_ERROR` or `TIMEOUT` for failures it synthesizes. */
+  /** A {@link @mux/moq-core!REQUEST_ERROR_CODE} value; the session uses `INTERNAL_ERROR` or `TIMEOUT` for failures it synthesizes. */
   errorCode: number;
   /** REQUEST_ERROR's Retry Interval as received; `0` for failures the session synthesizes. */
   retryInterval: number;
@@ -105,7 +105,7 @@ export interface SubscribeOk {
 
 /** PUBLISH_DONE: the publisher ended a subscription. */
 export interface PublishDone {
-  /** A {@link PUBLISH_DONE_STATUS} value. */
+  /** A {@link @mux/moq-core!PUBLISH_DONE_STATUS} value. */
   statusCode: number;
   /** Data streams the publisher opened; `undefined` when it could not count them (§10.12). */
   streamCount: number | undefined;
