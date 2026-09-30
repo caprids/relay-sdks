@@ -175,6 +175,7 @@ it('publishes native encoder output and retained config in keyframe groups, then
   const catalog = session.tracks.get('catalog')!;
   const document = JSON.parse(new TextDecoder().decode(catalog.objects[0]![0]!.bytes));
   expect(document.initDataList[0].data).toBe(Buffer.from(description).toString('base64'));
+  expect(document.tracks[0]).toMatchObject({ bitrate: 1_500_000, framerate: 30 });
   catalog.demand(true); // replacement subscriptions also need the catalog
   await vi.advanceTimersByTimeAsync(0);
   expect(catalog.objects).toHaveLength(2);

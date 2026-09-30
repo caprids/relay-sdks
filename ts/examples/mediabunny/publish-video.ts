@@ -56,7 +56,15 @@ export async function publishVideoFile(
     const track = await input.getPrimaryVideoTrack();
     const config = await track?.getDecoderConfig();
     if (!track || !config) throw new Error('The MP4 must contain an AVC video track with decoder configuration');
-    const video = videoTrackFromDecoderConfig(config);
+    // The decoder config has no bitrate or framerate. These are estimates from the first 100 packets.
+    const stats = await track.computePacketStats(100);
+    const bitrate = Math.round(stats.averageBitrate);
+    const framerate = Math.round(stats.averagePacketRate * 1000) / 1000;
+    const video = {
+      ...videoTrackFromDecoderConfig(config),
+      ...(Number.isFinite(bitrate) && bitrate > 0 && { bitrate }),
+      ...(Number.isFinite(framerate) && framerate > 0 && { framerate }),
+    };
     const document = buildMsfCatalog({ namespace, video });
     const catalogWriter = publisher.registerTrack({ track: CATALOG_TRACK, trackProperties: locTrackProperties() });
     closeTracks = () => catalogWriter.close();

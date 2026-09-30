@@ -18,7 +18,9 @@ TypeScript consumes encoder/demuxer-provided decoder configuration and length-pr
 packets. `avcCodecString` inspects the avcC header; it does not parse SPS or validate a bitstream.
 Annex B parsing, SPS/PPS reconstruction, and access-unit conversion are not exposed in TypeScript.
 The primary browser input is native WebCodecs. `videoTrackFromDecoderConfig` maps AVC decoder
-configuration (four-byte NAL lengths); `audioTrackFromDecoderConfig` maps Opus configuration.
+configuration (four-byte NAL lengths). A decoder config carries no bitrate or framerate, so a caller
+that knows them spreads them into the returned `VideoTrackInfo`. `audioTrackFromDecoderConfig` maps Opus
+configuration.
 Both copy description buffers, including the exact range of a view. `chunkToLocFrame` accepts
 `EncodedVideoChunk` or `EncodedAudioChunk` and returns `{ payload, timestampUs, key, properties }`.
 It copies encoded bytes unchanged, attaches supplied configs only on key chunks, and accepts the

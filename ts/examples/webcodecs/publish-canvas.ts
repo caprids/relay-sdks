@@ -61,7 +61,7 @@ export async function publishCanvas(
 
   try {
     signal.throwIfAborted();
-    const config: VideoEncoderConfig = {
+    const config = {
       codec: 'avc1.42001f',
       width: canvas.width,
       height: canvas.height,
@@ -69,7 +69,7 @@ export async function publishCanvas(
       framerate: 30,
       latencyMode: 'realtime',
       avc: { format: 'avc' },
-    };
+    } as const satisfies VideoEncoderConfig;
     const { supported } = await VideoEncoder.isConfigSupported(config);
     signal.throwIfAborted();
     if (!supported) throw new Error('This browser cannot encode the canvas with the example AVC configuration');
@@ -113,7 +113,12 @@ export async function publishCanvas(
         try {
           // WebCodecs need not repeat the config on later output callbacks.
           if (metadata?.decoderConfig) {
-            const nextVideo = videoTrackFromDecoderConfig(metadata.decoderConfig);
+            // A decoder config carries no bitrate or framerate; take them from the encoder config.
+            const nextVideo: VideoTrackInfo = {
+              ...videoTrackFromDecoderConfig(metadata.decoderConfig),
+              bitrate: config.bitrate,
+              framerate: config.framerate,
+            };
             const nextCatalogBytes = buildMsfCatalog({ namespace, video: nextVideo });
             if (
               catalogBytes &&
