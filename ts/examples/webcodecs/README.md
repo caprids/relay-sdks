@@ -46,6 +46,8 @@ to change it. It requests keyframes at least every two seconds of active capture
 when the encoder input queue is busy or two encoded chunks await transport, serializes output
 writes, and keeps an eight-chunk hard cap for bursts of internally buffered encoder output. It does
 not silently drop encoded deltas to relieve transport backpressure.
+
+This example does not reconnect after the connection ends, for example after a network outage longer than about 5 s in Chromium. See [publisher recovery](../../../spec/publisher-recovery.md) for what a replacement publisher can and cannot restore.
 Subscription changes reset video to the next keyframe and re-serve the catalog on replacement
 demand. Other write errors, encoder errors, and cancellation close its tracks and encoder; the caller
 closes the connection. There is no audio, automatic reconnection, or adaptive bitrate policy in this example.

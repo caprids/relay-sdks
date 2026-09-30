@@ -243,6 +243,37 @@ and has no request deadline: each track's `writeTimeoutMs` bounds its wait for d
 writes. Passing `requestTimeoutMs` to `connectRelayPublisher` is a type error; untyped JavaScript
 that passes it anyway has it ignored, like any other option the call does not take.
 
+### Chromium transport limits
+
+Chromium's QUIC stack ends some connections before any SDK deadline can act, and a page cannot
+configure it. The numbers below were observed in Chromium 147 (2026-09) and may change with
+Chromium versions. The SDK reports what the browser reports and cannot tell these cases from other
+losses.
+
+- **Handshake idle timeout, about 4 s.** A handshake that hears nothing for 4 s fails with
+  `TRANSPORT_ERROR` "Opening handshake failed." in phase `connecting`. A `connectTimeoutMs` above
+  about 4 s never fires on a silent path: the effective connect deadline is the smaller of
+  `connectTimeoutMs` and about 4 s of silence. In a retry policy, treat `TRANSPORT_ERROR` in phase
+  `connecting` like `CONNECTION_TIMEOUT`.
+- **Closed port.** A connect to a port nothing listens on fails with `TRANSPORT_ERROR` in a few
+  milliseconds, not at the deadline.
+- **Blackhole detection, about 5 s.** A connection with data outstanding that hears nothing for
+  about 5 s is closed, even if the path has since come back (Chromium logs `Network blackhole
+  detected`, QUIC error 85). The app sees `TRANSPORT_ERROR` "Connection lost." in phase
+  `connection`. Its cause is a `WebTransportError` with no QUIC code.
+- **1250-byte Initial datagrams.** Chromium's QUIC Initial packets are 1250 bytes, so a path that
+  carries only the 1200-byte minimum from RFC 9000 section 14 never connects. Tunnels and VPNs
+  with small MTUs can cause this. A cap applied after the connection is up does not end it.
+
+The Python SDK behaves differently: it survives outages until the relay's 30 s idle timeout,
+waits out the full connect deadline, and sends 1200-byte Initials.
+
+A browser publisher that must survive outages longer than about 5 s, or heavy burst loss, has to
+open a new connection and register its tracks again; see
+[publisher recovery](../spec/publisher-recovery.md). Subscriptions on the old connection are not
+handed to the new one ([#34](https://github.com/muxinc/relay-sdks/issues/34)). The SDK does not
+reconnect for you.
+
 Namespaces are arrays of 1–32 non-empty string fields, sent verbatim without splitting on `/`; a
 single string is a `TypeError`, not a one-field namespace. The 32-field protocol limit is pinned in
 [protocol.json](../spec/protocol.json) and exceeding it is a `RangeError`. Track names must be

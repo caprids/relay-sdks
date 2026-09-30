@@ -25,6 +25,9 @@ against that file.
   them; see `ts/README.md`, "Browser token exposure".
 - Connecting has one deadline that covers token resolution and both handshakes, transport and
   MOQT setup.
+- The browser transport may end a silent connection after about 5 s while data is outstanding.
+  The SDK reports it as `TRANSPORT_ERROR` in phase `connection` and cannot tell it apart from other
+  losses. See [Chromium transport limits](../ts/README.md#chromium-transport-limits).
 - The application can give the SDK a cancellation primitive, such as an abort signal or a
   cancellation token, that governs the connection's entire lifetime rather than only setup.
 - Every connection exposes a way to observe its closure and the error that caused it, if any.
@@ -51,7 +54,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `UPDATE_QUEUE_FULL` | More than eight updates were issued before the subscription was accepted; await acceptance (`onSubscribed` / `on_subscribed`) before updating again. Nothing was sent for the refused update. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
-| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
+| `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. In TypeScript, a `connecting`-phase `TRANSPORT_ERROR` usually means the browser abandoned the handshake, so a retry policy should treat it like `CONNECTION_TIMEOUT` (see [Chromium transport limits](../ts/README.md#chromium-transport-limits)). |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
 | `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. Python only for now (browsers do not expose the relay's refusal, so TypeScript reports `TRANSPORT_ERROR`; see #14). |
 
