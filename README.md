@@ -12,7 +12,7 @@ This is an initial development workspace. Package names are provisional and publ
 | `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol and `@mux/moq-media` format packages, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
 | `python/` | Python SDK `mux-relay` and the generic `moq-core` and `moq-media` packages, as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
 
-Start with the [JavaScript quickstart](ts/README.md#first-round-trip) (browser WebTransport) or
+Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (browser WebTransport) or
 [Python quickstart](python/README.md#first-round-trip) (native asyncio). Both use local packages
 and include credential setup and a bounded publish/subscribe round trip.
 
@@ -30,7 +30,24 @@ mise run python:test:relay
 ```
 
 Each directory keeps its native tooling, and the tasks only fan out to it. `cd ts && pnpm ...` and
-`cd python && uv ...` work as usual under `mise exec`. See `ts/README.md` and `python/README.md`.
+`cd python && uv ...` work as usual under `mise exec`. See the
+[TypeScript guide](ts/GUIDE.md) and the [Python guide](python/README.md) for each SDK's usage, and
+[Python development](python/README.md#development) for the native uv commands.
+
+### TypeScript
+
+Run the root tasks from anywhere in the repository, or run pnpm from `ts/` under `mise exec`:
+
+```sh
+mise run ts:install
+mise run ts:check     # equivalent to: cd ts && mise exec -- pnpm check
+mise run ts:lint      # Biome format and lint check only
+mise run ts:fix       # apply Biome's safe formatting and lint fixes
+```
+
+Formatting and linting are configured in `ts/biome.jsonc`, and every package extends the strict
+compiler options in `ts/tsconfig.base.json`. `pnpm lint` fails on warnings, so a clean check prints
+nothing.
 
 ## How the SDKs stay in lockstep
 

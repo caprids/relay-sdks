@@ -30,7 +30,7 @@ manual runs; automation can inject the environment variable through its secret m
 tokens in commands, source files, URLs, or committed `.env` files. The demo passes the token to
 `get_token` and redacts it from output. Authentication currently uses `?jwt=<token>` on the transport
 URL: scrub query values and token strings before collecting network URLs, traces, or exception
-reports. Browser consumers have an additional [console exposure risk](../ts/README.md#browser-token-exposure).
+reports. Browser consumers have an additional [console exposure risk](../ts/GUIDE.md#browser-token-exposure).
 
 ### Install and run
 

@@ -1,6 +1,6 @@
 # Relay example: publish and subscribe on mux.global
 
-Start with the [JavaScript quickstart](../../README.md#first-round-trip) for a fresh checkout,
+Start with the [JavaScript quickstart](../../GUIDE.md#first-round-trip) for a fresh checkout,
 runtime requirements, local package installation, endpoint and credential setup, and a one-object
 round trip. These packages are unpublished. The default endpoint is `https://sjc.relay.mux.global`;
 use `--url` or `RELAY_URL` for another deployment. Both operations require an authorized Relay JWT.
@@ -11,7 +11,7 @@ on localhost with an import map, drives headless Chromium through Playwright, an
 Node runs the launcher; the SDK's default transport requires browser WebTransport.
 
 The token comes from `RELAY_TOKEN` or a hidden prompt. The CLI never writes it to a file and redacts
-it from output. Read the [credential and token exposure guidance](../../README.md#endpoint-and-credentials)
+it from output. Read the [credential and token exposure guidance](../../GUIDE.md#endpoint-and-credentials)
 before collecting diagnostics.
 
 ## Startup and retry policy
