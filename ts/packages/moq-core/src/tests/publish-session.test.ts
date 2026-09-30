@@ -27,6 +27,7 @@ import {
   type MoqtPublishSessionCallbacks,
 } from '../protocol/publish-session.js';
 import { createMoqtSession, type MoqtSession, type MoqtTransport, type PublishDone } from '../protocol/session.js';
+import { createSubgroupWriter } from '../protocol/subgroup-writer.js';
 import {
   openRawRequest,
   type RawRequest,
@@ -1208,6 +1209,69 @@ describe('createMoqtPublishSession', () => {
 
     // The stream the session reset is gone for the caller too.
     await expect(stillOpenWriter.write(new Uint8Array([1]))).rejects.toBeDefined();
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('surfaces a transport failure on an open data stream to the FIN hand-over, and later ones only to fin()', async () => {
+    const { pair, session, subscriber } = makePublishHarness();
+
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+    const subscribe = await rawSubscribe(pair.server, 'video', 71);
+
+    await vi.waitFor(() => {
+      expect(subscribe.received).toHaveLength(1);
+    });
+
+    // Transport streams that accept writes, settle close only on the peer's ack (never, here), and can be failed as a
+    // STOP_SENDING or reset would fail them.
+    const transportStreams: { fail(error: unknown): void; close: ReturnType<typeof vi.fn> }[] = [];
+
+    pair.client.createUnidirectionalStream = async () => {
+      let controller!: WritableStreamDefaultController;
+      let rejectClose: ((error: unknown) => void) | undefined;
+      const close = vi.fn(
+        () =>
+          new Promise<void>((_, reject) => {
+            rejectClose = reject;
+          })
+      );
+
+      transportStreams.push({
+        fail(error) {
+          controller.error(error);
+          rejectClose?.(error);
+        },
+        close,
+      });
+      return new WritableStream<Uint8Array>({
+        start(c) {
+          controller = c;
+        },
+        close,
+      });
+    };
+
+    const failure = new Error('STOP_SENDING before the FIN');
+    const early = createSubgroupWriter(await session.openUniStream(71), { trackAlias: 71, groupId: 0 });
+
+    await early.writeObject({ objectId: 0, payload: new Uint8Array([1]) });
+    transportStreams[0]?.fail(failure);
+    await expect(early.handOverFin()).rejects.toBe(failure);
+    await expect(early.fin()).rejects.toBe(failure);
+    expect(transportStreams[0]?.close).not.toHaveBeenCalled();
+
+    const lateFailure = new Error('reset after the FIN');
+    const late = createSubgroupWriter(await session.openUniStream(71), { trackAlias: 71, groupId: 1 });
+
+    await late.writeObject({ objectId: 0, payload: new Uint8Array([2]) });
+    await late.handOverFin();
+    await vi.waitFor(() => expect(transportStreams[1]?.close).toHaveBeenCalled());
+    transportStreams[1]?.fail(lateFailure);
+    // Nobody asked about the late failure yet: an unhandled rejection would fail the run.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await expect(late.fin()).rejects.toBe(lateFailure);
     session.destroy();
     subscriber.destroy();
   });
