@@ -16,11 +16,20 @@ export function assertTimeoutMs(name: string, value: unknown): void {
   }
 }
 
-/** Supply a browser transport or a compatible implementation in another runtime. */
+/**
+ * Supply a browser transport or a compatible implementation in another runtime. Called once per
+ * connection with the endpoint URL (the token already in its `jwt` query parameter) and the MOQT
+ * protocol IDs to offer, today only `moqt-20`.
+ */
 export type RelayTransportFactory = (
   url: string,
   protocols: string[],
-) => { transport: MoqtTransport; ready: Promise<void> };
+) => {
+  /** The transport the MOQT session runs on. */
+  transport: MoqtTransport;
+  /** Resolves once the transport can open streams; a rejection fails the connect call. */
+  ready: Promise<void>;
+};
 
 /**
  * Connection options shared by connectRelaySubscriber and connectRelayPublisher: endpoint, token,
@@ -41,6 +50,10 @@ export interface ConnectRelayOptions {
   signal?: AbortSignal;
   /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
   connectTimeoutMs?: number;
+  /**
+   * Create the transport. Defaults to the browser's WebTransport; a runtime without it fails with
+   * `TRANSPORT_UNAVAILABLE` unless this is supplied.
+   */
   createTransport?: RelayTransportFactory;
 }
 
