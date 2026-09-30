@@ -35,8 +35,11 @@ const OBJECT_STATUS_WIRE: Record<ObjectStatus, number> = {
   'end-of-track': 4,
 };
 
+/** SUBGROUP_HEADER fields for {@link createSubgroupWriter}. */
 export interface SubgroupWriterOptions {
+  /** Track Alias of the subscription the stream serves. */
   trackAlias: number;
+  /** Group ID of the group the stream carries. */
   groupId: number;
   /**
    * Explicit publisher priority byte. Omitted, the header sets the DEFAULT_PRIORITY flag and subscribers fall back to
@@ -52,16 +55,21 @@ export interface SubgroupWriterOptions {
   endOfGroup?: boolean;
 }
 
+/** One object for {@link SubgroupWriter.writeObject}. */
 export interface SubgroupObjectInput {
   /** Absolute object ID; must increase monotonically within the stream. */
   objectId: number;
+  /** Object Properties. Must be empty or omitted when the stream was opened with `hasProperties: false`. */
   properties?: readonly KeyValuePair[];
+  /** Object payload, at most `MAX_OBJECT_PAYLOAD_LENGTH` bytes. */
   payload: Uint8Array;
   /** Only meaningful for zero-length payloads (§11.2.1.1). Default 'normal'. */
   status?: ObjectStatus;
 }
 
+/** Writes one subgroup of one group to a unidirectional stream. Returned by {@link createSubgroupWriter}. */
 export interface SubgroupWriter {
+  /** Group ID from the stream's SUBGROUP_HEADER. */
   readonly groupId: number;
   /** Serialize one object. Resolves when the transport accepted the bytes. */
   writeObject(object: SubgroupObjectInput): Promise<void>;

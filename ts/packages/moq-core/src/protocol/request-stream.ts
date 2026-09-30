@@ -15,7 +15,9 @@ import { MoqtProtocolError } from './errors.js';
 
 /** Structural subset of `WebTransportBidirectionalStream`. */
 export interface BidirectionalStreamLike {
+  /** Bytes from the peer. */
   readable: ReadableStream<Uint8Array>;
+  /** Bytes to the peer. */
   writable: WritableStream<Uint8Array>;
 }
 

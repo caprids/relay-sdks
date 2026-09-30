@@ -6,5 +6,8 @@ import type { MoqtSession } from './protocol/session.js';
  */
 export interface MoqTrackSource extends Pick<MoqtSession, 'subscribe' | 'fetch' | 'trackStatus'> {
   /** Resolves when the owning connection ends; an error denotes failure. */
-  readonly closed: Promise<{ error?: unknown }>;
+  readonly closed: Promise<{
+    /** Why the connection failed; absent when it closed cleanly. */
+    error?: unknown;
+  }>;
 }
