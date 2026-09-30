@@ -34,11 +34,16 @@ video, catalog serving, groups, bounded buffering, and cleanup. For files that n
 the optional [Mediabunny packet adapter](../moq-mediabunny/README.md). Python retains its Annex B
 helpers for the PyAV publisher.
 
+`parseMsfCatalog` reads an independent catalog object's payload back into track descriptions:
+namespace tuple, name, packaging, live status, role, codec, dimensions, rates, bitrate, and init
+data resolved from `initRef` to bytes. It rejects unsupported versions and delta updates, ignores
+unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as declared.
+
 Shared vectors live in `spec/vectors/media.json`. See `UPSTREAM.json` for Video.js provenance.
-Publishing handles and public readers are later stages of `spec/media-layer.md`.
+Publishing handles and the object-to-frame reader are later stages of `spec/media-layer.md`.
 
 ```ts
-import { buildMsfCatalog, composeMoqSource, locProperties, locTrackProperties } from '@mux/moq-media';
+import { buildMsfCatalog, composeMoqSource, locProperties, locTrackProperties, parseMsfCatalog } from '@mux/moq-media';
 
 const catalog = buildMsfCatalog({
   namespace: ['room', 'live'],
@@ -48,7 +53,6 @@ const catalog = buildMsfCatalog({
 const video = publisher.registerTrack({ track: 'video', trackProperties: locTrackProperties() });
 await group.write(encodedFrame, { properties: locProperties(timestampUs, { videoConfig: avcc }) });
 const source = composeMoqSource('https://relay.example', ['room', 'live'], { token });
-```
 
-The internal `parse-catalog.ts` extraction is used to check builder compatibility with Video.js;
-it is not exported as a public reader API.
+const { tracks } = parseMsfCatalog(catalogObject.payload, { catalogNamespace: ['room', 'live'] });
+```

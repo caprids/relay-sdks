@@ -320,6 +320,10 @@ names from the original examples; the mappings below are explicit.
 | Data description | `DataTrackInfo` | `DataTrackInfo` |
 | Catalog input | `MsfCatalogInput` | `build_msf_catalog` keyword arguments |
 | Build independent catalog bytes | `buildMsfCatalog` | `build_msf_catalog` |
+| Read an independent catalog object's payload | `parseMsfCatalog(payload, { catalogNamespace })` | `parse_msf_catalog(payload, catalog_namespace=...)` |
+| Catalog as read | `MsfCatalog` | `MsfCatalog` |
+| Track description as read | `MsfCatalogTrack` | `MsfCatalogTrack` |
+| Reader options | `ParseMsfCatalogOptions` | `parse_msf_catalog` keyword arguments |
 | LOC track properties | `locTrackProperties` | `loc_track_properties` |
 | LOC object properties from microseconds | `locProperties` / `LocPropertiesOptions` | `loc_properties` keyword arguments |
 | Compose source URL | `composeMoqSource` / `ComposeMoqSourceOptions` | `compose_player_url` keyword arguments |
@@ -343,8 +347,16 @@ Python also retains the example's `TRACK_TIMESCALE_PROPERTIES` as a tuple; new c
 `loc_track_properties()` for fresh properties.
 
 Track fields use camelCase in TypeScript and snake_case in Python (`initData` / `init_data`,
-`channelConfig` / `channel_config`). Catalog generation time is `generatedAt` / `generated_at_ms`.
-Media publishing-handle and reader names remain provisional.
+`channelConfig` / `channel_config`, `isLive` / `is_live`). Catalog generation time is `generatedAt` /
+`generated_at_ms`; completeness is `isComplete` / `is_complete`.
+
+The catalog reader mirrors the builder: `parse` because it reads a document the SDK did not
+produce, `Msf` because it reads msf-01's catalog, not a Relay concept. Its results are reader-side
+types rather than the builder's `VideoTrackInfo` / `AudioTrackInfo` / `DataTrackInfo`, because a
+read track may be any role and any packaging (moq-rs `cmaf`, `legacy`) and carries the namespace,
+packaging, and live status the builder fixes. The TypeScript parser was internal as
+`parseIndependentCatalog` (with `MoqCatalog` / `MoqCatalogTrack` from Video.js); those names are gone,
+with no alias. Media publishing-handle and object-to-frame reader names remain provisional.
 
 The TypeScript-only WebCodecs helpers in `@mux/moq-media` are `videoTrackFromDecoderConfig`,
 `audioTrackFromDecoderConfig`, `chunkToLocFrame`, `LocFrame`, and `ChunkToLocFrameOptions`.

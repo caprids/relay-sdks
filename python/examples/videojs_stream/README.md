@@ -183,7 +183,9 @@ finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skip
 `--verify` runs an in-process subscriber on the same tracks and prints what a player would see, which
 is how the example is checked without a browser. It waits for the publisher's `announced` and
 subscribes through the examples' announce-race retry (`examples/shared/announce_race.py`), logging
-any retry as `verify: subscribe retried`. With relay 0.14.17, expect
+any retry as `verify: subscribe retried`. The catalog line lists the tracks `parse_msf_catalog`
+reads back from the received document (name, packaging, codec, size or sample rate, init-data
+bytes); a document it rejects is reported as a problem. With relay 0.14.17, expect
 `keyframesWithConfig=0`: its output omits the Video Config object property, so players configure
 their decoder from the avcC in the catalog's `initDataList`. This counter does not indicate a missing
 publisher configuration or a decoder failure; another relay may forward the property.

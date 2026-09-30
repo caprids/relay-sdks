@@ -21,11 +21,24 @@ Construction from SPS/PPS supports Baseline, Main, and Extended profiles. Other 
 extension fields and are rejected; callers can still supply an encoder-generated High-profile avcC
 to the catalog builder.
 
+`parse_msf_catalog` reads an independent catalog object's payload back into an `MsfCatalog` of
+`MsfCatalogTrack` descriptions: namespace tuple, name, packaging, live status, role, codec,
+dimensions, rates, bitrate, and init data resolved from `initRef` to bytes. It raises `ValueError`
+on unsupported versions and delta updates, ignores unknown fields, and returns non-`loc` packagings
+(such as moq-rs `cmaf`) as declared.
+
 Shared vectors live in `spec/vectors/media.json`. See `UPSTREAM.json` for Video.js provenance.
-Publishing handles and public readers are later stages of `spec/media-layer.md`.
+Publishing handles and the object-to-frame reader are later stages of `spec/media-layer.md`.
 
 ```python
-from moq_media import AudioTrackInfo, VideoTrackInfo, build_msf_catalog, loc_properties, loc_track_properties
+from moq_media import (
+    AudioTrackInfo,
+    VideoTrackInfo,
+    build_msf_catalog,
+    loc_properties,
+    loc_track_properties,
+    parse_msf_catalog,
+)
 from moq_media.h264 import H264Config
 
 h264 = H264Config.from_annexb(encoder.extradata)
@@ -37,4 +50,6 @@ catalog = build_msf_catalog(
 video = publisher.register_track("video", track_properties=loc_track_properties())
 # The application opens a group at each keyframe and handles demand/recovery.
 await group.write(h264.to_avcc(access_unit), properties=loc_properties(timestamp_us, video_config=h264.avcc))
+
+tracks = parse_msf_catalog(catalog_object.payload, catalog_namespace=["room", "live"]).tracks
 ```

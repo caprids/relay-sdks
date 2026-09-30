@@ -1,5 +1,5 @@
 {
-  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document.",
+  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers.",
   "catalogs": [
     {
       "name": "h264-opus",
@@ -22,7 +22,44 @@
         },
         "generatedAt": "1700000000000"
       },
-      "json": "{\"version\":\"draft-01\",\"generatedAt\":1700000000000,\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc1.42C014\",\"width\":640,\"height\":360,\"framerate\":30,\"bitrate\":1500000},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\",\"bitrate\":96000}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}"
+      "json": "{\"version\":\"draft-01\",\"generatedAt\":1700000000000,\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc1.42C014\",\"width\":640,\"height\":360,\"framerate\":30,\"bitrate\":1500000},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\",\"bitrate\":96000}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "generatedAt": 1700000000000,
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "avc1.42C014",
+            "width": 640,
+            "height": 360,
+            "framerate": 30,
+            "bitrate": 1500000,
+            "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "bitrate": 96000
+          }
+        ]
+      }
     },
     {
       "name": "h264-awaiting-init",
@@ -38,7 +75,26 @@
         },
         "audio": {}
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2"
+          }
+        ]
+      }
     },
     {
       "name": "avc3-awaiting-init",
@@ -52,7 +108,12 @@
           "initData": ""
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": []
+      }
     },
     {
       "name": "avc3-preserves-contract",
@@ -66,7 +127,25 @@
           "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc3.42C014\"}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc3.42C014\"}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "avc3.42C014",
+            "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
+          }
+        ]
+      }
     },
     {
       "name": "vp8-minimal",
@@ -79,7 +158,24 @@
           "codec": "vp8"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8"
+          }
+        ]
+      }
     },
     {
       "name": "fractional-framerate",
@@ -93,7 +189,25 @@
           "framerate": "29.97"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":29.97}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":29.97}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "framerate": 29.97
+          }
+        ]
+      }
     },
     {
       "name": "data-and-unicode",
@@ -112,7 +226,32 @@
           }
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"métadata\",\"role\":\"metadata\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"métadata\",\"role\":\"metadata\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "métadata",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "metadata"
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "chat",
+            "packaging": "loc",
+            "isLive": true
+          }
+        ]
+      }
     },
     {
       "name": "audio-init",
@@ -128,7 +267,27 @@
           "initData": "1210"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"audio-init\",\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"mp4a.40.2\",\"samplerate\":44100,\"channelConfig\":\"1\"}],\"initDataList\":[{\"id\":\"audio-init\",\"type\":\"inline\",\"data\":\"EhA=\"}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"audio-init\",\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"mp4a.40.2\",\"samplerate\":44100,\"channelConfig\":\"1\"}],\"initDataList\":[{\"id\":\"audio-init\",\"type\":\"inline\",\"data\":\"EhA=\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "mp4a.40.2",
+            "samplerate": 44100,
+            "channelConfig": "1",
+            "initData": "1210"
+          }
+        ]
+      }
     },
     {
       "name": "empty",
@@ -138,7 +297,12 @@
           "live"
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": []
+      }
     },
     {
       "name": "small-framerate",
@@ -152,7 +316,25 @@
           "framerate": "0.000001"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":0.000001}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":0.000001}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "framerate": 1e-06
+          }
+        ]
+      }
     },
     {
       "name": "exponential-framerate",
@@ -166,7 +348,25 @@
           "framerate": "0.0000001"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":1e-7}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":1e-7}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "framerate": 1e-07
+          }
+        ]
+      }
     },
     {
       "name": "empty-init-is-absent",
@@ -183,7 +383,35 @@
           "initData": ""
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8"
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2"
+          }
+        ]
+      }
     },
     {
       "name": "non-bmp-unicode",
@@ -198,7 +426,22 @@
           }
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"📽️\",\"role\":\"metadata\"}]}"
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"📽️\",\"role\":\"metadata\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": [
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "📽️",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "metadata"
+          }
+        ]
+      }
     }
   ],
   "catalogErrors": [
@@ -364,6 +607,221 @@
           }
         ]
       }
+    }
+  ],
+  "catalogReads": [
+    {
+      "name": "moq-rs-import-fmp4",
+      "source": "moq-rs `moq` CLI 0.12.8 (moq-cli, the 2026-09-29 campaign build of a2d501d27): `moq import fmp4` of an ffmpeg CMAF file (H.264 Baseline 320x240, AAC-LC 48 kHz stereo), catalog object captured byte for byte through sjc.relay.mux.global on 2026-09-30.",
+      "catalogNamespace": [
+        "moq-rs",
+        "fmp4"
+      ],
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"name\":\"0.m4s\",\"packaging\":\"cmaf\",\"isLive\":true,\"role\":\"video\",\"codec\":\"avc1.42c00d\",\"width\":320,\"height\":240,\"bitrate\":85568,\"initRef\":\"init0\",\"renderGroup\":1,\"maxGrpSapStartingType\":2,\"maxObjSapStartingType\":2,\"jitter\":1000.0},{\"name\":\"1.m4s\",\"packaging\":\"cmaf\",\"isLive\":true,\"role\":\"audio\",\"codec\":\"mp4a.40.2\",\"samplerate\":48000,\"channelConfig\":\"2\",\"bitrate\":66738,\"initRef\":\"init1\",\"renderGroup\":1,\"maxGrpSapStartingType\":1,\"maxObjSapStartingType\":1,\"jitter\":1002.666666}],\"initDataList\":[{\"id\":\"init0\",\"type\":\"inline\",\"data\":\"AAAAHGZ0eXBpc29tAAACAGlzb21pc282bXA0MQAAAr9tb292AAAAeG12aGQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAA+gAAAAAAAAAAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAKG12ZXgAAAAgdHJleAAAAAAAAAABAAAAAQAAAAAAAAAAAAAAAAAAAhd0cmFrAAAAaHRraGQBAAAHAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAUAAAADwAAAAAAGnbWRpYQAAACxtZGhkAQAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAAAABVxAAAAAAALWhkbHIAAAAAAAAAAHZpZGUAAAAAAAAAAAAAAABWaWRlb0hhbmRsZXIAAAABRm1pbmYAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAEGc3RibAAAALpzdHNkAAAAAAAAAAEAAACqYXZjMQAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAFAAPAASAAAAEgAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABj//wAAADBhdmNDAULADf/hABhnQsAN2QFB+wEQAAADABAAAAMDwPFCpIABAAVoy4PLIAAAABRidHJ0AAAAAAABSuAAAUrgAAAAEHBhc3AAAAABAAAAAQAAABBzdHRzAAAAAAAAAAAAAAAQc3RzYwAAAAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAAFHZtaGQAAAABAAAAAAAAAAA=\"},{\"id\":\"init1\",\"type\":\"inline\",\"data\":\"AAAAHGZ0eXBpc29tAAACAGlzb21pc282bXA0MQAAAnNtb292AAAAeG12aGQBAAAAAAAAAAAAAAAAAAAAAAAAAAAAA+gAAAAAAAAAAAABAAABAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAKG12ZXgAAAAgdHJleAAAAAAAAAACAAAAAQAAAAAAAAAAAAAAAAAAAct0cmFrAAAAaHRraGQBAAAHAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEBAAAAAAEAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAFbbWRpYQAAACxtZGhkAQAAAAAAAAAAAAAAAAAAAAAAAAAAALuAAAAAAAAAAABVxAAAAAAALWhkbHIAAAAAAAAAAHNvdW4AAAAAAAAAAAAAAABTb3VuZEhhbmRsZXIAAAAA+m1pbmYAAAAkZGluZgAAABxkcmVmAAAAAAAAAAEAAAAMdXJsIAAAAAEAAAC+c3RibAAAAHJzdHNkAAAAAAAAAAEAAABibXA0YQAAAAAAAAABAAAAAAAAAAAAAgAQAAAAALuAAAAAAAAqZXNkcwAAAAADHAACAAQUQBUAAAAAAQSyAAEEsgUFEYhW5QAGAQIAAAAUYnRydAAAAAAAAQSyAAEEsgAAABBzdHRzAAAAAAAAAAAAAAAQc3RzYwAAAAAAAAAAAAAAFHN0c3oAAAAAAAAAAAAAAAAAAAAQc3RjbwAAAAAAAAAAAAAAEHNtaGQAAAAAAAAAAA==\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "moq-rs",
+              "fmp4"
+            ],
+            "name": "0.m4s",
+            "packaging": "cmaf",
+            "isLive": true,
+            "role": "video",
+            "codec": "avc1.42c00d",
+            "width": 320,
+            "height": 240,
+            "bitrate": 85568,
+            "initData": "0000001c6674797069736f6d0000020069736f6d69736f366d703431000002bf6d6f6f76000000786d7668640100000000000000000000000000000000000000000003e800000000000000000001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000002000000286d7665780000002074726578000000000000000100000001000000000000000000000000000002177472616b00000068746b6864010000070000000000000000000000000000000000000001000000000000000000000000000000000000000000000000000000000001000000000000000000000000000000010000000000000000000000000000400000000140000000f00000000001a76d6469610000002c6d646864010000000000000000000000000000000000000000003c00000000000000000055c400000000002d68646c72000000000000000076696465000000000000000000000000566964656f48616e646c657200000001466d696e660000002464696e660000001c6472656600000000000000010000000c75726c2000000001000001067374626c000000ba737473640000000000000001000000aa61766331000000000000000100000000000000000000000000000000014000f0004800000048000000000000000100000000000000000000000000000000000000000000000000000000000000000018ffff00000030617663430142c00dffe100186742c00dd90141fb0110000003001000000303c0f142a48001000568cb83cb2000000014627472740000000000014ae000014ae0000000107061737000000001000000010000001073747473000000000000000000000010737473630000000000000000000000147374737a000000000000000000000000000000107374636f000000000000000000000014766d6864000000010000000000000000"
+          },
+          {
+            "namespace": [
+              "moq-rs",
+              "fmp4"
+            ],
+            "name": "1.m4s",
+            "packaging": "cmaf",
+            "isLive": true,
+            "role": "audio",
+            "codec": "mp4a.40.2",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "bitrate": 66738,
+            "initData": "0000001c6674797069736f6d0000020069736f6d69736f366d703431000002736d6f6f76000000786d7668640100000000000000000000000000000000000000000003e800000000000000000001000001000000000000000000000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000000000000000000000000000000000000002000000286d7665780000002074726578000000000000000200000001000000000000000000000000000001cb7472616b00000068746b68640100000700000000000000000000000000000000000000020000000000000000000000000000000000000000000000010100000000010000000000000000000000000000000100000000000000000000000000004000000000000000000000000000015b6d6469610000002c6d64686401000000000000000000000000000000000000000000bb80000000000000000055c400000000002d68646c720000000000000000736f756e000000000000000000000000536f756e6448616e646c657200000000fa6d696e660000002464696e660000001c6472656600000000000000010000000c75726c2000000001000000be7374626c00000072737473640000000000000001000000626d703461000000000000000100000000000000000002001000000000bb8000000000002a6573647300000000031c00020004144015000000000104b2000104b20505118856e500060102000000146274727400000000000104b2000104b20000001073747473000000000000000000000010737473630000000000000000000000147374737a000000000000000000000000000000107374636f000000000000000000000010736d68640000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "name": "moq-rs-import-ts",
+      "source": "moq-rs `moq` CLI 0.12.8 (moq-cli, the 2026-09-29 campaign build of a2d501d27): `moq import ts` of the same file remuxed to MPEG-TS, captured the same way. Its root-level `mpegts` object is outside msf-01 and ignored.",
+      "catalogNamespace": [
+        "moq-rs",
+        "ts"
+      ],
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"name\":\"0.avc3\",\"packaging\":\"legacy\",\"isLive\":true,\"role\":\"video\",\"codec\":\"avc3.42c00d\",\"width\":320,\"height\":240,\"renderGroup\":1,\"maxGrpSapStartingType\":2,\"maxObjSapStartingType\":2},{\"name\":\"1.aac\",\"packaging\":\"legacy\",\"isLive\":true,\"role\":\"audio\",\"codec\":\"mp4a.40.2\",\"samplerate\":48000,\"channelConfig\":\"1\",\"initRef\":\"init0\",\"renderGroup\":1,\"maxGrpSapStartingType\":1,\"maxObjSapStartingType\":1}],\"initDataList\":[{\"id\":\"init0\",\"type\":\"inline\",\"data\":\"EYg=\"}],\"mpegts\":{\"tracks\":{\"0.avc3\":{\"pid\":256}},\"program\":{\"transportStreamId\":1,\"programNumber\":1,\"pmtPid\":4096},\"si\":{\"17\":{\"66\":{\"track\":\"0x0011-0x42.si\",\"interval\":2000}}}}}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "moq-rs",
+              "ts"
+            ],
+            "name": "0.avc3",
+            "packaging": "legacy",
+            "isLive": true,
+            "role": "video",
+            "codec": "avc3.42c00d",
+            "width": 320,
+            "height": 240
+          },
+          {
+            "namespace": [
+              "moq-rs",
+              "ts"
+            ],
+            "name": "1.aac",
+            "packaging": "legacy",
+            "isLive": true,
+            "role": "audio",
+            "codec": "mp4a.40.2",
+            "samplerate": 48000,
+            "channelConfig": "1",
+            "initData": "1188"
+          }
+        ]
+      }
+    },
+    {
+      "name": "lenient-fields",
+      "source": "Synthetic: msf-01 says a parser MUST ignore fields it does not understand. Wrong-typed and non-integral count fields are ignored, entries without a string name are skipped, unknown or non-inline init references resolve to nothing, and base64 is decoded as atob does.",
+      "catalogNamespace": [
+        "room",
+        "live"
+      ],
+      "json": "{\"version\":\"1\",\"generatedAt\":1.5,\"isComplete\":false,\"future\":{\"field\":1},\"tracks\":[{\"name\":\"v\",\"namespace\":\"/a//b/\",\"packaging\":\"loc\",\"isLive\":\"yes\",\"role\":7,\"width\":\"640\",\"height\":360.0,\"framerate\":25,\"bitrate\":1000.5,\"initRef\":\"missing\"},\"not-an-object\",{\"packaging\":\"loc\"},{\"name\":\"a\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"a-init\",\"samplerate\":48000,\"channelConfig\":2,\"codec\":\"mp4a.40.2\"},{\"name\":\"u\",\"initRef\":\"url-init\"}],\"initDataList\":[{\"id\":\"a-init\",\"data\":\" EhA \"},{\"id\":\"url-init\",\"type\":\"url\",\"data\":\"https://example.com/init\"},\"junk\"]}",
+      "parsed": {
+        "version": "1",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "a",
+              "b"
+            ],
+            "name": "v",
+            "packaging": "loc",
+            "isLive": false,
+            "height": 360,
+            "framerate": 25
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "a",
+            "packaging": "loc",
+            "isLive": true,
+            "codec": "mp4a.40.2",
+            "samplerate": 48000,
+            "initData": "1210"
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "u",
+            "packaging": "",
+            "isLive": false
+          }
+        ]
+      }
+    }
+  ],
+  "catalogReadErrors": [
+    {
+      "name": "unsupported-version",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":\"draft-02\",\"tracks\":[]}"
+    },
+    {
+      "name": "numeric-version",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":1,\"tracks\":[]}"
+    },
+    {
+      "name": "missing-version",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"tracks\":[]}"
+    },
+    {
+      "name": "delta-update",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":\"draft-01\",\"deltaUpdate\":[{\"op\":\"add\",\"tracks\":[{\"name\":\"v\"}]}]}"
+    },
+    {
+      "name": "missing-tracks",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":\"draft-01\"}"
+    },
+    {
+      "name": "tracks-not-array",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":\"draft-01\",\"tracks\":{}}"
+    },
+    {
+      "name": "not-an-object",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "[{\"version\":\"draft-01\",\"tracks\":[]}]"
+    },
+    {
+      "name": "not-json",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":\"draft-01\",\"tracks\":["
+    },
+    {
+      "name": "non-standard-constant",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":\"draft-01\",\"generatedAt\":NaN,\"tracks\":[]}"
+    },
+    {
+      "name": "byte-order-mark",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "\ufeff{\"version\":\"draft-01\",\"tracks\":[]}"
+    },
+    {
+      "name": "init-data-not-base64",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":\"draft-01\",\"tracks\":[],\"initDataList\":[{\"id\":\"x\",\"data\":\"@@@@\"}]}"
     }
   ],
   "loc": [

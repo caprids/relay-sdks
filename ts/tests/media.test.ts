@@ -1,7 +1,6 @@
 import { readFileSync } from 'node:fs';
 import * as media from '@mux/moq-media';
 import { describe, expect, it } from 'vitest';
-import { parseIndependentCatalog } from '../packages/moq-media/src/parse-catalog.js';
 
 interface RawTrack {
   name?: string;
@@ -22,8 +21,10 @@ interface RawCatalog {
   generatedAt?: string;
 }
 interface Vectors {
-  catalogs: { name: string; input: RawCatalog; json: string }[];
+  catalogs: { name: string; input: RawCatalog; json: string; parsed: unknown }[];
   catalogErrors: { name: string; input: RawCatalog }[];
+  catalogReads: { name: string; catalogNamespace: string[]; json: string; parsed: unknown }[];
+  catalogReadErrors: { name: string; catalogNamespace: string[]; json: string }[];
   loc: {
     name: string;
     timestampUs: string;
@@ -39,7 +40,14 @@ interface Vectors {
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/media.json', import.meta.url), 'utf8')) as Vectors;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 const bytes = (value: string) => new Uint8Array(Buffer.from(value, 'hex'));
-const text = (value: Uint8Array) => new TextDecoder().decode(value);
+/** The vectors' `parsed` form: init data as hex, everything else as the reader returns it. */
+const readable = (catalog: media.MsfCatalog) => ({
+  ...catalog,
+  tracks: catalog.tracks.map(({ initData, ...fields }) => ({
+    ...fields,
+    ...(initData === undefined ? {} : { initData: hex(initData) }),
+  })),
+});
 function track(raw: RawTrack): Record<string, unknown> {
   const result: Record<string, unknown> = { ...raw };
   for (const key of ['width', 'height', 'framerate', 'bitrate', 'samplerate'] as const) {
@@ -60,27 +68,26 @@ function input(raw: RawCatalog): media.MsfCatalogInput {
 
 describe('shared media vectors', () => {
   for (const vector of vectors.catalogs) {
-    it(`catalog ${vector.name}: exact bytes and Video.js parser round trip`, () => {
+    it(`catalog ${vector.name}: exact bytes and reader round trip`, () => {
       const document = media.buildMsfCatalog(input(vector.input));
       expect(hex(document)).toBe(hex(new TextEncoder().encode(vector.json)));
-      const parsed = parseIndependentCatalog(text(document), { catalogNamespace: vector.input.namespace });
-      const raw = JSON.parse(vector.json) as {
-        tracks: { name: string; role?: string; codec?: string; initRef?: string }[];
-      };
-      expect(parsed.tracks.map(({ name, role, codec }) => ({ name, role, codec }))).toEqual(
-        raw.tracks.map(({ name, role, codec }) => ({ name, role, codec })),
+      expect(readable(media.parseMsfCatalog(document, { catalogNamespace: vector.input.namespace }))).toEqual(
+        vector.parsed,
       );
-      expect(parsed.tracks.every((entry) => entry.namespace.join('/') === vector.input.namespace.join('/'))).toBe(true);
-      for (const entry of parsed.tracks) {
-        const original = [vector.input.video, vector.input.audio].find(
-          (value) => value && (value.name ?? (value === vector.input.video ? 'video' : 'audio')) === entry.name,
-        );
-        if (original?.initData !== undefined) expect(hex(entry.initData ?? new Uint8Array())).toBe(original.initData);
-      }
     });
   }
   for (const vector of vectors.catalogErrors) {
     it(`rejects catalog ${vector.name}`, () => expect(() => media.buildMsfCatalog(input(vector.input))).toThrow());
+  }
+  for (const vector of vectors.catalogReads) {
+    it(`reads catalog ${vector.name}`, () => {
+      const payload = new TextEncoder().encode(vector.json);
+      expect(readable(media.parseMsfCatalog(payload, vector))).toEqual(vector.parsed);
+    });
+  }
+  for (const vector of vectors.catalogReadErrors) {
+    it(`rejects reading catalog ${vector.name}`, () =>
+      expect(() => media.parseMsfCatalog(new TextEncoder().encode(vector.json), vector)).toThrow());
   }
   for (const vector of vectors.loc) {
     it(`LOC ${vector.name}`, () => {
@@ -121,6 +128,15 @@ it.each([
 });
 it.each(['', '0142', '0242c014'])('rejects invalid avcC header %s', (record) => {
   expect(() => media.avcCodecString(bytes(record))).toThrow();
+});
+it('rejects a catalog payload that is not UTF-8', () => {
+  const payload = new Uint8Array([
+    ...new TextEncoder().encode('{"version":"draft-01","tracks":[],"x":"'),
+    0xff,
+    0x22,
+    0x7d,
+  ]);
+  expect(() => media.parseMsfCatalog(payload, { catalogNamespace: ['room'] })).toThrow();
 });
 it('pins every media constant', () => {
   const spec = JSON.parse(readFileSync(new URL('../../spec/protocol.json', import.meta.url), 'utf8')) as {

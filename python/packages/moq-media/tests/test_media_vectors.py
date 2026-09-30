@@ -48,6 +48,77 @@ def test_catalog_errors(vector: dict[str, Any]) -> None:
         build(vector["input"])
 
 
+def readable(catalog: media.MsfCatalog) -> dict[str, Any]:
+    """The vectors' ``parsed`` form: camelCase, lists for tuples, init data as hex, ``None`` omitted."""
+    names = {"is_live": "isLive", "channel_config": "channelConfig", "init_data": "initData"}
+    tracks = []
+    for track in catalog.tracks:
+        fields: dict[str, Any] = {}
+        for key in track.__dataclass_fields__:
+            value = getattr(track, key)
+            if value is not None:
+                fields[names.get(key, key)] = (
+                    value.hex() if isinstance(value, bytes) else list(value) if isinstance(value, tuple) else value
+                )
+        tracks.append(fields)
+    result: dict[str, Any] = {"version": catalog.version}
+    if catalog.generated_at_ms is not None:
+        result["generatedAt"] = catalog.generated_at_ms
+    return result | {"isComplete": catalog.is_complete, "tracks": tracks}
+
+
+@pytest.mark.parametrize("vector", VECTORS["catalogs"], ids=lambda v: v["name"])
+def test_catalog_round_trip(vector: dict[str, Any]) -> None:
+    parsed = media.parse_msf_catalog(build(vector["input"]), catalog_namespace=vector["input"]["namespace"])
+    assert readable(parsed) == vector["parsed"]
+
+
+@pytest.mark.parametrize("vector", VECTORS["catalogs"], ids=lambda v: v["name"])
+def test_catalog_reads_back_its_inputs(vector: dict[str, Any]) -> None:
+    raw = vector["input"]
+    parsed = {
+        track.name: track for track in media.parse_msf_catalog(build(raw), catalog_namespace=raw["namespace"]).tracks
+    }
+    video = media.VideoTrackInfo(**track_input(raw["video"])) if "video" in raw else None
+    audio = media.AudioTrackInfo(**track_input(raw["audio"])) if "audio" in raw else None
+    inputs = [track for track in (video, audio) if track is not None and track.name in parsed]
+    for track in inputs:
+        read = parsed[track.name]
+        assert read.namespace == tuple(raw["namespace"])
+        role = "video" if isinstance(track, media.VideoTrackInfo) else "audio"
+        assert (read.packaging, read.is_live, read.role) == ("loc", True, role)
+        assert read.bitrate == track.bitrate
+        assert read.init_data == (track.init_data or None)
+        if isinstance(track, media.VideoTrackInfo):
+            assert (read.width, read.height, read.framerate) == (track.width, track.height, track.framerate)
+            if not track.codec.startswith(("avc1", "avc3")):
+                assert read.codec == track.codec
+        else:
+            assert (read.codec, read.channel_config) == (track.codec, track.channel_config)
+            assert read.samplerate == (48_000 if track.codec == "opus" else track.samplerate)
+    for track in raw.get("data", []):
+        assert (parsed[track["name"]].role, parsed[track["name"]].codec) == (track.get("role"), None)
+
+
+@pytest.mark.parametrize("vector", VECTORS["catalogReads"], ids=lambda v: v["name"])
+def test_catalog_reads(vector: dict[str, Any]) -> None:
+    parsed = media.parse_msf_catalog(vector["json"].encode(), catalog_namespace=vector["catalogNamespace"])
+    assert readable(parsed) == vector["parsed"]
+
+
+@pytest.mark.parametrize("vector", VECTORS["catalogReadErrors"], ids=lambda v: v["name"])
+def test_catalog_read_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        media.parse_msf_catalog(vector["json"].encode(), catalog_namespace=vector["catalogNamespace"])
+
+
+def test_catalog_read_rejects_non_utf8() -> None:
+    with pytest.raises(ValueError):
+        media.parse_msf_catalog(b'{"version":"draft-01","tracks":[],"x":"\xff"}', catalog_namespace=["room"])
+    with pytest.raises(ValueError, match="sequence of fields"):
+        media.parse_msf_catalog(b'{"version":"draft-01","tracks":[]}', catalog_namespace="room")
+
+
 @pytest.mark.parametrize("vector", VECTORS["loc"], ids=lambda v: v["name"])
 def test_loc(vector: dict[str, Any]) -> None:
     properties = media.loc_properties(
