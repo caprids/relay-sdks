@@ -261,7 +261,8 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     operation.objectTimer = undefined;
     operation.objectStartedAt = undefined;
   };
-  // The check §8 requires just before an object goes to the transport, in case its timer is late.
+  // The check §8 requires just before an object goes to the transport, in case its timer is late:
+  // before the stream write starts, and again once the stream's header write has settled.
   const checkObjectAge = (operation: Operation) => {
     const { objectMs } = operation.timeouts;
     if (operation.objectStartedAt !== undefined && objectMs > 0 && now() - operation.objectStartedAt > objectMs)
@@ -335,7 +336,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     }
     check(operation);
     operation.alias = alias;
-    // The subscriber's delivery timeouts are fixed now: a later REQUEST_UPDATE applies to later groups.
+    // The subscription's delivery timeouts apply from now, while the operation waits for room.
     operation.subscriber = subscriberTimeouts(alias);
     fixTimeouts(operation, operation.publisher);
     check(operation);
@@ -347,6 +348,10 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await settlingGroups.waitForRoom(operation.interrupted);
       check(operation);
     }
+    // They are fixed when the stream opens: a later REQUEST_UPDATE applies to later groups.
+    operation.subscriber = subscriberTimeouts(operation.alias);
+    fixTimeouts(operation, operation.publisher);
+    check(operation);
     const subgroup = await openSubgroup(operation.alias, groupId);
     if (operation.cancelled) {
       // The stream opened after the failure: reset it without sending payload bytes (§11.4.3).
@@ -460,7 +465,10 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
           const opened = await openStream(operation);
           operation.phase = 'writing';
           checkObjectAge(operation);
-          await opened.writeObject({ objectId: 0, properties, payload: bytes });
+          await opened.writeObject(
+            { objectId: 0, properties, payload: bytes },
+            { beforeWrite: () => checkObjectAge(operation) },
+          );
           untimeObject(operation);
           check(operation);
           operation.phase = 'closing';
@@ -517,7 +525,10 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
             startObject(operation, startedAt);
             await run(operation, () => {
               checkObjectAge(operation);
-              return subgroup.writeObject({ objectId: objectCount, properties, payload: bytes, status });
+              return subgroup.writeObject(
+                { objectId: objectCount, properties, payload: bytes, status },
+                { beforeWrite: () => checkObjectAge(operation) },
+              );
             });
             objectCount++;
           } finally {

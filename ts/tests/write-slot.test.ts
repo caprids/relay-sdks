@@ -4,7 +4,7 @@
  * "Write phases and interruptions" table in spec/behavior.md. Relay behaviour the slot cannot see
  * (demand arriving through the real binding callback, announce-and-serve) stays in publish.test.ts.
  */
-import type { SubgroupWriter } from '@mux/moq-core';
+import type { SubgroupWriteOptions, SubgroupWriter } from '@mux/moq-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type DeliveryTimeouts, NO_DELIVERY_TIMEOUTS } from '../src/delivery-timeouts.js';
 import { RelayError } from '../src/errors.js';
@@ -13,7 +13,7 @@ import { createSettlingGroups, SETTLING_GROUP_LIMIT, type SettlingGroups } from 
 import { createWriteSlot, RESET_CODE } from '../src/write-slot.js';
 
 type ObjectInput = Parameters<SubgroupWriter['writeObject']>[0];
-type Stall = 'none' | 'write' | 'second-write' | 'fin';
+type Stall = 'none' | 'header' | 'write' | 'second-write' | 'fin';
 
 /**
  * One subgroup stream as the slot sees it: records objects, FIN and abort reasons, and can stall or
@@ -43,7 +43,10 @@ class FakeSubgroup implements SubgroupWriter {
     this.#settled.catch(() => {});
   }
 
-  writeObject(object: ObjectInput): Promise<void> {
+  /** `header` holds the stream's header write before the object; an object refused by `beforeWrite` is not recorded. */
+  async writeObject(object: ObjectInput, options: SubgroupWriteOptions = {}): Promise<void> {
+    if (this.#stall === 'header' && this.objects.length === 0) await this.#stallStep(true);
+    options.beforeWrite?.();
     this.objects.push(object);
     return this.#stallStep(this.#stall === 'write' || (this.#stall === 'second-write' && this.objects.length === 2));
   }
@@ -1168,6 +1171,39 @@ describe('write slot: delivery timeouts (draft-20 §8)', () => {
     expect(opened[0]?.aborts).toEqual([]);
     await elapse(1);
     await rejected;
+  });
+
+  it('checks the age again once the header write settles, even when the timer fires late', async () => {
+    const { slot, writer, opened } = harness({ stall: 'header', trackTimeouts: { objectMs: 20 } });
+    slot.bind(1);
+    const group = await writer.openGroup();
+    const rejected = expect(group.write(bytes(1))).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'writing',
+    });
+    await flush();
+    // The event loop is late: the clock passes the timeout before the timer has run.
+    const late = performance.now() + 50;
+    const clock = vi.spyOn(performance, 'now').mockReturnValue(late);
+    opened[0]?.release();
+    await rejected;
+    clock.mockRestore();
+    expect(opened[0]?.objects).toEqual([]);
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+  });
+
+  it('fixes the subscriber value when the stream opens, after any wait for settling room', async () => {
+    const subscriber = new Map([[1, { subgroupMs: 0 }]]);
+    const { writer, opened } = settling({ subscriberTimeouts: subscriber });
+    for (let i = 0; i < SETTLING_GROUP_LIMIT; i++) await writer.write(bytes(1));
+    const waiting = writer.write(bytes(2));
+    await flush();
+    subscriber.set(1, { subgroupMs: 10 });
+    opened[0]?.acknowledge();
+    await waiting;
+    await elapse(10);
+    expect(opened[SETTLING_GROUP_LIMIT]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+    expect(opened[1]?.aborts).toEqual([]);
   });
 
   it('times nothing once the object reached the transport, and nothing while a group is idle', async () => {
