@@ -230,6 +230,15 @@ code (#14). Not adopted: `AUTHENTICATION_FAILED` or `FORBIDDEN`. The relay close
 for a missing, invalid, expired or out-of-scope token, so one name covers them, and it is the
 protocol's. A subscription refused for its grant stays a MOQT `RequestError` on `onError` / `on_error`.
 
+`DELIVERY_TIMEOUT` names a write whose object outlived the draft's delivery timeout (draft-20 §8)
+before it reached the transport, after the stream reset code the publisher sends with it (0x2). The
+term is in `CONTEXT.md`. Not adopted: reusing `WRITE_TIMEOUT`, because the write deadline is the
+SDK's own bound on one operation and calls for a different response (data that missed a write
+deadline may still be worth sending; data past its delivery timeout is stale and is not retried as
+it is), nor `OBJECT_EXPIRED` or `STALE_OBJECT`, which name no protocol term. A settling group reset
+by its subgroup timeout reports nothing, so the code only ever comes from the object timeout.
+TypeScript raises it; Python follows (#167).
+
 ## Async subscription consumption
 
 `subscriber.subscribeEvents()` / `subscriber.subscribe_events()` creates a bounded iterator of

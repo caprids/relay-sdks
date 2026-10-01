@@ -490,6 +490,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | --- | --- |
 | `CONNECTION_TIMEOUT` | Connecting exceeded its deadline; consider a new connection with backoff. |
 | `WRITE_TIMEOUT` | Inspect the phase below, then choose the next object or group explicitly. |
+| `DELIVERY_TIMEOUT` | An object outlived its delivery timeout before it reached the transport. The data is stale: do not retry it as it is; choose fresh data or the next random-access point. See [delivery timeouts](../spec/behavior.md#delivery-timeouts). |
 | `CLOSED` | The handle is closed; use an open connection, track, or group. |
 | `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
 | `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
@@ -506,7 +507,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
 async subscription request failure or local event-buffer overflow. Publishing records
 `waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
-A `WRITE_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
+A `WRITE_TIMEOUT` or `DELIVERY_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
 phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
 sent. Opening a group can start sending its header before the first object write. A phase records
 the failure's origin, and a later call on the failed handle can report that same error.
