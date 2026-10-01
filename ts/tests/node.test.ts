@@ -128,6 +128,36 @@ describe('@mux/relay/node', () => {
     expect(quic.nativeQuicTransport).toHaveBeenCalledTimes(2);
   });
 
+  it('checks its arguments and signal before reporting a missing adapter, as the browser default does', async () => {
+    vi.doMock('@mux/relay-quic', () => {
+      throw new Error("Cannot find package '@mux/relay-quic'");
+    });
+    const { connectRelaySubscriber } = await entry();
+
+    await expect(connectRelaySubscriber({ url: 'not a url' })).rejects.toThrow(TypeError);
+    const reason = new Error('cancelled');
+    await expect(connectRelaySubscriber({ url, signal: AbortSignal.abort(reason) })).rejects.toBe(reason);
+    await expect(connectRelaySubscriber({ url })).rejects.toMatchObject({ code: 'TRANSPORT_UNAVAILABLE' });
+  });
+
+  it('loads the adapter once for connections that start together', async () => {
+    const { connectRelayPublisher, connectRelaySubscriber } = await entry();
+    const relay = hub();
+    let roles = 0;
+    quic.route = (url, protocols) => (roles++ === 0 ? relay.connectPublisher : relay.connectSubscriber)(url, protocols);
+
+    const [publisher, subscriber] = await Promise.all([
+      connectRelayPublisher({ url, namespace }),
+      connectRelaySubscriber({ url }),
+    ]);
+    cleanup.push(
+      () => publisher.close(),
+      () => subscriber.close(),
+    );
+
+    expect(quic.nativeQuicTransport).toHaveBeenCalledOnce();
+  });
+
   it('passes an invalid trust option through as the adapter throws it', async () => {
     const { connectRelaySubscriber } = await entry();
     const invalid = new TypeError('unsupported certificate hash algorithm sha-1');

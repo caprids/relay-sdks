@@ -55,29 +55,31 @@ interface Adapter {
   shared: NativeQuicTransportFactory;
 }
 
-let adapter: Adapter | undefined;
+let loading: Promise<Adapter> | undefined;
 let warned = false;
 
 /**
- * Load `@mux/relay-quic` and its native addon on first use. Either one missing is `TRANSPORT_UNAVAILABLE`; a failure
- * is not kept, so a later call tries again.
+ * Load `@mux/relay-quic` and its native addon on first use; concurrent first calls share the one load. Either one
+ * missing is `TRANSPORT_UNAVAILABLE`; a failure is not kept, so a later call tries again.
  */
-async function loadAdapter(): Promise<Adapter> {
-  if (adapter) return adapter;
-  try {
-    const { nativeQuicTransport } = await import('@mux/relay-quic');
-    // With no options the only thing that can fail is loading the addon.
-    adapter = { nativeQuicTransport, shared: nativeQuicTransport() };
-    return adapter;
-  } catch (error) {
-    throw new RelayError(
-      'TRANSPORT_UNAVAILABLE',
-      '@mux/relay/node needs @mux/relay-quic and its native binary for this platform; install it next to @mux/relay ' +
-        '(see its README)',
-      'connecting',
-      { cause: error },
-    );
-  }
+function loadAdapter(): Promise<Adapter> {
+  loading ??= (async () => {
+    try {
+      const { nativeQuicTransport } = await import('@mux/relay-quic');
+      // With no options the only thing that can fail is loading the addon.
+      return { nativeQuicTransport, shared: nativeQuicTransport() };
+    } catch (error) {
+      loading = undefined;
+      throw new RelayError(
+        'TRANSPORT_UNAVAILABLE',
+        '@mux/relay/node needs @mux/relay-quic and its native binary for this platform; install it next to ' +
+          '@mux/relay (see its README)',
+        'connecting',
+        { cause: error },
+      );
+    }
+  })();
+  return loading;
 }
 
 /** Whether this runtime has a global `WebTransport` the core's default factory would use: one that negotiates protocols. */
@@ -110,7 +112,20 @@ async function withTransport<T extends ConnectRelayOptions>(options: RelayNodeOp
     }
     return rest as T;
   }
-  const { nativeQuicTransport, shared } = await loadAdapter();
+  let adapter: Adapter;
+  try {
+    adapter = await loadAdapter();
+  } catch (unavailable) {
+    // Raised from the factory, where the browser's default raises it too: the connect call checks its arguments and
+    // its signal first.
+    return {
+      ...rest,
+      createTransport: () => {
+        throw unavailable;
+      },
+    } as T;
+  }
+  const { nativeQuicTransport, shared } = adapter;
   // Invalid trust options throw here, as they do from nativeQuicTransport itself.
   const createTransport = trusted
     ? nativeQuicTransport({
