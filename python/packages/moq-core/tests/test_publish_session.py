@@ -49,6 +49,7 @@ from moq_core.publish_session import (
     MoqtPublishSessionCallbacks,
     MoqtPublishSessionConfig,
     RegisterTrackOptions,
+    TrackBinding,
     create_moqt_publish_session,
 )
 from moq_core.session import (
@@ -876,6 +877,62 @@ class TestCreateMoqtPublishSession:
         assert sub.received[-1] == PublishDone(
             status_code=PUBLISH_DONE_STATUS.UPDATE_FAILED, stream_count=0, reason="unsupported subscription update"
         )
+        harness.destroy()
+
+    async def test_reports_the_subscriptions_delivery_timeouts_and_accepts_an_update_that_changes_them(self) -> None:
+        # §8, §10.2.3, §10.2.4 (#167): the values reach the publisher on the binding, and REQUEST_UPDATE
+        # carrying either is applied and acknowledged rather than refused as unsupported.
+        ended_requests: list[int] = []
+        bindings: list[TrackBinding] = []
+        harness = Harness(
+            MoqtPublishSessionCallbacks(on_subscribe_end=ended_requests.append, on_track_binding=bindings.append)
+        )
+
+        await harness.session.ready
+        register(harness.session, "video")
+
+        sub = await open_raw_request(
+            harness.pair.server,
+            encode_subscribe(
+                Subscribe(
+                    request_id=121,
+                    track_namespace=NAMESPACE,
+                    track_name="video",
+                    parameters=MessageParameters(object_delivery_timeout=40, subgroup_delivery_timeout=300),
+                )
+            ),
+        )
+
+        await wait_for(lambda: sub.kinds() == ["subscribe-ok"] and len(bindings) == 1)
+        assert bindings[0] == TrackBinding(
+            track_name="video", track_alias=121, object_delivery_timeout=40, subgroup_delivery_timeout=300
+        )
+
+        await sub.send(encode_request_update(123, MessageParameters(subgroup_delivery_timeout=50)))
+        await wait_for(lambda: sub.kinds() == ["subscribe-ok", "request-ok"])
+        assert bindings[-1] == TrackBinding(
+            track_name="video", track_alias=121, object_delivery_timeout=40, subgroup_delivery_timeout=50
+        )
+
+        await sub.send(encode_request_update(125, MessageParameters(object_delivery_timeout=0)))
+        await wait_for(lambda: sub.kinds() == ["subscribe-ok", "request-ok", "request-ok"])
+        assert bindings[-1] == TrackBinding(
+            track_name="video", track_alias=121, object_delivery_timeout=0, subgroup_delivery_timeout=50
+        )
+        assert ended_requests == []
+        assert not sub.ended()
+        harness.destroy()
+
+    async def test_a_subscription_without_delivery_timeouts_binds_with_none(self) -> None:
+        bindings: list[TrackBinding] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_track_binding=bindings.append))
+
+        await harness.session.ready
+        register(harness.session, "video")
+        await raw_subscribe(harness.pair.server, "video", 131)
+
+        await wait_for(lambda: len(bindings) == 1)
+        assert bindings[0] == TrackBinding(track_name="video", track_alias=131)
         harness.destroy()
 
     async def test_teardown_does_not_reset_a_request_stream_that_already_carried_its_publish_done_and_fin(

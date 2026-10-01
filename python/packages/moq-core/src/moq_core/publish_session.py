@@ -107,10 +107,17 @@ class TrackBinding:
     while its Forward State permits data (``forward=0`` subscribes without authorizing it;
     REQUEST_UPDATE toggles it). ``None`` means no live forwarding subscription, so no data streams
     may be opened for the track.
+
+    The two delivery timeouts are that subscription's values in milliseconds (draft-20 §8, §10.2.3,
+    §10.2.4): SUBSCRIBE's parameters as updated by every REQUEST_UPDATE since, ``None`` where the
+    subscriber never sent one, and always ``None`` without a binding. A REQUEST_UPDATE that changes
+    either is reported as a binding with the same alias.
     """
 
     track_name: str
     track_alias: int | None
+    object_delivery_timeout: int | None = None
+    subgroup_delivery_timeout: int | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -236,6 +243,10 @@ class _SubscriberStream:
     """``on_subscribe`` fired; ``on_subscribe_end`` pairs on this, keeping counts balanced."""
     forwarding: bool = True
     """Forward State (SUBSCRIBE ``forward``, togglable via REQUEST_UPDATE); data flows only while true."""
+    object_delivery_timeout: int | None = None
+    """OBJECT_DELIVERY_TIMEOUT (§10.2.4) from SUBSCRIBE, as updated by REQUEST_UPDATE; ``None`` if never sent."""
+    subgroup_delivery_timeout: int | None = None
+    """SUBGROUP_DELIVERY_TIMEOUT (§10.2.3) from SUBSCRIBE, as updated by REQUEST_UPDATE; ``None`` if never sent."""
     finished: bool = False
     """The subscription is ending or over; no new data stream may open on its alias."""
     writer_closed: bool = False
@@ -1102,6 +1113,8 @@ class MoqtPublishSession:
             # Forward State defaults to 1; `forward=0` subscribes without authorizing data until a
             # REQUEST_UPDATE flips it.
             forwarding=subscribe.parameters.forward != 0,
+            object_delivery_timeout=subscribe.parameters.object_delivery_timeout,
+            subgroup_delivery_timeout=subscribe.parameters.subgroup_delivery_timeout,
         )
 
         track.subscribers.append(subscriber)
@@ -1141,10 +1154,7 @@ class MoqtPublishSession:
                     track, other, PUBLISH_DONE_STATUS.TRACK_ENDED, "superseded by a newer subscription"
                 )
 
-            _call(
-                self._callbacks.on_track_binding,
-                TrackBinding(track_name=track.track_name, track_alias=track_alias if subscriber.forwarding else None),
-            )
+            _call(self._callbacks.on_track_binding, _binding_of(track, subscriber if subscriber.forwarding else None))
 
         # Keep serving the request stream: REQUEST_UPDATEs arrive here.
         try:
@@ -1158,19 +1168,29 @@ class MoqtPublishSession:
                     unsupported = _unsupported_update_fields(parameters)
 
                     # Forward State toggles ride REQUEST_UPDATE; the binding must follow so data stops
-                    # (or starts) with the subscription's authorization. Newest-wins keeps this
-                    # subscriber the track's only live one, so its state IS the binding.
+                    # (or starts) with the subscription's authorization. The delivery timeouts ride it
+                    # too (§8), and the publisher applies the new values to groups it opens afterwards.
+                    # Newest-wins keeps this subscriber the track's only live one, so its state IS the
+                    # binding.
+                    rebind = False
+
                     if parameters.forward is not None:
                         subscriber.forwarding = parameters.forward != 0
+                        rebind = True
 
-                        if not subscriber.finished and subscriber.accepted:
-                            _call(
-                                self._callbacks.on_track_binding,
-                                TrackBinding(
-                                    track_name=track.track_name,
-                                    track_alias=subscriber.track_alias if subscriber.forwarding else None,
-                                ),
-                            )
+                    if parameters.object_delivery_timeout is not None:
+                        subscriber.object_delivery_timeout = parameters.object_delivery_timeout
+                        rebind = True
+
+                    if parameters.subgroup_delivery_timeout is not None:
+                        subscriber.subgroup_delivery_timeout = parameters.subgroup_delivery_timeout
+                        rebind = True
+
+                    if rebind and not subscriber.finished and subscriber.accepted:
+                        _call(
+                            self._callbacks.on_track_binding,
+                            _binding_of(track, subscriber if subscriber.forwarding else None),
+                        )
 
                     _call(
                         self._callbacks.on_request_update,
@@ -1185,9 +1205,10 @@ class MoqtPublishSession:
                         if unsupported:
                             # Acknowledging an update we did not apply would leave the peer serving
                             # stale expectations (a filter or range it believes is in effect). Forward
-                            # State is applied above and priority is advisory (the known relays discard
-                            # ours too); anything else ends this request honestly: the update's
-                            # REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED (§10.9.1).
+                            # State and the delivery timeouts are applied above and priority is advisory
+                            # (the known relays discard ours too); anything else ends this request
+                            # honestly: the update's REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED
+                            # (§10.9.1).
                             self._end_subscription(
                                 track,
                                 subscriber,
@@ -1251,19 +1272,28 @@ class MoqtPublishSession:
 
     def _emit_binding(self, track: _TrackRecord) -> None:
         live = [s for s in track.subscribers if not s.finished and s.accepted and s.forwarding]
-        binding = live[-1] if live else None
-        _call(
-            self._callbacks.on_track_binding,
-            TrackBinding(track_name=track.track_name, track_alias=binding.track_alias if binding else None),
-        )
+        _call(self._callbacks.on_track_binding, _binding_of(track, live[-1] if live else None))
+
+
+def _binding_of(track: _TrackRecord, subscriber: _SubscriberStream | None) -> TrackBinding:
+    """The track's binding to ``subscriber``, or no binding."""
+    if subscriber is None:
+        return TrackBinding(track_name=track.track_name, track_alias=None)
+
+    return TrackBinding(
+        track_name=track.track_name,
+        track_alias=subscriber.track_alias,
+        object_delivery_timeout=subscriber.object_delivery_timeout,
+        subgroup_delivery_timeout=subscriber.subgroup_delivery_timeout,
+    )
 
 
 def _unsupported_update_fields(parameters: MessageParameters) -> list[str]:
     """Parameter names set on a REQUEST_UPDATE that the publish driver does not apply.
 
-    Everything but FORWARD (applied) and SUBSCRIBER_PRIORITY (advisory).
+    Everything but FORWARD and the two delivery timeouts (applied) and SUBSCRIBER_PRIORITY (advisory).
     """
-    ignored = {"forward", "subscriber_priority"}
+    ignored = {"forward", "object_delivery_timeout", "subgroup_delivery_timeout", "subscriber_priority"}
     return [
         name
         for name in MessageParameters.__dataclass_fields__
