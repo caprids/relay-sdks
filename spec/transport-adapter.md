@@ -314,17 +314,19 @@ adapters MUST NOT copy them.
 ## Test doubles
 
 The in-memory transport pair (`ts/packages/moq-core/src/tests/helpers/transport-pair.ts`) is a test
-double, not an adapter the product ships. It wires `TransformStream`s back to back and is exempt
-from these rules until the conformance suite (#193) either brings it up to them or confirms the gap
-is harmless:
+double, not an adapter the product ships. Its streams are in-process pipes with a receive buffer, and
+`createTransportPairFactory` puts a factory in front of it with `ready`, `framing` and `protocol`. It
+passes the conformance suite except where it has no QUIC to model, and the suite skips those cases
+for it:
 
-- no reset or stop codes: abort and cancel error the pipe without a code (TA-17 to TA-20)
 - no stream credit: creates never reject for credit (TA-21)
-- close resolves when the pipe closes, not on acknowledgement (TA-15)
-- `closed` only ever resolves (TA-9), and `close()` reaches both ends at once
-- no factory, so no `ready`, `framing` or `protocol` (TA-1, TA-7, TA-8)
+- no acknowledgement: close resolves once the FIN is in the peer's buffer, and a peer cannot
+  withhold acknowledgement (TA-15, and the cases of TA-14 and TA-16 that need a paused peer)
 
-A test that depends on one of these behaviours uses an adapter that has it: the Python loopback
+`close()` reaches both ends at once, with no time in flight. That is harmless: no rule depends on how
+long a close takes to arrive.
+
+A test that depends on credit or acknowledgement uses an adapter that has it: the Python loopback
 server, Chromium against a local relay, or `@mux/relay-quic` once it exists.
 
 ## Python mapping (informative)
@@ -347,11 +349,21 @@ is its aioquic WebTransport session adapter. How the rules map:
 
 ## Conformance
 
-The conformance suite (#193) is written against `MoqtTransport` once and run against every target:
-the in-memory pair in vitest, Chromium's native `WebTransport` against a local relay or a test
-accepting end, and `@mux/relay-quic` in Node. Each MUST has at least one test named after its rule.
-For TA-26 the test is a Node script that has to exit by itself after `close()`. The suite owns the
-results; this document does not carry a per-adapter matrix.
+The conformance suite (`ts/conformance/`, #193) is written against `MoqtTransport` once and run against
+every target:
+
+- the in-memory pair in vitest, as part of `pnpm check`
+- Chromium's native `WebTransport` against a test accepting end
+- `@mux/relay-quic` in Node
+
+Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
+adapter, and the core's SETUP tests cover it. For TA-26 the test is a Node script that has to exit by
+itself after `close()`.
+
+A target declares what it cannot exercise, and which rules it is known to fail. A skip names its
+reason. A known failure names its Known deviation, or the issue that closes the gap, and its test goes
+red once the target starts to pass, so the expectation gets removed. The suite owns the results; this
+document does not carry a per-adapter matrix.
 
 A rule that a real adapter cannot meet is either fixed in the adapter or moved, with its evidence,
 to [Known deviations](#known-deviations). It is never removed silently.

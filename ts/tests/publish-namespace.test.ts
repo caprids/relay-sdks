@@ -139,8 +139,12 @@ describe('publisher namespace coverage', () => {
     await solicitation.reset(reset);
     const { error } = await publisher.closed;
     expect(error).toBeInstanceOf(RelayError);
-    // The withdrawal carries the peer's reset as its cause.
-    expect(error).toMatchObject({ code: 'NAMESPACE_ENDED', phase: 'connection', cause: { cause: reset } });
+    // The withdrawal carries the peer's reset as its cause, as a stream error with the reset's code (TA-19).
+    expect(error).toMatchObject({
+      code: 'NAMESPACE_ENDED',
+      phase: 'connection',
+      cause: { cause: { source: 'stream', streamErrorCode: 0 } },
+    });
     expect(await pending).toBe(error);
     await expect(track.write(new Uint8Array([2]))).rejects.toBe(error);
     expect(() => publisher.registerTrack({ track: 'another' })).toThrow(error as RelayError);
