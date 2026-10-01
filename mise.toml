@@ -70,6 +70,21 @@ depends = ["ts:install", "python:install"]
 dir = "ts"
 run = "pnpm test:conformance"
 
+# Only @mux/relay-quic's native addon needs Rust, so the tasks that build or lint it bring their own toolchain and
+# nothing else installs one: `pnpm check` builds no Rust.
+[tasks."ts:test:conformance:node"]
+description = "Build @mux/relay-quic's addon and run the transport adapter conformance suite against it in Node"
+depends = ["ts:install", "python:install"]
+tools = { rust = "1.97.1" }
+dir = "ts"
+run = "pnpm test:conformance:node"
+
+[tasks."ts:check:native"]
+description = "Format-check and lint @mux/relay-quic's Rust crate"
+tools = { rust = "1.97.1" }
+dir = "ts/packages/relay-quic/native"
+run = ["cargo fmt --check", "cargo clippy --release -- -D warnings"]
+
 [tasks."ts:example:mux-global"]
 description = "Run the mux.global example; pass its options after --"
 dir = "ts"

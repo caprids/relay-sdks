@@ -11,7 +11,12 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
 | `pair.test.js` | The suite against the in-memory pair, in `pnpm test` and so in `pnpm check`. |
 | `targets/pair.js` | The in-memory pair as a target, with an in-process peer. |
 | `targets/chromium.js` | The browser's native `WebTransport` as a target, run in a page. Its peer is the Python accepting end. |
+| `targets/relay-quic.js` | `@mux/relay-quic`, the Node adapter over native QUIC, as a target. Its peer is the Python accepting end with `--framing native-quic`. |
+| `targets/relay-quic-lifetime.js` | The child Node process behind that target's TA-25 and TA-26 checks, and its check that a cancelled dial (TA-11) lets the process exit. |
+| `targets/remote-peer.js` | The peer methods as requests to the Python accepting end, for both targets that use it. |
+| `relay-quic.conformance.js` | The suite against `@mux/relay-quic` under vitest, plus its trust checks (`ca`, an untrusted certificate, bad options). |
 | `../scripts/test-conformance.mjs` | The Chromium launcher: it starts the accepting end, serves the suite to a Playwright page, runs it and prints the results. |
+| `../scripts/conformance-peer.js` | Starts the Python accepting end for either launcher. |
 | `python/…/relay_helpers/conformance_peer.py` | The scriptable accepting end: aioquic, out of process, driven over JSON lines. |
 
 ## Running it
@@ -21,6 +26,13 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
   end. It needs the Python workspace (`mise run python:install`) and Playwright's Chromium
   (`pnpm exec playwright install chromium`). It takes about 15 s. `CONFORMANCE_GREP=TA-15` runs only the cases whose
   name contains the text. CI runs it as the TypeScript workflow's `conformance` job.
+- `pnpm test:conformance:node` (`mise run ts:test:conformance:node`) runs it in Node against `@mux/relay-quic` and the
+  Python accepting end in its native QUIC mode. It builds the native addon first, with the Rust toolchain the mise
+  task pins, and needs the Python workspace. After the build it takes about 25 s, most of it the TA-9 connection-loss
+  case waiting out the idle timeout. With the addon built,
+  `pnpm exec vitest run --config conformance/vitest.relay-quic.config.js -t TA-15` runs only the matching cases. CI
+  runs it as the `conformance-node` job, which also checks that `packages/relay-quic/src/native.d.ts` matches the
+  Rust.
 
 ## Targets
 
@@ -100,7 +112,7 @@ and `spec/vectors/` cover it (#191).
 
 ## The Python accepting end
 
-`conformance_peer.py` prints `{"event": "listening", "port", "certificateHash"}` once it listens on 127.0.0.1. It
+`conformance_peer.py` prints `{"event": "listening", "port", "certificateHash", "certificatePem"}` once it listens. It
 then takes one JSON request per stdin line, `{"id", "method", "params"}`, and answers each on stdout with
 `{"id", "result"}` or `{"id", "error"}`. Requests may overlap. Its certificate is a 10-day P-256 leaf, so a browser
 accepts it through `serverCertificateHashes`.
@@ -118,16 +130,23 @@ accepts it through `serverCertificateHashes`.
   10 s.
 - `quicClose()` sends CONNECTION_CLOSE 0x1c.
 
+With `--framing native-quic` it serves MOQT straight on QUIC instead (`relay_helpers/native_quic.py`), behind the same
+methods:
+
+- It listens on `::`, which takes IPv4 too, so a dialer that resolves `localhost` to either address reaches it.
+- It selects the protocol in TLS, from the ClientHello's ALPN list: the first offered, none, or `moqt-unoffered`.
+  `observedDial` reports the ClientHello's SNI and ALPN list as `{ serverName, protocols }`.
+- `hold` holds every datagram from the dialer until `releaseHandshake()`, and `refuse` fails the handshake with a TLS
+  handshake_failure alert.
+- `maxStreams` is the dialer's whole stream credit, with no HTTP/3 streams to add.
+- `reset` takes a code up to 2⁶²−1, as a decimal string above 2⁵³−1 (`largeCodes`). Codes go on the wire as given,
+  with no HTTP/3 mapping.
+- `close()` is an application CONNECTION_CLOSE (0x1d), and `closed()` reports the dialer's.
+
 ## Adding a target
 
 A target needs a peer that implements the methods above, and a runner for its runtime.
 
-- **Node (`@mux/relay-quic`, #194):**
-  - It runs under vitest, like the pair: a `relay-quic.test.js` that calls `describeConformance` with a native QUIC
-    target.
-  - Its peer is `conformance_peer.py --framing native-quic`, which today exits with "not implemented yet (#194)".
-    That mode serves MOQT on plain QUIC with ALPN `moqt-20` behind the same methods, and adds `serverName` to
-    `observedDial` and `largeCodes`.
-  - It adds `process` and implements `checkProcessLifetime` with a child Node script.
-  - Its vitest runner spawns the peer the way `test-conformance.mjs` does. `startPeer` there can move to a shared
-    module when the second launcher needs it.
+- **Node (`@mux/relay-quic`):** `relay-quic.conformance.js` runs under vitest, as the pair does, with its own config so
+  that `pnpm test` leaves it out. Another Node adapter can reuse `targets/relay-quic.js`'s shape and the native QUIC
+  peer as they are.
