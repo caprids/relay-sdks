@@ -282,14 +282,23 @@ class TestLoopback:
             await created.ready
 
 
-async def _drain_uni_streams(session: Any, into: list[int]) -> None:
-    """Read every incoming unidirectional stream to its end, recording the byte count of each."""
+async def _drain_uni_streams(session: Any, into: list[int | BaseException]) -> None:
+    """Read every incoming unidirectional stream to its end, recording the byte count of each.
+
+    A stream that fails records its error instead, so a test sees why rather than waiting out its deadline.
+    """
     readers: list[asyncio.Task[None]] = []
 
     async def read_all(stream: ReceiveStream) -> None:
         total = 0
-        while (chunk := await stream.read()) is not None:
-            total += len(chunk)
+
+        try:
+            while (chunk := await stream.read()) is not None:
+                total += len(chunk)
+        except Exception as error:
+            into.append(error)
+            return
+
         into.append(total)
 
     async for stream in session.incoming_unidirectional_streams():
@@ -315,7 +324,7 @@ class TestSendBackpressure:
         # cannot drain), so a deadline around the write fires instead of it returning at once (#3, #30).
         # (aioquic's own receiver keeps growing the flow-control window as data arrives whether or not
         # the application reads it, so a slow *link*, not a slow reader, is what models backpressure.)
-        received: list[int] = []
+        received: list[int | BaseException] = []
         sessions: list[Any] = []
         drainers: list[asyncio.Task[None]] = []
 
@@ -338,6 +347,8 @@ class TestSendBackpressure:
             # The bytes are still queued in the client: nothing was lost, the write is simply not done.
             quic = transport._protocol._quic
             assert sum(len(s.sender._buffer) for s in quic._streams.values()) > 0
+            # Abandon them, so the close below does not spend its drain bound on a link that cannot drain.
+            stream.abort()
         finally:
             transport.close()
             await asyncio.wait_for(transport.wait_closed(), 5)
@@ -346,7 +357,7 @@ class TestSendBackpressure:
 
     async def test_a_write_to_a_reading_peer_completes_promptly(self) -> None:
         # The positive control: when the peer reads, the same write settles quickly.
-        received: list[int] = []
+        received: list[int | BaseException] = []
         drainers: list[asyncio.Task[None]] = []
 
         def on_session(session: Any) -> None:
@@ -370,7 +381,7 @@ class TestSendBackpressure:
         # A slow uplink: before the fix, write() returned at once and close() tore the connection down
         # with the bytes still queued, so the peer saw a reset. Now write() paces to the link and
         # close() drains what it accepted, so every byte reaches the peer (#30).
-        received: list[int] = []
+        received: list[int | BaseException] = []
         sessions: list[Any] = []
         drainers: list[asyncio.Task[None]] = []
 
@@ -389,14 +400,56 @@ class TestSendBackpressure:
         await asyncio.wait_for(stream.close(), 20)
         transport.close()
         await asyncio.wait_for(transport.wait_closed(), 20)
-        await wait_for(lambda: received == [payload], timeout=20)
+        await wait_for(lambda: len(received) == 1, timeout=20)
+        assert received == [payload]
         server.close()
         await asyncio.sleep(0.05)
+
+    async def test_close_sends_the_session_close_only_after_the_streams_are_acknowledged(self) -> None:
+        # The peer ends the session as soon as it reads CLOSE_WEBTRANSPORT_SESSION, resetting every
+        # stream of it, so a FIN still being retransmitted when the capsule arrives was lost: the flake
+        # of #209, a tail drop on the rate-capped link. Here a blackout makes both wait for the same
+        # retransmission, and the peer reads the capsule first; the capsule must not be sent until the
+        # stream is acknowledged, so the peer reads the stream to its end inside the session.
+        sessions: list[Any] = []
+        readers: list[asyncio.Task[None]] = []
+        ended_at_fin: list[bool] = []
+
+        async def read_while_open(session: Any) -> None:
+            async for stream in session.incoming_unidirectional_streams():
+                while await stream.read() is not None:
+                    pass
+
+                ended_at_fin.append(session.ended)
+
+        def on_session(session: Any) -> None:
+            sessions.append(session)
+            readers.append(asyncio.ensure_future(read_while_open(session)))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+
+        try:
+            sessions[0].impair(paused=True)
+            stream = await transport.create_unidirectional_stream()
+            await asyncio.wait_for(stream.write(b"\1" * 1000), 5)
+            await asyncio.wait_for(stream.close(), 5)
+            transport.close()
+            await asyncio.sleep(0.3)
+            sessions[0].impair()
+            await asyncio.wait_for(transport.wait_closed(), 10)
+            await wait_for(lambda: sessions[0].ended, timeout=5)
+            assert ended_at_fin == [False]
+            assert sessions[0].close_info == (0, "")
+        finally:
+            server.close()
+            await asyncio.sleep(0.05)
 
     async def test_wait_acknowledged_settles_on_the_peers_acknowledgement_not_on_transmission(self) -> None:
         # A settling group (#160, #161): the FIN has been handed to the wire, so close() returns, but
         # the acknowledgement arrives only once the uplink is back. A reset stream never settles cleanly.
-        received: list[int] = []
+        received: list[int | BaseException] = []
         sessions: list[Any] = []
         drainers: list[asyncio.Task[None]] = []
 
@@ -557,7 +610,7 @@ class TestSendBackpressure:
     async def test_many_concurrent_slow_streams_drain_after_the_link_heals(self) -> None:
         # Hundreds of blocked single-object streams at once used to strand some forever; when the link
         # heals the whole queue must drain (#5).
-        received: list[int] = []
+        received: list[int | BaseException] = []
         sessions: list[Any] = []
         drainers: list[asyncio.Task[None]] = []
 
@@ -583,6 +636,7 @@ class TestSendBackpressure:
         impairment.jitter = 0.0
         await asyncio.wait_for(asyncio.gather(*writes), 20)
         await wait_for(lambda: len(received) == count, timeout=20)
+        assert received == [4096] * count
         # Nothing is stranded in the client's send buffers once the link is clean. aioquic holds a
         # stream's bytes until they are acknowledged, so this lags the peer having read them all.
         await wait_for(lambda: sum(len(s.sender._buffer) for s in quic._streams.values()) == 0, timeout=5)
@@ -653,7 +707,7 @@ class TestSendBackpressure:
         # future that concurrent and later writers on the stream share: the second writer keeps
         # waiting, and close() still completes once the link heals. The abandoned bytes stay queued,
         # the documented "a failed write may have delivered partial data".
-        received: list[int] = []
+        received: list[int | BaseException] = []
         sessions: list[Any] = []
         drainers: list[asyncio.Task[None]] = []
 

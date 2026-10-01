@@ -93,7 +93,7 @@ class WebTransportSessionBase:
         return BidirectionalStream(readable=receive, writable=send)
 
     def close(self, close_code: int = 0, reason: str = "") -> None:
-        """Send CLOSE_WEBTRANSPORT_SESSION, wait for in-flight data to be acknowledged, then close the connection.
+        """Wait for in-flight data to be acknowledged, send CLOSE_WEBTRANSPORT_SESSION, then close the connection.
 
         Writes fail from here on; the session reports itself closed once the connection is gone.
         """
@@ -107,13 +107,7 @@ class WebTransportSessionBase:
             self._finish(None)
             return
 
-        try:
-            protocol.h3.send_data(self.session_id, encode_close_session_capsule(close_code, reason), end_stream=True)
-            protocol.transmit()
-        except Exception:
-            pass
-
-        spawn(self._drain_then_close(protocol))
+        spawn(self._drain_then_close(protocol, close_code, reason))
 
     @property
     def ended(self) -> bool:
@@ -210,18 +204,37 @@ class WebTransportSessionBase:
             self._closing = True
             protocol.close_after_drain()
 
-    async def _drain_then_close(self, protocol: WebTransportProtocol) -> None:
+    async def _drain_then_close(self, protocol: WebTransportProtocol, close_code: int, reason: str) -> None:
         # Closing a QUIC connection discards queued stream data, and whatever the peer has not
-        # acknowledged is lost with it. So wait until every send stream, the close capsule included,
-        # has been acknowledged, within a bound so a peer that went silent cannot hold the close.
+        # acknowledged is lost with it. So wait until every send stream has been acknowledged, then
+        # send the close capsule and wait for that too, all within one bound so a peer that went
+        # silent cannot hold the close. The capsule goes last because the peer ends the session the
+        # moment it reads it and resets every stream of it: a stream FIN that was lost and is still
+        # being retransmitted would arrive after the capsule and be discarded (#209).
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + _CLOSE_DRAIN_TIMEOUT
+
         try:
             await asyncio.wait({self._wait_drained(protocol)}, timeout=_CLOSE_DRAIN_TIMEOUT)
+
+            if self._closed.done() or protocol.terminated is not None:
+                return
+
+            try:
+                capsule = encode_close_session_capsule(close_code, reason)
+                protocol.h3.send_data(self.session_id, capsule, end_stream=True)
+                protocol.transmit()
+            except Exception:
+                return
+
+            await asyncio.wait({self._wait_drained(protocol)}, timeout=max(0.0, deadline - loop.time()))
         finally:
             if protocol.terminated is None:
                 protocol.close_after_drain()
 
     def _wait_drained(self, protocol: WebTransportProtocol) -> asyncio.Future[None]:
-        if self._drained is None:
+        """A future settled once everything sent so far is acknowledged; a new one once the last has settled."""
+        if self._drained is None or self._drained.done():
             self._drained = asyncio.get_running_loop().create_future()
             observe(self._drained)
             protocol.watch_drain(self)
