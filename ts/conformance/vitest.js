@@ -20,7 +20,9 @@ export function describeConformance(target) {
         title,
         async (context) => {
           const result = await runCase(target, testCase);
-          if (result.status === 'failed') throw result.error;
+          if (result.status === 'failed') {
+            throw result.error instanceof Error ? result.error : new Error(`failed with ${String(result.error)}`);
+          }
           if (result.status === 'unexpected-pass') {
             throw new Error(`passes now: remove its expected failure ("${result.reason}") and promote it`);
           }

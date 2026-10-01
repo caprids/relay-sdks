@@ -36,11 +36,24 @@ function shapeOf(error) {
   return { source, streamErrorCode, closeCode, reason };
 }
 
+/** Structural equality: arrays in order, objects by their own keys in any order, values as `Object.is`. */
+function deepEqual(a, b) {
+  if (Object.is(a, b)) return true;
+  if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  if (keys.length !== Object.keys(b).length) return false;
+  return keys.every((key) => Object.hasOwn(b, key) && deepEqual(a[key], b[key]));
+}
+
 function equal(actual, expected, what) {
-  check(
-    JSON.stringify(actual) === JSON.stringify(expected),
-    `${what}: expected ${describe(expected)}, got ${describe(actual)}`,
-  );
+  check(deepEqual(actual, expected), `${what}: expected ${describe(expected)}, got ${describe(actual)}`);
+}
+
+/** `promise`, with its rejection marked handled: for an operation a case starts now and asserts on later. */
+function later(promise) {
+  promise.catch(() => {});
+  return promise;
 }
 
 const PENDING = Symbol('pending');
@@ -408,7 +421,7 @@ export const cases = [
       await ctx.peer.write(id, text('x'));
       const reader = (await nextIncoming(transport.incomingUnidirectionalStreams, 'the peer stream')).getReader();
       await readBytes(reader, 1);
-      const read = reader.read();
+      const read = later(reader.read());
       await ctx.peer.close(5, 'gone');
       expectSessionError(await rejects(read, 'the pending read'), 'the pending read');
       expectSessionError(await rejects(writer.closed, 'writer.closed'), 'writer.closed');
@@ -515,7 +528,7 @@ export const cases = [
       const { write, written } = await writeUntilBlocked(writer);
       await staysPending(write, 'the blocked write');
       await releasePeer(ctx);
-      const drained = ctx.peer.read(id, { bytes: written + 1 });
+      const drained = later(ctx.peer.read(id, { bytes: written + 1 }));
       await resolves(write, 'the blocked write once the peer reads', 20_000);
       await resolves(drained, 'the peer reading everything', 20_000);
     },
@@ -583,7 +596,7 @@ export const cases = [
       const { writer, id } = await openAcceptedUni(ctx, transport, text('x'));
       await holdPeer(ctx);
       const { write } = await writeUntilBlocked(writer);
-      const abort = writer.abort(ctx.reason(4));
+      const abort = later(writer.abort(ctx.reason(4)));
       await rejects(write, 'the blocked write');
       await rejects(writer.closed, 'writer.closed');
       await resolves(abort, 'abort');
@@ -601,7 +614,7 @@ export const cases = [
       await ctx.peer.pause();
       const close = writer.close();
       await staysPending(close, 'close while the peer acknowledges nothing');
-      const abort = writer.abort(ctx.reason(6));
+      const abort = later(writer.abort(ctx.reason(6)));
       await rejects(close, 'the pending close');
       await rejects(writer.closed, 'writer.closed');
       await resolves(abort, 'abort');
@@ -872,6 +885,8 @@ export async function runCase(target, testCase) {
   if (!plan.run) return { ...result, status: 'skipped', reason: plan.reason };
 
   const timeoutMs = testCase.timeoutMs ?? 10_000;
+  // Tracked apart from `error`: a case may fail with any value, `undefined` included.
+  let failed = false;
   let error;
   const session = await target.session(testCase.session ?? {});
   try {
@@ -884,6 +899,7 @@ export async function runCase(target, testCase) {
     };
     const ctx = { ...session, dial, target, reason: target.resetReason ?? defaultReason };
     const outcome = await settleWithin(testCase.run(ctx), timeoutMs);
+    failed = outcome.state !== 'fulfilled';
     if (outcome.state === 'pending') error = new ConformanceFailure(`timed out after ${timeoutMs} ms`);
     if (outcome.state === 'rejected') error = outcome.reason;
   } finally {
@@ -891,11 +907,11 @@ export async function runCase(target, testCase) {
   }
 
   if (plan.expectFailure) {
-    return error
+    return failed
       ? { ...result, status: 'expected-failure', reason: plan.expectFailure, error }
       : { ...result, status: 'unexpected-pass', reason: plan.expectFailure };
   }
-  if (!error) return { ...result, status: 'passed' };
+  if (!failed) return { ...result, status: 'passed' };
   return { ...result, status: level === 'SHOULD' ? 'unmet' : 'failed', error };
 }
 
