@@ -371,5 +371,7 @@ for an anonymous relay, which 0.15.8 rejects.
 
 `RELAY_ANONYMOUS=1` skips the token prompt; if `RELAY_TOKEN` is set, it is still used.
 `RELAY_CA_FILE` adds the local certificate as a Python trust root.
-`RELAY_CERTIFICATE_HASH` pins its SHA-256 DER hash for browser WebTransport. These are
-smoke-test options; normal SDK TLS verification remains unchanged.
+`RELAY_CERTIFICATE_HASH` pins its SHA-256 DER hash for browser WebTransport and for the TypeScript
+smoke test's Node run over native QUIC. That Node run uses `RELAY_CA_FILE` as its `ca` only when no
+hash is set, and only with a CA-signed leaf: the self-signed certificate above is not accepted as its
+own trust anchor. These are smoke-test options; normal SDK TLS verification remains unchanged.

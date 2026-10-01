@@ -26,9 +26,9 @@
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:docs": "typedoc --options typedoc.workspace.json --emit none",
     "docs": "pnpm build && typedoc --options typedoc.workspace.json",
-    "test:relay": "pnpm build && node scripts/test-relay.mjs",
+    "test:relay": "pnpm build && pnpm --filter @mux/relay-quic build:native && node scripts/test-relay.mjs",
     "test:conformance": "pnpm build && node scripts/test-conformance.mjs",
-    "example:mux-global": "pnpm build && node examples/mux-global/run.mjs",
+    "example:mux-global": "pnpm build && pnpm --filter @mux/relay-quic build:native && node examples/mux-global/run.mjs",
     "test:conformance:node": "pnpm build && pnpm --filter @mux/relay-quic build:native && vitest run --config conformance/vitest.relay-quic.config.js"
   },
   "dependencies": {

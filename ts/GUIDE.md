@@ -13,8 +13,9 @@ are provisional and publication is disabled.
 ## First round trip
 
 The packages are **unpublished**, so the first round trip runs the repository's example from a
-checkout; there is no registry install step. The example launcher opens the demo page in a browser
-for you and prints its output in the terminal. You need Git and
+checkout; there is no registry install step. The example launcher runs the demo in Node, over
+[`@mux/relay-quic`](packages/relay-quic/README.md)'s native QUIC transport, and prints its output in
+the terminal. You need Git and
 [mise](https://mise.jdx.dev/getting-started.html) available on your PATH. Commands below run in Bash
 from the repository root.
 
@@ -53,10 +54,11 @@ git clone https://github.com/muxinc/relay-sdks.git
 cd relay-sdks
 mise install
 mise run ts:install
-mise exec -- pnpm --dir ts exec playwright install chromium   # the browser the example launcher drives
 ```
 
-If the launcher's browser does not start, see [the example's setup notes](examples/mux-global/README.md#run-it).
+The example task also builds `@mux/relay-quic`'s native addon, which needs Rust until prebuilt binaries
+ship ([#195](https://github.com/muxinc/relay-sdks/issues/195)). The mise task brings the pinned
+toolchain; see [the example's setup notes](examples/mux-global/README.md#run-it).
 
 A publisher's `write()` waits for relay demand: a matching subscriber must be running. Even when
 publishing connects first, a fresh namespace can briefly reject subscriptions with request error 16
@@ -78,8 +80,7 @@ mise run ts:example:mux-global -- --url "$RELAY_URL" --namespace "$RELAY_NAMESPA
 # Enter the Relay token at the hidden prompt.
 ```
 
-The task builds both local packages, serves their ESM output with an import map on localhost,
-and opens the demo in a headless browser. The complete SDK example, including imports and cleanup, is
+The task builds the local packages and the native addon, then runs the demo in Node. The complete SDK example, including imports and cleanup, is
 [demo.js](examples/mux-global/demo.js); [run.mjs](examples/mux-global/run.mjs) supplies the explicit
 configuration and token. Edit the demo to adapt the payload for your application.
 
@@ -97,14 +98,13 @@ finished             published=1 received=1
 
 `finished published=1 received=1` is success. The 30-second run deadline bounds connection setup,
 waiting for demand, retries, and reception. Errors print a redacted `failed` line and exit nonzero;
-`finally` closes the connections, browser, and local server on success or failure. A write completing
+`finally` closes the connections on success or failure. A write completing
 only means the transport accepted it; the `received` line establishes this demo's round trip.
 
 ### Use the local packages in your application
 
 The supported first-use path is the workspace above. To use the build in an existing browser app,
-serve `ts/dist/` and `ts/packages/moq-core/dist/` as JavaScript modules and map **both** bare imports
-as the runner does:
+serve `ts/dist/` and `ts/packages/moq-core/dist/` as JavaScript modules and map **both** bare imports:
 
 ```html
 <script type="importmap">

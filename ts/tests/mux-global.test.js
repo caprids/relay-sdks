@@ -56,6 +56,15 @@ it('runs the documented one-object round trip and closes both connections', asyn
   for (const connection of connections) expect((await connection.closed).error).toBeUndefined();
 });
 
+it('connects both sides through the transport factory the launcher passes', async () => {
+  // run.mjs passes @mux/relay-quic's factory in Node; the hub stands in for the relay underneath it.
+  const createTransport = vi.fn();
+  await expect(runDemo({ ...config, createTransport }, vi.fn())).resolves.toEqual({ published: 1, received: 1 });
+  expect(connectors.connectRelayPublisher).toHaveBeenCalledWith(expect.objectContaining({ createTransport }));
+  expect(connectors.connectRelaySubscriber).toHaveBeenCalledWith(expect.objectContaining({ createTransport }));
+  await expectClosed();
+});
+
 /** Replace each registered track's write() with `write(original, bytes, options)`. */
 function wrapWrites(write) {
   connectors.connectRelayPublisher.mockImplementation(async (options) => {

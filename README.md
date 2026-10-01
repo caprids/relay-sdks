@@ -25,7 +25,7 @@ mise install              # node, pnpm, python, uv
 mise run check            # every SDK
 mise run ts:check
 mise run python:check
-mise run ts:test:relay    # opt-in live smoke test; needs RELAY_TOKEN or a hidden prompt
+mise run ts:test:relay    # opt-in live smoke test in Node and Chromium; needs RELAY_TOKEN or a hidden prompt
 mise run python:test:relay
 ```
 
@@ -50,8 +50,10 @@ nothing.
 
 ### TypeScript live Relay smoke test
 
-This opt-in Chromium test publishes and subscribes against a real relay. It is excluded from
-`pnpm check` and needs a token authorized for both operations. The token can be supplied through
+This opt-in test publishes and subscribes against a real relay, running the same scenario twice:
+first in Node over [`@mux/relay-quic`](ts/packages/relay-quic/README.md)'s native QUIC, then in
+headless Chromium over WebTransport. It is excluded from `pnpm check` and needs a token authorized
+for both operations. The token can be supplied through
 hidden stdin input or the `RELAY_TOKEN` environment variable; it is never written to a file.
 
 Set `RELAY_URL` and `RELAY_NAMESPACE` using the [quickstart prompts](ts/GUIDE.md#install-and-run) first. Your token must
@@ -62,6 +64,16 @@ random UUID. Running this command explicitly opts into contacting that endpoint.
 mise exec -- pnpm --dir ts exec playwright install chromium   # once
 RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:test:relay
 ```
+
+`RELAY_RUNTIME=node` or `RELAY_RUNTIME=chromium` runs only that runtime. The task builds
+`@mux/relay-quic`'s native addon first, with the Rust toolchain it brings, until prebuilt binaries
+ship ([#195](https://github.com/muxinc/relay-sdks/issues/195)).
+
+Each runtime gets its own fresh namespace and prints its own `PASS` or `FAIL` line, tagged with
+`runtime`. A final `summary` line follows. `DIVERGED` means the scenario passed on one runtime and
+failed on the other, which is a bug in an adapter or in the
+[transport adapter contract](spec/transport-adapter.md), unless a rerun shows a relay flake.
+Any result but `PASS` exits nonzero.
 
 The test waits for the publisher's `announced`, subscribes through the examples' announce-race
 retry and reports how often it retried, checks binary and empty payloads plus independent track

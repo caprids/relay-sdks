@@ -6,9 +6,11 @@ round trip. These packages are unpublished. The default endpoint is `https://sjc
 use `--url` or `RELAY_URL` for another deployment. Both operations require an authorized Relay JWT.
 
 [demo.js](demo.js) is the complete SDK example with imports, matching namespace and track,
-byte encoding/decoding, error handling, and cleanup. [run.mjs](run.mjs) serves the built SDK and demo
-on localhost with an import map, drives headless Chromium through Playwright, and prints its logs.
-Node runs the launcher; the SDK's default transport requires browser WebTransport.
+byte encoding/decoding, error handling, and cleanup. [run.mjs](run.mjs) runs it in Node and prints
+its logs. Node has no WebTransport, so run.mjs passes the demo
+[`@mux/relay-quic`](../../packages/relay-quic/README.md)'s `createTransport`, which carries MOQT over
+native QUIC. demo.js itself is runtime-neutral: in a browser with WebTransport it runs as is, on the
+SDK's default transport.
 
 The token comes from `RELAY_TOKEN` or a hidden prompt. The CLI never writes it to a file and redacts
 it from output. Read the [credential and token exposure guidance](../../GUIDE.md#endpoint-and-credentials)
@@ -49,16 +51,16 @@ arrive afterward. The demo observes connection closure, does not treat publisher
 all data received, and does not automatically resubscribe on completion. Additional readiness and
 termination APIs are tracked in [#68](https://github.com/muxinc/relay-sdks/issues/68).
 
-This example does not reconnect after the connection ends, for example after a network outage
-longer than about 5 s in Chromium. See [publisher recovery](../../../spec/publisher-recovery.md)
+This example does not reconnect after the connection ends, for example after a long network
+outage. See [publisher recovery](../../../spec/publisher-recovery.md)
 for what a replacement publisher can and cannot restore.
 
 ## Run it
 
-After the quickstart's setup, run from the repository root. The launcher drives Playwright's
-Chromium, installed once with `mise exec -- pnpm --dir ts exec playwright install chromium`. On
-Linux, if Chromium reports missing system libraries, provision Playwright's system dependencies for
-your machine (`playwright install-deps chromium`) first.
+After the quickstart's setup, run from the repository root. The task builds the SDK and
+`@mux/relay-quic`'s native addon. Until prebuilt binaries ship
+([#195](https://github.com/muxinc/relay-sdks/issues/195)), that build needs Rust; the mise task
+brings the toolchain `mise.toml` pins. Later runs reuse the build.
 
 These prompts request actual deployment values, not example credentials:
 
