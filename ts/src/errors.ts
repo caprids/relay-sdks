@@ -4,6 +4,12 @@ import { isStreamError } from '@mux/moq-core';
 export type RelayErrorCode =
   | 'CONNECTION_TIMEOUT'
   | 'WRITE_TIMEOUT'
+  /**
+   * An object outlived its delivery timeout (draft-ietf-moq-transport-20 §8) before it reached the transport: the
+   * smaller non-zero of the publisher's OBJECT_DELIVERY_TIMEOUT (`0x02`) and the relay subscription's. The data is
+   * stale; do not retry it as it is.
+   */
+  | 'DELIVERY_TIMEOUT'
   | 'CLOSED'
   | 'WRITE_PENDING'
   | 'NAMESPACE_NOT_SOLICITED'

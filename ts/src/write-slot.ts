@@ -10,16 +10,31 @@
  *
  * An operation completes once the transport has taken its group's FIN, not once the relay has
  * acknowledged it: the slot hands the FIN over, frees itself, and passes the group on to the
- * connection as a settling group (see CONTEXT.md). Nothing resets a settling group, and nothing
- * reports how it ends.
+ * connection as a settling group (see CONTEXT.md). Only the group's own delivery timeout resets a
+ * settling group, and nothing reports how it ends.
+ *
+ * The slot enforces the group's delivery timeouts (draft-ietf-moq-transport-20 §8, see
+ * delivery-timeouts.ts), fixed per group: the subscriber's side just before the group's stream opens
+ * (until then only the publisher's applies), the publisher's side from the first object or the track. The object timeout
+ * runs from the application's call until the transport takes the object, so waiting for demand, for
+ * settling room and for the stream all count, and it fails the operation with `DELIVERY_TIMEOUT`. The
+ * subgroup timeout runs from the FIN's hand-over and resets the settling group with code
+ * DELIVERY_TIMEOUT if the relay has not acknowledged it by then; it outlives the subscription and the
+ * track, and only the connection's end stops it.
  *
  * Everything the slot borrows enters through {@link WriteSlotDependencies}: how to open a subgroup
  * stream, the connection's settling-group limit, whether the namespace is solicited, whether the
- * connection is still open, and how to end the track in the core. Tests drive a slot with an
- * in-memory subgroup writer and fake timers; the "Write phases and interruptions" table in
- * spec/behavior.md is the list they cover.
+ * connection is still open, how to end the track in the core, and both sides' delivery timeouts.
+ * Tests drive a slot with an in-memory subgroup writer and fake timers; the "Write phases and
+ * interruptions" table in spec/behavior.md is the list they cover.
  */
 import { type SubgroupWriter, streamResetReason } from '@mux/moq-core';
+import {
+  type DeliveryTimeouts,
+  effectiveTimeouts,
+  NO_DELIVERY_TIMEOUTS,
+  publisherTimeouts,
+} from './delivery-timeouts.js';
 import { isStreamStop, RelayError, type RelayErrorPhase, transportError } from './errors.js';
 import { encodeJSON, encodeText } from './payload.js';
 import type { RelayGroupWriter, RelayTrackWriter } from './publish.js';
@@ -54,6 +69,10 @@ export interface WriteSlotDependencies {
   endTrack(): void;
   /** Deadline for waiting for demand and for each stream step. */
   writeTimeoutMs: number;
+  /** The publisher's delivery timeouts from the track properties, unless a group's first object overrides them. */
+  trackTimeouts: DeliveryTimeouts;
+  /** The delivery timeouts of the relay subscription with this alias, as REQUEST_UPDATE has left them. */
+  subscriberTimeouts(trackAlias: number): DeliveryTimeouts;
 }
 
 export interface WriteSlot {
@@ -84,6 +103,15 @@ interface Operation {
   failure: unknown;
   code: ResetCode;
   phase: RelayErrorPhase;
+  /** The publisher's delivery timeouts for this group: the track's until the first object says otherwise. */
+  publisher: DeliveryTimeouts;
+  /** The relay subscription's delivery timeouts, fixed just before the group's stream opens. */
+  subscriber: DeliveryTimeouts;
+  /** The group's effective delivery timeouts (§8). Before its stream opens only the publisher's apply. */
+  timeouts: DeliveryTimeouts;
+  /** When the application handed over the object now under the object timeout, if one is. */
+  objectStartedAt: number | undefined;
+  objectTimer: ReturnType<typeof setTimeout> | undefined;
   demand: Promise<void>;
   interrupted: Promise<never>;
   wake(): void;
@@ -91,13 +119,28 @@ interface Operation {
   cleanup(): void;
 }
 
+/** A monotonic clock for object ages. */
+const now = () => performance.now();
+
 export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
-  const { openSubgroup, settlingGroups, namespaceSolicited, assertOpen, endTrack, writeTimeoutMs } = deps;
+  const {
+    openSubgroup,
+    settlingGroups,
+    namespaceSolicited,
+    assertOpen,
+    endTrack,
+    writeTimeoutMs,
+    trackTimeouts,
+    subscriberTimeouts,
+  } = deps;
   let alias: number | undefined;
   let ended = false;
   let nextGroupId = 0;
   let active: Operation | undefined;
   const watchers = new Set<(value: boolean | undefined) => void>();
+  // Subgroup timers of this track's settling groups. They outlive the subscription and the track;
+  // only the connection's end clears them.
+  const subgroupTimers = new Set<ReturnType<typeof setTimeout>>();
 
   const notify = (value: boolean | undefined) => {
     for (const watcher of watchers) watcher(value);
@@ -149,6 +192,11 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     const operation: Operation = {
       kind,
       phase: 'waiting-for-demand',
+      publisher: trackTimeouts,
+      subscriber: NO_DELIVERY_TIMEOUTS,
+      timeouts: effectiveTimeouts(trackTimeouts, NO_DELIVERY_TIMEOUTS),
+      objectStartedAt: undefined,
+      objectTimer: undefined,
       alias: undefined,
       writer: undefined,
       cancelled: false,
@@ -159,6 +207,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       wake,
       cleanup() {
         signal?.removeEventListener('abort', abort);
+        untimeObject(operation);
       },
       cancel(error, code) {
         if (operation.cancelled) return;
@@ -180,6 +229,51 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
   const check = (operation: Operation) => {
     if (operation.cancelled) throw operation.failure;
     assertOpen();
+  };
+  // The object timeout expired before the transport took the object (§8): fail the operation in its
+  // current phase and reset its stream, if one is open, with DELIVERY_TIMEOUT. A group is not reopened.
+  const expireObject = (operation: Operation) => {
+    operation.cancel(
+      new RelayError(
+        'DELIVERY_TIMEOUT',
+        'Object exceeded its delivery timeout before reaching the transport',
+        operation.phase,
+      ),
+      RESET_CODE.DELIVERY_TIMEOUT,
+    );
+  };
+  // (Re)arm the object timer for the object now in flight, against the operation's current timeouts.
+  const timeObject = (operation: Operation) => {
+    clearTimeout(operation.objectTimer);
+    operation.objectTimer = undefined;
+    const { objectMs } = operation.timeouts;
+    if (operation.objectStartedAt === undefined || objectMs === 0 || operation.cancelled) return;
+    const remaining = operation.objectStartedAt + objectMs - now();
+    if (remaining < 0) expireObject(operation);
+    else operation.objectTimer = setTimeout(() => expireObject(operation), remaining);
+  };
+  const startObject = (operation: Operation, startedAt: number) => {
+    operation.objectStartedAt = startedAt;
+    timeObject(operation);
+  };
+  const untimeObject = (operation: Operation) => {
+    clearTimeout(operation.objectTimer);
+    operation.objectTimer = undefined;
+    operation.objectStartedAt = undefined;
+  };
+  // The check §8 requires just before an object goes to the transport, in case its timer is late:
+  // before the stream write starts, and again once the stream's header write has settled.
+  const checkObjectAge = (operation: Operation) => {
+    const { objectMs } = operation.timeouts;
+    if (operation.objectStartedAt !== undefined && objectMs > 0 && now() - operation.objectStartedAt > objectMs)
+      expireObject(operation);
+    check(operation);
+  };
+  // Fix the group's effective timeouts from the publisher's values and the subscription's.
+  const fixTimeouts = (operation: Operation, publisher: DeliveryTimeouts) => {
+    operation.publisher = publisher;
+    operation.timeouts = effectiveTimeouts(publisher, operation.subscriber);
+    timeObject(operation);
   };
   const run = async <T>(operation: Operation, send: () => Promise<T>): Promise<T> => {
     const timer = setTimeout(() => {
@@ -250,6 +344,12 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await settlingGroups.waitForRoom(operation.interrupted);
       check(operation);
     }
+    // The subscription's delivery timeouts are fixed just before the stream opens: a later
+    // REQUEST_UPDATE applies to later groups. Until now only the publisher's applied; an object
+    // already older than the effective timeout fails here, before any stream exists.
+    operation.subscriber = subscriberTimeouts(operation.alias);
+    fixTimeouts(operation, operation.publisher);
+    check(operation);
     const subgroup = await openSubgroup(operation.alias, groupId);
     if (operation.cancelled) {
       // The stream opened after the failure: reset it without sending payload bytes (§11.4.3).
@@ -264,9 +364,34 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     operation.cleanup();
   };
   // The operation is complete: its FIN was handed over, so the group settles on the connection's
-  // account and the slot is free.
+  // account and the slot is free. Its subgroup timeout starts now (§8): if the relay has not
+  // acknowledged the FIN when it expires, the stream is reset with DELIVERY_TIMEOUT, the failed FIN
+  // takes the group out of the settling set, and nobody hears of it.
   const completeOperation = (operation: Operation, subgroup: SubgroupWriter) => {
-    settlingGroups.add(subgroup.fin());
+    const settled = subgroup.fin();
+    settlingGroups.add(settled);
+    const { subgroupMs } = operation.timeouts;
+    if (subgroupMs > 0) {
+      const timer = setTimeout(() => {
+        subgroupTimers.delete(timer);
+        subgroup.abort(
+          resetReason(
+            RESET_CODE.DELIVERY_TIMEOUT,
+            new RelayError(
+              'DELIVERY_TIMEOUT',
+              'Group exceeded its subgroup delivery timeout before the relay acknowledged it',
+              'closing',
+            ),
+          ),
+        );
+      }, subgroupMs);
+      subgroupTimers.add(timer);
+      const stop = () => {
+        clearTimeout(timer);
+        subgroupTimers.delete(timer);
+      };
+      void settled.then(stop, stop);
+    }
     release(operation);
   };
 
@@ -322,16 +447,27 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await writer.write(encodeJSON(value), writeOptions);
     },
     async write(payload, writeOptions = {}) {
+      // The object's age counts from here (§8).
+      const startedAt = now();
       // Arguments before slot state: a bad payload is a programming error whatever the slot holds.
       const bytes = payloadBytes(payload);
       const properties = propertyPairs(writeOptions.properties);
       assertWritable();
       const operation = begin('write', writeOptions.signal);
+      // The object is the group's first, so its properties can set the publisher's timeouts.
+      operation.publisher = publisherTimeouts(properties, trackTimeouts);
+      operation.timeouts = effectiveTimeouts(operation.publisher, NO_DELIVERY_TIMEOUTS);
+      startObject(operation, startedAt);
       try {
         const subgroup = await run(operation, async () => {
           const opened = await openStream(operation);
           operation.phase = 'writing';
-          await opened.writeObject({ objectId: 0, properties, payload: bytes });
+          checkObjectAge(operation);
+          await opened.writeObject(
+            { objectId: 0, properties, payload: bytes },
+            { beforeWrite: () => checkObjectAge(operation) },
+          );
+          untimeObject(operation);
           check(operation);
           operation.phase = 'closing';
           await opened.handOverFin();
@@ -370,6 +506,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
           await groupWriter.write(encodeJSON(value), writeOptions);
         },
         async write(payload, writeOptions = {}) {
+          const startedAt = now();
           const bytes = payloadBytes(payload);
           const properties = propertyPairs(writeOptions.properties);
           const status = writeOptions.status ?? 'normal';
@@ -380,11 +517,20 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
           pending = true;
           try {
             operation.phase = 'writing';
-            await run(operation, () =>
-              subgroup.writeObject({ objectId: objectCount, properties, payload: bytes, status }),
-            );
+            // The first object's properties can override the track's timeouts for this group; a later
+            // object's are ignored (§8).
+            if (objectCount === 0) fixTimeouts(operation, publisherTimeouts(properties, trackTimeouts));
+            startObject(operation, startedAt);
+            await run(operation, () => {
+              checkObjectAge(operation);
+              return subgroup.writeObject(
+                { objectId: objectCount, properties, payload: bytes, status },
+                { beforeWrite: () => checkObjectAge(operation) },
+              );
+            });
             objectCount++;
           } finally {
+            untimeObject(operation);
             pending = false;
           }
         },
@@ -430,6 +576,9 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     },
     disconnect(error) {
       close(error, connectionResetCode(error));
+      // The connection's end resets every stream anyway: the subgroup timers have nothing left to do.
+      for (const timer of subgroupTimers) clearTimeout(timer);
+      subgroupTimers.clear();
     },
   };
 }

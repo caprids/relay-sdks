@@ -103,7 +103,9 @@ export interface MoqtPublishSessionCallbacks {
   onTrackBinding?(info: { trackName: string; trackAlias: number | undefined }): void;
   /**
    * REQUEST_UPDATE on an inbound request stream. `requestId` is the request being updated (the stream's SUBSCRIBE or
-   * SUBSCRIBE_NAMESPACE); `updateRequestId` is the update's own, freshly consumed Request ID (§10.1).
+   * SUBSCRIBE_NAMESPACE); `updateRequestId` is the update's own, freshly consumed Request ID (§10.1). A subscription
+   * update may carry Forward State, a subscriber priority and the two delivery timeouts (§8), which the session leaves
+   * to its caller; one carrying anything else is answered with REQUEST_ERROR and ends the subscription.
    */
   onRequestUpdate?(info: { requestId: number; updateRequestId: number; parameters: MessageParameters }): void;
   /** The session ended — transport closed, or a fatal protocol error. */
@@ -1197,7 +1199,15 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
         if (message.kind === 'request-update') {
           this.#claimPeerRequestId(message.requestId);
-          const { forward, subscriberPriority: _priority, ...unsupported } = message.parameters;
+          // The delivery timeouts (§8) are applied by the caller, through `onRequestUpdate`, to the groups it opens
+          // afterwards.
+          const {
+            forward,
+            subscriberPriority: _priority,
+            objectDeliveryTimeout: _objectTimeout,
+            subgroupDeliveryTimeout: _subgroupTimeout,
+            ...unsupported
+          } = message.parameters;
 
           // Forward State toggles ride REQUEST_UPDATE; the binding must
           // follow so data stops (or starts) with the subscription's
@@ -1224,9 +1234,10 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
             if (Object.keys(unsupported).length > 0) {
               // Acknowledging an update we did not apply would leave the
               // peer serving stale expectations (a filter or range it
-              // believes is in effect). Forward State is applied above
-              // and priority is advisory (the known relays discard ours
-              // too); anything else ends this request honestly: the
+              // believes is in effect). Forward State is applied above,
+              // priority is advisory (the known relays discard ours
+              // too), and the caller applies the delivery timeouts;
+              // anything else ends this request honestly: the
               // update's REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED
               // (§10.9.1).
               this.#endSubscription(

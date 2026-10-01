@@ -67,12 +67,23 @@ export interface SubgroupObjectInput {
   status?: ObjectStatus;
 }
 
+/** Options for {@link SubgroupWriter.writeObject}. */
+export interface SubgroupWriteOptions {
+  /**
+   * Called just before the object's bytes are handed to the stream, after the header write settled. Throwing refuses
+   * the object: nothing of it is written and the write rejects with the thrown value. The stream then has a gap, so
+   * every later write and FIN rejects too, and only `abort()` is left. This is where a publisher checks an object's
+   * delivery timeout (draft-ietf-moq-transport-20 §8).
+   */
+  beforeWrite?(): void;
+}
+
 /** Writes one subgroup of one group to a unidirectional stream. Returned by {@link createSubgroupWriter}. */
 export interface SubgroupWriter {
   /** Group ID from the stream's SUBGROUP_HEADER. */
   readonly groupId: number;
   /** Serialize one object. Resolves when the transport accepted the bytes. */
-  writeObject(object: SubgroupObjectInput): Promise<void>;
+  writeObject(object: SubgroupObjectInput, options?: SubgroupWriteOptions): Promise<void>;
   /**
    * FIN the stream — the group is complete. Resolves once the transport completes the FIN (in Chromium, once the peer
    * acknowledged it); rejects if the stream is reset or fails first.
@@ -167,6 +178,11 @@ export function createSubgroupWriter(
   const writer = stream.getWriter();
   let previousObjectId: number | undefined;
   let finished = false;
+  // An object refused by `beforeWrite`: later objects would encode against an ID that never went out.
+  let refused: unknown;
+  const assertWritable = () => {
+    if (refused !== undefined) throw new MoqtProtocolError('subgroup stream refused an object; reset it');
+  };
   let closing: { handedOver: Promise<void>; settled: Promise<void> } | undefined;
 
   // Header errors surface on the first awaited write/fin — an errored
@@ -179,6 +195,8 @@ export function createSubgroupWriter(
     let closed!: Promise<void>;
     const handedOver = (async () => {
       await headerWrite;
+      // An object queued before this FIN may have been refused meanwhile: its gap must not be FINed.
+      assertWritable();
       // A stream that already failed never hands the FIN over: close() would reject without reaching
       // the sink. The Streams spec makes `desiredSize` null exactly while the stream is erroring or
       // errored, and `closed` then rejects with the stream's stored error.
@@ -190,7 +208,8 @@ export function createSubgroupWriter(
         await handedOver;
         await closed;
       } finally {
-        finished = true;
+        // After a refusal the stream is still open, and only abort() may end it.
+        if (refused === undefined) finished = true;
       }
     })();
 
@@ -202,18 +221,28 @@ export function createSubgroupWriter(
   return {
     groupId: options.groupId,
 
-    async writeObject(object: SubgroupObjectInput): Promise<void> {
+    async writeObject(object: SubgroupObjectInput, writeOptions: SubgroupWriteOptions = {}): Promise<void> {
       if (finished || closing) throw new MoqtProtocolError('subgroup stream already finished');
+      assertWritable();
 
       const bytes = encodeObject(object, previousObjectId, hasProperties);
 
       previousObjectId = object.objectId;
       await headerWrite;
+      assertWritable();
+      try {
+        writeOptions.beforeWrite?.();
+      } catch (error) {
+        refused = error ?? true;
+        throw error;
+      }
       await writer.write(bytes);
     },
 
     fin(): Promise<void> {
       if (!closing && finished) return Promise.resolve();
+      if (!closing && refused !== undefined)
+        return Promise.reject(new MoqtProtocolError('subgroup stream refused an object; reset it'));
 
       closing ??= close();
       return closing.settled;
@@ -221,6 +250,8 @@ export function createSubgroupWriter(
 
     handOverFin(): Promise<void> {
       if (!closing && finished) return Promise.resolve();
+      if (!closing && refused !== undefined)
+        return Promise.reject(new MoqtProtocolError('subgroup stream refused an object; reset it'));
 
       closing ??= close();
       return closing.handedOver;
