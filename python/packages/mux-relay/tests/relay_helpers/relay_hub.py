@@ -52,6 +52,7 @@ from moq_core.control_messages import (
     Publish,
     RelativeGroupFilter,
     RequestError,
+    RequestOk,
     Subscribe,
     SubscribeNamespace,
     SubscribeOk,
@@ -59,6 +60,7 @@ from moq_core.control_messages import (
     decode_control_message,
     encode_publish_done,
     encode_request_error,
+    encode_request_update,
     encode_setup,
     encode_subscribe,
     encode_subscribe_namespace,
@@ -194,6 +196,13 @@ class RelayHub:
         """Tracks with standing upstream demand (downstream viewers or test priming)."""
         self._pull_upstream: Callable[[str], None] | None = None
         """The live publisher connection's per-track pull, when one is connected."""
+        self.upstream_object_delivery_timeout: int | None = None
+        """OBJECT_DELIVERY_TIMEOUT to put on upstream SUBSCRIBEs; moq-relay 0.15.8 sends none (#167)."""
+        self.upstream_subgroup_delivery_timeout: int | None = None
+        """SUBGROUP_DELIVERY_TIMEOUT to put on upstream SUBSCRIBEs; moq-relay 0.15.8 sends none (#167)."""
+        self.updates_acknowledged: list[str] = []
+        """Tracks whose upstream REQUEST_UPDATE the publisher answered with REQUEST_OK, in order."""
+        self._update_upstream: Callable[[str, MessageParameters], Coroutine[Any, Any, None]] | None = None
 
     # ------------------------------------------------------------------ bookkeeping
 
@@ -240,6 +249,11 @@ class RelayHub:
         if self._pull_upstream is not None:
             self._pull_upstream(track_name)
 
+    async def update_upstream(self, track_name: str, parameters: MessageParameters) -> None:
+        """Send REQUEST_UPDATE on the live upstream subscription for a track (moq-relay never does)."""
+        assert self._update_upstream is not None, "no publisher connected"
+        await self._update_upstream(track_name, parameters)
+
     def publisher_connections(self) -> int:
         return self._publisher_connections
 
@@ -280,7 +294,15 @@ class RelayHub:
         announced: list[TrackNamespace] = []
         announce_waiters: list[asyncio.Future[TrackNamespace]] = []
         upstream_tracks: set[str] = set()
+        upstream_writers: dict[str, Any] = {}
         connection_closed = [False]
+
+        async def update_upstream(track_name: str, parameters: MessageParameters) -> None:
+            request_id = next_request_id[0]
+            next_request_id[0] += 2
+            await upstream_writers[track_name].write(encode_request_update(request_id, parameters))
+
+        self._update_upstream = update_upstream
 
         async def announced_namespace() -> TrackNamespace:
             if announced:
@@ -349,11 +371,14 @@ class RelayHub:
                                         location_filter=RelativeGroupFilter(groups_before_next=1)
                                     ),
                                     group_order="descending",
+                                    object_delivery_timeout=self.upstream_object_delivery_timeout,
+                                    subgroup_delivery_timeout=self.upstream_subgroup_delivery_timeout,
                                 ),
                             )
                         )
                     )
                     self.subscribes.append(track_name)
+                    upstream_writers[track_name] = stream.writable
 
                     while not await reader.at_end():
                         message_type = await reader.read_varint()
@@ -362,6 +387,8 @@ class RelayHub:
                         if isinstance(message, SubscribeOk):
                             accepted = True
                             alias_to_track[message.track_alias] = track
+                        elif isinstance(message, RequestOk):
+                            self.updates_acknowledged.append(track_name)
                         elif isinstance(message, RequestError):
                             # DOES_NOT_EXIST usually means the demand raced the publisher's
                             # register_track: retry while the demand stands.
@@ -383,6 +410,7 @@ class RelayHub:
                     pass  # Reset or transport teardown: not a clean track end.
                 finally:
                     upstream_tracks.discard(track_name)
+                    upstream_writers.pop(track_name, None)
 
                     try:
                         await stream.writable.close()

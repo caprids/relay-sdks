@@ -132,7 +132,7 @@ class RelayPublisher:
         track = self._tracks.get(binding.track_name)
 
         if track is not None:
-            track._bind(binding.track_alias)
+            track._bind(binding.track_alias, binding.object_delivery_timeout, binding.subgroup_delivery_timeout)
 
     @property
     def namespace(self) -> list[str]:
@@ -177,6 +177,9 @@ class RelayPublisher:
         connection, including after their writer closes.
         ``track_properties`` is encoded as supplied; the SDK adds no default timescale.
         The relay may add, drop, or rewrite properties before delivery to subscribers; see README.
+        Properties 0x02 (OBJECT_DELIVERY_TIMEOUT) and 0x06 (SUBGROUP_DELIVERY_TIMEOUT), in
+        milliseconds, are also the publisher's delivery timeouts (draft-ietf-moq-transport-20
+        section 8), which the writer enforces; 0 means none, and values above 2147483647 are clamped.
         ``write_timeout`` (seconds) bounds relay demand and the transport write together.
         """
         # Arguments first, then connection state, then the registry.
@@ -211,6 +214,7 @@ class RelayPublisher:
                 assert_open=self._lifetime.assert_open,
                 end_track=registered.end,
                 write_timeout=write_timeout,
+                track_properties=properties,
             ),
         )
         self._tracks[name] = writer
