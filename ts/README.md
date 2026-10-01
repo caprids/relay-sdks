@@ -7,8 +7,9 @@ Payloads are bytes the SDK does not interpret; no player, media catalog, or Vide
 ## Requirements
 
 - Browser WebTransport in a secure context (HTTPS or localhost). This is the default transport.
-- A plain Node script cannot connect with the default transport. Node 24+ runs the build tools and
-  the example launcher. Other runtimes must pass a compatible `createTransport` factory.
+- Node 24+: import from `@mux/relay/node`, which connects over native QUIC through
+  `@mux/relay-quic` ([Node](#node)). Other runtimes must pass a compatible `createTransport`
+  factory.
 - A Relay endpoint and a short-lived Relay JWT authorized for the namespace you use. The SDK
   consumes tokens; it does not issue them.
 
@@ -48,6 +49,85 @@ await publisher.close();
 
 The [guide's first round trip](GUIDE.md#first-round-trip) runs the complete version of this in a
 browser, with credential handling, the subscribe retry, a deadline, and cleanup on failure.
+
+## Node
+
+`@mux/relay/node` exports everything `@mux/relay` does. Its `connectRelayPublisher` and
+`connectRelaySubscriber` connect over native QUIC (MOQT on QUIC, ALPN `moqt-20`) through
+[`@mux/relay-quic`](packages/relay-quic/README.md), Mux's transport adapter for Node. Pass the same
+`https://` endpoint you pass in a browser.
+
+### Install
+
+Add `@mux/relay-quic` next to `@mux/relay`. It is an optional peer dependency, needed only by
+`@mux/relay/node`, and it needs a native binary for your platform:
+[its README](packages/relay-quic/README.md) says how to get one. Without the package or the
+binary, a connect call fails with `RelayError` code `TRANSPORT_UNAVAILABLE`.
+
+### Publish and subscribe
+
+The code is the browser example's, with a different import:
+
+```ts
+import { connectRelayPublisher, connectRelaySubscriber, readText } from '@mux/relay/node';
+
+const url = 'https://sjc.relay.mux.global';
+const namespace = ['team', 'quickstart', 'unique-run'];
+const getToken = () => process.env.RELAY_TOKEN;
+
+const publisher = await connectRelayPublisher({ url, namespace, getToken });
+const ticker = publisher.registerTrack({ track: 'ticker' });
+await publisher.announced;
+
+const subscriber = await connectRelaySubscriber({ url, getToken });
+const subscription = subscriber.subscribe(
+  { namespace, track: 'ticker' },
+  { onObject: (object) => { if (object.status === 'normal') console.log(readText(object)); } },
+);
+await subscription.subscribed;
+
+await ticker.writeText('hello from Node');
+```
+
+### Trust
+
+By default a connection trusts the platform's root certificates. Two options change that, on
+either connect function:
+
+- `ca`: extra trust anchors, PEM, as a string, bytes, or an array of either, added to the
+  platform's roots. Use it for a relay behind a private certificate authority.
+- `serverCertificateHashes`: `[{ algorithm: 'sha-256', value }]`, in the W3C WebTransport shape.
+  The server's certificate must match one hash, and its chain is not validated.
+
+```ts
+import { readFile } from 'node:fs/promises';
+
+const subscriber = await connectRelaySubscriber({ url, getToken, ca: await readFile('relay-ca.pem') });
+```
+
+Connections without trust options share one adapter. Passing `createTransport` replaces the adapter
+entirely; passing it together with `ca` or `serverCertificateHashes` is a `TypeError`. To combine
+them, build the factory yourself with `nativeQuicTransport({ ca })` from `@mux/relay-quic`.
+
+### Process lifetime
+
+An open connection keeps the Node process alive, from the start of the dial until the connection
+has closed. After that the adapter holds nothing, so a script exits by itself once it has closed
+its publisher and subscriber ([TA-25, TA-26](../spec/transport-adapter.md)). A script that stops
+early without closing them keeps running.
+
+### Native WebTransport
+
+`@mux/relay/node` uses `@mux/relay-quic` even where a global `WebTransport` exists. If Node gains
+a `WebTransport` that can negotiate protocols, the first connect emits a `DeprecationWarning`
+(code `MUX_RELAY_NODE_NATIVE_WEBTRANSPORT`) through `process.emitWarning`, once per process: at
+that point `@mux/relay` connects on its own, and this entry point will be retired.
+
+### Deno
+
+Best effort, and untested: Deno can load the entry as `npm:@mux/relay/node` and the addon through
+its npm compatibility layer. Deno's own `WebTransport` cannot negotiate protocols, so plain
+`@mux/relay` fails there with `TRANSPORT_UNAVAILABLE`.
 
 ## Documentation
 

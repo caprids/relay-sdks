@@ -103,7 +103,7 @@ const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
   if (typeof WebTransport === 'undefined') {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
-      'WebTransport is unavailable; supply createTransport with a transport adapter for this runtime',
+      'WebTransport is unavailable; in Node, import from @mux/relay/node (needs @mux/relay-quic), or supply createTransport with a transport adapter for this runtime',
       'connecting',
     );
   }
@@ -150,11 +150,21 @@ function endpointSetupOptions(framing: unknown, url: URL): KeyValuePair[] {
 }
 
 /**
+ * Internal to the SDK's entry points, never part of the public options: resolves the transport factory in place of
+ * `createTransport`, inside the connection's deadline and signal and after the token. `@mux/relay/node` loads its
+ * adapter here. A failure is passed through as it is thrown.
+ */
+export const resolveTransport = Symbol('resolveTransport');
+
+/** The options {@link openRelaySession} reads: the public ones, plus an entry point's {@link resolveTransport}. */
+export type RelaySessionOptions = ConnectRelayOptions & { [resolveTransport]?: () => Promise<RelayTransportFactory> };
+
+/**
  * Shared transport/auth lifetime for the subscribe and publish session drivers. It validates only
  * the shared options; each role checks its own options before calling it.
  */
 export async function openRelaySession<T extends Session>(
-  options: ConnectRelayOptions,
+  options: RelaySessionOptions,
   createSession: (
     transport: MoqtTransport,
     callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>,
@@ -253,9 +263,16 @@ export async function openRelaySession<T extends Session>(
       if (token !== undefined && token.length > 0) url.searchParams.set('jwt', token);
     }
 
+    let createTransport = options.createTransport ?? createBrowserTransport;
+    const resolve = options[resolveTransport];
+    if (resolve) {
+      assertOpen();
+      createTransport = await resolve();
+    }
+
     assertOpen();
     usingTransport = true;
-    const created = (options.createTransport ?? createBrowserTransport)(url.href, [MOQT_PROTOCOL_ID]);
+    const created = createTransport(url.href, [MOQT_PROTOCOL_ID]);
 
     transport = created.transport;
     // WebTransport.closed may reject alongside ready, before a session can observe it.

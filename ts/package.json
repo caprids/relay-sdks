@@ -13,6 +13,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node.d.ts",
+      "import": "./dist/node.js"
     }
   },
   "scripts": {
@@ -33,6 +37,14 @@
   },
   "dependencies": {
     "@mux/moq-core": "workspace:*"
+  },
+  "peerDependencies": {
+    "@mux/relay-quic": "workspace:*"
+  },
+  "peerDependenciesMeta": {
+    "@mux/relay-quic": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
