@@ -19,7 +19,9 @@ subscription's parameters, as updated by REQUEST_UPDATE). The subscriber's are f
 stream opens, the publisher's when its first object is handed over. The object timeout bounds an
 object's age from the application's call until the transport has taken it, every wait included:
 it is checked just before the object is written and runs on until the stream write returns, which
-is when aioquic has transmitted the bytes. An older object fails its operation with
+is when aioquic has transmitted the bytes. Until the subscriber's values are fixed only the
+publisher's time the wait; at that point an object already older than the fixed value fails, before
+any stream opens. An older object fails its operation with
 ``DELIVERY_TIMEOUT`` and resets the group with DELIVERY_TIMEOUT (0x2). The subgroup timeout starts
 when the FIN is handed over and resets the settling group, silently, if the relay has not
 acknowledged the FIN by then.
@@ -282,10 +284,26 @@ class _Operation:
         self._object_properties = properties
         self._arm_object_timer()
 
-    def subscription_changed(self) -> None:
-        """The relay subscription's values changed: they still apply until this group's stream opens."""
-        if self.subscriber is None:
+    def fix_subscriber(self, subscriber: _Timeouts) -> None:
+        """Just before the stream opens: fix the subscriber's values and check the object against the result.
+
+        Until now only the publisher's value timed the wait. An object already older than the fixed
+        effective value fails here, in ``opening-stream``, before any stream opens; otherwise its
+        timer is re-armed for what remains.
+        """
+        self.subscriber = subscriber
+
+        if self._object_started is None:
+            return
+
+        limit = self._object_limit()
+
+        if limit and self._slot._clock() - self._object_started >= limit:
+            self._fail_delivery()
+        else:
             self._arm_object_timer()
+
+        self.check()
 
     def check_object_age(self) -> None:
         """The object is about to go to the transport: the §8 check, in case its timer is late.
@@ -318,8 +336,8 @@ class _Operation:
         return _publisher_timeouts(self._object_properties, self._slot._track_timeouts)
 
     def _object_limit(self) -> float:
-        """The object's effective timeout in seconds, 0 for none; the subscriber's value only once bound."""
-        subscriber = self.subscriber if self.subscriber is not None else self._slot._subscriber_timeouts
+        """The object's timeout in seconds, 0 for none: the publisher's alone until the subscriber's is fixed."""
+        subscriber = self.subscriber if self.subscriber is not None else _NO_TIMEOUTS
         return _effective_seconds(self._publisher_now().object, subscriber.object)
 
     def _arm_object_timer(self) -> None:
@@ -683,9 +701,6 @@ class RelayTrackWriter:
             else _NO_TIMEOUTS
         )
 
-        if self._active is not None:
-            self._active.subscription_changed()
-
         if next_alias is not None and self._active is not None:
             self._active.wake()
 
@@ -833,8 +848,9 @@ class RelayTrackWriter:
             await settling_groups.wait_for_room(operation.interrupted)
             operation.check()
 
-        # The group's subscriber values are those of the subscription its stream opens on (§8).
-        operation.subscriber = self._subscriber_timeouts
+        # The group's subscriber values are those of the subscription its stream opens on (§8). An
+        # object already older than the fixed value fails here, before any stream opens.
+        operation.fix_subscriber(self._subscriber_timeouts)
         writer = await self._deps.open_subgroup(alias, group_id)
 
         if operation.cancelled:

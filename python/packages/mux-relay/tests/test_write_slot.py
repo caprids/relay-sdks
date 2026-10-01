@@ -1119,32 +1119,66 @@ class TestObjectDeliveryTimeout:
             await h.writer.write(b"\x01", properties=[object_timeout(40)])
         assert failure.value.code == "DELIVERY_TIMEOUT"
 
-    async def test_the_subscribers_value_counts_once_bound_including_the_wait_for_settling_room(self) -> None:
+    async def test_only_the_publishers_value_times_the_wait_for_settling_room(self) -> None:
+        # The subscriber's smaller value is not fixed yet, so it does not cut the wait short.
         shared = SettlingGroups(limit=1)
         h = Harness(acknowledge=False, settling_groups=shared)
-        h.writer._bind(1, 50)
+        h.writer._bind(1, 30)
         await h.writer.write(b"\x01")  # fills the connection's only settling slot
+        writing = await started(h.writer.write(b"\x02"))
+        await settle(0.08)
+        assert not writing.done()
+        h.opened[0].acknowledge()
         with pytest.raises(RelayError) as failure:
-            await h.writer.write(b"\x02")
+            await asyncio.wait_for(writing, 1)
+        # Once room frees up, the value is fixed and the 80 ms old object fails before any stream opens.
         assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "opening-stream")
         assert len(h.opened) == 1
+        await h.writer.write(b"\x03")
+        assert h.opened[1].group_id == 2  # the failed write's group ID is not reused
 
-    async def test_a_binding_that_arrives_during_the_wait_shortens_it(self) -> None:
+    async def test_the_subscribers_smaller_value_fails_at_the_snapshot_with_no_stream_opened(self) -> None:
+        clock = SteppingClock()
+        h = Harness(track_properties=[object_timeout(1000)], clock=clock)
+        clock.step = 0.03  # the call, the timer and the snapshot: 60 ms old when the value is fixed
+        h.writer._bind(1, 50)
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "opening-stream")
+        assert h.opened == []
+
+    async def test_a_publisher_value_times_the_wait_and_rearms_for_the_rest_at_the_snapshot(self) -> None:
         shared = SettlingGroups(limit=1)
-        h = Harness(acknowledge=False, settling_groups=shared, track_properties=[object_timeout(1000)])
+        h = Harness(acknowledge=False, settling_groups=shared, stall="none")
         h.writer._bind(1)
         await h.writer.write(b"\x01")
+        h.writer._bind(1, 1000)
+        writing = await started(h.writer.write(b"\x02", properties=[object_timeout(100)]))
+        await settle(0.02)
+        h.opened[0].acknowledge()  # room frees at about 20 ms; the fixed value is the publisher's 100 ms
+        await asyncio.wait_for(writing, 1)
+        assert len(h.opened) == 2
+
+    async def test_an_update_that_raises_the_value_before_the_snapshot_does_not_fail_the_write_early(self) -> None:
+        shared = SettlingGroups(limit=1)
+        h = Harness(acknowledge=False, settling_groups=shared)
+        h.writer._bind(1, 40)
+        await h.writer.write(b"\x01")
         writing = await started(h.writer.write(b"\x02"))
-        h.writer._bind(1, 40)  # REQUEST_UPDATE while the write waits for room
-        with pytest.raises(RelayError) as failure:
-            await asyncio.wait_for(writing, 0.5)
-        assert failure.value.code == "DELIVERY_TIMEOUT"
+        h.writer._bind(1, 1000)  # REQUEST_UPDATE while the write waits for room
+        await settle(0.08)  # past the old 40 ms
+        assert not writing.done()
+        h.opened[0].acknowledge()
+        await asyncio.wait_for(writing, 1)  # fixed at 1 s: in time
+        assert len(h.opened) == 2
 
     async def test_an_object_too_old_at_the_transport_resets_its_stream_with_delivery_timeout(self) -> None:
         clock = SteppingClock()
         h = Harness(track_properties=[object_timeout(50)], clock=clock)
         h.writer._bind(1)
-        clock.step = 0.03  # every read of the clock is 30 ms later: the object reaches the open stream 60 ms old
+        # Every read of the clock is 15 ms later: 30 ms old when the value is fixed (in time), 60 ms old
+        # when it reaches the open stream.
+        clock.step = 0.015
         with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x01")
         assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "writing")
@@ -1228,10 +1262,11 @@ class TestObjectDeliveryTimeout:
         clock = SteppingClock()
         h = Harness(track_properties=[object_timeout(2**62)], clock=clock)
         h.writer._bind(1)
-        # The clock is read at the call, when the timer is armed, and at the transport: two steps of age.
-        clock.step = 1_073_741.0  # 2,147,482 s old: just under the clamp, still in time
+        # The clock is read at the call, when the timer is armed, at the snapshot, when it is re-armed and
+        # at the transport: four steps of age by then.
+        clock.step = 536_870.0  # 2,147,480 s old: just under the clamp, still in time
         await h.writer.write(b"\x01")
-        clock.step = 1_073_742.0  # 2,147,484 s old: past it
+        clock.step = 536_871.0  # 2,147,484 s old: past it
         with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x02")
         assert failure.value.code == "DELIVERY_TIMEOUT"

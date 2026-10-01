@@ -362,7 +362,9 @@ is only sent. The relay subscription's own values, if it sends any, combine with
 non-zero value wins, 0 means no timeout, and values above 2147483647 are clamped. The object timeout
 bounds an object's age from the `write()` or `group.write()` call until the transport has taken it,
 which is when its stream write returns (aioquic has transmitted the bytes); waiting for demand and for
-settling room count too. An older object raises `DELIVERY_TIMEOUT` in its current phase and resets
+settling room count too, timed by the publisher's value alone until the group's value is fixed just
+before its stream opens (an object already older than the fixed value fails then, before any stream
+opens). An older object raises `DELIVERY_TIMEOUT` in its current phase and resets
 its group with code `DELIVERY_TIMEOUT` (0x2), and the group's later writes fail too; the track stays
 open. A write waiting for demand fails at whichever of `write_timeout` and the object timeout comes
 first.
