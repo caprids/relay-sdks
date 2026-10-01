@@ -1,9 +1,8 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
-import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { startConformancePeer } from './conformance-peer.js';
 import { startModuleServer } from './module-server.js';
 
 // The Chromium launcher for the transport adapter conformance suite (conformance/suite.js). It starts the scriptable
@@ -12,56 +11,7 @@ import { startModuleServer } from './module-server.js';
 // expected failure starts to pass. CONFORMANCE_GREP=<text> runs only the cases whose name contains it.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const python = resolve(root, '../python');
 const grep = process.env.CONFORMANCE_GREP;
-
-/** Start the accepting end; resolves `{ port, certificateHash, call, stop }` once it listens. */
-async function startPeer() {
-  const child = spawn('uv', ['run', '--locked', 'python', '-m', 'relay_helpers.conformance_peer'], {
-    cwd: python,
-    env: { ...process.env, PYTHONPATH: resolve(python, 'packages/mux-relay/tests') },
-    stdio: ['pipe', 'pipe', 'inherit'],
-  });
-  const pending = new Map();
-  let nextId = 0;
-  let listening;
-  const started = new Promise((resolve, reject) => {
-    listening = { resolve, reject };
-  });
-  child.once('exit', (code) => {
-    const error = new Error(`the conformance peer exited (code ${code})`);
-    listening.reject(error);
-    for (const { reject } of pending.values()) reject(error);
-    pending.clear();
-  });
-  createInterface({ input: child.stdout }).on('line', (line) => {
-    const message = JSON.parse(line);
-    if (message.event === 'listening') {
-      listening.resolve(message);
-      return;
-    }
-    const waiter = pending.get(message.id);
-    pending.delete(message.id);
-    if ('error' in message) waiter?.reject(new Error(`peer: ${message.error}`));
-    else waiter?.resolve(message.result);
-  });
-  const { port, certificateHash } = await started;
-  return {
-    port,
-    certificateHash,
-    call(method, params = {}) {
-      const id = nextId++;
-      return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
-        child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
-      });
-    },
-    async stop() {
-      child.stdin.end();
-      await new Promise((resolve) => (child.exitCode === null ? child.once('exit', resolve) : resolve()));
-    },
-  };
-}
 
 const LABELS = {
   passed: 'pass',
@@ -77,7 +27,7 @@ function report(result) {
   console.log(`${LABELS[result.status].padEnd(7)} ${result.name}${detail ? `\n          ${detail}` : ''}`);
 }
 
-const peer = await startPeer();
+const peer = await startConformancePeer();
 const server = await startModuleServer({
   modules: { '/core/': resolve(root, 'packages/moq-core/dist'), '/conformance/': resolve(root, 'conformance') },
   importMap: { '@mux/moq-core': '/core/index.js' },

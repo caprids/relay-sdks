@@ -1,0 +1,30 @@
+[package]
+name = "relay-quic"
+version = "0.0.0"
+edition = "2021"
+license = "UNLICENSED"
+publish = false
+description = "The native QUIC dialing end behind @mux/relay-quic: quinn, exposed to Node through napi-rs"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+bytes = "1"
+futures-util = { version = "0.3", default-features = false }
+napi = { version = "3", default-features = false, features = ["napi8", "async"] }
+napi-derive = "3"
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rustls-native-certs = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", default-features = false }
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+strip = "symbols"
+codegen-units = 1

@@ -2,7 +2,16 @@
   "$schema": "https://biomejs.dev/schemas/2.5.13/schema.json",
   "files": {
     "ignoreUnknown": true,
-    "includes": ["**", "!**/dist", "!**/coverage", "!docs-api", "!pnpm-lock.yaml"]
+    "includes": [
+      "**",
+      "!**/dist",
+      "!**/coverage",
+      "!docs-api",
+      "!pnpm-lock.yaml",
+      // The native QUIC adapter: cargo's build output, and the typings napi-rs generates from the Rust.
+      "!packages/relay-quic/native/target",
+      "!packages/relay-quic/src/native.d.ts"
+    ]
   },
   "formatter": {
     "enabled": true,

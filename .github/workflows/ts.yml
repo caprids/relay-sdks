@@ -54,3 +54,22 @@ jobs:
       - run: pnpm exec playwright install --with-deps chromium
         working-directory: ts
       - run: mise run ts:test:conformance
+
+  # The Node transport adapter (@mux/relay-quic). Its Rust is linted and built only here: the mise tasks below bring the
+  # Rust toolchain they pin, and `check` builds no Rust.
+  conformance-node:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm python uv
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ts/packages/relay-quic/native -> target
+      - run: mise run ts:check:native
+      - run: mise run ts:install
+      - run: mise run python:install
+      - run: mise run ts:test:conformance:node
+      - name: The addon typings match the Rust
+        run: git diff --exit-code -- ts/packages/relay-quic/src/native.d.ts

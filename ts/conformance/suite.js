@@ -2,7 +2,8 @@
  * The transport adapter conformance suite (`spec/transport-adapter.md`, "Conformance"), runtime-neutral: it uses only
  * APIs that browsers and Node both provide, and gets everything target-specific from the target it is handed. Each
  * case is named after the rule it checks. A runner per runtime turns the cases into that runtime's tests:
- * `pair.test.js` for the in-memory pair under vitest. `README.md` describes the target and peer interfaces.
+ * `pair.test.js` for the in-memory pair and `relay-quic.conformance.js` for `@mux/relay-quic` under vitest, and
+ * `scripts/test-conformance.mjs` for Chromium. `README.md` describes the target and peer interfaces.
  */
 
 /** The MOQT protocol identifier the cases offer by default. */
@@ -493,6 +494,31 @@ export const cases = [
   },
   {
     rule: 'TA-12',
+    name: 'TA-12 incoming stream readables close after a clean end with no read pending',
+    async run(ctx) {
+      const transport = await open(ctx);
+      const uni = transport.incomingUnidirectionalStreams.getReader();
+      const bidi = transport.incomingBidirectionalStreams.getReader();
+      await ctx.peer.close(0, '');
+      await resolves(uni.closed, 'incoming uni closed');
+      await resolves(bidi.closed, 'incoming bidi closed');
+    },
+  },
+  {
+    rule: 'TA-12',
+    name: 'TA-12 incoming stream readables error after a QUIC-layer close with no read pending',
+    needs: ['quicClose'],
+    async run(ctx) {
+      const transport = await open(ctx);
+      const uni = transport.incomingUnidirectionalStreams.getReader();
+      const bidi = transport.incomingBidirectionalStreams.getReader();
+      await ctx.peer.quicClose();
+      await rejects(uni.closed, 'incoming uni closed');
+      await rejects(bidi.closed, 'incoming bidi closed');
+    },
+  },
+  {
+    rule: 'TA-12',
     name: 'TA-12 incoming stream readables error after a QUIC-layer close',
     needs: ['quicClose'],
     async run(ctx) {
@@ -734,6 +760,19 @@ export const cases = [
   },
   {
     rule: 'TA-19',
+    name: "TA-19 a peer reset errors the receive stream with the peer's code while nothing reads it",
+    async run(ctx) {
+      const transport = await open(ctx);
+      const id = await ctx.peer.openUni();
+      await ctx.peer.write(id, text('unread'));
+      const reader = (await nextIncoming(transport.incomingUnidirectionalStreams, 'the peer stream')).getReader();
+      await ctx.peer.reset(id, 11);
+      // The unread bytes may be discarded (RFC 9000 §3.2), but the reset must land without a read to carry it.
+      expectStreamError(await rejects(reader.closed, 'reader.closed'), 11, 'reader.closed after the reset');
+    },
+  },
+  {
+    rule: 'TA-19',
     name: "TA-19 a peer reset errors a bidirectional stream's readable with the peer's code",
     async run(ctx) {
       const transport = await open(ctx);
@@ -755,6 +794,21 @@ export const cases = [
       await ctx.peer.stop(id, 13);
       expectStreamError(await rejects(writer.closed, 'writer.closed'), 13, 'writer.closed');
       expectStreamError(await rejects(writer.write(text('late')), 'the next write'), 13, 'the next write');
+    },
+  },
+  {
+    rule: 'TA-20',
+    name: "TA-20 a peer stop rejects a write blocked on flow control with the peer's code",
+    timeoutMs: 30_000,
+    async run(ctx) {
+      const transport = await open(ctx);
+      const { writer, id } = await openAcceptedUni(ctx, transport, text('x'));
+      await holdPeer(ctx);
+      const { write } = await writeUntilBlocked(writer);
+      await ctx.peer.stop(id, 5);
+      expectStreamError(await rejects(write, 'the blocked write'), 5, 'the blocked write');
+      expectStreamError(await rejects(writer.closed, 'writer.closed'), 5, 'writer.closed');
+      await releasePeer(ctx);
     },
   },
   {

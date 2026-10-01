@@ -10,6 +10,7 @@
     "packages/moq-core/src/**/*.ts",
     "packages/moq-media/src/**/*.ts",
     "packages/moq-mediabunny/src/**/*.ts",
+    "packages/relay-quic/src/**/*.ts",
     "examples/mediabunny/**/*.ts",
     "examples/webcodecs/**/*.ts"
   ]

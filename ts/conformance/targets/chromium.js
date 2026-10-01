@@ -4,6 +4,7 @@
  * exposes to the page.
  */
 import { streamResetReason } from '@mux/moq-core';
+import { createRemotePeer } from './remote-peer.js';
 
 /** Rules Chromium is known not to meet, each with its Known deviation in `spec/transport-adapter.md`. */
 const protocolDeviation = {
@@ -20,30 +21,6 @@ const expectations = {
     fails: 'Known deviations: Browser session close codes (TA-24, #14)',
   },
 };
-
-/** A peer proxy: every method is a request to the Python accepting end. Bytes cross as arrays of numbers. */
-function createRemotePeer(call) {
-  return {
-    acceptUni: () => call('acceptUni'),
-    acceptBi: () => call('acceptBi'),
-    openUni: () => call('openUni'),
-    openBi: () => call('openBi'),
-    write: (stream, bytes) => call('write', { stream, data: Array.from(bytes) }),
-    finish: (stream) => call('finish', { stream }),
-    reset: (stream, code) => call('reset', { stream, code }),
-    stop: (stream, code) => call('stop', { stream, code }),
-    read: (stream, { bytes, discard } = {}) => call('read', { stream, count: bytes, discard }),
-    stopped: (stream) => call('stopped', { stream }),
-    close: (code, reason) => call('close', { code, reason }),
-    closed: () => call('closed'),
-    quicClose: () => call('quicClose'),
-    loseConnection: () => call('loseConnection'),
-    pause: () => call('pause'),
-    resume: () => call('resume'),
-    releaseHandshake: () => call('releaseHandshake'),
-    observed: () => call('observedDial'),
-  };
-}
 
 /**
  * @param {object} options
