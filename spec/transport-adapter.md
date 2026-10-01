@@ -336,8 +336,9 @@ passes the conformance suite except where it has no QUIC to model, and the suite
 for it:
 
 - no stream credit: creates never reject for credit (TA-21)
-- no acknowledgement: close resolves once the FIN is in the peer's buffer, and a peer cannot
-  withhold acknowledgement (TA-15, and the cases of TA-14 and TA-16 that need a paused peer)
+- no acknowledgement: close resolves once the FIN is in the peer's buffer, and a peer cannot pause:
+  drop what the dialer sends so that nothing is acknowledged (TA-15, and the cases of TA-14 and TA-16
+  that need a paused peer)
 
 `close()` reaches both ends at once, with no time in flight. That is harmless: no rule depends on how
 long a close takes to arrive.

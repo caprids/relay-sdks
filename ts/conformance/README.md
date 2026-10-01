@@ -63,7 +63,7 @@ A target is a plain object:
 | `refuseHandshake` | The peer can refuse the session (TA-9). |
 | `quicClose` | The peer can close the connection with a QUIC-layer CONNECTION_CLOSE (TA-9, TA-12). |
 | `connectionLoss` | The peer can vanish without a close (TA-9). |
-| `pause` | The peer can stop acknowledging until it resumes (TA-14 to TA-16). |
+| `pause` | The peer can drop every datagram from the dialer until it resumes, so it neither receives nor acknowledges (TA-14 to TA-16). |
 | `maxStreams` | The peer can limit the dialer's streams (TA-21). |
 | `largeCodes` | The peer can reset with a code above 2⁵³−1 (TA-22; native QUIC only). |
 | `process` | The adapter runs in a process the target can watch (TA-25, TA-26). |

@@ -690,8 +690,9 @@ export const cases = [
       check((await settleWithin(abort, PROMPTLY_MS)).state !== 'pending', 'abort still pending');
       await ctx.peer.resume();
       const seen = await resolves(ctx.peer.read(id), 'the peer read', 5_000);
-      // The FIN may have reached the peer before the reset; then the stream is complete (RFC 9000 §3.2).
-      check(seen.resetCode === 6 || seen.fin, `the peer saw neither the reset nor the FIN: ${describe(seen)}`);
+      // The peer dropped the FIN: it was paused before close(). A reset sender may not send it again (RFC 9000 §3.1,
+      // §3.3), so a FIN here means the adapter let it win over the abort.
+      check(seen.resetCode === 6 && !seen.fin, `the peer did not see only the reset: ${describe(seen)}`);
     },
   },
   {

@@ -115,7 +115,7 @@ export function createPairTarget() {
     capabilities: ['webtransport', 'selectProtocol', 'holdHandshake', 'refuseHandshake', 'quicClose', 'connectionLoss'],
     gaps: {
       pause:
-        'the pair has no acknowledgement to withhold: close resolves once the FIN is in the peer buffer (Test doubles, TA-15)',
+        'the pair cannot pause: it has no datagrams to drop and no acknowledgement to withhold, and close resolves once the FIN is in the peer buffer (Test doubles, TA-15)',
       maxStreams: 'the pair has no stream credit (Test doubles, TA-21)',
       'native-quic': 'the pair stands in for a WebTransport session',
       largeCodes: 'only native QUIC carries codes above 2^32-1',
