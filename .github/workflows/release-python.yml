@@ -65,12 +65,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           uv run python scripts/release.py notes "${GITHUB_REF_NAME#python/v}" > "$RUNNER_TEMP/notes.md"
-          # A rerun after a failed upload finds the release and uploads what is missing.
+          version="${GITHUB_REF_NAME#python/v}"
+          flags=()
+          if [[ "$version" =~ (a|b|rc)[0-9]+$ ]]; then flags+=(--prerelease); fi
+          # gh creates a draft, uploads, then publishes it. A rerun after a failed upload finds that draft, uploads
+          # what is missing and publishes it.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+            gh release edit "$GITHUB_REF_NAME" --draft=false "${flags[@]}"
           else
-            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
-              --title "Python SDK ${GITHUB_REF_NAME#python/v}" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag "${flags[@]}" \
+              --title "Python SDK $version" --notes-file "$RUNNER_TEMP/notes.md"
           fi
       - uses: actions/upload-artifact@v5
         with:

@@ -77,12 +77,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/release.mjs notes "${GITHUB_REF_NAME#ts/v}" > "$RUNNER_TEMP/notes.md"
-          # A rerun after a failed upload finds the release and uploads what is missing.
+          version="${GITHUB_REF_NAME#ts/v}"
+          flags=()
+          if [[ "$version" == *-* ]]; then flags+=(--prerelease); fi
+          # gh creates a draft, uploads, then publishes it. A rerun after a failed upload finds that draft, uploads
+          # what is missing and publishes it.
           if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" ../packed/*.tgz --clobber
+            gh release edit "$GITHUB_REF_NAME" --draft=false "${flags[@]}"
           else
-            gh release create "$GITHUB_REF_NAME" ../packed/*.tgz --verify-tag \
-              --title "TypeScript SDK ${GITHUB_REF_NAME#ts/v}" --notes-file "$RUNNER_TEMP/notes.md"
+            gh release create "$GITHUB_REF_NAME" ../packed/*.tgz --verify-tag "${flags[@]}" \
+              --title "TypeScript SDK $version" --notes-file "$RUNNER_TEMP/notes.md"
           fi
       - uses: actions/upload-artifact@v4
         with:
