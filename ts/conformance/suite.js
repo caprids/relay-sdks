@@ -745,9 +745,12 @@ export const cases = [
         if (kind === 'Bidirectional') await ctx.peer.finish(id);
         const until = performance.now() + 5_000;
         let outcome;
-        do {
+        while (true) {
           outcome = await settleWithin(create(), PROMPTLY_MS);
-        } while (outcome.state === 'rejected' && performance.now() < until);
+          if (outcome.state !== 'rejected' || performance.now() >= until) break;
+          // A rejection settles at once: yield to timers and I/O, or the MAX_STREAMS update never lands.
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
         check(outcome.state === 'fulfilled', `a ${kind} create after credit returned: ${describe(outcome)}`);
         for (const writer of opened.slice(1)) await writer.abort(ctx.reason(0)).catch(() => {});
       }
@@ -872,7 +875,14 @@ export async function runCase(target, testCase) {
   let error;
   const session = await target.session(testCase.session ?? {});
   try {
-    const ctx = { ...session, target, reason: target.resetReason ?? defaultReason };
+    // A case that ends the session without reading `closed` must not leave its rejection unhandled.
+    const dial = (options) => {
+      const result = session.dial(options);
+      result.ready.catch(() => {});
+      result.transport.closed.catch(() => {});
+      return result;
+    };
+    const ctx = { ...session, dial, target, reason: target.resetReason ?? defaultReason };
     const outcome = await settleWithin(testCase.run(ctx), timeoutMs);
     if (outcome.state === 'pending') error = new ConformanceFailure(`timed out after ${timeoutMs} ms`);
     if (outcome.state === 'rejected') error = outcome.reason;

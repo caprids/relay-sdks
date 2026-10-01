@@ -21,6 +21,10 @@ function pushChannel<T>(): PushChannel<T> {
     start(c) {
       controller = c;
     },
+    cancel() {
+      // The reader cancelled the queue, which closed it: nothing more is pushed and teardown leaves it be.
+      ended = true;
+    },
   });
 
   return {
