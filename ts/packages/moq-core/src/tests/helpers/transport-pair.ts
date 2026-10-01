@@ -182,6 +182,8 @@ export interface TransportPair {
    * error, and so does every pending step on every stream (TA-9, TA-12). A no-op once the session has ended.
    */
   fail(message?: string): void;
+  /** Whether the session has ended, by either end, cleanly or not. */
+  readonly ended: boolean;
 }
 
 /** One writer-side step as issued: the stream, `write`/`close`/`abort`, and the bytes written. */
@@ -314,6 +316,9 @@ export function createTransportPair({
     fail(message = 'The connection was lost.') {
       end(new PairTransportError(message, { source: 'session' }));
     },
+    get ended() {
+      return ended;
+    },
   };
 }
 
@@ -384,6 +389,8 @@ export function createTransportPairFactory({
         settleReady.reject(new PairTransportError(message, { source: 'session' }));
       };
       const answer = () => {
+        // Checked here as well as on `closed`, whose handler runs a microtask after the session ends.
+        if (pair.ended) endedWhileDialling();
         if (state !== 'dialling') return;
         if (handshake === 'refuse') return failDial('The accepting end refused the session.');
 

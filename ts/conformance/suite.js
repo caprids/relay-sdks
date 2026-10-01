@@ -96,11 +96,17 @@ async function staysPending(promise, what, ms = STAYS_PENDING_MS) {
   );
 }
 
-/** TA-22: a stream error has `source: 'stream'` and the peer's code. */
+/**
+ * TA-22: a stream error has `source: 'stream'` and the peer's code, or `null` where the adapter cannot know it (TA-22
+ * allows that; it is never 0 for unknown). The codes the dialer sends are checked exactly, at the peer.
+ */
 function expectStreamError(error, code, what) {
   check(typeof error === 'object' && error !== null, `${what}: expected a stream error object, got ${describe(error)}`);
   check(error.source === 'stream', `${what}: expected source 'stream', got ${describe(error)}`);
-  check(error.streamErrorCode === code, `${what}: expected streamErrorCode ${code}, got ${describe(error)}`);
+  check(
+    error.streamErrorCode === code || error.streamErrorCode === null,
+    `${what}: expected streamErrorCode ${code} (or null for unknown), got ${describe(error)}`,
+  );
 }
 
 /** TA-22: a session error has `source: 'session'`. */

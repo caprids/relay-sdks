@@ -35,3 +35,11 @@ it('the pair rejects ready when the session ends while the dial is held', async 
   factory.releaseHandshake();
   await expect(ready).rejects.toMatchObject({ source: 'session' });
 });
+
+it('the pair rejects ready when the session ends in the same turn the held handshake is released', async () => {
+  const factory = createTransportPairFactory({ handshake: 'hold' });
+  const { ready } = factory.createTransport('https://pair.invalid/', ['moqt-20']);
+  (await factory.dialled).pair.fail('lost');
+  factory.releaseHandshake();
+  await expect(ready).rejects.toMatchObject({ source: 'session' });
+});
