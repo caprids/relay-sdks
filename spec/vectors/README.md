@@ -15,6 +15,7 @@ Conventions:
 | --- | --- |
 | `media.json` | Exact MSF catalog UTF-8 JSON, LOC properties, MSF source URLs, H.264 avcC and access units, and rejected inputs |
 | `varint.json` | MOQT variable-length integers, draft-ietf-moq-transport-20 §1.4.1 |
+| `setup-options.json` | The PATH and AUTHORITY setup options the core sends for an endpoint URL and token, by framing, per `../transport-adapter.md` TA-6; TypeScript only until Python speaks native QUIC (#199) |
 | `arguments.json` | Namespace and track-name arguments the SDKs accept or reject locally, per the Arguments table in `../behavior.md`; properties and payloads are not portable through JSON and stay as mirrored tables in each suite |
 
 Planned: control message framing and parameters, subgroup and fetch stream headers, object status

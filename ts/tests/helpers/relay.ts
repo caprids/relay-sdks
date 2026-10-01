@@ -12,6 +12,7 @@ import {
   ControlMessageDeframer,
   decodeControlMessage,
   encodeSetup,
+  type KeyValuePair,
 } from '../../packages/moq-core/src/protocol/control-messages.js';
 
 interface PushChannel<T> {
@@ -51,6 +52,8 @@ export interface FakeTransport {
   transport: MoqtTransport;
   /** The SETUP control stream the client opened (first client uni stream). */
   clientControlStream(): Promise<StreamReader>;
+  /** The setup options of the client's SETUP, the first message on its control stream. */
+  clientSetupOptions(): Promise<KeyValuePair[]>;
   /** Wait for the next client-initiated request stream. */
   nextRequestStream(): Promise<ServerRequestStream>;
   /** Open the server's control stream and send its SETUP. */
@@ -149,6 +152,15 @@ export function createFakeTransport(): FakeTransport {
         if (clientUniStreams.length === 0) throw new Error('no client uni stream yet');
       });
       return new StreamReader(clientUniStreams[0]!);
+    },
+    async clientSetupOptions(): Promise<KeyValuePair[]> {
+      const control = await this.clientControlStream();
+      const type = await control.readVarint();
+      const length = (await control.readUint8()) * 256 + (await control.readUint8());
+      const setup = decodeControlMessage({ type, body: await control.readBytes(length) });
+
+      if (setup.kind !== 'setup') throw new Error(`client control stream opened with ${setup.kind}, not SETUP`);
+      return setup.options;
     },
     /** Wait for the next client-initiated request stream. */
     nextRequestStream(): Promise<ServerRequestStream> {

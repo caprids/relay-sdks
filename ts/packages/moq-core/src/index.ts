@@ -16,6 +16,7 @@ export {
   MOQT_PROTOCOL_ID,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
+  SETUP_OPTION,
 } from './protocol/control-messages.js';
 export type { SessionErrorCode } from './protocol/errors.js';
 export { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './protocol/errors.js';

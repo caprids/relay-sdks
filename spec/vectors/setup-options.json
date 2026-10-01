@@ -1,0 +1,95 @@
+{
+  "source": "spec/transport-adapter.md TA-1, TA-4, TA-6; draft-ietf-moq-transport-20 §10.3.1.1 (AUTHORITY), §10.3.1.2 (PATH); URL serialisation per the WHATWG URL Standard",
+  "note": "The setup options the core adds to CLIENT_SETUP for the endpoint, by framing. `url` is the endpoint the caller passes. `token` is what getToken returns; absent means no getToken. `framing` is what the transport factory declares; absent means it declares nothing, which is a WebTransport session. `path` and `authority` are the exact UTF-8 values of PATH (0x01) and AUTHORITY (0x05); null means the option MUST NOT be sent. The token reaches PATH through the URL's jwt query parameter, so its encoding is the URL Standard's application/x-www-form-urlencoded serialiser.",
+  "cases": [
+    {
+      "name": "a factory that declares no framing sends neither option",
+      "url": "https://relay.example.com/moq",
+      "token": "abc",
+      "path": null,
+      "authority": null
+    },
+    {
+      "name": "a WebTransport session sends neither option",
+      "url": "https://relay.example.com/moq?keep=1",
+      "token": "abc",
+      "framing": "webtransport",
+      "path": null,
+      "authority": null
+    },
+    {
+      "name": "native QUIC carries the endpoint path and the token from getToken",
+      "url": "https://relay.example.com/moq",
+      "token": "abc",
+      "framing": "native-quic",
+      "path": "/moq?jwt=abc",
+      "authority": "relay.example.com"
+    },
+    {
+      "name": "native QUIC keeps the endpoint query and form-encodes the token after it",
+      "url": "https://relay.example.com/moq?keep=1",
+      "token": "token with/&?",
+      "framing": "native-quic",
+      "path": "/moq?keep=1&jwt=token+with%2F%26%3F",
+      "authority": "relay.example.com"
+    },
+    {
+      "name": "native QUIC carries an explicit jwt exactly as given",
+      "url": "https://relay.example.com/moq?jwt=explicit.token-1&keep=1",
+      "framing": "native-quic",
+      "path": "/moq?jwt=explicit.token-1&keep=1",
+      "authority": "relay.example.com"
+    },
+    {
+      "name": "native QUIC with no token sends the path without a query",
+      "url": "https://relay.example.com/moq",
+      "framing": "native-quic",
+      "path": "/moq",
+      "authority": "relay.example.com"
+    },
+    {
+      "name": "native QUIC with an empty endpoint path sends the root path",
+      "url": "https://relay.example.com",
+      "token": "abc",
+      "framing": "native-quic",
+      "path": "/?jwt=abc",
+      "authority": "relay.example.com"
+    },
+    {
+      "name": "native QUIC keeps a percent-encoded path segment encoded",
+      "url": "https://relay.example.com/a%20b/moq",
+      "framing": "native-quic",
+      "path": "/a%20b/moq",
+      "authority": "relay.example.com"
+    },
+    {
+      "name": "native QUIC includes a non-default port in the authority",
+      "url": "https://relay.example.com:4443/moq",
+      "token": "abc",
+      "framing": "native-quic",
+      "path": "/moq?jwt=abc",
+      "authority": "relay.example.com:4443"
+    },
+    {
+      "name": "native QUIC omits the default port from the authority",
+      "url": "https://relay.example.com:443/moq",
+      "framing": "native-quic",
+      "path": "/moq",
+      "authority": "relay.example.com"
+    },
+    {
+      "name": "native QUIC lowercases the host",
+      "url": "https://Relay.Example.COM/moq",
+      "framing": "native-quic",
+      "path": "/moq",
+      "authority": "relay.example.com"
+    },
+    {
+      "name": "native QUIC brackets an IPv6 literal",
+      "url": "https://[::1]:4443/moq",
+      "framing": "native-quic",
+      "path": "/moq",
+      "authority": "[::1]:4443"
+    }
+  ]
+}
