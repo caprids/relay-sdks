@@ -1,0 +1,83 @@
+name: Release Python SDK
+
+# Builds, smoke-installs and publishes every Python package at one version (#216, docs/adr/0003). The steps are in
+# docs/releasing.md.
+#
+# A python/v<x.y.z> tag runs the publish job in the `release` environment. It publishes for real only when the
+# repository variable RELEASE_PUBLISH is `true`; until then, and on every pull request or manual run, it dry-runs. PyPI
+# trusted publishing (OIDC) authenticates it, so no PyPI token exists, and attestations are attached once the
+# repository is public.
+
+on:
+  push:
+    tags: ['python/v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release-python.yml'
+      - 'python/scripts/release.py'
+      - 'python/packages/*/pyproject.toml'
+  workflow_dispatch:
+
+concurrency:
+  group: release-python-${{ github.ref }}
+  # Never cancel a publish halfway; a rerun skips the files PyPI already has.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  dry-run:
+    if: ${{ !startsWith(github.ref, 'refs/tags/python/v') }}
+    runs-on: ubuntu-latest
+    steps: &steps
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: python uv
+      - name: The tag matches every package's version and the changelog
+        if: startsWith(github.ref, 'refs/tags/python/v')
+        run: uv run python scripts/release.py check "${GITHUB_REF_NAME#python/v}"
+        working-directory: python
+      - run: mise run python:check
+      - run: uv build --all-packages --out-dir dist
+        working-directory: python
+      - name: Install the wheels into a fresh venv and import them
+        run: uv run python scripts/release.py smoke dist
+        working-directory: python
+      - name: Dry-run the publish
+        if: ${{ !(startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true') }}
+        run: uv publish --dry-run --trusted-publishing never dist/*
+        working-directory: python
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: python/dist
+          skip-existing: true
+          # PyPI attestations need a public repository's workflow identity.
+          attestations: ${{ !github.event.repository.private }}
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true'
+        working-directory: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          uv run python scripts/release.py notes "${GITHUB_REF_NAME#python/v}" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+            --title "Python SDK ${GITHUB_REF_NAME#python/v}" --notes-file "$RUNNER_TEMP/notes.md"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: python-release-packages
+          path: python/dist/
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/python/v')
+    runs-on: ubuntu-latest
+    # Configure required reviewers on this environment, and the PyPI trusted publisher for this workflow and environment.
+    environment: release
+    permissions:
+      contents: write # the GitHub release
+      id-token: write # PyPI trusted publishing and attestations
+    steps: *steps

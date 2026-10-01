@@ -1,0 +1,96 @@
+name: Release TypeScript SDK
+
+# Packs, smoke-installs and publishes every TypeScript package at one version (#216, docs/adr/0003). The steps are in
+# docs/releasing.md.
+#
+# A ts/v<x.y.z> tag runs the publish job in the `release` environment. It publishes for real only when the repository
+# variable RELEASE_PUBLISH is `true`; until then, and on every pull request or manual run, it dry-runs. npm trusted
+# publishing (OIDC) authenticates it, so no npm token exists, and provenance is attached once the repository is public.
+
+on:
+  push:
+    tags: ['ts/v*']
+  pull_request:
+    paths:
+      - '.github/workflows/release-ts.yml'
+      - '.github/workflows/relay-quic-binaries.yml'
+      - 'ts/scripts/release.mjs'
+      - 'ts/package.json'
+      - 'ts/packages/*/package.json'
+      - 'ts/packages/relay-quic/npm/*/package.json'
+      - 'ts/packages/relay-quic/scripts/**'
+  workflow_dispatch:
+
+concurrency:
+  group: release-ts-${{ github.ref }}
+  # Never cancel a publish halfway; a rerun skips what the registry already has.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Builds, packs and smoke-loads @mux/relay-quic and its seven platform packages, with @mux/moq-core.
+  binaries:
+    uses: ./.github/workflows/relay-quic-binaries.yml
+
+  dry-run:
+    if: ${{ !startsWith(github.ref, 'refs/tags/ts/v') }}
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps: &steps
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm
+      - name: The tag matches every package's version and the changelog
+        if: startsWith(github.ref, 'refs/tags/ts/v')
+        run: node scripts/release.mjs check "${GITHUB_REF_NAME#ts/v}"
+        working-directory: ts
+      - run: mise run ts:check
+      - uses: actions/download-artifact@v5
+        with:
+          name: relay-quic-packages
+          path: packed
+      - name: Pack the other packages
+        run: node scripts/release.mjs pack ../packed
+        working-directory: ts
+      - name: Install the tarballs into an empty project, import and type-check them
+        run: node scripts/release.mjs smoke ../packed
+        working-directory: ts
+      - name: Publish
+        working-directory: ts
+        env:
+          REAL: ${{ startsWith(github.ref, 'refs/tags/ts/v') && vars.RELEASE_PUBLISH == 'true' }}
+          PUBLIC: ${{ !github.event.repository.private }}
+        run: |
+          flags=()
+          if [ "$REAL" != true ]; then flags+=(--dry-run); echo "Dry run: RELEASE_PUBLISH is not true or this is no ts/v* tag"; fi
+          # npm generates no provenance for a private repository's builds.
+          if [ "$PUBLIC" = true ]; then flags+=(--provenance); fi
+          node scripts/release.mjs publish ../packed "${flags[@]}"
+      - name: Create the GitHub release
+        if: startsWith(github.ref, 'refs/tags/ts/v') && vars.RELEASE_PUBLISH == 'true'
+        working-directory: ts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          node scripts/release.mjs notes "${GITHUB_REF_NAME#ts/v}" > "$RUNNER_TEMP/notes.md"
+          gh release create "$GITHUB_REF_NAME" ../packed/*.tgz --verify-tag \
+            --title "TypeScript SDK ${GITHUB_REF_NAME#ts/v}" --notes-file "$RUNNER_TEMP/notes.md"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ts-release-packages
+          path: packed/
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/ts/v')
+    needs: binaries
+    runs-on: ubuntu-latest
+    # Configure required reviewers on this environment, and the npm trusted publisher for this workflow and environment.
+    environment: release
+    permissions:
+      contents: write # the GitHub release
+      id-token: write # npm trusted publishing and provenance
+    steps: *steps
