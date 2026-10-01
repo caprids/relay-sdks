@@ -7,6 +7,9 @@ import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
 
+// The Chromium launcher for the live-relay scenario in relay-scenario.js: it serves the built modules,
+// runs the scenario in a Playwright page, and redacts and reports its outcome.
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const endpoint = process.env.RELAY_URL ?? 'https://sjc.relay.mux.global';
 const endpointUrl = new URL(endpoint);
@@ -49,11 +52,15 @@ const namespace = [
 const redact = (value) => (token ? String(value).replaceAll(token, '[redacted]') : String(value));
 const report = (value) => console.log(redact(typeof value === 'string' ? value : JSON.stringify(value)));
 
-/** The built SDK, the built core, and the example policy the test shares with the mux-global demo. */
+/**
+ * The built SDK, the built core, the runtime-neutral scenario, and the example policy it shares with
+ * the mux-global demo, at the paths the scenario's relative imports expect.
+ */
 const modules = {
   '/sdk/': resolve(root, 'dist'),
   '/core/': resolve(root, 'packages/moq-core/dist'),
-  '/shared/': resolve(root, 'examples/shared'),
+  '/scripts/': resolve(root, 'scripts'),
+  '/examples/shared/': resolve(root, 'examples/shared'),
 };
 const server = createServer(async (request, response) => {
   try {
@@ -91,13 +98,8 @@ try {
   await page.goto(`http://127.0.0.1:${server.address().port}/`);
   const result = await page.evaluate(
     async ({ endpoint, token, namespace, certificateHash }) => {
-      const { connectRelaySubscriber, connectRelayPublisher } = await import('/sdk/index.js');
-      const { subscribeWithRetry } = await import('/shared/announce-race.js');
+      const { runRelayScenario } = await import('/scripts/relay-scenario.js');
       if (typeof WebTransport === 'undefined') throw new Error('This browser does not provide WebTransport');
-      let publisher;
-      let subscriber;
-      let lateSubscriber;
-      let lateLargestObject;
       const createTransport = certificateHash
         ? (url, protocols) => {
             const value = Uint8Array.from(certificateHash.match(/../g), (byte) => Number.parseInt(byte, 16));
@@ -108,139 +110,7 @@ try {
             return { transport, ready: transport.ready };
           }
         : undefined;
-      const lifetime = new AbortController();
-      const deadline = setTimeout(() => lifetime.abort(new Error('Live relay test exceeded 45 seconds')), 45_000);
-      const received = { events: [], status: [], lateStatus: [] };
-      const errors = [];
-      const expectedEvents = [[0, 255, 128, 1], Array.from(new TextEncoder().encode('hello from Relay SDK')), []];
-      let closing = false;
-      const observeClosed = (label, connection) => {
-        void connection.closed.then(({ error }) => {
-          if (!closing) errors.push(`${label} closed: ${String(error ?? 'peer closure')}`);
-        });
-      };
-      const waitFor = async (predicate, label) => {
-        const until = performance.now() + 10_000;
-        while (!predicate()) {
-          if (errors.length > 0) throw new Error(errors.join('; '));
-          lifetime.signal.throwIfAborted();
-          if (performance.now() >= until) throw new Error(`Timed out waiting for ${label}`);
-          await new Promise((resolve) => setTimeout(resolve, 20));
-        }
-      };
-      const waitForCount = (track, count) =>
-        waitFor(() => received[track].length >= count, `${track}: ${count} objects`);
-      try {
-        publisher = await connectRelayPublisher({
-          url: endpoint,
-          createTransport,
-          namespace,
-          getToken: () => token,
-          signal: lifetime.signal,
-        });
-        observeClosed('publisher', publisher);
-        await window.reportPhase({ phase: 'publisher connected', namespace });
-        const events = publisher.registerTrack({ track: 'events', writeTimeoutMs: 20_000 });
-        const status = publisher.registerTrack({ track: 'status', writeTimeoutMs: 20_000 });
-        subscriber = await connectRelaySubscriber({
-          url: endpoint,
-          getToken: () => token,
-          signal: lifetime.signal,
-          createTransport,
-        });
-        observeClosed('subscriber', subscriber);
-        await window.reportPhase({ phase: 'subscriber connected' });
-        // Assertion 2. The announce left with the first registered track; the relay routes subscribes to
-        // the namespace about a round trip later, so the subscribe retries the rejection it may still answer.
-        await publisher.announced;
-        await window.reportPhase({ phase: 'announced' });
-        const retries = { events: 0, status: 0 };
-        for (const track of ['events', 'status']) {
-          await subscribeWithRetry(
-            subscriber,
-            { namespace, track },
-            {
-              onSubscribed: () => {
-                void window.reportPhase({ phase: 'subscribed', track });
-              },
-              onObject: (object) => {
-                if (object.status === 'normal') received[track].push(Array.from(object.payload));
-              },
-              onError: (error) => errors.push(`${track}: ${error.errorCode} ${error.reason}`),
-              onSubgroupReset: ({ error }) => errors.push(`${track} reset: ${String(error)}`),
-            },
-            {
-              signal: lifetime.signal,
-              onRetry: (attempt, delayMs) => {
-                retries[track] += 1;
-                void window.reportPhase({ phase: 'subscribe retried', track, attempt, delayMs });
-              },
-            },
-          );
-        }
-        if (errors.length > 0) throw new Error(errors.join('; '));
-        for (const payload of expectedEvents) await events.write(new Uint8Array(payload));
-        await status.write(new Uint8Array([42]));
-        await waitForCount('events', 3);
-        await waitForCount('status', 1);
-        await window.reportPhase({
-          phase: 'received initial payloads',
-          events: received.events.length,
-          status: received.status.length,
-        });
-        // A fresh subscriber must decode the relay's SUBSCRIBE_OK for a track with content.
-        lateSubscriber = await connectRelaySubscriber({
-          url: endpoint,
-          getToken: () => token,
-          signal: lifetime.signal,
-          createTransport,
-        });
-        observeClosed('late subscriber', lateSubscriber);
-        lateSubscriber.subscribe(
-          { namespace, track: 'status', parameters: { locationFilter: { type: 'next-object' } } },
-          {
-            onSubscribed: (ok) => {
-              lateLargestObject = ok.parameters.largestObject;
-              if (!lateLargestObject) errors.push('late SUBSCRIBE_OK omitted LARGEST_OBJECT');
-            },
-            onObject: (object) => {
-              if (object.status === 'normal') received.lateStatus.push(Array.from(object.payload));
-            },
-            onError: (error) => errors.push(`late status: ${error.errorCode} ${error.reason}`),
-          },
-        );
-        await waitFor(() => lateLargestObject !== undefined, 'late SUBSCRIBE_OK with LARGEST_OBJECT');
-        events.close();
-        await status.write(new Uint8Array([43]));
-        await waitForCount('status', 2);
-        await waitForCount('lateStatus', 1);
-        if (JSON.stringify(received.lateStatus) !== '[[43]]') throw new Error('Late subscriber payload mismatch');
-        const samePayloads = (actual, expected) =>
-          JSON.stringify(actual.map(JSON.stringify).sort()) === JSON.stringify(expected.map(JSON.stringify).sort());
-        if (!samePayloads(received.events, expectedEvents) || !samePayloads(received.status, [[42], [43]])) {
-          throw new Error(`Payload mismatch: ${JSON.stringify(received)}`);
-        }
-        if (errors.length > 0) throw new Error(errors.join('; '));
-        return {
-          endpoint,
-          namespace,
-          events: received.events.length,
-          status: received.status.length,
-          announceRaceRetries: retries,
-          binaryAndEmptyPayloads: 'passed',
-          independentTrackClose: 'passed',
-          lateSubscriberLargestObject: lateLargestObject,
-        };
-      } finally {
-        closing = true;
-        clearTimeout(deadline);
-        try {
-          await publisher?.close();
-        } finally {
-          subscriber?.close();
-          lateSubscriber?.close();
-        }
-      }
+      return runRelayScenario({ endpoint, token, namespace, createTransport, report: window.reportPhase });
     },
     { endpoint, token, namespace, certificateHash },
   );
