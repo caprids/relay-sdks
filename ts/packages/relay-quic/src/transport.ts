@@ -83,31 +83,45 @@ export class NativeQuicTransport implements MoqtTransport {
     throw toError(ended);
   }
 
-  /** Streams the peer opens, until the session ends: the readable closes after a clean end and errors otherwise (TA-12). */
+  /**
+   * Streams the peer opens. The readable closes after a clean end and errors otherwise (TA-12), when `closed` settles:
+   * a pending read is not needed for that.
+   */
   #incoming<Native, Stream>(
     accept: (session: Session) => Promise<Native | null>,
     wrap: (stream: Native) => Stream,
   ): ReadableStream<Stream> {
     return new ReadableStream<Stream>(
       {
+        start: (controller) => {
+          // Either throws once the readable already ended, which needs nothing more.
+          this.closed.then(
+            () => {
+              try {
+                controller.close();
+              } catch {}
+            },
+            (error) => {
+              try {
+                controller.error(error);
+              } catch {}
+            },
+          );
+        },
         pull: async (controller) => {
           let session: Session;
           try {
             session = await this.#session;
-          } catch (error) {
-            controller.error(error);
-            return;
+          } catch {
+            return; // `closed` rejects with the dial's failure, and `start` errors the readable with it.
           }
+          // Nothing once the session is over: `start` ends the readable as `closed` settles.
           const stream = await accept(session);
-          if (stream !== null) {
-            controller.enqueue(wrap(stream));
-            return;
-          }
+          if (stream === null) return;
           try {
-            await this.closed;
-            controller.close();
-          } catch (error) {
-            controller.error(error);
+            controller.enqueue(wrap(stream));
+          } catch {
+            // The readable ended or was cancelled while the stream arrived; the session is going with it.
           }
         },
       },

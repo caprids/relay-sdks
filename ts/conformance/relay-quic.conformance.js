@@ -20,6 +20,23 @@ it('TA-11 a dial cancelled before ready leaves nothing that keeps the process al
   await target.checkProcessLifetime('exits-after-cancel');
 }, 20_000);
 
+it('tries the next address when the first one the host resolves to does not answer', async () => {
+  // Listening on 127.0.0.1 alone: where `localhost` resolves to ::1 first, only the fallback reaches it.
+  const ipv4 = await startConformancePeer({ framing: 'native-quic', host: '127.0.0.1' });
+  try {
+    await ipv4.call('prepare');
+    const value = Uint8Array.from(ipv4.certificateHash.match(/../g), (byte) => Number.parseInt(byte, 16));
+    const factory = nativeQuicTransport({ serverCertificateHashes: [{ algorithm: 'sha-256', value }] });
+    const { transport, ready } = factory(`https://localhost:${ipv4.port}/`, ['moqt-20']);
+    transport.closed.catch(() => {});
+    await ready;
+    transport.close();
+    await transport.closed;
+  } finally {
+    await ipv4.stop();
+  }
+}, 15_000);
+
 describe('@mux/relay-quic trust', () => {
   it('trusts a ca anchor added to the platform roots', async () => {
     await peer.call('prepare');

@@ -555,7 +555,7 @@ async def _handle(peer: ConformancePeer, line: str) -> None:
         _reply({"id": request_id, "error": f"{type(error).__name__}: {error}"})
 
 
-async def main(framing: str) -> None:
+async def main(framing: str, listen: str | None = None) -> None:
     loop = asyncio.get_running_loop()
     peer = ConformancePeer(framing)
     certificate, key, digest = generate_leaf_certificate()
@@ -571,7 +571,7 @@ async def main(framing: str) -> None:
         host, create_protocol = "127.0.0.1", partial(ConformanceProtocol, peer=peer)
     configuration.certificate = certificate
     configuration.private_key = key
-    server = await serve(host, 0, configuration=configuration, create_protocol=create_protocol)
+    server = await serve(listen or host, 0, configuration=configuration, create_protocol=create_protocol)
     transport = server._transport
     assert transport is not None
     _reply(
@@ -596,4 +596,6 @@ async def main(framing: str) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--framing", choices=["webtransport", "native-quic"], default="webtransport")
-    asyncio.run(main(parser.parse_args().framing))
+    parser.add_argument("--host", help="the address to listen on, instead of the framing's default")
+    arguments = parser.parse_args()
+    asyncio.run(main(arguments.framing, arguments.host))

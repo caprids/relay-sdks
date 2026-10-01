@@ -75,15 +75,15 @@ run = "pnpm test:conformance"
 [tasks."ts:test:conformance:node"]
 description = "Build @mux/relay-quic's addon and run the transport adapter conformance suite against it in Node"
 depends = ["ts:install", "python:install"]
-tools = { rust = "1.97.1" }
+tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts"
 run = "pnpm test:conformance:node"
 
 [tasks."ts:check:native"]
-description = "Format-check and lint @mux/relay-quic's Rust crate"
-tools = { rust = "1.97.1" }
+description = "Format-check, lint and unit-test @mux/relay-quic's Rust crate"
+tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts/packages/relay-quic/native"
-run = ["cargo fmt --check", "cargo clippy --release -- -D warnings"]
+run = ["cargo fmt --check", "cargo clippy --release --all-targets -- -D warnings", "cargo test --release"]
 
 [tasks."ts:example:mux-global"]
 description = "Run the mux.global example; pass its options after --"

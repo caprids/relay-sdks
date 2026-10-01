@@ -494,6 +494,31 @@ export const cases = [
   },
   {
     rule: 'TA-12',
+    name: 'TA-12 incoming stream readables close after a clean end with no read pending',
+    async run(ctx) {
+      const transport = await open(ctx);
+      const uni = transport.incomingUnidirectionalStreams.getReader();
+      const bidi = transport.incomingBidirectionalStreams.getReader();
+      await ctx.peer.close(0, '');
+      await resolves(uni.closed, 'incoming uni closed');
+      await resolves(bidi.closed, 'incoming bidi closed');
+    },
+  },
+  {
+    rule: 'TA-12',
+    name: 'TA-12 incoming stream readables error after a QUIC-layer close with no read pending',
+    needs: ['quicClose'],
+    async run(ctx) {
+      const transport = await open(ctx);
+      const uni = transport.incomingUnidirectionalStreams.getReader();
+      const bidi = transport.incomingBidirectionalStreams.getReader();
+      await ctx.peer.quicClose();
+      await rejects(uni.closed, 'incoming uni closed');
+      await rejects(bidi.closed, 'incoming bidi closed');
+    },
+  },
+  {
+    rule: 'TA-12',
     name: 'TA-12 incoming stream readables error after a QUIC-layer close',
     needs: ['quicClose'],
     async run(ctx) {

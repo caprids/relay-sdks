@@ -3,6 +3,7 @@
  * `native/relay-quic.<platform>-<arch>[-<libc>].node`; until prebuilt binaries ship it comes from a local build.
  */
 import { createRequire } from 'node:module';
+import { fileURLToPath } from 'node:url';
 import type * as Addon from './native.js';
 
 export type { BiStream, Client, Dial, Failure, ReadResult, RecvStream, SendStream, Session } from './native.js';
@@ -34,7 +35,7 @@ export function loadAddon(): NativeAddon {
   const file = `relay-quic.${platformSuffix()}.node`;
   const url = new URL(`../native/${file}`, import.meta.url);
   try {
-    addon = createRequire(import.meta.url)(url.pathname) as NativeAddon;
+    addon = createRequire(import.meta.url)(fileURLToPath(url)) as NativeAddon;
   } catch (error) {
     if ((error as { code?: unknown }).code !== 'MODULE_NOT_FOUND') throw error;
     throw new Error(

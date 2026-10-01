@@ -50,7 +50,7 @@ There are no prebuilt binaries yet, so the addon is built locally, with Rust. Th
 
 ```sh
 mise run ts:test:conformance:node   # builds the addon, then runs the conformance suite against it
-mise run ts:check:native            # cargo fmt --check and clippy
+mise run ts:check:native            # cargo fmt --check, clippy and the unit tests
 ```
 
 With a Rust toolchain of your own, `cd ts && pnpm --filter @mux/relay-quic build:native` writes

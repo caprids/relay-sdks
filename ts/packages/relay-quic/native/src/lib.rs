@@ -9,10 +9,12 @@ mod failure;
 mod stream;
 mod tls;
 
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::FutureExt;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -25,6 +27,8 @@ use stream::{BiStream, RecvStream, SendStream};
 const KEEP_ALIVE: Duration = Duration::from_secs(4);
 /// How long the connection may hear nothing before it is lost (TA-9).
 const IDLE_TIMEOUT_MS: u32 = 30_000;
+/// How long a dial waits on one address before it also tries the next (RFC 8305 §5).
+const ATTEMPT_STAGGER: Duration = Duration::from_millis(250);
 /// How long `closed()` waits for the endpoint to put the CONNECTION_CLOSE on the wire.
 const CLOSE_FLUSH: Duration = Duration::from_secs(1);
 
@@ -112,14 +116,43 @@ impl Dial {
 }
 
 impl Dial {
+    /// Resolve the host and race a handshake per address, RFC 8305 style: the families alternate,
+    /// each attempt starts [`ATTEMPT_STAGGER`] after the one before or as soon as it fails, and the
+    /// first handshake to complete wins. The others are dropped, and their sockets with them.
     async fn connect(&self) -> std::result::Result<Session, Failure> {
-        let dial_failure = |reason: String| Failure::session("dial", None, reason);
-        let address: SocketAddr = tokio::net::lookup_host((self.host.as_str(), self.port))
+        let addresses: Vec<SocketAddr> = tokio::net::lookup_host((self.host.as_str(), self.port))
             .await
             .map_err(|error| dial_failure(format!("could not resolve {}: {error}", self.host)))?
-            .next()
-            .ok_or_else(|| dial_failure(format!("{} has no addresses", self.host)))?;
+            .collect();
+        let mut waiting: VecDeque<SocketAddr> = interleave_families(addresses).into();
+        let client = self.client_config()?;
 
+        let mut attempts = FuturesUnordered::new();
+        let mut failure = dial_failure(format!("{} has no addresses", self.host));
+        let stagger = tokio::time::sleep(Duration::ZERO);
+        tokio::pin!(stagger);
+        loop {
+            tokio::select! {
+                biased;
+                Some(result) = attempts.next() => match result {
+                    Ok(session) => return Ok(session),
+                    Err(error) => {
+                        failure = error;
+                        // A failed attempt makes way for the next at once.
+                        stagger.as_mut().reset(tokio::time::Instant::now());
+                    }
+                },
+                _ = &mut stagger, if !waiting.is_empty() => {
+                    let address = waiting.pop_front().expect("an address is waiting");
+                    attempts.push(self.attempt(address, client.clone()));
+                    stagger.as_mut().reset(tokio::time::Instant::now() + ATTEMPT_STAGGER);
+                },
+                else => return Err(failure),
+            }
+        }
+    }
+
+    fn client_config(&self) -> std::result::Result<quinn::ClientConfig, Failure> {
         let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(self.tls.clone())
             .map_err(|error| dial_failure(error.to_string()))?;
         let mut client = quinn::ClientConfig::new(Arc::new(crypto));
@@ -127,7 +160,11 @@ impl Dial {
         transport.keep_alive_interval(Some(KEEP_ALIVE));
         transport.max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(IDLE_TIMEOUT_MS))));
         client.transport_config(Arc::new(transport));
+        Ok(client)
+    }
 
+    /// One handshake to `address`, on an endpoint of its own.
+    async fn attempt(&self, address: SocketAddr, client: quinn::ClientConfig) -> std::result::Result<Session, Failure> {
         let bind: SocketAddr = if address.is_ipv6() { "[::]:0" } else { "0.0.0.0:0" }
             .parse()
             .expect("a socket address");
@@ -149,6 +186,50 @@ impl Dial {
             endpoint: std::sync::Mutex::new(Some(endpoint)),
             protocol,
         })
+    }
+}
+
+fn dial_failure(reason: String) -> Failure {
+    Failure::session("dial", None, reason)
+}
+
+/// `addresses` in resolver order, but alternating between the families, starting with the first
+/// one's (RFC 8305 §4).
+fn interleave_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
+    let first_is_v6 = addresses.first().is_some_and(SocketAddr::is_ipv6);
+    let (mut first, mut second): (VecDeque<_>, VecDeque<_>) = addresses
+        .into_iter()
+        .partition(|address| address.is_ipv6() == first_is_v6);
+    let mut ordered = Vec::with_capacity(first.len() + second.len());
+    while !first.is_empty() || !second.is_empty() {
+        ordered.extend(first.pop_front());
+        ordered.extend(second.pop_front());
+    }
+    ordered
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn families_alternate_from_the_first() {
+        let address = |text: &str| text.parse::<SocketAddr>().unwrap();
+        let ordered = interleave_families(vec![
+            address("[::1]:1"),
+            address("[::2]:1"),
+            address("1.1.1.1:1"),
+            address("[::3]:1"),
+        ]);
+        assert_eq!(
+            ordered,
+            vec![
+                address("[::1]:1"),
+                address("1.1.1.1:1"),
+                address("[::2]:1"),
+                address("[::3]:1")
+            ]
+        );
     }
 }
 

@@ -9,13 +9,22 @@ import { fileURLToPath } from 'node:url';
 const python = resolve(dirname(fileURLToPath(import.meta.url)), '../../python');
 
 /**
- * Start the accepting end for `framing` (`'webtransport'` or `'native-quic'`). Resolves
- * `{ port, certificateHash, certificatePem, call, stop }` once it listens.
+ * Start the accepting end for `framing` (`'webtransport'` or `'native-quic'`), on `host` when given instead of the
+ * framing's default. Resolves `{ port, certificateHash, certificatePem, call, stop }` once it listens.
  */
-export async function startConformancePeer({ framing = 'webtransport' } = {}) {
+export async function startConformancePeer({ framing = 'webtransport', host } = {}) {
   const child = spawn(
     'uv',
-    ['run', '--locked', 'python', '-m', 'relay_helpers.conformance_peer', '--framing', framing],
+    [
+      'run',
+      '--locked',
+      'python',
+      '-m',
+      'relay_helpers.conformance_peer',
+      '--framing',
+      framing,
+      ...(host ? ['--host', host] : []),
+    ],
     {
       cwd: python,
       env: { ...process.env, PYTHONPATH: resolve(python, 'packages/mux-relay/tests') },
