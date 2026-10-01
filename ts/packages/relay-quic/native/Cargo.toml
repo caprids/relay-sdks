@@ -2,7 +2,7 @@
 name = "relay-quic"
 version = "0.0.0"
 edition = "2021"
-license = "UNLICENSED"
+license = "Apache-2.0"
 publish = false
 description = "The native QUIC dialing end behind @mux/relay-quic: quinn, exposed to Node through napi-rs"
 

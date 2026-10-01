@@ -1,9 +1,13 @@
 {
   "name": "@mux/moq-core",
   "version": "0.0.0",
-  "private": true,
   "description": "Transport-independent MOQT track primitives",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "directory": "ts/packages/moq-core"
+  },
   "type": "module",
   "sideEffects": false,
   "files": [
@@ -23,5 +27,8 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

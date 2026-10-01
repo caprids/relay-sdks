@@ -1,13 +1,18 @@
 {
   "name": "@mux/moq-mediabunny",
   "version": "0.0.0",
-  "private": true,
   "description": "Optional Mediabunny packet adapter for LOC and MSF",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "directory": "ts/packages/moq-mediabunny"
+  },
   "type": "module",
   "sideEffects": false,
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "exports": {
     ".": {
@@ -29,5 +34,8 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

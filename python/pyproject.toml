@@ -6,7 +6,7 @@ name = "relay-sdks-python"
 version = "0.0.0"
 description = "Development workspace for the Relay Python SDK"
 requires-python = ">=3.11"
-dependencies = ["moq-core", "moq-media", "mux-relay"]
+dependencies = ["mux-moq-core", "mux-moq-media", "mux-relay"]
 
 [dependency-groups]
 dev = [
@@ -32,8 +32,8 @@ default-groups = ["dev", "examples"]
 members = ["packages/*"]
 
 [tool.uv.sources]
-moq-core = { workspace = true }
-moq-media = { workspace = true }
+mux-moq-core = { workspace = true }
+mux-moq-media = { workspace = true }
 mux-relay = { workspace = true }
 
 # ---------------------------------------------------------------------------------------------------

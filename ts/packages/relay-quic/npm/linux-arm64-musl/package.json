@@ -9,7 +9,12 @@
     "relay-quic.linux-arm64-musl.node"
   ],
   "description": "Native QUIC transport adapter for the Relay SDK in Node",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "directory": "ts/packages/relay-quic/npm/linux-arm64-musl"
+  },
   "engines": {
     "node": ">=24"
   },
@@ -18,5 +23,8 @@
   ],
   "libc": [
     "musl"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
