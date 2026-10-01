@@ -5,7 +5,7 @@ through the real binding callback, announce-and-serve) stays in ``test_publish*.
 """
 
 import asyncio
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any, Literal
 
 import pytest
@@ -68,7 +68,13 @@ class FakeSubgroup:
 
     def abort(self, reason: object = None) -> None:
         self.aborts.append(reason)
-        self._finish(reason if isinstance(reason, BaseException) else RelayError("stream was reset", code="CLOSED"))
+        error = reason if isinstance(reason, BaseException) else RelayError("stream was reset", code="CLOSED")
+        self._finish(error)
+
+        # TA-16: a reset before the acknowledgement means the stream will never be acknowledged.
+        if not self.acknowledgement.done():
+            self.acknowledgement.set_exception(error)
+            self.acknowledgement.exception()  # retrieved: a stream reset before it completed has no waiter
 
     def fail(self, error: BaseException) -> None:
         """The transport rejects the stalled step, as a failed stream write would."""
@@ -108,6 +114,8 @@ class Harness:
         open: Literal["ok", "hold", "reject"] = "ok",
         acknowledge: bool = True,
         settling_groups: SettlingGroups | None = None,
+        track_properties: Sequence[KeyValuePair] = (),
+        clock: Callable[[], float] | None = None,
     ) -> None:
         self.opened: list[FakeSubgroup] = []
         self.open_failure = ConnectionError("data stream failed")
@@ -128,6 +136,8 @@ class Harness:
                 assert_open=self._assert_open,
                 end_track=self._end_track,
                 write_timeout=write_timeout,
+                track_properties=track_properties,
+                clock=clock,
             ),
         )
 
@@ -896,6 +906,370 @@ class TestSettlingGroups:
         h.disconnect()
         assert h.opened[0].aborts == []
         assert h.settling_groups.size == 1
+
+
+class RecordingSettlingGroups(SettlingGroups):
+    """Settling groups that record each group's SUBGROUP_DELIVERY_TIMEOUT, in seconds (``None`` for none)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeouts: list[float | None] = []
+
+    def add(self, acknowledged: Any, *, timeout: float | None = None, on_timeout: Any = None) -> None:
+        self.timeouts.append(timeout)
+        super().add(acknowledged, timeout=timeout, on_timeout=on_timeout)
+
+
+class SteppingClock:
+    """A clock that moves ``step`` seconds on every read: an object ages between the call and the transport."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.step = 0.0
+
+    def __call__(self) -> float:
+        value = self.now
+        self.now += self.step
+        return value
+
+
+def subgroup(ms: int | bytes) -> KeyValuePair:
+    return KeyValuePair(0x06, ms)
+
+
+def object_timeout(ms: int | bytes) -> KeyValuePair:
+    return KeyValuePair(0x02, ms)
+
+
+def delivery_reset(subgroup: FakeSubgroup) -> bool:
+    return [reset_code(reason) for reason in subgroup.aborts] == [STREAM_RESET_CODE.DELIVERY_TIMEOUT]
+
+
+class TestSubgroupDeliveryTimeout:
+    """§8 SUBGROUP_DELIVERY_TIMEOUT: a settling group whose FIN is not acknowledged in time is reset (#167)."""
+
+    def harness(self, track: Sequence[KeyValuePair] = (), **options: Any) -> tuple[Harness, RecordingSettlingGroups]:
+        recorder = RecordingSettlingGroups()
+        return Harness(acknowledge=False, settling_groups=recorder, track_properties=track, **options), recorder
+
+    async def test_resets_an_unacknowledged_settling_group_with_delivery_timeout_and_reports_nothing(self) -> None:
+        h, recorder = self.harness([subgroup(50)])
+        h.writer._bind(1)
+        loop = asyncio.get_running_loop()
+        await h.writer.write(b"\x01")
+        handed_over = loop.time()
+        assert recorder.size == 1
+
+        await settle(0.02)
+        assert h.opened[0].aborts == []
+        await wait_for(lambda: recorder.size == 0)
+
+        assert loop.time() - handed_over >= 0.05
+        assert delivery_reset(h.opened[0])
+        assert recorder.timeouts == [0.05]
+        assert not h.writer.closed
+        await h.writer.write(b"\x02")  # the track writes on, as nothing happened
+        assert h.opened[1].group_id == 1
+
+    async def test_an_acknowledgement_in_time_stops_the_timer(self) -> None:
+        h, recorder = self.harness([subgroup(50)])
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        h.opened[0].acknowledge()
+        await wait_for(lambda: recorder.size == 0)
+        await settle(0.08)
+        assert h.opened[0].aborts == []
+
+    @pytest.mark.parametrize(
+        ("publisher", "subscriber", "expected"),
+        [
+            (50, 200, 0.05),
+            (200, 50, 0.05),
+            (0, 50, 0.05),
+            (None, 50, 0.05),
+            (50, 0, 0.05),
+            (50, None, 0.05),
+            (0, 0, None),
+            (None, None, None),
+            (2**40, None, 2_147_483.647),
+            (None, 2**40, 2_147_483.647),
+        ],
+    )
+    async def test_takes_the_smaller_non_zero_of_the_publishers_and_the_subscribers_value(
+        self, publisher: int | None, subscriber: int | None, expected: float | None
+    ) -> None:
+        h, recorder = self.harness([] if publisher is None else [subgroup(publisher)])
+        h.writer._bind(1, None, subscriber)
+        await h.writer.write(b"\x01")
+        group = await h.writer.open_group()
+        await group.close()
+        assert recorder.timeouts == [expected, expected]
+
+    async def test_a_first_object_property_overrides_the_track_and_a_later_ones_is_ignored(self) -> None:
+        h, recorder = self.harness([subgroup(1000)])
+        h.writer._bind(1)
+        await h.writer.write(b"\x01", properties=[subgroup(40)])
+        group = await h.writer.open_group()
+        await group.write(b"\x02", properties=[subgroup(30)])
+        await group.write(b"\x03", properties=[subgroup(5)])
+        await group.close()
+        later = await h.writer.open_group()
+        await later.write(b"\x04")
+        await later.write(b"\x05", properties=[subgroup(5)])
+        await later.close()
+        empty = await h.writer.open_group()
+        await empty.close()
+        assert recorder.timeouts == [0.04, 0.03, 1.0, 1.0]
+
+    async def test_an_object_property_of_zero_cancels_the_tracks_value_for_its_group(self) -> None:
+        h, recorder = self.harness([subgroup(50)])
+        h.writer._bind(1)
+        await h.writer.write(b"\x01", properties=[subgroup(0)])
+        assert recorder.timeouts == [None]
+
+    async def test_a_value_that_is_not_an_integer_is_ignored_for_timing(self) -> None:
+        # The SDK's own argument check refuses bytes on an even type at registration and on write; a
+        # value that reached the slot anyway does not time anything and the track's value applies.
+        h, recorder = self.harness([subgroup(b"\x32")])
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        assert recorder.timeouts == [None]
+
+        g, grouped = self.harness([subgroup(60)])
+        g.writer._bind(1)
+        group = await g.writer.open_group()
+        group._operation.start_object(g.writer._clock(), [subgroup(b"\x0a")])
+        group._operation.check_object_age()
+        group._operation.object_taken()
+        await group.close()
+        assert grouped.timeouts == [0.06]
+
+    async def test_a_subscription_update_applies_to_groups_opened_afterwards_only(self) -> None:
+        h, recorder = self.harness()
+        h.writer._bind(1, None, 1000)
+        await h.writer.write(b"\x01")  # settling with 1 s
+        group = await h.writer.open_group()  # open: its stream opened under 1 s
+        h.writer._bind(1, None, 40)  # REQUEST_UPDATE: same alias, new value
+        await group.write(b"\x02")
+        await group.close()
+        await h.writer.write(b"\x03")
+        assert recorder.timeouts == [1.0, 1.0, 0.04]
+        await wait_for(lambda: delivery_reset(h.opened[2]))
+        assert h.opened[0].aborts == [] and h.opened[1].aborts == []
+
+    async def test_the_timer_survives_a_subscription_change_its_end_and_the_track_closing(self) -> None:
+        h, recorder = self.harness([subgroup(60)])
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        h.writer._bind(2)
+        h.writer._bind(None)
+        h.writer.close()
+        assert h.opened[0].aborts == []  # none of those resets a settling group
+        await wait_for(lambda: recorder.size == 0)
+        assert delivery_reset(h.opened[0])
+
+    async def test_only_the_connection_ending_settles_the_group_before_its_timer(self) -> None:
+        h, recorder = self.harness([subgroup(50)])
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        h.disconnect()
+        h.opened[0].acknowledge(ConnectionError("session closed"))  # the transport fails the acknowledgement
+        await wait_for(lambda: recorder.size == 0)
+        await settle(0.08)
+        assert h.opened[0].aborts == []
+
+    async def test_a_timed_out_settling_group_frees_room_under_the_limit(self) -> None:
+        shared = SettlingGroups(limit=1)
+        h = Harness(acknowledge=False, settling_groups=shared, track_properties=[subgroup(40)])
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        writing = await started(h.writer.write(b"\x02"))
+        await settle()
+        assert not writing.done()  # waiting in opening-stream for room
+        await asyncio.wait_for(writing, 1)  # the first group timed out and made room
+        assert delivery_reset(h.opened[0])
+
+
+class TestObjectDeliveryTimeout:
+    """§8 OBJECT_DELIVERY_TIMEOUT: an object too old when it would reach the transport is not sent (#167)."""
+
+    async def test_a_write_waiting_too_long_for_demand_fails_with_delivery_timeout_and_sends_nothing(self) -> None:
+        h = Harness(track_properties=[object_timeout(50)])
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert loop.time() - started_at >= 0.05
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "waiting-for-demand")
+        assert h.opened == []
+        assert not h.writer.closed
+        h.writer._bind(1)
+        await h.writer.write(b"\x02")
+        assert h.opened[0].group_id == 0  # no group ID was consumed before the stream
+
+    async def test_the_shorter_write_deadline_wins_and_reports_write_timeout(self) -> None:
+        h = Harness(write_timeout=SHORT, track_properties=[object_timeout(1000)])
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", "waiting-for-demand")
+
+    async def test_an_object_property_sets_the_timeout_of_its_own_write(self) -> None:
+        h = Harness()
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01", properties=[object_timeout(40)])
+        assert failure.value.code == "DELIVERY_TIMEOUT"
+
+    async def test_only_the_publishers_value_times_the_wait_for_settling_room(self) -> None:
+        # The subscriber's smaller value is not fixed yet, so it does not cut the wait short.
+        shared = SettlingGroups(limit=1)
+        h = Harness(acknowledge=False, settling_groups=shared)
+        h.writer._bind(1, 30)
+        await h.writer.write(b"\x01")  # fills the connection's only settling slot
+        writing = await started(h.writer.write(b"\x02"))
+        await settle(0.08)
+        assert not writing.done()
+        h.opened[0].acknowledge()
+        with pytest.raises(RelayError) as failure:
+            await asyncio.wait_for(writing, 1)
+        # Once room frees up, the value is fixed and the 80 ms old object fails before any stream opens.
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "opening-stream")
+        assert len(h.opened) == 1
+        await h.writer.write(b"\x03")
+        assert h.opened[1].group_id == 2  # the failed write's group ID is not reused
+
+    async def test_the_subscribers_smaller_value_fails_at_the_snapshot_with_no_stream_opened(self) -> None:
+        clock = SteppingClock()
+        h = Harness(track_properties=[object_timeout(1000)], clock=clock)
+        clock.step = 0.03  # the call, the timer and the snapshot: 60 ms old when the value is fixed
+        h.writer._bind(1, 50)
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "opening-stream")
+        assert h.opened == []
+
+    async def test_a_publisher_value_times_the_wait_and_rearms_for_the_rest_at_the_snapshot(self) -> None:
+        shared = SettlingGroups(limit=1)
+        h = Harness(acknowledge=False, settling_groups=shared, stall="none")
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        h.writer._bind(1, 1000)
+        writing = await started(h.writer.write(b"\x02", properties=[object_timeout(100)]))
+        await settle(0.02)
+        h.opened[0].acknowledge()  # room frees at about 20 ms; the fixed value is the publisher's 100 ms
+        await asyncio.wait_for(writing, 1)
+        assert len(h.opened) == 2
+
+    async def test_an_update_that_raises_the_value_before_the_snapshot_does_not_fail_the_write_early(self) -> None:
+        shared = SettlingGroups(limit=1)
+        h = Harness(acknowledge=False, settling_groups=shared)
+        h.writer._bind(1, 40)
+        await h.writer.write(b"\x01")
+        writing = await started(h.writer.write(b"\x02"))
+        h.writer._bind(1, 1000)  # REQUEST_UPDATE while the write waits for room
+        await settle(0.08)  # past the old 40 ms
+        assert not writing.done()
+        h.opened[0].acknowledge()
+        await asyncio.wait_for(writing, 1)  # fixed at 1 s: in time
+        assert len(h.opened) == 2
+
+    async def test_an_object_too_old_at_the_transport_resets_its_stream_with_delivery_timeout(self) -> None:
+        clock = SteppingClock()
+        h = Harness(track_properties=[object_timeout(50)], clock=clock)
+        h.writer._bind(1)
+        # Every read of the clock is 15 ms later: 30 ms old when the value is fixed (in time), 60 ms old
+        # when it reaches the open stream.
+        clock.step = 0.015
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "writing")
+        assert h.opened[0].objects == []
+        assert delivery_reset(h.opened[0])
+        clock.step = 0.0
+        await h.writer.write(b"\x02")
+        assert h.opened[1].group_id == 1
+
+    async def test_an_object_blocked_in_the_stream_write_is_still_timed_and_its_stream_reset(self) -> None:
+        # The bytes are queued, not transmitted: the timer runs until the stream write returns.
+        h = Harness(stall="write", track_properties=[object_timeout(50)])
+        h.writer._bind(1)
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "writing")
+        assert delivery_reset(h.opened[0])
+        assert h.opened[0].fin_calls == 0
+
+    async def test_once_the_stream_write_returns_the_object_is_no_longer_timed(self) -> None:
+        h = Harness(stall="fin", write_timeout=0.15, track_properties=[object_timeout(30)])
+        h.writer._bind(1)
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", "closing")
+
+    async def test_in_an_open_group_resets_the_group_fails_later_writes_and_reopens_nothing(self) -> None:
+        clock = SteppingClock()
+        h = Harness(track_properties=[object_timeout(50)], clock=clock)
+        h.writer._bind(1)
+        group = await h.writer.open_group()
+        await group.write(b"\x01")
+        clock.step = 0.03
+        with pytest.raises(RelayError) as failure:
+            await group.write(b"\x02")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "writing")
+        assert delivery_reset(h.opened[0])
+        assert len(h.opened[0].objects) == 1
+        assert group.closed
+        clock.step = 0.0
+        with pytest.raises(RelayError) as later:
+            await group.write(b"\x03")
+        assert later.value.code == "DELIVERY_TIMEOUT"
+        assert len(h.opened) == 1  # no new stream for that group (§8 SHOULD NOT)
+        assert not h.writer.closed
+        await h.writer.write(b"\x04")
+        assert h.opened[1].group_id == 1
+
+    async def test_the_first_objects_value_applies_to_the_whole_group_and_a_later_objects_is_ignored(self) -> None:
+        clock = SteppingClock()
+        h = Harness(clock=clock)
+        h.writer._bind(1)
+        group = await h.writer.open_group()
+        await group.write(b"\x01", properties=[object_timeout(50)])
+        clock.step = 0.03
+        with pytest.raises(RelayError) as failure:
+            await group.write(b"\x02")
+        assert failure.value.code == "DELIVERY_TIMEOUT"
+
+        clock.step = 0.0
+        other = await h.writer.open_group()
+        await other.write(b"\x03")
+        clock.step = 0.03
+        await other.write(b"\x04", properties=[object_timeout(50)])
+        await other.write(b"\x05")
+        await other.close()
+        assert len(h.opened[1].objects) == 3
+
+    async def test_zero_and_a_missing_value_set_no_timeout(self) -> None:
+        clock = SteppingClock()
+        h = Harness(track_properties=[object_timeout(0)], clock=clock)
+        h.writer._bind(1, 0)
+        clock.step = 10.0
+        await h.writer.write(b"\x01")
+        group = await h.writer.open_group()
+        await group.write(b"\x02")
+        await group.close()
+        assert [len(s.objects) for s in h.opened] == [1, 1]
+
+    async def test_a_huge_value_is_clamped_rather_than_refused(self) -> None:
+        clock = SteppingClock()
+        h = Harness(track_properties=[object_timeout(2**62)], clock=clock)
+        h.writer._bind(1)
+        # The clock is read at the call, when the timer is armed, at the snapshot, when it is re-armed and
+        # at the transport: four steps of age by then.
+        clock.step = 536_870.0  # 2,147,480 s old: just under the clamp, still in time
+        await h.writer.write(b"\x01")
+        clock.step = 536_871.0  # 2,147,484 s old: past it
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x02")
+        assert failure.value.code == "DELIVERY_TIMEOUT"
 
 
 def test_stream_reset_carries_the_moqt_code_and_the_cause() -> None:

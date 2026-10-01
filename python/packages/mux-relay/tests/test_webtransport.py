@@ -433,6 +433,72 @@ class TestSendBackpressure:
             server.close()
             await asyncio.sleep(0.05)
 
+    async def test_an_abort_after_an_unacknowledged_fin_resets_with_the_code_and_fails_the_acknowledgement(
+        self,
+    ) -> None:
+        # TA-16 after the FIN went out (#167): a settling group's SUBGROUP_DELIVERY_TIMEOUT resets a stream
+        # whose FIN is in flight. The blackout drops the FIN; once the link is back the peer sees only
+        # RESET_STREAM with DELIVERY_TIMEOUT (0x2), and the acknowledgement wait fails instead of settling.
+        outcomes: list[tuple[str, int]] = []
+        sessions: list[Any] = []
+        readers: list[asyncio.Task[None]] = []
+
+        async def read(stream: ReceiveStream) -> None:
+            total = 0
+            try:
+                while (chunk := await stream.read()) is not None:
+                    total += len(chunk)
+            except WebTransportError as error:
+                outcomes.append(("reset", error.code if error.code is not None else -1))
+                return
+            outcomes.append(("fin", total))
+
+        async def accept(session: Any) -> None:
+            async for stream in session.incoming_unidirectional_streams():
+                readers.append(asyncio.ensure_future(read(stream)))
+
+        def on_session(session: Any) -> None:
+            sessions.append(session)
+            readers.append(asyncio.ensure_future(accept(session)))
+
+        server = await start_webtransport_server(on_session)
+        transport = await self._connect(server)
+        await wait_for(lambda: len(sessions) == 1, timeout=5)
+
+        try:
+            stream = await transport.create_unidirectional_stream()
+            await asyncio.wait_for(stream.write(b"\1" * 1000), 5)
+            await asyncio.sleep(0.2)  # the data is acknowledged; only the FIN will be in flight
+            sessions[0].impair(paused=True)
+            await asyncio.wait_for(stream.close(), 5)  # the FIN went out, into the blackout
+            acknowledged = asyncio.ensure_future(stream.wait_acknowledged())
+            await asyncio.sleep(0.2)
+            assert not acknowledged.done()
+
+            stream.abort(WebTransportError("delivery timeout", code=2))
+
+            sessions[0].impair()
+            with pytest.raises(WebTransportError):
+                await asyncio.wait_for(acknowledged, 5)
+            await wait_for(lambda: len(outcomes) == 1, timeout=5)
+            await asyncio.sleep(0.3)  # time for a retransmitted FIN, if one were still coming
+            assert outcomes == [("reset", 2)]
+
+            # Once a FIN is acknowledged there is nothing to reset: abort() sends nothing.
+            done = await transport.create_unidirectional_stream()
+            await done.write(b"\2")
+            await done.close()
+            await asyncio.wait_for(done.wait_acknowledged(), 5)
+            done.abort(WebTransportError("too late", code=2))
+            await wait_for(lambda: len(outcomes) == 2, timeout=5)
+            await asyncio.sleep(0.2)
+            assert outcomes == [("reset", 2), ("fin", 1)]
+        finally:
+            transport.close()
+            await asyncio.wait_for(transport.wait_closed(), 5)
+            server.close()
+            await asyncio.sleep(0.05)
+
     async def test_per_stream_state_is_pruned_as_streams_finish(self) -> None:
         # Every single-object write is one stream; finished streams must leave no permanent per-stream
         # state in the adapter's maps or in aioquic's live stream table (#4).

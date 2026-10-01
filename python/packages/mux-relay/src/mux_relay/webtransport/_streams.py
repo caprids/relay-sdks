@@ -219,8 +219,14 @@ class _SendHalf:
         await asyncio.shield(self._delivery)
 
     def abort(self, reason: object = None) -> None:
-        # A FIN that already went out is a complete stream at the peer; a reset now would only destroy it.
-        if self._aborted or self._error is not None or (self._closed and self._transmitted is None):
+        """RESET_STREAM now, in every state short of the peer's acknowledgement of the whole stream (TA-16).
+
+        That includes a FIN that was transmitted but not yet acknowledged: the peer may never have
+        received it, and a settling group's delivery timeout resets exactly that stream
+        (draft-ietf-moq-transport-20 section 8). :meth:`wait_acknowledged` then raises ``reason``.
+        Once the FIN is acknowledged there is nothing left to reset, and this does nothing.
+        """
+        if self._aborted or self._error is not None or self._acknowledged:
             return
 
         self._aborted = True

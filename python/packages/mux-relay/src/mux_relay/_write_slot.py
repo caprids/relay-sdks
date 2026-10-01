@@ -9,13 +9,28 @@ connection ends.
 
 An operation completes once the transport has taken its group's FIN, not once the relay has
 acknowledged it: the slot frees itself and passes the group on to the connection as a settling group
-(see ``CONTEXT.md`` and ``_settling_groups.py``). Nothing resets a settling group, and nothing reports
-how it ends.
+(see ``CONTEXT.md`` and ``_settling_groups.py``). Only the group's own delivery timeout resets a
+settling group, and nothing reports how it ends.
+
+The slot enforces both delivery timeouts of draft-ietf-moq-transport-20 section 8 (see
+``CONTEXT.md``). Each group's values are the smaller non-zero of the publisher's (the 0x02 or 0x06
+property on the group's first object, else the track property) and the subscriber's (the relay
+subscription's parameters, as updated by REQUEST_UPDATE). The subscriber's are fixed when the group's
+stream opens, the publisher's when its first object is handed over. The object timeout bounds an
+object's age from the application's call until the transport has taken it, every wait included:
+it is checked just before the object is written and runs on until the stream write returns, which
+is when aioquic has transmitted the bytes. Until the subscriber's values are fixed only the
+publisher's time the wait; at that point an object already older than the fixed value fails, before
+any stream opens. An older object fails its operation with
+``DELIVERY_TIMEOUT`` and resets the group with DELIVERY_TIMEOUT (0x2). The subgroup timeout starts
+when the FIN is handed over and resets the settling group, silently, if the relay has not
+acknowledged the FIN by then.
 
 Everything the slot borrows enters through :class:`WriteSlotDependencies`: how to open a subgroup
 stream, the connection's settling groups, whether the namespace is solicited, whether the connection
-is still open, and how to end the track in the core. Tests drive a slot with an in-memory subgroup
-writer; the "Write phases and interruptions" table in ``spec/behavior.md`` is the list they cover.
+is still open, how to end the track in the core, and the track's properties. Tests drive a slot with
+an in-memory subgroup writer; the "Write phases and interruptions" table in ``spec/behavior.md`` is
+the list they cover.
 """
 
 from __future__ import annotations
@@ -39,6 +54,54 @@ from .errors import (
 from .payload import _encode_json, _encode_text
 
 T = TypeVar("T")
+
+MAX_DELIVERY_TIMEOUT_MS = 2_147_483_647
+"""The largest delivery timeout honoured, in milliseconds; a larger value is clamped to it.
+
+The SDKs' common timer bound (see Deadline in ``spec/behavior.md``)."""
+
+OBJECT_DELIVERY_TIMEOUT = 0x02
+"""The OBJECT_DELIVERY_TIMEOUT property type (draft-ietf-moq-transport-20 section 12.2)."""
+
+SUBGROUP_DELIVERY_TIMEOUT = 0x06
+"""The SUBGROUP_DELIVERY_TIMEOUT property type (draft-ietf-moq-transport-20 section 12.1)."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Timeouts:
+    """One side's delivery timeouts in milliseconds; ``None`` where that side set none."""
+
+    object: int | None = None
+    subgroup: int | None = None
+
+
+_NO_TIMEOUTS = _Timeouts()
+
+
+def _property_timeout(properties: Sequence[KeyValuePair], kind: int) -> int | None:
+    """The first ``kind`` property as a timeout, or ``None``: absent, or not an integer (ignored for timing)."""
+    for pair in properties:
+        if pair.type == kind:
+            value = pair.value
+            return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+    return None
+
+
+def _publisher_timeouts(properties: Sequence[KeyValuePair], fallback: _Timeouts) -> _Timeouts:
+    """The publisher's values for a group: its first object's properties, else ``fallback`` (the track's)."""
+    object_timeout = _property_timeout(properties, OBJECT_DELIVERY_TIMEOUT)
+    subgroup_timeout = _property_timeout(properties, SUBGROUP_DELIVERY_TIMEOUT)
+    return _Timeouts(
+        object=fallback.object if object_timeout is None else object_timeout,
+        subgroup=fallback.subgroup if subgroup_timeout is None else subgroup_timeout,
+    )
+
+
+def _effective_seconds(publisher: int | None, subscriber: int | None) -> float:
+    """§8: the smaller of the non-zero values, clamped, in seconds; 0 when neither sets a timeout."""
+    values = [value for value in (publisher, subscriber) if value]
+    return min(*values, MAX_DELIVERY_TIMEOUT_MS) / 1000 if values else 0.0
 
 
 def _observe(future: asyncio.Future[Any]) -> None:
@@ -110,6 +173,10 @@ class WriteSlotDependencies:
     """Tell the core the track is done, so it FINs any live subscription stream."""
     write_timeout: float
     """Deadline in seconds for waiting for demand and for each stream step."""
+    track_properties: Sequence[KeyValuePair] = ()
+    """The track's properties as registered: its 0x02 and 0x06 are the publisher's delivery timeouts."""
+    clock: Callable[[], float] | None = None
+    """Seconds on a monotonic clock, for an object's age; the event loop's clock when ``None``."""
 
 
 class _Operation:
@@ -119,7 +186,23 @@ class _Operation:
     holds it never reaches into the track writer.
     """
 
-    __slots__ = ("_slot", "alias", "cancelled", "code", "demand", "failure", "interrupted", "kind", "phase", "writer")
+    __slots__ = (
+        "_object_properties",
+        "_object_started",
+        "_object_timer",
+        "_slot",
+        "alias",
+        "cancelled",
+        "code",
+        "demand",
+        "failure",
+        "interrupted",
+        "kind",
+        "phase",
+        "publisher",
+        "subscriber",
+        "writer",
+    )
 
     def __init__(self, slot: RelayTrackWriter, kind: Literal["write", "group"]) -> None:
         loop = asyncio.get_running_loop()
@@ -134,6 +217,14 @@ class _Operation:
         self.demand: asyncio.Future[None] = loop.create_future()
         self.interrupted: asyncio.Future[None] = loop.create_future()
         _observe(self.interrupted)
+        self.subscriber: _Timeouts | None = None
+        """The relay subscription's delivery timeouts, fixed when the group's stream opens."""
+        self.publisher: _Timeouts | None = None
+        """The publisher's delivery timeouts, fixed when the group's first object is handed over."""
+        self._object_started: float | None = None
+        """When the application handed over the object now on its way, by the slot's clock."""
+        self._object_properties: Sequence[KeyValuePair] = ()
+        self._object_timer: asyncio.TimerHandle | None = None
 
     def wake(self) -> None:
         if not self.demand.done():
@@ -147,6 +238,7 @@ class _Operation:
         self.cancelled = True
         self.failure = error
         self.code = code
+        self._stop_object_clock()
 
         if self.writer is not None:
             # Reset only this group's stream. The next explicit write uses a fresh group ID;
@@ -166,9 +258,126 @@ class _Operation:
             self._slot._active = None
 
     def complete(self, writer: SubgroupStream) -> None:
-        """The FIN was handed over: the group settles on the connection's account and the slot is free."""
-        self._slot._deps.settling_groups.add(writer.wait_acknowledged())
+        """The FIN was handed over: the group settles on the connection's account and the slot is free.
+
+        Its SUBGROUP_DELIVERY_TIMEOUT starts now (§8). If the relay has not acknowledged the FIN when
+        it expires, the stream is reset with DELIVERY_TIMEOUT, and nothing is reported: the group
+        leaves the settling set as a late failure.
+        """
+        publisher = self.publisher if self.publisher is not None else self._slot._track_timeouts
+        subscriber = self.subscriber if self.subscriber is not None else _NO_TIMEOUTS
+        timeout = _effective_seconds(publisher.subgroup, subscriber.subgroup)
+
+        def expire() -> None:
+            writer.abort(StreamReset(STREAM_RESET_CODE.DELIVERY_TIMEOUT, None))
+
+        self._slot._deps.settling_groups.add(
+            writer.wait_acknowledged(), timeout=timeout or None, on_timeout=expire if timeout else None
+        )
         self.release()
+
+    # ------------------------------------------------------------------ OBJECT_DELIVERY_TIMEOUT (§8)
+
+    def start_object(self, started: float, properties: Sequence[KeyValuePair]) -> None:
+        """The application handed over an object at ``started``: its age counts from then, every wait included."""
+        self._object_started = started
+        self._object_properties = properties
+        self._arm_object_timer()
+
+    def fix_subscriber(self, subscriber: _Timeouts) -> None:
+        """Just before the stream opens: fix the subscriber's values and check the object against the result.
+
+        Until now only the publisher's value timed the wait. An object already older than the fixed
+        effective value fails here, in ``opening-stream``, before any stream opens; otherwise its
+        timer is re-armed for what remains.
+        """
+        self.subscriber = subscriber
+
+        if self._object_started is None:
+            return
+
+        limit = self._object_limit()
+
+        if limit and self._slot._clock() - self._object_started >= limit:
+            self._fail_delivery()
+        else:
+            self._arm_object_timer()
+
+        self.check()
+
+    def check_object_age(self) -> None:
+        """The object is about to go to the transport: the §8 check, in case its timer is late.
+
+        The group's first object fixes the publisher's values. An object older than the effective
+        OBJECT_DELIVERY_TIMEOUT fails the operation with ``DELIVERY_TIMEOUT`` and resets its stream.
+        Its timer keeps running until :meth:`object_taken`.
+        """
+        if self.publisher is None:
+            self.publisher = self._publisher_now()
+
+        started = self._object_started
+
+        if started is not None:
+            limit = self._object_limit()
+
+            if limit and self._slot._clock() - started >= limit:
+                self._fail_delivery()
+
+        self.check()
+
+    def object_taken(self) -> None:
+        """The transport took the object: its stream write returned, so aioquic transmitted it. No longer timed."""
+        self._stop_object_clock()
+
+    def _publisher_now(self) -> _Timeouts:
+        if self.publisher is not None:
+            return self.publisher
+
+        return _publisher_timeouts(self._object_properties, self._slot._track_timeouts)
+
+    def _object_limit(self) -> float:
+        """The object's timeout in seconds, 0 for none: the publisher's alone until the subscriber's is fixed."""
+        subscriber = self.subscriber if self.subscriber is not None else _NO_TIMEOUTS
+        return _effective_seconds(self._publisher_now().object, subscriber.object)
+
+    def _arm_object_timer(self) -> None:
+        if self._object_timer is not None:
+            self._object_timer.cancel()
+            self._object_timer = None
+
+        if self._object_started is None or self.cancelled:
+            return
+
+        limit = self._object_limit()
+
+        if limit:
+            remaining = self._object_started + limit - self._slot._clock()
+            self._object_timer = asyncio.get_running_loop().call_later(max(remaining, 0.0), self._object_expired)
+
+    def _object_expired(self) -> None:
+        self._object_timer = None
+        started = self._object_started
+        limit = self._object_limit()
+
+        if started is not None and limit and self._slot._clock() - started >= limit:
+            self._fail_delivery()
+        else:
+            self._arm_object_timer()
+
+    def _stop_object_clock(self) -> None:
+        self._object_started = None
+
+        if self._object_timer is not None:
+            self._object_timer.cancel()
+            self._object_timer = None
+
+    def _fail_delivery(self) -> None:
+        error = RelayError(
+            "Object exceeded its delivery timeout before it reached the transport; the data is stale",
+            code="DELIVERY_TIMEOUT",
+            phase=self.phase,
+        )
+        self.cancel(error, STREAM_RESET_CODE.DELIVERY_TIMEOUT)
 
     def check(self) -> None:
         """Raise this operation's failure, or the connection's, before or after a step."""
@@ -306,7 +515,12 @@ class RelayGroupWriter:
         Properties are encoded as supplied; the relay may transform them before delivery.
         Each call has its own ``write_timeout`` deadline; expiry resets the group and leaves the
         track open. ``status`` is only meaningful for an empty payload (an end-of-group or end-of-track marker).
+        On the group's first object, a 0x02 or 0x06 property sets the group's delivery timeout
+        instead of the track's; on a later object it is only sent. An object older than the
+        group's OBJECT_DELIVERY_TIMEOUT when it reaches the transport raises ``DELIVERY_TIMEOUT``
+        and resets the group.
         """
+        started = self._operation._slot._clock()
         # Arguments before group state: a bad payload is a programming error whatever the group holds.
         data = payload_bytes(payload)
         object_properties = property_pairs(properties)
@@ -319,15 +533,20 @@ class RelayGroupWriter:
 
         self._check()
         object_id = self._next_object_id
+        operation = self._operation
+
+        async def send() -> None:
+            operation.check_object_age()
+            await self._writer.write_object(
+                object_id=object_id, payload=data, properties=object_properties, status=status
+            )
+            operation.object_taken()
 
         self._pending = True
         try:
-            self._operation.phase = "writing"
-            await self._operation.run(
-                lambda: self._writer.write_object(
-                    object_id=object_id, payload=data, properties=object_properties, status=status
-                )
-            )
+            operation.phase = "writing"
+            operation.start_object(started, object_properties)
+            await operation.run(send)
             self._next_object_id += 1
         finally:
             self._pending = False
@@ -372,11 +591,28 @@ class RelayTrackWriter:
     phases and interruptions" table in ``spec/behavior.md``).
     """
 
-    __slots__ = ("_active", "_alias", "_deps", "_ended", "_next_group_id", "_watchers", "name")
+    __slots__ = (
+        "_active",
+        "_alias",
+        "_clock",
+        "_deps",
+        "_ended",
+        "_next_group_id",
+        "_subscriber_timeouts",
+        "_track_timeouts",
+        "_watchers",
+        "name",
+    )
 
     def __init__(self, name: str, dependencies: WriteSlotDependencies) -> None:
         self.name = name
         self._deps = dependencies
+        loop = asyncio.get_running_loop()
+        self._clock: Callable[[], float] = dependencies.clock if dependencies.clock is not None else loop.time
+        self._track_timeouts = _publisher_timeouts(dependencies.track_properties, _NO_TIMEOUTS)
+        """The publisher's delivery timeouts from the track properties."""
+        self._subscriber_timeouts = _NO_TIMEOUTS
+        """The current relay subscription's delivery timeouts; none while there is no binding."""
         self._alias: int | None = None
         self._ended = False
         self._next_group_id = 0
@@ -435,8 +671,18 @@ class RelayTrackWriter:
 
     # ------------------------------------------------------------------ inbound from the publisher
 
-    def _bind(self, next_alias: int | None) -> None:
-        """The relay's binding for this track changed: a new alias, or ``None`` when its subscription ended."""
+    def _bind(
+        self,
+        next_alias: int | None,
+        object_delivery_timeout: int | None = None,
+        subgroup_delivery_timeout: int | None = None,
+    ) -> None:
+        """The relay's binding for this track changed: a new alias, or ``None`` when its subscription ended.
+
+        The two timeouts are the bound subscription's values in milliseconds (``None`` where it sent
+        none); a REQUEST_UPDATE that changes them arrives as a binding with the same alias. They apply
+        to groups whose streams open from now on.
+        """
         active = self._active
 
         if active is not None and active.alias is not None and active.alias != next_alias:
@@ -449,6 +695,11 @@ class RelayTrackWriter:
 
         changed = self._alias != next_alias
         self._alias = next_alias
+        self._subscriber_timeouts = (
+            _Timeouts(object=object_delivery_timeout, subgroup=subgroup_delivery_timeout)
+            if next_alias is not None
+            else _NO_TIMEOUTS
+        )
 
         if next_alias is not None and self._active is not None:
             self._active.wake()
@@ -530,8 +781,13 @@ class RelayTrackWriter:
         writing again. Bytes are copied. Failure resets this group and leaves the track usable
         while the connection is open. Data may already have reached the relay; choose the next
         object explicitly (no automatic retry).
-        Properties are encoded as supplied; the relay may transform them before delivery.
+        Properties are encoded as supplied; the relay may transform them before delivery. A 0x02 or
+        0x06 property sets this group's delivery timeout instead of the track's. An object older
+        than its OBJECT_DELIVERY_TIMEOUT when it would reach the transport, counted from this call and
+        including the wait for demand, raises ``DELIVERY_TIMEOUT``: the data is stale, so write fresh
+        data rather than this object again.
         """
+        started = self._clock()
         # Admit the arguments before consulting the track's single write slot: a payload or property
         # that cannot be converted must not leave the slot held, and a programming error is reported
         # the same way whatever the slot holds. `_begin` checks the slot.
@@ -539,6 +795,7 @@ class RelayTrackWriter:
         object_properties = property_pairs(properties)
 
         operation = self._begin("write")
+        operation.start_object(started, object_properties)
         try:
             writer = await operation.run(lambda: self._send(operation, data, object_properties))
             operation.complete(writer)
@@ -587,10 +844,13 @@ class RelayTrackWriter:
 
         if not settling_groups.has_room():
             # At the settling-group limit this waits under the write deadline, which reports a stall
-            # as a WRITE_TIMEOUT in this phase.
+            # as a WRITE_TIMEOUT in this phase (or a DELIVERY_TIMEOUT, if the object's comes first).
             await settling_groups.wait_for_room(operation.interrupted)
             operation.check()
 
+        # The group's subscriber values are those of the subscription its stream opens on (§8). An
+        # object already older than the fixed value fails here, before any stream opens.
+        operation.fix_subscriber(self._subscriber_timeouts)
         writer = await self._deps.open_subgroup(alias, group_id)
 
         if operation.cancelled:
@@ -604,7 +864,9 @@ class RelayTrackWriter:
     async def _send(self, operation: _Operation, data: bytes, properties: list[KeyValuePair]) -> SubgroupStream:
         writer = await self._open_stream(operation)
         operation.phase = "writing"
+        operation.check_object_age()
         await writer.write_object(object_id=0, properties=properties, payload=data)
+        operation.object_taken()
         operation.check()
         operation.phase = "closing"
         await writer.fin()

@@ -11,15 +11,21 @@ groups open at that moment. The TypeScript SDK keeps the same set (``ts/src/sett
 
 A settling group that fails later (STOP_SENDING, a reset, session teardown) leaves the set like one
 that settles cleanly, and nobody hears of it: the cause surfaces as demand, a rebind, or the
-connection's ``closed``. ``RelayPublisher.close()`` drains the set before it ends the session, because
-closing the connection discards whatever the relay has not acknowledged.
+connection's ``closed``. A group with a SUBGROUP_DELIVERY_TIMEOUT (draft-ietf-moq-transport-20 section
+8) carries its timer here: started when the group joins, it resets the stream if the acknowledgement
+has not come by then, which fails the acknowledgement wait, so the group leaves the set the same
+silent way and frees its room. The timer belongs to the group: a subscription change or end and the
+track's close leave it running, and only the acknowledgement or the connection's end settles the
+group first. ``RelayPublisher.close()`` drains the set before it ends the session, because closing
+the connection discards whatever the relay has not acknowledged; delivery timeouts only end some of
+the drained groups sooner.
 """
 
 from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from moq_core._tasks import observe, spawn
@@ -76,11 +82,26 @@ class SettlingGroups:
         if not waiter.done() or waiter.cancelled():
             interrupted.result()
 
-    def add(self, acknowledged: Awaitable[None]) -> None:
-        """A group's FIN was handed over: count it until ``acknowledged`` settles, either way."""
+    def add(
+        self,
+        acknowledged: Awaitable[None],
+        *,
+        timeout: float | None = None,
+        on_timeout: Callable[[], None] | None = None,
+    ) -> None:
+        """A group's FIN was handed over: count it until ``acknowledged`` settles, either way.
+
+        With a ``timeout`` (seconds, the group's SUBGROUP_DELIVERY_TIMEOUT), ``on_timeout`` runs if
+        ``acknowledged`` is still pending by then; it resets the group's stream, which settles
+        ``acknowledged`` with the reset.
+        """
         tracked = spawn(_settled(acknowledged))
         self._settling.add(tracked)
         tracked.add_done_callback(self._settle)
+
+        if timeout is not None and on_timeout is not None:
+            timer = asyncio.get_running_loop().call_later(timeout, on_timeout)
+            tracked.add_done_callback(lambda _: timer.cancel())
 
     async def drain(self, seconds: float, stop: asyncio.Future[Any], *also: Awaitable[None]) -> None:
         """Wait for every settling group and each of ``also``, for at most ``seconds`` or until ``stop`` settles.

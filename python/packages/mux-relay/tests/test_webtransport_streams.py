@@ -4,8 +4,8 @@ The contract tests run twice, over ``core_helpers.streams.Pipe`` (the in-memory 
 tests run on) and over a ``_SendHalf`` connected to a ``_ReceiveHalf`` through ``relay_helpers.stream_link``,
 so both adapters are held to the same expectations. What differs between them is tested on the halves alone:
 a write settles when the link transmits, not when the peer reads; the transmit waiter is shared by concurrent
-writers and shielded from their cancellation; an abort after a transmitted FIN is a no-op; and the link's own
-failure reaches every half.
+writers and shielded from their cancellation; an abort after a transmitted FIN still resets until the peer
+acknowledges it (TA-16); and the link's own failure reaches every half.
 """
 
 import asyncio
@@ -181,17 +181,44 @@ class TestSendHalf:
         await asyncio.wait_for(closing, 1)
         assert await read_all(receive) == [b"\1" * 8, b"tail"]
 
-    async def test_abort_after_the_fin_went_out_sends_no_reset(self) -> None:
+    async def test_abort_after_the_fin_went_out_still_resets_and_fails_the_acknowledgement(self) -> None:
+        # TA-16: a transmitted FIN the peer has not acknowledged may never arrive, so the stream is still
+        # resettable, and the acknowledgement wait fails with the reason (a settling group's delivery timeout).
+        link = StreamLink()
+        send, _ = link.pair(STREAM_ID)
+        closing = asyncio.ensure_future(send.close())
+        await asyncio.sleep(0)
+        link.transmit()
+        await closing
+        acknowledged = asyncio.ensure_future(send.wait_acknowledged())
+        await asyncio.sleep(0)
+        reason = WebTransportError("delivery timeout", code=2)
+
+        send.abort(reason)
+
+        assert link.resets == [(STREAM_ID, 2)]
+        with pytest.raises(WebTransportError) as failure:
+            await asyncio.wait_for(acknowledged, 1)
+        assert failure.value is reason
+
+        send.finished()  # the reset's acknowledgement changes nothing
+        with pytest.raises(WebTransportError):
+            await send.wait_acknowledged()
+
+    async def test_abort_after_the_fin_was_acknowledged_sends_no_reset(self) -> None:
         link = StreamLink()
         send, receive = link.pair(STREAM_ID)
         closing = asyncio.ensure_future(send.close())
         await asyncio.sleep(0)
         link.transmit()
         await closing
+        send.finished()  # the link reports the peer's acknowledgement of the FIN
 
         send.abort(WebTransportError("too late", code=9))
+
         assert link.resets == []
         assert await receive.read() is None
+        await asyncio.wait_for(send.wait_acknowledged(), 1)
 
     async def test_abort_during_a_pending_fin_fails_the_close_with_the_reason_and_resets(self) -> None:
         link = StreamLink()
