@@ -12,7 +12,6 @@
  *
  * @packageDocumentation
  */
-import type { NativeQuicTransportFactory, NativeQuicTransportOptions } from '@mux/relay-quic';
 import {
   type ConnectRelayOptions,
   type ConnectRelaySubscriberOptions,
@@ -20,6 +19,7 @@ import {
   type RelaySubscriber,
   type RelayTransportFactory,
 } from './connect.js';
+import { resolveTransport } from './connect-session.js';
 import { RelayError } from './errors.js';
 import {
   type ConnectRelayPublisherOptions,
@@ -29,6 +29,25 @@ import {
 
 export * from './index.js';
 
+/** A certificate hash the server's end-entity certificate must match, in the W3C WebTransport shape. */
+export interface RelayCertificateHash {
+  /** The hash algorithm; only `'sha-256'` is supported. */
+  algorithm: 'sha-256';
+  /** The SHA-256 of the certificate's DER encoding. */
+  value: BufferSource;
+}
+
+/**
+ * What a Node connection trusts, passed to `@mux/relay-quic`'s `nativeQuicTransport`. With neither option, the
+ * platform's root certificates. Declared here, not imported, so these declarations need no `@mux/relay-quic` installed.
+ */
+export interface RelayNodeTrustOptions {
+  /** Extra trust anchors, PEM encoded, added to the platform's roots: one string or buffer may hold several. */
+  ca?: string | Uint8Array | readonly (string | Uint8Array)[];
+  /** Accept exactly the end-entity certificates with these hashes instead of validating a chain. */
+  serverCertificateHashes?: readonly RelayCertificateHash[];
+}
+
 /**
  * A role's connection options in Node: either the native QUIC adapter's trust options (`ca`,
  * `serverCertificateHashes`), or a `createTransport` of the caller's own, which replaces the adapter. Both at once is a
@@ -36,7 +55,7 @@ export * from './index.js';
  */
 export type RelayNodeOptions<T extends ConnectRelayOptions> =
   | (Omit<T, 'createTransport'> &
-      NativeQuicTransportOptions & {
+      RelayNodeTrustOptions & {
         /** Absent: the connection dials through `@mux/relay-quic`. */
         createTransport?: undefined;
       })
@@ -51,8 +70,8 @@ export type RelayNodeOptions<T extends ConnectRelayOptions> =
 
 /** The adapter's module and the factory it makes with no options, shared by every connection that passes none. */
 interface Adapter {
-  nativeQuicTransport(options?: NativeQuicTransportOptions): NativeQuicTransportFactory;
-  shared: NativeQuicTransportFactory;
+  nativeQuicTransport(options?: RelayNodeTrustOptions): RelayTransportFactory;
+  shared: RelayTransportFactory;
 }
 
 let loading: Promise<Adapter> | undefined;
@@ -101,8 +120,11 @@ function warnIfNativeWebTransport(): void {
   );
 }
 
-/** The role's options with `createTransport` set: the caller's own, or the adapter's. */
-async function withTransport<T extends ConnectRelayOptions>(options: RelayNodeOptions<T>): Promise<T> {
+/**
+ * The role's options for the root connect function: the caller's own `createTransport`, or the adapter, loaded inside
+ * the connection's deadline and signal, after its arguments are checked.
+ */
+function withTransport<T extends ConnectRelayOptions>(options: RelayNodeOptions<T>): T {
   warnIfNativeWebTransport();
   const { ca, serverCertificateHashes, ...rest } = options;
   const trusted = ca !== undefined || serverCertificateHashes !== undefined;
@@ -112,28 +134,18 @@ async function withTransport<T extends ConnectRelayOptions>(options: RelayNodeOp
     }
     return rest as T;
   }
-  let adapter: Adapter;
-  try {
-    adapter = await loadAdapter();
-  } catch (unavailable) {
-    // Raised from the factory, where the browser's default raises it too: the connect call checks its arguments and
-    // its signal first.
-    return {
-      ...rest,
-      createTransport: () => {
-        throw unavailable;
-      },
-    } as T;
-  }
-  const { nativeQuicTransport, shared } = adapter;
-  // Invalid trust options throw here, as they do from nativeQuicTransport itself.
-  const createTransport = trusted
-    ? nativeQuicTransport({
+  return {
+    ...rest,
+    [resolveTransport]: async () => {
+      const { nativeQuicTransport, shared } = await loadAdapter();
+      if (!trusted) return shared;
+      // Invalid trust options throw here, as they do from nativeQuicTransport itself.
+      return nativeQuicTransport({
         ...(ca === undefined ? {} : { ca }),
         ...(serverCertificateHashes === undefined ? {} : { serverCertificateHashes }),
-      })
-    : shared;
-  return { ...rest, createTransport } as T;
+      });
+    },
+  } as T;
 }
 
 /**
@@ -144,7 +156,7 @@ async function withTransport<T extends ConnectRelayOptions>(options: RelayNodeOp
 export async function connectRelaySubscriber(
   options: RelayNodeOptions<ConnectRelaySubscriberOptions>,
 ): Promise<RelaySubscriber> {
-  return connectSubscriber(await withTransport(options));
+  return connectSubscriber(withTransport(options));
 }
 
 /**
@@ -155,5 +167,5 @@ export async function connectRelaySubscriber(
 export async function connectRelayPublisher(
   options: RelayNodeOptions<ConnectRelayPublisherOptions>,
 ): Promise<RelayPublisher> {
-  return connectPublisher(await withTransport(options));
+  return connectPublisher(withTransport(options));
 }

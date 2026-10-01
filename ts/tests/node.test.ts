@@ -1,3 +1,4 @@
+import type { NativeQuicTransportOptions } from '@mux/relay-quic';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, type Mock, vi } from 'vitest';
 import type { RelayTransportFactory } from '../src/index.js';
 import type * as NodeEntry from '../src/node.js';
@@ -140,6 +141,21 @@ describe('@mux/relay/node', () => {
     await expect(connectRelaySubscriber({ url })).rejects.toMatchObject({ code: 'TRANSPORT_UNAVAILABLE' });
   });
 
+  it('applies the signal and the deadline while the adapter is still loading', async () => {
+    vi.doMock('@mux/relay-quic', () => new Promise(() => {}));
+    const { connectRelaySubscriber } = await entry();
+
+    const owner = new AbortController();
+    const aborting = connectRelaySubscriber({ url, signal: owner.signal });
+    const reason = new Error('cancelled');
+    owner.abort(reason);
+    await expect(aborting).rejects.toBe(reason);
+
+    await expect(connectRelaySubscriber({ url, connectTimeoutMs: 50 })).rejects.toMatchObject({
+      code: 'CONNECTION_TIMEOUT',
+    });
+  });
+
   it('loads the adapter once for connections that start together', async () => {
     const { connectRelayPublisher, connectRelaySubscriber } = await entry();
     const relay = hub();
@@ -212,6 +228,10 @@ describe('@mux/relay/node', () => {
 });
 
 describe('@mux/relay/node types', () => {
+  it("declares the trust options as @mux/relay-quic's own, without importing them", () => {
+    expectTypeOf<NodeEntry.RelayNodeTrustOptions>().toEqualTypeOf<NativeQuicTransportOptions>();
+  });
+
   it('takes the trust options, or a createTransport, but not both', () => {
     type Options = Parameters<typeof NodeEntry.connectRelayPublisher>[0];
     const createTransport = {} as RelayTransportFactory;

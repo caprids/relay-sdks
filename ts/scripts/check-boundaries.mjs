@@ -88,6 +88,9 @@ for (const name of Object.keys(sdkExports)) {
   const own = name === 'connectRelayPublisher' || name === 'connectRelaySubscriber';
   assert.equal(nodeExports[name] === sdkExports[name], !own, `${name} ${own ? 'defaults the transport' : 'is shared'}`);
 }
+// Its declarations stand without the optional adapter installed.
+const nodeDeclarations = (await readFile(resolve(root, 'dist/node.d.ts'), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
+assert.doesNotMatch(nodeDeclarations, /['"]@mux\/relay-quic['"]/, 'dist/node.d.ts must not import @mux/relay-quic');
 // Generated declarations name the shared connection options and each role's own (issue #72).
 const declarations = await readFile(resolve(root, 'dist/index.d.ts'), 'utf8');
 for (const name of ['ConnectRelayOptions', 'ConnectRelaySubscriberOptions', 'ConnectRelayPublisherOptions']) {
