@@ -202,6 +202,19 @@ class TestCreateSubgroupWriter:
         await wait_for(lambda: sink.aborted)
         assert sink.abort_reason is reason
 
+    async def test_abort_after_the_fin_still_hands_the_reset_to_the_transport_once(self) -> None:
+        # A settling group's delivery timeout (#167): the transport decides whether anything is left to reset.
+        sink = CollectingStream()
+        writer = create_subgroup_writer(sink, track_alias=9, group_id=4)
+        await writer.fin()
+        reason = RuntimeError("delivery timeout")
+
+        writer.abort(reason)
+        writer.abort(RuntimeError("again"))
+
+        assert sink.aborted
+        assert sink.abort_reason is reason
+
     async def test_a_failed_header_write_surfaces_on_the_first_awaited_write(self) -> None:
         class FailingStream(CollectingStream):
             async def write(self, data: bytes) -> None:

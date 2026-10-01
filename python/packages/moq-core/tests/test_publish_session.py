@@ -878,6 +878,41 @@ class TestCreateMoqtPublishSession:
         )
         harness.destroy()
 
+    async def test_teardown_does_not_reset_a_request_stream_that_already_carried_its_publish_done_and_fin(
+        self,
+    ) -> None:
+        # A send stream's abort resets until its FIN is acknowledged (TA-16), so the session must not
+        # abort a request stream it already ended: that would destroy the PUBLISH_DONE in flight.
+        harness = Harness()
+        aborts: list[object] = []
+        incoming = harness.pair.client.incoming_bidirectional_streams
+
+        async def spying() -> Any:
+            async for stream in incoming():
+                writable = stream.writable
+                inner_abort = writable.abort
+
+                def abort(reason: object = None, inner_abort: Any = inner_abort) -> None:
+                    aborts.append(reason)
+                    inner_abort(reason)
+
+                setattr(writable, "abort", abort)  # noqa: B010 - replaces a method in place
+                yield stream
+
+        setattr(harness.pair.client, "incoming_bidirectional_streams", spying)  # noqa: B010
+
+        await harness.session.ready
+        track = register(harness.session, "video")
+        sub = await raw_subscribe(harness.pair.server, "video", 141)
+        await wait_for(lambda: sub.kinds() == ["subscribe-ok"])
+
+        track.end()
+        await wait_for(lambda: sub.kinds() == ["subscribe-ok", "publish-done"] and sub.ended())
+        harness.destroy()
+        await settle()
+
+        assert aborts == []
+
     async def test_treats_announce_carrier_loss_after_a_goaway_as_migration_not_failure(self) -> None:
         goaways: list[int] = []
         endings: list[BaseException | None] = []

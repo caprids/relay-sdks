@@ -238,6 +238,8 @@ class _SubscriberStream:
     """Forward State (SUBSCRIBE ``forward``, togglable via REQUEST_UPDATE); data flows only while true."""
     finished: bool = False
     """The subscription is ending or over; no new data stream may open on its alias."""
+    writer_closed: bool = False
+    """Our direction of the request stream was FINed (after PUBLISH_DONE); it is never reset afterwards."""
     stream_count: int = 0
     """Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§10.12)."""
     data_streams: set[_DataStream] = field(default_factory=set)
@@ -261,7 +263,12 @@ class _SubscriberStream:
 
     def cancel(self) -> None:
         self.finished = True
-        self.writer.abort()
+
+        # A request stream whose PUBLISH_DONE and FIN were handed over is complete: resetting it now
+        # (a send stream's abort resets until the FIN is acknowledged) would destroy that end.
+        if not self.writer_closed:
+            self.writer.abort()
+
         self.reader.cancel()
         self.settle_request()
 
@@ -745,6 +752,7 @@ class MoqtPublishSession:
 
             subscriber.reset_data_streams()
             await subscriber.writer.write(preceding + encode_publish_done(status, subscriber.stream_count, reason))
+            subscriber.writer_closed = True
             await subscriber.writer.close()
             fin_written = True
 

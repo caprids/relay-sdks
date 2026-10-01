@@ -354,7 +354,7 @@ is its aioquic WebTransport session adapter. How the rules map:
 | TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. |
 | TA-10 | `close(close_code=0, reason="")` is idempotent and ignored after the session ends. |
 | TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
-| TA-16 | **Differs:** `abort()` after the FIN has been fully transmitted is a no-op, on the grounds that the peer already has a complete stream. TA-16 still resets. |
+| TA-16 | `abort()` resets until the peer acknowledges the FIN, including after the FIN was transmitted, and `wait_acknowledged()` then raises the reason. Once the FIN is acknowledged it does nothing (the stream is in Data Recvd). A settling group's delivery timeout depends on this (#167). |
 | TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `WebTransportError`'s `code`, else from a `stream_error_code` attribute, else from an integer reason, each within 0 to 2³²−1, else 0. |
 | TA-19, TA-20, TA-22 | **Name-based, not shape-based:** a stream failure is a `WebTransportError` with the peer's code in `code`, and a peer STOP_SENDING is its `StreamStopped` subclass. There is no `source` field. |
 | TA-24 | `peer_closed`, `code` and `reason` carry the peer's CLOSE_WEBTRANSPORT_SESSION, and the SDK reports `UNAUTHORIZED` from it. |

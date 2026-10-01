@@ -105,6 +105,7 @@ class SubgroupWriter:
     """Writer for one subgroup stream. Create one with :func:`create_subgroup_writer`."""
 
     __slots__ = (
+        "_aborted",
         "_finished",
         "_finishing",
         "_has_properties",
@@ -130,6 +131,7 @@ class SubgroupWriter:
         self._previous_object_id: int | None = None
         self._finished = False
         self._finishing = False
+        self._aborted = False
         # Header errors surface on the first awaited write/fin: an errored stream rejects
         # everything queued after it.
         header = _encode_subgroup_header(track_alias, group_id, priority, has_properties, end_of_group)
@@ -196,11 +198,15 @@ class SubgroupWriter:
         """Reset the stream; delivered objects may be incomplete (drop path).
 
         A FIN the transport has not taken yet is reset too, and the pending :meth:`fin` raises
-        ``reason``: the send half turns a closed-but-untransmitted stream into a RESET_STREAM.
+        ``reason``: the send half turns a closed-but-untransmitted stream into a RESET_STREAM. So is
+        a FIN that was taken but not yet acknowledged, which is how a settling group's
+        SUBGROUP_DELIVERY_TIMEOUT resets it (§8); :meth:`wait_acknowledged` then raises. Once the
+        whole stream is acknowledged the transport has nothing left to reset. Idempotent.
         """
-        if self._finished:
+        if self._aborted:
             return
 
+        self._aborted = True
         self._finished = True
         self._finishing = False
         self._stream.abort(reason)

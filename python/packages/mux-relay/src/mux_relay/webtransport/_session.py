@@ -460,8 +460,11 @@ class WebTransportSessionBase:
         if protocol is None or protocol.terminated is not None:
             return
 
-        # A stream aioquic already discarded must not be recreated by the reset.
-        if live_stream(protocol._quic, stream_id) is None:
+        # A stream aioquic already discarded must not be recreated by the reset, and one whose FIN
+        # (or an earlier reset) is acknowledged is past "Data Recvd": nothing is left to reset.
+        stream = live_stream(protocol._quic, stream_id)
+
+        if stream is None or stream.sender.is_finished:
             return
 
         try:
