@@ -218,6 +218,27 @@ describe('createSubgroupWriter', () => {
     expect(sink.abortReason()).toBe(reason);
   });
 
+  it('calls beforeWrite once the header write settles, and a throw there writes nothing of the object', async () => {
+    const pipe = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = createSubgroupWriter(pipe.writable, { trackAlias: 1, groupId: 0 });
+    const refusal = new Error('object too old');
+    const beforeWrite = vi.fn(() => {
+      throw refusal;
+    });
+    const writing = writer.writeObject({ objectId: 0, payload: new Uint8Array([1]) }, { beforeWrite });
+    const rejected = expect(writing).rejects.toBe(refusal);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // The header is still held by reader backpressure.
+    expect(beforeWrite).not.toHaveBeenCalled();
+    const reader = pipe.readable.getReader();
+    const header = await reader.read();
+    expect(header.done).toBe(false);
+    await rejected;
+    expect(beforeWrite).toHaveBeenCalledOnce();
+    writer.abort(refusal);
+    await expect(reader.read()).rejects.toBe(refusal);
+  });
+
   it('aborts fin while the subgroup header is stalled on reader backpressure', async () => {
     const pipe = new TransformStream<Uint8Array, Uint8Array>();
     const writer = createSubgroupWriter(pipe.writable, { trackAlias: 1, groupId: 0 });

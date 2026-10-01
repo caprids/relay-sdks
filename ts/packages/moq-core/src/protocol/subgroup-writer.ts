@@ -67,12 +67,22 @@ export interface SubgroupObjectInput {
   status?: ObjectStatus;
 }
 
+/** Options for {@link SubgroupWriter.writeObject}. */
+export interface SubgroupWriteOptions {
+  /**
+   * Called just before the object's bytes are handed to the stream, after the header write settled. Throwing refuses
+   * the object: nothing of it is written and the write rejects with the thrown value. This is where a publisher checks
+   * an object's delivery timeout (draft-ietf-moq-transport-20 §8).
+   */
+  beforeWrite?(): void;
+}
+
 /** Writes one subgroup of one group to a unidirectional stream. Returned by {@link createSubgroupWriter}. */
 export interface SubgroupWriter {
   /** Group ID from the stream's SUBGROUP_HEADER. */
   readonly groupId: number;
   /** Serialize one object. Resolves when the transport accepted the bytes. */
-  writeObject(object: SubgroupObjectInput): Promise<void>;
+  writeObject(object: SubgroupObjectInput, options?: SubgroupWriteOptions): Promise<void>;
   /**
    * FIN the stream — the group is complete. Resolves once the transport completes the FIN (in Chromium, once the peer
    * acknowledged it); rejects if the stream is reset or fails first.
@@ -202,13 +212,14 @@ export function createSubgroupWriter(
   return {
     groupId: options.groupId,
 
-    async writeObject(object: SubgroupObjectInput): Promise<void> {
+    async writeObject(object: SubgroupObjectInput, writeOptions: SubgroupWriteOptions = {}): Promise<void> {
       if (finished || closing) throw new MoqtProtocolError('subgroup stream already finished');
 
       const bytes = encodeObject(object, previousObjectId, hasProperties);
 
       previousObjectId = object.objectId;
       await headerWrite;
+      writeOptions.beforeWrite?.();
       await writer.write(bytes);
     },
 

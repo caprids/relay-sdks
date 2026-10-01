@@ -53,7 +53,12 @@ export type {
 } from './protocol/session.js';
 export { createMoqtSession, isStreamFailure } from './protocol/session.js';
 export { streamResetReason } from './protocol/stream-reset.js';
-export type { SubgroupObjectInput, SubgroupWriter, SubgroupWriterOptions } from './protocol/subgroup-writer.js';
+export type {
+  SubgroupObjectInput,
+  SubgroupWriteOptions,
+  SubgroupWriter,
+  SubgroupWriterOptions,
+} from './protocol/subgroup-writer.js';
 export { createSubgroupWriter } from './protocol/subgroup-writer.js';
 export { isStreamError, MoqtStreamError } from './protocol/transport-error.js';
 export type { MoqTrackSource } from './track-source.js';
