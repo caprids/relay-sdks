@@ -195,6 +195,8 @@ export function createSubgroupWriter(
     let closed!: Promise<void>;
     const handedOver = (async () => {
       await headerWrite;
+      // An object queued before this FIN may have been refused meanwhile: its gap must not be FINed.
+      assertWritable();
       // A stream that already failed never hands the FIN over: close() would reject without reaching
       // the sink. The Streams spec makes `desiredSize` null exactly while the stream is erroring or
       // errored, and `closed` then rejects with the stream's stored error.
@@ -206,7 +208,8 @@ export function createSubgroupWriter(
         await handedOver;
         await closed;
       } finally {
-        finished = true;
+        // After a refusal the stream is still open, and only abort() may end it.
+        if (refused === undefined) finished = true;
       }
     })();
 

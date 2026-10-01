@@ -1096,17 +1096,30 @@ describe('write slot: delivery timeouts (draft-20 §8)', () => {
     await rejected;
   });
 
-  it("counts the wait for demand against the subscriber's value once the subscription arrives", async () => {
+  it("counts the wait for demand against the subscriber's value once it is fixed, opening no stream", async () => {
     const { slot, writer, opened } = harness({ subscriberTimeouts: new Map([[1, { objectMs: 30 }]]) });
     const writing = writer.write(bytes(1));
-    const rejected = expect(writing).rejects.toMatchObject({ code: 'DELIVERY_TIMEOUT', phase: 'waiting-for-demand' });
-    // Before a subscription exists only the publisher's value applies, and it has none.
+    const rejected = expect(writing).rejects.toMatchObject({ code: 'DELIVERY_TIMEOUT', phase: 'opening-stream' });
+    // Until the stream is about to open only the publisher's value applies, and it has none.
     await elapse(40);
     slot.bind(1);
     await rejected;
     expect(opened).toHaveLength(0);
     await writer.write(bytes(2));
-    expect(opened[0]).toMatchObject({ groupId: 0, aborts: [] });
+    expect(opened[0]).toMatchObject({ groupId: 1, aborts: [] });
+  });
+
+  it('applies a subscriber value raised while the write waits for settling room', async () => {
+    const subscriber = new Map([[1, { objectMs: 40 }]]);
+    const { writer, opened } = settling({ subscriberTimeouts: subscriber });
+    for (let i = 0; i < SETTLING_GROUP_LIMIT; i++) await writer.write(bytes(1));
+    const waiting = writer.write(bytes(2));
+    await flush();
+    subscriber.set(1, { objectMs: 400 });
+    await elapse(70);
+    opened[0]?.acknowledge();
+    await waiting;
+    expect(opened[SETTLING_GROUP_LIMIT]?.aborts).toEqual([]);
   });
 
   it('counts the wait for the stream, and resets a stream that opens late with DELIVERY_TIMEOUT', async () => {
@@ -1192,7 +1205,7 @@ describe('write slot: delivery timeouts (draft-20 §8)', () => {
     expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
   });
 
-  it('fixes the subscriber value once the stream has opened, after any wait for it', async () => {
+  it('fixes the subscriber value just before the stream opens: an update while it opens is for later groups', async () => {
     const subscriber = new Map([[1, { subgroupMs: 0 }]]);
     const { writer, opened, releaseOpen } = settling({ open: 'hold', subscriberTimeouts: subscriber });
     const writing = writer.write(bytes(1));
@@ -1200,11 +1213,11 @@ describe('write slot: delivery timeouts (draft-20 §8)', () => {
     subscriber.set(1, { subgroupMs: 10 });
     releaseOpen();
     await writing;
-    await elapse(10);
-    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+    await elapse(100);
+    expect(opened[0]?.aborts).toEqual([]);
   });
 
-  it('fixes the subscriber value when the stream opens, after any wait for settling room', async () => {
+  it('fixes the subscriber value after any wait for settling room', async () => {
     const subscriber = new Map([[1, { subgroupMs: 0 }]]);
     const { writer, opened } = settling({ subscriberTimeouts: subscriber });
     for (let i = 0; i < SETTLING_GROUP_LIMIT; i++) await writer.write(bytes(1));

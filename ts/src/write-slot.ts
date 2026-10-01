@@ -14,8 +14,8 @@
  * settling group, and nothing reports how it ends.
  *
  * The slot enforces the group's delivery timeouts (draft-ietf-moq-transport-20 §8, see
- * delivery-timeouts.ts), fixed per group: the subscriber's side when the operation takes the relay
- * subscription's alias, the publisher's side from the first object or the track. The object timeout
+ * delivery-timeouts.ts), fixed per group: the subscriber's side just before the group's stream opens
+ * (until then only the publisher's applies), the publisher's side from the first object or the track. The object timeout
  * runs from the application's call until the transport takes the object, so waiting for demand, for
  * settling room and for the stream all count, and it fails the operation with `DELIVERY_TIMEOUT`. The
  * subgroup timeout runs from the FIN's hand-over and resets the settling group with code
@@ -105,9 +105,9 @@ interface Operation {
   phase: RelayErrorPhase;
   /** The publisher's delivery timeouts for this group: the track's until the first object says otherwise. */
   publisher: DeliveryTimeouts;
-  /** The relay subscription's delivery timeouts, fixed when the operation took its alias. */
+  /** The relay subscription's delivery timeouts, fixed just before the group's stream opens. */
   subscriber: DeliveryTimeouts;
-  /** The group's effective delivery timeouts (§8). Before the operation has an alias only the publisher's apply. */
+  /** The group's effective delivery timeouts (§8). Before its stream opens only the publisher's apply. */
   timeouts: DeliveryTimeouts;
   /** When the application handed over the object now under the object timeout, if one is. */
   objectStartedAt: number | undefined;
@@ -336,10 +336,6 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     }
     check(operation);
     operation.alias = alias;
-    // The subscription's delivery timeouts apply from now, while the operation waits for room.
-    operation.subscriber = subscriberTimeouts(alias);
-    fixTimeouts(operation, operation.publisher);
-    check(operation);
     const groupId = nextGroupId++;
     operation.phase = 'opening-stream';
     // At the settling-group limit this waits under the write deadline, which reports it as a
@@ -348,6 +344,12 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await settlingGroups.waitForRoom(operation.interrupted);
       check(operation);
     }
+    // The subscription's delivery timeouts are fixed just before the stream opens: a later
+    // REQUEST_UPDATE applies to later groups. Until now only the publisher's applied; an object
+    // already older than the effective timeout fails here, before any stream exists.
+    operation.subscriber = subscriberTimeouts(operation.alias);
+    fixTimeouts(operation, operation.publisher);
+    check(operation);
     const subgroup = await openSubgroup(operation.alias, groupId);
     if (operation.cancelled) {
       // The stream opened after the failure: reset it without sending payload bytes (§11.4.3).
@@ -355,11 +357,6 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       check(operation);
     }
     operation.writer = subgroup;
-    // The subscription's timeouts are fixed now that the stream is open: a later REQUEST_UPDATE
-    // applies to later groups. An object already too old resets the stream with DELIVERY_TIMEOUT.
-    operation.subscriber = subscriberTimeouts(operation.alias);
-    fixTimeouts(operation, operation.publisher);
-    check(operation);
     return subgroup;
   };
   const release = (operation: Operation) => {

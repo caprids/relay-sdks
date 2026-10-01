@@ -243,6 +243,29 @@ describe('createSubgroupWriter', () => {
     await expect(reader.read()).rejects.toBe(refusal);
   });
 
+  it('rejects a FIN queued behind an object that beforeWrite then refuses, and still resets', async () => {
+    const pipe = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = createSubgroupWriter(pipe.writable, { trackAlias: 1, groupId: 0 });
+    const refusal = new Error('object too old');
+    const writing = writer.writeObject(
+      { objectId: 0, payload: new Uint8Array([1]) },
+      {
+        beforeWrite: () => {
+          throw refusal;
+        },
+      }
+    );
+    const finishing = writer.fin();
+    const writeRejected = expect(writing).rejects.toBe(refusal);
+    const finRejected = expect(finishing).rejects.toThrow(MoqtProtocolError);
+    const reader = pipe.readable.getReader();
+    await reader.read();
+    await writeRejected;
+    await finRejected;
+    writer.abort(refusal);
+    await expect(reader.read()).rejects.toBe(refusal);
+  });
+
   it('aborts fin while the subgroup header is stalled on reader backpressure', async () => {
     const pipe = new TransformStream<Uint8Array, Uint8Array>();
     const writer = createSubgroupWriter(pipe.writable, { trackAlias: 1, groupId: 0 });
