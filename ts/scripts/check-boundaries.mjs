@@ -7,6 +7,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const core = JSON.parse(await readFile(resolve(root, 'packages/moq-core/package.json'), 'utf8'));
 const media = JSON.parse(await readFile(resolve(root, 'packages/moq-media/package.json'), 'utf8'));
 const adapter = JSON.parse(await readFile(resolve(root, 'packages/moq-mediabunny/package.json'), 'utf8'));
+const quic = JSON.parse(await readFile(resolve(root, 'packages/relay-quic/package.json'), 'utf8'));
 const sdk = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
 
 assert.deepEqual(core.dependencies ?? {}, {}, 'Generic MoQ core must have no runtime dependencies');
@@ -21,17 +22,24 @@ assert.deepEqual(media.dependencies, { [core.name]: 'workspace:*' }, 'Media form
 assert.deepEqual(adapter.dependencies, { [media.name]: 'workspace:*' });
 assert.deepEqual(Object.keys(adapter.peerDependencies), ['mediabunny']);
 
-async function inspect(directory, permittedPackage) {
+// The Node transport adapter is the only package with native code and Node built-ins (#194). It builds on the
+// generic core alone, and nothing runtime-agnostic depends on it.
+assert.deepEqual(quic.dependencies, { [core.name]: 'workspace:*' }, 'The native QUIC adapter depends only on the core');
+
+async function inspect(directory, permittedPackage, { nodeBuiltins = false } = {}) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) {
       await inspect(path, permittedPackage);
     } else if (entry.name.endsWith('.js')) {
-      const text = await readFile(path, 'utf8');
+      // Block comments go first: a doc comment's code example is not an import.
+      const text = (await readFile(path, 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
       for (const match of text.matchAll(/(?:from\s*|import\s*\(\s*|import\s*)['"]([^'"]+)['"]/g)) {
         const specifier = match[1];
         assert(
-          specifier.startsWith('.') || specifier === permittedPackage,
+          (specifier.startsWith('.') && !specifier.endsWith('.node')) ||
+            specifier === permittedPackage ||
+            (nodeBuiltins && specifier.startsWith('node:')),
           `Unexpected runtime import in ${path}: ${specifier}`,
         );
       }
@@ -43,6 +51,7 @@ await inspect(resolve(root, 'packages/moq-core/dist'));
 await inspect(resolve(root, 'packages/moq-media/dist'), core.name);
 await inspect(resolve(root, 'dist'), core.name);
 await inspect(resolve(root, 'packages/moq-mediabunny/dist'), media.name);
+await inspect(resolve(root, 'packages/relay-quic/dist'), core.name, { nodeBuiltins: true });
 const mediaExports = await import('../packages/moq-media/dist/index.js');
 for (const name of [
   'buildMsfCatalog',
@@ -72,4 +81,7 @@ const declarations = await readFile(resolve(root, 'dist/index.d.ts'), 'utf8');
 for (const name of ['ConnectRelayOptions', 'ConnectRelaySubscriberOptions', 'ConnectRelayPublisherOptions']) {
   assert.match(declarations, new RegExp(`\\b${name}\\b`), `${name} must be exported from the built declarations`);
 }
-console.log('Built SDK and media formats import only the generic core; core has no runtime package imports.');
+console.log(
+  'Built SDK and media formats import only the generic core; core has no runtime package imports; ' +
+    'only the native QUIC adapter uses Node built-ins.',
+);

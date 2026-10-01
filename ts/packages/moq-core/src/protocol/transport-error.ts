@@ -24,6 +24,7 @@ function sourceOf(error: unknown): unknown {
  * with `source` `'stream'` and the code in `streamErrorCode`.
  */
 export class MoqtStreamError extends Error {
+  /** Always `'MoqtStreamError'`; not part of the contract, which classifies by `source`. */
   override readonly name = 'MoqtStreamError';
   /** Always `'stream'`: the failure belongs to one stream. */
   readonly source = 'stream';

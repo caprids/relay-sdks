@@ -1,8 +1,8 @@
 # Transport adapter contract
 
 A Relay connection runs over a **transport adapter** (see `CONTEXT.md`): the browser's native
-`WebTransport`, the Python aioquic WebTransport client, the coming `@mux/relay-quic` native QUIC
-adapter, and the in-memory pairs the tests use. This document states what every adapter must do
+`WebTransport`, the Python aioquic WebTransport client, the `@mux/relay-quic` native QUIC adapter
+for Node, and the in-memory pairs the tests use. This document states what every adapter must do
 for the SDK core to behave as `behavior.md` says. Until now that was only the TypeScript
 `MoqtTransport` interface plus behaviour the core relied on without writing it down.
 
@@ -340,8 +340,7 @@ for it:
 long a close takes to arrive.
 
 A test that depends on credit or acknowledgement uses an adapter that has it: Chromium against the
-conformance suite's Python accepting end, the Python loopback server, or `@mux/relay-quic` once it
-exists.
+conformance suite's Python accepting end, the Python loopback server, or `@mux/relay-quic`.
 
 ## Python mapping (informative)
 
@@ -370,7 +369,8 @@ every target:
 - Chromium's native `WebTransport`, in `pnpm test:conformance`, against a scriptable Python
   accepting end (`python/packages/mux-relay/tests/relay_helpers/conformance_peer.py`) that can
   reset, stop, close at either layer, withhold acknowledgement and limit stream credit
-- `@mux/relay-quic` in Node, against the same accepting end in a native QUIC mode (#194)
+- `@mux/relay-quic` in Node, in `pnpm test:conformance:node`, against the same accepting end in its
+  native QUIC mode (`--framing native-quic`)
 
 Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
 adapter, and the core's SETUP tests cover it. For TA-26 the test is a Node script that has to exit by

@@ -1,0 +1,39 @@
+{
+  "name": "@mux/relay-quic",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Native QUIC transport adapter for the Relay SDK in Node",
+  "license": "UNLICENSED",
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "native/*.node"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:native": "napi build --platform --release --manifest-path native/Cargo.toml --output-dir native --no-js --dts ../src/native.d.ts"
+  },
+  "napi": {
+    "binaryName": "relay-quic",
+    "targets": [
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "dependencies": {
+    "@mux/moq-core": "workspace:*"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.10.5",
+    "@types/node": "24.12.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

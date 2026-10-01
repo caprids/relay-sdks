@@ -1,0 +1,2 @@
+# The repo formats TypeScript at 120 columns too (biome.jsonc).
+max_width = 120
