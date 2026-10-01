@@ -237,7 +237,7 @@ SDK's own bound on one operation and calls for a different response (data that m
 deadline may still be worth sending; data past its delivery timeout is stale and is not retried as
 it is), nor `OBJECT_EXPIRED` or `STALE_OBJECT`, which name no protocol term. A settling group reset
 by its subgroup timeout reports nothing, so the code only ever comes from the object timeout.
-TypeScript raises it; Python follows (#167).
+Both SDKs raise it.
 
 ## Async subscription consumption
 

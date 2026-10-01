@@ -45,7 +45,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | --- | --- |
 | `CONNECTION_TIMEOUT` | Connecting exceeded its deadline; consider a new connection with backoff. |
 | `WRITE_TIMEOUT` | Inspect the phase below, then choose the next object or group explicitly. |
-| `DELIVERY_TIMEOUT` | An object outlived its [delivery timeout](#delivery-timeouts) before it reached the transport. The data is stale: do not retry it as it is; choose fresh data or the next random-access point. TypeScript only for now; Python follows (#167). |
+| `DELIVERY_TIMEOUT` | An object outlived its [delivery timeout](#delivery-timeouts) before it reached the transport. The data is stale: do not retry it as it is; choose fresh data or the next random-access point. |
 | `CLOSED` | The handle is closed; use an open connection, track, or group. |
 | `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
 | `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
@@ -468,15 +468,16 @@ OBJECT_DELIVERY_TIMEOUT (`0x02`) bounds how old an object may be when it reaches
 There are no options for them: an application sets the publisher's values with the track and object
 properties it already passes.
 
-- **The value.** Each group's value is fixed when its stream opens. The publisher's is the
-  property on the group's first object when present, and the track property otherwise; on any
-  later object the property is ignored. The subscriber's is the parameter on the relay
-  subscription's SUBSCRIBE, as updated by any REQUEST_UPDATE so far. When both are non-zero the
-  smaller applies, and otherwise the non-zero one; 0 means no timeout. A value above 2147483647 ms
-  is clamped to that bound, a byte-valued property is not a timeout (and is still sent as
-  supplied), and registration refuses none of these. A REQUEST_UPDATE carrying either parameter is
-  acknowledged with REQUEST_OK, and the new value applies to groups opened after it; groups already
-  open or settling keep theirs.
+- **The value.** Each group's value is fixed just before its stream opens, after any wait for
+  settling room. The publisher's is the property on the group's first object when present, and the
+  track property otherwise; on any later object the property is ignored. The subscriber's is the
+  parameter on the relay subscription's SUBSCRIBE, as updated by any REQUEST_UPDATE so far. When
+  both are non-zero the smaller applies, and otherwise the non-zero one; 0 means no timeout. A value
+  above 2147483647 ms is clamped to that bound, and registration refuses neither 0 nor a clamped
+  value. Both types are even, so their values are integers: the [Arguments](#arguments) table
+  already refuses bytes there. A REQUEST_UPDATE carrying either parameter is acknowledged with
+  REQUEST_OK, and the new value applies to groups whose stream opens after it; groups already open
+  or settling keep theirs.
 - **The subgroup timeout** starts when the group's FIN is handed to the transport, the moment its
   operation completes and it becomes a settling group. If the relay has not acknowledged the FIN
   when it expires, the stream is reset with `DELIVERY_TIMEOUT` (0x2), as Section 8 requires before
@@ -487,15 +488,17 @@ properties it already passes.
 - **The object timeout** counts from the application's write call (`write()`, or the group's
   `write()`) to the moment the transport takes the object, so waiting for demand, for settling
   room, for the stream and behind the group's earlier bytes all count. The age is checked again
-  just before the object is handed over, as Section 8 requires. Before a relay subscription exists
-  only the publisher's value can apply. When it expires the operation fails with `DELIVERY_TIMEOUT`
+  just before the object is handed over, as Section 8 requires. Until the group's value is fixed
+  only the publisher's value times the wait; an object already older than the fixed value fails
+  then, before any stream opens. When it expires the operation fails with `DELIVERY_TIMEOUT`
   in its current phase, and a stream already open is reset with code 0x2. In a group the whole
   group is reset and its later writes fail with the same error; no stream is opened again for it
   (Section 8: SHOULD NOT). The track stays open and the next write uses a new group ID, as after
   any interruption. The object timeout runs alongside the write deadline: whichever expires first
   fails the write, with `DELIVERY_TIMEOUT` or `WRITE_TIMEOUT`. Once the transport has taken an
-  object, its bytes cannot be timed out; in TypeScript that is when the object's stream write
-  resolves, so an object queued behind stream flow control is still timed.
+  object, its bytes cannot be timed out. In TypeScript the transport has taken an object when its
+  stream write resolves, so an object queued behind stream flow control is still timed; in Python,
+  when the stream write returns, once aioquic has transmitted the bytes.
 - **On moq-relay 0.15.8** neither value has any effect beyond the publisher. The relay never sends
   either parameter upstream: its SUBSCRIBE carries only `0x10`, `0x20`, `0x21`, `0x22`, `0x23` and
   `0x35` ([subscribe.rs](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b348ae055e70957/rs/moq-net/src/ietf/subscribe.rs#L181)), its REQUEST_UPDATE only `0x10`, `0x20` and `0x21`,
@@ -503,10 +506,13 @@ properties it already passes.
   It drops both track properties and the `0x02` object property, and reads an object's `0x06` as a
   Timestamp ([Relay property handling](#relay-property-handling)), so a first-object `0x06` reaches
   viewers as a Timestamp. In production the publisher's own values are therefore the only ones that
-  apply, and a track property is the safer way to set the subgroup timeout. Evidence:
+  apply, and a track property is the safer way to set the subgroup timeout. The reverse also holds:
+  a publisher that still sends timestamps as `0x06` (the draft-ietf-moq-loc-03 id) now gives each
+  group a subgroup timeout equal to its first object's timestamp. Applications must not send a
+  timestamp as `0x06`; LOC Timestamp is `0x10`. Evidence:
   [issue #167](https://github.com/muxinc/relay-sdks/issues/167).
 
-Implemented in the TypeScript SDK; Python follows (#167).
+Implemented in both SDKs.
 
 ### Write phases and interruptions
 
@@ -520,13 +526,13 @@ unless stated otherwise.
 | Phase | Interruption | Reported to the caller | Wire effect | Track afterwards | Source |
 | --- | --- | --- | --- | --- | --- |
 | waiting-for-demand | write deadline expires | `WRITE_TIMEOUT`, or `NAMESPACE_NOT_SOLICITED` when solicitations arrived but none covers the namespace; phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | SDK policy: the protocol has no timer for awaiting a subscription (§13.6 only warns of idle timeout) |
-| waiting-for-demand | object timeout expires: the publisher's value, or the effective one once a relay subscription arrives | `DELIVERY_TIMEOUT`, phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | §8: an object's age counts from when the application provided it, and is checked before it reaches the transport |
+| waiting-for-demand | object timeout expires: the publisher's value, the only one that applies before the group's value is fixed | `DELIVERY_TIMEOUT`, phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | §8: an object's age counts from when the application provided it, and is checked before it reaches the transport |
 | waiting-for-demand | relay subscription ends while waiting | the wait continues until the deadline | nothing sent | open | SDK policy |
 | waiting-for-demand | caller cancels | the caller's reason, unwrapped; phase `waiting-for-demand` | nothing sent | open | SDK policy |
 | waiting-for-demand | track closed | `CLOSED`, phase `waiting-for-demand` | nothing sent | ended | SDK policy |
 | waiting-for-demand | connection ends | the connection's own error (phase `connection`), or `CLOSED` after a clean shutdown | nothing sent | ended | §3.5: streams and subscriptions end with the session |
 | opening-stream | write deadline expires or caller cancels | `WRITE_TIMEOUT` or the caller's reason; phase `opening-stream` | a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) or `CANCELLED` (0x1); its header may precede the reset (RESET_STREAM_AT) | open; the next write uses a new group ID | §11.4.3: a stream closed before all objects are delivered MUST be reset, and the reset SHOULD include the header; the deadline itself is SDK policy |
-| opening-stream | object timeout expires, while waiting for settling room or for the stream | `DELIVERY_TIMEOUT`, phase `opening-stream` | a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §8 MUST reset with `DELIVERY_TIMEOUT`; §11.4.3 |
+| opening-stream | object timeout expires, while waiting for settling room or for the stream, or the object is already older than the value fixed just before the stream opens | `DELIVERY_TIMEOUT`, phase `opening-stream` | no stream opens, or a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §8 MUST reset with `DELIVERY_TIMEOUT`; §11.4.3 |
 | writing | object timeout expires before the transport takes the object | `DELIVERY_TIMEOUT`, phase `writing`; a group's earlier objects may have been delivered. Never `closing`: the object is with the transport by then | stream reset, code `DELIVERY_TIMEOUT` (0x2); the group's later writes and `close()` fail with the same error, and no stream is opened again for it | open; the next write uses a new group ID | §8: MUST reset with `DELIVERY_TIMEOUT`, SHOULD NOT open a new stream for the subgroup |
 | writing, closing | write deadline expires | `WRITE_TIMEOUT`, phase `writing` or `closing`; object bytes may have been delivered, and `closing` can fail after all of them were. In TypeScript `closing` can only fail before the FIN is handed to the transport; Python's `closing` can still wait on transport backpressure | stream reset, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §11.4.3 MUST reset; §8 and §15.11.4 for the code; the deadline is SDK policy |
 | opening-stream, writing, closing | caller cancels (AbortSignal, task cancellation, or `group.abort()`) | the caller's reason unwrapped, or `CLOSED` when `abort()` gave none; the current phase | stream reset, code `CANCELLED` (0x1) | open | §11.4.3 MUST reset; code choice is SDK policy (§3.3.4 SHOULD be relevant) |
