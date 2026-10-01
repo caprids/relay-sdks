@@ -82,6 +82,8 @@ export function createRelayQuicTarget({ port, certificateHash, call }) {
       'process',
     ],
     gaps: { webtransport: 'native QUIC carries no WebTransport session' },
+    /** The factory the target dials with, for checks outside the suite. */
+    dialFactory: factory,
     expectations,
     async session({ handshake, select, maxStreams } = {}) {
       await call('prepare', { handshake, select, maxStreams });

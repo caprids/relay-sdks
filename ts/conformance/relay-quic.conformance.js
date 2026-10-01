@@ -37,6 +37,14 @@ it('tries the next address when the first one the host resolves to does not answ
   }
 }, 15_000);
 
+it('TA-7 ready rejects when the offer is empty and the peer selects no protocol', async () => {
+  // With nothing offered, TLS itself does not require a selection; the adapter does.
+  await peer.call('prepare', { select: 'none' });
+  const { transport, ready } = target.dialFactory(`https://localhost:${peer.port}/`, []);
+  transport.closed.catch(() => {});
+  await expect(ready).rejects.toMatchObject({ source: 'session' });
+});
+
 describe('@mux/relay-quic trust', () => {
   it('trusts a ca anchor added to the platform roots', async () => {
     await peer.call('prepare');

@@ -760,6 +760,19 @@ export const cases = [
   },
   {
     rule: 'TA-19',
+    name: "TA-19 a peer reset errors the receive stream with the peer's code while nothing reads it",
+    async run(ctx) {
+      const transport = await open(ctx);
+      const id = await ctx.peer.openUni();
+      await ctx.peer.write(id, text('unread'));
+      const reader = (await nextIncoming(transport.incomingUnidirectionalStreams, 'the peer stream')).getReader();
+      await ctx.peer.reset(id, 11);
+      // The unread bytes may be discarded (RFC 9000 §3.2), but the reset must land without a read to carry it.
+      expectStreamError(await rejects(reader.closed, 'reader.closed'), 11, 'reader.closed after the reset');
+    },
+  },
+  {
+    rule: 'TA-19',
     name: "TA-19 a peer reset errors a bidirectional stream's readable with the peer's code",
     async run(ctx) {
       const transport = await open(ctx);

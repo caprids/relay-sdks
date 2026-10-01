@@ -72,7 +72,8 @@ impl SendStream {
 impl SendStream {
     /// Write all of `data`. Resolves once quinn has taken every byte (TA-14): it waits while flow
     /// control or the send buffer holds the stream, and gives up at once if the stream is reset or
-    /// stopped.
+    /// stopped. The bytes are read off the JS thread for as long as the write waits, so `data` must
+    /// be a buffer nothing else holds: the JS layer passes a copy.
     #[napi]
     pub async fn write(&self, data: Uint8Array) -> Option<Failure> {
         let mut stream = match self.lock().await {
@@ -165,6 +166,8 @@ pub struct ReadResult {
 pub struct RecvStream {
     inner: Arc<Mutex<quinn::RecvStream>>,
     stopped: CancellationToken,
+    /// The current `watch()`'s token: the next `read()` cancels it to take the lock.
+    watching: std::sync::Mutex<Option<CancellationToken>>,
 }
 
 impl RecvStream {
@@ -172,6 +175,7 @@ impl RecvStream {
         Self {
             inner: Arc::new(Mutex::new(stream)),
             stopped: CancellationToken::new(),
+            watching: std::sync::Mutex::new(None),
         }
     }
 }
@@ -179,9 +183,12 @@ impl RecvStream {
 #[napi]
 impl RecvStream {
     /// Read up to `max` bytes, in order. A peer reset fails the read with its code (TA-19); bytes
-    /// already read stay read.
+    /// already read stay read. Ends a pending `watch()` first.
     #[napi]
     pub async fn read(&self, max: u32) -> ReadResult {
+        if let Some(watch) = self.watching.lock().ok().and_then(|mut watching| watching.take()) {
+            watch.cancel();
+        }
         let closed = || ReadResult {
             chunk: None,
             fin: false,
@@ -199,6 +206,35 @@ impl RecvStream {
                 Ok(Some(chunk)) => ReadResult { chunk: Some(chunk.bytes.to_vec().into()), fin: false, failure: None },
                 Ok(None) => ReadResult { chunk: None, fin: true, failure: None },
                 Err(error) => ReadResult { chunk: None, fin: false, failure: Some(failure::read(error)) },
+            },
+        }
+    }
+
+    /// Wait, without reading, until the peer resets the stream (TA-19) or the session ends (TA-12),
+    /// and resolve with that failure; or with nothing once the next `read()` or `stop()` comes, or
+    /// once the peer's FIN means a reset can no longer arrive. A newer watch ends an older one.
+    #[napi]
+    pub async fn watch(&self) -> Option<Failure> {
+        let demand = CancellationToken::new();
+        if let Some(older) = self.watching.lock().ok()?.replace(demand.clone()) {
+            older.cancel();
+        }
+        let mut stream = tokio::select! {
+            biased;
+            _ = self.stopped.cancelled() => return None,
+            _ = demand.cancelled() => return None,
+            guard = self.inner.lock() => guard,
+        };
+        tokio::select! {
+            biased;
+            _ = self.stopped.cancelled() => None,
+            _ = demand.cancelled() => None,
+            // quinn's reset watch reads no data, and is cancel-safe.
+            result = stream.received_reset() => match result {
+                Ok(Some(code)) => Some(Failure::stream("reset", code)),
+                Ok(None) => None,
+                Err(quinn::ResetError::ConnectionLost(error)) => Some(failure::connection(&error)),
+                Err(quinn::ResetError::ZeroRttRejected) => Some(Failure::session("transport", None, "0-RTT was rejected")),
             },
         }
     }

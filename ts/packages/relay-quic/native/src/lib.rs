@@ -176,11 +176,16 @@ impl Dial {
             .connect(address, &self.server_name)
             .map_err(|error| dial_failure(error.to_string()))?;
         let connection = connecting.await.map_err(|error| failure::connection(&error))?;
-        let protocol = connection
+        let selected = connection
             .handshake_data()
             .and_then(|data| data.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
-            .and_then(|data| data.protocol)
-            .map(|protocol| String::from_utf8_lossy(&protocol).into_owned());
+            .and_then(|data| data.protocol);
+        // rustls insists on a selection only when the offer is not empty, so check here too (TA-7).
+        let Some(selected) = selected.filter(|selected| self.tls.alpn_protocols.contains(selected)) else {
+            connection.close(quinn::VarInt::from_u32(0), b"no offered protocol was selected");
+            return Err(dial_failure("the peer selected none of the offered protocols".into()));
+        };
+        let protocol = Some(String::from_utf8_lossy(&selected).into_owned());
         Ok(Session {
             connection,
             endpoint: std::sync::Mutex::new(Some(endpoint)),

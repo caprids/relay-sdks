@@ -6,7 +6,7 @@
  * acknowledgement. It watches for STOP_SENDING from the start, so `writer.closed` rejects with the peer's code even
  * when nothing is in flight (TA-20).
  */
-import type { BiStream, RecvStream, SendStream } from './addon.js';
+import type { BiStream, Failure, RecvStream, SendStream } from './addon.js';
 import { resetCode, toError } from './errors.js';
 
 /** The most a single read takes from quinn. */
@@ -34,7 +34,9 @@ export function sendWritable(send: SendStream): WritableStream<Uint8Array> {
     },
     async write(chunk) {
       if (!(chunk instanceof Uint8Array)) throw new TypeError('a native QUIC stream takes Uint8Array chunks');
-      const failure = await send.write(chunk);
+      // The addon reads the bytes off the JS thread while the write waits, so it gets a copy of its own: the caller may
+      // reuse, transfer or resize its buffer as soon as it likes.
+      const failure = await send.write(chunk.slice());
       if (failure) throw failed(toError(failure));
     },
     async close() {
@@ -45,22 +47,46 @@ export function sendWritable(send: SendStream): WritableStream<Uint8Array> {
   });
 }
 
-/** A readable over `recv`. Cancelling it sends STOP_SENDING with the reason's code and ends it (TA-18). */
+/**
+ * A readable over `recv`. It reads only on demand; between reads a native watch waits for a peer reset (TA-19) or the
+ * session's end (TA-12) without reading, so either settles the readable even while nothing reads it. Cancelling sends
+ * STOP_SENDING with the reason's code and ends the readable (TA-18).
+ */
 export function recvReadable(recv: RecvStream): ReadableStream<Uint8Array> {
-  let cancelled = false;
-  return new ReadableStream<Uint8Array>({
-    async pull(controller) {
-      const { chunk, fin, failure } = await recv.read(READ_CHUNK_BYTES);
-      if (cancelled) return;
-      if (failure) controller.error(toError(failure));
-      else if (fin) controller.close();
-      else if (chunk) controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+  let ended = false;
+  const end = (controller: ReadableStreamDefaultController<Uint8Array>, failure: Failure | undefined) => {
+    if (ended) return;
+    ended = true;
+    if (failure) controller.error(toError(failure));
+    else controller.close();
+  };
+  const watch = (controller: ReadableStreamDefaultController<Uint8Array>) => {
+    void recv.watch().then((failure) => {
+      // Bytes not yet read may be discarded on a reset (RFC 9000 §3.2).
+      if (failure) end(controller, failure);
+    });
+  };
+
+  return new ReadableStream<Uint8Array>(
+    {
+      start: watch,
+      async pull(controller) {
+        const { chunk, fin, failure } = await recv.read(READ_CHUNK_BYTES);
+        if (ended) return;
+        if (failure || fin) {
+          end(controller, failure);
+          return;
+        }
+        if (chunk) controller.enqueue(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength));
+        watch(controller);
+      },
+      async cancel(reason) {
+        ended = true;
+        await recv.stop(resetCode(reason));
+      },
     },
-    async cancel(reason) {
-      cancelled = true;
-      await recv.stop(resetCode(reason));
-    },
-  });
+    { highWaterMark: 0 },
+  );
 }
 
 /** Both halves of `stream`. */

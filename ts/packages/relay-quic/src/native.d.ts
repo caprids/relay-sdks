@@ -36,9 +36,15 @@ export declare class Dial {
 export declare class RecvStream {
   /**
    * Read up to `max` bytes, in order. A peer reset fails the read with its code (TA-19); bytes
-   * already read stay read.
+   * already read stay read. Ends a pending `watch()` first.
    */
   read(max: number): Promise<ReadResult>
+  /**
+   * Wait, without reading, until the peer resets the stream (TA-19) or the session ends (TA-12),
+   * and resolve with that failure; or with nothing once the next `read()` or `stop()` comes, or
+   * once the peer's FIN means a reset can no longer arrive. A newer watch ends an older one.
+   */
+  watch(): Promise<Failure | null>
   /** STOP_SENDING with `code`, now (TA-18): a pending read ends, and nothing more is delivered. */
   stop(code: number): Promise<void>
 }
@@ -48,7 +54,8 @@ export declare class SendStream {
   /**
    * Write all of `data`. Resolves once quinn has taken every byte (TA-14): it waits while flow
    * control or the send buffer holds the stream, and gives up at once if the stream is reset or
-   * stopped.
+   * stopped. The bytes are read off the JS thread for as long as the write waits, so `data` must
+   * be a buffer nothing else holds: the JS layer passes a copy.
    */
   write(data: Uint8Array): Promise<Failure | null>
   /**
