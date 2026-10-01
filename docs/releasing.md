@@ -38,15 +38,18 @@ then publishes, and creates a GitHub release with the changelog section and the 
 TypeScript also rebuilds and smoke-loads relay-quic's binaries on every platform first, through
 `relay-quic-binaries.yml`.
 
+A prerelease version such as `0.2.0-rc.1` publishes to npm's `next` dist-tag, not `latest`; PyPI
+(`0.2.0rc1`) leaves prereleases out of a plain install by itself.
+
 If a publish fails partway, rerun the workflow. It skips the packages (npm) or files (PyPI) the
-registry already has.
+registry already has, and uploads any release assets that are missing.
 
 ## What stops a real publish
 
-Pull requests that touch the release scripts, workflows or manifests, and manual runs, always
-dry-run. A tag runs the `publish` job in the `release` environment, and it publishes only when the
-repository variable `RELEASE_PUBLISH` is `true`. Otherwise it dry-runs and creates no GitHub
-release. Before the first real publish:
+Pull requests that touch the release scripts, workflows or manifests, and manual runs (even on a
+tag ref), always dry-run. A tag push runs the `publish` job in the `release` environment, and it
+publishes only when the repository variable `RELEASE_PUBLISH` is `true`. Otherwise it dry-runs and
+creates no GitHub release. Before the first real publish:
 
 - the package names and npm scope are settled;
 - the repository is public, so the package READMEs' links resolve and provenance can be issued;

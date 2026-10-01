@@ -12,8 +12,9 @@
  *
  * `pack` leaves `@mux/relay-quic` and its platform packages to `packages/relay-quic/scripts/pack.mjs`, which adds the
  * optional dependencies on the platform packages and needs their binaries; it fails if their tarballs are missing.
- * `publish` publishes in dependency order (platform packages first) and skips a package whose version the registry
- * already has, so a rerun after a partial publish finishes the job.
+ * `publish` publishes in dependency order (platform packages first), a release to the `latest` dist-tag and a
+ * prerelease to `next`, and skips a package whose version the registry already has, so a rerun after a partial publish
+ * finishes the job.
  */
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -133,7 +134,9 @@ if (command === 'version') {
       process.stdout.write(`${spec} is already on the registry; skipped\n`);
       continue;
     }
-    const args = ['publish', tarball, '--access', 'public', '--tag', 'latest'];
+    // A prerelease (0.2.0-rc.1) goes to `next`, so it never becomes what a plain install gets.
+    const tag = manifest.version.includes('-') ? 'next' : 'latest';
+    const args = ['publish', tarball, '--access', 'public', '--tag', tag];
     if (provenance) args.push('--provenance');
     if (dryRun) args.push('--dry-run');
     run('npm', args, { stdio: 'inherit' });

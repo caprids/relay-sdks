@@ -35,7 +35,8 @@ jobs:
     uses: ./.github/workflows/relay-quic-binaries.yml
 
   dry-run:
-    if: ${{ !startsWith(github.ref, 'refs/tags/ts/v') }}
+    # A manual run on a tag ref is still a dry run: only a tag push reaches the release environment.
+    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ts/v')) }}
     needs: binaries
     runs-on: ubuntu-latest
     steps: &steps
@@ -61,23 +62,28 @@ jobs:
       - name: Publish
         working-directory: ts
         env:
-          REAL: ${{ startsWith(github.ref, 'refs/tags/ts/v') && vars.RELEASE_PUBLISH == 'true' }}
+          REAL: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ts/v') && vars.RELEASE_PUBLISH == 'true' }}
           PUBLIC: ${{ !github.event.repository.private }}
         run: |
           flags=()
-          if [ "$REAL" != true ]; then flags+=(--dry-run); echo "Dry run: RELEASE_PUBLISH is not true or this is no ts/v* tag"; fi
+          if [ "$REAL" != true ]; then flags+=(--dry-run); echo "Dry run: not a ts/v* tag push, or RELEASE_PUBLISH is not true"; fi
           # npm generates no provenance for a private repository's builds.
           if [ "$PUBLIC" = true ]; then flags+=(--provenance); fi
           node scripts/release.mjs publish ../packed "${flags[@]}"
       - name: Create the GitHub release
-        if: startsWith(github.ref, 'refs/tags/ts/v') && vars.RELEASE_PUBLISH == 'true'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ts/v') && vars.RELEASE_PUBLISH == 'true'
         working-directory: ts
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           node scripts/release.mjs notes "${GITHUB_REF_NAME#ts/v}" > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" ../packed/*.tgz --verify-tag \
-            --title "TypeScript SDK ${GITHUB_REF_NAME#ts/v}" --notes-file "$RUNNER_TEMP/notes.md"
+          # A rerun after a failed upload finds the release and uploads what is missing.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" ../packed/*.tgz --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" ../packed/*.tgz --verify-tag \
+              --title "TypeScript SDK ${GITHUB_REF_NAME#ts/v}" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ts-release-packages
@@ -85,7 +91,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/ts/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ts/v')
     needs: binaries
     runs-on: ubuntu-latest
     # Configure required reviewers on this environment, and the npm trusted publisher for this workflow and environment.

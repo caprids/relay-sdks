@@ -18,7 +18,7 @@ Nothing in this repository was installable from a registry. We decided how the S
   Merging it and pushing the tag starts the release workflow, which fails unless the tag, every
   manifest and the changelog agree.
 - **Gated in code.** `release-ts.yml` and `release-python.yml` dry-run on pull requests and manual
-  runs. On a tag they run in the `release` environment, and they publish for real only when the
+  runs, even on a tag ref. On a tag push they run in the `release` environment, and they publish for real only when the
   repository variable `RELEASE_PUBLISH` is `true`. Both registries authenticate through trusted
   publishing (OIDC), so the workflows hold no registry token. (npm adds a trusted publisher only
   to a package that exists, so each npm package's very first version is published once by the scope

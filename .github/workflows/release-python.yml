@@ -28,7 +28,8 @@ permissions:
 
 jobs:
   dry-run:
-    if: ${{ !startsWith(github.ref, 'refs/tags/python/v') }}
+    # A manual run on a tag ref is still a dry run: only a tag push reaches the release environment.
+    if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/python/v')) }}
     runs-on: ubuntu-latest
     steps: &steps
       - uses: actions/checkout@v5
@@ -46,11 +47,11 @@ jobs:
         run: uv run python scripts/release.py smoke dist
         working-directory: python
       - name: Dry-run the publish
-        if: ${{ !(startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true') }}
+        if: ${{ !(github.event_name == 'push' && startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true') }}
         run: uv publish --dry-run --trusted-publishing never dist/*
         working-directory: python
       - name: Publish
-        if: startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: python/dist
@@ -58,14 +59,19 @@ jobs:
           # PyPI attestations need a public repository's workflow identity.
           attestations: ${{ !github.event.repository.private }}
       - name: Create the GitHub release
-        if: startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true'
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/python/v') && vars.RELEASE_PUBLISH == 'true'
         working-directory: python
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           uv run python scripts/release.py notes "${GITHUB_REF_NAME#python/v}" > "$RUNNER_TEMP/notes.md"
-          gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
-            --title "Python SDK ${GITHUB_REF_NAME#python/v}" --notes-file "$RUNNER_TEMP/notes.md"
+          # A rerun after a failed upload finds the release and uploads what is missing.
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --verify-tag \
+              --title "Python SDK ${GITHUB_REF_NAME#python/v}" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
       - uses: actions/upload-artifact@v5
         with:
           name: python-release-packages
@@ -73,7 +79,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/python/v')
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/python/v')
     runs-on: ubuntu-latest
     # Configure required reviewers on this environment, and the PyPI trusted publisher for this workflow and environment.
     environment: release
