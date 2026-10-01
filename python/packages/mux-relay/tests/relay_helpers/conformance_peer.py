@@ -169,7 +169,7 @@ class ConformanceProtocol(WebTransportServerProtocol):
         if self._options.handshake == "refuse":
             self.h3.send_headers(event.stream_id, [(b":status", b"404")], end_stream=True)
             self.transmit()
-        elif self._options.handshake == "hold":
+        elif self._options.handshake == "hold" and not self._peer.handshake_released:
             self._held = event
         else:
             self._answer(event, headers)
@@ -224,6 +224,8 @@ class ConformancePeer:
     def __init__(self) -> None:
         self.next_options = DialOptions()
         self.observed: dict[str, Any] | None = None
+        self.handshake_released = False
+        """``releaseHandshake`` came: a held CONNECT is answered, and so is one that has not arrived yet."""
         self._protocol: ConformanceProtocol | None = None
         self._session: WebTransportServerSession | None = None
         self._session_ready: asyncio.Future[WebTransportServerSession] = asyncio.get_running_loop().create_future()
@@ -257,6 +259,7 @@ class ConformancePeer:
         await self.dispose()
         self.next_options = DialOptions(handshake=handshake, select=select, max_streams=maxStreams)
         self.observed = None
+        self.handshake_released = False
         self._protocol = None
         self._session = None
         self._session_ready = asyncio.get_running_loop().create_future()
@@ -370,7 +373,9 @@ class ConformancePeer:
         self._require_protocol().impairment = None
 
     async def releaseHandshake(self) -> None:
-        self._require_protocol().release_handshake()
+        self.handshake_released = True
+        if self._protocol is not None:
+            self._protocol.release_handshake()
 
     async def observedDial(self) -> dict[str, Any] | None:
         return self.observed
