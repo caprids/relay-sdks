@@ -1,6 +1,7 @@
 /**
- * Loads the native addon (`native/`, built by `napi build`) for this platform. The binary sits beside the package as
- * `native/relay-quic.<platform>-<arch>[-<libc>].node`; until prebuilt binaries ship it comes from a local build.
+ * Loads the native addon (`native/`, built by `napi build`) for this platform. A local build,
+ * `native/relay-quic.<platform>-<arch>[-<libc>].node`, wins; otherwise the binary comes from the prebuilt platform
+ * package `@mux/relay-quic-<platform>-<arch>[-<libc>]`, one of this package's optional dependencies (#195).
  */
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -29,20 +30,43 @@ function hasGlibc(): boolean {
   return typeof report?.header?.glibcVersionRuntime === 'string';
 }
 
-/** The addon, loaded on first use. Throws, naming the missing file and how to build it, when there is no binary. */
+/** Where the addon for a platform suffix may be, in the order {@link loadAddon} tries them. */
+export function addonCandidates(suffix: string = platformSuffix()): [localFile: string, platformPackage: string] {
+  return [fileURLToPath(new URL(`../native/relay-quic.${suffix}.node`, import.meta.url)), `@mux/relay-quic-${suffix}`];
+}
+
+/**
+ * The first of `candidates` that `load` finds. A candidate that is not there is skipped; one that is there but fails
+ * to load (a wrong libc, say) throws its own error. Throws, naming every place it looked, when none is there.
+ */
+export function loadFirst(candidates: readonly string[], load: (id: string) => unknown, suffix: string): unknown {
+  const missing: unknown[] = [];
+  for (const candidate of candidates) {
+    try {
+      return load(candidate);
+    } catch (error) {
+      if (!isNotFound(error, candidate)) throw error;
+      missing.push(error);
+    }
+  }
+  throw new Error(
+    `@mux/relay-quic has no native binary for this platform (${suffix}). Install its optional dependency ` +
+      `${candidates.at(-1)}, which a package manager skips when optional dependencies are off, or build ` +
+      `${candidates[0]} with \`pnpm --filter @mux/relay-quic build:native\`, which needs a Rust toolchain.`,
+    { cause: new AggregateError(missing, 'no candidate was found') },
+  );
+}
+
+/** Whether `error` says `id` itself is missing, rather than something it needs. */
+function isNotFound(error: unknown, id: string): boolean {
+  const { code, message } = error as { code?: unknown; message?: unknown };
+  return code === 'MODULE_NOT_FOUND' && typeof message === 'string' && message.includes(`'${id}'`);
+}
+
+/** The addon, loaded on first use. Throws, naming the places it looked, when there is no binary for this platform. */
 export function loadAddon(): NativeAddon {
   if (addon) return addon;
-  const file = `relay-quic.${platformSuffix()}.node`;
-  const url = new URL(`../native/${file}`, import.meta.url);
-  try {
-    addon = createRequire(import.meta.url)(fileURLToPath(url)) as NativeAddon;
-  } catch (error) {
-    if ((error as { code?: unknown }).code !== 'MODULE_NOT_FOUND') throw error;
-    throw new Error(
-      `@mux/relay-quic has no native binary for this platform (${file}). Build it with ` +
-        '`pnpm --filter @mux/relay-quic build:native`, which needs a Rust toolchain.',
-      { cause: error },
-    );
-  }
+  const suffix = platformSuffix();
+  addon = loadFirst(addonCandidates(suffix), createRequire(import.meta.url), suffix) as NativeAddon;
   return addon;
 }
