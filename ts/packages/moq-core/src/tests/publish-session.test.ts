@@ -1417,7 +1417,10 @@ describe('createMoqtPublishSession', () => {
     subscriber.destroy();
   });
 
-  it("resets a superseded subscription's data streams with a WebTransportError carrying CANCELLED", async () => {
+  it.each([
+    ['in a browser, a WebTransportError', true],
+    ['elsewhere, a stream error of the SDK', false],
+  ])("resets a superseded subscription's data streams with CANCELLED: %s (TA-17, TA-22)", async (_, browser) => {
     // Spec-shaped: WebTransport reads a reset's code only from this native type's `streamErrorCode`.
     class FakeWebTransportError extends Error {
       readonly source: string;
@@ -1428,7 +1431,7 @@ describe('createMoqtPublishSession', () => {
         this.streamErrorCode = options.streamErrorCode ?? null;
       }
     }
-    vi.stubGlobal('WebTransportError', FakeWebTransportError);
+    if (browser) vi.stubGlobal('WebTransportError', FakeWebTransportError);
 
     try {
       const { pair, session, subscriber } = makePublishHarness();
@@ -1466,7 +1469,7 @@ describe('createMoqtPublishSession', () => {
       });
 
       expect(reasons).toHaveLength(1);
-      expect(reasons[0]).toBeInstanceOf(FakeWebTransportError);
+      expect(reasons[0]).toBeInstanceOf(browser ? FakeWebTransportError : Error);
       expect(reasons[0]).toMatchObject({ source: 'stream', streamErrorCode: STREAM_RESET_CODE.CANCELLED });
       session.destroy();
       subscriber.destroy();

@@ -65,23 +65,10 @@ export interface WriteSlot {
   disconnect(error?: unknown): void;
 }
 
-/**
- * The reason handed to a stream reset outside a browser: transports read `streamErrorCode` from it.
- * In a browser the reason is a WebTransportError, which is how WebTransport carries the code.
- */
-export class StreamReset extends Error {
-  override readonly name = 'StreamReset';
-  readonly streamErrorCode: ResetCode;
-
-  constructor(code: ResetCode, cause: unknown) {
-    super(cause instanceof Error ? cause.message : 'Publish operation reset', { cause });
-    this.streamErrorCode = code;
-  }
-}
-
+/** The reason a stream reset hands the transport (TA-17): see `streamResetReason`. */
 function resetReason(code: ResetCode, cause: unknown): unknown {
   const message = cause instanceof Error ? cause.message : 'Publish operation reset';
-  return streamResetReason(code, message, () => new StreamReset(code, cause));
+  return streamResetReason(code, message, { cause });
 }
 
 /** The code for a reset caused by the connection ending. */

@@ -40,8 +40,8 @@ export interface RequestStream {
   finWrite(): Promise<void>;
   /**
    * Cancel the request (§3.3.3): abort the sending direction and stop reading the receiving direction. `reason` is
-   * surfaced to the transport — a DOM caller passes a `WebTransportError` carrying the stream error code; tests pass
-   * anything.
+   * surfaced to the transport — a caller passes the reason `streamResetReason` builds, which carries the stream error
+   * code (TA-17); tests pass anything.
    */
   cancel(reason?: unknown): void;
   readonly cancelled: boolean;

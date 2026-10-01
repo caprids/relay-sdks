@@ -54,6 +54,7 @@ import { isSubgroupHeaderType, STREAM_TYPE } from './object-stream.js';
 import type { BidirectionalStreamLike } from './request-stream.js';
 import type { Goaway, MoqtTransport } from './session.js';
 import { streamResetReason } from './stream-reset.js';
+import { isSessionError } from './transport-error.js';
 
 // =============================================================================
 // Driver types
@@ -289,19 +290,6 @@ interface NamespaceStream {
   writer: WritableStreamDefaultWriter<Uint8Array>;
   /** Suffixes announced on this stream (for NAMESPACE_DONE at close). */
   announced: TrackNamespace[];
-}
-
-/**
- * Whether a stream failure is the session's own end rather than something the peer did to the stream: a browser's
- * WebTransport fails every stream of an ended session with a `WebTransportError` whose `source` is `'session'` (a
- * peer's RESET_STREAM has `source` `'stream'`).
- */
-function isSessionFailure(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    error.name === 'WebTransportError' &&
-    (error as Error & { source?: unknown }).source === 'session'
-  );
 }
 
 const PENDING = Symbol('pending');
@@ -622,12 +610,12 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    * response-write failure path; `cause` is the stream failure that ended the carrier. Silent while closing,
    * destroyed, or migrating (a GOAWAY makes the peer's streams ending the orderly drain), and once the transport has
    * ended: an ended transport fails every stream as it settles `closed`, and that is connection loss, which
-   * `#handleClosed` reports, not a withdrawal. The failure's shape or the settled `closed` decides, not whether the
-   * `closed` handler happened to run first.
+   * `#handleClosed` reports, not a withdrawal. A failure with `source` `'session'` (TA-23) or the settled `closed`
+   * decides, not whether the `closed` handler happened to run first.
    */
   async #reportAnnounceLoss(cause: unknown): Promise<void> {
     if (this.#announceLossSilenced() || this.#announceCarried()) return;
-    if (isSessionFailure(cause) || (await hasSettled(this.#transport.closed))) return;
+    if (isSessionError(cause) || (await hasSettled(this.#transport.closed))) return;
     // A replacement solicitation may have picked the announce up during that turn.
     if (this.#announceLossSilenced() || this.#announceCarried()) return;
 

@@ -1,3 +1,5 @@
+import { isStreamError } from '@mux/moq-core';
+
 /** Stable categories for SDK lifecycle failures; messages are diagnostic text only. */
 export type RelayErrorCode =
   | 'CONNECTION_TIMEOUT'
@@ -53,15 +55,18 @@ export class RelayError extends Error {
 }
 
 /**
- * Whether a send-stream failure is the peer's STOP_SENDING. Chromium reports it in one of two shapes, depending on
- * which of its own notifications lands first: a `WebTransportError` whose `source` is `'stream'` ("Received
- * STOP_SENDING."), or a `NetworkError` DOMException saying the remote side aborted the stream. A session failure is a
- * `WebTransportError` whose `source` is `'session'`.
+ * Whether a send-stream failure is the peer's STOP_SENDING: a stream error (TA-20, TA-22), whatever its class or name.
+ * Chromium sometimes reports the stop instead as a `NetworkError` DOMException saying the remote side aborted the
+ * stream, with no `source` and no code, which is accepted too (spec/transport-adapter.md, Known deviations). A session
+ * failure has `source` `'session'`.
  */
 export function isStreamStop(error: unknown): boolean {
-  if (!(error instanceof Error)) return false;
-  if (error.name === 'WebTransportError') return (error as Error & { source?: unknown }).source === 'stream';
-  return error.name === 'NetworkError' && error.message === 'The stream was aborted by the remote server';
+  if (isStreamError(error)) return true;
+  return (
+    error instanceof Error &&
+    error.name === 'NetworkError' &&
+    error.message === 'The stream was aborted by the remote server'
+  );
 }
 
 /** Wrap only transport/session failures, preserving their original cause. */
