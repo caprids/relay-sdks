@@ -51,8 +51,9 @@ export interface ConnectRelayOptions {
   /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
   connectTimeoutMs?: number;
   /**
-   * Create the transport. Defaults to the browser's WebTransport; a runtime without it fails with
-   * `TRANSPORT_UNAVAILABLE` unless this is supplied.
+   * Create the transport. Defaults to the browser's WebTransport; a runtime without it, or whose
+   * WebTransport cannot negotiate protocols, fails with `TRANSPORT_UNAVAILABLE` unless this is
+   * supplied.
    */
   createTransport?: RelayTransportFactory;
 }
@@ -89,7 +90,16 @@ function createBrowserTransport(url: string, protocols: string[]) {
   if (typeof WebTransport === 'undefined') {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
-      'WebTransport is unavailable; supply createTransport for this runtime',
+      'WebTransport is unavailable; supply createTransport with a transport adapter for this runtime',
+      'connecting',
+    );
+  }
+  // Deno 2.x has a global that ignores protocols and has no protocol getter, so it could never
+  // agree on moqt-20; refuse it here rather than hang waiting for a SETUP that cannot come.
+  if (!('protocol' in WebTransport.prototype)) {
+    throw new RelayError(
+      'TRANSPORT_UNAVAILABLE',
+      'WebTransport in this runtime cannot negotiate protocols; supply createTransport with a transport adapter for this runtime',
       'connecting',
     );
   }
