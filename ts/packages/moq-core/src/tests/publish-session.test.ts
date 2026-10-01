@@ -1077,6 +1077,35 @@ describe('createMoqtPublishSession', () => {
     subscriber.destroy();
   });
 
+  it('acknowledges a subscription update carrying delivery timeouts and hands them to its caller (§8)', async () => {
+    const updates: unknown[] = [];
+    const endedRequests: number[] = [];
+    const { pair, session, subscriber } = makePublishHarness({
+      onRequestUpdate: (update) => updates.push(update),
+      onSubscribeEnd: ({ requestId }) => endedRequests.push(requestId),
+    });
+
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    const sub = await rawSubscribe(pair.server, 'video', 111);
+
+    await vi.waitFor(() => {
+      expect(sub.received.map((m) => m.kind)).toEqual(['subscribe-ok']);
+    });
+    await sub.send(encodeRequestUpdate(113, { subgroupDeliveryTimeout: 40, objectDeliveryTimeout: 20 }));
+    await vi.waitFor(() => {
+      expect(sub.received.map((m) => m.kind)).toEqual(['subscribe-ok', 'request-ok']);
+    });
+    expect(updates).toEqual([
+      { requestId: 111, updateRequestId: 113, parameters: { subgroupDeliveryTimeout: 40, objectDeliveryTimeout: 20 } },
+    ]);
+    expect(sub.ended()).toBe(false);
+    expect(endedRequests).toEqual([]);
+    session.destroy();
+    subscriber.destroy();
+  });
+
   it('treats announce-carrier loss after a GOAWAY as migration, not failure', async () => {
     const goaways: number[] = [];
     const endings: unknown[] = [];
