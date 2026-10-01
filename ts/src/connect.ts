@@ -147,9 +147,10 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
     observeClosed,
     assertOpen,
     close,
-  } = await openRelaySession(options, (transport, callbacks) =>
+  } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
       implementationName: '@mux/relay',
+      setupOptions,
       requestTimeoutMs: options.requestTimeoutMs,
       callbacks,
     }),

@@ -1,4 +1,10 @@
-import { MOQT_PROTOCOL_ID, type MoqtSessionCallbacks, type MoqtTransport } from '@mux/moq-core';
+import {
+  type KeyValuePair,
+  MOQT_PROTOCOL_ID,
+  type MoqtSessionCallbacks,
+  type MoqtTransport,
+  SETUP_OPTION,
+} from '@mux/moq-core';
 
 import { RelayError, transportError } from './errors.js';
 
@@ -29,6 +35,13 @@ export type RelayTransportFactory = (
   transport: MoqtTransport;
   /** Resolves once the transport can open streams; a rejection fails the connect call. */
   ready: Promise<void>;
+  /**
+   * What the transport carries. `'webtransport'` (the default) is a WebTransport session, whose
+   * CONNECT request carries the URL. `'native-quic'` is MOQT directly on a QUIC connection: the
+   * adapter dials only the URL's host and port, and the core sends the path, query and authority
+   * in SETUP.
+   */
+  framing?: 'webtransport' | 'native-quic';
 };
 
 /**
@@ -86,7 +99,7 @@ interface RelaySessionLifetime<T extends Session> {
   close(): void;
 }
 
-function createBrowserTransport(url: string, protocols: string[]) {
+const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
   if (typeof WebTransport === 'undefined') {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
@@ -106,7 +119,34 @@ function createBrowserTransport(url: string, protocols: string[]) {
 
   const transport = new WebTransport(url, { protocols });
 
-  return { transport, ready: transport.ready };
+  return { transport, ready: transport.ready, framing: 'webtransport' };
+};
+
+const utf8 = new TextEncoder();
+
+/**
+ * The setup options the endpoint URL needs in CLIENT_SETUP for a framing (TA-6). On native QUIC,
+ * PATH (the path-abempty and `?query`, the resolved jwt included) and AUTHORITY take the place of
+ * the CONNECT request a WebTransport session sends; on a WebTransport session neither may be sent
+ * (draft-20 §10.3.1.2, §10.3.1.1).
+ */
+function endpointSetupOptions(framing: unknown, url: URL): KeyValuePair[] {
+  if (framing === undefined || framing === 'webtransport') return [];
+  if (framing !== 'native-quic')
+    throw new RelayError(
+      'TRANSPORT_ERROR',
+      `createTransport returned an unknown framing ${JSON.stringify(framing)}; expected 'webtransport' or 'native-quic'`,
+      'connecting',
+    );
+  // URL.search is empty for both an absent and an empty query, but `?` with nothing after it is a
+  // present, empty query that PATH keeps. A path cannot contain `?` and the endpoint has no
+  // fragment, so the query is everything in href from the first `?`.
+  const queryStart = url.href.indexOf('?');
+  const path = url.pathname + (queryStart === -1 ? '' : url.href.slice(queryStart));
+  return [
+    { type: SETUP_OPTION.PATH, value: utf8.encode(path) },
+    { type: SETUP_OPTION.AUTHORITY, value: utf8.encode(url.host) },
+  ];
 }
 
 /**
@@ -115,7 +155,11 @@ function createBrowserTransport(url: string, protocols: string[]) {
  */
 export async function openRelaySession<T extends Session>(
   options: ConnectRelayOptions,
-  createSession: (transport: MoqtTransport, callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>) => T,
+  createSession: (
+    transport: MoqtTransport,
+    callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>,
+    setupOptions: KeyValuePair[],
+  ) => T,
 ): Promise<RelaySessionLifetime<T>> {
   // Not a string, or not a URL at all (including an https URL with no host), is a TypeError: the
   // wrong shape. A URL that parses but is not one Relay accepts is a RangeError: a disallowed value.
@@ -229,23 +273,28 @@ export async function openRelaySession<T extends Session>(
 
     await created.ready;
     assertOpen();
+    const setupOptions = endpointSetupOptions(created.framing, url);
 
-    session = createSession(transport, {
-      onClosed: (info) =>
-        finish(
-          info.error === undefined
-            ? info
-            : { error: transportError(info.error, established ? 'connection' : 'connecting') },
-        ),
-      onGoaway: () =>
-        finish({
-          error: new RelayError(
-            'GOAWAY',
-            'Relay requested session migration; open a new connection',
-            established ? 'connection' : 'connecting',
+    session = createSession(
+      transport,
+      {
+        onClosed: (info) =>
+          finish(
+            info.error === undefined
+              ? info
+              : { error: transportError(info.error, established ? 'connection' : 'connecting') },
           ),
-        }),
-    });
+        onGoaway: () =>
+          finish({
+            error: new RelayError(
+              'GOAWAY',
+              'Relay requested session migration; open a new connection',
+              established ? 'connection' : 'connecting',
+            ),
+          }),
+      },
+      setupOptions,
+    );
 
     await session.ready;
     assertOpen();

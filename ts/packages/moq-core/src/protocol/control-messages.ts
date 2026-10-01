@@ -58,14 +58,25 @@ export const MESSAGE_TYPE = {
   SUBSCRIBE_TRACKS: 0x51,
 } as const;
 
-/** Setup Option types (§10.3.1). A namespace separate from message parameters. */
+/**
+ * Setup Option types (§10.3.1). A namespace separate from message parameters. A session sends
+ * options of these types through its `setupOptions` config, beside the MOQT_IMPLEMENTATION it adds
+ * itself.
+ */
 export const SETUP_OPTION = {
+  /** The endpoint's path and query, sent only on native QUIC (§10.3.1.2). */
   PATH: 0x01,
+  /** A token authorizing the session (§10.3.1.4). */
   AUTHORIZATION_TOKEN: 0x03,
+  /** How many bytes of registered tokens the sender will cache (§10.3.1.3). */
   MAX_AUTH_TOKEN_CACHE_SIZE: 0x04,
+  /** The endpoint's host and port, sent only on native QUIC (§10.3.1.1). */
   AUTHORITY: 0x05,
+  /** The most ranges the sender accepts in one location filter (§10.3.1.6). */
   MAX_FILTER_RANGES: 0x06,
+  /** The sender's implementation name (§10.3.1.5). */
   MOQT_IMPLEMENTATION: 0x07,
+  /** The most REQUEST_UPDATE messages the sender accepts unanswered on one request stream (§10.3.1.7). */
   MAX_REQUEST_UPDATES: 0x08,
 } as const;
 

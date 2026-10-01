@@ -64,7 +64,7 @@ The seam is the factory a connection calls and the transport it returns.
 | --- | --- |
 | `createTransport(url, protocols)` | `RelayTransportFactory`. Called once per connection with the endpoint URL (the token already in its `jwt` query parameter) and the MOQT protocol identifiers to offer, in preference order. Returns `{ transport, ready, framing }`. |
 | `ready` | Resolves once the transport can open streams and a protocol was selected; a rejection fails the connect call. |
-| `framing` | `'webtransport'` or `'native-quic'`: what the transport carries. Optional, default `'webtransport'`. **Not yet implemented** (#191). |
+| `framing` | `'webtransport'` or `'native-quic'`: what the transport carries. Optional, default `'webtransport'`. |
 | `transport.protocol` | The protocol identifier the peer selected. **Not yet in `MoqtTransport`** (#203); a browser's `WebTransport` has it. |
 | `transport.incomingUnidirectionalStreams` | `ReadableStream` of the peer's unidirectional streams, each a `ReadableStream<Uint8Array>`. |
 | `transport.incomingBidirectionalStreams` | `ReadableStream` of the peer's bidirectional streams, each `{ readable, writable }`. |
@@ -85,8 +85,7 @@ The same holds for a bidirectional stream's two halves.
 **TA-1.** The adapter MUST declare its framing in the factory result: `'webtransport'` when the
 transport carries a WebTransport session, `'native-quic'` when it carries MOQT directly on a QUIC
 connection. An adapter that declares nothing is a WebTransport session.
-**Why:** the framing decides what CLIENT_SETUP contains (TA-5, TA-6). **Not yet implemented:**
-#191.
+**Why:** the framing decides what CLIENT_SETUP contains (TA-5, TA-6).
 
 **TA-2.** On a WebTransport session the adapter MUST send the extended CONNECT to the URL exactly
 as it was given, path and query included, so the token reaches the relay in the `jwt` query
@@ -115,8 +114,8 @@ a WebTransport session it cannot run.
 authority) and the PATH setup option (the URL's path-abempty, then `?` and the query when present,
 the resolved `jwt` included) in CLIENT_SETUP. On a WebTransport session it MUST NOT send either
 (draft-20 §10.3.1.1, §10.3.1.2).
-**Not yet implemented:** #191. Today the core sends neither, which is right for a WebTransport
-session only.
+The cases, from the URL and token to the exact option values, are in
+`vectors/setup-options.json`.
 
 **TA-7.** The adapter MUST NOT resolve `ready` until the peer has explicitly selected one of the
 offered protocols: the negotiated ALPN on native QUIC, the `WT-Protocol` response header on a
@@ -282,7 +281,8 @@ The contract has two sides. Against an adapter that follows the rules above, the
 
 - attaches a handler to `closed` as soon as the factory returns, so TA-9's rejection alongside
   `ready` is never unhandled;
-- sends PATH and AUTHORITY only on native QUIC (TA-6, #191);
+- sends PATH and AUTHORITY only on native QUIC (TA-6), and fails the connection with
+  `TRANSPORT_ERROR`, closing the transport, when `framing` is neither value TA-1 allows;
 - checks `protocol` after `ready` (TA-8, #203);
 - classifies errors by `source`, not by class or name, and hands over `streamErrorCode` on the
   reasons it resets and stops with (TA-17, TA-22, `transport-error.ts`);

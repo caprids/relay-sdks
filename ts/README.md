@@ -570,6 +570,8 @@ Automatic reconnection, token refresh on a live session, datagram reception, pro
 resource discovery, and a Video.js adapter are not implemented yet. A GOAWAY ends the connection with an error; subscriptions still awaiting their first response end with it (`subscribed` rejects with `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `onError`;
 callers can open a replacement. A custom `createTransport`
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
+A factory whose transport carries MOQT directly on QUIC, not a WebTransport session, returns
+`framing: 'native-quic'`, and the core then sends the endpoint's path, token and authority in SETUP.
 
 ## Live Relay smoke test
 

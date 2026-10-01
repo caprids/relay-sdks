@@ -193,9 +193,10 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   });
   // Nobody may await readiness; a rejection must not surface as an unhandled rejection.
   void announced.catch(() => {});
-  const lifetime = await openRelaySession(options, (transport, callbacks) =>
+  const lifetime = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtPublishSession(transport, {
       implementationName: '@mux/relay publisher',
+      setupOptions,
       callbacks: {
         ...callbacks,
         onAnnounced: () => announce(),
