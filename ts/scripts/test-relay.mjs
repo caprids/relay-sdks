@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { dirname, resolve, sep } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { startModuleServer } from './module-server.js';
 
 // The Chromium launcher for the live-relay scenario in relay-scenario.js: it serves the built modules,
 // runs the scenario in a Playwright page, and redacts and reports its outcome.
@@ -62,34 +61,10 @@ const modules = {
   '/scripts/': resolve(root, 'scripts'),
   '/examples/shared/': resolve(root, 'examples/shared'),
 };
-const server = createServer(async (request, response) => {
-  try {
-    const path = new URL(request.url, 'http://localhost').pathname;
-    if (path === '/') {
-      response.setHeader('Content-Type', 'text/html');
-      response.end(
-        '<!doctype html><script type="importmap">{"imports":{"@mux/relay":"/sdk/index.js","@mux/moq-core":"/core/index.js"}}</script>',
-      );
-      return;
-    }
-    const prefix = Object.keys(modules).find((candidate) => path.startsWith(candidate));
-    if (!prefix) {
-      response.writeHead(404).end();
-      return;
-    }
-    const base = modules[prefix];
-    const file = resolve(base, decodeURIComponent(path.slice(prefix.length)));
-    if (!file.startsWith(base + sep) || !file.endsWith('.js')) {
-      response.writeHead(403).end();
-      return;
-    }
-    response.setHeader('Content-Type', 'text/javascript');
-    response.end(await readFile(file));
-  } catch {
-    response.writeHead(404).end();
-  }
+const server = await startModuleServer({
+  modules,
+  importMap: { '@mux/relay': '/sdk/index.js', '@mux/moq-core': '/core/index.js' },
 });
-await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 let browser;
 try {
   browser = await chromium.launch({ headless: true });

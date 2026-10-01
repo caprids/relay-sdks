@@ -310,6 +310,18 @@ adapters MUST NOT copy them.
   refused connection (#14), so a credentials refusal reaches the SDK as `TRANSPORT_ERROR`.
 - **Browser stream error codes (TA-22).** A browser's `streamErrorCode` is nullable and is `null`
   when the browser does not know the code, which TA-22 allows.
+- **Chromium `ready` without a selected protocol (TA-7).** When the peer's response names no
+  protocol, or one that was not offered, Chromium resolves `ready` anyway and sets `protocol` to the
+  empty string. The core's check of `protocol` after `ready` (TA-8, #203) turns that into a connect
+  failure; until it lands, the failure surfaces later, at SETUP.
+  **Evidence:** the conformance suite, in Chromium 147.0.7727.15 against the Python accepting end.
+- **Chromium 8-bit send codes (TA-17, TA-18).** Chromium's `WebTransportError` constructor clamps
+  `streamErrorCode` to 255, so a reset or a stop it sends carries at most 255. Codes it receives are
+  not limited: a peer reset with 2³²−1 arrives intact (TA-19). This is harmless today, since every
+  stream reset code the core sends is 0x12 or below (draft-20 §3.3.4).
+  **Evidence:** in Chromium 147.0.7727.15,
+  `new WebTransportError({ message, streamErrorCode: 256 }).streamErrorCode` is 255, and the
+  conformance suite's peer sees 255 for a reset or stop sent with 256, 65536 or 2³²−1.
 
 ## Test doubles
 
@@ -326,8 +338,9 @@ for it:
 `close()` reaches both ends at once, with no time in flight. That is harmless: no rule depends on how
 long a close takes to arrive.
 
-A test that depends on credit or acknowledgement uses an adapter that has it: the Python loopback
-server, Chromium against a local relay, or `@mux/relay-quic` once it exists.
+A test that depends on credit or acknowledgement uses an adapter that has it: Chromium against the
+conformance suite's Python accepting end, the Python loopback server, or `@mux/relay-quic` once it
+exists.
 
 ## Python mapping (informative)
 
@@ -353,8 +366,10 @@ The conformance suite (`ts/conformance/`, #193) is written against `MoqtTranspor
 every target:
 
 - the in-memory pair in vitest, as part of `pnpm check`
-- Chromium's native `WebTransport` against a test accepting end
-- `@mux/relay-quic` in Node
+- Chromium's native `WebTransport`, in `pnpm test:conformance`, against a scriptable Python
+  accepting end (`python/packages/mux-relay/tests/relay_helpers/conformance_peer.py`) that can
+  reset, stop, close at either layer, withhold acknowledgement and limit stream credit
+- `@mux/relay-quic` in Node, against the same accepting end in a native QUIC mode (#194)
 
 Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
 adapter, and the core's SETUP tests cover it. For TA-26 the test is a Node script that has to exit by

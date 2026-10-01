@@ -64,6 +64,12 @@ description = "Opt-in live smoke test against a real Relay (RELAY_TOKEN or hidde
 dir = "ts"
 run = "pnpm test:relay"
 
+[tasks."ts:test:conformance"]
+description = "Run the transport adapter conformance suite in headless Chromium against the Python accepting end"
+depends = ["ts:install", "python:install"]
+dir = "ts"
+run = "pnpm test:conformance"
+
 [tasks."ts:example:mux-global"]
 description = "Run the mux.global example; pass its options after --"
 dir = "ts"
