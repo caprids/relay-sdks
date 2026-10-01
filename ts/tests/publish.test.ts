@@ -666,6 +666,9 @@ function heldAcknowledgments(factory: RelayTransportFactory) {
     return {
       ready,
       transport: {
+        get protocol() {
+          return transport.protocol;
+        },
         incomingUnidirectionalStreams: transport.incomingUnidirectionalStreams,
         incomingBidirectionalStreams: transport.incomingBidirectionalStreams,
         createBidirectionalStream: () => transport.createBidirectionalStream(),

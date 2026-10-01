@@ -117,7 +117,8 @@ const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
     );
   }
 
-  const transport = new WebTransport(url, { protocols });
+  // TypeScript's DOM lib does not declare `protocol` yet; the prototype check above found it.
+  const transport = new WebTransport(url, { protocols }) as WebTransport & { readonly protocol: string };
 
   return { transport, ready: transport.ready, framing: 'webtransport' };
 };
@@ -147,6 +148,20 @@ function endpointSetupOptions(framing: unknown, url: URL): KeyValuePair[] {
     { type: SETUP_OPTION.PATH, value: utf8.encode(path) },
     { type: SETUP_OPTION.AUTHORITY, value: utf8.encode(url.host) },
   ];
+}
+
+/**
+ * Fail the connection unless the transport negotiated `moqt-20` (TA-8). It backs up TA-7, which makes `ready` reject
+ * on no selection or an unoffered one; Chromium resolves `ready` anyway, with an empty `protocol`.
+ */
+function assertNegotiatedProtocol(protocol: unknown): void {
+  if (protocol === MOQT_PROTOCOL_ID) return;
+  const received = typeof protocol === 'string' && protocol.length > 0 ? JSON.stringify(protocol) : 'none';
+  throw new RelayError(
+    'TRANSPORT_ERROR',
+    `Relay transport negotiated ${received}, not the offered protocol "${MOQT_PROTOCOL_ID}"`,
+    'connecting',
+  );
 }
 
 /**
@@ -290,6 +305,7 @@ export async function openRelaySession<T extends Session>(
 
     await created.ready;
     assertOpen();
+    assertNegotiatedProtocol(transport.protocol);
     const setupOptions = endpointSetupOptions(created.framing, url);
 
     session = createSession(

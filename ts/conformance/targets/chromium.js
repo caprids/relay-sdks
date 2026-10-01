@@ -9,7 +9,7 @@ import { createRemotePeer } from './remote-peer.js';
 /** Rules Chromium is known not to meet, each with its Known deviation in `spec/transport-adapter.md`. */
 const protocolDeviation = {
   fails:
-    'Known deviations: Chromium resolves ready without a selected protocol (TA-7); the core checks protocol (#203)',
+    'Known deviations: Chromium resolves ready without a selected protocol (TA-7); the core checks protocol (TA-8)',
 };
 const codeDeviation = { fails: 'Known deviations: Chromium sends stream error codes as 8 bits (TA-17, TA-18)' };
 const expectations = {

@@ -104,7 +104,7 @@ the crate. CI checks that it matches.
 | Path | What it is |
 | --- | --- |
 | `src/index.ts` | `nativeQuicTransport` and its option and result types. |
-| `src/transport.ts` | The `MoqtTransport`: the dial, `ready`, `closed`, `close()` and the incoming streams. |
+| `src/transport.ts` | The `MoqtTransport`: the dial, `ready`, `protocol`, `closed`, `close()` and the incoming streams. |
 | `src/streams.ts` | WHATWG streams over the addon's stream halves. |
 | `src/errors.ts` | The addon's failures as the contract's error shapes (TA-22). |
 | `src/addon.ts` | Finds and loads the addon for this platform: a local build, else the platform package. |

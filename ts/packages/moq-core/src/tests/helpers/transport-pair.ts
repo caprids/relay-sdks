@@ -3,7 +3,7 @@
  * the peer's incoming stream queues, so a publish session on one side can talk to a subscribe session on the other over
  * real (in-process) WHATWG streams — the same structural seam a `WebTransport` satisfies in production.
  */
-import { MESSAGE_TYPE } from '../../protocol/control-messages.js';
+import { MESSAGE_TYPE, MOQT_PROTOCOL_ID } from '../../protocol/control-messages.js';
 import type { BidirectionalStreamLike } from '../../protocol/request-stream.js';
 import type { MoqtTransport } from '../../protocol/session.js';
 import { decodeVarint, encodeVarintInto, varintByteLength } from '../../protocol/varint.js';
@@ -285,6 +285,7 @@ export function createTransportPair({
   };
 
   const makeTransport = (local: typeof a, remote: typeof b, closedPromise: Promise<unknown>): MoqtTransport => ({
+    protocol: MOQT_PROTOCOL_ID,
     incomingUnidirectionalStreams: local.incomingUni.stream,
     incomingBidirectionalStreams: local.incomingBidi.stream,
     async createUnidirectionalStream() {
@@ -494,6 +495,9 @@ export function setRequestIdParity(chunk: Uint8Array): Uint8Array {
  */
 export function withServerRequestIds(transport: MoqtTransport): MoqtTransport {
   return {
+    get protocol() {
+      return transport.protocol;
+    },
     incomingUnidirectionalStreams: transport.incomingUnidirectionalStreams,
     incomingBidirectionalStreams: transport.incomingBidirectionalStreams,
     createUnidirectionalStream: () => transport.createUnidirectionalStream(),

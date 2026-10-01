@@ -60,6 +60,11 @@ import { type BidirectionalStreamLike, openRequestStream, type RequestStream } f
  * provide an in-memory fake (the same seam pattern as SPF's fetch injection).
  */
 export interface MoqtTransport {
+  /**
+   * The protocol the peer selected from those offered: the negotiated ALPN on native QUIC, the `WT-Protocol` response
+   * header on a WebTransport session. Read once the transport is ready (TA-8).
+   */
+  readonly protocol: string;
   /** Unidirectional streams the peer opens: its control stream and data streams. */
   readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
   /** Bidirectional streams the peer opens: its request streams. */
@@ -1216,8 +1221,10 @@ class MoqtSessionImpl implements MoqtSession {
  *
  * @example
  *   ```ts
- *   const transport = new WebTransport(url, { protocols: [MOQT_PROTOCOL_ID] });
+ *   // TypeScript's DOM lib does not declare WebTransport's `protocol` yet.
+ *   const transport = new WebTransport(url, { protocols: [MOQT_PROTOCOL_ID] }) as WebTransport & MoqtTransport;
  *   await transport.ready;
+ *   if (transport.protocol !== MOQT_PROTOCOL_ID) throw new Error(`negotiated ${transport.protocol || 'none'}`);
  *   const session = createMoqtSession(transport, {
  *     callbacks: { onGoaway: (g) => migrate(g.newSessionUri) },
  *   });
