@@ -60,7 +60,9 @@ dir = "ts"
 run = "pnpm run docs"
 
 [tasks."ts:test:relay"]
-description = "Opt-in live smoke test against a real Relay (RELAY_TOKEN or hidden prompt)"
+description = "Opt-in live smoke test against a real Relay, in Node and in Chromium (RELAY_TOKEN or hidden prompt)"
+depends = ["ts:install"]
+tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts"
 run = "pnpm test:relay"
 
@@ -70,8 +72,8 @@ depends = ["ts:install", "python:install"]
 dir = "ts"
 run = "pnpm test:conformance"
 
-# Only @mux/relay-quic's native addon needs Rust, so the tasks that build or lint it bring their own toolchain and
-# nothing else installs one: `pnpm check` builds no Rust.
+# Only @mux/relay-quic's native addon needs Rust, so the tasks that build or lint it (these two, the live smoke test
+# and the mux-global example) bring their own toolchain and nothing else installs one: `pnpm check` builds no Rust.
 [tasks."ts:test:conformance:node"]
 description = "Build @mux/relay-quic's addon and run the transport adapter conformance suite against it in Node"
 depends = ["ts:install", "python:install"]
@@ -86,7 +88,9 @@ dir = "ts/packages/relay-quic/native"
 run = ["cargo fmt --check", "cargo clippy --release --all-targets -- -D warnings", "cargo test --release"]
 
 [tasks."ts:example:mux-global"]
-description = "Run the mux.global example; pass its options after --"
+description = "Run the mux.global example in Node; pass its options after --"
+depends = ["ts:install"]
+tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts"
 run = "pnpm example:mux-global"
 

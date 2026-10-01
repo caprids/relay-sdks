@@ -1,28 +1,30 @@
 #!/usr/bin/env node
 /**
- * Run the Relay example (demo.js) against a live Relay in headless Chromium.
+ * Run the Relay example (demo.js) against a live Relay in Node.
  *
- * Node has no WebTransport, so this serves the built SDK and demo.js on localhost, launches
- * Chromium through Playwright, and prints the page's log entries. The SDK calls live in demo.js.
+ * Node has no WebTransport, so the connections use @mux/relay-quic, which carries MOQT over native
+ * QUIC. This parses the options, reads the token, and prints demo.js's log entries. The SDK calls
+ * live in demo.js.
  *
- *   cd ts && pnpm build
+ *   cd ts && pnpm build && pnpm --filter @mux/relay-quic build:native
  *   # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
  *   node examples/mux-global/run.mjs --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE"
  */
 import { randomUUID } from 'node:crypto';
-import { access, readFile } from 'node:fs/promises';
-import { createServer } from 'node:http';
-import { dirname, resolve, sep } from 'node:path';
+import { access } from 'node:fs/promises';
+import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { chromium } from 'playwright';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, '../..');
-/** The two built packages, which must exist, and the example policies shared with the smoke test. */
-const built = { '/sdk/': resolve(root, 'dist'), '/core/': resolve(root, 'packages/moq-core/dist') };
-const modules = { ...built, '/shared/': resolve(here, '../shared') };
+/** The built packages, which must exist. */
+const built = [
+  resolve(root, 'dist'),
+  resolve(root, 'packages/moq-core/dist'),
+  resolve(root, 'packages/relay-quic/dist'),
+];
 const usage = `Usage: node examples/mux-global/run.mjs [options]
 
   --url <https url>      Relay endpoint (default RELAY_URL or https://sjc.relay.mux.global)
@@ -91,9 +93,19 @@ const config = {
   timeoutMs: positiveInteger('timeout', args.timeout) * 1000,
 };
 
-await Promise.all(Object.values(built).map((directory) => access(resolve(directory, 'index.js')))).catch(() =>
+await Promise.all(built.map((directory) => access(resolve(directory, 'index.js')))).catch(() =>
   fail('The SDK is not built yet; run `pnpm build` first'),
 );
+// Imported once the build is known to exist. The factory throws at once, naming the build command, when the
+// native addon has not been built for this platform.
+const { nativeQuicTransport } = await import('@mux/relay-quic');
+const { runDemo } = await import('./demo.js');
+let createTransport;
+try {
+  createTransport = nativeQuicTransport();
+} catch (error) {
+  fail(error.message);
+}
 
 const token = await readToken();
 if (!token) fail('A Relay token is required');
@@ -107,40 +119,6 @@ const format = ({ event, ...fields }) =>
       .map(([key, value]) => `${key}=${typeof value === 'string' ? value : JSON.stringify(value)}`),
   ].join(' ');
 const print = (entry) => console.log(redact(format(entry)));
-
-const server = createServer(async (request, response) => {
-  const path = new URL(request.url, 'http://localhost').pathname;
-  try {
-    if (path === '/') {
-      response.setHeader('Content-Type', 'text/html');
-      response.end(
-        '<!doctype html><title>@mux/relay example</title>' +
-          '<script type="importmap">{"imports":{"@mux/relay":"/sdk/index.js","@mux/moq-core":"/core/index.js"}}</script>',
-      );
-      return;
-    }
-    const file = resolveModule(path);
-    if (!file) {
-      response.writeHead(404).end();
-      return;
-    }
-    response.setHeader('Content-Type', 'text/javascript');
-    response.end(await readFile(file));
-  } catch {
-    response.writeHead(404).end();
-  }
-});
-
-/** Only demo.js, the shared example policies, and built .js files under the two dist directories are served. */
-function resolveModule(path) {
-  if (path === '/demo.js') return resolve(here, 'demo.js');
-  for (const [prefix, base] of Object.entries(modules)) {
-    if (!path.startsWith(prefix)) continue;
-    const file = resolve(base, decodeURIComponent(path.slice(prefix.length)));
-    return file.startsWith(base + sep) && file.endsWith('.js') ? file : undefined;
-  }
-  return undefined;
-}
 
 async function readToken() {
   if (process.env.RELAY_TOKEN) return process.env.RELAY_TOKEN;
@@ -168,19 +146,7 @@ async function readToken() {
   }
 }
 
-await new Promise((listening) => server.listen(0, '127.0.0.1', listening));
-let browser;
 try {
-  browser = await chromium.launch({ headless: true });
-  const tab = await browser.newPage();
-  tab.on('pageerror', (error) => print({ event: 'page error', message: error.message }));
-  tab.on('console', (message) => {
-    if (message.type() === 'error' || message.type() === 'warning') {
-      print({ event: `console ${message.type()}`, message: message.text() });
-    }
-  });
-  await tab.exposeFunction('relayLog', print);
-  await tab.goto(`http://127.0.0.1:${server.address().port}/`);
   print({
     event: 'starting',
     mode: config.mode,
@@ -188,23 +154,9 @@ try {
     track: config.track,
     count: config.count,
   });
-  const result = await tab.evaluate(
-    async (config) => {
-      if (typeof WebTransport === 'undefined') throw new Error('This browser does not provide WebTransport');
-      const { runDemo } = await import('/demo.js');
-      return runDemo(config, (entry) => void window.relayLog(entry));
-    },
-    { ...config, token },
-  );
+  const result = await runDemo({ ...config, token, createTransport }, print);
   print({ event: 'finished', ...result });
 } catch (error) {
-  // Playwright prefixes page errors with the call site and appends the page stack; keep the message itself.
-  const message = (error instanceof Error ? error.message : String(error))
-    .replace(/^page\.evaluate: (Error: )?/, '')
-    .split('\n')[0];
-  console.error(redact(format({ event: 'failed', error: message })));
+  console.error(redact(format({ event: 'failed', error: error instanceof Error ? error.message : String(error) })));
   process.exitCode = 1;
-} finally {
-  await browser?.close();
-  await new Promise((closed) => server.close(closed));
 }

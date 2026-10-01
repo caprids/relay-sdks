@@ -1,9 +1,9 @@
 /**
  * Publish JSON ticks to a Relay namespace and subscribe to them again.
  *
- * This is the part of the example that uses the SDK. It runs in any browser with WebTransport;
- * run.mjs serves it next to the built SDK and drives it in headless Chromium because Node has no
- * WebTransport. `log` receives one plain object per event so the runner can print it.
+ * This is the part of the example that uses the SDK, and it is runtime-neutral: run.mjs runs it in
+ * Node with @mux/relay-quic's `createTransport`, and in a browser with WebTransport it runs as is,
+ * on the SDK's default transport. `log` receives one plain object per event so the runner can print it.
  */
 import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
 import { subscribeWithRetry } from '../shared/announce-race.js';
@@ -14,17 +14,22 @@ const decoder = new TextDecoder();
 
 /**
  * @param {object} config
- * @param {string} config.url Relay WebTransport endpoint, e.g. https://sjc.relay.mux.global
+ * @param {string} config.url Relay endpoint, e.g. https://sjc.relay.mux.global
  * @param {string} config.token Relay JWT authorized for `namespace`
  * @param {string[]} config.namespace Absolute namespace tuple, including the token's root prefix
  * @param {string} config.track Track name inside the namespace
- * @param {'both' | 'publish' | 'subscribe'} config.mode Run both sides in this page, or only one
+ * @param {'both' | 'publish' | 'subscribe'} config.mode Run both sides in this process, or only one
  * @param {number} config.count Objects to publish and/or wait for
  * @param {number} config.intervalMs Delay between published objects
  * @param {number} config.timeoutMs Deadline for the whole run
+ * @param {((url: string, protocols: string[]) => unknown) | undefined} [config.createTransport] The
+ *   transport factory both connections use, or undefined for the SDK's default (browser WebTransport)
  * @param {(entry: Record<string, unknown>) => void} log
  */
-export async function runDemo({ url, token, namespace, track, mode, count, intervalMs, timeoutMs }, log) {
+export async function runDemo(
+  { url, token, namespace, track, mode, count, intervalMs, timeoutMs, createTransport },
+  log,
+) {
   const lifetime = new AbortController();
   const deadline = setTimeout(() => lifetime.abort(new Error(`Run exceeded ${timeoutMs} ms`)), timeoutMs);
   const connections = [];
@@ -66,7 +71,7 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
       // One publisher connection serves one namespace; register as many tracks on it as needed.
       publisher = await watch(
         'publisher',
-        connectRelayPublisher({ url, namespace, getToken: () => token, signal: lifetime.signal }),
+        connectRelayPublisher({ url, createTransport, namespace, getToken: () => token, signal: lifetime.signal }),
       );
       log({ event: 'publisher connected', url, namespace: namespace.join('/') });
       writer = publisher.registerTrack({ track, writeTimeoutMs: 15_000 });
@@ -81,10 +86,10 @@ export async function runDemo({ url, token, namespace, track, mode, count, inter
     if (mode !== 'publish') {
       const subscriber = await watch(
         'subscriber',
-        connectRelaySubscriber({ url, getToken: () => token, signal: lifetime.signal }),
+        connectRelaySubscriber({ url, createTransport, getToken: () => token, signal: lifetime.signal }),
       );
       log({ event: 'subscriber connected', url });
-      // Same page as the publisher: subscribing before its announce reached the wire would be
+      // Same process as the publisher: subscribing before its announce reached the wire would be
       // rejected for certain; after it, the shared retry covers the round trip the relay still needs.
       if (publisher) await publisher.announced;
       // subscribeWithRetry runs in the background (nothing below depends on its result), but
@@ -187,7 +192,7 @@ function inspect(payload) {
   const text = decoder.decode(payload);
   try {
     const { seq, sentAt } = JSON.parse(text);
-    // Only a real one-way latency when the same page published it; across machines this includes clock skew.
+    // Only a real one-way latency when the same process published it; across machines this includes clock skew.
     return { seq, ageMs: sentAt ? Math.max(0, Date.now() - Date.parse(sentAt)) : undefined };
   } catch {
     return { text: text.slice(0, 60) };
