@@ -78,6 +78,7 @@ function createFakeTransport() {
   });
 
   const transport: MoqtTransport = {
+    protocol: 'moqt-20',
     incomingUnidirectionalStreams: incomingUni.stream,
     incomingBidirectionalStreams: incomingBidi.stream,
     async createUnidirectionalStream() {

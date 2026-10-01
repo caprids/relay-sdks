@@ -50,6 +50,9 @@ function terminableTransport(inner: MoqtTransport, order: EndOrder) {
   let ended = false;
 
   const transport: MoqtTransport = {
+    get protocol() {
+      return inner.protocol;
+    },
     incomingUnidirectionalStreams: inner.incomingUnidirectionalStreams,
     incomingBidirectionalStreams: inner.incomingBidirectionalStreams.pipeThrough(
       new TransformStream<BidirectionalStreamLike, BidirectionalStreamLike>({

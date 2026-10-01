@@ -65,7 +65,7 @@ The seam is the factory a connection calls and the transport it returns.
 | `createTransport(url, protocols)` | `RelayTransportFactory`. Called once per connection with the endpoint URL (the token already in its `jwt` query parameter) and the MOQT protocol identifiers to offer, in preference order. Returns `{ transport, ready, framing }`. |
 | `ready` | Resolves once the transport can open streams and a protocol was selected; a rejection fails the connect call. |
 | `framing` | `'webtransport'` or `'native-quic'`: what the transport carries. Optional, default `'webtransport'`. |
-| `transport.protocol` | The protocol identifier the peer selected. **Not yet in `MoqtTransport`** (#203); a browser's `WebTransport` has it. |
+| `transport.protocol` | The protocol identifier the peer selected (TA-8). A browser's `WebTransport` has it. |
 | `transport.incomingUnidirectionalStreams` | `ReadableStream` of the peer's unidirectional streams, each a `ReadableStream<Uint8Array>`. |
 | `transport.incomingBidirectionalStreams` | `ReadableStream` of the peer's bidirectional streams, each `{ readable, writable }`. |
 | `transport.createUnidirectionalStream()` | Opens a send stream: `Promise<WritableStream<Uint8Array>>`. |
@@ -126,8 +126,9 @@ protocol.
 speak. A silent default fails late, as an obscure SETUP error, instead of at `ready`.
 
 **TA-8.** Once `ready` resolves, `transport.protocol` MUST be the selected identifier.
-**Not yet implemented:** #203 adds `protocol` to `MoqtTransport` and makes the core fail the
-connection unless it equals `MOQT_PROTOCOL_ID`. That check backs up TA-7; it does not replace it.
+**Why:** `protocol` is a required, read-only member of `MoqtTransport`, and the core fails the
+connection unless it equals `MOQT_PROTOCOL_ID` (#203). That check backs up TA-7; it does not
+replace it.
 
 ### Session lifetime
 
@@ -283,7 +284,9 @@ The contract has two sides. Against an adapter that follows the rules above, the
   `ready` is never unhandled;
 - sends PATH and AUTHORITY only on native QUIC (TA-6), and fails the connection with
   `TRANSPORT_ERROR`, closing the transport, when `framing` is neither value TA-1 allows;
-- checks `protocol` after `ready` (TA-8, #203);
+- checks `protocol` after `ready` and, unless it is `moqt-20`, fails the connection with
+  `TRANSPORT_ERROR` in phase `connecting`, naming the protocol received (or "none"), closes the
+  transport and never sends CLIENT_SETUP (TA-7, TA-8);
 - classifies errors by `source`, not by class or name, and hands over `streamErrorCode` on the
   reasons it resets and stops with (TA-17, TA-22, `transport-error.ts`);
 - never concludes the session has ended from a create rejection alone, only from `closed` or a
@@ -313,8 +316,8 @@ adapters MUST NOT copy them.
   when the browser does not know the code, which TA-22 allows.
 - **Chromium `ready` without a selected protocol (TA-7).** When the peer's response names no
   protocol, or one that was not offered, Chromium resolves `ready` anyway and sets `protocol` to the
-  empty string. The core's check of `protocol` after `ready` (TA-8, #203) turns that into a connect
-  failure; until it lands, the failure surfaces later, at SETUP.
+  empty string. The core's check of `protocol` after `ready` (TA-8) turns that into a connect
+  failure before SETUP.
   **Evidence:** the conformance suite, in Chromium 147.0.7727.15 against the Python accepting end.
 - **Chromium 8-bit send codes (TA-17, TA-18).** Chromium's `WebTransportError` constructor clamps
   `streamErrorCode` to 255, so a reset or a stop it sends carries at most 255. Codes it receives are
