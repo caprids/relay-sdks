@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-01
 ---
 
@@ -40,6 +40,7 @@ a custom CA, and musl builds.
   name.
 - The repo takes on a Rust toolchain and a per-platform prebuilt-binary matrix (linux x64/arm64 gnu
   and musl, darwin arm64; win-x64 if cheap).
-- Native QUIC on mux.global must be confirmed as a supported surface with the relay team before v1.
-  If it is not, revisit with `@moq/web-transport` as the fallback.
+- Native QUIC is a supported transport in moq-relay, the relay mux.global runs, not something
+  that merely happens to work (confirmed 2026-10-01, #188). If that changes, revisit with
+  `@moq/web-transport` as the fallback.
 - Revisit when `node:quic` ships in an official Node LTS binary.
