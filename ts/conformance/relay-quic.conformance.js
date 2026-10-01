@@ -97,3 +97,22 @@ describe('@mux/relay-quic trust', () => {
     ).toThrow(/32-byte/);
   });
 });
+
+describe('@mux/relay/node', () => {
+  // The peer accepts the QUIC connection but speaks no MOQT, so a connect that gets as far as SETUP times out: the
+  // entry point's default adapter dialled, with the trust it was given. Untrusted, the handshake itself fails.
+  it('dials through @mux/relay-quic by default, with the ca it is given', async () => {
+    await peer.call('prepare');
+    const { connectRelaySubscriber } = await import('@mux/relay/node');
+    const url = `https://localhost:${peer.port}/`;
+    await expect(
+      connectRelaySubscriber({ url, ca: peer.certificatePem, connectTimeoutMs: 1_000 }),
+    ).rejects.toMatchObject({ code: 'CONNECTION_TIMEOUT' });
+
+    await peer.call('prepare');
+    await expect(connectRelaySubscriber({ url, connectTimeoutMs: 5_000 })).rejects.toMatchObject({
+      code: 'TRANSPORT_ERROR',
+      phase: 'connecting',
+    });
+  }, 15_000);
+});

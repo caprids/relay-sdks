@@ -6,12 +6,14 @@ and subscribe without a browser. It follows the transport adapter contract in
 [`spec/transport-adapter.md`](../../../spec/transport-adapter.md) and passes its conformance suite. The design is
 [ADR 0002](../../../docs/adr/0002-node-adapter-speaks-native-quic.md).
 
-The package is private for now: prebuilt binaries are still to come (#195), and so is an `@mux/relay/node` entry point
-that uses this adapter by default (#196).
+The package is private for now: prebuilt binaries are still to come (#195).
 
 ## Use
 
-Pass the factory as `createTransport`. The URL stays the same `https://` endpoint the browser uses: the adapter dials
+Most scripts need no code from this package: `@mux/relay/node` uses it by default, and takes the trust options below
+(see the [SDK README](../../README.md#node)). Install it next to `@mux/relay`.
+
+To use it with `@mux/relay` directly, pass the factory as `createTransport`. The URL stays the same `https://` endpoint the browser uses: the adapter dials
 only its host and port, and the core sends the path, the token and the authority in SETUP.
 
 ```ts

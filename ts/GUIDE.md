@@ -2,9 +2,10 @@
 
 Publish and subscribe to arbitrary track objects through Relay without Video.js, a media catalog,
 or a player. `@mux/relay` runs in a browser page: its default transport is **browser WebTransport
-in a secure context** (HTTPS or localhost). A plain Node script cannot connect with the default
-transport; other runtimes must supply a compatible `createTransport` factory, and installing this
-package does not supply one. Node 24+ runs the build tools and the example launcher.
+in a secure context** (HTTPS or localhost). In Node 24+, import from `@mux/relay/node`, which
+connects over native QUIC through the optional `@mux/relay-quic` package (see the
+[README's Node section](README.md#node)). Other runtimes must supply a compatible
+`createTransport` factory.
 
 This is the TypeScript SDK in the Relay SDKs repository. The shared protocol pins, behavior
 contract, and test vectors live in [spec](../spec/README.md); the [root README](../README.md) describes the suite. Package names
@@ -498,7 +499,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
-| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport (TypeScript). |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
 | `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. Python only for now (browsers do not expose the relay's refusal, so TypeScript reports `TRANSPORT_ERROR`; see #14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide

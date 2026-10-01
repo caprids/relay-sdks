@@ -103,7 +103,7 @@ const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
   if (typeof WebTransport === 'undefined') {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
-      'WebTransport is unavailable; supply createTransport with a transport adapter for this runtime',
+      'WebTransport is unavailable; in Node, import from @mux/relay/node (needs @mux/relay-quic), or supply createTransport with a transport adapter for this runtime',
       'connecting',
     );
   }
