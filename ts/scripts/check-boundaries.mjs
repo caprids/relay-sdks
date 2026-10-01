@@ -29,6 +29,38 @@ assert.deepEqual(quic.dependencies, { [core.name]: 'workspace:*' }, 'The native 
 assert.deepEqual(sdk.peerDependencies, { [quic.name]: 'workspace:*' }, 'The SDK takes only the adapter as a peer');
 assert.deepEqual(sdk.peerDependenciesMeta, { [quic.name]: { optional: true } }, 'The adapter is an optional peer');
 
+// Its prebuilt binaries ship as one package per napi target, each holding only its `.node` (#195). The packages are
+// named for the platform suffix the loader computes, and its only package-name lookup is that platform package. The
+// optional dependencies on them are added only when the packages are packed, so the lockfile never names them.
+const quicRoot = resolve(root, 'packages/relay-quic');
+const arch = { x86_64: 'x64', aarch64: 'arm64' };
+const suffixOf = (triple) => {
+  const [cpu, , os, abi] = triple.split('-');
+  if (os === 'darwin') return `darwin-${arch[cpu]}`;
+  if (os === 'windows') return `win32-${arch[cpu]}-${abi}`;
+  return `linux-${arch[cpu]}-${abi}`;
+};
+assert.equal(quic.optionalDependencies, undefined, 'Platform packages are optional dependencies only when packed');
+const platformDirs = (await readdir(resolve(quicRoot, 'npm'))).sort();
+assert.deepEqual(platformDirs, quic.napi.targets.map(suffixOf).sort(), 'One platform package per napi target');
+for (const suffix of platformDirs) {
+  const platform = JSON.parse(await readFile(resolve(quicRoot, 'npm', suffix, 'package.json'), 'utf8'));
+  const binary = `relay-quic.${suffix}.node`;
+  assert.equal(platform.name, `${quic.name}-${suffix}`, `npm/${suffix} is named for its platform suffix`);
+  assert.equal(platform.version, quic.version, `npm/${suffix} moves in lockstep with ${quic.name}`);
+  assert.equal(platform.main, binary, `npm/${suffix} has its binary as main`);
+  assert.deepEqual(platform.files, [binary], `npm/${suffix} ships only its binary`);
+  for (const field of ['dependencies', 'optionalDependencies', 'peerDependencies', 'scripts']) {
+    assert.equal(platform[field], undefined, `npm/${suffix} has no ${field}`);
+  }
+}
+const loader = (await readFile(resolve(quicRoot, 'dist/addon.js'), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
+assert.deepEqual(
+  [...loader.matchAll(/[`'"](@[\w.-]+\/[\w.${}-]+)[`'"]/g)].map((match) => match[1]),
+  [`${quic.name}-\${suffix}`],
+  'The addon loader looks up no package but the platform one',
+);
+
 async function inspect(directory, permittedPackage, { nodeBuiltins = false, extra = {} } = {}) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = resolve(directory, entry.name);

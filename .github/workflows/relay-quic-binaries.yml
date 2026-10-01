@@ -1,0 +1,210 @@
+name: relay-quic binaries
+
+# Prebuilt binaries for @mux/relay-quic's native addon (#195): one npm package per platform, built, packed and
+# smoke-loaded on the platform it is for. Only this workflow builds them; ts.yml's conformance-node job still builds the
+# addon from source for linux-x64-gnu, and `pnpm check` builds no Rust.
+#
+# A ts/v* tag or a manual run also dry-runs the publish. Nothing is published to npm yet: the TS SDK has no release.
+
+on:
+  push:
+    branches: [main]
+    tags: ['ts/v*']
+    paths: &paths
+      - 'ts/packages/relay-quic/native/**'
+      - 'ts/packages/relay-quic/npm/**'
+      - 'ts/packages/relay-quic/scripts/**'
+      - 'ts/packages/relay-quic/src/addon.ts'
+      - 'ts/packages/relay-quic/package.json'
+      - 'ts/pnpm-lock.yaml'
+      - 'mise.toml'
+      - '.github/workflows/relay-quic-binaries.yml'
+  pull_request:
+    paths: *paths
+  workflow_dispatch:
+
+concurrency:
+  group: relay-quic-binaries-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # All four Linux targets cross-compile from x64 with zig (napi build -x), which links against glibc 2.28: the floor
+  # Node 24 itself has.
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: x86_64-unknown-linux-gnu, suffix: linux-x64-gnu }
+          - { target: aarch64-unknown-linux-gnu, suffix: linux-arm64-gnu }
+          - { target: x86_64-unknown-linux-musl, suffix: linux-x64-musl }
+          - { target: aarch64-unknown-linux-musl, suffix: linux-arm64-musl }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ts/packages/relay-quic/native -> target
+          key: ${{ matrix.target }}
+      - run: mise run ts:install
+      - run: mise exec rust@1.97.1 -- rustup target add ${{ matrix.target }}
+      - run: mise run ts:build:native -- --target ${{ matrix.target }} -x
+      - name: The gnu binary needs no glibc newer than 2.28
+        if: endsWith(matrix.suffix, '-gnu')
+        run: |
+          floor=$(readelf --dyn-syms -W ts/packages/relay-quic/native/relay-quic.${{ matrix.suffix }}.node \
+            | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)
+          echo "glibc floor: $floor"
+          test "$(printf '%s\nGLIBC_2.28\n' "$floor" | sort -V | tail -1)" = GLIBC_2.28
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-${{ matrix.suffix }}
+          path: ts/packages/relay-quic/native/relay-quic.${{ matrix.suffix }}.node
+          if-no-files-found: error
+
+  # The macOS SDK is needed to link (the platform's root certificates come from Security.framework), so both darwin
+  # targets build on one arm64 runner.
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ts/packages/relay-quic/native -> target
+      - run: mise run ts:install
+      - run: mise exec rust@1.97.1 -- rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: mise run ts:build:native -- --target aarch64-apple-darwin
+      - run: mise run ts:build:native -- --target x86_64-apple-darwin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-darwin-arm64
+          path: ts/packages/relay-quic/native/relay-quic.darwin-arm64.node
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-darwin-x64
+          path: ts/packages/relay-quic/native/relay-quic.darwin-x64.node
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ts/packages/relay-quic/native -> target
+      - run: mise run ts:install
+      - run: mise run ts:build:native -- --target x86_64-pc-windows-msvc
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bindings-win32-x64-msvc
+          path: ts/packages/relay-quic/native/relay-quic.win32-x64-msvc.node
+          if-no-files-found: error
+
+  # Puts each binary in its platform package and packs them all, with the sizes in the job summary.
+  package:
+    needs: [linux, macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm
+      - run: mise run ts:install
+      - run: pnpm --filter @mux/moq-core build && pnpm --filter @mux/relay-quic build
+        working-directory: ts
+      - uses: actions/download-artifact@v5
+        with:
+          pattern: bindings-*
+          path: ts/packages/relay-quic/artifacts
+      - run: pnpm exec napi artifacts --output-dir artifacts
+        working-directory: ts/packages/relay-quic
+      - run: node scripts/pack.mjs ../../../packed
+        working-directory: ts/packages/relay-quic
+      - name: Dry-run the publish
+        if: startsWith(github.ref, 'refs/tags/ts/v') || github.event_name == 'workflow_dispatch'
+        run: pnpm exec napi pre-publish --dry-run --tag-style npm
+        working-directory: ts/packages/relay-quic
+      - uses: actions/upload-artifact@v4
+        with:
+          name: relay-quic-packages
+          path: packed/
+          if-no-files-found: error
+
+  # Each package installed from its tarball by npm, as an application would, on the platform it is for. The arm64
+  # images run under QEMU; the smoke is an install, a load and one cancelled dial, so emulation costs little.
+  smoke-linux:
+    needs: package
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { suffix: linux-x64-gnu, platform: linux/amd64, image: 'node:24-bullseye-slim' }
+          - { suffix: linux-arm64-gnu, platform: linux/arm64, image: 'node:24-bullseye-slim' }
+          - { suffix: linux-x64-musl, platform: linux/amd64, image: 'node:24-alpine' }
+          - { suffix: linux-arm64-musl, platform: linux/arm64, image: 'node:24-alpine' }
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v5
+        with:
+          name: relay-quic-packages
+          path: packed
+      - if: matrix.platform == 'linux/arm64'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+      - run: >-
+          docker run --rm --platform ${{ matrix.platform }} -v "$PWD:/w" -w /w ${{ matrix.image }}
+          node ts/packages/relay-quic/scripts/smoke.mjs packed
+
+  smoke-macos:
+    needs: package
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node
+      - uses: actions/download-artifact@v5
+        with:
+          name: relay-quic-packages
+          path: packed
+      - run: node ts/packages/relay-quic/scripts/smoke.mjs packed
+      # darwin-x64 under Rosetta: an x64 Node first on PATH, so npm installs for x64 as well.
+      - name: darwin-x64 under Rosetta
+        run: |
+          version=$(node -p process.versions.node)
+          curl -fsSL "https://nodejs.org/dist/v$version/node-v$version-darwin-x64.tar.gz" | tar -xz -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/node-v$version-darwin-x64/bin:$PATH"
+          test "$(node -p process.arch)" = x64
+          node ts/packages/relay-quic/scripts/smoke.mjs packed
+
+  smoke-windows:
+    needs: package
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node
+      - uses: actions/download-artifact@v5
+        with:
+          name: relay-quic-packages
+          path: packed
+      - run: node ts/packages/relay-quic/scripts/smoke.mjs packed

@@ -1,0 +1,19 @@
+{
+  "name": "@mux/relay-quic-win32-x64-msvc",
+  "version": "0.0.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "relay-quic.win32-x64-msvc.node",
+  "files": [
+    "relay-quic.win32-x64-msvc.node"
+  ],
+  "description": "Native QUIC transport adapter for the Relay SDK in Node",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=24"
+  },
+  "os": [
+    "win32"
+  ]
+}

@@ -81,6 +81,12 @@ tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts"
 run = "pnpm test:conformance:node"
 
+[tasks."ts:build:native"]
+description = "Build @mux/relay-quic's addon for release; pass napi build options, such as --target <triple> -x, after --"
+tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" }, zig = "0.13.0" }
+dir = "ts/packages/relay-quic"
+run = "pnpm build:native"
+
 [tasks."ts:check:native"]
 description = "Format-check, lint and unit-test @mux/relay-quic's Rust crate"
 tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
