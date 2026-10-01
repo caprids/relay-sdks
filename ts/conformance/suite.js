@@ -785,6 +785,21 @@ export const cases = [
   },
   {
     rule: 'TA-20',
+    name: "TA-20 a peer stop rejects a write blocked on flow control with the peer's code",
+    timeoutMs: 30_000,
+    async run(ctx) {
+      const transport = await open(ctx);
+      const { writer, id } = await openAcceptedUni(ctx, transport, text('x'));
+      await holdPeer(ctx);
+      const { write } = await writeUntilBlocked(writer);
+      await ctx.peer.stop(id, 5);
+      expectStreamError(await rejects(write, 'the blocked write'), 5, 'the blocked write');
+      expectStreamError(await rejects(writer.closed, 'writer.closed'), 5, 'writer.closed');
+      await releasePeer(ctx);
+    },
+  },
+  {
+    rule: 'TA-20',
     name: "TA-20 a peer stop on a bidirectional stream rejects its writer with the peer's code",
     async run(ctx) {
       const transport = await open(ctx);

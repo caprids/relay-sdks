@@ -47,7 +47,8 @@ export declare class RecvStream {
 export declare class SendStream {
   /**
    * Write all of `data`. Resolves once quinn has taken every byte (TA-14): it waits while flow
-   * control or the send buffer holds the stream, and gives up at once if the stream is reset.
+   * control or the send buffer holds the stream, and gives up at once if the stream is reset or
+   * stopped.
    */
   write(data: Uint8Array): Promise<Failure | null>
   /**

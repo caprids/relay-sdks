@@ -1,8 +1,8 @@
 //! Stream halves. Each holds its quinn stream behind an async mutex, which a write or a read keeps
-//! for as long as it waits. A reset or a stop first cancels a sticky token that every waiting
-//! operation selects on, so the waiter lets go of the lock at once and the frame goes out
-//! immediately (TA-16, TA-18). The token is sticky: an operation that starts after the reset fails
-//! at once instead of missing a one-shot wake-up.
+//! for as long as it waits. A local reset or stop, and a peer's STOP_SENDING, first cancel a sticky
+//! token that every waiting operation selects on, so the waiter lets go of the lock at once and the
+//! frame goes out immediately (TA-16, TA-18, TA-20). The tokens are sticky: an operation that starts
+//! afterwards fails at once instead of missing a one-shot wake-up.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -23,6 +23,12 @@ type Stopped = Pin<Box<dyn Future<Output = std::result::Result<Option<VarInt>, q
 pub struct SendStream {
     inner: Arc<Mutex<quinn::SendStream>>,
     aborted: CancellationToken,
+    /// Cancelled once the peer's STOP_SENDING is seen, with its code in `stop_code`. The stop
+    /// watcher interrupts waiting operations through it before it takes the lock: quinn keeps a
+    /// write blocked on connection-level credit pending even after a stop, so the lock would never
+    /// come free otherwise.
+    peer_stopped: CancellationToken,
+    stop_code: std::sync::Mutex<Option<VarInt>>,
     /// Taken by the first `stopped()`: quinn's stop watch does not borrow the stream, so it never
     /// waits on the lock a blocked write holds.
     stopped: std::sync::Mutex<Option<Stopped>>,
@@ -34,15 +40,30 @@ impl SendStream {
         Self {
             inner: Arc::new(Mutex::new(stream)),
             aborted: CancellationToken::new(),
+            peer_stopped: CancellationToken::new(),
+            stop_code: std::sync::Mutex::new(None),
             stopped: std::sync::Mutex::new(Some(stopped)),
         }
     }
 
-    async fn lock(&self) -> Option<tokio::sync::MutexGuard<'_, quinn::SendStream>> {
+    /// Resolves once a waiting operation must give up: this end reset the stream, or the peer
+    /// stopped it.
+    async fn interrupted(&self) -> Failure {
         tokio::select! {
             biased;
-            _ = self.aborted.cancelled() => None,
-            guard = self.inner.lock() => Some(guard),
+            _ = self.aborted.cancelled() => Failure::closed(),
+            _ = self.peer_stopped.cancelled() => {
+                let code = self.stop_code.lock().ok().and_then(|code| *code).unwrap_or(VarInt::from_u32(0));
+                Failure::stream("stopped", code)
+            }
+        }
+    }
+
+    async fn lock(&self) -> std::result::Result<tokio::sync::MutexGuard<'_, quinn::SendStream>, Failure> {
+        tokio::select! {
+            biased;
+            failure = self.interrupted() => Err(failure),
+            guard = self.inner.lock() => Ok(guard),
         }
     }
 }
@@ -50,15 +71,17 @@ impl SendStream {
 #[napi]
 impl SendStream {
     /// Write all of `data`. Resolves once quinn has taken every byte (TA-14): it waits while flow
-    /// control or the send buffer holds the stream, and gives up at once if the stream is reset.
+    /// control or the send buffer holds the stream, and gives up at once if the stream is reset or
+    /// stopped.
     #[napi]
     pub async fn write(&self, data: Uint8Array) -> Option<Failure> {
-        let Some(mut stream) = self.lock().await else {
-            return Some(Failure::closed());
+        let mut stream = match self.lock().await {
+            Ok(stream) => stream,
+            Err(failure) => return Some(failure),
         };
         tokio::select! {
             biased;
-            _ = self.aborted.cancelled() => Some(Failure::closed()),
+            failure = self.interrupted() => Some(failure),
             result = stream.write_all(&data) => result.err().map(failure::write),
         }
     }
@@ -68,8 +91,9 @@ impl SendStream {
     #[napi]
     pub async fn finish(&self) -> Option<Failure> {
         let acknowledged = {
-            let Some(mut stream) = self.lock().await else {
-                return Some(Failure::closed());
+            let mut stream = match self.lock().await {
+                Ok(stream) => stream,
+                Err(failure) => return Some(failure),
             };
             if stream.finish().is_err() {
                 return Some(Failure::closed());
@@ -78,7 +102,7 @@ impl SendStream {
         };
         tokio::select! {
             biased;
-            _ = self.aborted.cancelled() => Some(Failure::closed()),
+            failure = self.interrupted() => Some(failure),
             result = acknowledged => match result {
                 Ok(None) => None,
                 Ok(Some(code)) => Some(Failure::stream("stopped", code)),
@@ -111,6 +135,11 @@ impl SendStream {
         };
         match result {
             Ok(Some(code)) => {
+                if let Ok(mut stop_code) = self.stop_code.lock() {
+                    *stop_code = Some(code);
+                }
+                // Free the lock first: a write blocked on connection credit would hold it for good.
+                self.peer_stopped.cancel();
                 let _ = self.inner.lock().await.reset(code);
                 Some(Failure::stream("stopped", code))
             }
