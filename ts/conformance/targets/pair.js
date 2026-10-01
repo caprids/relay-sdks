@@ -57,19 +57,22 @@ function createPairPeer(factory) {
     async stop(id, code) {
       await readerOf(id).cancel(peerReason(code));
     },
-    async read(id, { bytes } = {}) {
+    async read(id, { bytes, discard = false } = {}) {
       const reader = readerOf(id);
       const out = [];
+      let byteLength = 0;
+      const result = (fin, resetCode) => ({ bytes: out, byteLength, fin, resetCode });
       try {
-        while (bytes === undefined || out.length < bytes) {
+        while (bytes === undefined || byteLength < bytes) {
           const { done, value } = await reader.read();
-          if (done) return { bytes: out, fin: true, resetCode: null };
-          out.push(...value);
+          if (done) return result(true, null);
+          byteLength += value.byteLength;
+          if (!discard) out.push(...value);
         }
-        return { bytes: out, fin: false, resetCode: null };
+        return result(false, null);
       } catch (error) {
         if (error?.source !== 'stream') throw error;
-        return { bytes: out, fin: false, resetCode: error.streamErrorCode };
+        return result(false, error.streamErrorCode);
       }
     },
     async stopped(id) {

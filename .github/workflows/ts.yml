@@ -3,9 +3,24 @@ name: TypeScript SDK
 on:
   push:
     branches: [main]
-    paths: ['ts/**', 'spec/**', 'mise.toml', '.github/workflows/ts.yml']
+    paths:
+      - 'ts/**'
+      - 'spec/**'
+      - 'mise.toml'
+      - '.github/workflows/ts.yml'
+      # The conformance job's accepting end and the aioquic stack under it.
+      - 'python/packages/mux-relay/tests/relay_helpers/**'
+      - 'python/packages/mux-relay/src/mux_relay/webtransport/**'
+      - 'python/uv.lock'
   pull_request:
-    paths: ['ts/**', 'spec/**', 'mise.toml', '.github/workflows/ts.yml']
+    paths:
+      - 'ts/**'
+      - 'spec/**'
+      - 'mise.toml'
+      - '.github/workflows/ts.yml'
+      - 'python/packages/mux-relay/tests/relay_helpers/**'
+      - 'python/packages/mux-relay/src/mux_relay/webtransport/**'
+      - 'python/uv.lock'
 
 concurrency:
   group: ts-${{ github.ref }}
@@ -26,3 +41,16 @@ jobs:
           name: ts-api-reference
           path: ts/docs-api/
           if-no-files-found: error
+
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm python uv
+      - run: mise run ts:install
+      - run: mise run python:install
+      - run: pnpm exec playwright install --with-deps chromium
+        working-directory: ts
+      - run: mise run ts:test:conformance

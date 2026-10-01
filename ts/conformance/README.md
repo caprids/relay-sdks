@@ -10,10 +10,17 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
 | `vitest.js` | `describeConformance(target)`: one vitest test per case. |
 | `pair.test.js` | The suite against the in-memory pair, in `pnpm test` and so in `pnpm check`. |
 | `targets/pair.js` | The in-memory pair as a target, with an in-process peer. |
+| `targets/chromium.js` | The browser's native `WebTransport` as a target, run in a page. Its peer is the Python accepting end. |
+| `../scripts/test-conformance.mjs` | The Chromium launcher: it starts the accepting end, serves the suite to a Playwright page, runs it and prints the results. |
+| `python/…/relay_helpers/conformance_peer.py` | The scriptable accepting end: aioquic, out of process, driven over JSON lines. |
 
 ## Running it
 
-`pnpm exec vitest run conformance` runs it against the pair. It is also part of `pnpm test`.
+- `pnpm exec vitest run conformance` runs it against the pair. It is also part of `pnpm test`.
+- `pnpm test:conformance` (`mise run ts:test:conformance`) runs it in headless Chromium against the Python accepting
+  end. It needs the Python workspace (`mise run python:install`) and Playwright's Chromium
+  (`pnpm exec playwright install chromium`). It takes about 15 s. `CONFORMANCE_GREP=TA-15` runs only the cases whose
+  name contains the text. CI runs it as the TypeScript workflow's `conformance` job.
 
 ## Targets
 
@@ -60,7 +67,7 @@ bytes are a `Uint8Array` going in and an array of numbers coming out, so a remot
 | `openUni()`, `openBi()` | Open a stream to the dialer and return its id. |
 | `write(id, bytes)`, `finish(id)` | Write on the peer's send half, then send the FIN. |
 | `reset(id, code)`, `stop(id, code)` | RESET_STREAM the peer's send half, or STOP_SENDING its receive half. `code` may be a decimal string above 2⁵³−1 with `largeCodes`. |
-| `read(id, { bytes })` | Read until the FIN, a reset, or `bytes` bytes. Resolves `{ bytes, fin, resetCode }`. `resetCode` is the dialer's code, or `null`. |
+| `read(id, { bytes, discard })` | Read until the FIN, a reset, or `bytes` bytes. Resolves `{ bytes, byteLength, fin, resetCode }`. `resetCode` is the dialer's code, or `null`. With `discard`, `bytes` comes back empty. |
 | `stopped(id)` | Resolves with the code once the dialer stops the peer's send half. |
 | `close(code, reason)` | The application close: CLOSE_WEBTRANSPORT_SESSION, or CONNECTION_CLOSE 0x1d. |
 | `closed()` | Resolves `{ closeCode, reason }` once the dialer closed the session. |
@@ -91,6 +98,26 @@ The suite owns these results. The spec does not keep a per-adapter matrix.
 TA-6 is the core's rule, not the adapter's: the core sends PATH and AUTHORITY in CLIENT_SETUP. The core's SETUP tests
 and `spec/vectors/` cover it (#191).
 
+## The Python accepting end
+
+`conformance_peer.py` prints `{"event": "listening", "port", "certificateHash"}` once it listens on 127.0.0.1. It
+then takes one JSON request per stdin line, `{"id", "method", "params"}`, and answers each on stdout with
+`{"id", "result"}` or `{"id", "error"}`. Requests may overlap. Its certificate is a 10-day P-256 leaf, so a browser
+accepts it through `serverCertificateHashes`.
+
+- `prepare({ handshake, select, maxStreams })` sets up the next connection and forgets the previous session.
+  `dispose()` closes the current connection.
+- The other methods are the peer methods above, with these differences in the wire spelling:
+  - parameters are named: `{ stream, data }` for `write`, `{ stream, count, discard }` for `read`, and
+    `{ code, reason }` for `close`
+  - `observed()` is `observedDial`
+- With `maxStreams`, the dialer gets that many streams of each kind beyond HTTP/3's own. Credit returns one stream at
+  a time, as the peer reads a dialer's stream to its FIN. aioquic would otherwise double the limit by itself.
+- `pause()` drops every datagram from the dialer, so nothing is acknowledged.
+- `loseConnection()` drops traffic both ways until the dialer's idle timeout fires. The peer's own idle timeout is
+  10 s.
+- `quicClose()` sends CONNECTION_CLOSE 0x1c.
+
 ## Adding a target
 
 A target needs a peer that implements the methods above, and a runner for its runtime.
@@ -98,6 +125,9 @@ A target needs a peer that implements the methods above, and a runner for its ru
 - **Node (`@mux/relay-quic`, #194):**
   - It runs under vitest, like the pair: a `relay-quic.test.js` that calls `describeConformance` with a native QUIC
     target.
-  - Its peer is the same scriptable Python accepting end that the Chromium target uses, in a native QUIC mode.
+  - Its peer is `conformance_peer.py --framing native-quic`, which today exits with "not implemented yet (#194)".
+    That mode serves MOQT on plain QUIC with ALPN `moqt-20` behind the same methods, and adds `serverName` to
+    `observedDial` and `largeCodes`.
   - It adds `process` and implements `checkProcessLifetime` with a child Node script.
-- **Chromium:** it runs the cases in the page with `runSuite`, against the scriptable Python accepting end.
+  - Its vitest runner spawns the peer the way `test-conformance.mjs` does. `startPeer` there can move to a shared
+    module when the second launcher needs it.

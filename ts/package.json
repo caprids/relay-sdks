@@ -27,6 +27,7 @@
     "check:docs": "typedoc --options typedoc.workspace.json --emit none",
     "docs": "pnpm build && typedoc --options typedoc.workspace.json",
     "test:relay": "pnpm build && node scripts/test-relay.mjs",
+    "test:conformance": "pnpm build && node scripts/test-conformance.mjs",
     "example:mux-global": "pnpm build && node examples/mux-global/run.mjs"
   },
   "dependencies": {

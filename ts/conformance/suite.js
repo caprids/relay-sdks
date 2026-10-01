@@ -204,10 +204,37 @@ async function releasePeer(ctx) {
   if (ctx.target.capabilities.includes('pause')) await ctx.peer.resume();
 }
 
-/** Codes a reset or stop must carry through, the extremes of TA-17's range included. */
-const VALID_CODES = [0, 1, 7, 255, 256, 0xffff_ffff];
+/** Codes a reset or stop must carry through, up to 255: all the MOQT codes the core sends (draft-20 §3.3.4). */
+const LOW_CODES = [0, 1, 7, 0x12, 255];
+/** The rest of TA-17's range, which some browsers cannot send (Known deviations). */
+const HIGH_CODES = [256, 0x1_0000, 0xffff_ffff];
 /** `streamErrorCode` values TA-17 maps to 0. */
 const INVALID_CODES = [-1, 0x1_0000_0000, 1.5, Number.NaN, '7', null];
+
+/** TA-17: reset a fresh stream with each of `codes`; the peer must see each one. */
+async function resetsCarry(ctx, codes) {
+  const transport = await open(ctx);
+  for (const code of codes) {
+    const { writer, id } = await openAcceptedUni(ctx, transport);
+    await writer.abort(ctx.reason(code));
+    equal((await ctx.peer.read(id)).resetCode, code, `the reset code for streamErrorCode ${code}`);
+  }
+}
+
+/** TA-18: stop a fresh peer stream with each of `codes`; the peer must see each one, and the readable ends. */
+async function stopsCarry(ctx, codes) {
+  const transport = await open(ctx);
+  for (const code of codes) {
+    const id = await ctx.peer.openUni();
+    await ctx.peer.write(id, text('before'));
+    const reader = (await nextIncoming(transport.incomingUnidirectionalStreams, 'the peer stream')).getReader();
+    await readBytes(reader, 6);
+    await reader.cancel(ctx.reason(code));
+    equal(await resolves(ctx.peer.stopped(id), 'the peer seeing the stop'), code, `the stop code for ${code}`);
+    await ctx.peer.write(id, text('after')).catch(() => {});
+    equal((await reader.read()).done, true, 'a read after cancel');
+  }
+}
 
 /**
  * The cases. Each has the `rule` it checks, a `level` (`MUST` or `SHOULD`), a `name` that starts with the rule, the
@@ -288,7 +315,11 @@ export const cases = [
     needs: ['selectProtocol'],
     session: { select: 'none' },
     async run(ctx) {
-      expectSessionError(await rejects(ctx.dial().ready, 'ready'), 'ready');
+      const { ready, transport } = ctx.dial();
+      const outcome = await settleWithin(ready, PROMPTLY_MS);
+      check(outcome.state !== 'fulfilled', `ready resolved, with protocol ${describe(transport.protocol)}`);
+      check(outcome.state === 'rejected', `ready still pending after ${PROMPTLY_MS} ms`);
+      expectSessionError(outcome.reason, 'ready');
     },
   },
   {
@@ -297,7 +328,11 @@ export const cases = [
     needs: ['selectProtocol'],
     session: { select: 'unoffered' },
     async run(ctx) {
-      expectSessionError(await rejects(ctx.dial().ready, 'ready'), 'ready');
+      const { ready, transport } = ctx.dial();
+      const outcome = await settleWithin(ready, PROMPTLY_MS);
+      check(outcome.state !== 'fulfilled', `ready resolved, with protocol ${describe(transport.protocol)}`);
+      check(outcome.state === 'rejected', `ready still pending after ${PROMPTLY_MS} ms`);
+      expectSessionError(outcome.reason, 'ready');
     },
   },
   {
@@ -500,7 +535,8 @@ export const cases = [
       await writer.write(text('ping'));
       await writer.close();
       const id = await ctx.peer.acceptBi();
-      equal(await ctx.peer.read(id), { bytes: [...text('ping')], fin: true, resetCode: null }, 'what the peer read');
+      const { bytes, fin, resetCode } = await ctx.peer.read(id);
+      equal({ bytes, fin, resetCode }, { bytes: [...text('ping')], fin: true, resetCode: null }, 'what the peer read');
       await ctx.peer.write(id, text('pong'));
       await ctx.peer.finish(id);
       equal(asText(await readToEnd(outgoing.readable.getReader())), 'pong', 'the reply');
@@ -534,7 +570,7 @@ export const cases = [
       const { write, written } = await writeUntilBlocked(writer);
       await staysPending(write, 'the blocked write');
       await releasePeer(ctx);
-      const drained = later(ctx.peer.read(id, { bytes: written + 1 }));
+      const drained = later(ctx.peer.read(id, { bytes: written + 1, discard: true }));
       await resolves(write, 'the blocked write once the peer reads', 20_000);
       await resolves(drained, 'the peer reading everything', 20_000);
     },
@@ -605,7 +641,8 @@ export const cases = [
       const abort = later(writer.abort(ctx.reason(4)));
       await rejects(write, 'the blocked write');
       await rejects(writer.closed, 'writer.closed');
-      await resolves(abort, 'abort');
+      // abort() itself rejects when it interrupts a pending step (WHATWG streams); TA-16 asks only that it settle.
+      check((await settleWithin(abort, PROMPTLY_MS)).state !== 'pending', 'abort still pending');
       await releasePeer(ctx);
       equal((await resolves(ctx.peer.read(id), 'the peer read', 10_000)).resetCode, 4, 'the reset code the peer saw');
     },
@@ -623,7 +660,8 @@ export const cases = [
       const abort = later(writer.abort(ctx.reason(6)));
       await rejects(close, 'the pending close');
       await rejects(writer.closed, 'writer.closed');
-      await resolves(abort, 'abort');
+      // abort() itself rejects when it interrupts a pending step (WHATWG streams); TA-16 asks only that it settle.
+      check((await settleWithin(abort, PROMPTLY_MS)).state !== 'pending', 'abort still pending');
       await ctx.peer.resume();
       const seen = await resolves(ctx.peer.read(id), 'the peer read', 5_000);
       // The FIN may have reached the peer before the reset; then the stream is complete (RFC 9000 §3.2).
@@ -632,15 +670,13 @@ export const cases = [
   },
   {
     rule: 'TA-17',
-    name: "TA-17 a reset carries the reason's streamErrorCode",
-    async run(ctx) {
-      const transport = await open(ctx);
-      for (const code of VALID_CODES) {
-        const { writer, id } = await openAcceptedUni(ctx, transport);
-        await writer.abort(ctx.reason(code));
-        equal((await ctx.peer.read(id)).resetCode, code, `the reset code for streamErrorCode ${code}`);
-      }
-    },
+    name: "TA-17 a reset carries the reason's streamErrorCode, up to 255",
+    run: (ctx) => resetsCarry(ctx, LOW_CODES),
+  },
+  {
+    rule: 'TA-17',
+    name: "TA-17 a reset carries the reason's streamErrorCode, above 255",
+    run: (ctx) => resetsCarry(ctx, HIGH_CODES),
   },
   {
     rule: 'TA-17',
@@ -657,20 +693,13 @@ export const cases = [
   },
   {
     rule: 'TA-18',
-    name: 'TA-18 cancel sends STOP_SENDING with the code and ends the readable',
-    async run(ctx) {
-      const transport = await open(ctx);
-      for (const code of VALID_CODES) {
-        const id = await ctx.peer.openUni();
-        await ctx.peer.write(id, text('before'));
-        const reader = (await nextIncoming(transport.incomingUnidirectionalStreams, 'the peer stream')).getReader();
-        await readBytes(reader, 6);
-        await reader.cancel(ctx.reason(code));
-        equal(await resolves(ctx.peer.stopped(id), 'the peer seeing the stop'), code, `the stop code for ${code}`);
-        await ctx.peer.write(id, text('after')).catch(() => {});
-        equal((await reader.read()).done, true, 'a read after cancel');
-      }
-    },
+    name: 'TA-18 cancel sends STOP_SENDING with the code, up to 255, and ends the readable',
+    run: (ctx) => stopsCarry(ctx, LOW_CODES),
+  },
+  {
+    rule: 'TA-18',
+    name: 'TA-18 cancel sends STOP_SENDING with the code, above 255',
+    run: (ctx) => stopsCarry(ctx, HIGH_CODES),
   },
   {
     rule: 'TA-18',
