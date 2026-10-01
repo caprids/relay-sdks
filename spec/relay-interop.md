@@ -333,7 +333,7 @@ see the local filesystem.
 interop_dir=$(mktemp -d)
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
   -keyout "$interop_dir/key.pem" -out "$interop_dir/cert.pem" -days 7 \
-  -subj /CN=localhost -addext subjectAltName=DNS:localhost
+  -subj /CN=localhost -addext subjectAltName=DNS:localhost,IP:127.0.0.1
 
 docker create --name relay-sdk-interop -p 127.0.0.1:4443:4443/udp moqdev/moq-relay:0.15.8 \
   --listen '[::]:4443' --listen-tls-cert /tls/cert.pem --listen-tls-key /tls/key.pem \
@@ -341,7 +341,7 @@ docker create --name relay-sdk-interop -p 127.0.0.1:4443:4443/udp moqdev/moq-rel
 docker cp "$interop_dir/." relay-sdk-interop:/tls
 docker start relay-sdk-interop
 
-export RELAY_ANONYMOUS=1 RELAY_URL=https://localhost:4443
+export RELAY_ANONYMOUS=1 RELAY_URL=https://127.0.0.1:4443
 unset RELAY_TOKEN
 export RELAY_CA_FILE="$interop_dir/cert.pem"
 export RELAY_CERTIFICATE_HASH=$(openssl x509 -in "$interop_dir/cert.pem" -outform DER | openssl dgst -sha256 -r | cut -d ' ' -f 1)
@@ -353,10 +353,17 @@ rm -r "$interop_dir"
 unset RELAY_ANONYMOUS RELAY_URL RELAY_CA_FILE RELAY_CERTIFICATE_HASH
 ```
 
+The relay URL is an IPv4 literal because the port is published on `127.0.0.1` only. Where
+`localhost` resolves to `::1` first, nothing listens there: the Node run falls back to the next
+address and passes, but Chromium and aioquic do not, so the TypeScript summary reads `DIVERGED`. The
+certificate carries `IP:127.0.0.1` for Python's `RELAY_CA_FILE` hostname check, and keeps
+`DNS:localhost` for hosts where `localhost` is IPv4.
+
 If the Docker daemon runs in another network namespace, such as a sidecar or a VM whose published
 ports do not reach this machine's loopback, replace `-p 127.0.0.1:4443:4443/udp` with
-`--network host`. Both smoke tests passed that way on 2026-09-28, in a workspace whose daemon is a
-sidecar.
+`--network host`; the relay listens on `[::]`, so `127.0.0.1` still reaches it. On 2026-10-01 the
+recipe passed for Python, Node and Chromium both as written and with `--network host`, on a host
+where `localhost` resolves to `::1` first.
 
 Both tests publish binary, text, and empty payloads, then connect a second subscriber
 **after** the relay has received content. They require `SUBSCRIBE_OK` to contain
