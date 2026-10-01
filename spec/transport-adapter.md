@@ -200,8 +200,8 @@ a native `WebTransportError` reason and resets with 0 for any other (see
 `WebTransportError` (`streamResetReason` in `stream-reset.ts` does).
 **Why:** the core sends MOQT stream reset codes (draft-20 §3.3.4) as `streamErrorCode` on the
 reason it hands over (`stream-reset.ts`, `write-slot.ts`): a native `WebTransportError` in a browser,
-a plain `Error` with the field elsewhere. 2³²−1 is the largest code a WebTransport session can carry,
-so the range is the same in both framings. A conformance test for this rule against a browser hands
+the SDK's own `MoqtStreamError`, which has the TA-22 shape, elsewhere. 2³²−1 is the largest code a
+WebTransport session can carry, so the range is the same in both framings. A conformance test for this rule against a browser hands
 the reason `streamResetReason` builds, not a plain object.
 
 **TA-18.** A receive stream's cancel MUST send STOP_SENDING (RFC 9000 §19.5) with the code TA-17
@@ -247,13 +247,13 @@ drained.
 The error's class and `name` are not part of the contract. A browser's `WebTransportError` already
 has this shape, and other adapters SHOULD use an `Error` subclass so a stack is kept.
 **Why:** the core classifies by shape so that an adapter without `WebTransportError` is understood
-(#190). **Not yet implemented:** the core still tests `name === 'WebTransportError'` (`errors.ts`
-`isStreamStop`, `publish-session.ts` `isSessionFailure`) until #190 lands.
+(#190): `isStreamError` and `isSessionError` in `transport-error.ts` read `source` alone, and
+`isStreamStop` (`errors.ts`) and the publish session's announce-loss check build on them.
 
 **TA-23.** `source: 'session'` on a stream operation's error MUST mean the session is over. An
 adapter MUST NOT use it for a failure that leaves the session usable.
 **Why:** the publish session reads a request stream failing with `source: 'session'` as the
-session's own end, not something the peer did to the stream (`isSessionFailure`). TA-21's credit
+session's own end, not something the peer did to the stream (`isSessionError`). TA-21's credit
 rejection is exempt only because it is a create rejection, which the core never classifies.
 
 **TA-24.** A session error that reports the peer's close SHOULD carry the peer's `closeCode` and
@@ -284,7 +284,8 @@ The contract has two sides. Against an adapter that follows the rules above, the
   `ready` is never unhandled;
 - sends PATH and AUTHORITY only on native QUIC (TA-6, #191);
 - checks `protocol` after `ready` (TA-8, #203);
-- classifies errors by `source` and `streamErrorCode`, not by name (TA-22, #190);
+- classifies errors by `source`, not by class or name, and hands over `streamErrorCode` on the
+  reasons it resets and stops with (TA-17, TA-22, `transport-error.ts`);
 - never concludes the session has ended from a create rejection alone, only from `closed` or a
   `source: 'session'` error on a stream;
 - keeps reading the [Chromium deviations](#known-deviations) below as their conforming equivalents.

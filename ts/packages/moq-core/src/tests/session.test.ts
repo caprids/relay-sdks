@@ -317,6 +317,48 @@ describe('createMoqtSession', () => {
     harness.session.destroy();
   });
 
+  it('reports a peer reset with a shape-only stream error as onSubgroupReset (TA-19, TA-22)', async () => {
+    const harness = createSessionHarness();
+
+    harness.sendServerSetup();
+
+    const onOk = vi.fn();
+    const onError = vi.fn();
+    const objects: MoqtObject[] = [];
+    const subgroupEnds: unknown[] = [];
+    const resets: unknown[] = [];
+
+    harness.session.subscribe(
+      { trackNamespace: ['live'], trackName: 'video' },
+      {
+        onOk,
+        onError,
+        onObject: (object) => objects.push(object),
+        onSubgroupEnd: (info) => subgroupEnds.push(info),
+        onSubgroupReset: (info) => resets.push(info),
+      }
+    );
+    const request = await harness.nextRequestStream();
+
+    await request.firstMessage;
+    await request.send(encodeSubscribeOk(11));
+    await vi.waitFor(() => expect(onOk).toHaveBeenCalled());
+
+    const dataStream = harness.openControlledDataStream();
+
+    await dataStream.write(encodeSubgroup(11, 41, utf8Encode('frame')));
+    await vi.waitFor(() => expect(objects).toHaveLength(1));
+    // A non-browser adapter's RESET_STREAM: the TA-22 shape, with no WebTransportError name.
+    const reset = Object.assign(new Error('peer reset the stream'), { source: 'stream', streamErrorCode: 2 });
+    dataStream.reset(reset);
+
+    await vi.waitFor(() => expect(resets).toEqual([{ groupId: 41, error: reset }]));
+    expect(subgroupEnds).toEqual([]);
+    expect(onError).not.toHaveBeenCalled();
+
+    harness.session.destroy();
+  });
+
   it('buffers a data stream that arrives before SUBSCRIBE_OK registers the alias', async () => {
     const harness = createSessionHarness();
 

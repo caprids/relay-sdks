@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
 import type { RelayGroupWriter } from '../src/publish.js';
 import { createSettlingGroups, SETTLING_GROUP_LIMIT, type SettlingGroups } from '../src/settling-groups.js';
-import { createWriteSlot, RESET_CODE, StreamReset } from '../src/write-slot.js';
+import { createWriteSlot, RESET_CODE } from '../src/write-slot.js';
 
 type ObjectInput = Parameters<SubgroupWriter['writeObject']>[0];
 type Stall = 'none' | 'write' | 'second-write' | 'fin';
@@ -184,6 +184,10 @@ const stopSending = () => new FakeWebTransportError('Received STOP_SENDING.', 's
 /** The same stop when Chromium learns first that the network side closed the stream: a NetworkError DOMException. */
 const remoteAbort = () =>
   Object.assign(new Error('The stream was aborted by the remote server'), { name: 'NetworkError' });
+
+/** The same stop from a non-browser adapter: the TA-22 shape, with no `WebTransportError` name. */
+const shapeOnlyStop = () =>
+  Object.assign(new Error('peer stopped the stream'), { source: 'stream', streamErrorCode: 0 });
 
 const bytes = (...values: number[]) => new Uint8Array(values);
 const flush = () => vi.advanceTimersByTimeAsync(0);
@@ -515,6 +519,7 @@ describe('write slot: writing and closing a single write', () => {
   it.each([
     ['WebTransportError', stopSending],
     ['NetworkError', remoteAbort],
+    ['shape only, TA-20 and TA-22', shapeOnlyStop],
   ])(
     'reports a relay stop (%s) as SUBSCRIPTION_CHANGED while the subscription goes on, and writes on at once',
     async (_, stopped) => {
@@ -942,10 +947,19 @@ describe('write slot: demand observers', () => {
 });
 
 describe('write slot: reset reasons', () => {
-  it('carries the MOQT code on a StreamReset outside a browser, keeping the cause', () => {
-    const cause = new Error('why');
-    const reset = new StreamReset(RESET_CODE.DELIVERY_TIMEOUT, cause);
-    expect(reset).toMatchObject({ name: 'StreamReset', streamErrorCode: 2, message: 'why', cause });
+  it('resets outside a browser with a stream error carrying the MOQT code and the cause (TA-17, TA-22)', async () => {
+    const { slot, writer, opened } = harness();
+    slot.bind(1);
+    const group = await writer.openGroup();
+    const cause = new Error('Stopped');
+    group.abort(cause);
+    expect(opened[0]?.aborts[0]).toBeInstanceOf(Error);
+    expect(opened[0]?.aborts[0]).toMatchObject({
+      source: 'stream',
+      streamErrorCode: RESET_CODE.CANCELLED,
+      message: 'Stopped',
+      cause,
+    });
   });
 });
 
