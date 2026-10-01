@@ -6,6 +6,7 @@
  */
 import type { SubgroupWriter } from '@mux/moq-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { type DeliveryTimeouts, NO_DELIVERY_TIMEOUTS } from '../src/delivery-timeouts.js';
 import { RelayError } from '../src/errors.js';
 import type { RelayGroupWriter } from '../src/publish.js';
 import { createSettlingGroups, SETTLING_GROUP_LIMIT, type SettlingGroups } from '../src/settling-groups.js';
@@ -39,6 +40,7 @@ class FakeSubgroup implements SubgroupWriter {
     this.#settled = new Promise((resolve, reject) => {
       this.#settle = { resolve, reject };
     });
+    this.#settled.catch(() => {});
   }
 
   writeObject(object: ObjectInput): Promise<void> {
@@ -66,10 +68,12 @@ class FakeSubgroup implements SubgroupWriter {
     this.#settle.reject(error);
   }
 
+  /** A reset fails a FIN still awaiting acknowledgment, as Chromium rejects its in-flight close (TA-16). */
   abort(reason?: unknown): void {
     this.aborts.push(reason);
     this.#waiting?.reject(reason);
     this.#waiting = undefined;
+    this.#settle.reject(reason);
   }
 
   /** The transport rejects the stalled step, as a failed stream write would. */
@@ -105,6 +109,10 @@ interface HarnessOptions {
   manualSettle?: boolean;
   /** The connection's settling groups, shared when several slots stand for one connection. */
   settlingGroups?: SettlingGroups;
+  /** The publisher's delivery timeouts from the track properties. */
+  trackTimeouts?: Partial<DeliveryTimeouts>;
+  /** Each relay subscription's delivery timeouts, by alias; the test may change them, as REQUEST_UPDATE would. */
+  subscriberTimeouts?: Map<number, Partial<DeliveryTimeouts>>;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -139,6 +147,8 @@ function harness(options: HarnessOptions = {}) {
     },
     endTrack,
     writeTimeoutMs: options.writeTimeoutMs ?? 1_000,
+    trackTimeouts: { ...NO_DELIVERY_TIMEOUTS, ...options.trackTimeouts },
+    subscriberTimeouts: (alias) => ({ ...NO_DELIVERY_TIMEOUTS, ...options.subscriberTimeouts?.get(alias) }),
   });
   return {
     slot,
@@ -206,7 +216,7 @@ describe('write slot: waiting for demand', () => {
   it('sends one object as its own group once demand is bound, copying the payload first', async () => {
     const { slot, writer, opened } = harness();
     const payload = bytes(1, 2);
-    const writing = writer.write(payload, { properties: [{ type: 2, value: 7 }] });
+    const writing = writer.write(payload, { properties: [{ type: 0x7a, value: 7 }] });
     payload[0] = 9;
     expect(writer.hasDemand).toBe(false);
     await flush();
@@ -216,7 +226,7 @@ describe('write slot: waiting for demand', () => {
     await writing;
     expect(opened).toHaveLength(1);
     expect(opened[0]).toMatchObject({ trackAlias: 4, groupId: 0, finCalls: 1, aborts: [] });
-    expect(opened[0]?.objects).toEqual([{ objectId: 0, properties: [{ type: 2, value: 7 }], payload: bytes(1, 2) }]);
+    expect(opened[0]?.objects).toEqual([{ objectId: 0, properties: [{ type: 0x7a, value: 7 }], payload: bytes(1, 2) }]);
     await writer.write(bytes(3));
     expect(opened[1]).toMatchObject({ trackAlias: 4, groupId: 1 });
   });
@@ -908,6 +918,269 @@ describe('write slot: settling groups', () => {
     // Closing every open group may take the count past the limit for a moment; nothing is refused.
     for (const group of groups) await group.close();
     expect(settlingGroups.size).toBe(SETTLING_GROUP_LIMIT + 2);
+  });
+});
+
+describe('write slot: delivery timeouts (draft-20 §8)', () => {
+  const MAX_TIMER_MS = 2_147_483_647;
+
+  /** One track on its own connection, bound to alias 1, with FINs that wait for `acknowledge()`. */
+  function settling(options: HarnessOptions = {}) {
+    const settlingGroups = createSettlingGroups();
+    const track = harness({ manualSettle: true, settlingGroups, ...options });
+    track.slot.bind(1);
+    return { ...track, settlingGroups };
+  }
+
+  it('resets a settling group with DELIVERY_TIMEOUT once its subgroup timeout runs out, reporting nothing', async () => {
+    const { writer, opened, settlingGroups } = settling({ trackTimeouts: { subgroupMs: 50 } });
+    await writer.write(bytes(1));
+    expect(settlingGroups.size).toBe(1);
+    await elapse(49);
+    expect(opened[0]?.aborts).toEqual([]);
+    await elapse(1);
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+    expect(settlingGroups.size).toBe(0);
+    expect(writer.closed).toBe(false);
+    await writer.write(bytes(2));
+    expect(opened[1]).toMatchObject({ groupId: 1, aborts: [] });
+  });
+
+  it('leaves a group the relay acknowledged in time alone', async () => {
+    const { writer, opened, settlingGroups } = settling({ trackTimeouts: { subgroupMs: 50 } });
+    await writer.write(bytes(1));
+    opened[0]?.acknowledge();
+    await elapse(100);
+    expect(opened[0]?.aborts).toEqual([]);
+    expect(settlingGroups.size).toBe(0);
+  });
+
+  it.each([
+    [50, 30, 30],
+    [30, 50, 30],
+    [0, 40, 40],
+    [40, 0, 40],
+  ])(
+    'with publisher %i ms and subscriber %i ms the subgroup timeout is %i ms',
+    async (publisher, subscriber, expected) => {
+      const { writer, opened } = settling({
+        trackTimeouts: { subgroupMs: publisher },
+        subscriberTimeouts: new Map([[1, { subgroupMs: subscriber }]]),
+      });
+      await writer.write(bytes(1));
+      await elapse(expected - 1);
+      expect(opened[0]?.aborts).toEqual([]);
+      await elapse(1);
+      expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+    },
+  );
+
+  it('starts no timer when both sides are 0 or unset, or a property holds bytes', async () => {
+    const { writer, opened } = settling({
+      trackTimeouts: { objectMs: 0, subgroupMs: 0 },
+      subscriberTimeouts: new Map([[1, { objectMs: 0, subgroupMs: 0 }]]),
+    });
+    await writer.write(bytes(1), { properties: [{ type: 0x06, value: 0 }] });
+    // Odd neighbours of the timeout types carry bytes; they are sent and never read as a timeout.
+    const odd = [
+      { type: 0x03, value: bytes(9) },
+      { type: 0x07, value: bytes(9) },
+    ];
+    await writer.write(bytes(2), { properties: odd });
+    await elapse(60_000);
+    expect(opened.map((subgroup) => subgroup.aborts)).toEqual([[], []]);
+    expect(opened[1]?.objects[0]?.properties).toEqual(odd);
+  });
+
+  it('clamps a value above the timer bound instead of firing at once', async () => {
+    const { writer, opened } = settling({ trackTimeouts: { subgroupMs: Number.MAX_SAFE_INTEGER } });
+    await writer.write(bytes(1));
+    await elapse(MAX_TIMER_MS - 1);
+    expect(opened[0]?.aborts).toEqual([]);
+    await elapse(1);
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+  });
+
+  it("takes the first object's 0x06 over the track's, and ignores it on a later object", async () => {
+    const { writer, opened } = settling({ trackTimeouts: { subgroupMs: 100 } });
+    await writer.write(bytes(1), { properties: [{ type: 0x06, value: 20 }] });
+    const group = await writer.openGroup();
+    await group.write(bytes(2), { properties: [{ type: 0x06, value: 30 }] });
+    await group.write(bytes(3), { properties: [{ type: 0x06, value: 5 }] });
+    await group.close();
+    const plain = await writer.openGroup();
+    await plain.write(bytes(4));
+    await plain.write(bytes(5), { properties: [{ type: 0x06, value: 5 }] });
+    await plain.close();
+    await elapse(20);
+    expect(opened.map((subgroup) => subgroup.aborts.length)).toEqual([1, 0, 0]);
+    await elapse(10);
+    expect(opened.map((subgroup) => subgroup.aborts.length)).toEqual([1, 1, 0]);
+    await elapse(70);
+    expect(opened.map((subgroup) => subgroup.aborts.length)).toEqual([1, 1, 1]);
+  });
+
+  it('applies a changed subscriber value only to groups opened afterwards', async () => {
+    const subscriber = new Map([[1, { subgroupMs: 100 }]]);
+    const { writer, opened } = settling({ subscriberTimeouts: subscriber });
+    await writer.write(bytes(1));
+    const open = await writer.openGroup();
+    // A REQUEST_UPDATE lowers the subscription's value while one group settles and one is open.
+    subscriber.set(1, { subgroupMs: 20 });
+    await open.write(bytes(2));
+    await open.close();
+    await writer.write(bytes(3));
+    await elapse(20);
+    expect(opened.map((subgroup) => subgroup.aborts.length)).toEqual([0, 0, 1]);
+    await elapse(80);
+    expect(opened.map((subgroup) => subgroup.aborts.length)).toEqual([1, 1, 1]);
+  });
+
+  it('keeps timing a settling group through a subscription change, its end, and the track closing', async () => {
+    const { slot, writer, opened } = settling({ trackTimeouts: { subgroupMs: 50 } });
+    await writer.write(bytes(1));
+    slot.bind(2);
+    await writer.write(bytes(2));
+    slot.bind(undefined);
+    writer.close();
+    await elapse(50);
+    expect(opened.map((subgroup) => subgroup.aborts)).toEqual([
+      [resetWith(RESET_CODE.DELIVERY_TIMEOUT)],
+      [resetWith(RESET_CODE.DELIVERY_TIMEOUT)],
+    ]);
+  });
+
+  it('stops the subgroup timers when the connection ends', async () => {
+    const { writer, opened, disconnect } = settling({ trackTimeouts: { subgroupMs: 50 } });
+    await writer.write(bytes(1));
+    disconnect();
+    await elapse(100);
+    expect(opened[0]?.aborts).toEqual([]);
+  });
+
+  it('fails a write waiting for demand with DELIVERY_TIMEOUT, sending nothing and keeping the track', async () => {
+    const { slot, writer, opened } = harness({ trackTimeouts: { objectMs: 50 } });
+    const rejected = expect(writer.write(bytes(1))).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'waiting-for-demand',
+    });
+    await elapse(50);
+    await rejected;
+    expect(opened).toHaveLength(0);
+    expect(writer.closed).toBe(false);
+    slot.bind(1);
+    await writer.write(bytes(2));
+    expect(opened[0]).toMatchObject({ groupId: 0, aborts: [] });
+  });
+
+  it('reports whichever of the object timeout and the write deadline expires first', async () => {
+    const early = harness({ writeTimeoutMs: 100, trackTimeouts: { objectMs: 40 } });
+    const late = harness({ writeTimeoutMs: 40, trackTimeouts: { objectMs: 100 } });
+    const first = expect(early.writer.write(bytes(1))).rejects.toMatchObject({ code: 'DELIVERY_TIMEOUT' });
+    const second = expect(late.writer.write(bytes(1))).rejects.toMatchObject({ code: 'WRITE_TIMEOUT' });
+    await elapse(40);
+    await first;
+    await second;
+  });
+
+  it("takes the object's own 0x02 over the track's for the timeout it waits under", async () => {
+    const { writer } = harness({ writeTimeoutMs: 1_000, trackTimeouts: { objectMs: 500 } });
+    const rejected = expect(writer.write(bytes(1), { properties: [{ type: 0x02, value: 30 }] })).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'waiting-for-demand',
+    });
+    await elapse(30);
+    await rejected;
+  });
+
+  it("counts the wait for demand against the subscriber's value once the subscription arrives", async () => {
+    const { slot, writer, opened } = harness({ subscriberTimeouts: new Map([[1, { objectMs: 30 }]]) });
+    const writing = writer.write(bytes(1));
+    const rejected = expect(writing).rejects.toMatchObject({ code: 'DELIVERY_TIMEOUT', phase: 'waiting-for-demand' });
+    // Before a subscription exists only the publisher's value applies, and it has none.
+    await elapse(40);
+    slot.bind(1);
+    await rejected;
+    expect(opened).toHaveLength(0);
+    await writer.write(bytes(2));
+    expect(opened[0]).toMatchObject({ groupId: 0, aborts: [] });
+  });
+
+  it('counts the wait for the stream, and resets a stream that opens late with DELIVERY_TIMEOUT', async () => {
+    const { slot, writer, opened, releaseOpen } = harness({ open: 'hold', trackTimeouts: { objectMs: 50 } });
+    slot.bind(1);
+    const rejected = expect(writer.write(bytes(1))).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'opening-stream',
+    });
+    await elapse(50);
+    await rejected;
+    releaseOpen();
+    await flush();
+    expect(opened[0]?.objects).toEqual([]);
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+  });
+
+  it('counts the wait for settling room in opening-stream', async () => {
+    const { writer, opened } = settling({ trackTimeouts: { objectMs: 50 } });
+    for (let i = 0; i < SETTLING_GROUP_LIMIT; i++) await writer.write(bytes(1));
+    const rejected = expect(writer.write(bytes(2))).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'opening-stream',
+    });
+    await elapse(50);
+    await rejected;
+    expect(opened).toHaveLength(SETTLING_GROUP_LIMIT);
+  });
+
+  it('resets an open group whose object does not reach the transport in time; later writes fail, nothing reopens', async () => {
+    const { slot, writer, opened } = harness({ stall: 'second-write', trackTimeouts: { objectMs: 50 } });
+    slot.bind(1);
+    const group = await writer.openGroup();
+    await group.write(bytes(1));
+    const rejected = expect(group.write(bytes(2))).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'writing',
+    });
+    await elapse(50);
+    await rejected;
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+    expect(group.closed).toBe(true);
+    await expect(group.write(bytes(3))).rejects.toMatchObject({ code: 'DELIVERY_TIMEOUT' });
+    await expect(group.close()).rejects.toMatchObject({ code: 'DELIVERY_TIMEOUT' });
+    expect(opened).toHaveLength(1);
+    expect(writer.closed).toBe(false);
+    const next = await writer.openGroup();
+    expect(next.groupId).toBe(1);
+  });
+
+  it("times each object of a group by the first object's 0x02, from that object's own write call", async () => {
+    const { slot, writer, opened } = harness({ stall: 'second-write', trackTimeouts: { objectMs: 500 } });
+    slot.bind(1);
+    const group = await writer.openGroup();
+    await elapse(1_000);
+    await group.write(bytes(1), { properties: [{ type: 0x02, value: 30 }] });
+    const rejected = expect(group.write(bytes(2), { properties: [{ type: 0x02, value: 900 }] })).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'writing',
+    });
+    await elapse(29);
+    expect(opened[0]?.aborts).toEqual([]);
+    await elapse(1);
+    await rejected;
+  });
+
+  it('times nothing once the object reached the transport, and nothing while a group is idle', async () => {
+    const { slot, writer, opened } = harness({ stall: 'fin', trackTimeouts: { objectMs: 20 } });
+    slot.bind(1);
+    const group = await writer.openGroup();
+    await group.write(bytes(1));
+    await elapse(100);
+    const closing = group.close();
+    await elapse(100);
+    expect(opened[0]?.aborts).toEqual([]);
+    opened[0]?.release();
+    await closing;
   });
 });
 

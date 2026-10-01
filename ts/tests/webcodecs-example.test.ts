@@ -2,6 +2,7 @@ import { LOC_TIMESTAMP, LOC_VIDEO_CONFIG } from '@mux/moq-media';
 import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@mux/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { publishCanvas } from '../examples/webcodecs/publish-canvas.js';
+import { NO_DELIVERY_TIMEOUTS } from '../src/delivery-timeouts.js';
 import { createSettlingGroups } from '../src/settling-groups.js';
 import { createWriteSlot } from '../src/write-slot.js';
 
@@ -103,6 +104,8 @@ function recordingPublisher(
         assertOpen() {},
         endTrack() {},
         writeTimeoutMs: 10000,
+        trackTimeouts: NO_DELIVERY_TIMEOUTS,
+        subscriberTimeouts: () => NO_DELIVERY_TIMEOUTS,
         async openSubgroup(_alias, groupId) {
           const group: RecordedObject[] = [];
           objects.push(group);

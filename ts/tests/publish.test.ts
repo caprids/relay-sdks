@@ -144,8 +144,8 @@ describe('connectRelayPublisher', () => {
     const events = publisher.registerTrack({ track: 'events' });
     const received = receive(subscriber, 'events');
     const properties = [
-      { type: 2, value: 7 },
       { type: 3, value: new Uint8Array([0xff, 2]) },
+      { type: 0x7a, value: 7 },
     ];
 
     await events.write(new Uint8Array([1]), { properties });
@@ -655,10 +655,12 @@ describe('connectRelayPublisher', () => {
 /**
  * A publisher transport whose data streams take the FIN at once but settle their close only when the
  * test acknowledges it, as Chromium settles a WebTransport close only once the relay acknowledged
- * the FIN. The control stream (the first one) is left alone.
+ * the FIN. A reset while the close waits fails it with the reason, as Chromium does (TA-16), and is
+ * recorded in `resets`. The control stream (the first one) is left alone.
  */
 function heldAcknowledgments(factory: RelayTransportFactory) {
   const pending: (() => void)[] = [];
+  const resets: unknown[] = [];
   const state = { transportClosed: false };
   let streams = 0;
   const createTransport: RelayTransportFactory = (endpoint, protocols) => {
@@ -673,11 +675,26 @@ function heldAcknowledgments(factory: RelayTransportFactory) {
           const stream = await transport.createUnidirectionalStream();
           if (streams++ === 0) return stream;
           const writer = stream.getWriter();
+          let fail: ((reason: unknown) => void) | undefined;
           return new WritableStream<Uint8Array>({
+            start(controller) {
+              // WHATWG holds the sink's abort() behind an in-flight close; the signal fires at once.
+              controller.signal.addEventListener('abort', () => {
+                resets.push(controller.signal.reason);
+                fail?.(controller.signal.reason);
+              });
+            },
             write: (chunk) => writer.write(chunk),
             async close() {
               await writer.close();
-              await new Promise<void>((resolve) => pending.push(resolve));
+              await new Promise<void>((resolve, reject) => {
+                const acknowledge = () => resolve();
+                pending.push(acknowledge);
+                fail = (reason) => {
+                  pending.splice(pending.indexOf(acknowledge), 1);
+                  reject(reason);
+                };
+              });
             },
             abort: (reason) => writer.abort(reason),
           });
@@ -693,6 +710,7 @@ function heldAcknowledgments(factory: RelayTransportFactory) {
   return {
     createTransport,
     state,
+    resets,
     unacknowledged: () => pending.length,
     acknowledgeAll: () => {
       for (const acknowledge of pending.splice(0)) acknowledge();
@@ -770,6 +788,91 @@ describe('settling groups', () => {
   });
 });
 
+describe('delivery timeouts (draft-20 §8)', () => {
+  it("resets a settling group with code 2 when the track's 0x06 runs out, so closing does not wait for it", async () => {
+    const hub = createRelayHub();
+    cleanup.push(() => hub.destroy());
+    const held = heldAcknowledgments(hub.connectPublisher);
+    const publisher = await connectRelayPublisher({ url, namespace, createTransport: held.createTransport });
+    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
+    cleanup.push(() => subscriber.close());
+    cleanup.push(() => publisher.close());
+    const events = publisher.registerTrack({ track: 'events', trackProperties: [{ type: 0x06, value: 50 }] });
+    const received = receive(subscriber, 'events');
+
+    await events.write(new Uint8Array([1]));
+    expect(held.unacknowledged()).toBe(1);
+    await vi.waitFor(() => expect(held.resets).toEqual([expect.objectContaining({ streamErrorCode: 2 })]));
+    expect(held.unacknowledged()).toBe(0);
+    expect(events.closed).toBe(false);
+    expect(received.objects).toHaveLength(1);
+
+    // Nothing is left settling, so closing does not wait out the 10 s write deadline.
+    const started = performance.now();
+    await publisher.close();
+    expect(performance.now() - started).toBeLessThan(5_000);
+  });
+
+  it("applies the subscription's SUBSCRIBE and REQUEST_UPDATE values to the groups opened afterwards", async () => {
+    const pair = createTransportPair();
+    const held = heldAcknowledgments(() => ({ transport: pair.client, ready: Promise.resolve() }));
+    const [publisher, subscriber] = await Promise.all([
+      connectRelayPublisher({ url, namespace, createTransport: held.createTransport }),
+      connectRelaySubscriber({
+        url,
+        createTransport: () => ({ transport: withServerRequestIds(pair.server), ready: Promise.resolve() }),
+      }),
+    ]);
+    cleanup.push(() => subscriber.close());
+    cleanup.push(() => publisher.close());
+    const events = publisher.registerTrack({ track: 'events' });
+    const onUpdateOk = vi.fn();
+    const onPublisherDone = vi.fn();
+    const subscription = subscriber.subscribe(
+      { namespace, track: 'events', parameters: { subgroupDeliveryTimeout: 10_000 } },
+      { onUpdateOk, onPublisherDone },
+    );
+    await subscription.subscribed;
+
+    await events.write(new Uint8Array([1]));
+    subscription.update({ subgroupDeliveryTimeout: 30 });
+    await vi.waitFor(() => expect(onUpdateOk).toHaveBeenCalledOnce());
+    await events.write(new Uint8Array([2]));
+    await vi.waitFor(() => expect(held.resets).toEqual([expect.objectContaining({ streamErrorCode: 2 })]));
+    // The group opened before the update keeps its 10 s and is still settling.
+    expect(held.unacknowledged()).toBe(1);
+    expect(onPublisherDone).not.toHaveBeenCalled();
+    held.acknowledgeAll();
+  });
+
+  it("fails a write that waits longer than the track's 0x02 for demand, and accepts odd values at registration", async () => {
+    const { publisher, subscriber } = await connectHub();
+    const events = publisher.registerTrack({ track: 'events', trackProperties: [{ type: 0x02, value: 30 }] });
+    expect(() =>
+      publisher.registerTrack({
+        track: 'odd',
+        trackProperties: [
+          { type: 0x02, value: 0 },
+          { type: 0x06, value: Number.MAX_SAFE_INTEGER },
+          { type: 0x03, value: new Uint8Array([1]) },
+          { type: 0x07, value: new Uint8Array([1]) },
+        ],
+      }),
+    ).not.toThrow();
+
+    await expect(events.write(new Uint8Array([1]))).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'waiting-for-demand',
+    });
+    expect(events.closed).toBe(false);
+    const received = receive(subscriber, 'events');
+    await vi.waitFor(() => expect(events.hasDemand).toBe(true));
+    await events.write(new Uint8Array([2]));
+    await vi.waitFor(() => expect(received.objects).toHaveLength(1));
+    expect(received.objects[0]).toMatchObject({ groupId: 0, payload: new Uint8Array([2]) });
+  });
+});
+
 describe('text and JSON helpers', () => {
   it('round-trips Unicode, empty text, and JSON on tracks and groups with metadata', async () => {
     const { publisher, subscriber } = await connectHub();
@@ -777,7 +880,7 @@ describe('text and JSON helpers', () => {
     const { objects } = receive(subscriber, 'helpers');
     const text = '\uFEFFHello, 世界 🌍\n\0';
     const value = { text, nested: [null, true, 42, { empty: '' }] };
-    const properties = [{ type: 2, value: 7 }];
+    const properties = [{ type: 0x7a, value: 7 }];
     await track.writeText(text, { properties });
     await track.writeJSON(value, { properties });
     const group = await track.openGroup();

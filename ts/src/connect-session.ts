@@ -9,7 +9,7 @@ import {
 import { RelayError, transportError } from './errors.js';
 
 /** setTimeout stores its delay in a signed 32-bit integer; a larger one wraps and fires at once. */
-const MAX_TIMEOUT_MS = 2_147_483_647;
+export const MAX_TIMEOUT_MS = 2_147_483_647;
 
 /**
  * Reject a deadline a timer cannot hold, so a larger number never means a shorter wait. A value

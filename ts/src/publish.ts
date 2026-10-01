@@ -1,5 +1,11 @@
 import { createMoqtPublishSession, createSubgroupWriter, type ObjectStatus } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
+import {
+  type DeliveryTimeouts,
+  NO_DELIVERY_TIMEOUTS,
+  publisherTimeouts,
+  subscriberTimeouts,
+} from './delivery-timeouts.js';
 import { RelayError } from './errors.js';
 import { createSettlingGroups } from './settling-groups.js';
 import { namespaceFields, propertyPairs, trackName } from './validation.js';
@@ -40,6 +46,13 @@ export interface RegisterTrackOptions {
    * SUBSCRIBE_OK carries the relay's track properties, not these, and a Timescale (`0x08`) here is
    * what keeps supplied object Timestamps unchanged. See "Relay property handling" in
    * spec/behavior.md.
+   *
+   * An OBJECT_DELIVERY_TIMEOUT (`0x02`) or SUBGROUP_DELIVERY_TIMEOUT (`0x06`) here, in milliseconds,
+   * is the publisher's delivery timeout (draft-20 §8), which the first object of a group can
+   * override for that group. An object still short of the transport when the object timeout
+   * expires fails its write with `DELIVERY_TIMEOUT`; a completed group the relay has not
+   * acknowledged when the subgroup timeout expires is reset, and nothing is reported. 0 means no
+   * timeout.
    */
   trackProperties?: readonly PublishProperty[];
   /** Deadline for relay demand and stream writes. Default 10 seconds, maximum 2147483647. */
@@ -59,8 +72,10 @@ export interface RelayGroupWriter {
   /** True once `close()` completed, or the group was aborted, failed, or lost its track or connection. */
   readonly closed: boolean;
   /**
-   * Append one object, starting at ID 0. Each write has its own writeTimeoutMs deadline.
-   * Properties are encoded as supplied; the relay may transform them before delivery.
+   * Append one object, starting at ID 0. Each write has its own writeTimeoutMs deadline, and a
+   * delivery timeout can end it sooner with `DELIVERY_TIMEOUT`, which resets the whole group.
+   * Properties are encoded as supplied; the relay may transform them before delivery. A `0x02` or
+   * `0x06` property on object 0 sets the group's delivery timeouts; on a later object it is ignored.
    */
   write(
     payload: ArrayBufferView,
@@ -180,6 +195,9 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   // One write slot per registered track; the session's binding callback and the connection's end
   // reach the slots through here.
   const tracks = new Map<string, WriteSlot>();
+  // Each relay subscription's delivery timeouts (§8), by its request ID, which the core also uses as
+  // its track alias: SUBSCRIBE's parameters, as REQUEST_UPDATE changes them.
+  const subscriptionTimeouts = new Map<number, DeliveryTimeouts>();
   // Groups whose FIN the transport took but the relay has not acknowledged, shared by every track.
   const settlingGroups = createSettlingGroups();
   // What closing waits for them: the largest write deadline among the tracks.
@@ -200,6 +218,12 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       callbacks: {
         ...callbacks,
         onAnnounced: () => announce(),
+        onSubscribe: ({ requestId, parameters }) => subscriptionTimeouts.set(requestId, subscriberTimeouts(parameters)),
+        onRequestUpdate: ({ requestId, parameters }) => {
+          const previous = subscriptionTimeouts.get(requestId);
+          if (previous) subscriptionTimeouts.set(requestId, subscriberTimeouts(parameters, previous));
+        },
+        onSubscribeEnd: ({ requestId }) => subscriptionTimeouts.delete(requestId),
         onTrackBinding: ({ trackName, trackAlias }) => tracks.get(trackName)?.bind(trackAlias),
         onAnnounceEnded: ({ error }) =>
           callbacks.onClosed?.({
@@ -253,6 +277,8 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         assertOpen: lifetime.assertOpen,
         endTrack: () => registered.end(),
         writeTimeoutMs,
+        trackTimeouts: publisherTimeouts(properties),
+        subscriberTimeouts: (trackAlias) => subscriptionTimeouts.get(trackAlias) ?? NO_DELIVERY_TIMEOUTS,
       });
       tracks.set(track, slot);
       drainMs = Math.max(drainMs, writeTimeoutMs);
