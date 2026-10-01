@@ -52,10 +52,17 @@ convention. A package manager installs only the one whose `os`, `cpu` and `libc`
 
 | Platform package | Built on | Packed | Installed |
 | --- | --- | --- | --- |
-SIZES_TABLE
+| `@mux/relay-quic-darwin-arm64` | macos-14 | 1.14 MiB | 2.62 MiB |
+| `@mux/relay-quic-darwin-x64` | macos-14, cross | 1.21 MiB | 2.85 MiB |
+| `@mux/relay-quic-linux-arm64-gnu` | ubuntu-latest, zig | 1.19 MiB | 2.67 MiB |
+| `@mux/relay-quic-linux-arm64-musl` | ubuntu-latest, zig | 1.19 MiB | 2.67 MiB |
+| `@mux/relay-quic-linux-x64-gnu` | ubuntu-latest, zig | 1.26 MiB | 3.01 MiB |
+| `@mux/relay-quic-linux-x64-musl` | ubuntu-latest, zig | 1.26 MiB | 3.00 MiB |
+| `@mux/relay-quic-win32-x64-msvc` | windows-latest | 1.26 MiB | 3.33 MiB |
 
 Installed is what an install puts on disk on that platform: this package, `@mux/moq-core` and the one binary. The
-glibc builds need glibc 2.28 or later, which Node 24 needs too.
+sizes are from the 0.0.0 packages CI packed on 2026-10-01. The glibc builds need glibc 2.28 or later, which Node 24
+needs too.
 
 `src/addon.ts` loads a local build, `native/relay-quic.<platform>.node`, first, so a build from source always wins.
 Without one it loads `@mux/relay-quic-<platform>`. If neither is there, the error names both. A platform package that is
