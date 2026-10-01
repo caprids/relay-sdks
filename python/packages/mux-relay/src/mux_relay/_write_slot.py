@@ -17,10 +17,12 @@ The slot enforces both delivery timeouts of draft-ietf-moq-transport-20 section 
 property on the group's first object, else the track property) and the subscriber's (the relay
 subscription's parameters, as updated by REQUEST_UPDATE). The subscriber's are fixed when the group's
 stream opens, the publisher's when its first object is handed over. The object timeout bounds an
-object's age from the application's call to the moment it reaches the transport, every wait
-included; an older object fails its operation with ``DELIVERY_TIMEOUT`` and resets the group with
-DELIVERY_TIMEOUT (0x2). The subgroup timeout starts when the FIN is handed over and resets the
-settling group, silently, if the relay has not acknowledged the FIN by then.
+object's age from the application's call until the transport has taken it, every wait included:
+it is checked just before the object is written and runs on until the stream write returns, which
+is when aioquic has transmitted the bytes. An older object fails its operation with
+``DELIVERY_TIMEOUT`` and resets the group with DELIVERY_TIMEOUT (0x2). The subgroup timeout starts
+when the FIN is handed over and resets the settling group, silently, if the relay has not
+acknowledged the FIN by then.
 
 Everything the slot borrows enters through :class:`WriteSlotDependencies`: how to open a subgroup
 stream, the connection's settling groups, whether the namespace is solicited, whether the connection
@@ -285,23 +287,29 @@ class _Operation:
         if self.subscriber is None:
             self._arm_object_timer()
 
-    def hand_over_object(self) -> None:
-        """The object is about to reach the transport: the §8 check, after which its age no longer matters.
+    def check_object_age(self) -> None:
+        """The object is about to go to the transport: the §8 check, in case its timer is late.
 
         The group's first object fixes the publisher's values. An object older than the effective
         OBJECT_DELIVERY_TIMEOUT fails the operation with ``DELIVERY_TIMEOUT`` and resets its stream.
+        Its timer keeps running until :meth:`object_taken`.
         """
         if self.publisher is None:
             self.publisher = self._publisher_now()
 
         started = self._object_started
-        limit = self._object_limit()
-        self._stop_object_clock()
 
-        if started is not None and limit and self._slot._clock() - started >= limit:
-            self._fail_delivery()
+        if started is not None:
+            limit = self._object_limit()
+
+            if limit and self._slot._clock() - started >= limit:
+                self._fail_delivery()
 
         self.check()
+
+    def object_taken(self) -> None:
+        """The transport took the object: its stream write returned, so aioquic transmitted it. No longer timed."""
+        self._stop_object_clock()
 
     def _publisher_now(self) -> _Timeouts:
         if self.publisher is not None:
@@ -510,10 +518,11 @@ class RelayGroupWriter:
         operation = self._operation
 
         async def send() -> None:
-            operation.hand_over_object()
+            operation.check_object_age()
             await self._writer.write_object(
                 object_id=object_id, payload=data, properties=object_properties, status=status
             )
+            operation.object_taken()
 
         self._pending = True
         try:
@@ -838,10 +847,10 @@ class RelayTrackWriter:
 
     async def _send(self, operation: _Operation, data: bytes, properties: list[KeyValuePair]) -> SubgroupStream:
         writer = await self._open_stream(operation)
-        # Nothing of the object has been sent yet: a delivery timeout here reports `opening-stream`.
-        operation.hand_over_object()
         operation.phase = "writing"
+        operation.check_object_age()
         await writer.write_object(object_id=0, properties=properties, payload=data)
+        operation.object_taken()
         operation.check()
         operation.phase = "closing"
         await writer.fin()

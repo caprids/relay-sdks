@@ -1039,7 +1039,8 @@ class TestSubgroupDeliveryTimeout:
         g.writer._bind(1)
         group = await g.writer.open_group()
         group._operation.start_object(g.writer._clock(), [subgroup(b"\x0a")])
-        group._operation.hand_over_object()
+        group._operation.check_object_age()
+        group._operation.object_taken()
         await group.close()
         assert grouped.timeouts == [0.06]
 
@@ -1146,12 +1147,29 @@ class TestObjectDeliveryTimeout:
         clock.step = 0.03  # every read of the clock is 30 ms later: the object reaches the open stream 60 ms old
         with pytest.raises(RelayError) as failure:
             await h.writer.write(b"\x01")
-        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "opening-stream")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "writing")
         assert h.opened[0].objects == []
         assert delivery_reset(h.opened[0])
         clock.step = 0.0
         await h.writer.write(b"\x02")
         assert h.opened[1].group_id == 1
+
+    async def test_an_object_blocked_in_the_stream_write_is_still_timed_and_its_stream_reset(self) -> None:
+        # The bytes are queued, not transmitted: the timer runs until the stream write returns.
+        h = Harness(stall="write", track_properties=[object_timeout(50)])
+        h.writer._bind(1)
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "writing")
+        assert delivery_reset(h.opened[0])
+        assert h.opened[0].fin_calls == 0
+
+    async def test_once_the_stream_write_returns_the_object_is_no_longer_timed(self) -> None:
+        h = Harness(stall="fin", write_timeout=0.15, track_properties=[object_timeout(30)])
+        h.writer._bind(1)
+        with pytest.raises(RelayError) as failure:
+            await h.writer.write(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("WRITE_TIMEOUT", "closing")
 
     async def test_in_an_open_group_resets_the_group_fails_later_writes_and_reopens_nothing(self) -> None:
         clock = SteppingClock()
