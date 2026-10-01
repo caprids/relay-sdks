@@ -48,9 +48,12 @@ function rawSubscribe(server: Parameters<typeof rawSubscribeTo>[0], trackName: s
   return rawSubscribeTo(server, NAMESPACE, trackName, requestId);
 }
 
-function makePublishHarness(callbacks: MoqtPublishSessionCallbacks = {}) {
+function makePublishHarness(
+  callbacks: MoqtPublishSessionCallbacks = {},
+  { bufferBytes }: { bufferBytes?: number } = {}
+) {
   const events: PipeEvent[] = [];
-  const pair = createTransportPair({ events });
+  const pair = createTransportPair({ events, ...(bufferBytes === undefined ? {} : { bufferBytes }) });
   const subscriber = createMoqtSession(withServerRequestIds(pair.server), { unknownAliasTimeoutMs: 500 });
   const session = createMoqtPublishSession(pair.client, { callbacks });
 
@@ -599,9 +602,12 @@ describe('createMoqtPublishSession', () => {
 
   it('converges on the newest subscription regardless of acceptance order', async () => {
     const bindings: (number | undefined)[] = [];
-    const { pair, session, subscriber } = makePublishHarness({
-      onTrackBinding: ({ trackAlias }) => bindings.push(trackAlias),
-    });
+    const { pair, session, subscriber } = makePublishHarness(
+      {
+        onTrackBinding: ({ trackAlias }) => bindings.push(trackAlias),
+      },
+      { bufferBytes: 0 }
+    );
 
     await session.ready;
     session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
@@ -664,10 +670,13 @@ describe('createMoqtPublishSession', () => {
   it('a stale acceptance does not steal the binding from a newer subscription', async () => {
     const bindings: (number | undefined)[] = [];
     const subscribed: number[] = [];
-    const { pair, session, subscriber } = makePublishHarness({
-      onTrackBinding: ({ trackAlias }) => bindings.push(trackAlias),
-      onSubscribe: ({ requestId }) => subscribed.push(requestId),
-    });
+    const { pair, session, subscriber } = makePublishHarness(
+      {
+        onTrackBinding: ({ trackAlias }) => bindings.push(trackAlias),
+        onSubscribe: ({ requestId }) => subscribed.push(requestId),
+      },
+      { bufferBytes: 0 }
+    );
 
     await session.ready;
     session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
