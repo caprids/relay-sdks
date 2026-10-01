@@ -558,11 +558,45 @@ describe('connectRelaySubscriber', () => {
     expect(createTransport).not.toHaveBeenCalled();
   });
 
-  it('reports missing browser transport support', async () => {
-    vi.stubGlobal('WebTransport', undefined);
-    await expect(connectRelaySubscriber({ url: endpoint })).rejects.toMatchObject({
-      code: 'TRANSPORT_UNAVAILABLE',
-      phase: 'connecting',
+  describe('default transport', () => {
+    function stubWebTransport(options: { protocol: boolean }) {
+      const fake = createFakeTransport();
+      // `new` on this returns the scripted fake, so the SDK drives it as the browser transport.
+      // biome-ignore lint/complexity/useArrowFunction: an arrow function cannot be called with new.
+      const StubWebTransport = vi.fn(function () {
+        return Object.assign(fake.transport, { ready: Promise.resolve() });
+      });
+      if (options.protocol) {
+        Object.defineProperty(StubWebTransport.prototype, 'protocol', { get: () => 'moqt-20' });
+      }
+      vi.stubGlobal('WebTransport', StubWebTransport);
+      return { fake, constructed: StubWebTransport.mock.calls };
+    }
+
+    it('reports a runtime with no WebTransport global and names createTransport', async () => {
+      vi.stubGlobal('WebTransport', undefined);
+      const rejected = connectRelaySubscriber({ url: endpoint });
+
+      await expect(rejected).rejects.toMatchObject({ code: 'TRANSPORT_UNAVAILABLE', phase: 'connecting' });
+      await expect(rejected).rejects.toThrow('createTransport');
+    });
+
+    it('refuses a WebTransport global that cannot negotiate protocols, as in Deno', async () => {
+      const { constructed } = stubWebTransport({ protocol: false });
+      const rejected = connectRelaySubscriber({ url: endpoint });
+
+      await expect(rejected).rejects.toMatchObject({ code: 'TRANSPORT_UNAVAILABLE', phase: 'connecting' });
+      await expect(rejected).rejects.toThrow(/cannot negotiate protocols.*createTransport/);
+      expect(constructed).toEqual([]);
+    });
+
+    it('connects through a WebTransport global that negotiates protocols', async () => {
+      const { fake, constructed } = stubWebTransport({ protocol: true });
+      const connecting = connectRelaySubscriber({ url: endpoint });
+
+      fake.sendServerSetup();
+      connections.push(await connecting);
+      expect(constructed).toEqual([[endpoint, { protocols: ['moqt-20'] }]]);
     });
   });
 

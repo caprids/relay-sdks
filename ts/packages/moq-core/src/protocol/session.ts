@@ -60,11 +60,17 @@ import { type BidirectionalStreamLike, openRequestStream, type RequestStream } f
  * provide an in-memory fake (the same seam pattern as SPF's fetch injection).
  */
 export interface MoqtTransport {
+  /** Unidirectional streams the peer opens: its control stream and data streams. */
   readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
+  /** Bidirectional streams the peer opens: its request streams. */
   readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStreamLike>;
+  /** Open a unidirectional stream to the peer. */
   createUnidirectionalStream(): Promise<WritableStream<Uint8Array>>;
+  /** Open a bidirectional stream to the peer. */
   createBidirectionalStream(): Promise<BidirectionalStreamLike>;
+  /** Close the transport session with an optional application close code and reason. */
   close(closeInfo?: { closeCode?: number; reason?: string }): void;
+  /** Settles when the transport session has closed. */
   readonly closed: Promise<unknown>;
 }
 
@@ -72,29 +78,48 @@ export interface MoqtTransport {
 // Public session surface
 // ============================================================================
 
+/**
+ * A failed request: a REQUEST_ERROR from the peer, or a failure the session synthesized from a stream event (see
+ * {@link isStreamFailure}).
+ */
 export interface RequestError {
+  /** A {@link @mux/moq-core!REQUEST_ERROR_CODE} value; the session uses `INTERNAL_ERROR` or `TIMEOUT` for failures it synthesizes. */
   errorCode: number;
+  /** REQUEST_ERROR's Retry Interval as received; `0` for failures the session synthesizes. */
   retryInterval: number;
+  /** Reason phrase; empty when the peer gave none. */
   reason: string;
+  /** Where to re-issue the request, present when `errorCode` is `REDIRECT`. */
   redirect?: Redirect;
 }
 
+/** SUBSCRIBE_OK: the peer accepted a subscription. */
 export interface SubscribeOk {
+  /** Track Alias the publisher assigned; incoming subgroup streams name the subscription by it. */
   trackAlias: number;
+  /** Message parameters SUBSCRIBE_OK carried. */
   parameters: MessageParameters;
+  /** Track Properties SUBSCRIBE_OK carried. */
   trackProperties: KeyValuePair[];
 }
 
+/** PUBLISH_DONE: the publisher ended a subscription. */
 export interface PublishDone {
+  /** A {@link @mux/moq-core!PUBLISH_DONE_STATUS} value. */
   statusCode: number;
   /** Data streams the publisher opened; `undefined` when it could not count them (§10.12). */
   streamCount: number | undefined;
+  /** Reason phrase; empty when the publisher gave none. */
   reason: string;
 }
 
+/** Callbacks for {@link MoqtSession.subscribe}. Each must be synchronous; an async function throws `TypeError`. */
 export interface SubscriptionHandlers {
+  /** SUBSCRIBE_OK arrived. */
   onOk?(ok: SubscribeOk): void;
+  /** The subscription failed before or instead of SUBSCRIBE_OK: REQUEST_ERROR, or a stream failure. */
   onError?(error: RequestError): void;
+  /** An object arrived on one of the subscription's subgroup streams. */
   onObject?(object: MoqtObject): void;
   /** A subgroup stream finished cleanly (FIN). */
   onSubgroupEnd?(info: { groupId: number; subgroupId: number; endOfGroup: boolean }): void;
@@ -103,6 +128,7 @@ export interface SubscriptionHandlers {
    * relay that drops a reset instead of forwarding it leaves nothing to report.
    */
   onSubgroupReset?(info: { groupId: number; error: unknown }): void;
+  /** PUBLISH_DONE arrived. Subgroup streams already in flight still deliver until the subscription is cancelled. */
   onDone?(done: PublishDone): void;
   /** Response to a REQUEST_UPDATE sent on this subscription. */
   onUpdateOk?(): void;
@@ -161,7 +187,9 @@ function synchronousSubscriptionHandlers(handlers: SubscriptionHandlers): Subscr
   return result;
 }
 
+/** A live subscription returned by {@link MoqtSession.subscribe}. */
 export interface Subscription {
+  /** Request ID of the SUBSCRIBE. */
   readonly requestId: number;
   /** Modify the subscription (REQUEST_UPDATE, §10.9). */
   update(parameters: MessageParameters): void;
@@ -169,47 +197,78 @@ export interface Subscription {
   cancel(reason?: unknown): void;
 }
 
+/** FETCH_OK: the peer accepted a fetch. */
 export interface FetchOk {
+  /** FETCH_OK's End Of Track flag. */
   endOfTrack: boolean;
-  endLocation: { group: number; object: number };
+  /** FETCH_OK's End Location. */
+  endLocation: {
+    /** Group ID. */
+    group: number;
+    /** Object ID within the group. */
+    object: number;
+  };
+  /** Message parameters FETCH_OK carried. */
   parameters: MessageParameters;
+  /** Track Properties FETCH_OK carried. */
   trackProperties: KeyValuePair[];
 }
 
+/** Callbacks for {@link MoqtSession.fetch}. */
 export interface FetchHandlers {
+  /** FETCH_OK arrived. Not called when the peer answers with a bare REQUEST_OK instead. */
   onOk?(ok: FetchOk): void;
+  /** The fetch failed: REQUEST_ERROR, or a stream failure. */
   onError?(error: RequestError): void;
+  /** An entry arrived on the fetch data stream. */
   onEntry?(entry: FetchStreamEntry): void;
   /** The fetch data stream finished cleanly (FIN). */
   onEnd?(): void;
   /** The fetch data stream was reset — delivered entries may be incomplete. */
   onReset?(info: { error: unknown }): void;
+  /** GOAWAY on this request stream: re-issue the request (possibly elsewhere). */
   onGoaway?(goaway: Goaway): void;
 }
 
+/** A fetch in progress, returned by {@link MoqtSession.fetch}. */
 export interface FetchHandle {
+  /** Request ID of the FETCH. */
   readonly requestId: number;
+  /** Stop the fetch: cancel its request stream and deliver no further entries. */
   cancel(reason?: unknown): void;
 }
 
+/** Callbacks for {@link MoqtSession.trackStatus}. */
 export interface TrackStatusHandlers {
+  /** REQUEST_OK arrived with the track's current parameters and Track Properties. */
   onOk?(status: { parameters: MessageParameters; trackProperties: KeyValuePair[] }): void;
+  /** The request failed: REQUEST_ERROR, or a stream failure. */
   onError?(error: RequestError): void;
 }
 
+/** GOAWAY: the peer asks the client to stop making requests on this session and move to a new one. */
 export interface Goaway {
+  /** New Session URI; empty when the peer names none. */
   newSessionUri: string;
+  /** GOAWAY's Timeout field as received. */
   timeout: number;
 }
 
+/** A server-initiated PUBLISH, passed to `onIncomingPublish`. */
 export interface IncomingPublish {
+  /** Request ID of the PUBLISH. */
   requestId: number;
+  /** Track namespace being published. */
   trackNamespace: TrackNamespace;
+  /** Track name being published. */
   trackName: string;
+  /** Track Alias the publisher assigned. */
   trackAlias: number;
+  /** Message parameters the PUBLISH carried. */
   parameters: MessageParameters;
 }
 
+/** Session-level event callbacks for {@link createMoqtSession}. All are optional. */
 export interface MoqtSessionCallbacks {
   /** The server's SETUP arrived; the session is fully established. */
   onReady?(serverOptions: KeyValuePair[]): void;
@@ -230,6 +289,7 @@ export interface MoqtSessionCallbacks {
   onClosed?(info: { error?: unknown }): void;
 }
 
+/** Options for {@link createMoqtSession}. */
 export interface MoqtSessionConfig {
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
@@ -246,12 +306,17 @@ export interface MoqtSessionConfig {
    * this a relay that accepts the stream and then goes quiet leaves the request pending forever. Default 10000ms.
    */
   requestTimeoutMs?: number | undefined;
+  /** Session-level event callbacks. */
   callbacks?: MoqtSessionCallbacks | undefined;
 }
 
+/** The track and parameters for a SUBSCRIBE (also used by TRACK_STATUS). */
 export interface MoqtSubscribeOptions {
+  /** Track namespace to request. */
   trackNamespace: TrackNamespace;
+  /** Track name to request. */
   trackName: string;
+  /** Message parameters to send with the request. */
   parameters?: MessageParameters | undefined;
 }
 
@@ -262,11 +327,15 @@ export interface MoqtSubscribeOptions {
  */
 export type MoqtFetchOptions = MoqtSubscribeOptions;
 
+/** A subscribe-side MOQT session over an established transport. Created by {@link createMoqtSession}. */
 export interface MoqtSession {
   /** Resolves when the server's SETUP has been received. */
   readonly ready: Promise<void>;
+  /** Send SUBSCRIBE (§10.7) on a new request stream. Results arrive through `handlers`. */
   subscribe(options: MoqtSubscribeOptions, handlers?: SubscriptionHandlers): Subscription;
+  /** Send FETCH (§10.13) on a new request stream. Results arrive through `handlers`. */
   fetch(options: MoqtFetchOptions, handlers?: FetchHandlers): FetchHandle;
+  /** Send TRACK_STATUS (§10.15) on a new request stream and report its one response through `handlers`. */
   trackStatus(options: MoqtSubscribeOptions, handlers?: TrackStatusHandlers): void;
   /** Close the transport session. Sends no GOAWAY (spec/behavior.md, "Relay interop deviations"). */
   close(closeCode?: number, reason?: string): void;

@@ -54,18 +54,25 @@ import { isSubgroupHeaderType, STREAM_TYPE } from './object-stream.js';
 import type { BidirectionalStreamLike } from './request-stream.js';
 import type { Goaway, MoqtTransport } from './session.js';
 import { streamResetReason } from './stream-reset.js';
+import { isSessionError } from './transport-error.js';
 
 // =============================================================================
 // Driver types
 // =============================================================================
 
+/** A SUBSCRIBE from the peer, as passed to `onSubscribe` once it has been answered with SUBSCRIBE_OK. */
 export interface IncomingSubscribe {
+  /** The SUBSCRIBE's Request ID; the session also uses it as the subscription's Track Alias. */
   requestId: number;
+  /** Track namespace requested. */
   trackNamespace: TrackNamespace;
+  /** Track name requested. */
   trackName: string;
+  /** Message parameters the SUBSCRIBE carried. */
   parameters: MessageParameters;
 }
 
+/** Event callbacks for {@link createMoqtPublishSession}. All are optional. */
 export interface MoqtPublishSessionCallbacks {
   /** The server's SETUP arrived; the session is fully established. */
   onReady?(serverOptions: KeyValuePair[]): void;
@@ -103,22 +110,29 @@ export interface MoqtPublishSessionCallbacks {
   onClosed?(info: { error?: unknown }): void;
 }
 
+/** Options for {@link createMoqtPublishSession}. */
 export interface MoqtPublishSessionConfig {
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
   /** Identifies this implementation in SETUP (§10.3.1.5). */
   implementationName?: string;
+  /** Session event callbacks. */
   callbacks?: MoqtPublishSessionCallbacks;
 }
 
+/** A track for {@link MoqtPublishSession.registerTrack}. */
 export interface RegisterTrackOptions {
   /** Track metadata is explicit; raw tracks have no implied timestamp unit. */
   trackProperties?: KeyValuePair[];
+  /** Track namespace the peer's SUBSCRIBE must name. */
   trackNamespace: TrackNamespace;
+  /** Track name the peer's SUBSCRIBE must name. */
   trackName: string;
 }
 
+/** A track registered with {@link MoqtPublishSession.registerTrack}. */
 export interface RegisteredTrack {
+  /** The registered track name. */
   readonly trackName: string;
   /**
    * End the track: end every live subscription (its data streams closed, then PUBLISH_DONE `TRACK_ENDED` and a FIN on
@@ -127,6 +141,7 @@ export interface RegisteredTrack {
   end(): void;
 }
 
+/** A publish-capable MOQT session over an established transport. Created by {@link createMoqtPublishSession}. */
 export interface MoqtPublishSession {
   /** Resolves when the server's SETUP has been received. */
   readonly ready: Promise<void>;
@@ -152,8 +167,8 @@ export interface MoqtPublishSession {
    * (NAMESPACE_DONE), give those writes a bounded window to reach the wire (closing a WebTransport discards queued
    * data), then give the peer a bounded window to close each ended subscription's request stream, which it does once it
    * has consumed the PUBLISH_DONE, and close the transport. Synchronous callers return immediately; the transport closes
-   * within {@link CLOSE_FLUSH_TIMEOUT_MS} plus {@link CLOSE_END_ACK_TIMEOUT_MS}, and sooner against a peer that answers
-   * promptly.
+   * within `CLOSE_FLUSH_TIMEOUT_MS` (250 ms) plus `CLOSE_END_ACK_TIMEOUT_MS` (2 s), and sooner against a peer that
+   * answers promptly.
    */
   close(closeCode?: number, reason?: string): void;
   /** Drain outgoing streams, preserving an optional local closure error. */
@@ -275,19 +290,6 @@ interface NamespaceStream {
   writer: WritableStreamDefaultWriter<Uint8Array>;
   /** Suffixes announced on this stream (for NAMESPACE_DONE at close). */
   announced: TrackNamespace[];
-}
-
-/**
- * Whether a stream failure is the session's own end rather than something the peer did to the stream: a browser's
- * WebTransport fails every stream of an ended session with a `WebTransportError` whose `source` is `'session'` (a
- * peer's RESET_STREAM has `source` `'stream'`).
- */
-function isSessionFailure(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    error.name === 'WebTransportError' &&
-    (error as Error & { source?: unknown }).source === 'session'
-  );
 }
 
 const PENDING = Symbol('pending');
@@ -608,12 +610,12 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    * response-write failure path; `cause` is the stream failure that ended the carrier. Silent while closing,
    * destroyed, or migrating (a GOAWAY makes the peer's streams ending the orderly drain), and once the transport has
    * ended: an ended transport fails every stream as it settles `closed`, and that is connection loss, which
-   * `#handleClosed` reports, not a withdrawal. The failure's shape or the settled `closed` decides, not whether the
-   * `closed` handler happened to run first.
+   * `#handleClosed` reports, not a withdrawal. A failure with `source` `'session'` (TA-23) or the settled `closed`
+   * decides, not whether the `closed` handler happened to run first.
    */
   async #reportAnnounceLoss(cause: unknown): Promise<void> {
     if (this.#announceLossSilenced() || this.#announceCarried()) return;
-    if (isSessionFailure(cause) || (await hasSettled(this.#transport.closed))) return;
+    if (isSessionError(cause) || (await hasSettled(this.#transport.closed))) return;
     // A replacement solicitation may have picked the announce up during that turn.
     if (this.#announceLossSilenced() || this.#announceCarried()) return;
 

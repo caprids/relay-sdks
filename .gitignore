@@ -1,6 +1,8 @@
 node_modules/
 dist/
 coverage/
+# Generated TypeScript API reference (mise run ts:docs)
+ts/docs-api/
 *.tsbuildinfo
 .env
 .env.*
@@ -14,6 +16,7 @@ __pycache__/
 .ruff_cache/
 .import_linter_cache/
 *.egg-info/
+python/api-docs/
 
 # Personal mise overrides
 mise.local.toml

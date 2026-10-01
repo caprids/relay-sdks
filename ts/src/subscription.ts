@@ -26,14 +26,66 @@ import { RelayError } from './errors.js';
 
 /** Delivery order is callback arrival order, with no ordering guarantee across streams. */
 export type SubscriptionEvent =
-  | { type: 'subscribed'; value: SubscribeOk }
-  | { type: 'object'; value: MoqtObject }
-  | { type: 'publisherDone'; value: PublishDone }
-  | { type: 'subgroupEnd'; value: { groupId: number; subgroupId: number; endOfGroup: boolean } }
-  | { type: 'subgroupReset'; value: { groupId: number; error: unknown } }
-  | { type: 'stateNotify'; value: MessageParameters }
-  | { type: 'goaway'; value: Goaway }
-  | { type: 'updateOk'; value: undefined };
+  | {
+      /** The relay accepted the subscription (SUBSCRIBE_OK). */
+      type: 'subscribed';
+      /** The acceptance info `onSubscribed` receives. */
+      value: SubscribeOk;
+    }
+  | {
+      /** One object arrived, including an object that carries only a protocol status. */
+      type: 'object';
+      /** The object; its payload is uninterpreted bytes. */
+      value: MoqtObject;
+    }
+  | {
+      /** The publisher finished with the track (PUBLISH_DONE). Not an ending: trailing objects can follow. */
+      type: 'publisherDone';
+      /** The done's status, stream count and reason. */
+      value: PublishDone;
+    }
+  | {
+      /** A subgroup stream finished cleanly (FIN); only that subgroup ended. */
+      type: 'subgroupEnd';
+      /** Which subgroup ended. */
+      value: {
+        /** The group the subgroup belongs to. */
+        groupId: number;
+        /** The subgroup that ended. */
+        subgroupId: number;
+        /** Whether the subgroup's header marked it as holding the group's largest object. */
+        endOfGroup: boolean;
+      };
+    }
+  | {
+      /** A subgroup stream was reset; objects from it may be missing. Delivery continues. */
+      type: 'subgroupReset';
+      /** Which group the reset stream carried, and why it failed. */
+      value: {
+        /** The group the reset subgroup belongs to. */
+        groupId: number;
+        /** The transport's stream error, as the runtime reported it. */
+        error: unknown;
+      };
+    }
+  | {
+      /** The publisher changed subscription state on its own (PUBLISH_STATE_NOTIFY). */
+      type: 'stateNotify';
+      /** Only the parameters that changed. */
+      value: MessageParameters;
+    }
+  | {
+      /** The relay sent GOAWAY on this request. Informational; the SDK does not retry. */
+      type: 'goaway';
+      /** The relay's suggested new session URI (may be empty) and timeout. */
+      value: Goaway;
+    }
+  | {
+      /** The relay acknowledged an `update()` (REQUEST_OK). */
+      type: 'updateOk';
+      /** Always `undefined`; the acknowledgment carries nothing. */
+      value: undefined;
+    };
 
 /**
  * The lifecycle name for how a subscription ended: `rejected` when the relay answered the request
@@ -50,9 +102,36 @@ export type SubscriptionEndKind = 'rejected' | 'terminated' | 'cancelled';
  * connection's failure (undefined after a clean shutdown), or the cancel reason.
  */
 export type SubscriptionEnd =
-  | { kind: 'rejected' | 'terminated'; cause: 'request-error'; accepted: boolean; error: RequestError }
-  | { kind: 'terminated'; cause: 'connection-closed'; accepted: boolean; error: unknown }
-  | { kind: 'cancelled'; cause: 'cancelled'; accepted: boolean; error: unknown };
+  | {
+      /** `rejected` before SUBSCRIBE_OK, `terminated` after it. */
+      kind: 'rejected' | 'terminated';
+      /** The relay answered with REQUEST_ERROR, or the request timed out or its stream failed. */
+      cause: 'request-error';
+      /** Whether SUBSCRIBE_OK had arrived. */
+      accepted: boolean;
+      /** The REQUEST_ERROR, with its numeric code and reason. */
+      error: RequestError;
+    }
+  | {
+      /** Always `terminated`, including when the connection ended before any answer. */
+      kind: 'terminated';
+      /** The connection ended, cleanly or not. */
+      cause: 'connection-closed';
+      /** Whether SUBSCRIBE_OK had arrived. */
+      accepted: boolean;
+      /** The connection's failure, or `undefined` after a clean shutdown. */
+      error: unknown;
+    }
+  | {
+      /** The subscription was cancelled locally. */
+      kind: 'cancelled';
+      /** `cancel()` ran, called directly or by an events iterator that closed, aborted or overflowed. */
+      cause: 'cancelled';
+      /** Whether SUBSCRIBE_OK had arrived. */
+      accepted: boolean;
+      /** The cancel reason, or `undefined` when none was given. */
+      error: unknown;
+    };
 
 /** The handle `RelaySubscriber.subscribe()` returns: the core handle plus readiness and termination. */
 export interface RelaySubscription extends Subscription {
@@ -108,25 +187,45 @@ export interface ProductSubscription extends RelaySubscription {
   readonly end: SubscriptionEnd | undefined;
 }
 
+/**
+ * An events iterator's queue was full when another event arrived. Code `SUBSCRIPTION_OVERFLOW`, phase
+ * `subscription`. The iterator discards its queue and cancels its subscription; it does not drop the
+ * event and continue.
+ */
 export class SubscriptionOverflowError extends RelayError {
+  /** `'SubscriptionOverflowError'`. */
   override readonly name = 'SubscriptionOverflowError';
   constructor() {
     super('SUBSCRIPTION_OVERFLOW', 'Subscription event buffer overflow', 'subscription');
   }
 }
 
+/**
+ * The relay answered the subscription with REQUEST_ERROR, or the request timed out or failed before
+ * acceptance. Code `SUBSCRIPTION_REQUEST_FAILED`, phase `subscription`; `message` is the REQUEST_ERROR's reason phrase.
+ */
 export class SubscriptionRequestError extends RelayError {
+  /** `'SubscriptionRequestError'`. */
   override readonly name = 'SubscriptionRequestError';
+  /** The MOQT REQUEST_ERROR as the callback form's `onError` receives it, with its numeric code. */
   readonly requestError: RequestError;
 
+  /** @param requestError The REQUEST_ERROR to wrap. */
   constructor(requestError: RequestError) {
     super('SUBSCRIPTION_REQUEST_FAILED', requestError.reason, 'subscription');
     this.requestError = requestError;
   }
 }
 
+/**
+ * The connection ended while the subscription was open, including a clean local close. Code `CLOSED`,
+ * phase `connection`; `cause` is the connection's failure when there was one. Never a claim that
+ * delivery drained.
+ */
 export class SubscriptionConnectionClosedError extends RelayError {
+  /** `'SubscriptionConnectionClosedError'`. */
   override readonly name = 'SubscriptionConnectionClosedError';
+  /** @param cause The connection's failure, if any. */
   constructor(cause?: unknown) {
     super('CLOSED', 'Connection closed; subscription delivery ended without a drain guarantee', 'connection', {
       cause,

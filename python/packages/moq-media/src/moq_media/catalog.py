@@ -18,6 +18,13 @@ MSF_CATALOG_VERSION = "draft-01"
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class VideoTrackInfo:
+    """The video track :func:`build_msf_catalog` describes.
+
+    An ``avc1`` or ``avc3`` track needs ``init_data``: without it the track is left out of the
+    catalog, and with it the codec string's profile and level come from the avcC. Fields left as
+    ``None`` are omitted from the catalog.
+    """
+
     name: str = VIDEO_TRACK
     codec: str
     """WebCodecs registry codec string, e.g. ``avc1.42E01F``."""
@@ -31,18 +38,25 @@ class VideoTrackInfo:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AudioTrackInfo:
+    """The audio track :func:`build_msf_catalog` describes. Fields left as ``None`` are omitted."""
+
     name: str = AUDIO_TRACK
     codec: str = "opus"
     samplerate: int = 48_000
+    """Opus always declares 48000, the rate it decodes at, whatever is given here."""
     channel_config: str = "2"
     bitrate: int | None = None
     init_data: bytes | None = None
+    """Decoder configuration, emitted inline as ``initDataList``."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class DataTrackInfo:
+    """A non-media track :func:`build_msf_catalog` lists by name and role only."""
+
     name: str
     role: str | None = None
+    """Must not be a media role (``video``, ``audio``, ``caption`` and the like)."""
 
 
 _MEDIA_ROLES = frozenset({"video", "audio", "caption", "subtitle", "audiodescription", "signlanguage"})

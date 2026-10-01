@@ -56,6 +56,7 @@ export function isSubgroupHeaderType(type: number): boolean {
  * maximum-size values, not just typical frame metadata.
  */
 export const MAX_OBJECT_PAYLOAD_LENGTH = 16 * 1024 * 1024;
+/** Ceiling on an object's Properties block, in bytes; see {@link MAX_OBJECT_PAYLOAD_LENGTH}. */
 export const MAX_OBJECT_PROPERTIES_LENGTH = 1024 * 1024;
 
 function checkPayloadLength(length: number): number {
@@ -66,6 +67,7 @@ function checkPayloadLength(length: number): number {
   return length;
 }
 
+/** An object's status: `'normal'` for a payload-carrying object, otherwise the end marker it signals. */
 export type ObjectStatus = 'normal' | 'end-of-group' | 'end-of-track';
 
 const OBJECT_STATUS_WIRE: Record<number, ObjectStatus> = {
@@ -76,13 +78,19 @@ const OBJECT_STATUS_WIRE: Record<number, ObjectStatus> = {
 
 /** An object delivered on a subscription's subgroup stream. */
 export interface MoqtObject {
+  /** Group ID. */
   groupId: number;
+  /** Object ID within the group. */
   objectId: number;
+  /** Subgroup ID, resolved from the subgroup header's mode. */
   subgroupId: number;
   /** Publisher priority; `undefined` inherits the subscription's priority. */
   priority?: number | undefined;
+  /** `'normal'` unless the payload is empty and the object carries an end status. */
   status: ObjectStatus;
+  /** Object Properties; empty when the subgroup carries none. */
   properties: KeyValuePair[];
+  /** Object payload; empty for a status-only object. */
   payload: Uint8Array;
 }
 
@@ -233,21 +241,32 @@ const FETCH_END_OF_RANGE_STATUS: Record<number, FetchEndOfRangeStatus> = {
  */
 export type FetchEndOfRangeStatus = 'non-existent' | 'unknown' | 'timed-out';
 
+/** One entry on a FETCH response stream: an object, or a marker for a run of Locations that was not serialized. */
 export type FetchStreamEntry =
   | {
+      /** A fetched object. */
       kind: 'object';
+      /** Group ID. */
       groupId: number;
+      /** Object ID within the group. */
       objectId: number;
       /** Absent for objects with Forwarding Preference = Datagram. */
       subgroupId?: number | undefined;
+      /** Publisher priority, carried over from the prior object when the entry omits it. */
       priority: number;
+      /** Object Properties; empty when the entry carries none. */
       properties: KeyValuePair[];
+      /** Object payload; may be empty. */
       payload: Uint8Array;
     }
   | {
+      /** A run of Locations the stream does not serialize. */
       kind: 'end-of-range';
+      /** Why the run was not serialized. */
       status: FetchEndOfRangeStatus;
+      /** Group ID of the Location the marker carries. */
       groupId: number;
+      /** Object ID of the Location the marker carries. */
       objectId: number;
     };
 

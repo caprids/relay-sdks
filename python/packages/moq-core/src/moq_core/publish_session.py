@@ -89,6 +89,12 @@ from .transport import (
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class AnnounceEnded:
+    """What ``on_announce_ended`` receives: no solicitation stream carries the announce any more.
+
+    ``error`` is a :class:`MoqtProtocolError` whose ``__cause__`` is the stream failure, if any, that
+    ended the last carrier.
+    """
+
     error: BaseException | None = None
 
 
@@ -122,6 +128,8 @@ class IncomingRequestUpdate:
 
 @dataclass(slots=True, kw_only=True)
 class MoqtPublishSessionCallbacks:
+    """Synchronous callbacks a publish session calls as its state changes. Every one is optional."""
+
     on_ready: Callable[[list[KeyValuePair]], None] | None = None
     """The server's SETUP arrived; the session is fully established."""
     on_goaway: Callable[[Goaway], None] | None = None
@@ -143,7 +151,9 @@ class MoqtPublishSessionCallbacks:
     on_subscribe_end: Callable[[int], None] | None = None
     """A subscription ended (the peer's FIN or reset, or our PUBLISH_DONE); the argument is its request id."""
     on_track_binding: Callable[[TrackBinding], None] | None = None
+    """A registered track's effective alias binding changed; see :class:`TrackBinding`."""
     on_request_update: Callable[[IncomingRequestUpdate], None] | None = None
+    """The peer sent REQUEST_UPDATE on one of its requests; see :class:`IncomingRequestUpdate`."""
     on_closed: Callable[[Closed], None] | None = None
     """The session ended: transport closed, or a fatal protocol error."""
 
@@ -169,6 +179,8 @@ a peer that never closes its side costs at most this much.
 
 @dataclass(slots=True, kw_only=True)
 class MoqtPublishSessionConfig:
+    """How :func:`create_moqt_publish_session` sets up a publish session."""
+
     setup_options: Sequence[KeyValuePair] = ()
     """Extra Setup Options to send (an implementation identifier is added automatically)."""
     implementation_name: str = DEFAULT_IMPLEMENTATION_NAME
@@ -178,6 +190,8 @@ class MoqtPublishSessionConfig:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RegisterTrackOptions:
+    """The track :meth:`MoqtPublishSession.register_track` makes servable."""
+
     track_namespace: Sequence[str]
     track_name: str
     track_properties: Sequence[KeyValuePair] = ()
@@ -199,6 +213,7 @@ class RegisteredTrack:
         self._end = end
 
     def end(self) -> None:
+        """End every live subscription on the track and refuse later SUBSCRIBEs. Idempotent."""
         self._end()
 
 

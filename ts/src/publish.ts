@@ -14,9 +14,16 @@ export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
   namespace: readonly string[];
 }
 
+/**
+ * One MOQT property (a key-value pair) on a registered track or a written object, encoded as
+ * supplied. Invalid properties are a TypeError naming the property index; a byte value over 65535
+ * bytes, or a list whose encoding exceeds 1 MiB, is a RangeError. Both are raised before a track is
+ * registered or a write starts.
+ */
 export interface PublishProperty {
   /** Non-negative safe integer: even types encode an integer, odd types encode bytes. */
   type: number;
+  /** A non-negative safe integer for an even type; an `ArrayBufferView`, copied as its raw bytes, for an odd type. */
   value: number | ArrayBufferView;
 }
 
@@ -29,16 +36,27 @@ export interface RegisterTrackOptions {
   track: string;
   /**
    * Track metadata sent to the relay. The SDK adds no default timescale; the relay may
-   * add, drop, or rewrite properties before delivery to subscribers. See README.
+   * add, drop, or rewrite properties before delivery to subscribers. With moq-relay 0.15.8 every
+   * SUBSCRIBE_OK carries the relay's track properties, not these, and a Timescale (`0x08`) here is
+   * what keeps supplied object Timestamps unchanged. See "Relay property handling" in
+   * spec/behavior.md.
    */
   trackProperties?: readonly PublishProperty[];
   /** Deadline for relay demand and stream writes. Default 10 seconds, maximum 2147483647. */
   writeTimeoutMs?: number;
 }
 
+/**
+ * One open group from {@link RelayTrackWriter.openGroup}: a single subgroup stream the application
+ * writes objects to in order, then FINs with `close()` or resets with `abort()`. It holds the track's
+ * write slot until then, so the track's `write()` and another `openGroup()` fail with `WRITE_PENDING` meanwhile.
+ */
 export interface RelayGroupWriter {
+  /** The group's ID. Group IDs start at 0 on each track and increase by one per group the track opens. */
   readonly groupId: number;
+  /** How many objects this group has written; the next `write()` uses it as the object ID. */
   readonly objectCount: number;
+  /** True once `close()` completed, or the group was aborted, failed, or lost its track or connection. */
   readonly closed: boolean;
   /**
    * Append one object, starting at ID 0. Each write has its own writeTimeoutMs deadline.
@@ -137,7 +155,10 @@ export interface RelayPublisher {
    */
   readonly announced: Promise<void>;
   /** Ends when the connection shuts down. Errors are returned as data; this never rejects. */
-  readonly closed: Promise<{ error?: unknown }>;
+  readonly closed: Promise<{
+    /** The failure that ended the connection; absent after a clean shutdown. */
+    error?: unknown;
+  }>;
   /**
    * End all tracks, retract the namespace, and wait for transport shutdown. First waits, for up to
    * the largest writeTimeoutMs among the tracks, for completed groups the relay has not yet
@@ -172,9 +193,10 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   });
   // Nobody may await readiness; a rejection must not surface as an unhandled rejection.
   void announced.catch(() => {});
-  const lifetime = await openRelaySession(options, (transport, callbacks) =>
+  const lifetime = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtPublishSession(transport, {
       implementationName: '@mux/relay publisher',
+      setupOptions,
       callbacks: {
         ...callbacks,
         onAnnounced: () => announce(),

@@ -100,6 +100,7 @@ describe('publisher transport end with a live announce', () => {
     ['streams-first', 'a plain stream error'],
     ['closed-handlers-late', 'a plain stream error'],
     ['closed-later', "a WebTransportError with source 'session'"],
+    ['closed-later', "a shape-only error with source 'session' (TA-22, TA-23)"],
   ] as const)('reports TRANSPORT_ERROR when %s, with %s', async (order, streamErrorKind) => {
     const pair = createTransportPair();
     const terminable = terminableTransport(pair.client, order);
@@ -120,7 +121,9 @@ describe('publisher transport end with a live announce', () => {
     const streamError =
       streamErrorKind === 'a plain stream error'
         ? idle
-        : Object.assign(new Error('The session is closed.'), { name: 'WebTransportError', source: 'session' });
+        : streamErrorKind === "a WebTransportError with source 'session'"
+          ? Object.assign(new Error('The session is closed.'), { name: 'WebTransportError', source: 'session' })
+          : Object.assign(new Error('The session is closed.'), { source: 'session' });
     terminable.terminate(streamError, idle);
 
     const { error } = await publisher.closed;

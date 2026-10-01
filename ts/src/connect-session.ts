@@ -1,4 +1,10 @@
-import { MOQT_PROTOCOL_ID, type MoqtSessionCallbacks, type MoqtTransport } from '@mux/moq-core';
+import {
+  type KeyValuePair,
+  MOQT_PROTOCOL_ID,
+  type MoqtSessionCallbacks,
+  type MoqtTransport,
+  SETUP_OPTION,
+} from '@mux/moq-core';
 
 import { RelayError, transportError } from './errors.js';
 
@@ -16,11 +22,27 @@ export function assertTimeoutMs(name: string, value: unknown): void {
   }
 }
 
-/** Supply a browser transport or a compatible implementation in another runtime. */
+/**
+ * Supply a browser transport or a compatible implementation in another runtime. Called once per
+ * connection with the endpoint URL (the token already in its `jwt` query parameter) and the MOQT
+ * protocol IDs to offer, today only `moqt-20`.
+ */
 export type RelayTransportFactory = (
   url: string,
   protocols: string[],
-) => { transport: MoqtTransport; ready: Promise<void> };
+) => {
+  /** The transport the MOQT session runs on. */
+  transport: MoqtTransport;
+  /** Resolves once the transport can open streams; a rejection fails the connect call. */
+  ready: Promise<void>;
+  /**
+   * What the transport carries. `'webtransport'` (the default) is a WebTransport session, whose
+   * CONNECT request carries the URL. `'native-quic'` is MOQT directly on a QUIC connection: the
+   * adapter dials only the URL's host and port, and the core sends the path, query and authority
+   * in SETUP.
+   */
+  framing?: 'webtransport' | 'native-quic';
+};
 
 /**
  * Connection options shared by connectRelaySubscriber and connectRelayPublisher: endpoint, token,
@@ -41,6 +63,11 @@ export interface ConnectRelayOptions {
   signal?: AbortSignal;
   /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
   connectTimeoutMs?: number;
+  /**
+   * Create the transport. Defaults to the browser's WebTransport; a runtime without it, or whose
+   * WebTransport cannot negotiate protocols, fails with `TRANSPORT_UNAVAILABLE` unless this is
+   * supplied.
+   */
   createTransport?: RelayTransportFactory;
 }
 
@@ -72,18 +99,54 @@ interface RelaySessionLifetime<T extends Session> {
   close(): void;
 }
 
-function createBrowserTransport(url: string, protocols: string[]) {
+const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
   if (typeof WebTransport === 'undefined') {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
-      'WebTransport is unavailable; supply createTransport for this runtime',
+      'WebTransport is unavailable; supply createTransport with a transport adapter for this runtime',
+      'connecting',
+    );
+  }
+  // Deno 2.x has a global that ignores protocols and has no protocol getter, so it could never
+  // agree on moqt-20; refuse it here rather than hang waiting for a SETUP that cannot come.
+  if (!('protocol' in WebTransport.prototype)) {
+    throw new RelayError(
+      'TRANSPORT_UNAVAILABLE',
+      'WebTransport in this runtime cannot negotiate protocols; supply createTransport with a transport adapter for this runtime',
       'connecting',
     );
   }
 
   const transport = new WebTransport(url, { protocols });
 
-  return { transport, ready: transport.ready };
+  return { transport, ready: transport.ready, framing: 'webtransport' };
+};
+
+const utf8 = new TextEncoder();
+
+/**
+ * The setup options the endpoint URL needs in CLIENT_SETUP for a framing (TA-6). On native QUIC,
+ * PATH (the path-abempty and `?query`, the resolved jwt included) and AUTHORITY take the place of
+ * the CONNECT request a WebTransport session sends; on a WebTransport session neither may be sent
+ * (draft-20 §10.3.1.2, §10.3.1.1).
+ */
+function endpointSetupOptions(framing: unknown, url: URL): KeyValuePair[] {
+  if (framing === undefined || framing === 'webtransport') return [];
+  if (framing !== 'native-quic')
+    throw new RelayError(
+      'TRANSPORT_ERROR',
+      `createTransport returned an unknown framing ${JSON.stringify(framing)}; expected 'webtransport' or 'native-quic'`,
+      'connecting',
+    );
+  // URL.search is empty for both an absent and an empty query, but `?` with nothing after it is a
+  // present, empty query that PATH keeps. A path cannot contain `?` and the endpoint has no
+  // fragment, so the query is everything in href from the first `?`.
+  const queryStart = url.href.indexOf('?');
+  const path = url.pathname + (queryStart === -1 ? '' : url.href.slice(queryStart));
+  return [
+    { type: SETUP_OPTION.PATH, value: utf8.encode(path) },
+    { type: SETUP_OPTION.AUTHORITY, value: utf8.encode(url.host) },
+  ];
 }
 
 /**
@@ -92,7 +155,11 @@ function createBrowserTransport(url: string, protocols: string[]) {
  */
 export async function openRelaySession<T extends Session>(
   options: ConnectRelayOptions,
-  createSession: (transport: MoqtTransport, callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>) => T,
+  createSession: (
+    transport: MoqtTransport,
+    callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>,
+    setupOptions: KeyValuePair[],
+  ) => T,
 ): Promise<RelaySessionLifetime<T>> {
   // Not a string, or not a URL at all (including an https URL with no host), is a TypeError: the
   // wrong shape. A URL that parses but is not one Relay accepts is a RangeError: a disallowed value.
@@ -206,23 +273,28 @@ export async function openRelaySession<T extends Session>(
 
     await created.ready;
     assertOpen();
+    const setupOptions = endpointSetupOptions(created.framing, url);
 
-    session = createSession(transport, {
-      onClosed: (info) =>
-        finish(
-          info.error === undefined
-            ? info
-            : { error: transportError(info.error, established ? 'connection' : 'connecting') },
-        ),
-      onGoaway: () =>
-        finish({
-          error: new RelayError(
-            'GOAWAY',
-            'Relay requested session migration; open a new connection',
-            established ? 'connection' : 'connecting',
+    session = createSession(
+      transport,
+      {
+        onClosed: (info) =>
+          finish(
+            info.error === undefined
+              ? info
+              : { error: transportError(info.error, established ? 'connection' : 'connecting') },
           ),
-        }),
-    });
+        onGoaway: () =>
+          finish({
+            error: new RelayError(
+              'GOAWAY',
+              'Relay requested session migration; open a new connection',
+              established ? 'connection' : 'connecting',
+            ),
+          }),
+      },
+      setupOptions,
+    );
 
     await session.ready;
     assertOpen();

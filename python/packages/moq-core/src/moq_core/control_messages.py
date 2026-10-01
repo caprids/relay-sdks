@@ -885,9 +885,13 @@ class Setup:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Goaway:
+    """GOAWAY (§10.4): the peer intends to close the session soon and asks for no new requests."""
+
     kind: ClassVar[Literal["goaway"]] = "goaway"
     new_session_uri: str = ""
+    """Where to reconnect; empty means the current URI. A client always sends it empty."""
     timeout: int = 0
+    """Milliseconds until the peer closes the session; ``0`` when it gave none."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -937,6 +941,12 @@ class SubscribeNamespace:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SubscribeOk:
+    """SUBSCRIBE_OK (§10.8): the publisher accepted a subscription.
+
+    ``track_alias`` is the alias its data streams carry; ``parameters`` and ``track_properties`` are
+    as the publisher sent them.
+    """
+
     kind: ClassVar[Literal["subscribe-ok"]] = "subscribe-ok"
     track_alias: int
     parameters: MessageParameters = field(default_factory=MessageParameters)
@@ -952,6 +962,12 @@ class RequestOk:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestError:
+    """REQUEST_ERROR (§10.6): the peer refused a request.
+
+    The session also reports a request that fails on its stream (FIN before any response, a reset,
+    or the response timeout) in this shape, so a consumer has one failure path.
+    """
+
     kind: ClassVar[Literal["request-error"]] = "request-error"
     error_code: int
     retry_interval: int = 0
@@ -974,6 +990,12 @@ class PublishStateNotify:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PublishDone:
+    """PUBLISH_DONE (§10.12): the publisher finished a subscription.
+
+    ``status_code`` is one of the PUBLISH_DONE status codes; ``stream_count`` is how many data streams
+    it opened for the subscription, so a subscriber can tell when all of them have arrived.
+    """
+
     kind: ClassVar[Literal["publish-done"]] = "publish-done"
     status_code: int
     stream_count: int | None
@@ -1002,9 +1024,13 @@ class PublishNamespace:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FetchOk:
+    """FETCH_OK (§10.14): the publisher accepted a fetch; its objects follow on a fetch data stream."""
+
     kind: ClassVar[Literal["fetch-ok"]] = "fetch-ok"
     end_of_track: bool
+    """The track is complete and ``end_location`` is its final Location."""
     end_location: Location
+    """Where the fetched range ends."""
     parameters: MessageParameters = field(default_factory=MessageParameters)
     track_properties: list[KeyValuePair] = field(default_factory=list)
 

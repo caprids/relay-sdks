@@ -16,18 +16,27 @@ function pruneUndefined<T extends object>(value: T): { [K in keyof T]?: Exclude<
 export interface MsfCatalogTrack {
   /** Namespace tuple: the track's own slash-joined `namespace` split into fields, else the catalog track's. */
   namespace: string[];
+  /** Track name, as declared. */
   name: string;
   /** Payload encapsulation as declared (`'loc'`, or e.g. moq-rs `'cmaf'`/`'legacy'`); `''` when absent. */
   packaging: string;
   /** `false` when absent. */
   isLive: boolean;
+  /** MSF role (§5.2.6), e.g. `'video'`, `'audio'` or `'data'`. */
   role?: string;
+  /** WebCodecs registry codec string. */
   codec?: string;
+  /** Width in pixels; integral values only. */
   width?: number;
+  /** Height in pixels; integral values only. */
   height?: number;
+  /** Frames per second. */
   framerate?: number;
+  /** Audio sample rate in hertz; integral values only. */
   samplerate?: number;
+  /** Channel config string, e.g. `'2'` or `'5.1'`. */
   channelConfig?: string;
+  /** Bits per second; integral values only. */
   bitrate?: number;
   /** Decoder init data, resolved from `initRef` through the catalog's inline `initDataList`. */
   initData?: Uint8Array;
@@ -35,14 +44,17 @@ export interface MsfCatalogTrack {
 
 /** An independent MSF catalog (msf-01 §5.1), as `parseMsfCatalog` reads it. */
 export interface MsfCatalog {
+  /** The catalog's declared version: `'draft-01'`, or the lenient alias `'1'`. */
   version: string;
   /** Catalog generation time (§5.1.2), epoch milliseconds. */
   generatedAt?: number;
   /** `true` only when the catalog declares the broadcast complete (§5.1.3). */
   isComplete: boolean;
+  /** The track entries that have a string `name`, in catalog order. */
   tracks: MsfCatalogTrack[];
 }
 
+/** Options for {@link parseMsfCatalog}. */
 export interface ParseMsfCatalogOptions {
   /** Namespace of the catalog track itself — inherited by tracks that omit one (§5.2.2). */
   catalogNamespace: readonly string[];

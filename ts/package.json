@@ -22,8 +22,10 @@
     "lint": "biome check --error-on-warnings .",
     "fix": "biome check --write .",
     "format": "biome format --write .",
-    "check": "pnpm lint && pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries",
+    "check": "pnpm lint && pnpm build && pnpm typecheck && pnpm test && pnpm check:boundaries && pnpm check:docs",
     "check:boundaries": "node scripts/check-boundaries.mjs",
+    "check:docs": "typedoc --options typedoc.workspace.json --emit none",
+    "docs": "pnpm build && typedoc --options typedoc.workspace.json",
     "test:relay": "pnpm build && node scripts/test-relay.mjs",
     "example:mux-global": "pnpm build && node examples/mux-global/run.mjs"
   },
@@ -37,6 +39,7 @@
     "@types/node": "24.12.2",
     "mediabunny": "1.58.1",
     "playwright": "1.59.1",
+    "typedoc": "0.28.20",
     "typescript": "6.0.2",
     "vitest": "4.1.10"
   },

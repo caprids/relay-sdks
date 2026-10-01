@@ -7,7 +7,7 @@
  * literal 404 ("Broadcast not found"). The SDK reports that rejection like any other and never
  * retries a subscribe, so an application that may start before its publisher retries within its own
  * budget. This module is that policy, shared by the mux-global demo and the live smoke test
- * (scripts/test-relay.mjs), both of which serve it to the browser next to the SDK.
+ * (scripts/relay-scenario.js), whose launchers serve it to the browser next to the SDK.
  *
  * A page that also owns the publisher awaits `publisher.announced` first: that removes most of the
  * race, and the retry covers the round trip the relay still needs after the announce reached the

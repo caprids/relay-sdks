@@ -240,6 +240,8 @@ _FETCH_END_OF_RANGE_STATUS: dict[int, FetchEndOfRangeStatus] = {
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FetchObject:
+    """One object read from a fetch data stream, with its Location made absolute."""
+
     kind: ClassVar[Literal["object"]] = "object"
     group_id: int
     object_id: int
@@ -252,6 +254,11 @@ class FetchObject:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FetchEndOfRange:
+    """An End of Range marker on a fetch data stream (§11.4.4): a run of Locations was not serialized.
+
+    ``status`` says why; ``group_id`` and ``object_id`` are the Location the marker carries.
+    """
+
     kind: ClassVar[Literal["end-of-range"]] = "end-of-range"
     status: FetchEndOfRangeStatus
     group_id: int
