@@ -348,10 +348,6 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await settlingGroups.waitForRoom(operation.interrupted);
       check(operation);
     }
-    // They are fixed when the stream opens: a later REQUEST_UPDATE applies to later groups.
-    operation.subscriber = subscriberTimeouts(operation.alias);
-    fixTimeouts(operation, operation.publisher);
-    check(operation);
     const subgroup = await openSubgroup(operation.alias, groupId);
     if (operation.cancelled) {
       // The stream opened after the failure: reset it without sending payload bytes (§11.4.3).
@@ -359,6 +355,11 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       check(operation);
     }
     operation.writer = subgroup;
+    // The subscription's timeouts are fixed now that the stream is open: a later REQUEST_UPDATE
+    // applies to later groups. An object already too old resets the stream with DELIVERY_TIMEOUT.
+    operation.subscriber = subscriberTimeouts(operation.alias);
+    fixTimeouts(operation, operation.publisher);
+    check(operation);
     return subgroup;
   };
   const release = (operation: Operation) => {

@@ -1192,6 +1192,18 @@ describe('write slot: delivery timeouts (draft-20 §8)', () => {
     expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
   });
 
+  it('fixes the subscriber value once the stream has opened, after any wait for it', async () => {
+    const subscriber = new Map([[1, { subgroupMs: 0 }]]);
+    const { writer, opened, releaseOpen } = settling({ open: 'hold', subscriberTimeouts: subscriber });
+    const writing = writer.write(bytes(1));
+    await flush();
+    subscriber.set(1, { subgroupMs: 10 });
+    releaseOpen();
+    await writing;
+    await elapse(10);
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+  });
+
   it('fixes the subscriber value when the stream opens, after any wait for settling room', async () => {
     const subscriber = new Map([[1, { subgroupMs: 0 }]]);
     const { writer, opened } = settling({ subscriberTimeouts: subscriber });

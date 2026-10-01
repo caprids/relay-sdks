@@ -235,6 +235,10 @@ describe('createSubgroupWriter', () => {
     expect(header.done).toBe(false);
     await rejected;
     expect(beforeWrite).toHaveBeenCalledOnce();
+    // The stream now has a gap: nothing more may go out on it but a reset.
+    await expect(writer.writeObject({ objectId: 1, payload: new Uint8Array([2]) })).rejects.toThrow(MoqtProtocolError);
+    await expect(writer.fin()).rejects.toThrow(MoqtProtocolError);
+    await expect(writer.handOverFin()).rejects.toThrow(MoqtProtocolError);
     writer.abort(refusal);
     await expect(reader.read()).rejects.toBe(refusal);
   });
