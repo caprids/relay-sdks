@@ -355,6 +355,24 @@ application metadata that must arrive intact in payloads, and read the received 
 interpreting timestamps. See [Relay property handling](../spec/behavior.md#relay-property-handling)
 for the observations and media guidance.
 
+Two properties also set delivery timeouts (draft-ietf-moq-transport-20 §8), in milliseconds:
+`0x02` (`OBJECT_DELIVERY_TIMEOUT`) and `0x06` (`SUBGROUP_DELIVERY_TIMEOUT`). Set either as a track
+property, or on a group's first object to override the track for that group; on any later object it
+is only sent. The relay subscription's own values, if it sends any, combine with them: the smaller
+non-zero value wins, 0 means no timeout, and values above 2147483647 are clamped. The object timeout
+bounds an object's age from the `write()` or `group.write()` call until the transport has taken it,
+which is when its stream write returns (aioquic has transmitted the bytes); waiting for demand and for
+settling room count too. An older object raises `DELIVERY_TIMEOUT` in its current phase and resets
+its group with code `DELIVERY_TIMEOUT` (0x2), and the group's later writes fail too; the track stays
+open. A write waiting for demand fails at whichever of `write_timeout` and the object timeout comes
+first.
+The subgroup timeout starts when a group's FIN is handed to the transport and resets that settling
+group (code `DELIVERY_TIMEOUT`, 0x2) if the relay has not acknowledged the FIN by then; nothing is
+reported to the track, and the group frees its place under the settling-group limit. moq-relay 0.15.8
+neither sends these values upstream nor forwards the properties, so the publisher's own properties are
+the only ones in effect against it. Because `0x06` is now a timeout, do not send the older LOC
+Timestamp id `0x06`; use `0x10`.
+
 `events.close()` cancels an outstanding write and ends that track; other tracks
 keep running. `await publisher.close()` ends all tracks, retracts the namespace, and waits for
 transport shutdown. That includes QUIC's closing period after CONNECTION_CLOSE (RFC 9000 §10.2),
@@ -466,6 +484,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | --- | --- |
 | `CONNECTION_TIMEOUT` | Connecting exceeded its deadline; consider a new connection with backoff. |
 | `WRITE_TIMEOUT` | Inspect the phase below, then choose the next object or group explicitly. |
+| `DELIVERY_TIMEOUT` | The object outlived its delivery timeout (property `0x02`) before reaching the transport, and its group was reset. The data is stale: write fresh data, at the next random-access point for a group, rather than retrying it as-is. |
 | `CLOSED` | The handle is closed; use an open connection, track, or group. |
 | `WRITE_PENDING` | Await the outstanding operation or finish/abort the open group before starting another. |
 | `NAMESPACE_NOT_SOLICITED` | Received namespace solicitations do not cover this publisher; check the namespace and token configuration. A later matching solicitation can restore demand. |
