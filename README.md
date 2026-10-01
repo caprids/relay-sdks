@@ -10,7 +10,7 @@ This is an initial development workspace. Package names are provisional and publ
 | --- | --- | --- |
 | `spec/` | Protocol pins, the behavior contract every SDK implements, and language-neutral test vectors | Source of truth |
 | `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol and `@mux/moq-media` format packages, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
-| `python/` | Python SDK `mux-relay` and the generic `moq-core` and `moq-media` packages, as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
+| `python/` | Python SDK `mux-relay` and the generic `mux-moq-core` and `mux-moq-media` packages (imported as `moq_core` and `moq_media`), as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
 
 Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (browser WebTransport) or
 [Python quickstart](python/README.md#first-round-trip) (native asyncio). Both use local packages
@@ -140,9 +140,13 @@ Alignment comes from `spec/`, not from shared version numbers:
 ## Versioning and releases
 
 Each SDK is versioned and released independently and tagged by directory, for example `ts/v0.2.0`
-and `python/v0.1.0`. Lockstep applies to the protocol pin and the behavior contract, not to version
-numbers, so a fix in one language never forces an empty release in another. This table records
-which SDK versions speak which draft:
+and `python/v0.1.0`. Lockstep across languages applies to the protocol pin and the behavior
+contract, not to version numbers, so a fix in one language never forces an empty release in
+another. Within a language every package moves at one version: all the `@mux/*` packages together,
+and `mux-relay`, `mux-moq-core` and `mux-moq-media` together. Everything is Apache-2.0
+([LICENSE](LICENSE)). [Releasing](docs/releasing.md) has the steps, and
+[ADR 0003](docs/adr/0003-hand-cut-lockstep-releases.md) the reasons. This table records which SDK
+versions speak which draft:
 
 | SDK | Version | MOQT draft |
 | --- | --- | --- |

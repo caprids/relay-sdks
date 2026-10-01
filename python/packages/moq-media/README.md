@@ -53,3 +53,10 @@ await group.write(h264.to_avcc(access_unit), properties=loc_properties(timestamp
 
 tracks = parse_msf_catalog(catalog_object.payload, catalog_namespace=["room", "live"]).tracks
 ```
+
+The distribution on PyPI is `mux-moq-media`; the import name is `moq_media`.
+
+## Stability
+
+Before 1.0, a minor version can break the API. This package releases together with `mux-relay` at
+the same version; see the [changelog](../../CHANGELOG.md).

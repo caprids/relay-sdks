@@ -20,3 +20,8 @@ explicit, with no default media timescale. `createSubgroupWriter` writes arbitra
 and metadata; the SDK supplies the bounded, single-object-group publishing policy above it.
 
 For Relay application usage and local installation, start with the [JavaScript quickstart](../../GUIDE.md#first-round-trip).
+
+## Stability
+
+Before 1.0, a minor version can break the API. This package releases together with `@mux/relay`
+at the same version; see the [changelog](../../CHANGELOG.md).

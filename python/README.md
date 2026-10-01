@@ -106,7 +106,7 @@ mise exec -- uv pip install --python /tmp/relay-quickstart-venv/bin/python -e ./
 ```
 
 Choose your application's environment path in place of the temporary path when adopting the SDK.
-Installing only `mux-relay` would leave its unpublished `moq-core` dependency unresolved.
+Installing only `mux-relay` would leave its unpublished `mux-moq-core` dependency unresolved.
 
 ## Subscribe and publish separately
 
@@ -375,7 +375,7 @@ raises `WRITE_TIMEOUT`; the track stays open for a new group at the next keyfram
 The following is an application sketch, not the data quickstart. The optional
 [moq-media format package](packages/moq-media/README.md) supplies `loc_properties` and
 `loc_track_properties`; the encoded frames, timestamps, and codec configuration come from your
-encoder. Install `moq-media` alongside `mux-relay` when publishing media (the development workspace
+encoder. Install `mux-moq-media` alongside `mux-relay` when publishing media (the development workspace
 includes it). It also provides the MSF catalog builder, source URLs, and H.264 configuration helpers
 used by the Video.js example.
 

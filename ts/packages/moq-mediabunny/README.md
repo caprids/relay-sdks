@@ -60,3 +60,8 @@ Public upstream APIs: [encoded packets](https://mediabunny.dev/api/EncodedPacket
 [reading files](https://mediabunny.dev/guide/reading-media-files),
 [media sources](https://mediabunny.dev/guide/media-sources),
 [AVC packet contract](https://mediabunny.dev/codec-registry/avc).
+
+## Stability
+
+Before 1.0, a minor version can break the API. This package releases together with `@mux/relay`
+at the same version; see the [changelog](../../CHANGELOG.md).

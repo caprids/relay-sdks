@@ -16,7 +16,7 @@ Payloads are bytes the SDK does not interpret; no browser, player, or media cata
 ## Install
 
 The package is unpublished and its name is provisional. Install it together with its local
-`moq-core` dependency from a checkout of this repository, as described in
+`mux-moq-core` dependency from a checkout of this repository, as described in
 [Use the local packages in your application](../../README.md#use-the-local-packages-in-your-application).
 
 ## Publish and subscribe
@@ -56,6 +56,13 @@ async def main(token: str) -> None:
 
 The [guide's first round trip](../../README.md#first-round-trip) runs the complete version of this,
 with credential handling, the subscribe retry, a deadline, and cleanup on failure.
+
+## Stability
+
+Before 1.0, a minor version can break the API, and [CHANGELOG.md](../../CHANGELOG.md) says what
+changed. `mux-relay`, `mux-moq-core` and `mux-moq-media` always release together at the same
+version, and `mux-relay` pins `mux-moq-core` exactly. A release supports Python 3.11 or later, and
+MOQT draft 20 (`moqt-20`) only, against moq-relay 0.15.4 or later.
 
 ## Documentation
 
