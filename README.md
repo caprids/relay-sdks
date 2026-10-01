@@ -12,7 +12,7 @@ This is an initial development workspace. Package names are provisional and publ
 | `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol and `@mux/moq-media` format packages, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
 | `python/` | Python SDK `mux-relay` and the generic `moq-core` and `moq-media` packages, as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
 
-Start with the [JavaScript quickstart](ts/README.md#first-round-trip) (browser WebTransport) or
+Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (browser WebTransport) or
 [Python quickstart](python/README.md#first-round-trip) (native asyncio). Both use local packages
 and include credential setup and a bounded publish/subscribe round trip.
 
@@ -30,7 +30,86 @@ mise run python:test:relay
 ```
 
 Each directory keeps its native tooling, and the tasks only fan out to it. `cd ts && pnpm ...` and
-`cd python && uv ...` work as usual under `mise exec`. See `ts/README.md` and `python/README.md`.
+`cd python && uv ...` work as usual under `mise exec`. See the
+[TypeScript guide](ts/GUIDE.md) and the [Python guide](python/README.md) for each SDK's usage.
+
+### TypeScript
+
+Run the root tasks from anywhere in the repository, or run pnpm from `ts/` under `mise exec`:
+
+```sh
+mise run ts:install
+mise run ts:check     # equivalent to: cd ts && mise exec -- pnpm check
+mise run ts:lint      # Biome format and lint check only
+mise run ts:fix       # apply Biome's safe formatting and lint fixes
+```
+
+Formatting and linting are configured in `ts/biome.jsonc`, and every package extends the strict
+compiler options in `ts/tsconfig.base.json`. `pnpm lint` fails on warnings, so a clean check prints
+nothing.
+
+### TypeScript live Relay smoke test
+
+This opt-in Chromium test publishes and subscribes against a real relay. It is excluded from
+`pnpm check` and needs a token authorized for both operations. The token can be supplied through
+hidden stdin input or the `RELAY_TOKEN` environment variable; it is never written to a file.
+
+Set `RELAY_URL` and `RELAY_NAMESPACE` using the [quickstart prompts](ts/GUIDE.md#install-and-run) first. Your token must
+authorize both operations under that namespace prefix, including children: the test appends a
+random UUID. Running this command explicitly opts into contacting that endpoint.
+
+```sh
+mise exec -- pnpm --dir ts exec playwright install chromium   # once
+RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:test:relay
+```
+
+The test waits for the publisher's `announced`, subscribes through the examples' announce-race
+retry and reports how often it retried, checks binary and empty payloads plus independent track
+closure, then closes both connections. It defaults to
+`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
+the SDK are absolute: include the token's root prefix when required by the relay.
+
+The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
+on `status`, with the second status object delivered after the events track closed.
+
+### Python
+
+Tool versions come from the repository's root `mise.toml`. The Python toolchain is the Astral stack:
+uv for the workspace and lockfile, ruff for linting and formatting, ty for type checking.
+
+```sh
+mise install              # once
+mise run python:check     # uv sync, ruff check, ruff format --check, lint-imports, ty check, pytest
+mise run python:test      # pytest only
+```
+
+From `python/` under `mise exec`, the native commands are `uv sync`, `uv run pytest`,
+`uv run ruff check .`, `uv run ruff format .`, `uv run ty check`, and `uv run lint-imports`. Run
+`uv lock` after changing a dependency and commit `uv.lock`.
+
+### Python live Relay smoke test
+
+This opt-in test publishes and subscribes against a real relay. It is excluded from `python:check`
+and needs a token authorized for both operations. The token can be supplied through a hidden prompt
+or the `RELAY_TOKEN` environment variable; it is never written to a file and is redacted from output.
+
+Set `RELAY_URL` and `RELAY_NAMESPACE` using the [quickstart prompts](python/README.md#install-and-run) first. Your token must
+authorize both operations under that namespace prefix, including children: the test appends a
+random UUID. Running this command explicitly opts into contacting that endpoint.
+
+```sh
+RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python:test:relay
+```
+
+The test waits for the publisher's `announced`, subscribes through the examples' announce-race
+retry and reports how often it retried, checks binary, empty, and text payloads plus independent
+track closure, then closes both connections. It defaults to
+`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
+the SDK are absolute: include the token's root prefix when required by the relay.
+
+The live test passed against `sjc.relay.mux.global` on 2026-09-11 over the aioquic WebTransport
+transport: three objects on `events` and two on `status`, with the second status object delivered
+after the events track closed, and both connections closed cleanly.
 
 ## How the SDKs stay in lockstep
 
@@ -62,6 +141,18 @@ Publishers end a track with PUBLISH_DONE, which needs moq-relay 0.15.4 or later:
 0.15.3 every track end reaches viewers as an aborted track. For that boundary, the 0.14.17 one, and
 a reproducible local test, see [relay interoperability](spec/relay-interop.md). SDK adoption and
 the relay upgrade must be coordinated.
+
+The package READMEs (`ts/README.md` for npm, `python/packages/mux-relay/README.md` for PyPI) use
+relative links while the repository is private. Those links do not resolve on a registry page, and
+the linked files are not in either package, so each must become an absolute URL before the first
+release:
+
+- `ts/README.md`: `GUIDE.md`, `GUIDE.md#first-round-trip`,
+  `GUIDE.md#use-the-local-packages-in-your-application`, `GUIDE.md#errors-and-recovery`, and
+  `../spec/README.md`.
+- `python/packages/mux-relay/README.md`: `../../README.md`, `../../README.md#first-round-trip`,
+  `../../README.md#use-the-local-packages-in-your-application`, `../../README.md#errors-and-recovery`,
+  and `../../../spec/README.md`.
 
 ## Package boundaries
 

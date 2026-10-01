@@ -6,7 +6,7 @@ For live browser capture, start with the [direct WebCodecs example](../webcodecs
 MP4 with Mediabunny, takes its AVC decoder configuration and encoded packets, and publishes a paced
 LOC video track plus an independent MSF catalog. It does not decode or re-encode the file.
 
-After the [workspace setup](../../README.md#development), run `mise run ts:build`. Import the function
+After the [workspace setup](../../../README.md#development), run `mise run ts:build`. Import the function
 into a browser application built with a TypeScript-capable bundler, alongside the workspace packages
 `@mux/relay`, `@mux/moq-media`, `@mux/moq-mediabunny`, and `mediabunny`:
 

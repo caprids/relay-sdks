@@ -30,7 +30,7 @@ manual runs; automation can inject the environment variable through its secret m
 tokens in commands, source files, URLs, or committed `.env` files. The demo passes the token to
 `get_token` and redacts it from output. Authentication currently uses `?jwt=<token>` on the transport
 URL: scrub query values and token strings before collecting network URLs, traces, or exception
-reports. Browser consumers have an additional [console exposure risk](../ts/README.md#browser-token-exposure).
+reports. Browser consumers have an additional [console exposure risk](../ts/GUIDE.md#browser-token-exposure).
 
 ### Install and run
 
@@ -640,41 +640,7 @@ subscriptions still awaiting their first response end with it (`subscribed` rais
 `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `on_error`;
 callers can open a replacement.
 
-## Live Relay smoke test
-
-This opt-in test publishes and subscribes against a real relay. It is excluded from `python:check`
-and needs a token authorized for both operations. The token can be supplied through a hidden prompt
-or the `RELAY_TOKEN` environment variable; it is never written to a file and is redacted from output.
-
-Set `RELAY_URL` and `RELAY_NAMESPACE` using the quickstart prompts first. Your token must
-authorize both operations under that namespace prefix, including children: the test appends a
-random UUID. Running this command explicitly opts into contacting that endpoint.
-
-```sh
-RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python:test:relay
-```
-
-The test waits for the publisher's `announced`, subscribes through the examples' announce-race
-retry and reports how often it retried, checks binary, empty, and text payloads plus independent
-track closure, then closes both connections. It defaults to
-`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
-the SDK are absolute: include the token's root prefix when required by the relay.
-
-The live test passed against `sjc.relay.mux.global` on 2026-09-11 over the aioquic WebTransport
-transport: three objects on `events` and two on `status`, with the second status object delivered
-after the events track closed, and both connections closed cleanly.
-
 ## Development
 
-Tool versions come from the repository's root `mise.toml`. The Python toolchain is the Astral stack:
-uv for the workspace and lockfile, ruff for linting and formatting, ty for type checking.
-
-```sh
-mise install              # once
-mise run python:check     # uv sync, ruff check, ruff format --check, lint-imports, ty check, pytest
-mise run python:test      # pytest only
-```
-
-From this directory under `mise exec`, the native commands are `uv sync`, `uv run pytest`,
-`uv run ruff check .`, `uv run ruff format .`, `uv run ty check`, and `uv run lint-imports`. Run
-`uv lock` after changing a dependency and commit `uv.lock`.
+Contributor setup, checks, formatting, and the opt-in live Relay smoke test for this workspace are
+in the root [README](../README.md#development).

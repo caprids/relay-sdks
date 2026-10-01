@@ -19,4 +19,4 @@ The extracted publish driver excludes SPF actors and media dependencies. Track p
 explicit, with no default media timescale. `createSubgroupWriter` writes arbitrary object payloads
 and metadata; the SDK supplies the bounded, single-object-group publishing policy above it.
 
-For Relay application usage and local installation, start with the [JavaScript quickstart](../../README.md#first-round-trip).
+For Relay application usage and local installation, start with the [JavaScript quickstart](../../GUIDE.md#first-round-trip).
