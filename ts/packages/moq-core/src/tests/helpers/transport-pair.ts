@@ -148,6 +148,9 @@ function createPipe(bufferBytes: number): Pipe {
         await new Promise<void>((resolve, reject) => {
           waiting = { resolve, reject };
         });
+        // The wait may have been released in the same turn the stream ended: a stop, a reset or the session's end.
+        if (writerError !== undefined) throw writerError;
+        if (writeController.signal.aborted) throw writeController.signal.reason;
       }
 
       readController.enqueue(chunk.slice());
@@ -414,6 +417,16 @@ export function createTransportPairFactory({
         },
       };
 
+      // The session can end while the dial is held: the peer closing or the connection failing rejects `ready` too.
+      const endedWhileDialling = () => {
+        if (state !== 'dialling') return;
+
+        state = 'cancelled';
+        settleReady.reject(
+          new PairTransportError('The session ended before it was established.', { source: 'session' })
+        );
+      };
+      client.closed.then(endedWhileDialling, endedWhileDialling);
       release = answer;
       if (handshake !== 'hold') setTimeout(answer, 0);
       resolveDialled({ url, protocols: offered, pair });
