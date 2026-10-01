@@ -102,10 +102,33 @@ listener, viewer
 
 **Transport adapter**:
 An implementation of the transport seam a connection runs over: create and accept streams, close,
-observe closure (the core's `MoqtTransport`). The aioquic WebTransport client is the product's adapter;
-the tests supply in-memory pairs and a loopback server on the same base.
-_Avoid_: transport layer, transport implementation, WebTransport (the protocol, not the adapter),
-connection (a Relay connection runs over an adapter)
+observe closure (the core's `MoqtTransport`). The aioquic WebTransport client is the Python product's
+adapter; in TypeScript a runtime's native `WebTransport` is the default adapter, and runtimes without
+one take an adapter the caller supplies. The tests supply in-memory pairs and a loopback accepting end.
+_Avoid_: polyfill (an adapter satisfies the SDK's seam, not the W3C `WebTransport` API), transport
+layer, transport implementation, WebTransport (the protocol, not the adapter), connection (a Relay
+connection runs over an adapter)
+
+**Native QUIC**:
+MOQT carried directly on a QUIC connection, with the MOQT version as the ALPN and the path and
+authority sent in SETUP. The SDK uses it where a runtime has no usable `WebTransport`.
+_Avoid_: raw QUIC, direct QUIC, plain QUIC
+
+**WebTransport session**:
+MOQT carried inside a WebTransport session over HTTP/3, with the version negotiated through
+`WT-Available-Protocols` and the path in the URL. Browsers always use this.
+_Avoid_: WebTransport connection, H3 transport
+
+**Dialing end**:
+The end of a transport that opens the connection. The SDK is always the dialing end, whether it runs
+in a browser or server-side.
+_Avoid_: client (pairs with "server", which collides with server-side runtimes), server-side
+(that is where code runs, not which end it is)
+
+**Accepting end**:
+The end of a transport that listens for and accepts connections. The relay is the accepting end; the
+SDKs ship none, and only test helpers play it.
+_Avoid_: server, server role (collides with server-side runtimes)
 
 ### Test vocabulary
 
