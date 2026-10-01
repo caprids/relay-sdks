@@ -171,6 +171,10 @@ pub struct RecvStream {
     /// enables `read_wanted` before it looks, so a read that starts in between still wakes it.
     readers: AtomicUsize,
     read_wanted: Notify,
+    /// The peer's reset, once a `watch()` saw it. quinn hands a reset to whichever call notices it
+    /// first and then reports the stream as closed, so a later read takes it from here. Written and
+    /// read only under the stream's lock.
+    reset_seen: std::sync::Mutex<Option<VarInt>>,
 }
 
 impl RecvStream {
@@ -180,6 +184,7 @@ impl RecvStream {
             stopped: CancellationToken::new(),
             readers: AtomicUsize::new(0),
             read_wanted: Notify::new(),
+            reset_seen: std::sync::Mutex::new(None),
         }
     }
 }
@@ -212,6 +217,13 @@ impl RecvStream {
             _ = self.stopped.cancelled() => return closed(),
             guard = self.inner.lock() => guard,
         };
+        if let Some(code) = self.reset_seen.lock().ok().and_then(|code| *code) {
+            return ReadResult {
+                chunk: None,
+                fin: false,
+                failure: Some(Failure::stream("reset", code)),
+            };
+        }
         tokio::select! {
             biased;
             _ = self.stopped.cancelled() => closed(),
@@ -250,7 +262,12 @@ impl RecvStream {
             _ = read_wanted => None,
             // quinn's reset watch reads no data, and is cancel-safe.
             result = stream.received_reset() => match result {
-                Ok(Some(code)) => Some(Failure::stream("reset", code)),
+                Ok(Some(code)) => {
+                    if let Ok(mut seen) = self.reset_seen.lock() {
+                        *seen = Some(code);
+                    }
+                    Some(Failure::stream("reset", code))
+                }
                 Ok(None) => None,
                 Err(quinn::ResetError::ConnectionLost(error)) => Some(failure::connection(&error)),
                 Err(quinn::ResetError::ZeroRttRejected) => Some(Failure::session("transport", None, "0-RTT was rejected")),
