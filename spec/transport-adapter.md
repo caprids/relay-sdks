@@ -132,14 +132,19 @@ connection unless it equals `MOQT_PROTOCOL_ID`. That check backs up TA-7; it doe
 
 ### Session lifetime
 
-**TA-9.** `closed` MUST resolve, with `{ closeCode, reason }`, when the session ends cleanly from
-either end: a local `close()`, or the peer's CONNECTION_CLOSE (native QUIC, RFC 9000 §19.19) or
-CLOSE_WEBTRANSPORT_SESSION capsule (draft-ietf-webtrans-http3 §6). It MUST reject, with a session
-error (TA-22), when the session ends any other way: connection loss, idle timeout, a failed
-handshake or dial. `closed` MAY reject at the same time as `ready`.
+**TA-9.** `closed` MUST resolve, with `{ closeCode, reason }`, when the session ends by an
+application close from either end: a local `close()`, or the peer's application CONNECTION_CLOSE
+(native QUIC, frame type 0x1d, RFC 9000 §19.19) or CLOSE_WEBTRANSPORT_SESSION capsule
+(draft-ietf-webtrans-http3 §6), whatever its code. It MUST reject, with a session error (TA-22),
+when the session ends any other way: a QUIC-layer CONNECTION_CLOSE (frame type 0x1c, a transport
+error such as FLOW_CONTROL_ERROR, RFC 9000 §20.1) from either end, connection loss, idle timeout,
+a stateless reset, or a failed handshake or dial. `closed` MAY reject at the same time as `ready`.
 **Why:** the core treats a resolution as a clean end and a rejection as a failure
-(`#handleClosed`), and attaches its rejection handler as soon as the factory returns
-(`connect-session.ts`), so a `closed` that rejects with `ready` is never unhandled.
+(`#handleClosed`), and after SETUP it reports no error for a resolution. A transport failure that
+resolved `closed` would read as an orderly shutdown. The core attaches its rejection handler as
+soon as the factory returns (`connect-session.ts`), so a `closed` that rejects with `ready` is never
+unhandled. Resolving for any application close code matches W3C WebTransport, where a
+CLOSE_WEBTRANSPORT_SESSION capsule resolves `closed` with its code.
 
 **TA-10.** `close({ closeCode, reason })` MUST end the session with that code and reason, using the
 framing's own close (draft-20 §3.5). It MUST be idempotent, and MUST NOT throw, including after the
@@ -188,12 +193,16 @@ the blocked write drains or the FIN is acknowledged.
 
 **TA-17.** The code a reset or a stop carries out MUST be taken from the abort or cancel reason's
 `streamErrorCode` when that is an integer from 0 to 2³²−1, and MUST be 0 otherwise (absent, not a
-number, not an integer, out of range). The adapter MUST NOT depend on the reason's class or name.
-**Why:** the core sends MOQT stream reset codes (draft-20 §3.3.4) as `streamErrorCode` on whatever
-reason it hands over (`stream-reset.ts`, `write-slot.ts`). In a browser that reason is a native
-`WebTransportError`, the only form a browser reads a code from; elsewhere it is a plain `Error` with
-the field. 2³²−1 is the largest code a WebTransport session can carry, so the range is the same in
-both framings.
+number, not an integer, out of range). An adapter other than a runtime's native `WebTransport` MUST
+NOT depend on the reason's class or name. A runtime's native `WebTransport` reads the code only from
+a native `WebTransportError` reason and resets with 0 for any other (see
+[Known deviations](#known-deviations)), so where that global exists the core MUST hand over a
+`WebTransportError` (`streamResetReason` in `stream-reset.ts` does).
+**Why:** the core sends MOQT stream reset codes (draft-20 §3.3.4) as `streamErrorCode` on the
+reason it hands over (`stream-reset.ts`, `write-slot.ts`): a native `WebTransportError` in a browser,
+a plain `Error` with the field elsewhere. 2³²−1 is the largest code a WebTransport session can carry,
+so the range is the same in both framings. A conformance test for this rule against a browser hands
+the reason `streamResetReason` builds, not a plain object.
 
 **TA-18.** A receive stream's cancel MUST send STOP_SENDING (RFC 9000 §19.5) with the code TA-17
 gives, and end the readable. Later reads MUST NOT deliver more bytes.
@@ -290,6 +299,10 @@ adapters MUST NOT copy them.
   with `source: 'stream'` ("Received STOP_SENDING."), or as a `NetworkError` `DOMException` with the
   message "The stream was aborted by the remote server", which has no `source` and no code. The core
   MUST keep accepting the second form as a stop (`isStreamStop` in `errors.ts`).
+- **Browser reset reasons (TA-17).** A browser's native `WebTransport` takes a reset or stop code
+  only from a native `WebTransportError` reason, and resets with code 0 for a plain object or
+  `Error` carrying `streamErrorCode`. The core works around it by building a `WebTransportError`
+  wherever the global exists.
 - **Chromium `WebTransportError` constructor (TA-17).** Chromium still implements the earlier
   dictionary constructor, `new WebTransportError({ message, streamErrorCode })`. `streamResetReason`
   falls back to it, so the reason still carries the code.
