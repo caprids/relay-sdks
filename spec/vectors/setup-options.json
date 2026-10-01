@@ -48,6 +48,13 @@
       "authority": "relay.example.com"
     },
     {
+      "name": "native QUIC keeps an explicitly empty query",
+      "url": "https://relay.example.com/moq?",
+      "framing": "native-quic",
+      "path": "/moq?",
+      "authority": "relay.example.com"
+    },
+    {
       "name": "native QUIC with an empty endpoint path sends the root path",
       "url": "https://relay.example.com",
       "token": "abc",

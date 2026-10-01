@@ -138,8 +138,13 @@ function endpointSetupOptions(framing: unknown, url: URL): KeyValuePair[] {
       `createTransport returned an unknown framing ${JSON.stringify(framing)}; expected 'webtransport' or 'native-quic'`,
       'connecting',
     );
+  // URL.search is empty for both an absent and an empty query, but `?` with nothing after it is a
+  // present, empty query that PATH keeps. A path cannot contain `?` and the endpoint has no
+  // fragment, so the query is everything in href from the first `?`.
+  const queryStart = url.href.indexOf('?');
+  const path = url.pathname + (queryStart === -1 ? '' : url.href.slice(queryStart));
   return [
-    { type: SETUP_OPTION.PATH, value: utf8.encode(url.pathname + url.search) },
+    { type: SETUP_OPTION.PATH, value: utf8.encode(path) },
     { type: SETUP_OPTION.AUTHORITY, value: utf8.encode(url.host) },
   ];
 }
