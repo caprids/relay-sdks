@@ -36,13 +36,13 @@ export declare class Dial {
 export declare class RecvStream {
   /**
    * Read up to `max` bytes, in order. A peer reset fails the read with its code (TA-19); bytes
-   * already read stay read. Ends a pending `watch()` first.
+   * already read stay read. A pending `watch()` gives way to it.
    */
   read(max: number): Promise<ReadResult>
   /**
    * Wait, without reading, until the peer resets the stream (TA-19) or the session ends (TA-12),
-   * and resolve with that failure; or with nothing once the next `read()` or `stop()` comes, or
-   * once the peer's FIN means a reset can no longer arrive. A newer watch ends an older one.
+   * and resolve with that failure; or with nothing as soon as a `read()` is in progress, after
+   * `stop()`, or once the peer's FIN means a reset can no longer arrive.
    */
   watch(): Promise<Failure | null>
   /** STOP_SENDING with `code`, now (TA-18): a pending read ends, and nothing more is delivered. */

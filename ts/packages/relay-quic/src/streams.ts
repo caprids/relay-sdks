@@ -35,8 +35,8 @@ export function sendWritable(send: SendStream): WritableStream<Uint8Array> {
     async write(chunk) {
       if (!(chunk instanceof Uint8Array)) throw new TypeError('a native QUIC stream takes Uint8Array chunks');
       // The addon reads the bytes off the JS thread while the write waits, so it gets a copy of its own: the caller may
-      // reuse, transfer or resize its buffer as soon as it likes.
-      const failure = await send.write(chunk.slice());
+      // reuse, transfer or resize its buffer as soon as it likes. Not `slice()`, which a Node Buffer shares.
+      const failure = await send.write(new Uint8Array(chunk));
       if (failure) throw failed(toError(failure));
     },
     async close() {

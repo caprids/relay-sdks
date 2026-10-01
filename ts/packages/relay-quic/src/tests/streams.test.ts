@@ -30,6 +30,15 @@ describe('sendWritable', () => {
     expect(written[0]?.buffer === original).toBe(false);
     expect([...(written[0] ?? [])]).toEqual([1, 2, 3]);
   });
+
+  it('copies a Node Buffer too, whose slice() would share its memory', async () => {
+    const { send, written } = fakeSend();
+    const writer = sendWritable(send).getWriter();
+    const chunk = Buffer.from([4, 5, 6]);
+    await writer.write(chunk);
+    chunk.fill(0);
+    expect([...(written[0] ?? [])]).toEqual([4, 5, 6]);
+  });
 });
 
 describe('recvReadable (TA-19)', () => {

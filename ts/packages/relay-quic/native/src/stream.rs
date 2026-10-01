@@ -6,12 +6,13 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use quinn::VarInt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::failure::{self, Failure};
@@ -166,8 +167,10 @@ pub struct ReadResult {
 pub struct RecvStream {
     inner: Arc<Mutex<quinn::RecvStream>>,
     stopped: CancellationToken,
-    /// The current `watch()`'s token: the next `read()` cancels it to take the lock.
-    watching: std::sync::Mutex<Option<CancellationToken>>,
+    /// Reads in progress. A `watch()` holding the lock gives it up as soon as this is nonzero; it
+    /// enables `read_wanted` before it looks, so a read that starts in between still wakes it.
+    readers: AtomicUsize,
+    read_wanted: Notify,
 }
 
 impl RecvStream {
@@ -175,20 +178,30 @@ impl RecvStream {
         Self {
             inner: Arc::new(Mutex::new(stream)),
             stopped: CancellationToken::new(),
-            watching: std::sync::Mutex::new(None),
+            readers: AtomicUsize::new(0),
+            read_wanted: Notify::new(),
         }
+    }
+}
+
+/// Counts one read in progress for as long as it lives.
+struct Reading<'a>(&'a AtomicUsize);
+
+impl Drop for Reading<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
 #[napi]
 impl RecvStream {
     /// Read up to `max` bytes, in order. A peer reset fails the read with its code (TA-19); bytes
-    /// already read stay read. Ends a pending `watch()` first.
+    /// already read stay read. A pending `watch()` gives way to it.
     #[napi]
     pub async fn read(&self, max: u32) -> ReadResult {
-        if let Some(watch) = self.watching.lock().ok().and_then(|mut watching| watching.take()) {
-            watch.cancel();
-        }
+        self.readers.fetch_add(1, Ordering::SeqCst);
+        let _reading = Reading(&self.readers);
+        self.read_wanted.notify_waiters();
         let closed = || ReadResult {
             chunk: None,
             fin: false,
@@ -211,24 +224,30 @@ impl RecvStream {
     }
 
     /// Wait, without reading, until the peer resets the stream (TA-19) or the session ends (TA-12),
-    /// and resolve with that failure; or with nothing once the next `read()` or `stop()` comes, or
-    /// once the peer's FIN means a reset can no longer arrive. A newer watch ends an older one.
+    /// and resolve with that failure; or with nothing as soon as a `read()` is in progress, after
+    /// `stop()`, or once the peer's FIN means a reset can no longer arrive.
     #[napi]
     pub async fn watch(&self) -> Option<Failure> {
-        let demand = CancellationToken::new();
-        if let Some(older) = self.watching.lock().ok()?.replace(demand.clone()) {
-            older.cancel();
+        let read_wanted = self.read_wanted.notified();
+        tokio::pin!(read_wanted);
+        read_wanted.as_mut().enable();
+        if self.readers.load(Ordering::SeqCst) > 0 {
+            return None;
         }
         let mut stream = tokio::select! {
             biased;
             _ = self.stopped.cancelled() => return None,
-            _ = demand.cancelled() => return None,
+            _ = read_wanted.as_mut() => return None,
             guard = self.inner.lock() => guard,
         };
+        // A read may have started while this waited for the lock.
+        if self.readers.load(Ordering::SeqCst) > 0 {
+            return None;
+        }
         tokio::select! {
             biased;
             _ = self.stopped.cancelled() => None,
-            _ = demand.cancelled() => None,
+            _ = read_wanted => None,
             // quinn's reset watch reads no data, and is cancel-safe.
             result = stream.received_reset() => match result {
                 Ok(Some(code)) => Some(Failure::stream("reset", code)),

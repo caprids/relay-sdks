@@ -45,6 +45,31 @@ it('TA-7 ready rejects when the offer is empty and the peer selects no protocol'
   await expect(ready).rejects.toMatchObject({ source: 'session' });
 });
 
+it('keeps reading a stream whose bytes trickle in, as the read and the reset watch hand over between them', async () => {
+  await peer.call('prepare');
+  const { transport, ready } = target.dialFactory(`https://localhost:${peer.port}/`, ['moqt-20']);
+  transport.closed.catch(() => {});
+  await ready;
+  const id = await peer.call('openUni');
+  const incoming = transport.incomingUnidirectionalStreams.getReader();
+  let received = 0;
+  const chunks = 200;
+  const reading = (async () => {
+    const reader = (await incoming.read()).value.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      received += value.byteLength;
+    }
+  })();
+  for (let i = 0; i < chunks; i++) await peer.call('write', { stream: id, data: [i % 256] });
+  await peer.call('finish', { stream: id });
+  await reading;
+  expect(received).toBe(chunks);
+  transport.close();
+  await transport.closed;
+}, 20_000);
+
 describe('@mux/relay-quic trust', () => {
   it('trusts a ca anchor added to the platform roots', async () => {
     await peer.call('prepare');
