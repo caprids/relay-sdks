@@ -13,6 +13,7 @@ from pathlib import Path
 import moq_core
 import mux_relay
 import mux_relay.media
+import mux_relay.quic
 import mux_relay.webtransport
 from mux_relay import RelayPublisher, RelaySubscriber, RelaySubscriptionHandlers, RelayTrackWriter
 
@@ -85,6 +86,9 @@ WEBTRANSPORT_NAMES = [
 ]
 """The public interface of ``mux_relay.webtransport``, the aioquic transport: its factory and its exception."""
 
+QUIC_NAMES = ["connect_quic"]
+"""The public interface of ``mux_relay.quic``, the aioquic native QUIC transport: its factory, kept out of the root."""
+
 
 def test_all_is_exactly_the_pinned_list() -> None:
     assert sorted(mux_relay.__all__) == sorted(PUBLIC_NAMES)
@@ -111,6 +115,18 @@ def test_the_webtransport_package_binds_its_factory_and_its_exception_and_nothin
     assert mux_relay.connect_webtransport is mux_relay.webtransport.connect_webtransport
 
 
+def test_the_quic_package_binds_its_factory_and_nothing_else() -> None:
+    """The session and protocol classes are reached through the private submodule, and the root has none of it."""
+    assert sorted(mux_relay.quic.__all__) == sorted(QUIC_NAMES)
+    bound = {
+        name
+        for name, value in vars(mux_relay.quic).items()
+        if not name.startswith("_") and not isinstance(value, types.ModuleType)
+    }
+    assert bound == set(QUIC_NAMES)
+    assert not set(QUIC_NAMES) & set(mux_relay.__all__)
+
+
 def test_all_matches_the_names_the_package_binds() -> None:
     """Nothing is importable from the root without being pinned, and nothing pinned is missing."""
     bound = {
@@ -124,7 +140,7 @@ def test_all_matches_the_names_the_package_binds() -> None:
 def test_every_export_appears_in_the_spec() -> None:
     """``spec/vocabulary.md``: a name that exists in one SDK without a row is a bug."""
     spec = (REPO / "spec" / "vocabulary.md").read_text() + (REPO / "spec" / "behavior.md").read_text()
-    names = [*mux_relay.__all__, *mux_relay.media.__all__, *mux_relay.webtransport.__all__]
+    names = [*mux_relay.__all__, *mux_relay.media.__all__, *mux_relay.webtransport.__all__, *mux_relay.quic.__all__]
     missing = [name for name in names if re.search(rf"\b{re.escape(name)}\b", spec) is None]
     assert missing == []
 

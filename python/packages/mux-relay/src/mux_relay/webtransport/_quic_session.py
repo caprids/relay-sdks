@@ -299,7 +299,11 @@ class QuicStreamSession(Generic[P]):
         )
         self._finish(error)
 
-    def _finish(self, error: BaseException | None) -> None:
+    def _finish(self, error: BaseException | None, *, stream_error: BaseException | None = None) -> None:
+        """End the session: ``wait_closed`` raises ``error`` (returns, for ``None``), and every stream fails.
+
+        The streams fail with ``stream_error`` when given, else with ``error``, else with a plain closure.
+        """
         if self._closed.done():
             return
 
@@ -308,7 +312,8 @@ class QuicStreamSession(Generic[P]):
         else:
             self._closed.set_exception(error)
 
-        stream_error = error if error is not None else WebTransportError(self._CLOSED_MESSAGE)
+        if stream_error is None:
+            stream_error = error if error is not None else WebTransportError(self._CLOSED_MESSAGE)
 
         for receive in self._receives.values():
             receive.fail(stream_error)

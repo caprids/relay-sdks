@@ -30,6 +30,7 @@ from mux_relay.webtransport._aioquic import (
     rearm_fin,
     reset_pending,
     serve_resets_first,
+    stream_credit_left,
     transmitted,
 )
 from mux_relay.webtransport._protocol import WebTransportProtocol
@@ -129,6 +130,11 @@ class TestAioquicInternals:
 
         # QuicConnection._packet_number: the keepalive's send clock, one per packet built.
         assert connection._packet_number == 0
+
+        # QuicConnection._remote_max_streams_uni / _bidi: the peer's MAX_STREAMS, which native QUIC's
+        # creates check before opening a stream aioquic would otherwise hold blocked (TA-21).
+        assert connection._remote_max_streams_uni == 0
+        assert connection._remote_max_streams_bidi == 0
 
         # H3Connection: the per-stream record the adapter drops once both halves are done.
         assert isinstance(h3._stream, dict)
@@ -369,6 +375,22 @@ class TestAioquicFunctions:
         before = packets_sent(quic)
         assert quic.datagrams_to_send(now=0.0) == []
         assert packets_sent(quic) == before  # nothing built, nothing counted
+
+    def test_stream_credit_left_follows_the_peer_max_streams(self) -> None:
+        pair = QuicPair()
+        quic = pair.client
+        uni = quic._remote_max_streams_uni
+        bidi = quic._remote_max_streams_bidi
+        assert uni > 0 and bidi > 0  # the transport parameters granted some
+
+        for _ in range(uni):
+            assert stream_credit_left(quic, unidirectional=True)
+            quic.send_stream_data(quic.get_next_available_stream_id(is_unidirectional=True), b"", False)
+
+        assert not stream_credit_left(quic, unidirectional=True)
+        assert stream_credit_left(quic, unidirectional=False)  # each kind has its own limit
+        quic._remote_max_streams_uni += 1  # what a MAX_STREAMS frame does
+        assert stream_credit_left(quic, unidirectional=True)
 
 
 class _Transport:

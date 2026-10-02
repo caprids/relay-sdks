@@ -42,6 +42,10 @@ class NativeQuicSession:
         """The connection is over."""
         return self._closed.done()
 
+    async def wait_closed(self) -> None:
+        """Return once the connection is over."""
+        await asyncio.wait({self._closed})
+
     def incoming_unidirectional_streams(self) -> AsyncIterator[Any]:
         return self._incoming_uni
 

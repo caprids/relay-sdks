@@ -11,26 +11,33 @@ import asyncio
 import inspect
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Generic, Protocol, TypeAlias, TypeVar
+from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from moq_core import MOQT_PROTOCOL_ID, Closed, Goaway, MoqtTransport
+from moq_core import MOQT_PROTOCOL_ID, Closed, Goaway, KeyValuePair, MoqtTransport
 from moq_core._tasks import call_later, observe, spawn
+from moq_core.control_messages import SETUP_OPTION
 from moq_core.transport import transport_ended
 
 from .cancellation import CancellationToken
-from .errors import RelayError, _transport_error
+from .errors import RelayError, RelayErrorPhase, _peer_close, _refusal, _transport_error, _unauthorized
 
 TokenProvider = Callable[[], str | Awaitable[str | None] | None]
 """Resolve a connection token, synchronously or asynchronously. ``None`` or ``""`` sends no token."""
 
 
+Framing: TypeAlias = Literal["webtransport", "native-quic"]
+"""What a transport carries: a WebTransport session, or MOQT directly on a QUIC connection (TA-1)."""
+
+
 @dataclass(frozen=True, slots=True)
 class ConnectingTransport:
-    """What a transport factory hands back: the transport, and an awaitable for its handshake."""
+    """What a transport factory hands back: the transport, an awaitable for its handshake, and its framing."""
 
     transport: MoqtTransport
     ready: Awaitable[None]
+    framing: Framing = "webtransport"
+    """``"native-quic"`` makes the connection send the endpoint's PATH and AUTHORITY in SETUP (TA-1, TA-6)."""
 
 
 RelayTransportFactory = Callable[[str, Sequence[str]], ConnectingTransport]
@@ -193,6 +200,11 @@ def _parse_endpoint(url: object) -> tuple[str, bool]:
 
     has_jwt = bool(jwts)
     normalized = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
+
+    # urlunsplit drops an empty query, but `?` with nothing after it is a present query that PATH keeps (TA-6).
+    if not parts.query and "?" in url:
+        normalized += "?"
+
     return normalized, has_jwt
 
 
@@ -200,6 +212,42 @@ def _with_token(url: str, token: str) -> str:
     parts = urlsplit(url)
     query = [*parse_qsl(parts.query, keep_blank_values=True), ("jwt", token)]
     return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), ""))
+
+
+def _endpoint_setup_options(framing: object, url: str) -> list[KeyValuePair]:
+    """The setup options the endpoint URL needs in CLIENT_SETUP for a framing (TA-6).
+
+    On native QUIC, PATH (the path, then ``?`` and the query when present, the resolved ``jwt``
+    included) and AUTHORITY take the place of the CONNECT request a WebTransport session sends; on a
+    WebTransport session neither may be sent (draft-20 §10.3.1.2, §10.3.1.1). ``url`` is the endpoint
+    as ``_parse_endpoint`` normalized it, so its path is never empty and it has no fragment.
+    """
+    if framing == "webtransport":
+        return []
+
+    if framing != "native-quic":
+        raise RelayError(
+            f"create_transport returned an unknown framing {framing!r}; expected 'webtransport' or 'native-quic'",
+            code="TRANSPORT_ERROR",
+            phase="connecting",
+        )
+
+    parts = urlsplit(url)
+    # The query is everything from the first `?`, an empty one included: a path cannot contain `?`.
+    query_start = url.find("?")
+    path = parts.path + ("" if query_start == -1 else url[query_start:])
+    authority = parts.hostname or ""
+
+    if ":" in authority:
+        authority = f"[{authority}]"
+
+    if parts.port is not None and parts.port != 443:
+        authority = f"{authority}:{parts.port}"
+
+    return [
+        KeyValuePair(SETUP_OPTION.PATH, path.encode()),
+        KeyValuePair(SETUP_OPTION.AUTHORITY, authority.encode()),
+    ]
 
 
 def _default_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
@@ -210,7 +258,7 @@ def _default_transport(url: str, protocols: Sequence[str]) -> ConnectingTranspor
 
 async def open_relay_session(
     options: ConnectRelayOptions,
-    create_session: Callable[[MoqtTransport, LifetimeCallbacks], T],
+    create_session: Callable[[MoqtTransport, LifetimeCallbacks, Sequence[KeyValuePair]], T],
 ) -> RelaySessionLifetime[T]:
     """Resolve the token, connect the transport, run SETUP, and bind the session to the lifetime."""
     url, has_jwt = _parse_endpoint(options.url)
@@ -269,6 +317,20 @@ async def open_relay_session(
             except Exception:
                 # A failed handshake may leave a transport that already refuses close().
                 pass
+
+    def closure(info: Closed, phase: RelayErrorPhase) -> Closed:
+        """How the session ended, as the connection reports it.
+
+        On native QUIC a peer's application close ends the transport cleanly whatever its code
+        (TA-9), so a credentials refusal is read from the code it carried, not from an error.
+        """
+        peer_close = _peer_close(state.transport)
+
+        if info.error is not None:
+            return Closed(_transport_error(info.error, phase, peer_close))
+
+        refusal = _refusal(peer_close)
+        return Closed(_unauthorized(refusal, phase)) if refusal is not None else info
 
     def on_cancel(reason: BaseException) -> None:
         finish(Closed(reason))
@@ -337,15 +399,12 @@ async def open_relay_session(
 
         await ready
         assert_open()
+        setup_options = _endpoint_setup_options(created.framing, connect_url)
 
         session = create_session(
             transport,
             LifetimeCallbacks(
-                on_closed=lambda info: finish(
-                    Closed(_transport_error(info.error, "connection" if established else "connecting"))
-                    if info.error is not None
-                    else info
-                ),
+                on_closed=lambda info: finish(closure(info, "connection" if established else "connecting")),
                 on_goaway=lambda goaway: finish(
                     Closed(
                         RelayError(
@@ -356,6 +415,7 @@ async def open_relay_session(
                     )
                 ),
             ),
+            setup_options,
         )
         state.session = session
 
@@ -378,7 +438,7 @@ async def open_relay_session(
         elif stopped:
             failure = stop_error
         else:
-            failure = _transport_error(error, "connecting") if using_transport else error
+            failure = _transport_error(error, "connecting", _peer_close(state.transport)) if using_transport else error
         assert failure is not None
         finish(Closed(failure))
         if failure is error:
@@ -398,6 +458,7 @@ __all__ = [
     "ClosureObserver",
     "ConnectRelayOptions",
     "ConnectingTransport",
+    "Framing",
     "LifetimeCallbacks",
     "RelaySessionLifetime",
     "RelayTransportFactory",
