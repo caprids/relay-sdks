@@ -35,6 +35,7 @@ from aioquic.quic.configuration import QuicConfiguration
 from relay_helpers.conformance_client import ConformancePeerProcess, RemotePeer
 from relay_helpers.conformance_targets import (
     IDLE_TIMEOUT,
+    KNOWN_FAILURE,
     TARGETS,
     ConformanceTarget,
     ContractFailure,
@@ -281,6 +282,7 @@ async def ctx(
     expectation = target.expectations.get(test.__name__)
     if expectation is not None:
         request.applymarker(pytest.mark.xfail(reason=expectation.reason, raises=expectation.raises, strict=True))
+        request.node.stash[KNOWN_FAILURE] = expectation
 
     process = conformance_peers.get(target.peer_framing)
     if process is None:
@@ -527,7 +529,8 @@ async def test_ta_10_close_without_a_code_sends_code_0_and_an_empty_reason(ctx: 
 async def test_ta_10_close_is_idempotent_and_does_not_raise_after_the_session_ended(ctx: Ctx) -> None:
     dialed = ctx.dial()
     await resolves(dialed.ready, "ready")
-    await ctx.peer.close(3, "peer first")
+    # Code 0: a nonzero code is TA-9's known failure on the WebTransport dialing end, and would end the case here.
+    await ctx.peer.close(0, "peer first")
     await resolves(dialed.closed, "wait_closed")
     dialed.transport.close(4, "late")
     dialed.transport.close()

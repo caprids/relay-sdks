@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 
+import pytest
 from aioquic.quic.configuration import QuicConfiguration
 
 from mux_relay.connect_session import ConnectingTransport
@@ -37,8 +38,15 @@ class KnownFailure:
 
     reason: str
     """The issue that closes the gap, or the Known deviation in ``spec/transport-adapter.md``."""
+    match: str
+    """A pattern the failure's message must contain (``re.search``): the assertion the gap trips, and no other."""
     raises: type[BaseException] = ContractFailure
-    """What the failure must be. Anything else (a timeout, a different assertion) is a real failure."""
+    """What the failure must be. Anything else, or a message ``match`` misses (a timeout, another assertion), is a
+    real failure: ``conftest.py`` turns it red."""
+
+
+KNOWN_FAILURE = pytest.StashKey[KnownFailure]()
+"""Where a case's known failure is kept on its test item, for ``conftest.py`` to check the failure against."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,12 +76,14 @@ PEER_CAPABILITIES = frozenset(
 _SHAPE = KnownFailure(
     "#233: Python classifies transport errors by name (WebTransportError, StreamStopped), not by a source field "
     "(spec/transport-adapter.md, Python mapping, TA-19, TA-20, TA-22)",
+    match=r"expected source '(stream|session)', got",
     raises=ErrorShapeFailure,
 )
 _PEER_CLOSE = KnownFailure(
     "#229, #232: the WebTransport dialing end raises for a peer close with a nonzero code, which is how it reports "
     "UNAUTHORIZED; native QUIC settles cleanly (#229), and #232 retires this end "
-    "(spec/transport-adapter.md, Python mapping, TA-9)"
+    "(spec/transport-adapter.md, Python mapping, TA-9)",
+    match=r"wait_closed: raised WebTransportError\('peer closed the WebTransport session",
 )
 
 
@@ -93,21 +103,24 @@ def webtransport_target() -> ConformanceTarget:
         expectations={
             "test_ta_7_ready_rejects_when_the_peer_selects_no_protocol": KnownFailure(
                 "#229: a response that names no protocol is accepted, with protocol_id None "
-                "(spec/transport-adapter.md, Python mapping, TA-7)"
+                "(spec/transport-adapter.md, Python mapping, TA-7)",
+                match=r"^ready returned, with protocol None$",
             ),
             "test_ta_9_wait_closed_returns_after_the_peers_application_close": _PEER_CLOSE,
-            "test_ta_10_close_is_idempotent_and_does_not_raise_after_the_session_ended": _PEER_CLOSE,
             "test_ta_11_close_before_ready_cancels_the_dial": KnownFailure(
                 "#234: close() before ready ends the session cleanly, so wait_closed() returns "
-                "(spec/transport-adapter.md, Python mapping, TA-11)"
+                "(spec/transport-adapter.md, Python mapping, TA-11)",
+                match=r"^wait_closed: returned None, expected it to raise$",
             ),
             "test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close": KnownFailure(
                 "#235: the incoming stream iterators end cleanly however the session ended "
-                "(spec/transport-adapter.md, Python mapping, TA-12)"
+                "(spec/transport-adapter.md, Python mapping, TA-12)",
+                match=r"^the incoming uni iterator ended cleanly instead of raising$",
             ),
             "test_ta_21_creates_raise_promptly_at_the_peers_stream_limit_and_succeed_once_credit_returns": KnownFailure(
                 "#236: aioquic queues a stream beyond the peer's limit as blocked, so the create succeeds "
-                "(spec/transport-adapter.md, Python mapping, TA-21)"
+                "(spec/transport-adapter.md, Python mapping, TA-21)",
+                match=r"^create unidirectional stream 5 of 4: returned .*, expected it to raise$",
             ),
             "test_ta_19_a_peer_reset_errors_the_receive_stream_with_the_peers_code": _SHAPE,
             "test_ta_19_a_peer_reset_errors_the_receive_stream_while_nothing_reads_it": _SHAPE,
