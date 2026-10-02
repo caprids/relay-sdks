@@ -21,6 +21,7 @@ from aioquic.asyncio import QuicConnectionProtocol, serve
 from aioquic.quic import events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
+from aioquic.quic.packet import QuicErrorCode, QuicFrameType
 from core_helpers.waiting import wait_for
 from cryptography.hazmat.primitives import serialization
 from relay_helpers.conformance_peer import (
@@ -207,6 +208,18 @@ class TestLifetime:
         assert not failure.value.peer_closed
         assert session.close_info is None
 
+    async def test_ta9_a_quic_layer_close_with_no_error_still_raises(self, peer: Peer) -> None:
+        session = await ready(*peer.dial())
+        protocol = peer.peer._require_protocol()
+
+        # Code 0, but frame type 0x1c: the QUIC layer's close, not the application's.
+        protocol._quic.close(error_code=QuicErrorCode.NO_ERROR, frame_type=QuicFrameType.PADDING, reason_phrase="bye")
+        protocol.transmit()
+
+        with pytest.raises(WebTransportError):
+            await asyncio.wait_for(session.wait_closed(), 5)
+        assert session.close_info is None
+
     async def test_ta9_connection_loss_raises_at_the_idle_timeout(self, peer: Peer) -> None:
         session = await ready(*peer.dial(idle_timeout=0.5))
 
@@ -377,6 +390,34 @@ class TestStreams:
         with pytest.raises(WebTransportError) as failure:
             await asyncio.wait_for(incoming.read(), 5)
         assert failure.value.code == 0xABCD  # as it was on the wire: no HTTP/3 mapping
+        session.close()
+
+    async def test_ta13_ta19_a_peer_stream_that_opens_with_a_reset_still_arrives(self, peer: Peer) -> None:
+        session = await ready(*peer.dial())
+        stream_id = await peer.peer.openBi()  # nothing is sent on it yet
+
+        await peer.peer.reset(stream_id, 5)
+
+        incoming = await asyncio.wait_for(anext(aiter(session.incoming_bidirectional_streams())), 5)
+        with pytest.raises(WebTransportError) as failure:
+            await asyncio.wait_for(incoming.readable.read(), 5)
+        assert failure.value.code == 5
+        # The other half is still the client's to use.
+        await incoming.writable.write(b"still here")
+        await incoming.writable.close()
+        assert (await asyncio.wait_for(peer.peer.read(stream_id), 5))["bytes"] == list(b"still here")
+        session.close()
+
+    async def test_ta13_ta20_a_peer_stream_that_opens_with_a_stop_still_arrives(self, peer: Peer) -> None:
+        session = await ready(*peer.dial())
+        stream_id = await peer.peer.openBi()
+
+        await peer.peer.stop(stream_id, 6)
+
+        incoming = await asyncio.wait_for(anext(aiter(session.incoming_bidirectional_streams())), 5)
+        with pytest.raises(StreamStopped) as failure:
+            await incoming.writable.write(b"x")
+        assert failure.value.code == 6
         session.close()
 
     async def test_ta20_a_peer_stop_fails_the_next_write_with_its_code(self, peer: Peer) -> None:

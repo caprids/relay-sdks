@@ -55,6 +55,17 @@ class NativeQuicProtocol(QuicProtocol):
         self.alpn_protocol: str | None = None
         """The protocol the handshake negotiated, ``None`` when the peer selected none."""
 
+    def quic_event_received(self, event: quic_events.QuicEvent) -> None:
+        # A peer can open a stream with RESET_STREAM or STOP_SENDING and no data at all; the stream
+        # still arrives (TA-13), with that half already failed and the other half usable.
+        if (
+            isinstance(event, quic_events.StreamReset | quic_events.StopSendingReceived)
+            and event.stream_id not in self.stream_owners
+        ):
+            self.session._on_stream_bytes(event.stream_id, b"", False)
+
+        super().quic_event_received(event)
+
     def _on_quic_event(self, event: quic_events.QuicEvent) -> None:
         if isinstance(event, quic_events.StreamDataReceived):
             self.session._on_stream_bytes(event.stream_id, event.data, event.end_stream)
@@ -74,6 +85,8 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
 
     _CLOSED_MESSAGE = "QUIC session closed"
     _NOT_ESTABLISHED_MESSAGE = "QUIC session is not established"
+    _CLEAN_CLOSE_CODES = frozenset()
+    """None: only an application close is a clean end, never a QUIC-layer close, whatever its code (TA-9)."""
 
     def __init__(self, url: str, protocols: Sequence[str], configuration: QuicConfiguration | None = None) -> None:
         super().__init__()
