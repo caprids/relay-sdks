@@ -8,6 +8,7 @@ import {
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
 } from '../packages/moq-core/src/protocol/control-messages.js';
+import { openRelaySession } from '../src/connect-session.js';
 import {
   type ConnectRelaySubscriberOptions,
   connectRelaySubscriber,
@@ -564,6 +565,29 @@ describe('connectRelaySubscriber', () => {
         createTransport: () => ({ transport: fake.transport, ready: Promise.reject(cause) }),
       }),
     ).rejects.toMatchObject({ code: 'UNAUTHORIZED', phase: 'connecting', cause });
+  });
+
+  // The session can end in the turn server SETUP arrives, before the connect call resumes; that is no refusal either.
+  it('does not read a session error with UNAUTHORIZED in the turn server SETUP arrives as a credentials refusal', async () => {
+    const sessionError = Object.assign(new Error('the peer closed the session (code 2, unauthorized)'), {
+      source: 'session',
+      closeCode: 0x2,
+      reason: 'unauthorized',
+    });
+    const fake = createFakeTransport();
+    const opening = openRelaySession(
+      { url: endpoint, createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }) },
+      (_transport, callbacks) => {
+        const session = { ready: Promise.resolve(), destroy: () => {} };
+        queueMicrotask(() => {
+          callbacks.onReady?.([]);
+          callbacks.onClosed?.({ error: sessionError });
+        });
+        return session;
+      },
+    );
+
+    await expect(opening).rejects.toMatchObject({ code: 'TRANSPORT_ERROR', cause: sessionError });
   });
 
   it('reports any other peer close code before server SETUP as a transport error', async () => {

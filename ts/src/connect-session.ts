@@ -182,7 +182,7 @@ export async function openRelaySession<T extends Session>(
   options: RelaySessionOptions,
   createSession: (
     transport: MoqtTransport,
-    callbacks: Pick<MoqtSessionCallbacks, 'onClosed' | 'onGoaway'>,
+    callbacks: Pick<MoqtSessionCallbacks, 'onReady' | 'onClosed' | 'onGoaway'>,
     setupOptions: KeyValuePair[],
   ) => T,
 ): Promise<RelaySessionLifetime<T>> {
@@ -269,6 +269,10 @@ export async function openRelaySession<T extends Session>(
   let established = false;
   let usingTransport = false;
   let peerClose: unknown;
+  // Set in the turn server SETUP arrives, ahead of `established`: a failure in between is no credentials refusal.
+  let setupReceived = false;
+  const connectFailure = (error: unknown): RelayError =>
+    setupReceived ? transportError(error, 'connecting') : connectingError(error, peerClose);
   const establish = async (): Promise<{ session: T; transport: MoqtTransport }> => {
     if (!url.searchParams.has('jwt') && options.getToken) {
       const token = await options.getToken();
@@ -318,14 +322,15 @@ export async function openRelaySession<T extends Session>(
     session = createSession(
       transport,
       {
+        onReady: () => {
+          setupReceived = true;
+        },
         onClosed: (info) =>
           finish(
             info.error === undefined
               ? info
               : {
-                  error: established
-                    ? transportError(info.error, 'connection')
-                    : connectingError(info.error, peerClose),
+                  error: established ? transportError(info.error, 'connection') : connectFailure(info.error),
                 },
           ),
         onGoaway: () =>
@@ -351,7 +356,7 @@ export async function openRelaySession<T extends Session>(
     connected = await Promise.race([establish(), interrupted]);
     assertOpen();
   } catch (error) {
-    const failure = stopped ? stopError : usingTransport ? connectingError(error, peerClose) : error;
+    const failure = stopped ? stopError : usingTransport ? connectFailure(error) : error;
     finish({ error: failure });
     throw failure;
   }
