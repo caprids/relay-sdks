@@ -4,12 +4,11 @@ name: relay-quic binaries
 # smoke-loaded on the platform it is for. Only this workflow builds them; ts.yml's conformance-node job still builds the
 # addon from source for linux-x64-gnu, and `pnpm check` builds no Rust.
 #
-# A ts/v* tag or a manual run also dry-runs the publish. Nothing is published to npm yet: the TS SDK has no release.
+# release-ts.yml calls it (workflow_call) and publishes the tarballs it packs: it publishes nothing itself.
 
 on:
   push:
     branches: [main]
-    tags: ['ts/v*']
     paths: &paths
       - 'ts/packages/relay-quic/native/**'
       - 'ts/packages/relay-quic/npm/**'
@@ -22,10 +21,13 @@ on:
   pull_request:
     paths: *paths
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
-  group: relay-quic-binaries-${{ github.ref }}
-  cancel-in-progress: true
+  # Called from release-ts.yml, github.workflow names the caller, so the release's run never cancels this one's.
+  group: ${{ github.workflow }}-relay-quic-binaries-${{ github.ref }}
+  # Never cancel the build a tag's publish is waiting on.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
@@ -135,10 +137,6 @@ jobs:
       - run: pnpm exec napi artifacts --output-dir artifacts
         working-directory: ts/packages/relay-quic
       - run: node scripts/pack.mjs ../../../packed
-        working-directory: ts/packages/relay-quic
-      - name: Dry-run the publish
-        if: startsWith(github.ref, 'refs/tags/ts/v') || github.event_name == 'workflow_dispatch'
-        run: pnpm exec napi pre-publish --dry-run --tag-style npm
         working-directory: ts/packages/relay-quic
       - uses: actions/upload-artifact@v4
         with:

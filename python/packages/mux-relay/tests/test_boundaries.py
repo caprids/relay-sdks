@@ -28,7 +28,7 @@ def test_the_generic_core_declares_no_runtime_dependencies() -> None:
 
 
 def test_the_sdk_depends_only_on_the_core_and_its_transport_library() -> None:
-    assert sorted(dependencies("mux-relay")) == ["aioquic", "moq-core"]
+    assert sorted(dependencies("mux-relay")) == ["aioquic", "mux-moq-core"]
 
 
 def test_importing_the_core_loads_no_transport_or_product_module() -> None:
@@ -52,4 +52,22 @@ def test_the_sdk_leaves_the_protocol_pin_and_limits_to_the_core() -> None:
 
 
 def test_the_media_package_depends_only_on_the_core() -> None:
-    assert dependencies("moq-media") == ["moq-core"]
+    assert dependencies("moq-media") == ["mux-moq-core"]
+
+
+def test_the_packages_release_in_lockstep_under_one_licence() -> None:
+    # Every package releases at one version and pins its siblings exactly (#216, ADR 0003); scripts/release.py
+    # moves both.
+    projects = [
+        tomllib.loads(path.read_text())["project"]
+        for path in sorted((PYTHON_ROOT / "packages").glob("*/pyproject.toml"))
+    ]
+    versions = {project["version"] for project in projects}
+    assert len(versions) == 1, versions
+    names = {project["name"] for project in projects}
+    for project in projects:
+        assert project["license"] == "Apache-2.0", project["name"]
+        for requirement in project["dependencies"]:
+            name = requirement.split("=")[0].split(">")[0].split("<")[0]
+            if name in names:
+                assert requirement == f"{name}=={project['version']}", (project["name"], requirement)

@@ -23,3 +23,10 @@ The implementation is a port of `ts/packages/moq-core`, which is itself an attri
 Video.js protocol modules under Apache-2.0. See `NOTICE` and `UPSTREAM.json`.
 
 For Relay application usage and local installation, start with the [Python quickstart](../../README.md#first-round-trip).
+
+The distribution on PyPI is `mux-moq-core`; the import name is `moq_core`.
+
+## Stability
+
+Before 1.0, a minor version can break the API. This package releases together with `mux-relay` at
+the same version; see the [changelog](../../CHANGELOG.md).

@@ -129,6 +129,16 @@ Best effort, and untested: Deno can load the entry as `npm:@mux/relay/node` and 
 its npm compatibility layer. Deno's own `WebTransport` cannot negotiate protocols, so plain
 `@mux/relay` fails there with `TRANSPORT_UNAVAILABLE`.
 
+## Stability
+
+Before 1.0, a minor version can break the API, and [CHANGELOG.md](CHANGELOG.md) says what changed.
+`@mux/relay`, `@mux/moq-core`, `@mux/moq-media`, `@mux/moq-mediabunny` and `@mux/relay-quic` always
+release together at the same version, so install matching versions. A release supports:
+
+- browsers with WebTransport, and Node 24 or later on the platforms `@mux/relay-quic` ships
+  binaries for (Linux x64 and arm64 with glibc or musl, macOS arm64 and x64, Windows x64);
+- MOQT draft 20 (`moqt-20`) only, against moq-relay 0.15.4 or later.
+
 ## Documentation
 
 - [TypeScript guide](GUIDE.md): the quickstart, subscription and publishing lifecycles, async

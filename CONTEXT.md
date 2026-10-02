@@ -137,6 +137,15 @@ The end of a transport that listens for and accepts connections. The relay is th
 SDKs ship none, and only test helpers play it.
 _Avoid_: server, server role (collides with server-side runtimes)
 
+### Releasing
+
+**Release train**:
+The set of packages that release together at one version under one tag prefix: the TypeScript
+train (`ts/v*`, every npm package) or the Python train (`python/v*`, every PyPI package). The two
+trains never share a version number. See `docs/releasing.md` and ADR 0003.
+_Avoid_: release channel (that is a dist-tag), monorepo version, lockstep (across languages that
+means the protocol pin and the behaviour contract, not versions)
+
 ### Test vocabulary
 
 **Relay hub**:

@@ -1,9 +1,13 @@
 {
   "name": "@mux/moq-media",
   "version": "0.0.0",
-  "private": true,
   "description": "Transport-independent LOC and MSF media format helpers",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "directory": "ts/packages/moq-media"
+  },
   "type": "module",
   "sideEffects": false,
   "files": [
@@ -26,5 +30,8 @@
   },
   "engines": {
     "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

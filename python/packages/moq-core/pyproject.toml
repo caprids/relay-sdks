@@ -1,15 +1,24 @@
 [project]
-name = "moq-core"
+name = "mux-moq-core"
 version = "0.0.0"
 description = "Transport-independent MOQT track primitives"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 # Boundary: the generic core has no runtime dependencies. A transport belongs in mux-relay,
 # behind the abstract interface declared in moq_core.transport, matching the TypeScript
 # `createTransport` seam.
 dependencies = []
 
+[project.urls]
+Repository = "https://github.com/muxinc/relay-sdks"
+
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
 build-backend = "uv_build"
+
+# The distribution is mux-moq-core (PyPI has no scopes, so the Mux prefix avoids claiming a generic
+# MoQ name); the import name stays moq_core.
+[tool.uv.build-backend]
+module-name = "moq_core"

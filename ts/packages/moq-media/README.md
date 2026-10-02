@@ -56,3 +56,8 @@ const source = composeMoqSource('https://relay.example', ['room', 'live'], { tok
 
 const { tracks } = parseMsfCatalog(catalogObject.payload, { catalogNamespace: ['room', 'live'] });
 ```
+
+## Stability
+
+Before 1.0, a minor version can break the API. This package releases together with `@mux/relay`
+at the same version; see the [changelog](../../CHANGELOG.md).

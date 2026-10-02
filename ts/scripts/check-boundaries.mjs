@@ -61,6 +61,20 @@ assert.deepEqual(
   'The addon loader looks up no package but the platform one',
 );
 
+// Every package releases at one version, under one licence, publicly (#216, ADR 0003). scripts/release.mjs sets the
+// version; the registry rejects a scoped package published without public access.
+const published = [sdk, core, media, adapter, quic];
+for (const suffix of platformDirs) {
+  published.push(JSON.parse(await readFile(resolve(quicRoot, 'npm', suffix, 'package.json'), 'utf8')));
+}
+for (const manifest of published) {
+  assert.equal(manifest.version, sdk.version, `${manifest.name} moves in lockstep with ${sdk.name}`);
+  assert.equal(manifest.license, 'Apache-2.0', `${manifest.name} is Apache-2.0`);
+  assert.equal(manifest.private, undefined, `${manifest.name} is not private: scripts/release.mjs gates publishing`);
+  assert.equal(manifest.publishConfig?.access, 'public', `${manifest.name} publishes with public access`);
+  assert.equal(manifest.repository?.url, sdk.repository.url, `${manifest.name} names the repository`);
+}
+
 async function inspect(directory, permittedPackage, { nodeBuiltins = false, extra = {} } = {}) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = resolve(directory, entry.name);

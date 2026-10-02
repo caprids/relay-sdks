@@ -9,11 +9,19 @@
     "relay-quic.darwin-arm64.node"
   ],
   "description": "Native QUIC transport adapter for the Relay SDK in Node",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "directory": "ts/packages/relay-quic/npm/darwin-arm64"
+  },
   "engines": {
     "node": ">=24"
   },
   "os": [
     "darwin"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

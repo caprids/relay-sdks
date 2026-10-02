@@ -1,15 +1,24 @@
 [project]
-name = "moq-media"
+name = "mux-moq-media"
 version = "0.0.0"
 description = "Transport-independent LOC and MSF media format helpers"
 readme = "README.md"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
-dependencies = ["moq-core"]
+# Released in lockstep with mux-moq-core, so the pin is exact; scripts/release_version.py moves it.
+dependencies = ["mux-moq-core==0.0.0"]
+
+[project.urls]
+Repository = "https://github.com/muxinc/relay-sdks"
 
 [tool.uv.sources]
-moq-core = { workspace = true }
+mux-moq-core = { workspace = true }
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
 build-backend = "uv_build"
+
+# The distribution is mux-moq-media; the import name stays moq_media.
+[tool.uv.build-backend]
+module-name = "moq_media"

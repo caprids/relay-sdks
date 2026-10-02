@@ -9,11 +9,19 @@
     "relay-quic.win32-x64-msvc.node"
   ],
   "description": "Native QUIC transport adapter for the Relay SDK in Node",
-  "license": "UNLICENSED",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "directory": "ts/packages/relay-quic/npm/win32-x64-msvc"
+  },
   "engines": {
     "node": ">=24"
   },
   "os": [
     "win32"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }
