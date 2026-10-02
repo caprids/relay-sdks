@@ -42,7 +42,7 @@ from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
 from mux_relay.webtransport._errors import WebTransportError
 from mux_relay.webtransport._streams import _ReceiveHalf, _SendHalf
-from mux_relay.webtransport._wire import parse_sf_list_of_strings, sf_list_of_strings
+from mux_relay.webtransport._wire import encode_close_session_capsule, parse_sf_list_of_strings, sf_list_of_strings
 from relay_helpers.native_quic import NativeQuicSession
 from relay_helpers.wt_server import SERVER_NAME, Impairment, WebTransportServerProtocol, WebTransportServerSession
 
@@ -339,6 +339,20 @@ class NativeQuicConformanceProtocol(QuicConnectionProtocol):
             super().close(error_code=error_code, reason_phrase=reason_phrase)
 
 
+def _close_at_once(session: WebTransportServerSession, code: int, reason: str) -> None:
+    """Send CLOSE_WEBTRANSPORT_SESSION now, and leave the connection for the dialer to close.
+
+    A session's own ``close()`` first waits for the dialer to acknowledge everything in flight (#209). A paused peer
+    drops those acknowledgements, so that wait would only run out its bound before the capsule went out.
+    """
+    protocol = session._protocol
+    if session._closing or protocol is None or protocol.terminated is not None:
+        return
+    session._closing = True
+    protocol.h3.send_data(session.session_id, encode_close_session_capsule(code, reason), end_stream=True)
+    protocol.transmit()
+
+
 @dataclass
 class _Stream:
     send: Any = None
@@ -477,7 +491,13 @@ class ConformancePeer:
         return send._stopped
 
     async def close(self, code: int, reason: str) -> None:
-        (await self._current()).close(code, reason)
+        session = await self._current()
+        protocol = self._protocol
+        paused = protocol is not None and protocol.impairment is not None and protocol.impairment.paused
+        if paused and isinstance(session, WebTransportServerSession):
+            _close_at_once(session, code, reason)
+        else:
+            session.close(code, reason)
 
     async def closed(self) -> dict[str, Any]:
         session = await self._current()

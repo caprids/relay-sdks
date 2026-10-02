@@ -354,13 +354,16 @@ is its aioquic WebTransport session adapter. How the rules map:
 | Rule | Python |
 | --- | --- |
 | TA-1 to TA-6 | WebTransport session only (`connect_webtransport`); the CONNECT carries the URL and `WT-Available-Protocols`. Native QUIC is #199. |
-| TA-7, TA-8 | `protocol_id` holds the selection, and an unoffered selection fails the dial. **Differs:** a response that names no protocol is accepted, with `protocol_id` set to `None`. |
-| TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. |
+| TA-7, TA-8 | `protocol_id` holds the selection, and an unoffered selection fails the dial. **Differs:** a response that names no protocol is accepted, with `protocol_id` set to `None` (#229). |
+| TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. It has no code to return. **Differs:** a peer CLOSE_WEBTRANSPORT_SESSION with a nonzero code raises, carrying the code (TA-24), instead of returning. That is how the SDK reports `UNAUTHORIZED` today. Native QUIC settles cleanly (#229), and #232 retires the WebTransport dialing end. |
 | TA-10 | `close(close_code=0, reason="")` is idempotent and ignored after the session ends. |
-| TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
+| TA-11 | **Differs:** `close()` before `ready` makes `ready` raise but ends the session cleanly, so `wait_closed()` returns (#234). |
+| TA-12 | The incoming readables are async iterators. **Differs:** they end with `StopAsyncIteration` however the session ended, never with its error (#235). |
+| TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. `wait_acknowledged()` also raises when the stream fails between writes, so it stands in for `writer.closed` (TA-12, TA-16, TA-20). A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
 | TA-16 | `abort()` resets until the peer acknowledges the FIN, including after the FIN was transmitted, and `wait_acknowledged()` then raises the reason. Once the FIN is acknowledged it does nothing (the stream is in Data Recvd). A settling group's delivery timeout depends on this (#167). |
 | TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `WebTransportError`'s `code`, else from a `stream_error_code` attribute, else from an integer reason, each within 0 to 2³²−1, else 0. |
-| TA-19, TA-20, TA-22 | **Name-based, not shape-based:** a stream failure is a `WebTransportError` with the peer's code in `code`, and a peer STOP_SENDING is its `StreamStopped` subclass. There is no `source` field. |
+| TA-19, TA-20, TA-22 | **Name-based, not shape-based:** a stream failure is a `WebTransportError` with the peer's code in `code`, and a peer STOP_SENDING is its `StreamStopped` subclass. There is no `source` field (#233). |
+| TA-21 | **Differs:** at the peer's stream limit, a create succeeds: aioquic queues the stream as blocked until MAX_STREAMS rises (#236). |
 | TA-24 | `peer_closed`, `code` and `reason` carry the peer's CLOSE_WEBTRANSPORT_SESSION, and the SDK reports `UNAUTHORIZED` from it. |
 | TA-25, TA-26 | asyncio holds no process open by itself: the application's own `asyncio.run` decides. |
 
@@ -375,6 +378,17 @@ every target:
   reset, stop, close at either layer, withhold acknowledgement and limit stream credit
 - `@mux/relay-quic` in Node, in `pnpm test:conformance:node`, against the same accepting end in its
   native QUIC mode (`--framing native-quic`)
+
+A pytest port (`python/packages/mux-relay/tests/test_transport_conformance.py`, #230) runs the same cases
+against `moq_core.transport.MoqtTransport`, spelled as the [Python mapping](#python-mapping-informative) says,
+in the Python SDK's `uv run pytest`. Its targets (`tests/relay_helpers/conformance_targets.py`) are:
+
+- the WebTransport dialing end (`connect_webtransport`), against the accepting end's default framing
+- the native QUIC dialing end, against `--framing native-quic`, skipped until #229 adds it
+
+Each **Differs** row in the Python mapping, and the name-based classification (TA-19, TA-20, TA-22), is a
+known failure there, naming the issue that closes it. TA-6 and
+TA-25/TA-26 are skipped, with the reasons the mapping gives.
 
 Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
 adapter, and the core's SETUP tests cover it. For TA-26 the test is a Node script that has to exit by
