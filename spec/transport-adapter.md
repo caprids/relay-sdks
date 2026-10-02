@@ -259,7 +259,8 @@ rejection is exempt only because it is a create rejection, which the core never 
 **TA-24.** A session error that reports the peer's close SHOULD carry the peer's `closeCode` and
 `reason`. A session error for a lost connection carries neither.
 **Why:** a refusal for credentials is a peer close with MOQT's UNAUTHORIZED code (draft-20 §3.5),
-which the SDK reports as `UNAUTHORIZED`. Browsers do not expose it (#14), so it is not a MUST.
+which the SDK reports as `UNAUTHORIZED` while connecting. Browsers do not expose it (#14), so it is not
+a MUST.
 
 ### Process lifetime
 
@@ -291,6 +292,10 @@ The contract has two sides. Against an adapter that follows the rules above, the
   reasons it resets and stops with (TA-17, TA-22, `transport-error.ts`);
 - never concludes the session has ended from a create rejection alone, only from `closed` or a
   `source: 'session'` error on a stream;
+- fails the connection with `UNAUTHORIZED` when the peer closes with MOQT's UNAUTHORIZED (0x2),
+  MALFORMED_AUTH_TOKEN (0x16) or EXPIRED_AUTH_TOKEN (0x18) before its SETUP, read from `closed`'s
+  resolution (TA-9) or a session error's `closeCode` (TA-24); the same close after SETUP is not a
+  refusal;
 - keeps reading the [Chromium deviations](#known-deviations) below as their conforming equivalents.
 
 ## Known deviations
@@ -310,8 +315,13 @@ adapters MUST NOT copy them.
 - **Chromium `WebTransportError` constructor (TA-17).** Chromium still implements the earlier
   dictionary constructor, `new WebTransportError({ message, streamErrorCode })`. `streamResetReason`
   falls back to it, so the reason still carries the code.
-- **Browser session close codes (TA-24).** A browser does not expose the peer's close code on a
-  refused connection (#14), so a credentials refusal reaches the SDK as `TRANSPORT_ERROR`.
+- **Browser session close codes (TA-9, TA-24).** Against moq-relay 0.15.8, a browser does not expose
+  the peer's close code on a refused connection: the relay tears down HTTP/3 in the same flight as
+  its CLOSE_WEBTRANSPORT_SESSION capsule, so `closed` rejects with "Connection lost." and no
+  `closeCode`, and a credentials refusal reaches the SDK as `TRANSPORT_ERROR` (#14). The relay fix
+  (moq-dev/moq#4429) is merged but not in a release yet.
+  **Evidence:** Chromium against `sjc.relay.mux.global` on 2026-10-02: no token, an empty token, a
+  tampered signature and a wrong path each gave "Connection lost." in 3/3 runs.
 - **Browser stream error codes (TA-22).** A browser's `streamErrorCode` is nullable and is `null`
   when the browser does not know the code, which TA-22 allows.
 - **Chromium `ready` without a selected protocol (TA-7).** When the peer's response names no

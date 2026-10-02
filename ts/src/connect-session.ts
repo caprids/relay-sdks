@@ -6,7 +6,7 @@ import {
   SETUP_OPTION,
 } from '@mux/moq-core';
 
-import { RelayError, transportError } from './errors.js';
+import { connectingError, RelayError, transportError } from './errors.js';
 
 /** setTimeout stores its delay in a signed 32-bit integer; a larger one wraps and fires at once. */
 export const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -268,6 +268,7 @@ export async function openRelaySession<T extends Session>(
 
   let established = false;
   let usingTransport = false;
+  let peerClose: unknown;
   const establish = async (): Promise<{ session: T; transport: MoqtTransport }> => {
     if (!url.searchParams.has('jwt') && options.getToken) {
       const token = await options.getToken();
@@ -290,8 +291,14 @@ export async function openRelaySession<T extends Session>(
     const created = createTransport(url.href, [MOQT_PROTOCOL_ID]);
 
     transport = created.transport;
-    // WebTransport.closed may reject alongside ready, before a session can observe it.
-    void transport.closed.catch(() => {});
+    // WebTransport.closed may reject alongside ready, before a session can observe it. Registered before the
+    // session's own handler, so a peer close is recorded by the time the session reports it.
+    void transport.closed.then(
+      (info) => {
+        peerClose = info;
+      },
+      () => {},
+    );
     // A custom factory can synchronously abort before returning its transport.
     if (stopped) {
       void created.ready.catch(() => {});
@@ -315,7 +322,11 @@ export async function openRelaySession<T extends Session>(
           finish(
             info.error === undefined
               ? info
-              : { error: transportError(info.error, established ? 'connection' : 'connecting') },
+              : {
+                  error: established
+                    ? transportError(info.error, 'connection')
+                    : connectingError(info.error, peerClose),
+                },
           ),
         onGoaway: () =>
           finish({
@@ -340,7 +351,7 @@ export async function openRelaySession<T extends Session>(
     connected = await Promise.race([establish(), interrupted]);
     assertOpen();
   } catch (error) {
-    const failure = stopped ? stopError : usingTransport ? transportError(error, 'connecting') : error;
+    const failure = stopped ? stopError : usingTransport ? connectingError(error, peerClose) : error;
     finish({ error: failure });
     throw failure;
   }

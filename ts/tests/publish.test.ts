@@ -12,6 +12,7 @@ import {
   readJSON,
   readText,
 } from '../src/index.js';
+import { createFakeTransport } from './helpers/relay.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
 const namespace = ['testing', 'data'];
@@ -43,6 +44,20 @@ function receive(subscriber: RelaySubscriber, track: string) {
 }
 
 describe('connectRelayPublisher', () => {
+  // draft-20 §3.5 UNAUTHORIZED, sent by moq-relay after reading SETUP (#14, TA-9).
+  it('reports a peer close with UNAUTHORIZED before server SETUP as a credentials refusal', async () => {
+    const fake = createFakeTransport();
+    const connecting = connectRelayPublisher({
+      url,
+      namespace,
+      createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
+    });
+
+    await fake.clientSetupOptions();
+    fake.peerClose({ closeCode: 0x2, reason: 'unauthorized' });
+    await expect(connecting).rejects.toMatchObject({ code: 'UNAUTHORIZED', phase: 'connecting' });
+  });
+
   it('rejects oversized namespaces before resolving credentials or opening transport', async () => {
     const getToken = vi.fn();
     const createTransport = vi.fn();

@@ -501,7 +501,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. Python only for now (browsers do not expose the relay's refusal, so TypeScript reports `TRANSPORT_ERROR`; see #14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In TypeScript, only native QUIC (`@mux/relay/node`) reports it for now: browsers do not expose the relay's refusal, so there it arrives as `TRANSPORT_ERROR` (#14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
@@ -522,9 +522,11 @@ No code or phase promises safe replay. Account for previous attempts, data fresh
 application's deduplication policy. Successful writes mean transport acceptance, not viewer
 acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
-code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too), in
-any phase. It is Python only until browsers can see the relay's close code, so in TypeScript a
-refusal still arrives as `TRANSPORT_ERROR`. Neither another connection failure nor an uncovered
+code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
+TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-20 §3.5 defines
+it as refusing to establish a session; Python maps it in any phase (#227). TypeScript reports it over
+native QUIC today. Browsers cannot see the relay's close code until a moq-relay release after 0.15.8,
+so in a browser a refusal still arrives as `TRANSPORT_ERROR` (#14). Neither another connection failure nor an uncovered
 namespace proves authentication was denied. A subscription outside the token's grant is refused
 per request, through `onError` / `on_error` (MOQT `UNAUTHORIZED`, 0x1), and leaves the connection open.
 

@@ -1,4 +1,4 @@
-import { isStreamError } from '@mux/moq-core';
+import { isStreamError, SESSION_ERROR } from '@mux/moq-core';
 
 /** Stable categories for SDK lifecycle failures; messages are diagnostic text only. */
 export type RelayErrorCode =
@@ -22,9 +22,9 @@ export type RelayErrorCode =
   | 'TRANSPORT_ERROR'
   | 'TRANSPORT_UNAVAILABLE'
   /**
-   * The relay refused the connection's credentials. Shared with the Python SDK, which reports it today. TypeScript
-   * does not produce it yet: browsers do not expose moq-relay's CLOSE_WEBTRANSPORT_SESSION code, so a refusal
-   * arrives as `TRANSPORT_ERROR` until the relay lets the capsule through (muxinc/relay-sdks#14).
+   * The relay refused the connection's credentials, in phase `connecting`. Over native QUIC (`@mux/relay/node`) a
+   * refusal always reports this. Browsers do not expose moq-relay 0.15.8's CLOSE_WEBTRANSPORT_SESSION code, so there
+   * a refusal arrives as `TRANSPORT_ERROR` until the relay lets the capsule through (muxinc/relay-sdks#14).
    */
   | 'UNAUTHORIZED';
 
@@ -72,6 +72,47 @@ export function isStreamStop(error: unknown): boolean {
     error instanceof Error &&
     error.name === 'NetworkError' &&
     error.message === 'The stream was aborted by the remote server'
+  );
+}
+
+/**
+ * MOQT session termination codes (draft-20 §3.5) that mean the relay refused the connection's credentials. moq-relay
+ * sends `UNAUTHORIZED` (0x2) for every refusal: no token, a bad signature, a malformed or expired token, a path outside
+ * the token's root. The core never closes with any of them itself.
+ */
+const CREDENTIAL_REFUSALS: ReadonlySet<number> = new Set([
+  SESSION_ERROR.UNAUTHORIZED,
+  SESSION_ERROR.MALFORMED_AUTH_TOKEN,
+  SESSION_ERROR.EXPIRED_AUTH_TOKEN,
+]);
+
+/**
+ * The peer's close, when it closed the session because of the credentials: `closed` resolving with the code (TA-9), or
+ * a session error carrying it (TA-24).
+ */
+function credentialRefusal(value: unknown): { closeCode: number; reason: string } | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const { source, closeCode, reason } = value as { source?: unknown; closeCode?: unknown; reason?: unknown };
+  // A `closed` resolution has no source; an error that has one must be a session error (TA-22).
+  if (source !== undefined && source !== 'session') return undefined;
+  if (typeof closeCode !== 'number' || !CREDENTIAL_REFUSALS.has(closeCode)) return undefined;
+  return { closeCode, reason: typeof reason === 'string' ? reason : '' };
+}
+
+/**
+ * Wrap a failure while connecting: a credentials refusal is `UNAUTHORIZED`, anything else a transport error.
+ * `peerClose` is what the transport's `closed` resolved with, if it has; the session reports a clean close before
+ * server SETUP without its code. Code 2 after SETUP is not a refusal, so the connected phase never comes here.
+ */
+export function connectingError(error: unknown, peerClose?: unknown): RelayError {
+  if (error instanceof RelayError) return error;
+  const refusal = credentialRefusal(error) ?? credentialRefusal(peerClose);
+  if (refusal === undefined) return transportError(error, 'connecting');
+  return new RelayError(
+    'UNAUTHORIZED',
+    `Relay refused the connection's credentials: ${refusal.reason || 'no reason given'} (session closed with code 0x${refusal.closeCode.toString(16)}); check the token and that it grants this endpoint's path`,
+    'connecting',
+    { cause: error },
   );
 }
 
