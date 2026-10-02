@@ -67,8 +67,8 @@ jobs:
         run: |
           flags=()
           if [ "$REAL" != true ]; then flags+=(--dry-run); echo "Dry run: not a ts/v* tag push, or RELEASE_PUBLISH is not true"; fi
-          # npm generates no provenance for a private repository's builds.
-          if [ "$PUBLIC" = true ]; then flags+=(--provenance); fi
+          # Provenance needs the publish job's OIDC token, and npm generates none for a private repository's builds.
+          if [ "$REAL" = true ] && [ "$PUBLIC" = true ]; then flags+=(--provenance); fi
           node scripts/release.mjs publish ../packed "${flags[@]}"
       - name: Create the GitHub release
         if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/ts/v') && vars.RELEASE_PUBLISH == 'true'

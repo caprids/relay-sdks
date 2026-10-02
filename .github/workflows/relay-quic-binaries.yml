@@ -26,7 +26,8 @@ on:
 concurrency:
   # Called from release-ts.yml, github.workflow names the caller, so the release's run never cancels this one's.
   group: ${{ github.workflow }}-relay-quic-binaries-${{ github.ref }}
-  cancel-in-progress: true
+  # Never cancel the build a tag's publish is waiting on.
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 permissions:
   contents: read
