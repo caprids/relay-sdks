@@ -43,6 +43,10 @@ leaves from the new address and the relay migrates (RFC 9000 §9.3). Chromium do
 TypeScript SDK.
 """
 
+_MAX_CLOSE_REASON = 1024
+"""Most bytes of a close reason sent. CONNECTION_CLOSE must fit in one packet (RFC 9000 §19.19), and aioquic
+fails the transmit, closing nothing, when it does not."""
+
 _SOCKET_RELEASE_DELAY = 3.0
 """Seconds ``close_after_drain`` waits for the connection to end on its own before it releases the socket."""
 
@@ -317,14 +321,17 @@ class QuicProtocol(QuicConnectionProtocol):
         self._stop_keepalive()  # the connection is closing: nothing is left to keep alive
         # However the handshake ended (failed, timed out, cancelled, closed), its reports end with it.
         self._stop_reporting_refusals()
+        # Cut on a character boundary, so what is sent still decodes.
+        reason_phrase = reason_phrase.encode()[:_MAX_CLOSE_REASON].decode(errors="ignore")
         super().close(error_code=error_code, reason_phrase=reason_phrase)
 
     def close_after_drain(self, error_code: int = QuicErrorCode.NO_ERROR, reason_phrase: str = "") -> None:
         """Close the QUIC connection, and make sure the UDP socket is released even if the peer never answers."""
-        self.close(error_code=error_code, reason_phrase=reason_phrase)
 
         def release() -> None:
             if self.owns_transport and self._transport is not None and not self.terminated_event.is_set():
                 self._transport.close()
 
+        # Armed first: the release must come even if sending the close fails.
         self._loop.call_later(_SOCKET_RELEASE_DELAY, release)
+        self.close(error_code=error_code, reason_phrase=reason_phrase)

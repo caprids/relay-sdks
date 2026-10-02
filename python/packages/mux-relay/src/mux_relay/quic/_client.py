@@ -97,6 +97,8 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
         observe(self.ready)
         self.close_info: tuple[int, str] | None = None
         """``(code, reason)`` of the peer's application CONNECTION_CLOSE (frame type 0x1d), once received."""
+        self._peer_close_error: WebTransportError | None = None
+        """What every operation raises once the peer's application close ended the session (TA-24)."""
         self._configuration = configuration
         # Only the host and port leave this call: the path and the token travel in the core's SETUP (TA-3, TA-6).
         self._connect_task = spawn(self._connect(url))
@@ -264,6 +266,9 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
                 protocol.close_after_drain(close_code, reason)
 
     def check_live(self) -> None:
+        if self._peer_close_error is not None:
+            raise self._peer_close_error
+
         if not self.ready.done() and not self._closed.done():
             raise WebTransportError(self._NOT_ESTABLISHED_MESSAGE)
 
@@ -291,6 +296,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
             reason=reason,
             peer_closed=True,
         )
+        self._peer_close_error = error
         # Before `ready` the dial fails with the peer's close; after it the session ended cleanly.
         self._finish(None if self.ready.done() else error, stream_error=error)
 

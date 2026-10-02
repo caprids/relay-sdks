@@ -195,8 +195,10 @@ class TestLifetime:
             await stream.write(b"late")
         assert (failure.value.peer_closed, failure.value.code, failure.value.reason) == (True, 7, "goodbye")
 
-        with pytest.raises(WebTransportError):
-            await session.create_unidirectional_stream()
+        for create in (session.create_unidirectional_stream, session.create_bidirectional_stream):
+            with pytest.raises(WebTransportError) as failure:
+                await create()
+            assert (failure.value.peer_closed, failure.value.code, failure.value.reason) == (True, 7, "goodbye")
 
     async def test_ta9_a_quic_layer_close_raises(self, peer: Peer) -> None:
         session = await ready(*peer.dial())
@@ -239,6 +241,17 @@ class TestLifetime:
         assert await asyncio.wait_for(peer.peer.closed(), 5) == {"closeCode": 0x10, "reason": "done here"}
         await asyncio.wait_for(session.wait_closed(), 5)
         session.close()  # and never raises after the end
+
+    async def test_ta10_a_reason_too_long_for_one_packet_is_cut_and_the_close_still_completes(self, peer: Peer) -> None:
+        session = await ready(*peer.dial())
+
+        session.close(0x10, "é" * 2000)
+
+        closed = await asyncio.wait_for(peer.peer.closed(), 5)
+        assert closed["closeCode"] == 0x10
+        assert 0 < len(closed["reason"].encode()) <= 1024
+        assert set(closed["reason"]) == {"é"}  # cut on a character boundary
+        await asyncio.wait_for(session.wait_closed(), 5)
 
     async def test_ta10_close_delivers_what_was_written_before_it_209(self, peer: Peer) -> None:
         session = await ready(*peer.dial())
