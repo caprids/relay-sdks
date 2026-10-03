@@ -362,15 +362,16 @@ both unless the row names one. How the rules map:
 | TA-3, TA-4 | Native QUIC: `connect_quic` takes the `https:` URL, dials its host and port (443 by default) with the host as the server name, and reads nothing else from it. |
 | TA-5 | WebTransport session: `WT-Available-Protocols`. Native QUIC: the ALPN list is exactly `protocols`, with no `h3`. |
 | TA-6 | `open_relay_session` sends PATH and AUTHORITY through moq_core's `setup_options` on native QUIC only (`test_setup_options.py`, against `vectors/setup-options.json`). |
-| TA-7, TA-8 | `protocol_id` holds the selection, and an unoffered selection fails the dial. Native QUIC: a handshake that negotiates no ALPN fails it too, and `protocol_id` is the negotiated ALPN. **Differs, WebTransport session:** a response that names no protocol is accepted, with `protocol_id` set to `None`. |
-| TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. Native QUIC: a peer's application close (0x1d) is a clean end whatever its code, and `close_info` holds its `(code, reason)`; a QUIC-layer close, an idle timeout or a failed dial raises. **Differs, WebTransport session:** a CLOSE_WEBTRANSPORT_SESSION capsule with a nonzero code raises. |
+| TA-7, TA-8 | `protocol_id` holds the selection, and an unoffered selection fails the dial. Native QUIC: a handshake that negotiates no ALPN fails it too, and `protocol_id` is the negotiated ALPN. **Differs, WebTransport session:** a response that names no protocol is accepted, with `protocol_id` set to `None` (until #232 retires it). |
+| TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. Native QUIC: a peer's application close (0x1d) is a clean end whatever its code, and `close_info` holds its `(code, reason)`; a QUIC-layer close, an idle timeout or a failed dial raises. **Differs, WebTransport session:** a CLOSE_WEBTRANSPORT_SESSION capsule with a nonzero code raises (until #232 retires it). |
 | TA-10 | `close(close_code=0, reason="")` is idempotent and ignored after the session ends. It waits, within a bound, for every send stream to be acknowledged first (#209). Native QUIC ends with an application CONNECTION_CLOSE carrying the code and reason; the WebTransport session sends the capsule. |
-| TA-11 | `close()` before `ready` cancels the dial and fails `ready`. Native QUIC: `wait_closed()` raises too. **Differs, WebTransport session:** `wait_closed()` returns. |
-| TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
+| TA-11 | `close()` before `ready` cancels the dial and fails `ready`. Native QUIC: `wait_closed()` raises too. **Differs, WebTransport session:** `wait_closed()` returns (until #232 retires it). |
+| TA-12 | The incoming readables are async iterators. **Differs:** in both framings they end with `StopAsyncIteration` however the session ended, never with its error (#235). |
+| TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. `wait_acknowledged()` also raises when the stream fails between writes, so it stands in for `writer.closed` (TA-12, TA-16, TA-20). A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
 | TA-16 | `abort()` resets until the peer acknowledges the FIN, including after the FIN was transmitted, and `wait_acknowledged()` then raises the reason. Once the FIN is acknowledged it does nothing (the stream is in Data Recvd). A settling group's delivery timeout depends on this (#167). |
 | TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `WebTransportError`'s `code`, else from a `stream_error_code` attribute, else from an integer reason, each within 0 to 2³²−1, else 0. Native QUIC puts the code on the wire as it is; the WebTransport session maps it into the HTTP/3 range. |
 | TA-19, TA-20, TA-22 | **Name-based, not shape-based:** a stream failure is a `WebTransportError` with the peer's code in `code`, and a peer STOP_SENDING is its `StreamStopped` subclass. There is no `source` field (#233). |
-| TA-21 | Native QUIC: a create rejects at once when the peer's MAX_STREAMS is used up, and succeeds again once the peer raises it. **Differs, WebTransport session:** aioquic opens the stream anyway and holds it until the peer raises the limit. |
+| TA-21 | Native QUIC: a create rejects at once when the peer's MAX_STREAMS is used up, and succeeds again once the peer raises it. **Differs, WebTransport session:** aioquic opens the stream anyway and holds it until the peer raises the limit (until #232 retires it). |
 | TA-24 | WebTransport session: `peer_closed`, `code` and `reason` carry the peer's CLOSE_WEBTRANSPORT_SESSION. Native QUIC: `close_info` carries the peer's application close, and so does the error an operation raises once it has ended the session. The SDK reports `UNAUTHORIZED` from either, in any phase. |
 | TA-25, TA-26 | asyncio holds no process open by itself: the application's own `asyncio.run` decides. |
 
@@ -385,6 +386,18 @@ every target:
   reset, stop, close at either layer, withhold acknowledgement and limit stream credit
 - `@mux/relay-quic` in Node, in `pnpm test:conformance:node`, against the same accepting end in its
   native QUIC mode (`--framing native-quic`)
+
+A pytest port (`python/packages/mux-relay/tests/test_transport_conformance.py`, #230) runs the same cases
+against `moq_core.transport.MoqtTransport`, spelled as the [Python mapping](#python-mapping-informative) says,
+in the Python SDK's `uv run pytest`. Its targets (`tests/relay_helpers/conformance_targets.py`) are:
+
+- the WebTransport dialing end (`connect_webtransport`), against the accepting end's default framing,
+  until #232 retires it
+- the native QUIC dialing end (`connect_quic`), against `--framing native-quic`
+
+Each **Differs** row in the Python mapping, and the name-based classification (TA-19, TA-20, TA-22), is a
+known failure there, naming the issue that closes it. TA-6 and TA-25/TA-26 are skipped, with the reasons the
+mapping gives.
 
 Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
 adapter, and the core's SETUP tests cover it. For TA-26 the test is a Node script that has to exit by

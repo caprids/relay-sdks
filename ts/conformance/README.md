@@ -18,6 +18,7 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
 | `../scripts/test-conformance.mjs` | The Chromium launcher: it starts the accepting end, serves the suite to a Playwright page, runs it and prints the results. |
 | `../scripts/conformance-peer.js` | Starts the Python accepting end for either launcher. |
 | `python/…/relay_helpers/conformance_peer.py` | The scriptable accepting end: aioquic, out of process, driven over JSON lines. |
+| `python/…/tests/test_transport_conformance.py` | The suite ported to pytest, against the Python dialing ends (#230). It drives the same accepting end through `relay_helpers/conformance_client.py`. |
 
 ## Running it
 
@@ -126,6 +127,8 @@ accepts it through `serverCertificateHashes`.
 - With `maxStreams`, the dialer gets that many streams of each kind beyond HTTP/3's own. Credit returns one stream at
   a time, as the peer reads a dialer's stream to its FIN. aioquic would otherwise double the limit by itself.
 - `pause()` drops every datagram from the dialer, so nothing is acknowledged.
+- `close()` while paused sends CLOSE_WEBTRANSPORT_SESSION at once. Otherwise the session waits first for the dialer to
+  acknowledge what is in flight, as the SDK's own close does (#209), and a paused peer would only wait out that bound.
 - `loseConnection()` drops traffic both ways until the dialer's idle timeout fires. The peer's own idle timeout is
   10 s.
 - `quicClose()` sends CONNECTION_CLOSE 0x1c.
