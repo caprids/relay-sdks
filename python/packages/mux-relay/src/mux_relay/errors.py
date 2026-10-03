@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Literal
 from moq_core import SESSION_ERROR
 
 if TYPE_CHECKING:
-    from .webtransport import WebTransportError
+    pass
 
 RelayErrorCode = Literal[
     "CONNECTION_TIMEOUT",
@@ -70,19 +70,17 @@ expired token, a path outside the token's root.
 """
 
 
-def _transport_error(error: BaseException, phase: RelayErrorPhase) -> BaseException:
+def _transport_error(
+    error: BaseException, phase: RelayErrorPhase, peer_close: tuple[int, str] | None = None
+) -> BaseException:
+    """Wrap a transport failure as a Relay failure; ``peer_close`` is the peer's application close, if one ended it."""
     # asyncio task cancellation and Relay errors keep their identity; anything else, the transport's
     # own exceptions included, becomes a Relay failure with the original chained as its cause.
     if not isinstance(error, Exception) or isinstance(error, RelayError):
         return error
-    refusal = _credential_refusal(error)
+    refusal = _credential_refusal(error) or _refusal(peer_close)
     wrapped = (
-        RelayError(
-            f"Relay refused the connection's credentials: {refusal.reason or 'no reason given'} "
-            f"(session closed with code 0x{refusal.code:x})",
-            code="UNAUTHORIZED",
-            phase=phase,
-        )
+        _unauthorized(refusal, phase)
         if refusal is not None
         else RelayError(str(error), code="TRANSPORT_ERROR", phase=phase)
     )
@@ -90,15 +88,42 @@ def _transport_error(error: BaseException, phase: RelayErrorPhase) -> BaseExcept
     return wrapped
 
 
-def _credential_refusal(error: Exception) -> WebTransportError | None:
+def _unauthorized(refusal: tuple[int, str], phase: RelayErrorPhase) -> RelayError:
+    code, reason = refusal
+    return RelayError(
+        f"Relay refused the connection's credentials: {reason or 'no reason given'} "
+        f"(session closed with code 0x{code:x})",
+        code="UNAUTHORIZED",
+        phase=phase,
+    )
+
+
+def _refusal(peer_close: tuple[int, str] | None) -> tuple[int, str] | None:
+    """The peer's application close ``(code, reason)``, when it closed because of the credentials."""
+    return peer_close if peer_close is not None and peer_close[0] in _CREDENTIAL_REFUSALS else None
+
+
+def _credential_refusal(error: Exception) -> tuple[int, str] | None:
     """The peer's session close, when it closed the WebTransport session because of the credentials."""
     # Imported here: the webtransport package imports the connection code, which imports this module.
     from .webtransport import WebTransportError
 
-    if isinstance(error, WebTransportError) and error.peer_closed and error.code in _CREDENTIAL_REFUSALS:
-        return error
+    if isinstance(error, WebTransportError) and error.peer_closed and error.code is not None:
+        return _refusal((error.code, error.reason))
 
     return None
+
+
+def _peer_close(transport: object) -> tuple[int, str] | None:
+    """The peer's application CONNECTION_CLOSE ``(code, reason)`` on a native QUIC session, once it arrived.
+
+    A native QUIC session ends cleanly on any application close (TA-9), so a refusal reaches the SDK
+    only through this, not through the error the session ends with.
+    """
+    # Imported here for the same reason as in `_credential_refusal`.
+    from .quic._client import QuicSession
+
+    return transport.close_info if isinstance(transport, QuicSession) else None
 
 
 def _stream_stopped(error: BaseException) -> bool:

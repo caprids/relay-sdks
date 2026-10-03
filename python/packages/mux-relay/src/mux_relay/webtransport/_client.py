@@ -213,12 +213,12 @@ class WebTransportSession(WebTransportSessionBase):
                 error if error is not None else WebTransportError("closed before the session was established")
             )
 
-    def _finish(self, error: BaseException | None) -> None:
+    def _finish(self, error: BaseException | None, *, stream_error: BaseException | None = None) -> None:
         # Every way the session can end (a local close, the QUIC connection terminating, a peer close
         # capsule) runs through here, so a handshake still waiting on the CONNECT response fails now
         # instead of hanging until the caller's connect deadline.
         self._reject_ready(error)
-        super()._finish(error)
+        super()._finish(error, stream_error=stream_error)
 
     def _transport_protocol(self) -> WebTransportProtocol | None:
         return self._protocol or self._pending_protocol
@@ -282,4 +282,4 @@ def connect_webtransport(
     parameters; ALPN and datagram support are set for HTTP/3 regardless.
     """
     session = WebTransportSession(url, protocols, configuration)
-    return ConnectingTransport(transport=session, ready=session.ready)
+    return ConnectingTransport(transport=session, ready=session.ready, framing="webtransport")
