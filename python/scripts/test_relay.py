@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Opt-in live smoke test against a real Relay. Excluded from ``mise run python:check``.
 
-Publishes and subscribes on the same random namespace over an aioquic transport, then
-asserts the list in ``spec/behavior.md``:
+Publishes and subscribes on the same random namespace over the SDK's default transport (native QUIC
+on aioquic), then asserts the list in ``spec/behavior.md``:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
 2. Once the publisher's ``announced`` settles, subscriptions to two tracks on the namespace are
@@ -16,8 +16,8 @@ asserts the list in ``spec/behavior.md``:
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
 (https, without the token), ``RELAY_NAMESPACE_PREFIX`` (a random field is appended). The token is
 never written to disk and is redacted from output. For anonymous local relays, set
-``RELAY_ANONYMOUS=1``; ``RELAY_CA_FILE`` supplies a local certificate trust root. ``RELAY_FRAMING=native-quic``
-dials over native QUIC (``mux_relay.quic``) instead of a WebTransport session.
+``RELAY_ANONYMOUS=1``; ``RELAY_CA_FILE`` supplies a local certificate trust root. ``RELAY_FRAMING=webtransport``
+dials a WebTransport session (``mux_relay.webtransport``) instead, until #232 retires it.
 See ``spec/relay-interop.md`` for the local moq-relay 0.15.8 reproduction.
 
     # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
@@ -91,11 +91,19 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
     from mux_relay.quic import connect_quic
     from mux_relay.webtransport import connect_webtransport
 
-    connect = connect_quic if os.environ.get("RELAY_FRAMING") == "native-quic" else connect_webtransport
+    framing = os.environ.get("RELAY_FRAMING", "native-quic")
 
-    def create_transport(url: str, protocols: Any) -> Any:
-        configuration = QuicConfiguration(is_client=True, cafile=os.environ.get("RELAY_CA_FILE"))
-        return connect(url, protocols, configuration=configuration)
+    if framing not in ("native-quic", "webtransport"):
+        raise SystemExit("RELAY_FRAMING must be native-quic or webtransport")
+
+    connect = connect_quic if framing == "native-quic" else connect_webtransport
+    cafile = os.environ.get("RELAY_CA_FILE")
+
+    def dial(url: str, protocols: Any) -> Any:
+        return connect(url, protocols, configuration=QuicConfiguration(is_client=True, cafile=cafile))
+
+    # Without a trust root or a framing to swap, the run takes the SDK's own default transport.
+    create_transport = dial if cafile or framing != "native-quic" else None
 
     lifetime = CancellationToken()
     loop = asyncio.get_running_loop()

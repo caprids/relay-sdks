@@ -7,7 +7,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.11"
 # The product package owns the Relay API, the authentication convention, and the default
-# transport: WebTransport over HTTP/3 through aioquic, so this SDK runs natively with no browser.
+# transport: native QUIC through aioquic, so this SDK runs natively with no browser.
 # mux-moq-core is released in lockstep, so the pin is exact; scripts/release_version.py moves it.
 dependencies = ["mux-moq-core==0.0.0", "aioquic>=1.3,<1.4"]
 

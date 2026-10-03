@@ -2,7 +2,7 @@
 
 A standalone product SDK for Relay. Connect to a Relay endpoint and subscribe to arbitrary track
 objects, or publish data, from any Python 3.11+ asyncio program. No browser is involved: the SDK
-speaks WebTransport over HTTP/3 through aioquic.
+speaks MOQT directly on QUIC (native QUIC) through aioquic.
 
 This is the Python SDK in the Relay SDKs repository. The shared protocol pins, behavior contract, and
 test vectors live in [spec](../spec/README.md); the [root README](../README.md) describes the suite. Package names are provisional
@@ -13,13 +13,13 @@ and publication is disabled.
 The packages are **unpublished**. Use the local uv workspace below; there is no registry install
 step. You need Git and [mise](https://mise.jdx.dev/getting-started.html) on PATH. The SDK requires
 Python 3.11+; mise installs the repository's pinned Python and uv. Commands below run in Bash from
-the repository root. The default transport is native aioquic WebTransport over HTTP/3, not a browser
+the repository root. The default transport is native QUIC through aioquic, not a browser, HTTP/3
 or a WebSocket. The endpoint and network must allow QUIC/UDP traffic.
 
 ### Endpoint and credentials
 
 Ask the team operating your Relay deployment (or your application's backend owner) for an HTTPS
-WebTransport endpoint, the exact authorized namespace fields including any root prefix, and a
+Relay endpoint, the exact authorized namespace fields including any root prefix, and a
 short-lived Relay JWT authorized to **publish and subscribe** there. The SDK consumes tokens; it
 does not issue them or provide a public token signup flow. A Mux API access token is not a Relay JWT.
 The hosted demo defaults to `https://sjc.relay.mux.global`, which still requires authorized credentials.
@@ -535,14 +535,14 @@ Python raises one `RelayError`, with the `code` above and a `phase`, exactly as 
 subscription errors that carry payload (`SubscriptionRequestError`, `SubscriptionOverflowError`,
 `SubscriptionConnectionClosedError`). Branch on `code`, never on the message.
 
-Wrapped transport/session failures preserve the original exception in `__cause__`. The lower-level
-WebTransport API's `WebTransportError` (in `mux_relay.webtransport`) is the transport's own
-exception, not a `RelayError`; it keeps its numeric `code` and `reason`, and a failure surfaced
-through the Relay connection/publishing API wraps it in a `RelayError` with `code == "TRANSPORT_ERROR"`
-and the `WebTransportError` as `__cause__`. When the peer closed the session with a
-CLOSE_WEBTRANSPORT_SESSION capsule, `peer_closed` is true and `code` and `reason` are the capsule's;
-a credential refusal (code 0x2, reason `"unauthorized"` from moq-relay) is wrapped as
-`code == "UNAUTHORIZED"` instead. Explicit caller cancellation, including
+Wrapped transport/session failures preserve the original exception in `__cause__`. The transport's
+own exception is `WebTransportError` (in `mux_relay.webtransport`), on native QUIC too until #233
+classifies transport errors by shape. It is not a `RelayError`; it keeps its numeric `code` and
+`reason`, and a failure surfaced through the Relay connection/publishing API wraps it in a
+`RelayError` with `code == "TRANSPORT_ERROR"` and the `WebTransportError` as `__cause__`. A
+credential refusal is a peer close with code 0x2 and reason `"unauthorized"` from moq-relay: on
+native QUIC an application CONNECTION_CLOSE, on a WebTransport session a CLOSE_WEBTRANSPORT_SESSION
+capsule. Either is reported as `code == "UNAUTHORIZED"` instead. Explicit caller cancellation, including
 `asyncio.CancelledError`, is passed through unchanged.
 
 ```python
@@ -559,33 +559,28 @@ except RelayError as error:
 
 ## Transport
 
-`connect_relay_subscriber` and `connect_relay_publisher` default to `mux_relay.connect_webtransport`, a
-WebTransport-over-HTTP/3 client on aioquic: extended CONNECT with `WT-Available-Protocols: "moqt-20"`,
-session-bound streams, CLOSE_WEBTRANSPORT_SESSION on shutdown. TLS verification uses the system CA
-bundle that ships with `certifi`. Pass `create_transport` to supply a `QuicConfiguration` (custom
-CAs, QUIC parameters) or any other implementation of the `moq_core.MoqtTransport` seam:
+`connect_relay_subscriber` and `connect_relay_publisher` default to `mux_relay.quic.connect_quic`,
+native QUIC on aioquic: the wire path `@mux/relay-quic` uses on Node. MOQT runs straight on the QUIC
+connection with ALPN `moqt-20` and no HTTP/3, and SETUP carries the endpoint's path (with the token)
+and authority ([ADR 0004](../docs/adr/0004-python-dialing-end-speaks-native-quic.md)). The connection
+ends with an application CONNECTION_CLOSE. TLS verification uses the system CA bundle that ships with
+`certifi`. Pass `create_transport` to supply a `QuicConfiguration` (custom CAs, QUIC parameters) or
+any other implementation of the `moq_core.MoqtTransport` seam:
 
 ```python
 from aioquic.quic.configuration import QuicConfiguration
-from mux_relay import connect_relay_subscriber, connect_webtransport
+from mux_relay import connect_relay_subscriber
+from mux_relay.quic import connect_quic
 
 configuration = QuicConfiguration(is_client=True, cafile="/path/to/ca.pem")
 subscriber = await connect_relay_subscriber(
-    url, create_transport=lambda url, protocols: connect_webtransport(url, protocols, configuration=configuration)
+    url, create_transport=lambda url, protocols: connect_quic(url, protocols, configuration=configuration)
 )
 ```
 
-`mux_relay.quic.connect_quic` speaks native QUIC instead, the wire path `@mux/relay-quic` uses on
-Node: MOQT straight on QUIC with ALPN `moqt-20`, no HTTP/3, and the endpoint's path, token and
-authority in SETUP. It takes the same `configuration`, and it becomes the default in a later release
-([ADR 0004](../docs/adr/0004-python-dialing-end-speaks-native-quic.md)). Until then, pass it as
-`create_transport`:
-
-```python
-from mux_relay.quic import connect_quic
-
-subscriber = await connect_relay_subscriber(url, create_transport=connect_quic)
-```
+`mux_relay.connect_webtransport`, a WebTransport session over HTTP/3 on aioquic (extended CONNECT
+with `WT-Available-Protocols: "moqt-20"`), takes the same `configuration` through `create_transport`.
+It leaves the package before the first release (#232).
 
 ### Receive throughput
 
@@ -602,18 +597,20 @@ end-to-end latency and growing subscriber memory. The SDK has no transport-wide 
 async consumption limits bound local buffering only (see
 [async subscription consumption](../spec/behavior.md#async-subscription-consumption)).
 
-`packages/mux-relay/tests/test_webtransport.py` runs the full smoke-test assertion list over a real
-QUIC loopback: a WebTransport server on `127.0.0.1` (aioquic, self-signed certificate) fronting the
-in-memory relay hub, so the transport adapter is exercised end to end in `python:check`. The stream
+`packages/mux-relay/tests/test_quic.py` runs the full smoke-test assertion list over a real QUIC
+loopback: native QUIC listeners on `localhost` (aioquic, self-signed certificates) fronting the
+in-memory relay hub (`tests/relay_helpers/quic_hub.py`), so the default transport is exercised end to
+end in `python:check`. It also holds the native QUIC dialing end to the transport adapter rules, one
+test per rule, against the conformance peer's native QUIC mode. `test_webtransport.py` does the same
+for the WebTransport session, which still has its own loopback tests until #232. The stream
 halves and the dropped-FIN retry also have in-process tests that need no socket
 (`test_webtransport_streams.py`, which holds the halves to the same expectations as the core's in-memory
 `Pipe`, and `test_webtransport_fin_retry.py`), and `test_webtransport_aioquic.py` pins the aioquic
 internals the adapter reaches into, all named in `mux_relay/webtransport/_aioquic.py`, along with the
 aioquic behaviour its workarounds exist for. Where a test needs real packets it handshakes a client and
 server `QuicConnection` in memory (`tests/relay_helpers/quic_pair.py`). The package pins
-`aioquic>=1.3,<1.4` until that list is re-verified against a newer minor. `test_quic.py` does the same
-for native QUIC, one test per transport adapter rule, against the conformance peer's native QUIC mode
-and the relay hub served over native QUIC; `RELAY_FRAMING=native-quic` runs the live smoke test over it.
+`aioquic>=1.3,<1.4` until that list is re-verified against a newer minor. The live smoke test dials
+native QUIC; `RELAY_FRAMING=webtransport` runs it over a WebTransport session instead.
 
 ## Video.js media example
 
@@ -661,7 +658,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `subscriber.trackSource` | `subscriber.track_source` |
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
 | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
-| Browser `WebTransport` | aioquic WebTransport client (`connect_webtransport`) |
+| Browser `WebTransport`, or `@mux/relay-quic` on Node | aioquic native QUIC client (`mux_relay.quic.connect_quic`) |
 
 ## Initial scope
 

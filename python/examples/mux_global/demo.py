@@ -5,7 +5,7 @@ The SDK usage lives in :func:`run_demo`. It connects a publisher with ``connect_
 registers a track, connects a subscriber with ``connect_relay_subscriber`` to the same track, publishes JSON
 objects one second apart, and prints each object as it comes back through the relay. It decodes the
 JSON itself; the SDK only delivers bytes. Unlike the TypeScript example, no browser is involved: the
-aioquic WebTransport transport runs natively.
+SDK's native QUIC transport runs on aioquic.
 
     # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
     mise run python:example:mux-global -- --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE"

@@ -3,7 +3,7 @@
 The dialing end of the framing ``@mux/relay-quic`` speaks for Node: the connection offers the MOQT
 protocol identifiers as its ALPN list, and the core sends the endpoint's path (with the token) and
 authority in SETUP instead of a CONNECT request (``spec/transport-adapter.md`` TA-1 to TA-6). It is
-available through ``create_transport`` and is not the default yet (#231).
+the default transport of ``connect_relay_publisher`` and ``connect_relay_subscriber``.
 
 The QUIC-level workarounds it shares with the WebTransport session (the dropped-FIN retry, resets
 served first, the keepalive, the ICMP refusal reports, the drain before close) live in

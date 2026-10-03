@@ -109,8 +109,8 @@ listener, viewer
 
 **Transport adapter**:
 An implementation of the transport seam a connection runs over: create and accept streams, close,
-observe closure (the core's `MoqtTransport`). The aioquic WebTransport client is the Python product's
-default adapter, and its aioquic native QUIC client (`mux_relay.quic`) replaces it (ADR 0004); in TypeScript a runtime's native `WebTransport` is the default adapter, and runtimes without
+observe closure (the core's `MoqtTransport`). The aioquic native QUIC client (`mux_relay.quic`) is the
+Python product's default adapter, and replaces its aioquic WebTransport client (ADR 0004); in TypeScript a runtime's native `WebTransport` is the default adapter, and runtimes without
 one take an adapter the caller supplies. The tests supply in-memory pairs and a loopback accepting end.
 _Avoid_: polyfill (an adapter satisfies the SDK's seam, not the W3C `WebTransport` API), transport
 layer, transport implementation, WebTransport (the protocol, not the adapter), connection (a Relay
@@ -119,7 +119,7 @@ connection runs over an adapter)
 **Native QUIC**:
 MOQT carried directly on a QUIC connection, with the MOQT version as the ALPN and the path and
 authority sent in SETUP. The TypeScript SDK uses it where a runtime has no usable `WebTransport`, and
-the Python SDK is moving to it (ADR 0004).
+it is the Python SDK's default transport (ADR 0004).
 _Avoid_: raw QUIC, direct QUIC, plain QUIC
 
 **WebTransport session**:

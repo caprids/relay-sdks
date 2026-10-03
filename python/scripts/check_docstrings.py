@@ -16,7 +16,7 @@ import inspect
 import sys
 from collections.abc import Iterator
 
-PACKAGES = ("mux_relay", "mux_relay.webtransport", "moq_core", "moq_media")
+PACKAGES = ("mux_relay", "mux_relay.quic", "mux_relay.webtransport", "moq_core", "moq_media")
 
 
 def _own_doc(obj: object) -> str | None:

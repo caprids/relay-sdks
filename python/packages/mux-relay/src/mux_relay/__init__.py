@@ -1,7 +1,7 @@
 """Relay Python SDK.
 
 Owns the Relay product API and authentication convention, built on ``moq_core``. The default
-transport is WebTransport over HTTP/3 through aioquic, which reaches a relay natively with no
+transport is native QUIC through aioquic (``mux_relay.quic``), which reaches a relay natively with no
 browser; ``create_transport`` swaps in another implementation of the same seam.
 
 The public names are the rows of ``spec/vocabulary.md``, pinned by ``tests/test_exports.py``. From
