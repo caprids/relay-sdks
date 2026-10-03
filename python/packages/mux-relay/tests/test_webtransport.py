@@ -778,7 +778,7 @@ class TestKeepalive:
 
     @pytest.fixture(autouse=True)
     def _short_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mux_relay.webtransport import _protocol
+        from mux_relay.webtransport import _quic_protocol as _protocol
 
         assert _protocol._KEEPALIVE_INTERVAL == 5.0
         monkeypatch.setattr(_protocol, "_KEEPALIVE_INTERVAL", self.INTERVAL)

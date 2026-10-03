@@ -13,6 +13,7 @@ from moq_core import (
     FetchHandle,
     FetchHandlers,
     Goaway,
+    KeyValuePair,
     MessageParameters,
     MoqtObject,
     MoqTrackSource,
@@ -345,11 +346,14 @@ async def connect_relay_subscriber(
         create_transport=create_transport,
     )
 
-    def create_session(transport: MoqtTransport, callbacks: LifetimeCallbacks) -> MoqtSession:
+    def create_session(
+        transport: MoqtTransport, callbacks: LifetimeCallbacks, setup_options: Sequence[KeyValuePair]
+    ) -> MoqtSession:
         return create_moqt_session(
             transport,
             MoqtSessionConfig(
                 implementation_name=IMPLEMENTATION_NAME,
+                setup_options=setup_options,
                 request_timeout=request_timeout,
                 callbacks=MoqtSessionCallbacks(on_closed=callbacks.on_closed, on_goaway=callbacks.on_goaway),
             ),

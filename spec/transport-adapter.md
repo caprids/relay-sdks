@@ -1,8 +1,8 @@
 # Transport adapter contract
 
 A Relay connection runs over a **transport adapter** (see `CONTEXT.md`): the browser's native
-`WebTransport`, the Python aioquic WebTransport client, the `@mux/relay-quic` native QUIC adapter
-for Node, and the in-memory pairs the tests use. This document states what every adapter must do
+`WebTransport`, the Python aioquic WebTransport client and native QUIC client, the `@mux/relay-quic`
+native QUIC adapter for Node, and the in-memory pairs the tests use. This document states what every adapter must do
 for the SDK core to behave as `behavior.md` says. Until now that was only the TypeScript
 `MoqtTransport` interface plus behaviour the core relied on without writing it down.
 
@@ -50,8 +50,8 @@ only.
 The rules are stated in terms of the protocols (send stream, receive stream, reset, FIN
 acknowledgement) and are normative for the TypeScript SDK, whose binding is the next section. The
 [Python mapping](#python-mapping-informative) records how `moq_core.transport` meets the same rules
-and where its aioquic adapter differs today. It is informative: moving Python to native QUIC is
-#199, not this contract.
+and where its aioquic adapters differ today. It is informative: moving Python's default to native
+QUIC is #199, not this contract.
 
 Datagrams are outside the contract. MOQT requires the QUIC DATAGRAM extension
 (draft-20 §3.1), and the QUIC stack negotiates it, but the core never sends or reads datagrams.
@@ -348,23 +348,31 @@ conformance suite's Python accepting end, the Python loopback server, or `@mux/r
 
 ## Python mapping (informative)
 
-`moq_core.transport.MoqtTransport` is the same seam spelled for asyncio, and `mux_relay.webtransport`
-is its aioquic WebTransport session adapter. How the rules map:
+`moq_core.transport.MoqtTransport` is the same seam spelled for asyncio. `mux_relay` has two aioquic
+adapters for it: `mux_relay.webtransport` (`connect_webtransport`), a WebTransport session and the
+default, and `mux_relay.quic` (`connect_quic`), native QUIC, through `create_transport` until it
+becomes the default (#231) and the WebTransport session leaves the package (#232, ADR 0004). The
+two share the stream halves and the QUIC-level half of the connection, so a rule below holds for
+both unless the row names one. How the rules map:
 
 | Rule | Python |
 | --- | --- |
-| TA-1 to TA-6 | WebTransport session only (`connect_webtransport`); the CONNECT carries the URL and `WT-Available-Protocols`. Native QUIC is #199. |
-| TA-7, TA-8 | `protocol_id` holds the selection, and an unoffered selection fails the dial. **Differs:** a response that names no protocol is accepted, with `protocol_id` set to `None` (#229). |
-| TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. It has no code to return. **Differs:** a peer CLOSE_WEBTRANSPORT_SESSION with a nonzero code raises, carrying the code (TA-24), instead of returning. That is how the SDK reports `UNAUTHORIZED` today. Native QUIC settles cleanly (#229), and #232 retires the WebTransport dialing end. |
-| TA-10 | `close(close_code=0, reason="")` is idempotent and ignored after the session ends. |
-| TA-11 | **Differs:** `close()` before `ready` makes `ready` raise but ends the session cleanly, so `wait_closed()` returns (#234). |
-| TA-12 | The incoming readables are async iterators. **Differs:** they end with `StopAsyncIteration` however the session ended, never with its error (#235). |
+| TA-1 | `ConnectingTransport.framing`, `"webtransport"` by default. `connect_quic` declares `"native-quic"`. Any other value fails the connection with `TRANSPORT_ERROR`, closing the transport. |
+| TA-2 | WebTransport session: the CONNECT carries the URL as given. |
+| TA-3, TA-4 | Native QUIC: `connect_quic` takes the `https:` URL, dials its host and port (443 by default) with the host as the server name, and reads nothing else from it. |
+| TA-5 | WebTransport session: `WT-Available-Protocols`. Native QUIC: the ALPN list is exactly `protocols`, with no `h3`. |
+| TA-6 | `open_relay_session` sends PATH and AUTHORITY through moq_core's `setup_options` on native QUIC only (`test_setup_options.py`, against `vectors/setup-options.json`). |
+| TA-7, TA-8 | `protocol_id` holds the selection, and an unoffered selection fails the dial. Native QUIC: a handshake that negotiates no ALPN fails it too, and `protocol_id` is the negotiated ALPN. **Differs, WebTransport session:** a response that names no protocol is accepted, with `protocol_id` set to `None` (until #232 retires it). |
+| TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. Native QUIC: a peer's application close (0x1d) is a clean end whatever its code, and `close_info` holds its `(code, reason)`; a QUIC-layer close, an idle timeout or a failed dial raises. **Differs, WebTransport session:** a CLOSE_WEBTRANSPORT_SESSION capsule with a nonzero code raises (until #232 retires it). |
+| TA-10 | `close(close_code=0, reason="")` is idempotent and ignored after the session ends. It waits, within a bound, for every send stream to be acknowledged first (#209). Native QUIC ends with an application CONNECTION_CLOSE carrying the code and reason; the WebTransport session sends the capsule. |
+| TA-11 | `close()` before `ready` cancels the dial and fails `ready`. Native QUIC: `wait_closed()` raises too. **Differs, WebTransport session:** `wait_closed()` returns (until #232 retires it). |
+| TA-12 | The incoming readables are async iterators. **Differs:** in both framings they end with `StopAsyncIteration` however the session ended, never with its error (#235). |
 | TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. `wait_acknowledged()` also raises when the stream fails between writes, so it stands in for `writer.closed` (TA-12, TA-16, TA-20). A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
 | TA-16 | `abort()` resets until the peer acknowledges the FIN, including after the FIN was transmitted, and `wait_acknowledged()` then raises the reason. Once the FIN is acknowledged it does nothing (the stream is in Data Recvd). A settling group's delivery timeout depends on this (#167). |
-| TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `WebTransportError`'s `code`, else from a `stream_error_code` attribute, else from an integer reason, each within 0 to 2³²−1, else 0. |
+| TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `WebTransportError`'s `code`, else from a `stream_error_code` attribute, else from an integer reason, each within 0 to 2³²−1, else 0. Native QUIC puts the code on the wire as it is; the WebTransport session maps it into the HTTP/3 range. |
 | TA-19, TA-20, TA-22 | **Name-based, not shape-based:** a stream failure is a `WebTransportError` with the peer's code in `code`, and a peer STOP_SENDING is its `StreamStopped` subclass. There is no `source` field (#233). |
-| TA-21 | **Differs:** at the peer's stream limit, a create succeeds: aioquic queues the stream as blocked until MAX_STREAMS rises (#236). |
-| TA-24 | `peer_closed`, `code` and `reason` carry the peer's CLOSE_WEBTRANSPORT_SESSION, and the SDK reports `UNAUTHORIZED` from it. |
+| TA-21 | Native QUIC: a create rejects at once when the peer's MAX_STREAMS is used up, and succeeds again once the peer raises it. **Differs, WebTransport session:** aioquic opens the stream anyway and holds it until the peer raises the limit (until #232 retires it). |
+| TA-24 | WebTransport session: `peer_closed`, `code` and `reason` carry the peer's CLOSE_WEBTRANSPORT_SESSION. Native QUIC: `close_info` carries the peer's application close, and so does the error an operation raises once it has ended the session. The SDK reports `UNAUTHORIZED` from either, in any phase. |
 | TA-25, TA-26 | asyncio holds no process open by itself: the application's own `asyncio.run` decides. |
 
 ## Conformance
@@ -383,12 +391,13 @@ A pytest port (`python/packages/mux-relay/tests/test_transport_conformance.py`, 
 against `moq_core.transport.MoqtTransport`, spelled as the [Python mapping](#python-mapping-informative) says,
 in the Python SDK's `uv run pytest`. Its targets (`tests/relay_helpers/conformance_targets.py`) are:
 
-- the WebTransport dialing end (`connect_webtransport`), against the accepting end's default framing
-- the native QUIC dialing end, against `--framing native-quic`, skipped until #229 adds it
+- the WebTransport dialing end (`connect_webtransport`), against the accepting end's default framing,
+  until #232 retires it
+- the native QUIC dialing end (`connect_quic`), against `--framing native-quic`
 
 Each **Differs** row in the Python mapping, and the name-based classification (TA-19, TA-20, TA-22), is a
-known failure there, naming the issue that closes it. TA-6 and
-TA-25/TA-26 are skipped, with the reasons the mapping gives.
+known failure there, naming the issue that closes it. TA-6 and TA-25/TA-26 are skipped, with the reasons the
+mapping gives.
 
 Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
 adapter, and the core's SETUP tests cover it. For TA-26 the test is a Node script that has to exit by

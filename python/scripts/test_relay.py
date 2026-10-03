@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Opt-in live smoke test against a real Relay. Excluded from ``mise run python:check``.
 
-Publishes and subscribes on the same random namespace over the aioquic WebTransport transport, then
+Publishes and subscribes on the same random namespace over an aioquic transport, then
 asserts the list in ``spec/behavior.md``:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
@@ -16,7 +16,8 @@ asserts the list in ``spec/behavior.md``:
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
 (https, without the token), ``RELAY_NAMESPACE_PREFIX`` (a random field is appended). The token is
 never written to disk and is redacted from output. For anonymous local relays, set
-``RELAY_ANONYMOUS=1``; ``RELAY_CA_FILE`` supplies a local certificate trust root.
+``RELAY_ANONYMOUS=1``; ``RELAY_CA_FILE`` supplies a local certificate trust root. ``RELAY_FRAMING=native-quic``
+dials over native QUIC (``mux_relay.quic``) instead of a WebTransport session.
 See ``spec/relay-interop.md`` for the local moq-relay 0.15.8 reproduction.
 
     # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
@@ -87,11 +88,14 @@ def redact(value: str, token: str | None) -> str:
 async def run(endpoint: str, token: str | None, namespace: list[str], report: Any) -> dict[str, Any]:
     from aioquic.quic.configuration import QuicConfiguration
 
+    from mux_relay.quic import connect_quic
     from mux_relay.webtransport import connect_webtransport
+
+    connect = connect_quic if os.environ.get("RELAY_FRAMING") == "native-quic" else connect_webtransport
 
     def create_transport(url: str, protocols: Any) -> Any:
         configuration = QuicConfiguration(is_client=True, cafile=os.environ.get("RELAY_CA_FILE"))
-        return connect_webtransport(url, protocols, configuration=configuration)
+        return connect(url, protocols, configuration=configuration)
 
     lifetime = CancellationToken()
     loop = asyncio.get_running_loop()

@@ -2,8 +2,8 @@
 
 A target is what ``ts/conformance/README.md`` calls one ("Targets"), spelled for pytest: its framing, what its peer
 and runtime can do, the gaps it skips with their reasons, and the rules it is known to fail, each naming the issue
-that closes the gap. ``TARGETS`` lists one factory per dialing end; a dialing end that does not exist yet is a target
-with ``unavailable`` set, so its tests are skipped with that reason rather than missing.
+that closes the gap. ``TARGETS`` lists one factory per dialing end; a dialing end that does not exist yet would be a
+target with ``unavailable`` set, so its tests are skipped with that reason rather than missing.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import pytest
 from aioquic.quic.configuration import QuicConfiguration
 
 from mux_relay.connect_session import ConnectingTransport
+from mux_relay.quic import connect_quic
 from mux_relay.webtransport import connect_webtransport
 
 IDLE_TIMEOUT = 10.0
@@ -80,15 +81,33 @@ _SHAPE = KnownFailure(
     raises=ErrorShapeFailure,
 )
 _PEER_CLOSE = KnownFailure(
-    "#229, #232: the WebTransport dialing end raises for a peer close with a nonzero code, which is how it reports "
+    "#232: the WebTransport dialing end raises for a peer close with a nonzero code, which is how it reports "
     "UNAUTHORIZED; native QUIC settles cleanly (#229), and #232 retires this end "
     "(spec/transport-adapter.md, Python mapping, TA-9)",
     match=r"wait_closed: raised WebTransportError\('peer closed the WebTransport session",
 )
+_ITERATORS_END = KnownFailure(
+    "#235: the incoming stream iterators end cleanly however the session ended "
+    "(spec/transport-adapter.md, Python mapping, TA-12)",
+    match=r"^the incoming uni iterator ended cleanly instead of raising$",
+)
+_SHAPE_CASES = dict.fromkeys(
+    (
+        "test_ta_19_a_peer_reset_errors_the_receive_stream_with_the_peers_code",
+        "test_ta_19_a_peer_reset_errors_the_receive_stream_while_nothing_reads_it",
+        "test_ta_19_a_peer_reset_errors_a_bidirectional_streams_readable",
+        "test_ta_20_a_peer_stop_fails_the_send_stream_while_nothing_is_in_flight",
+        "test_ta_20_a_peer_stop_fails_a_write_blocked_on_flow_control",
+        "test_ta_20_a_peer_stop_on_a_bidirectional_stream_fails_its_writer",
+        "test_ta_22_a_session_error_has_source_session",
+    ),
+    _SHAPE,
+)
+"""The cases that check the TA-22 shape, on every target until #233."""
 
 
 def webtransport_target() -> ConformanceTarget:
-    """Today's dialing end: ``connect_webtransport``, against the peer's default framing."""
+    """The WebTransport dialing end, ``connect_webtransport``, against the peer's default framing. #232 retires it."""
     return ConformanceTarget(
         name="webtransport",
         framing="webtransport",
@@ -102,48 +121,43 @@ def webtransport_target() -> ConformanceTarget:
         },
         expectations={
             "test_ta_7_ready_rejects_when_the_peer_selects_no_protocol": KnownFailure(
-                "#229: a response that names no protocol is accepted, with protocol_id None "
-                "(spec/transport-adapter.md, Python mapping, TA-7)",
+                "#232: a WebTransport response that names no protocol is accepted, with protocol_id None; native "
+                "QUIC fails the dial, and #232 retires this end (spec/transport-adapter.md, Python mapping, TA-7)",
                 match=r"^ready returned, with protocol None$",
             ),
             "test_ta_9_wait_closed_returns_after_the_peers_application_close": _PEER_CLOSE,
             "test_ta_11_close_before_ready_cancels_the_dial": KnownFailure(
-                "#234: close() before ready ends the session cleanly, so wait_closed() returns "
-                "(spec/transport-adapter.md, Python mapping, TA-11)",
+                "#232: close() before ready ends a WebTransport session cleanly, so wait_closed() returns; native "
+                "QUIC raises, and #232 retires this end (#234; spec/transport-adapter.md, Python mapping, TA-11)",
                 match=r"^wait_closed: returned None, expected it to raise$",
             ),
-            "test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close": KnownFailure(
-                "#235: the incoming stream iterators end cleanly however the session ended "
-                "(spec/transport-adapter.md, Python mapping, TA-12)",
-                match=r"^the incoming uni iterator ended cleanly instead of raising$",
-            ),
+            "test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close": _ITERATORS_END,
             "test_ta_21_creates_raise_promptly_at_the_peers_stream_limit_and_succeed_once_credit_returns": KnownFailure(
-                "#236: aioquic queues a stream beyond the peer's limit as blocked, so the create succeeds "
-                "(spec/transport-adapter.md, Python mapping, TA-21)",
+                "#232: aioquic queues a WebTransport stream beyond the peer's limit as blocked, so the create "
+                "succeeds; native QUIC raises, and #232 retires this end (#236; spec/transport-adapter.md, Python "
+                "mapping, TA-21)",
                 match=r"^create unidirectional stream 5 of 4: returned .*, expected it to raise$",
             ),
-            "test_ta_19_a_peer_reset_errors_the_receive_stream_with_the_peers_code": _SHAPE,
-            "test_ta_19_a_peer_reset_errors_the_receive_stream_while_nothing_reads_it": _SHAPE,
-            "test_ta_19_a_peer_reset_errors_a_bidirectional_streams_readable": _SHAPE,
-            "test_ta_20_a_peer_stop_fails_the_send_stream_while_nothing_is_in_flight": _SHAPE,
-            "test_ta_20_a_peer_stop_fails_a_write_blocked_on_flow_control": _SHAPE,
-            "test_ta_20_a_peer_stop_on_a_bidirectional_stream_fails_its_writer": _SHAPE,
-            "test_ta_22_a_session_error_has_source_session": _SHAPE,
+            **_SHAPE_CASES,
         },
     )
 
 
 def native_quic_target() -> ConformanceTarget:
-    """The native QUIC dialing end, against ``--framing native-quic``. #229 adds it; until then it is skipped."""
+    """The native QUIC dialing end: ``connect_quic``, against ``--framing native-quic``."""
     return ConformanceTarget(
         name="native-quic",
         framing="native-quic",
         peer_framing="native-quic",
         host="localhost",
-        dial=None,
+        dial=lambda url, protocols, configuration: connect_quic(url, protocols, configuration=configuration),
         capabilities=PEER_CAPABILITIES | {"native-quic", "largeCodes"},
         gaps={"webtransport": "native QUIC carries no WebTransport session"},
-        unavailable="#229: there is no native QUIC dialing end yet",
+        expectations={
+            "test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close": _ITERATORS_END,
+            "test_ta_22_a_code_above_2_53_minus_1_is_reported_as_none": _SHAPE,
+            **_SHAPE_CASES,
+        },
     )
 
 

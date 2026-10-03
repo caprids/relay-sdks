@@ -575,6 +575,18 @@ subscriber = await connect_relay_subscriber(
 )
 ```
 
+`mux_relay.quic.connect_quic` speaks native QUIC instead, the wire path `@mux/relay-quic` uses on
+Node: MOQT straight on QUIC with ALPN `moqt-20`, no HTTP/3, and the endpoint's path, token and
+authority in SETUP. It takes the same `configuration`, and it becomes the default in a later release
+([ADR 0004](../docs/adr/0004-python-dialing-end-speaks-native-quic.md)). Until then, pass it as
+`create_transport`:
+
+```python
+from mux_relay.quic import connect_quic
+
+subscriber = await connect_relay_subscriber(url, create_transport=connect_quic)
+```
+
 ### Receive throughput
 
 The QUIC stack is pure Python, so a subscriber's receive rate is bound by CPU on the event loop's one
@@ -599,7 +611,9 @@ halves and the dropped-FIN retry also have in-process tests that need no socket
 internals the adapter reaches into, all named in `mux_relay/webtransport/_aioquic.py`, along with the
 aioquic behaviour its workarounds exist for. Where a test needs real packets it handshakes a client and
 server `QuicConnection` in memory (`tests/relay_helpers/quic_pair.py`). The package pins
-`aioquic>=1.3,<1.4` until that list is re-verified against a newer minor.
+`aioquic>=1.3,<1.4` until that list is re-verified against a newer minor. `test_quic.py` does the same
+for native QUIC, one test per transport adapter rule, against the conformance peer's native QUIC mode
+and the relay hub served over native QUIC; `RELAY_FRAMING=native-quic` runs the live smoke test over it.
 
 ## Video.js media example
 

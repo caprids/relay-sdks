@@ -298,7 +298,9 @@ async def connect_relay_publisher(
         if not announced.done():
             announced.set_result(None)
 
-    def create_session(transport: MoqtTransport, callbacks: LifetimeCallbacks) -> MoqtPublishSession:
+    def create_session(
+        transport: MoqtTransport, callbacks: LifetimeCallbacks, setup_options: Sequence[KeyValuePair]
+    ) -> MoqtPublishSession:
         def on_track_binding(binding: TrackBinding) -> None:
             if publisher_ref:
                 publisher_ref[0]._on_track_binding(binding)
@@ -307,6 +309,7 @@ async def connect_relay_publisher(
             transport,
             MoqtPublishSessionConfig(
                 implementation_name=IMPLEMENTATION_NAME,
+                setup_options=setup_options,
                 callbacks=MoqtPublishSessionCallbacks(
                     on_closed=callbacks.on_closed,
                     on_goaway=callbacks.on_goaway,
