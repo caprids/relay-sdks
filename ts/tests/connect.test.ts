@@ -8,6 +8,7 @@ import {
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
 } from '../packages/moq-core/src/protocol/control-messages.js';
+import { openRelaySession } from '../src/connect-session.js';
 import {
   type ConnectRelaySubscriberOptions,
   connectRelaySubscriber,
@@ -529,6 +530,84 @@ describe('connectRelaySubscriber', () => {
     await vi.advanceTimersByTimeAsync(20);
     await rejected;
     expect(close).toHaveBeenCalledOnce();
+  });
+
+  // draft-20 §3.5 UNAUTHORIZED; moq-relay closes with it, reason "unauthorized", after reading SETUP (#14, TA-9).
+  it('reports a peer close with UNAUTHORIZED before server SETUP as a credentials refusal', async () => {
+    const fake = createFakeTransport();
+    const connecting = connectRelaySubscriber({
+      url: endpoint,
+      getToken: () => 'secret-token',
+      createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
+    });
+
+    await fake.clientSetupOptions();
+    fake.peerClose({ closeCode: 0x2, reason: 'unauthorized' });
+    const error = await connecting.catch((caught: unknown) => caught);
+
+    expect(error).toMatchObject({ name: 'RelayError', code: 'UNAUTHORIZED', phase: 'connecting' });
+    expect((error as Error).message).toMatch(/credentials/);
+    expect((error as Error).message).toMatch(/unauthorized/);
+    expect((error as Error).message).not.toMatch(/secret-token/);
+  });
+
+  it('reports a session error carrying UNAUTHORIZED while connecting as a credentials refusal (TA-24)', async () => {
+    const cause = Object.assign(new Error('the peer closed the session (code 2, unauthorized)'), {
+      source: 'session',
+      closeCode: 0x2,
+      reason: 'unauthorized',
+    });
+    const fake = createFakeTransport();
+
+    await expect(
+      connectRelaySubscriber({
+        url: endpoint,
+        createTransport: () => ({ transport: fake.transport, ready: Promise.reject(cause) }),
+      }),
+    ).rejects.toMatchObject({ code: 'UNAUTHORIZED', phase: 'connecting', cause });
+  });
+
+  // The session can end in the turn server SETUP arrives, before the connect call resumes; that is no refusal either.
+  it('does not read a session error with UNAUTHORIZED in the turn server SETUP arrives as a credentials refusal', async () => {
+    const sessionError = Object.assign(new Error('the peer closed the session (code 2, unauthorized)'), {
+      source: 'session',
+      closeCode: 0x2,
+      reason: 'unauthorized',
+    });
+    const fake = createFakeTransport();
+    const opening = openRelaySession(
+      { url: endpoint, createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }) },
+      (_transport, callbacks) => {
+        const session = { ready: Promise.resolve(), destroy: () => {} };
+        queueMicrotask(() => {
+          callbacks.onReady?.([]);
+          callbacks.onClosed?.({ error: sessionError });
+        });
+        return session;
+      },
+    );
+
+    await expect(opening).rejects.toMatchObject({ code: 'TRANSPORT_ERROR', cause: sessionError });
+  });
+
+  it('reports any other peer close code before server SETUP as a transport error', async () => {
+    const fake = createFakeTransport();
+    const connecting = connectRelaySubscriber({
+      url: endpoint,
+      createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
+    });
+
+    await fake.clientSetupOptions();
+    fake.peerClose({ closeCode: 0x3, reason: 'protocol violation' });
+    await expect(connecting).rejects.toMatchObject({ code: 'TRANSPORT_ERROR', phase: 'connecting' });
+  });
+
+  it('does not read a peer close with UNAUTHORIZED after server SETUP as a credentials refusal', async () => {
+    const fake = await connectFake();
+
+    fake.peerClose({ closeCode: 0x2, reason: 'unauthorized' });
+    const { error } = await fake.connection.closed;
+    expect(error).not.toMatchObject({ code: 'UNAUTHORIZED' });
   });
 
   it('closes a transport whose handshake rejects', async () => {

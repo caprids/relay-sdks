@@ -66,6 +66,8 @@ export interface FakeTransport {
   getCloseInfo(): { closeCode?: number; reason?: string } | undefined;
   /** Simulate a transport-side drop (peer/network close, not a local `close()`). */
   dropTransport(): void;
+  /** Simulate the peer's application close: `closed` resolves with its code and reason (TA-9). */
+  peerClose(info: { closeCode: number; reason: string }): void;
 }
 
 /** Options for {@link createFakeTransport}. */
@@ -231,6 +233,7 @@ export function createFakeTransport({ protocol = 'moqt-20' }: FakeTransportOptio
     getCloseInfo: () => closeInfo,
     /** Simulate a transport-side drop (peer/network close, not a local `close()`). */
     dropTransport: () => resolveClosed(undefined),
+    peerClose: (info) => resolveClosed(info),
   };
 }
 
