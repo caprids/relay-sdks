@@ -13,14 +13,22 @@
     },
     "limits": {
       "maxObjectPropertiesBytes": 65536,
-      "note": "moq-relay's implementation limit on an object's encoded property block (MAX_OBJECT_EXTENSIONS since 0.17.0; not a draft-20 limit). The relay stops the subgroup stream on a larger block and the object is lost with no error to the subscriber, so both SDKs refuse such a write as an argument error. limits.maxObjectPropertiesBytes stays the core's draft-20 bound and still applies to track properties and to what a subscriber decodes."
+      "maxTrackProperties": 64,
+      "note": "moq-relay implementation limits, not draft-20 ones. maxObjectPropertiesBytes is the limit on an object's encoded property block (MAX_OBJECT_EXTENSIONS since 0.17.0): the relay stops the subgroup stream on a larger block and the object is lost with no error to the subscriber, so both SDKs refuse such a write as an argument error. limits.maxObjectPropertiesBytes stays the core's draft-20 bound for what a subscriber decodes. maxTrackProperties is the number of track properties the relay parses from SUBSCRIBE_OK (MAX_PROPERTIES in 0.17.0): past it, the relay refuses every subscriber with REQUEST_ERROR 18 'too many' and the publisher hears nothing, so both SDKs refuse such a track at registration."
     }
   },
   "limits": {
     "maxObjectPayloadBytes": 16777216,
     "maxObjectPropertiesBytes": 1048576,
+    "maxTrackPropertiesBytes": 65525,
     "maxPropertyValueBytes": 65535,
-    "maxNamespaceFields": 32
+    "maxNamespaceFields": 32,
+    "note": "maxTrackPropertiesBytes is the encoded track property block a publisher's SUBSCRIBE_OK can carry: the 16-bit control message length (65535) less the track alias, a varint of up to 9 bytes that is the peer's request ID and so unknown at registration, and the 1-byte count of the message parameters, of which the SDKs send none. Both SDKs refuse a larger block at registration; the core holds the bound."
+  },
+  "trackProperties": {
+    "defaultPublisherPriority": { "type": 14, "max": 255 },
+    "defaultPublisherGroupOrder": { "type": 34, "values": [1, 2] },
+    "note": "Track property values draft-20 restricts (sections 12.4 and 12.5): a Default Publisher Priority above 255 is invalid and a Default Publisher Group Order other than 1 (ascending) or 2 (descending) is a PROTOCOL_VIOLATION. moq-relay refuses every subscriber to such a track with REQUEST_ERROR 18 'invalid value', so both SDKs refuse it at registration."
   },
   "media": {
     "locDocument": "draft-ietf-moq-loc-04",

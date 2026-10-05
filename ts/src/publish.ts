@@ -8,7 +8,7 @@ import {
 } from './delivery-timeouts.js';
 import { RelayError } from './errors.js';
 import { createSettlingGroups } from './settling-groups.js';
-import { namespaceFields, propertyPairs, trackName } from './validation.js';
+import { namespaceFields, trackName, trackPropertyPairs } from './validation.js';
 import { createWriteSlot, type WriteSlot } from './write-slot.js';
 
 /**
@@ -22,9 +22,11 @@ export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
 
 /**
  * One MOQT property (a key-value pair) on a registered track or a written object, encoded as
- * supplied. Invalid properties are a TypeError naming the property index; a byte value over 65535
- * bytes, or a list whose encoding exceeds 1 MiB (64 KiB on an object, the relay's limit), is a
- * RangeError. Both are raised before a track is registered or a write starts.
+ * supplied. Invalid properties are a TypeError naming the property index. A byte value over 65535
+ * bytes is a RangeError, and so is a list past its bound: on a track, more than 65525 encoded bytes
+ * (the room SUBSCRIBE_OK leaves), more than 64 pairs, or a 0x0E above 255 or 0x22 other than 1 or 2;
+ * on an object, more than 64 KiB encoded (the relay's limit). Both are raised before a track is
+ * registered or a write starts.
  */
 export interface PublishProperty {
   /** Non-negative safe integer: even types encode an integer, odd types encode bytes. */
@@ -45,7 +47,10 @@ export interface RegisterTrackOptions {
    * add, drop, or rewrite properties before delivery to subscribers. With moq-relay 0.17.0 every
    * SUBSCRIBE_OK carries the relay's track properties, not these, and a Timescale (`0x08`) here is
    * what keeps supplied object Timestamps unchanged. See "Relay property handling" in
-   * spec/behavior.md.
+   * spec/behavior.md. The list rides in every SUBSCRIBE_OK, so it must encode to at most 65525
+   * bytes, hold at most 64 pairs (the relay's limit) and keep `0x0E` at most 255 and `0x22` at 1
+   * or 2 (draft-20); otherwise the relay would refuse every subscriber, so `registerTrack` throws a
+   * RangeError instead.
    *
    * An OBJECT_DELIVERY_TIMEOUT (`0x02`) or SUBGROUP_DELIVERY_TIMEOUT (`0x06`) here, in milliseconds,
    * is the publisher's delivery timeout (draft-20 §8), which the first object of a group can
@@ -258,7 +263,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
     registerTrack({ track, trackProperties, writeTimeoutMs = 10_000 }) {
       // Arguments first, then connection state, then the registry.
       const name = trackName(track);
-      const properties = propertyPairs(trackProperties);
+      const properties = trackPropertyPairs(trackProperties);
       assertTimeoutMs('writeTimeoutMs', writeTimeoutMs);
       lifetime.assertOpen();
       if (closing) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');

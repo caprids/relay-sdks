@@ -37,6 +37,7 @@ from .object_stream import (
     ObjectStatus,
 )
 from .publish_session import (
+    MAX_TRACK_PROPERTIES_LENGTH,
     AnnounceEnded,
     IncomingRequestUpdate,
     MoqtPublishSession,
@@ -73,6 +74,7 @@ from .transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendSt
 __all__ = [
     "MAX_NAMESPACE_FIELDS",
     "MAX_OBJECT_PAYLOAD_LENGTH",
+    "MAX_TRACK_PROPERTIES_LENGTH",
     "MOQT_PROTOCOL_ID",
     "PUBLISH_DONE_STATUS",
     "REQUEST_ERROR_CODE",

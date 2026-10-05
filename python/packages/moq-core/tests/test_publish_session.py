@@ -17,7 +17,7 @@ from core_helpers.transport_pair import (
 )
 from core_helpers.waiting import settle, wait_for
 
-from moq_core import publish_session
+from moq_core import KeyValuePair, publish_session
 from moq_core.control_messages import (
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
@@ -42,9 +42,10 @@ from moq_core.control_messages import (
     encode_subscribe_namespace,
     encode_subscribe_ok,
 )
-from moq_core.errors import SESSION_ERROR
+from moq_core.errors import SESSION_ERROR, MoqtProtocolError
 from moq_core.object_stream import MoqtObject
 from moq_core.publish_session import (
+    MAX_TRACK_PROPERTIES_LENGTH,
     MoqtPublishSession,
     MoqtPublishSessionCallbacks,
     MoqtPublishSessionConfig,
@@ -442,6 +443,35 @@ class TestCreateMoqtPublishSession:
         # Undeclared, moq-lite-rs relays parse and DISCARD the objects' TIMESTAMP extensions and
         # re-stamp frames on arrival: viewers would sync to relay arrival time instead of capture time.
         assert subscribe.received[0] == SubscribeOk(track_alias=11, track_properties=[])
+        harness.destroy()
+
+    def test_track_property_limit_fits_a_subscribe_ok_with_the_largest_alias(self) -> None:
+        # One odd pair whose type and length take 4 bytes; the alias is the peer's request ID, so
+        # registration has to assume the 9-byte varint.
+        def block(length: int) -> list[KeyValuePair]:
+            return [KeyValuePair(1, bytes(length - 4))]
+
+        largest_alias = 2**64 - 1
+        assert (
+            len(encode_subscribe_ok(largest_alias, MessageParameters(), block(MAX_TRACK_PROPERTIES_LENGTH)))
+            == 3 + 0xFFFF
+        )
+        with pytest.raises(MoqtProtocolError, match="control message exceeds"):
+            encode_subscribe_ok(largest_alias, MessageParameters(), block(MAX_TRACK_PROPERTIES_LENGTH + 1))
+
+    async def test_answers_a_subscribe_for_a_track_whose_properties_fill_the_limit(self) -> None:
+        harness = Harness()
+
+        await harness.session.ready
+        properties = [KeyValuePair(1, bytes(MAX_TRACK_PROPERTIES_LENGTH - 4))]
+        harness.session.register_track(
+            RegisterTrackOptions(track_namespace=NAMESPACE, track_name="video", track_properties=properties)
+        )
+
+        subscribe = await raw_subscribe(harness.pair.server, "video", 11)
+
+        await wait_for(lambda: len(subscribe.received) == 1)
+        assert subscribe.received[0] == SubscribeOk(track_alias=11, track_properties=properties)
         harness.destroy()
 
     async def test_rejects_inbound_subscribe_for_unknown_tracks_with_does_not_exist(self) -> None:

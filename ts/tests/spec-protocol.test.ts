@@ -7,18 +7,32 @@ import {
   MAX_NAMESPACE_FIELDS,
   MAX_OBJECT_PAYLOAD_LENGTH,
   MAX_OBJECT_PROPERTIES_LENGTH,
+  MAX_TRACK_PROPERTIES_LENGTH,
   MOQT_PROTOCOL_ID,
 } from '../packages/moq-core/src/index.js';
-import { MAX_PROPERTY_VALUE_LENGTH, MAX_RELAY_OBJECT_PROPERTIES_LENGTH } from '../src/validation.js';
+import {
+  DEFAULT_PUBLISHER_GROUP_ORDER,
+  DEFAULT_PUBLISHER_GROUP_ORDERS,
+  DEFAULT_PUBLISHER_PRIORITY,
+  MAX_DEFAULT_PUBLISHER_PRIORITY,
+  MAX_PROPERTY_VALUE_LENGTH,
+  MAX_RELAY_OBJECT_PROPERTIES_LENGTH,
+  MAX_RELAY_TRACK_PROPERTIES,
+} from '../src/validation.js';
 
 interface ProtocolSpec {
   moqt: { document: string; protocolId: string };
-  relay: { limits: { maxObjectPropertiesBytes: number } };
+  relay: { limits: { maxObjectPropertiesBytes: number; maxTrackProperties: number } };
   limits: {
     maxObjectPayloadBytes: number;
     maxObjectPropertiesBytes: number;
+    maxTrackPropertiesBytes: number;
     maxPropertyValueBytes: number;
     maxNamespaceFields: number;
+  };
+  trackProperties: {
+    defaultPublisherPriority: { type: number; max: number };
+    defaultPublisherGroupOrder: { type: number; values: number[] };
   };
 }
 
@@ -44,6 +58,25 @@ describe('spec/protocol.json', () => {
 
   it('pins the encoded object properties limit', () => {
     expect(MAX_OBJECT_PROPERTIES_LENGTH).toBe(spec.limits.maxObjectPropertiesBytes);
+  });
+
+  it('pins the track property block SUBSCRIBE_OK has room for', () => {
+    expect(MAX_TRACK_PROPERTIES_LENGTH).toBe(spec.limits.maxTrackPropertiesBytes);
+  });
+
+  it('pins the relay limit on the number of track properties, which the SDK checks at registration', () => {
+    expect(MAX_RELAY_TRACK_PROPERTIES).toBe(spec.relay.limits.maxTrackProperties);
+  });
+
+  it('pins the draft-20 track property values the SDK checks at registration', () => {
+    expect(spec.trackProperties.defaultPublisherPriority).toEqual({
+      type: DEFAULT_PUBLISHER_PRIORITY,
+      max: MAX_DEFAULT_PUBLISHER_PRIORITY,
+    });
+    expect(spec.trackProperties.defaultPublisherGroupOrder).toEqual({
+      type: DEFAULT_PUBLISHER_GROUP_ORDER,
+      values: DEFAULT_PUBLISHER_GROUP_ORDERS,
+    });
   });
 
   it('pins the relay limit on an object property block, which the SDK checks on write', () => {

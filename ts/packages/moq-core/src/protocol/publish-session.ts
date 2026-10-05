@@ -41,6 +41,7 @@ import {
   encodeSetup,
   encodeSubscribeOk,
   type KeyValuePair,
+  MAX_CONTROL_MESSAGE_LENGTH,
   MESSAGE_TYPE,
   type MessageParameters,
   PUBLISH_DONE_STATUS,
@@ -121,6 +122,15 @@ export interface MoqtPublishSessionConfig {
   /** Session event callbacks. */
   callbacks?: MoqtPublishSessionCallbacks;
 }
+
+/**
+ * The largest encoded track property block every SUBSCRIBE_OK this session sends can carry. The
+ * properties ride in SUBSCRIBE_OK, a control message whose length field is 16 bits (§10). The rest
+ * of its body is the track alias, a varint of up to 9 bytes on the wire (it is the peer's request
+ * ID, so it is unknown until a subscription arrives), and the count of message parameters, of which
+ * this session sends none (1 byte). A longer block registers but can never answer a subscription.
+ */
+export const MAX_TRACK_PROPERTIES_LENGTH = MAX_CONTROL_MESSAGE_LENGTH - 9 - 1;
 
 /** A track for {@link MoqtPublishSession.registerTrack}. */
 export interface RegisterTrackOptions {

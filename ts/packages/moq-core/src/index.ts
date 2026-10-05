@@ -30,7 +30,7 @@ export type {
   RegisteredTrack,
   RegisterTrackOptions,
 } from './protocol/publish-session.js';
-export { createMoqtPublishSession } from './protocol/publish-session.js';
+export { createMoqtPublishSession, MAX_TRACK_PROPERTIES_LENGTH } from './protocol/publish-session.js';
 export type { BidirectionalStreamLike } from './protocol/request-stream.js';
 export type {
   FetchHandle,

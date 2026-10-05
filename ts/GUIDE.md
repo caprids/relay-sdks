@@ -357,10 +357,13 @@ Optional `trackProperties` on `registerTrack()` and `properties` on `write()` ca
 metadata. Property types and even-type integer values must be non-negative integers up to
 `Number.MAX_SAFE_INTEGER`, the largest value the core's varint carries; odd-type values must be
 `ArrayBufferView`s and are copied as their raw bytes. Invalid properties raise a `TypeError` naming
-the property index before registering a track or starting a write. A byte value longer than 65535
-bytes, or a list whose encoding exceeds 1 MiB (64 KiB on `write()`, which the relay drops silently
-past that), is a `RangeError` at the same point: the SDK measures
-the encoding with the core's own encoder, so an oversized property never opens a stream. The SDK adds
+the property index before registering a track or starting a write. A `RangeError` at the same
+point covers: a byte value longer than 65535 bytes; `trackProperties` that encode to more than 65525
+bytes (what `SUBSCRIBE_OK` has room for), hold more than 64 pairs (the relay's limit), or carry a
+`0x0E` above 255 or a `0x22` other than 1 or 2 (values draft-20 rules out), any of which would leave
+the track unsubscribable; and object `properties` on `write()` that encode to more than 64 KiB,
+which the relay drops silently. The SDK measures the encoding with the core's own encoder, so an
+oversized property never opens a stream. The SDK adds
 no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB of payload.
 
 Properties are encoded as supplied, but subscribers see the relay's output. With moq-relay 0.17.0,
@@ -369,11 +372,10 @@ declared Timescale (`0x08`); every other object property, including Video Config
 without a declared Timescale, and objects without a Timestamp, get relay-clock timestamps. Declaring
 `trackProperties: [{ type: 0x08, value: 1_000_000 }]` keeps supplied Timestamp values unchanged.
 Every `SUBSCRIBE_OK` carries the relay's track properties (`0x08` = 1,000,000, `0x0E` = 128 unless
-the publisher set it, `0x22` = 2), not the publisher's, and a `0x0E` above 255 or a `0x22` other
-than 1 or 2 in `trackProperties` makes every subscribe fail with request error 18 `invalid value`.
-The relay also drops any object whose encoded properties exceed 64 KiB, although the SDK accepts up
-to 1 MiB: the write succeeds, and viewers see a missing group with no reset
-([#247](https://github.com/muxinc/relay-sdks/issues/247)). A subscription with `parameters: { includeProperties: 0 }`
+the publisher set it, `0x22` = 2), not the publisher's; the relay would refuse every subscriber to
+a track whose `0x0E` or `0x22` is out of range or that has more than 64 track properties, which is
+why `registerTrack()` refuses those ([#252](https://github.com/muxinc/relay-sdks/issues/252)). A
+subscription with `parameters: { includeProperties: 0 }`
 gets no track properties and objects with no properties at all, not even a Timestamp.
 Keep application metadata that must arrive intact in payloads, and read the received track timescale
 when interpreting timestamps. See [Relay property

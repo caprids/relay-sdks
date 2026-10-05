@@ -5,7 +5,7 @@
  * follow the "Arguments" table in spec/behavior.md.
  */
 import { readFile } from 'node:fs/promises';
-import { ByteWriter, encodeKeyValuePairs, MAX_OBJECT_PAYLOAD_LENGTH } from '@mux/moq-core';
+import { ByteWriter, encodeKeyValuePairs, MAX_OBJECT_PAYLOAD_LENGTH, MAX_TRACK_PROPERTIES_LENGTH } from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   connectRelayPublisher,
@@ -16,13 +16,18 @@ import {
   type RelayTransportFactory,
 } from '../src/index.js';
 import {
+  DEFAULT_PUBLISHER_GROUP_ORDER,
+  DEFAULT_PUBLISHER_GROUP_ORDERS,
+  DEFAULT_PUBLISHER_PRIORITY,
+  MAX_DEFAULT_PUBLISHER_PRIORITY,
   MAX_PROPERTY_VALUE_LENGTH,
   MAX_RELAY_OBJECT_PROPERTIES_LENGTH,
+  MAX_RELAY_TRACK_PROPERTIES,
   namespaceFields,
   objectPropertyPairs,
   payloadBytes,
-  propertyPairs,
   trackName,
+  trackPropertyPairs,
 } from '../src/validation.js';
 import { createFakeTransport } from './helpers/relay.js';
 import { createRelayHub } from './helpers/relay-hub.js';
@@ -246,12 +251,16 @@ function blockOf(length: number): PublishProperty[] {
   return properties;
 }
 
-/** Sixteen maximal byte values encode past the 1 MiB object bound although each is legal on its own. */
+/** Maximal byte values: each is legal on its own, but two already encode past every property bound. */
 const maximalValues = (count: number): PublishProperty[] =>
   Array.from({ length: count }, (_, index) => ({
     type: 2 * index + 1,
     value: new Uint8Array(MAX_PROPERTY_VALUE_LENGTH),
   }));
+
+/** Odd-typed pairs with empty values, to count pairs without nearing a byte bound or a draft-20 value rule. */
+const emptyValues = (count: number): PublishProperty[] =>
+  Array.from({ length: count }, (_, index) => ({ type: 2 * index + 1, value: new Uint8Array(0) }));
 
 describe('properties', () => {
   it.each<[string, unknown]>([
@@ -271,26 +280,60 @@ describe('properties', () => {
     ['an even type with a value above the varint bound', [{ type: 2, value: Number.MAX_SAFE_INTEGER + 1 }]],
     ['an even type with a byte value', [{ type: 2, value: new Uint8Array([1]) }]],
   ])('rejects %s as a TypeError', (_label, properties) => {
-    expect(() => propertyPairs(properties)).toThrow(TypeError);
+    expect(() => trackPropertyPairs(properties)).toThrow(TypeError);
   });
 
   it('rejects a byte value longer than its 16-bit wire length as a RangeError', () => {
     const properties = [{ type: 3, value: new Uint8Array(MAX_PROPERTY_VALUE_LENGTH + 1) }];
-    expect(() => propertyPairs(properties)).toThrow(RangeError);
-    expect(() => propertyPairs(properties)).toThrow(/Property 0 value exceeds/);
+    expect(() => trackPropertyPairs(properties)).toThrow(RangeError);
+    expect(() => trackPropertyPairs(properties)).toThrow(/Property 0 value exceeds/);
   });
 
-  it('rejects a list whose encoding exceeds the 1 MiB object bound as a RangeError', () => {
-    expect(() => propertyPairs(maximalValues(16))).toThrow(RangeError);
-    expect(() => propertyPairs(maximalValues(16))).toThrow(/encoded limit/);
+  it('rejects a track list past the SUBSCRIBE_OK room as a RangeError naming the size', () => {
+    // #252: SUBSCRIBE_OK carries the list, and a control message's length is 16 bits.
+    expect(() => trackPropertyPairs(blockOf(MAX_TRACK_PROPERTIES_LENGTH + 1))).toThrow(RangeError);
+    expect(() => trackPropertyPairs(blockOf(MAX_TRACK_PROPERTIES_LENGTH + 1))).toThrow(
+      /encode to 65526 bytes, over the 65525 bytes SUBSCRIBE_OK has room for/,
+    );
+    expect(() => trackPropertyPairs(maximalValues(2))).toThrow(/SUBSCRIBE_OK has room for/);
   });
 
-  it('admits the boundaries: a maximal byte value, fifteen of them, and the varint ceiling', () => {
-    expect(propertyPairs([{ type: 3, value: new Uint8Array(MAX_PROPERTY_VALUE_LENGTH) }])).toHaveLength(1);
-    expect(propertyPairs(maximalValues(15))).toHaveLength(15);
-    expect(propertyPairs([{ type: Number.MAX_SAFE_INTEGER - 1, value: Number.MAX_SAFE_INTEGER }])).toEqual([
+  it('rejects more track properties than the relay reads as a RangeError', () => {
+    // moq-relay 0.17.0 refuses every subscriber with REQUEST_ERROR 18 "too many" past 64 pairs (#252).
+    expect(() => trackPropertyPairs(emptyValues(MAX_RELAY_TRACK_PROPERTIES + 1))).toThrow(RangeError);
+    expect(() => trackPropertyPairs(emptyValues(MAX_RELAY_TRACK_PROPERTIES + 1))).toThrow(
+      /hold 65 pairs, over the relay's 64-pair limit/,
+    );
+  });
+
+  it.each<[PublishProperty[], RegExp]>([
+    [[{ type: DEFAULT_PUBLISHER_PRIORITY, value: MAX_DEFAULT_PUBLISHER_PRIORITY + 1 }], /Priority, 0x0E/],
+    [
+      [
+        { type: 2, value: 0 },
+        { type: DEFAULT_PUBLISHER_GROUP_ORDER, value: 0 },
+      ],
+      /Property 1 .*Group Order, 0x22/,
+    ],
+    [[{ type: DEFAULT_PUBLISHER_GROUP_ORDER, value: 3 }], /1 \(ascending\) or 2 \(descending\)/],
+  ])('rejects a track property value draft-20 rules out as a RangeError (%#)', (properties, message) => {
+    expect(() => trackPropertyPairs(properties)).toThrow(RangeError);
+    expect(() => trackPropertyPairs(properties)).toThrow(message);
+  });
+
+  it('admits the boundaries: the SUBSCRIBE_OK room, the relay pair count, the draft-20 values and the varint ceiling', () => {
+    expect(trackPropertyPairs(blockOf(MAX_TRACK_PROPERTIES_LENGTH))).toEqual(blockOf(MAX_TRACK_PROPERTIES_LENGTH));
+    expect(trackPropertyPairs(emptyValues(MAX_RELAY_TRACK_PROPERTIES))).toHaveLength(MAX_RELAY_TRACK_PROPERTIES);
+    expect(trackPropertyPairs([{ type: Number.MAX_SAFE_INTEGER - 1, value: Number.MAX_SAFE_INTEGER }])).toEqual([
       { type: Number.MAX_SAFE_INTEGER - 1, value: Number.MAX_SAFE_INTEGER },
     ]);
+    for (const order of DEFAULT_PUBLISHER_GROUP_ORDERS) {
+      const properties = [
+        { type: DEFAULT_PUBLISHER_PRIORITY, value: MAX_DEFAULT_PUBLISHER_PRIORITY },
+        { type: DEFAULT_PUBLISHER_GROUP_ORDER, value: order },
+      ];
+      expect(trackPropertyPairs(properties)).toEqual(properties);
+    }
   });
 
   it('admits object properties that encode to exactly the relay limit', () => {
@@ -310,16 +353,22 @@ describe('properties', () => {
 
   it('copies the bytes a view spans and admits an absent list as empty', () => {
     const bytes = new Uint8Array([9, 1, 2, 9]);
-    const pairs = propertyPairs([{ type: 3, value: new DataView(bytes.buffer, 1, 2) }]);
+    const pairs = trackPropertyPairs([{ type: 3, value: new DataView(bytes.buffer, 1, 2) }]);
     bytes.fill(0);
     expect(pairs).toEqual([{ type: 3, value: new Uint8Array([1, 2]) }]);
-    expect(propertyPairs(undefined)).toEqual([]);
-    expect(propertyPairs([])).toEqual([]);
+    expect(trackPropertyPairs(undefined)).toEqual([]);
+    expect(trackPropertyPairs([])).toEqual([]);
   });
 
   it('reports an oversized property as an argument error at registerTrack and write, not as a transport failure', async () => {
     const { publisher } = await connectHubPublisher();
-    expect(() => publisher.registerTrack({ track: 'events', trackProperties: maximalValues(16) })).toThrow(RangeError);
+    for (const refused of [
+      maximalValues(2),
+      emptyValues(MAX_RELAY_TRACK_PROPERTIES + 1),
+      [{ type: DEFAULT_PUBLISHER_GROUP_ORDER, value: 3 }],
+    ]) {
+      expect(() => publisher.registerTrack({ track: 'events', trackProperties: refused })).toThrow(RangeError);
+    }
     const track = publisher.registerTrack({ track: 'events' });
     await expect(track.write(new Uint8Array([1]), { properties: maximalValues(16) })).rejects.toThrow(RangeError);
     await expect(
