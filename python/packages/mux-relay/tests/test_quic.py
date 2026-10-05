@@ -3,8 +3,9 @@
 The accepting end is the conformance peer in its native QUIC mode (``relay_helpers.conformance_peer``), in
 process: it records the dial, selects a protocol as told, resets, stops, closes at either layer, withholds
 acknowledgement and limits stream credit. The whole SDK runs against the in-memory relay hub served over
-native QUIC. The setup options themselves (TA-6) are covered against the vectors in ``test_setup_options.py``;
-here they are read off a real connection's CLIENT_SETUP.
+native QUIC (``relay_helpers.quic_hub``), through the assertion list the live smoke test in
+``scripts/test_relay.py`` runs against a real relay. The setup options themselves (TA-6) are covered against
+the vectors in ``test_setup_options.py``; here they are read off a real connection's CLIENT_SETUP.
 """
 
 from __future__ import annotations
@@ -17,10 +18,8 @@ from functools import partial
 from typing import Any, cast
 
 import pytest
-from aioquic.asyncio import QuicConnectionProtocol, serve
-from aioquic.quic import events
+from aioquic.asyncio import serve
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet import QuicErrorCode, QuicFrameType
 from core_helpers.waiting import wait_for
 from cryptography.hazmat.primitives import serialization
@@ -30,7 +29,7 @@ from relay_helpers.conformance_peer import (
     NativeQuicConformanceProtocol,
     generate_leaf_certificate,
 )
-from relay_helpers.native_quic import NativeQuicSession
+from relay_helpers.quic_hub import HubServer, start_quic_hub
 from relay_helpers.relay_hub import RelayHub, create_relay_hub
 from relay_helpers.wt_server import SERVER_NAME
 from test_setup_options import option_value, read_client_setup
@@ -42,6 +41,7 @@ from moq_core.transport import ReceiveStream
 from mux_relay import (
     Closed,
     ConnectingTransport,
+    RelayAwaitable,
     RelayError,
     RelaySubscriptionHandlers,
     connect_relay_publisher,
@@ -505,6 +505,41 @@ class TestRelayConnection:
         assert (error.code, error.phase) == ("UNAUTHORIZED", "connecting")
         assert str(error) == "Relay refused the connection's credentials: unauthorized (session closed with code 0x2)"
 
+    @pytest.mark.parametrize("role", ["subscriber", "publisher"])
+    async def test_the_default_transport_is_native_quic(
+        self, peer: Peer, role: str, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import mux_relay.quic
+
+        dials: list[str] = []
+
+        def trusting(url: str, protocols: Sequence[str], *, configuration: QuicConfiguration | None = None):
+            # The default trusts the system's CAs; only the peer's certificate is added here.
+            assert configuration is None
+            dials.append(url)
+            return connect_quic(url, protocols, configuration=peer.configuration())
+
+        monkeypatch.setattr(mux_relay.quic, "connect_quic", trusting)
+        url = f"https://{SERVER_NAME}:{peer.port}/moq"
+
+        if role == "subscriber":
+            connecting = asyncio.ensure_future(connect_relay_subscriber(url, get_token=lambda: "a token"))
+        else:
+            connecting = asyncio.ensure_future(
+                connect_relay_publisher(url, namespace=NAMESPACE, get_token=lambda: "a token")
+            )
+
+        control = await asyncio.wait_for(peer.peer.acceptUni(), 5)
+        options = await asyncio.wait_for(read_client_setup(StreamReader(peer.peer._stream(control).receive)), 5)
+
+        assert dials == [f"{url}?jwt=a+token"]
+        assert peer.peer.observed is not None
+        assert peer.peer.observed["protocols"] == [MOQT]
+        assert option_value(options, SETUP_OPTION.PATH) == "/moq?jwt=a+token"
+        assert option_value(options, SETUP_OPTION.AUTHORITY) == f"{SERVER_NAME}:{peer.port}"
+        connecting.cancel()
+        await asyncio.wait({connecting})
+
     async def test_a_peer_close_with_another_code_before_setup_is_a_transport_error(self, peer: Peer) -> None:
         async def close() -> None:
             await peer.peer.acceptUni()
@@ -522,118 +557,95 @@ class TestRelayConnection:
 # ---------------------------------------------------------------------- the relay hub over native QUIC
 
 
-class _HubProtocol(QuicConnectionProtocol):
-    """One accepted native QUIC connection, served by the relay hub in one role."""
-
-    def __init__(
-        self,
-        quic: QuicConnection,
-        stream_handler: Any = None,
-        *,
-        hub: RelayHub,
-        role: str,
-        sessions: list[NativeQuicSession],
-    ) -> None:
-        super().__init__(quic, stream_handler)
-        self.session = NativeQuicSession(self)
-        self._hub = hub
-        self._role = role
-        self._sessions = sessions
-
-    def quic_event_received(self, event: events.QuicEvent) -> None:
-        if isinstance(event, events.HandshakeCompleted):
-            self._sessions.append(self.session)
-            if self._role == "publisher":
-                self._hub.serve_publisher(cast(Any, self.session))
-            else:
-                self._hub.serve_subscriber(cast(Any, self.session))
-        self.session.on_event(event)
-
-
-@dataclass
-class HubServer:
-    port: int
-    certificate_pem: bytes
-    sessions: list[NativeQuicSession]
-    server: Any
-
-    def factory(self):
-        def create_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
-            return connect_quic(url, protocols, configuration=QuicConfiguration(cadata=self.certificate_pem))
-
-        return create_transport
-
-    def url(self) -> str:
-        return f"https://{SERVER_NAME}:{self.port}/moq"
-
-
-async def start_hub_server(hub: RelayHub, role: str) -> HubServer:
-    certificate, key, _ = generate_leaf_certificate()
-    configuration = QuicConfiguration(is_client=False, alpn_protocols=[MOQT], idle_timeout=IDLE_TIMEOUT)
-    configuration.certificate = certificate
-    configuration.private_key = key
-    sessions: list[NativeQuicSession] = []
-    server = await serve(
-        "::",
-        0,
-        configuration=configuration,
-        create_protocol=partial(_HubProtocol, hub=hub, role=role, sessions=sessions),
-    )
-    transport = server._transport
-    assert transport is not None
-    pem = certificate.public_bytes(serialization.Encoding.PEM)
-    return HubServer(transport.get_extra_info("sockname")[1], pem, sessions, server)
-
-
 @pytest.fixture
 async def hub() -> AsyncIterator[tuple[RelayHub, HubServer, HubServer]]:
     relay = create_relay_hub()
-    publishers = await start_hub_server(relay, "publisher")
-    subscribers = await start_hub_server(relay, "subscriber")
+    servers = await start_quic_hub(relay)
 
     try:
-        yield relay, publishers, subscribers
+        yield relay, servers.publishers, servers.subscribers
     finally:
         relay.destroy()
-        publishers.server.close()
-        subscribers.server.close()
-        await asyncio.sleep(0.05)
+        await servers.close()
 
 
 class TestOverTheRelayHub:
-    async def test_publishes_and_subscribes_one_track_over_native_quic(
+    async def test_runs_the_smoke_test_assertion_list_over_native_quic(
         self, hub: tuple[RelayHub, HubServer, HubServer]
     ) -> None:
-        _, publishers, subscribers = hub
+        relay, publishers, subscribers = hub
+
+        # 1. A publisher connection and a subscriber connection both open.
         publisher = await asyncio.wait_for(
             connect_relay_publisher(publishers.url(), namespace=NAMESPACE, create_transport=publishers.factory()), 10
         )
         subscriber = await asyncio.wait_for(
             connect_relay_subscriber(subscribers.url(), create_transport=subscribers.factory()), 10
         )
-        received: list[bytes] = []
+        closing = False
+        problems: list[str] = []
 
-        def on_object(obj: MoqtObject) -> None:
-            if obj.status == "normal":
-                received.append(obj.payload)
+        def observe(label: str, closed: RelayAwaitable[Closed]) -> None:
+            def done(future: asyncio.Future[Closed]) -> None:
+                if not closing:
+                    problems.append(f"{label} closed: {future.result().error!r}")
 
-        accepted: list[str] = []
-        subscriber.subscribe(
-            NAMESPACE,
-            "track",
-            RelaySubscriptionHandlers(on_subscribed=lambda ok: accepted.append("track"), on_object=on_object),
-        )
-        await wait_for(lambda: accepted == ["track"], timeout=10)
-        track = publisher.register_track("track", write_timeout=5)
+            closed.add_done_callback(done)
 
-        for payload in (b"object 0", b"", bytes([0, 255])):
-            await track.write(payload)
+        observe("publisher", publisher.closed)
+        observe("subscriber", subscriber.closed)
 
-        await wait_for(lambda: len(received) == 3, timeout=10)
-        assert sorted(received) == sorted([b"object 0", b"", bytes([0, 255])])
+        try:
+            events = publisher.register_track("events", write_timeout=5)
+            status = publisher.register_track("status", write_timeout=5)
+            received: dict[str, list[bytes]] = {"events": [], "status": []}
+            accepted: list[str] = []
 
-        await asyncio.wait_for(publisher.close(), 10)
-        subscriber.close()
+            def subscribe(track: str) -> None:
+                def on_object(obj: MoqtObject) -> None:
+                    if obj.status == "normal":
+                        received[track].append(obj.payload)
+
+                subscriber.subscribe(
+                    NAMESPACE,
+                    track,
+                    RelaySubscriptionHandlers(
+                        on_subscribed=lambda ok: accepted.append(track),
+                        on_object=on_object,
+                        on_error=lambda error: problems.append(f"{track}: {error.error_code} {error.reason}"),
+                        on_subgroup_reset=lambda reset: problems.append(f"{track} reset: {reset.error!r}"),
+                    ),
+                )
+
+            subscribe("events")
+            subscribe("status")
+            # 2. Subscriptions to two tracks on the namespace are accepted.
+            await wait_for(lambda: sorted(accepted) == ["events", "status"], timeout=10)
+
+            # 3. Binary, empty, and text payloads all arrive intact.
+            expected_events = [bytes([0, 255, 128, 1]), b"hello from Relay SDK", b""]
+
+            for payload in expected_events:
+                await events.write(payload)
+
+            await status.write(bytes([42]))
+            await wait_for(lambda: len(received["events"]) == 3 and len(received["status"]) == 1, timeout=10)
+
+            # 4. Closing one track writer does not affect delivery on another track.
+            events.close()
+            await status.write(bytes([43]))
+            await wait_for(lambda: len(received["status"]) == 2, timeout=10)
+
+            assert sorted(received["events"]) == sorted(expected_events)
+            assert received["status"] == [bytes([42]), bytes([43])]
+            assert problems == []
+            assert relay.subscribes.count("events") >= 1
+        finally:
+            closing = True
+            # 5. Both connections close cleanly once the test closes them.
+            await asyncio.wait_for(publisher.close(), 10)
+            subscriber.close()
+
         assert await publisher.closed == Closed()
         assert await subscriber.closed == Closed()
 

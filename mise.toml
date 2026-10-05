@@ -126,7 +126,7 @@ run = [
 [tasks."python:docs"]
 description = "Render the Python API reference with pdoc to python/api-docs/ (open index.html)"
 dir = "python"
-run = "uv run pdoc --docformat restructuredtext --output-directory api-docs mux_relay mux_relay.webtransport moq_core moq_media"
+run = "uv run pdoc --docformat restructuredtext --output-directory api-docs mux_relay mux_relay.quic mux_relay.webtransport moq_core moq_media"
 
 [tasks."python:test:relay"]
 description = "Opt-in live smoke test against a real Relay (RELAY_TOKEN or hidden prompt)"

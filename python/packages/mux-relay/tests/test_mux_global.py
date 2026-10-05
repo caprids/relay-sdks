@@ -143,29 +143,19 @@ def test_cli_failure_is_nonzero_and_redacts_token(monkeypatch: pytest.MonkeyPatc
     assert CONFIG.token not in output.out + output.err
 
 
-async def test_demo_over_native_aioquic(monkeypatch: pytest.MonkeyPatch):
-    from relay_helpers.wt_server import start_webtransport_server
-
-    from mux_relay import connect_webtransport
+async def test_demo_over_native_quic(monkeypatch: pytest.MonkeyPatch):
+    from relay_helpers.quic_hub import start_quic_hub
 
     hub = create_relay_hub()
-
-    def serve(session):
-        if session.path.startswith("/publish"):
-            hub.serve_publisher(session)
-        else:
-            hub.serve_subscriber(session)
-
-    server = await start_webtransport_server(serve)
-
-    def transport(url, protocols):
-        return connect_webtransport(url, protocols, configuration=server.client_configuration())
+    servers = await start_quic_hub(hub)
 
     async def publisher(_url, **kwargs):
-        return await connect_relay_publisher(server.url_for("/publish"), **kwargs, create_transport=transport)
+        transport = servers.publishers.factory()
+        return await connect_relay_publisher(servers.publishers.url(), **kwargs, create_transport=transport)
 
     async def subscriber(_url, **kwargs):
-        return await connect_relay_subscriber(server.url_for("/subscribe"), **kwargs, create_transport=transport)
+        transport = servers.subscribers.factory()
+        return await connect_relay_subscriber(servers.subscribers.url(), **kwargs, create_transport=transport)
 
     monkeypatch.setattr(demo, "connect_relay_publisher", publisher)
     monkeypatch.setattr(demo, "connect_relay_subscriber", subscriber)
@@ -173,8 +163,7 @@ async def test_demo_over_native_aioquic(monkeypatch: pytest.MonkeyPatch):
         assert await demo.run_demo(CONFIG, lambda _: None) == {"published": 1, "received": 1}
     finally:
         hub.destroy()
-        server.close()
-        await asyncio.sleep(0.05)
+        await servers.close()
 
 
 async def test_track_closed_while_waiting_for_demand(connected, monkeypatch: pytest.MonkeyPatch):

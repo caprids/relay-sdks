@@ -1,4 +1,4 @@
-"""WebTransport over HTTP/3 on aioquic: the default :class:`moq_core.MoqtTransport` for this SDK.
+"""WebTransport over HTTP/3 on aioquic: a :class:`moq_core.MoqtTransport` passed as ``create_transport``.
 
 A browser hands the TypeScript SDK a ``WebTransport`` object. Python has no such built-in, so this
 module implements the client side of draft-ietf-webtrans-http3 on top of aioquic's QUIC and HTTP/3
@@ -17,7 +17,7 @@ they need from their session), ``_protocol`` (the aioquic connection protocol dr
 CONNECT). Two modules hold what is aioquic's rather than WebTransport's: ``_aioquic`` names every
 private member the adapter reaches into (and holds ``serve_resets_first``, the workaround for a queued
 RESET_STREAM that holds each transmit to one packet, #160), and ``_fin_retry`` is the dropped-FIN
-workaround (#47), deletable as a unit. The product imports :func:`connect_webtransport` and catches
+workaround (#47), deletable as a unit. The product re-exports :func:`connect_webtransport` and catches
 :class:`WebTransportError`; the test suite reaches the private modules directly.
 """
 

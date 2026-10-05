@@ -50,8 +50,8 @@ only.
 The rules are stated in terms of the protocols (send stream, receive stream, reset, FIN
 acknowledgement) and are normative for the TypeScript SDK, whose binding is the next section. The
 [Python mapping](#python-mapping-informative) records how `moq_core.transport` meets the same rules
-and where its aioquic adapters differ today. It is informative: moving Python's default to native
-QUIC is #199, not this contract.
+and where its aioquic adapters differ today. It is informative: Python's move to native QUIC is #199,
+not this contract.
 
 Datagrams are outside the contract. MOQT requires the QUIC DATAGRAM extension
 (draft-20 §3.1), and the QUIC stack negotiates it, but the core never sends or reads datagrams.
@@ -359,15 +359,15 @@ conformance suite's Python accepting end, the Python loopback server, or `@mux/r
 ## Python mapping (informative)
 
 `moq_core.transport.MoqtTransport` is the same seam spelled for asyncio. `mux_relay` has two aioquic
-adapters for it: `mux_relay.webtransport` (`connect_webtransport`), a WebTransport session and the
-default, and `mux_relay.quic` (`connect_quic`), native QUIC, through `create_transport` until it
-becomes the default (#231) and the WebTransport session leaves the package (#232, ADR 0004). The
+adapters for it: `mux_relay.quic` (`connect_quic`), native QUIC and the default (#231), and
+`mux_relay.webtransport` (`connect_webtransport`), a WebTransport session, through `create_transport`
+until it leaves the package (#232, ADR 0004). The
 two share the stream halves and the QUIC-level half of the connection, so a rule below holds for
 both unless the row names one. How the rules map:
 
 | Rule | Python |
 | --- | --- |
-| TA-1 | `ConnectingTransport.framing`, `"webtransport"` by default. `connect_quic` declares `"native-quic"`. Any other value fails the connection with `TRANSPORT_ERROR`, closing the transport. |
+| TA-1 | `ConnectingTransport.framing`, `"webtransport"` when a factory leaves it out. `connect_quic`, the default factory, declares `"native-quic"`. Any other value fails the connection with `TRANSPORT_ERROR`, closing the transport. |
 | TA-2 | WebTransport session: the CONNECT carries the URL as given. |
 | TA-3, TA-4 | Native QUIC: `connect_quic` takes the `https:` URL, dials its host and port (443 by default) with the host as the server name, and reads nothing else from it. |
 | TA-5 | WebTransport session: `WT-Available-Protocols`. Native QUIC: the ALPN list is exactly `protocols`, with no `h3`. |

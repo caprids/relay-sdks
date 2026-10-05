@@ -119,7 +119,7 @@ track closure, then closes both connections. It defaults to
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
 the SDK are absolute: include the token's root prefix when required by the relay.
 
-The live test passed against `sjc.relay.mux.global` on 2026-09-11 over the aioquic WebTransport
+The live test passed against `sjc.relay.mux.global` on 2026-10-03 over the default native QUIC
 transport: three objects on `events` and two on `status`, with the second status object delivered
 after the events track closed, and both connections closed cleanly.
 

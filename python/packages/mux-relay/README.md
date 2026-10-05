@@ -7,7 +7,7 @@ Payloads are bytes the SDK does not interpret; no browser, player, or media cata
 ## Requirements
 
 - Python 3.11+ and asyncio.
-- The default transport is WebTransport over HTTP/3 through aioquic, installed as a dependency. The
+- The default transport is native QUIC (MOQT directly on QUIC) through aioquic, installed as a dependency. The
   endpoint and network must allow QUIC/UDP traffic. Other transports can be passed as
   `create_transport`.
 - A Relay endpoint and a short-lived Relay JWT authorized for the namespace you use. The SDK

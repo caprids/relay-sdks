@@ -6,8 +6,8 @@ round trip. These packages are unpublished. The default endpoint is `https://sjc
 use `--url` or `RELAY_URL` for another deployment. Both operations require an authorized Relay JWT.
 
 [demo.py](demo.py) is the complete SDK example with imports, matching namespace and track,
-byte encoding/decoding, error handling, and cleanup. It runs natively in asyncio using aioquic
-WebTransport. `asyncio.timeout` bounds the run; `AsyncExitStack` enters the SDK connection context
+byte encoding/decoding, error handling, and cleanup. It runs natively in asyncio over native
+QUIC through aioquic. `asyncio.timeout` bounds the run; `AsyncExitStack` enters the SDK connection context
 managers and closes them on success or failure, and background tasks are cancelled and awaited.
 
 The token comes from `RELAY_TOKEN` or a hidden prompt. The CLI never writes it to a file and redacts

@@ -1,8 +1,7 @@
-"""The aioquic WebTransport adapter over a real QUIC loopback: the whole SDK, backpressure, pruning, teardown.
+"""The aioquic WebTransport adapter over a real QUIC loopback: the session, backpressure, pruning, teardown.
 
-The loopback test is the offline counterpart of the live smoke test in ``scripts/test_relay.py``: it
-runs the same assertion list from ``spec/behavior.md`` against the in-memory relay hub served over
-real WebTransport sessions on 127.0.0.1, so the transport adapter is exercised end to end. The wire
+The SDK's default is native QUIC (``test_quic.py`` runs the smoke-test assertion list over it); these tests
+dial the WebTransport session through ``create_transport`` until #232 retires it from the package. The wire
 codecs are covered in ``test_webtransport_wire.py`` and the aioquic internals the adapter relies on in
 ``test_webtransport_aioquic.py``.
 """
@@ -34,9 +33,7 @@ from relay_helpers.wt_server import (
 from moq_core import MoqtObject
 from moq_core.transport import ReceiveStream, SendStream
 from mux_relay import (
-    Closed,
     ConnectingTransport,
-    RelayAwaitable,
     RelayError,
     RelaySubscriptionHandlers,
     connect_relay_publisher,
@@ -112,87 +109,6 @@ class TestLoopback:
         # The peer observed the CLOSE_WEBTRANSPORT_SESSION capsule as a clean end.
         await asyncio.wait_for(sessions[0].wait_closed(), 5)
         assert sessions[0].close_info == (0, "")
-
-    async def test_runs_the_smoke_test_assertion_list_over_quic(
-        self, loopback: tuple[LoopbackWebTransportServer, RelayHub, list[WebTransportServerSession]]
-    ) -> None:
-        server, hub, _ = loopback
-        create_transport = factory_for(server)
-
-        # 1. A publisher connection and a subscriber connection both open.
-        publisher = await asyncio.wait_for(
-            connect_relay_publisher(server.url_for("/publish"), namespace=NAMESPACE, create_transport=create_transport),
-            10,
-        )
-        subscriber = await asyncio.wait_for(
-            connect_relay_subscriber(server.url_for("/subscribe"), create_transport=create_transport), 10
-        )
-        closing = False
-        problems: list[str] = []
-
-        def observe(label: str, closed: RelayAwaitable[Closed]) -> None:
-            def done(future: asyncio.Future[Closed]) -> None:
-                if not closing:
-                    problems.append(f"{label} closed: {future.result().error!r}")
-
-            closed.add_done_callback(done)
-
-        observe("publisher", publisher.closed)
-        observe("subscriber", subscriber.closed)
-
-        try:
-            events = publisher.register_track("events", write_timeout=5)
-            status = publisher.register_track("status", write_timeout=5)
-            received: dict[str, list[bytes]] = {"events": [], "status": []}
-            accepted: list[str] = []
-
-            def subscribe(track: str) -> None:
-                def on_object(obj: MoqtObject) -> None:
-                    if obj.status == "normal":
-                        received[track].append(obj.payload)
-
-                subscriber.subscribe(
-                    NAMESPACE,
-                    track,
-                    RelaySubscriptionHandlers(
-                        on_subscribed=lambda ok: accepted.append(track),
-                        on_object=on_object,
-                        on_error=lambda error: problems.append(f"{track}: {error.error_code} {error.reason}"),
-                        on_subgroup_reset=lambda reset: problems.append(f"{track} reset: {reset.error!r}"),
-                    ),
-                )
-
-            subscribe("events")
-            subscribe("status")
-            # 2. Subscriptions to two tracks on the namespace are accepted.
-            await wait_for(lambda: sorted(accepted) == ["events", "status"], timeout=10)
-
-            # 3. Binary, empty, and text payloads all arrive intact.
-            expected_events = [bytes([0, 255, 128, 1]), b"hello from Relay SDK", b""]
-
-            for payload in expected_events:
-                await events.write(payload)
-
-            await status.write(bytes([42]))
-            await wait_for(lambda: len(received["events"]) == 3 and len(received["status"]) == 1, timeout=10)
-
-            # 4. Closing one track writer does not affect delivery on another track.
-            events.close()
-            await status.write(bytes([43]))
-            await wait_for(lambda: len(received["status"]) == 2, timeout=10)
-
-            assert sorted(received["events"]) == sorted(expected_events)
-            assert received["status"] == [bytes([42]), bytes([43])]
-            assert problems == []
-            assert hub.subscribes.count("events") >= 1
-        finally:
-            closing = True
-            # 5. Both connections close cleanly once the test closes them.
-            await asyncio.wait_for(publisher.close(), 10)
-            subscriber.close()
-
-        assert await publisher.closed == Closed()
-        assert await subscriber.closed == Closed()
 
     async def test_closing_a_session_whose_connect_is_unanswered_fails_ready_at_once(self) -> None:
         requests: list[dict[bytes, bytes]] = []

@@ -43,7 +43,7 @@ class ConnectingTransport:
 RelayTransportFactory = Callable[[str, Sequence[str]], ConnectingTransport]
 """Supply a transport for ``(url, protocols)``.
 
-The aioquic WebTransport client by default; tests supply in-memory pairs.
+Native QUIC on aioquic (``mux_relay.quic.connect_quic``) by default; tests supply in-memory pairs.
 """
 
 DEFAULT_CONNECT_TIMEOUT = 10.0
@@ -53,7 +53,7 @@ DEFAULT_REQUEST_TIMEOUT = 10.0
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ConnectRelayOptions:
     url: str
-    """Relay's HTTPS WebTransport endpoint, including any endpoint path."""
+    """Relay's ``https:`` endpoint, including any endpoint path, which SETUP carries on native QUIC."""
     get_token: TokenProvider | None = None
     """Resolve a connection token. Relay carries it in the endpoint's ``jwt`` query parameter.
 
@@ -251,9 +251,9 @@ def _endpoint_setup_options(framing: object, url: str) -> list[KeyValuePair]:
 
 
 def _default_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
-    from .webtransport import connect_webtransport
+    from .quic import connect_quic
 
-    return connect_webtransport(url, protocols)
+    return connect_quic(url, protocols)
 
 
 async def open_relay_session(
