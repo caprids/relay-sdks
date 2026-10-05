@@ -391,16 +391,17 @@ describe('encodeMessageParameters', () => {
     }
   );
 
-  it('frames INCLUDE_PROPERTIES as a length-prefixed byte and rejects values other than 0 and 1', () => {
-    expect(Array.from(encodeParameters({ includeProperties: 1 }))).toEqual([0x01, 0x35, 0x01, 0x01]);
+  it('frames INCLUDE_PROPERTIES as a raw byte and rejects values other than 0 and 1', () => {
+    // §10.2.21 and moq-relay 0.17.0: a uint8 with no Length.
+    expect(Array.from(encodeParameters({ includeProperties: 0 }))).toEqual([0x01, 0x35, 0x00]);
 
-    const writer = new ByteWriter();
+    const reader = new ByteReader(Uint8Array.of(0x01, 0x35, 0x00));
 
-    writer.writeVarint(1);
-    writer.writeVarint(PARAMETER_TYPE.INCLUDE_PROPERTIES);
-    writer.writeVarint(1);
-    writer.writeUint8(2);
-    expect(() => decodeMessageParameters(new ByteReader(writer.toBytes()))).toThrow(/INCLUDE_PROPERTIES/);
+    expect(decodeMessageParameters(reader)).toEqual({ includeProperties: 0 });
+    expect(reader.remaining).toBe(0);
+    expect(() => decodeMessageParameters(new ByteReader(Uint8Array.of(0x01, 0x35, 0x02)))).toThrow(
+      /INCLUDE_PROPERTIES/
+    );
   });
 
   it('encodes FILL_PARAMETERS as a nested parameter list', () => {

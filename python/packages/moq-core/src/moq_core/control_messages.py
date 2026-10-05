@@ -647,7 +647,7 @@ def _collect_parameter_entries(parameters: MessageParameters) -> list[tuple[int,
         entries.append((PARAMETER_TYPE.TRACK_NAMESPACE_PREFIX, lambda w: _write_track_namespace(w, prefix)))
 
     if parameters.include_properties is not None:
-        prefixed(PARAMETER_TYPE.INCLUDE_PROPERTIES, bytes((parameters.include_properties,)))
+        uint8(PARAMETER_TYPE.INCLUDE_PROPERTIES, parameters.include_properties)
 
     return entries
 
@@ -742,14 +742,13 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
         elif parameter_type == PARAMETER_TYPE.TRACK_NAMESPACE_PREFIX:
             parameters.track_namespace_prefix = _read_track_namespace(reader)
         elif parameter_type == PARAMETER_TYPE.INCLUDE_PROPERTIES:
-            # §10.2.21 calls the value a uint8; moq-relay frames it length-prefixed by the odd-type
-            # parity rule (moq-dev/moq#3255). This remains length-prefixed in moq-relay 0.15.8.
-            value_bytes = reader.read_bytes(reader.read_varint())
+            # §10.2.21: a uint8 with no Length, as moq-relay frames it since 0.17.0 (0.15.8 and
+            # earlier added a Length by the odd-type parity rule).
+            include = reader.read_uint8()
+            if include not in (0, 1):
+                raise MoqtProtocolError(f"invalid INCLUDE_PROPERTIES value {include}")
 
-            if len(value_bytes) != 1 or value_bytes[0] > 1:
-                raise MoqtProtocolError(f"invalid INCLUDE_PROPERTIES value {','.join(str(b) for b in value_bytes)}")
-
-            parameters.include_properties = value_bytes[0]
+            parameters.include_properties = include
         elif parameter_type in _RANGE_FILTER_TYPES:
             value_bytes = reader.read_bytes(reader.read_varint())
 
