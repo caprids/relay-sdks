@@ -49,7 +49,7 @@ from mux_relay import (
 )
 from mux_relay.quic import connect_quic
 from mux_relay.quic._client import QuicSession
-from mux_relay.quic._errors import QuicTransportError
+from mux_relay.quic._errors import QuicTransportError, _from_h3_error_code, _from_native_wire_code, _to_h3_error_code
 
 MOQT = "moqt-20"
 NAMESPACE = ["loopback", "quic"]
@@ -306,6 +306,34 @@ class TestLifetime:
 
         assert isinstance(failure.value.__cause__, ConnectionRefusedError)
         assert loop.time() - started < 2
+
+
+class TestStreamCodes:
+    """TA-27: stream codes cross native QUIC in the HTTP/3 encoding moq-relay uses (close codes do not, TA-10)."""
+
+    def test_a_code_goes_out_in_the_http3_encoding_skipping_one_grease_slot_per_30_codes(self) -> None:
+        assert _to_h3_error_code(0) == 0x52E4A40FA8DB
+        assert _to_h3_error_code(1) == 0x52E4A40FA8DC  # what moq-relay resets a forwarded subgroup with (#248)
+        assert _to_h3_error_code(0x1D) == 0x52E4A40FA8DB + 0x1D
+        assert _to_h3_error_code(0x1E) == 0x52E4A40FA8DB + 0x1F
+        assert _to_h3_error_code(0xFFFFFFFF) == 0x52E5AC983162
+        with pytest.raises(ValueError):
+            _to_h3_error_code(0x1_0000_0000)
+
+    def test_an_encoded_code_decodes_back(self) -> None:
+        for code in (0, 1, 7, 0x12, 0x1D, 0x1E, 0x1F, 12345, 0xFFFFFFFF):
+            assert _from_h3_error_code(_to_h3_error_code(code)) == code
+            assert _from_native_wire_code(_to_h3_error_code(code)) == code
+
+    def test_a_grease_slot_carries_no_code(self) -> None:
+        for slot in (0x52E4A40FA8DB + 0x1E, 0x52E4A40FA8DB + 0x1E + 0x1F):
+            assert _from_h3_error_code(slot) is None
+            assert _from_native_wire_code(slot) is None
+
+    def test_a_code_outside_the_encoding_is_the_peers_as_it_is(self) -> None:
+        for code in (0, 11, 0xFFFFFFFF, 0x52E4A40FA8DA, 0x52E5AC983163, 2**62 - 1):
+            assert _from_h3_error_code(code) is None
+            assert _from_native_wire_code(code) == code
 
 
 class TestStreams:

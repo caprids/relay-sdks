@@ -78,7 +78,7 @@ def native_quic_target() -> ConformanceTarget:
         peer_framing="native-quic",
         host="localhost",
         dial=lambda url, protocols, configuration: connect_quic(url, protocols, configuration=configuration),
-        capabilities=PEER_CAPABILITIES | {"native-quic", "largeCodes"},
+        capabilities=PEER_CAPABILITIES | {"native-quic", "largeCodes", "wireCodes"},
         gaps={"webtransport": "native QUIC carries no WebTransport session"},
     )
 

@@ -79,6 +79,7 @@ export function createRelayQuicTarget({ port, certificateHash, call }) {
       'pause',
       'maxStreams',
       'largeCodes',
+      'wireCodes',
       'process',
     ],
     gaps: { webtransport: 'native QUIC carries no WebTransport session' },

@@ -119,6 +119,7 @@ export function createPairTarget() {
       maxStreams: 'the pair has no stream credit (Test doubles, TA-21)',
       'native-quic': 'the pair stands in for a WebTransport session',
       largeCodes: 'only native QUIC carries codes above 2^32-1',
+      wireCodes: "TA-27 is native QUIC's: a WebTransport session maps its codes itself",
       process: 'an in-process target has no process lifetime of its own',
     },
     expectations: {},

@@ -5,6 +5,7 @@
 //! Nothing fallible throws once a dial has started: every call resolves with a [`Failure`], or
 //! with nothing on success (`failure.rs`). Only bad options throw, when the [`Client`] is built.
 
+mod codes;
 mod failure;
 mod stream;
 mod tls;

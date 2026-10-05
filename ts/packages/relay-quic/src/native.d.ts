@@ -45,7 +45,10 @@ export declare class RecvStream {
    * `stop()`, or once the peer's FIN means a reset can no longer arrive.
    */
   watch(): Promise<Failure | null>
-  /** STOP_SENDING with `code`, now (TA-18): a pending read ends, and nothing more is delivered. */
+  /**
+   * STOP_SENDING with `code`, encoded (TA-27), now (TA-18): a pending read ends, and nothing more
+   * is delivered.
+   */
   stop(code: number): Promise<void>
 }
 
@@ -64,8 +67,8 @@ export declare class SendStream {
    */
   finish(): Promise<Failure | null>
   /**
-   * RESET_STREAM with `code`, now (TA-16): a write blocked on flow control and a FIN waiting for
-   * acknowledgement both fail at once. Harmless once the stream is complete.
+   * RESET_STREAM with `code`, encoded (TA-27), now (TA-16): a write blocked on flow control and a
+   * FIN waiting for acknowledgement both fail at once. Harmless once the stream is complete.
    */
   reset(code: number): Promise<void>
   /**
@@ -126,7 +129,10 @@ export interface Failure {
    * protocol or TLS failure), `local`, `timeout`, `stateless-reset`, `cancelled` or `dial`.
    */
   kind: string
-  /** The peer's code in decimal: a QUIC varint has 62 bits, more than a JS number holds exactly. */
+  /**
+   * The peer's code in decimal: a QUIC varint has 62 bits, more than a JS number holds exactly.
+   * For `stream`, the code decoded from the wire (TA-27), absent when it carries none.
+   */
   code?: string
   /** The peer's reason phrase, or a diagnostic. */
   reason: string

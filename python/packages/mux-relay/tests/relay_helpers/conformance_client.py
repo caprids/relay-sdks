@@ -143,11 +143,13 @@ class RemotePeer:
     async def finish(self, stream: int) -> None:
         await self._call("finish", stream=stream)
 
-    async def reset(self, stream: int, code: int | str) -> None:
-        await self._call("reset", stream=stream, code=code)
+    async def reset(self, stream: int, code: int | str, *, wire: bool = False) -> None:
+        """Reset with ``code``; with ``wire``, put ``code`` on native QUIC's wire as it is, unencoded (TA-27)."""
+        await self._call("reset", stream=stream, code=code, wire=wire or None)
 
-    async def stop(self, stream: int, code: int) -> None:
-        await self._call("stop", stream=stream, code=code)
+    async def stop(self, stream: int, code: int | str, *, wire: bool = False) -> None:
+        """Stop with ``code``; with ``wire``, as :meth:`reset`."""
+        await self._call("stop", stream=stream, code=code, wire=wire or None)
 
     async def read(self, stream: int, *, count: int | None = None, discard: bool = False) -> dict[str, Any]:
         """``{bytes, byteLength, fin, resetCode}``: read until the FIN, a reset, or ``count`` bytes."""
@@ -155,6 +157,11 @@ class RemotePeer:
 
     async def stopped(self, stream: int) -> int:
         return await self._call("stopped", stream=stream)
+
+    async def wire_code(self, stream: int) -> int | None:
+        """The code the dialer's last reset or stop of ``stream`` carried on native QUIC's wire (TA-27)."""
+        code = await self._call("wireCode", stream=stream)
+        return None if code is None else int(code)
 
     async def close(self, code: int, reason: str) -> None:
         await self._call("close", code=code, reason=reason)

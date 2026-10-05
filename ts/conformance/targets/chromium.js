@@ -49,6 +49,7 @@ export function createChromiumTarget({ port, certificateHash, call }) {
     gaps: {
       'native-quic': 'a browser speaks WebTransport only',
       largeCodes: 'only native QUIC carries codes above 2^32-1',
+      wireCodes: "TA-27 is native QUIC's: a WebTransport session maps its codes itself",
       process: 'a browser has no process to keep alive (TA-25, TA-26 do not apply)',
     },
     expectations,

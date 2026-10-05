@@ -5,6 +5,8 @@
 use napi_derive::napi;
 use quinn::{ConnectionError, ReadError, StoppedError, VarInt, WriteError};
 
+use crate::codes;
+
 /// Why an operation failed.
 #[napi(object)]
 pub struct Failure {
@@ -17,17 +19,19 @@ pub struct Failure {
     /// protocol or TLS failure), `local`, `timeout`, `stateless-reset`, `cancelled` or `dial`.
     pub kind: String,
     /// The peer's code in decimal: a QUIC varint has 62 bits, more than a JS number holds exactly.
+    /// For `stream`, the code decoded from the wire (TA-27), absent when it carries none.
     pub code: Option<String>,
     /// The peer's reason phrase, or a diagnostic.
     pub reason: String,
 }
 
 impl Failure {
+    /// The peer reset or stopped a stream with the wire code `code`, decoded as TA-27 says.
     pub fn stream(kind: &str, code: VarInt) -> Self {
         Self {
             source: "stream".into(),
             kind: kind.into(),
-            code: Some(code.into_inner().to_string()),
+            code: codes::from_wire(code).map(|code| code.to_string()),
             reason: String::new(),
         }
     }

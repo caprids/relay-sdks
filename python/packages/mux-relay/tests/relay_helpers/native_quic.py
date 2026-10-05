@@ -1,9 +1,10 @@
 """The accepting end of a native QUIC session: MOQT straight on a QUIC connection, with no HTTP/3 or WebTransport.
 
 :class:`NativeQuicSession` is a :class:`~mux_relay.quic._streams._StreamLink` over raw QUIC streams, so the
-conformance peer drives the very stream halves the SDK's session uses. Codes go on the wire as they are: there
-is no HTTP/3 error-code mapping to undo. The session never waits for acknowledgements; a write settles once it was
-handed to aioquic, which is all the peer needs.
+conformance peer drives the very stream halves the SDK's session uses. Stream codes go on the wire in the HTTP/3
+encoding, and a dialer's code is read back from it, as moq-relay does on native QUIC (TA-27): a code outside that
+encoding reaches the peer's halves as unknown, the way the relay reads it. Close codes go as they are. The session
+never waits for acknowledgements; a write settles once it was handed to aioquic, which is all the peer needs.
 """
 
 from __future__ import annotations
@@ -18,7 +19,7 @@ from aioquic.quic.connection import stream_is_client_initiated, stream_is_unidir
 
 from moq_core._tasks import observe
 from moq_core.transport import BidirectionalStream
-from mux_relay.quic._errors import _session_error, _stream_error
+from mux_relay.quic._errors import _from_h3_error_code, _session_error, _stream_error, _to_h3_error_code
 from mux_relay.quic._streams import _ReceiveHalf, _SendHalf, _StreamQueue
 
 
@@ -37,8 +38,12 @@ class NativeQuicSession:
         self.close_info: tuple[int, str] | None = None
         """``(code, reason)`` of the dialer's application CONNECTION_CLOSE (frame type 0x1d), once received."""
         self.reset_codes: dict[int, int] = {}
-        """The code the next reset of a stream carries instead of its reason's: a 62-bit code, which no reason can
-        carry (TA-17 caps it at 2^32-1), for the conformance peer's TA-22 case."""
+        """The code the next reset of a stream carries on the wire, as it is, instead of its reason's encoded: a code
+        outside the HTTP/3 encoding (TA-27), or a 62-bit one, which no reason can carry (TA-17 caps it at 2^32-1)."""
+        self.stop_codes: dict[int, int] = {}
+        """The code the next stop of a stream carries on the wire, as it is, instead of its reason's encoded."""
+        self.wire_codes: dict[int, int] = {}
+        """The code each stream's last reset or stop from the dialer carried on the wire, before decoding."""
 
     @property
     def ended(self) -> bool:
@@ -87,13 +92,15 @@ class NativeQuicSession:
         if isinstance(event, events.StreamDataReceived):
             self._on_stream_data(event)
         elif isinstance(event, events.StreamReset):
+            self.wire_codes[event.stream_id] = event.error_code
             receive = self._receives.get(event.stream_id)
             if receive is not None:
-                receive.fail(_stream_error("reset", event.error_code))
+                receive.fail(_stream_error("reset", _from_h3_error_code(event.error_code)))
         elif isinstance(event, events.StopSendingReceived):
+            self.wire_codes[event.stream_id] = event.error_code
             send = self._sends.get(event.stream_id)
             if send is not None:
-                send.stopped(event.error_code)
+                send.stopped(_from_h3_error_code(event.error_code))
         elif isinstance(event, events.ConnectionTerminated):
             # aioquic reports no frame type for an application close.
             if event.frame_type is None:
@@ -142,7 +149,8 @@ class NativeQuicSession:
         await waiter
 
     def reset_stream(self, stream_id: int, code: int) -> None:
-        code = self.reset_codes.pop(stream_id, code)
+        wire = self.reset_codes.pop(stream_id, None)
+        code = _to_h3_error_code(code) if wire is None else wire
         if self.ended:
             return
         try:
@@ -152,6 +160,8 @@ class NativeQuicSession:
             pass
 
     def stop_stream(self, stream_id: int, code: int) -> None:
+        wire = self.stop_codes.pop(stream_id, None)
+        code = _to_h3_error_code(code) if wire is None else wire
         if self.ended:
             return
         try:

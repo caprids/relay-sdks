@@ -51,7 +51,8 @@ export function toError(failure: Failure): Error {
   switch (failure.source) {
     case 'stream': {
       const what = failure.kind === 'stopped' ? 'stopped' : 'reset';
-      return new MoqtStreamError(`the peer ${what} the stream (code ${failure.code})`, safeCode(failure.code));
+      const detail = failure.code === undefined ? '' : ` (code ${failure.code})`;
+      return new MoqtStreamError(`the peer ${what} the stream${detail}`, safeCode(failure.code));
     }
     case 'session': {
       // The peer's close is a session error only on a stream; `closed` itself resolves with it (TA-9).

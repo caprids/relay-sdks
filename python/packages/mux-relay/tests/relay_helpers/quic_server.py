@@ -31,6 +31,7 @@ from moq_core._tasks import spawn
 from moq_core.transport import BidirectionalStream, SendStream
 from mux_relay.quic._aioquic import finish_receiving_half
 from mux_relay.quic._client import NativeQuicProtocol
+from mux_relay.quic._errors import _from_native_wire_code, _to_h3_error_code
 from mux_relay.quic._protocol import QuicProtocol
 from mux_relay.quic._session import _CLOSE_DRAIN_TIMEOUT, QuicStreamSession
 
@@ -119,7 +120,8 @@ class QuicServerSession(QuicStreamSession["QuicServerProtocol"]):
     """The accepting end of one native QUIC connection: a ``MoqtTransport`` for a test or the relay hub to serve.
 
     Opens streams the way the dialing end does, without its credit check, and closes with an application close
-    after the same drain. The dialer's application close ends it cleanly, with ``close_info`` set.
+    after the same drain. The dialer's application close ends it cleanly, with ``close_info`` set. Stream codes cross
+    in the HTTP/3 encoding, as with moq-relay (TA-27).
     """
 
     _CLOSED_MESSAGE = "QUIC session closed"
@@ -175,6 +177,12 @@ class QuicServerSession(QuicStreamSession["QuicServerProtocol"]):
         finally:
             if protocol.terminated is None:
                 protocol.close_after_drain(close_code, reason)
+
+    def _to_wire_code(self, code: int) -> int:
+        return _to_h3_error_code(code)
+
+    def _from_wire_code(self, code: int) -> int | None:
+        return _from_native_wire_code(code)
 
     def _on_terminated(self, event: quic_events.ConnectionTerminated) -> None:
         # aioquic reports no frame type for an application close; one this end did not send is the dialer's.

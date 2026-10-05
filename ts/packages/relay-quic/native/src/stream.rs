@@ -15,6 +15,7 @@ use quinn::VarInt;
 use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
+use crate::codes;
 use crate::failure::{self, Failure};
 
 type Stopped = Pin<Box<dyn Future<Output = std::result::Result<Option<VarInt>, quinn::StoppedError>> + Send>>;
@@ -113,12 +114,12 @@ impl SendStream {
         }
     }
 
-    /// RESET_STREAM with `code`, now (TA-16): a write blocked on flow control and a FIN waiting for
-    /// acknowledgement both fail at once. Harmless once the stream is complete.
+    /// RESET_STREAM with `code`, encoded (TA-27), now (TA-16): a write blocked on flow control and a
+    /// FIN waiting for acknowledgement both fail at once. Harmless once the stream is complete.
     #[napi]
     pub async fn reset(&self, code: u32) {
         self.aborted.cancel();
-        let _ = self.inner.lock().await.reset(VarInt::from_u32(code));
+        let _ = self.inner.lock().await.reset(codes::to_wire(code));
     }
 
     /// Resolves with the peer's STOP_SENDING (TA-20), answered with a RESET_STREAM carrying its code
@@ -275,11 +276,12 @@ impl RecvStream {
         }
     }
 
-    /// STOP_SENDING with `code`, now (TA-18): a pending read ends, and nothing more is delivered.
+    /// STOP_SENDING with `code`, encoded (TA-27), now (TA-18): a pending read ends, and nothing more
+    /// is delivered.
     #[napi]
     pub async fn stop(&self, code: u32) {
         self.stopped.cancel();
-        let _ = self.inner.lock().await.stop(VarInt::from_u32(code));
+        let _ = self.inner.lock().await.stop(codes::to_wire(code));
     }
 }
 

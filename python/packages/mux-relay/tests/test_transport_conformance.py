@@ -177,6 +177,13 @@ def expect_stream_error(error: BaseException, code: int | None, what: str) -> No
     )
 
 
+def expect_exact_stream_error(error: BaseException, code: int | None, what: str) -> None:
+    """TA-27: a stream error whose ``stream_error_code`` is exactly ``code``, where ``None`` is no code at all."""
+    check(getattr(error, "source", None) == "stream", f"{what}: expected source 'stream', got {error!r}")
+    reported = getattr(error, "stream_error_code", "missing")
+    check(reported == code, f"{what}: expected stream_error_code {code}, got {reported!r}")
+
+
 def expect_session_error(error: BaseException, what: str) -> None:
     """TA-22: ``source == 'session'``."""
     check(getattr(error, "source", None) == "session", f"{what}: expected source 'session', got {error!r}")
@@ -912,17 +919,80 @@ async def test_ta_21_creates_raise_promptly_at_the_peers_stream_limit_and_succee
             send.abort(CodeReason(0))
 
 
+H3_FIRST_CODE = 0x52E4A40FA8DB
+"""Where the HTTP/3 encoding puts code 0 (TA-27)."""
+
+
+def h3_code(code: int) -> int:
+    """``code`` in the HTTP/3 encoding: one GREASE slot is skipped per 30 codes (TA-27)."""
+    return H3_FIRST_CODE + code + code // 0x1E
+
+
+TA_27_CODES = (0, 7, 0x1D, 0x1E, 0xFFFF_FFFF)
+"""Codes on both sides of the first GREASE slot, and the range's ends."""
+
+
+@needs("native-quic", "wireCodes")
+async def test_ta_27_a_reset_goes_out_in_the_http3_encoding(ctx: Ctx) -> None:
+    transport = await ctx.open()
+    for code in TA_27_CODES:
+        send, stream_id = await open_accepted_uni(ctx, transport)
+        send.abort(CodeReason(code))
+        await resolves(ctx.peer.read(stream_id), "the peer read")
+        seen = await ctx.peer.wire_code(stream_id)
+        check(seen == h3_code(code), f"the wire code for {code}: expected {h3_code(code)}, got {seen}")
+
+
+@needs("native-quic", "wireCodes")
+async def test_ta_27_a_stop_goes_out_in_the_http3_encoding(ctx: Ctx) -> None:
+    transport = await ctx.open()
+    for code in TA_27_CODES:
+        stream_id = await ctx.peer.open_uni()
+        await ctx.peer.write(stream_id, b"x")
+        receive = await next_incoming(transport.incoming_unidirectional_streams(), "the peer stream")
+        await read_bytes(receive, 1)
+        receive.cancel(CodeReason(code))
+        await resolves(ctx.peer.stopped(stream_id), "the peer seeing the stop")
+        seen = await ctx.peer.wire_code(stream_id)
+        check(seen == h3_code(code), f"the wire code for {code}: expected {h3_code(code)}, got {seen}")
+
+
+@needs("native-quic", "wireCodes")
+async def test_ta_27_a_peer_reset_in_the_http3_encoding_is_decoded(ctx: Ctx) -> None:
+    transport = await ctx.open()
+    # A GREASE slot carries no code, and a code outside the encoding is the peer's as it is.
+    for wire, code in [*((h3_code(code), code) for code in TA_27_CODES), (H3_FIRST_CODE + 0x1E, None), (11, 11)]:
+        stream_id = await ctx.peer.open_uni()
+        await ctx.peer.write(stream_id, b"x")
+        receive = await next_incoming(transport.incoming_unidirectional_streams(), "the peer stream")
+        await read_bytes(receive, 1)
+        await ctx.peer.reset(stream_id, str(wire), wire=True)
+        error = await rejects(receive.read(), "the read")
+        expect_exact_stream_error(error, code, f"the read after a reset with wire code {wire}")
+
+
+@needs("native-quic", "wireCodes")
+async def test_ta_27_a_peer_stop_in_the_http3_encoding_is_decoded(ctx: Ctx) -> None:
+    transport = await ctx.open()
+    for wire, code in [(h3_code(13), 13), (h3_code(0xFFFF_FFFF), 0xFFFF_FFFF), (H3_FIRST_CODE + 0x1E, None), (13, 13)]:
+        send, stream_id = await open_accepted_uni(ctx, transport)
+        sent = acknowledged(send)
+        await ctx.peer.stop(stream_id, str(wire), wire=True)
+        error = await rejects(sent, "wait_acknowledged")
+        expect_exact_stream_error(error, code, f"wait_acknowledged after a stop with wire code {wire}")
+
+
 # ── Error shape ───────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-@needs("native-quic", "largeCodes")
+@needs("native-quic", "largeCodes", "wireCodes")
 async def test_ta_22_a_code_above_2_53_minus_1_is_reported_as_none(ctx: Ctx) -> None:
     transport = await ctx.open()
     stream_id = await ctx.peer.open_uni()
     await ctx.peer.write(stream_id, b"x")
     receive = await next_incoming(transport.incoming_unidirectional_streams(), "the peer stream")
     await read_bytes(receive, 1)
-    await ctx.peer.reset(stream_id, "4611686018427387903")
+    await ctx.peer.reset(stream_id, "4611686018427387903", wire=True)
     error = await rejects(receive.read(), "the read")
     expect_stream_error(error, None, "the read after a 62-bit reset")
 

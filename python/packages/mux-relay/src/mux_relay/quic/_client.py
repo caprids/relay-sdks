@@ -18,7 +18,7 @@ from moq_core.transport import BidirectionalStream, SendStream
 
 from ..connect_session import ConnectingTransport
 from ._aioquic import finish_receiving_half, stream_credit_left
-from ._errors import QuicTransportError, _session_error
+from ._errors import QuicTransportError, _from_native_wire_code, _session_error, _to_h3_error_code
 from ._protocol import QuicProtocol
 from ._session import _CLOSE_DRAIN_TIMEOUT, QuicStreamSession
 from ._udp import open_socket
@@ -80,7 +80,8 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
     """A native QUIC session: MOQT straight on a QUIC connection. Create one with :func:`connect_quic`.
 
     ``ready`` resolves once the handshake negotiated one of ``protocols`` as its ALPN, and
-    ``protocol_id`` is that protocol. Reset and stop codes go on the wire as they are.
+    ``protocol_id`` is that protocol. Reset and stop codes go on the wire in the HTTP/3 encoding moq-relay reads
+    them in, and a peer's code in that encoding is decoded (TA-27); close codes go as they are.
     """
 
     _CLOSED_MESSAGE = "QUIC session closed"
@@ -275,6 +276,14 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
             raise QuicTransportError(self._NOT_ESTABLISHED_MESSAGE)
 
         super().check_live()
+
+    # ------------------------------------------------------------------ framing hooks
+
+    def _to_wire_code(self, code: int) -> int:
+        return _to_h3_error_code(code)
+
+    def _from_wire_code(self, code: int) -> int | None:
+        return _from_native_wire_code(code)
 
     # ------------------------------------------------------------------ ending
 

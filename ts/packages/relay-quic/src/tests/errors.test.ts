@@ -37,6 +37,11 @@ describe('toError (TA-22, TA-23, TA-24)', () => {
     });
   });
 
+  it('makes a reset that carried no code (a GREASE slot, TA-27) a stream error with a null code', () => {
+    const error = toError({ source: 'stream', kind: 'reset', reason: '' });
+    expect(error).toMatchObject({ source: 'stream', streamErrorCode: null, message: 'the peer reset the stream' });
+  });
+
   it("makes the peer's close a session error carrying its code and reason", () => {
     expect(toError({ source: 'session', kind: 'application', code: '16', reason: 'unauthorized' })).toMatchObject({
       source: 'session',
