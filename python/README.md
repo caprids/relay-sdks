@@ -440,7 +440,11 @@ round trip after the last viewer leaves, so the next viewer brings a new `True` 
 viewer that resubscribes on the same connection within about 30 seconds can receive the relay's
 cached copy before the re-sent one. `True` does not prove anyone is watching. Write only state that
 is safe to serve from cache and to receive more than once, and do not use demand to decide whether
-to keep encoding. See [relay demand](../spec/relay-interop.md#relay-demand).
+to keep encoding. When the first viewer is on another relay, the publisher's relay subscribes once
+to look up the track's info, cancels about 50 ms later, and subscribes again: `True`, `False`, `True`. Objects
+written during that first subscription reach no viewer, so do not rely on the first objects after
+demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and
+[a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay).
 
 Both loops above exist ready-made in `mux_relay.media`, the media publishing policy the Video.js
 example runs on. `CatalogService(track, document)` re-sends a document on every relay subscription

@@ -469,7 +469,11 @@ round trip after the last viewer leaves, so the next viewer brings a new `true` 
 viewer that resubscribes on the same connection within about 30 seconds can receive the relay's
 cached copy before the re-sent one. `true` does not prove anyone is watching. Write only state that
 is safe to serve from cache and to receive more than once, and do not use demand to decide whether
-to keep encoding. See [relay demand](../spec/relay-interop.md#relay-demand).
+to keep encoding. When the first viewer is on another relay, the publisher's relay subscribes once
+to look up the track's info, cancels about 50 ms later, and subscribes again: `true`, `false`, `true`. Objects
+written during that first subscription reach no viewer, so do not rely on the first objects after
+demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and
+[a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay).
 
 Custom transports with asynchronous sink writes or closes must honor the writable controller's
 abort signal to interrupt them and reset their underlying stream, as browser WebTransport does.

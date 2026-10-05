@@ -206,6 +206,39 @@ keep or stop encoding, and a catalog re-sent on each demanded value is what the 
 every later viewer: write only state that is safe to serve from cache, and expect a viewer to see
 a document more than once.
 
+### A viewer on another relay
+
+When the first viewer of a track is on a different relay from the publisher, the publisher sees
+two relay subscriptions, not one
+([issue #243](https://github.com/muxinc/relay-sdks/issues/243)). Relays mesh over moq-lite, and a
+lite-05 subscriber fetches a track's TRACK_INFO before it subscribes (`TrackInfoFetch` in
+`rs/moq-net/src/lite/subscriber.rs` at `moq-relay-v0.17.0`). The publisher's relay can learn the
+info of an IETF publisher's track only from a SUBSCRIBE_OK, so it subscribes to answer the query
+(`TrackInfoServe` in `rs/moq-net/src/lite/publisher.rs`, `run_subscribe` in
+`rs/moq-net/src/ietf/subscriber.rs`). Nothing reads that track, so the relay cancels the
+subscription as unused about 50 ms later, and the downstream relay's real SUBSCRIBE starts a new one
+after the info has made the trip back. Measured on the r1 fleet on 0.15.8 (sjc publisher, two-hop
+path to fra):
+
+```text
+59.642 sjc ietf subscriber: subscribe started   track=events   (answers the TRACK_INFO query)
+59.692 sjc ietf subscriber: subscribe cancelled track=events
+60.072 sjc lite publisher:  subscribed started                 (the mesh SUBSCRIBE from iad)
+60.072 sjc ietf subscriber: subscribe started   track=events
+```
+
+Objects written to the first subscription reach no viewer. A write still in flight when it is
+cancelled fails with `SUBSCRIPTION_CHANGED`; a write that completed before the cancel was accepted by
+the transport and is dropped by the relay without an error. Against local relays the first object
+of a continuous publisher was lost in every run, and on the fleet the remote viewer's first object
+was seq 1 or 2 on three of four paths. A viewer on the publisher's own relay sends no TRACK_INFO
+query and gets one subscription (3 of 3 on 0.17.0 on 2026-10-05). The SDKs cannot tell the two
+subscriptions apart: each is a demanded value, the first followed by `false` ([ADR 0001](../docs/adr/0001-one-relay-subscription-per-track.md)).
+Because publishers retain no history, the second subscription's current-group fill has nothing to
+recover either. A live publisher therefore cannot count on its first objects after demand begins
+reaching a viewer: write state-shaped tracks on every demanded value (the catalog service does), and
+start media at a keyframe after any change (the frame writer does).
+
 Relays before 0.15 held the upstream subscription for about 30 seconds after the last viewer left
 (measured against the same endpoint on 2026-09-15, [issue #24](https://github.com/muxinc/relay-sdks/issues/24));
 that is no longer the case.
