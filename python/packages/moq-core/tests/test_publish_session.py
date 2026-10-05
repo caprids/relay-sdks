@@ -50,6 +50,7 @@ from moq_core.publish_session import (
     MoqtPublishSessionCallbacks,
     MoqtPublishSessionConfig,
     RegisterTrackOptions,
+    SubscribeFailed,
     TrackBinding,
     create_moqt_publish_session,
 )
@@ -472,6 +473,40 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: len(subscribe.received) == 1)
         assert subscribe.received[0] == SubscribeOk(track_alias=11, track_properties=properties)
+        harness.destroy()
+
+    async def test_refuses_a_subscribe_whose_subscribe_ok_cannot_be_encoded_with_internal_error(self) -> None:
+        failures: list[SubscribeFailed] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_subscribe_failed=failures.append))
+
+        await harness.session.ready
+        # One byte past the limit the SDK enforces at registration, which the core does not check: with
+        # the largest alias, the 9-byte varint the limit allows for, SUBSCRIBE_OK overflows its frame.
+        harness.session.register_track(
+            RegisterTrackOptions(
+                track_namespace=NAMESPACE,
+                track_name="video",
+                track_properties=[KeyValuePair(1, bytes(MAX_TRACK_PROPERTIES_LENGTH - 3))],
+            )
+        )
+        register(harness.session, "audio")
+
+        subscribe = await raw_subscribe(harness.pair.server, "video", 2**64 - 1)
+
+        # A local failure is not a peer cancel: the peer gets a prompt REQUEST_ERROR, then the FIN.
+        await wait_for(lambda: subscribe.ended())
+        assert subscribe.failure() is None
+        assert subscribe.received == [
+            RequestError(error_code=REQUEST_ERROR_CODE.INTERNAL_ERROR, reason="could not encode SUBSCRIBE_OK")
+        ]
+        assert [(failure.request_id, failure.track_name) for failure in failures] == [(2**64 - 1, "video")]
+        assert isinstance(failures[0].error, MoqtProtocolError)
+
+        # The session stays up and keeps serving: the other track still answers SUBSCRIBE_OK.
+        audio = await raw_subscribe(harness.pair.server, "audio", 11)
+
+        await wait_for(lambda: len(audio.received) == 1)
+        assert audio.received[0] == SubscribeOk(track_alias=11, track_properties=[])
         harness.destroy()
 
     async def test_rejects_inbound_subscribe_for_unknown_tracks_with_does_not_exist(self) -> None:

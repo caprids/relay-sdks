@@ -135,6 +135,20 @@ class IncomingRequestUpdate:
     parameters: MessageParameters
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class SubscribeFailed:
+    """What ``on_subscribe_failed`` receives: the session could not build its SUBSCRIBE_OK.
+
+    The peer was answered REQUEST_ERROR ``INTERNAL_ERROR`` instead. The track stays registered and the
+    session stays up, but a cause that lies in the track (its properties) fails every subscription
+    to it. ``error`` is the encoder's failure.
+    """
+
+    request_id: int
+    track_name: str
+    error: BaseException
+
+
 @dataclass(slots=True, kw_only=True)
 class MoqtPublishSessionCallbacks:
     """Synchronous callbacks a publish session calls as its state changes. Every one is optional."""
@@ -159,6 +173,8 @@ class MoqtPublishSessionCallbacks:
     """The peer subscribed to a registered track (already answered SUBSCRIBE_OK)."""
     on_subscribe_end: Callable[[int], None] | None = None
     """A subscription ended (the peer's FIN or reset, or our PUBLISH_DONE); the argument is its request id."""
+    on_subscribe_failed: Callable[[SubscribeFailed], None] | None = None
+    """A SUBSCRIBE to a registered track could not be answered; see :class:`SubscribeFailed`."""
     on_track_binding: Callable[[TrackBinding], None] | None = None
     """A registered track's effective alias binding changed; see :class:`TrackBinding`."""
     on_request_update: Callable[[IncomingRequestUpdate], None] | None = None
@@ -380,6 +396,17 @@ async def _swallow(awaitable: Awaitable[object]) -> None:
         await awaitable
     except Exception:  # the peer is gone or the stream is already over
         pass
+
+
+async def _refuse(writer: SendStream, reader: StreamReader, code: int, reason: str) -> None:
+    """Answer a request with REQUEST_ERROR and close it both ways."""
+    try:
+        await writer.write(encode_request_error(code, reason))
+        await writer.close()
+    except Exception:  # peer cancelled
+        pass
+
+    reader.cancel()
 
 
 # =============================================================================
@@ -1108,18 +1135,28 @@ class MoqtPublishSession:
         writer = stream.writable
 
         if track is None or track.done:
-            try:
-                await writer.write(encode_request_error(REQUEST_ERROR_CODE.DOES_NOT_EXIST, "unknown track"))
-                await writer.close()
-            except Exception:  # peer cancelled
-                pass
-
-            reader.cancel()
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, "unknown track")
             return
 
         # The peer's request IDs are session-unique, so they double as the track alias: binding one
         # alias to two live request IDs is a session-fatal Duplicate on moq-lite-rs.
         track_alias = subscribe.request_id
+
+        # Encoded before the write's guard: only a failed write is the peer cancelling. A response
+        # this side cannot build (the properties overflow the message, say) is refused promptly, so
+        # the peer is not left waiting on a request that never gets an answer.
+        try:
+            subscribe_ok = encode_subscribe_ok(track_alias, MessageParameters(), track.track_properties)
+        except Exception as error:  # the encoder refused the response; the peer did nothing wrong
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, "could not encode SUBSCRIBE_OK")
+
+            if not self._destroyed:
+                _call(
+                    self._callbacks.on_subscribe_failed,
+                    SubscribeFailed(request_id=subscribe.request_id, track_name=track.track_name, error=error),
+                )
+            return
+
         subscriber = _SubscriberStream(
             request_id=subscribe.request_id,
             track_alias=track_alias,
@@ -1135,7 +1172,7 @@ class MoqtPublishSession:
         track.subscribers.append(subscriber)
 
         try:
-            await writer.write(encode_subscribe_ok(track_alias, MessageParameters(), track.track_properties))
+            await writer.write(subscribe_ok)
             subscriber.accepted = True
         except Exception:  # peer cancelled before the response landed
             track.subscribers = [s for s in track.subscribers if s is not subscriber]
@@ -1343,6 +1380,7 @@ __all__ = [
     "MoqtPublishSessionConfig",
     "RegisterTrackOptions",
     "RegisteredTrack",
+    "SubscribeFailed",
     "TrackBinding",
     "create_moqt_publish_session",
 ]

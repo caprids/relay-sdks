@@ -45,6 +45,7 @@ from .publish_session import (
     MoqtPublishSessionConfig,
     RegisteredTrack,
     RegisterTrackOptions,
+    SubscribeFailed,
     TrackBinding,
     create_moqt_publish_session,
 )
@@ -123,6 +124,7 @@ __all__ = [
     "SubgroupEnd",
     "SubgroupReset",
     "SubgroupWriter",
+    "SubscribeFailed",
     "SubscribeOk",
     "Subscription",
     "SubscriptionHandlers",
