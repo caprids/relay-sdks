@@ -470,7 +470,12 @@ still invokes the gap callback. Publisher completion leaves readers active for t
   count nor a liveness signal. A document re-sent on each demanded value reaches the viewers who
   join during one relay subscription from the relay's cache, not as a re-send, so a state-shaped
   track writes only state that is safe to serve from cache and to receive more than once
-  ([relay demand](relay-interop.md#relay-demand)). Implemented in both SDKs.
+  ([relay demand](relay-interop.md#relay-demand)). When the first viewer is on another relay, the
+  publisher's relay first subscribes briefly to answer a track-info query and then subscribes again,
+  so objects written during the first subscription reach no viewer, with or without a
+  `SUBSCRIPTION_CHANGED` error; a live publisher cannot rely on its first objects after demand
+  begins being delivered ([a viewer on another relay](relay-interop.md#a-viewer-on-another-relay)).
+  Implemented in both SDKs.
 
 ### Delivery timeouts
 
