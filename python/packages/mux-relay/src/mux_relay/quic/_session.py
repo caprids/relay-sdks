@@ -299,7 +299,8 @@ class QuicStreamSession(Generic[P]):
     def _finish(self, error: BaseException | None, *, stream_error: BaseException | None = None) -> None:
         """End the session: ``wait_closed`` raises ``error`` (returns, for ``None``), and every stream fails.
 
-        The streams fail with ``stream_error`` when given, else with ``error``, else with a plain closure.
+        The incoming iterators raise ``error`` too, or end for ``None`` (TA-12). The streams fail with
+        ``stream_error`` when given, else with ``error``, else with a plain closure.
         """
         if self._closed.done():
             return
@@ -318,8 +319,12 @@ class QuicStreamSession(Generic[P]):
         for send in self._sends.values():
             send.fail(stream_error)
 
-        self._incoming_uni.close()
-        self._incoming_bidi.close()
+        # TA-12: the incoming iterators end after a clean end and raise the session's error after any other.
+        for incoming in (self._incoming_uni, self._incoming_bidi):
+            if error is None:
+                incoming.close()
+            else:
+                incoming.fail(error)
 
         if self._drained is not None and not self._drained.done():
             self._drained.set_result(None)

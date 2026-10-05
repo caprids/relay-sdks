@@ -69,12 +69,6 @@ PEER_CAPABILITIES = frozenset(
 )
 """What the conformance peer can do in either framing (``ts/conformance/README.md``, "Capabilities")."""
 
-_ITERATORS_END = KnownFailure(
-    "#235: the incoming stream iterators end cleanly however the session ended "
-    "(spec/transport-adapter.md, Python mapping, TA-12)",
-    match=r"^the incoming uni iterator ended cleanly instead of raising$",
-)
-
 
 def native_quic_target() -> ConformanceTarget:
     """The native QUIC dialing end: ``connect_quic``, against ``--framing native-quic``."""
@@ -86,9 +80,6 @@ def native_quic_target() -> ConformanceTarget:
         dial=lambda url, protocols, configuration: connect_quic(url, protocols, configuration=configuration),
         capabilities=PEER_CAPABILITIES | {"native-quic", "largeCodes"},
         gaps={"webtransport": "native QUIC carries no WebTransport session"},
-        expectations={
-            "test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close": _ITERATORS_END,
-        },
     )
 
 

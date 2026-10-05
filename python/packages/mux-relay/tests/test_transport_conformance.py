@@ -580,6 +580,18 @@ async def test_ta_12_incoming_stream_iterators_end_after_a_clean_end(ctx: Ctx) -
         check(isinstance(error, _Ended), f"the incoming {name} iterator raised {error!r} instead of ending")
 
 
+async def test_ta_12_incoming_stream_iterators_end_after_a_clean_end_with_no_read_pending(ctx: Ctx) -> None:
+    transport = await ctx.open()
+    await ctx.peer.close(0, "")
+    await resolves(transport.wait_closed(), "wait_closed")
+    for name, incoming in (
+        ("uni", transport.incoming_unidirectional_streams()),
+        ("bidi", transport.incoming_bidirectional_streams()),
+    ):
+        error = await rejects(anext(aiter(incoming)), f"the incoming {name} iterator")
+        check(isinstance(error, _Ended), f"the incoming {name} iterator raised {error!r} instead of ending")
+
+
 @needs("quicClose")
 async def test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close(ctx: Ctx) -> None:
     transport = await ctx.open()
@@ -589,6 +601,21 @@ async def test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close(ct
     for name, pending in (("uni", uni), ("bidi", bidi)):
         error = await rejects(pending, f"the incoming {name} iterator")
         check(not isinstance(error, _Ended), f"the incoming {name} iterator ended cleanly instead of raising")
+        expect_session_error(error, f"the incoming {name} iterator")
+
+
+@needs("quicClose")
+async def test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close_with_no_read_pending(ctx: Ctx) -> None:
+    transport = await ctx.open()
+    await ctx.peer.quic_close()
+    closed = await rejects(transport.wait_closed(), "wait_closed")
+    for name, incoming in (
+        ("uni", transport.incoming_unidirectional_streams()),
+        ("bidi", transport.incoming_bidirectional_streams()),
+    ):
+        error = await rejects(anext(aiter(incoming)), f"the incoming {name} iterator")
+        check(not isinstance(error, _Ended), f"the incoming {name} iterator ended cleanly instead of raising")
+        check(error is closed, f"the incoming {name} iterator raised {error!r}, not the session's error {closed!r}")
 
 
 # ── Streams ───────────────────────────────────────────────────────────────────────────────────────────────────────

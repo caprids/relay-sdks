@@ -421,3 +421,38 @@ class TestStreamQueue:
         queue.close()
         queue.push(1)
         assert [item async for item in queue] == []
+
+    async def test_a_failed_queue_yields_what_was_queued_then_raises_the_error(self) -> None:
+        queue: _StreamQueue = _StreamQueue()
+        error = RuntimeError("connection lost")
+        queue.push(1)
+        queue.fail(error)
+        queue.push(2)
+        assert await anext(queue) == 1
+
+        with pytest.raises(RuntimeError) as raised:
+            await anext(queue)
+
+        assert raised.value is error
+
+        with pytest.raises(RuntimeError):
+            await anext(queue)
+
+    async def test_fail_wakes_a_pending_anext(self) -> None:
+        queue: _StreamQueue = _StreamQueue()
+        error = RuntimeError("connection lost")
+        pending = asyncio.ensure_future(anext(queue))
+        await asyncio.sleep(0)
+        assert not pending.done()
+
+        queue.fail(error)
+        with pytest.raises(RuntimeError) as raised:
+            await asyncio.wait_for(pending, 1)
+
+        assert raised.value is error
+
+    async def test_fail_after_close_keeps_the_clean_end(self) -> None:
+        queue: _StreamQueue = _StreamQueue()
+        queue.close()
+        queue.fail(RuntimeError("late"))
+        assert [item async for item in queue] == []
