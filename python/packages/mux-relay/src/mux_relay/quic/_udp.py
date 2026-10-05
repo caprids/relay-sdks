@@ -19,7 +19,7 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
-from ._errors import WebTransportError
+from ._errors import _session_error
 
 _MSG_ERRQUEUE = getattr(socket, "MSG_ERRQUEUE", 0x2000)
 
@@ -84,7 +84,7 @@ def open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, tu
     reports ICMP errors (see above), so a closed port fails the connect at once.
     """
     if not addresses:
-        raise WebTransportError("no addresses to connect to")
+        raise _session_error("no addresses to connect to")
 
     try:
         sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
@@ -98,9 +98,7 @@ def open_socket(addresses: Sequence[tuple[Any, ...]]) -> tuple[socket.socket, tu
         ipv4 = [address for address in addresses if len(address) == 2]
 
         if not ipv4:
-            raise WebTransportError(
-                "the host resolves only to IPv6 addresses, but IPv6 sockets are unavailable"
-            ) from None
+            raise _session_error("the host resolves only to IPv6 addresses, but IPv6 sockets are unavailable") from None
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         sock.bind(("0.0.0.0", 0))

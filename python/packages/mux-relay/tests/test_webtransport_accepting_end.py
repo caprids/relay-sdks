@@ -23,7 +23,7 @@ from relay_helpers.webtransport.wire import (
     webtransport_to_h3_error_code,
 )
 
-from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._errors import QuicTransportError, _session_error
 
 
 class TestWire:
@@ -52,10 +52,10 @@ class TestWire:
 class TestSessionClose:
     async def test_transport_failures_keep_their_details(self) -> None:
         session = WebTransportSessionBase()
-        error = WebTransportError("QUIC connection terminated", code=1, reason="Idle timeout")
+        error = _session_error("QUIC connection terminated: Idle timeout (code 0x1)")
         session._finish(error)
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await session.wait_closed()
 
         assert failure.value is error
@@ -87,11 +87,10 @@ class TestSessionClose:
         session._on_connect_data(capsule, True)
         assert session.close_info == (2, "unauthorized")
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await session.wait_closed()
 
-        assert failure.value.peer_closed
-        assert (failure.value.code, failure.value.reason) == (2, "unauthorized")
+        assert (failure.value.source, failure.value.close_code, failure.value.reason) == ("session", 2, "unauthorized")
 
 
 class TestH3Internals:

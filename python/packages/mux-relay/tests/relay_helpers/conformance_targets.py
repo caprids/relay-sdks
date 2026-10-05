@@ -24,10 +24,6 @@ Dial = Callable[[str, Sequence[str], QuicConfiguration], ConnectingTransport]
 """Start a dial to ``(url, protocols)`` with a configuration that trusts the peer's certificate."""
 
 
-class ErrorShapeFailure(AssertionError):
-    """An error lacks the TA-22 shape (``source``, ``stream_error_code``). Python classifies by name until #233."""
-
-
 class ContractFailure(AssertionError):
     """A case's assertion about the contract failed."""
 
@@ -73,30 +69,11 @@ PEER_CAPABILITIES = frozenset(
 )
 """What the conformance peer can do in either framing (``ts/conformance/README.md``, "Capabilities")."""
 
-_SHAPE = KnownFailure(
-    "#233: Python classifies transport errors by name (WebTransportError, StreamStopped), not by a source field "
-    "(spec/transport-adapter.md, Python mapping, TA-19, TA-20, TA-22)",
-    match=r"expected source '(stream|session)', got",
-    raises=ErrorShapeFailure,
-)
 _ITERATORS_END = KnownFailure(
     "#235: the incoming stream iterators end cleanly however the session ended "
     "(spec/transport-adapter.md, Python mapping, TA-12)",
     match=r"^the incoming uni iterator ended cleanly instead of raising$",
 )
-_SHAPE_CASES = dict.fromkeys(
-    (
-        "test_ta_19_a_peer_reset_errors_the_receive_stream_with_the_peers_code",
-        "test_ta_19_a_peer_reset_errors_the_receive_stream_while_nothing_reads_it",
-        "test_ta_19_a_peer_reset_errors_a_bidirectional_streams_readable",
-        "test_ta_20_a_peer_stop_fails_the_send_stream_while_nothing_is_in_flight",
-        "test_ta_20_a_peer_stop_fails_a_write_blocked_on_flow_control",
-        "test_ta_20_a_peer_stop_on_a_bidirectional_stream_fails_its_writer",
-        "test_ta_22_a_session_error_has_source_session",
-    ),
-    _SHAPE,
-)
-"""The cases that check the TA-22 shape, on every target until #233."""
 
 
 def native_quic_target() -> ConformanceTarget:
@@ -111,8 +88,6 @@ def native_quic_target() -> ConformanceTarget:
         gaps={"webtransport": "native QUIC carries no WebTransport session"},
         expectations={
             "test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close": _ITERATORS_END,
-            "test_ta_22_a_code_above_2_53_minus_1_is_reported_as_none": _SHAPE,
-            **_SHAPE_CASES,
         },
     )
 

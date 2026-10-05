@@ -16,7 +16,7 @@ from moq_core.control_messages import STREAM_RESET_CODE
 from mux_relay import RelayError
 from mux_relay._settling_groups import SETTLING_GROUP_LIMIT, SettlingGroups
 from mux_relay._write_slot import RelayTrackWriter, StreamReset, WriteSlotDependencies
-from mux_relay.quic._errors import StreamStopped, WebTransportError
+from mux_relay.quic._errors import QuicTransportError, _session_error, _stream_error
 
 Stall = Literal["none", "write", "second-write", "fin"]
 SHORT = 0.05
@@ -186,9 +186,12 @@ def reset_code(reason: object) -> int:
     return reason.stream_error_code
 
 
-def stop_sending() -> StreamStopped:
-    """The relay's STOP_SENDING on a data stream, as the SDK transport fails the pending write or FIN with it."""
-    return StreamStopped("peer stopped the stream", code=0)
+def stop_sending() -> QuicTransportError:
+    """The relay's STOP_SENDING on a data stream, as the SDK transport fails the pending write or FIN with it.
+
+    A stream error (``source="stream"``) on the send half: where it surfaces makes it a stop (TA-20).
+    """
+    return _stream_error("stopped", 0)
 
 
 async def started(coroutine: Any) -> asyncio.Task[Any]:
@@ -539,7 +542,7 @@ class TestWritingAndClosingASingleWrite:
         h.writer._bind(1)
         writing = await started(h.writer.write(b"\x01"))
         await wait_for(lambda: h.opened[0].stalled)
-        cause = WebTransportError("session closed", code=0)
+        cause = _session_error("session closed")
         h.opened[0].fail(cause)
         with pytest.raises(RelayError) as failure:
             await writing

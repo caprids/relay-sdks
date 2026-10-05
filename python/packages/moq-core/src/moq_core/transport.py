@@ -12,6 +12,8 @@ Stream semantics follow QUIC and the WHATWG streams the TypeScript core is writt
 - :meth:`ReceiveStream.cancel` is STOP_SENDING: the reader wants no more bytes.
 - :meth:`SendStream.write` returns once the transport accepted the bytes (not when the peer read
   them); :meth:`SendStream.close` FINs the stream; :meth:`SendStream.abort` is RESET_STREAM.
+- A stream or session failure is classified by its shape, not its class: its ``source`` is ``"stream"`` or
+  ``"session"`` (:func:`is_stream_error`, :func:`is_session_error`; ``spec/transport-adapter.md`` TA-22).
 - A send stream may also report when the peer acknowledged it (:class:`AcknowledgedSendStream`).
   That is optional: :func:`wait_acknowledged` treats a stream without it as acknowledged once
   written, which is all an in-memory transport can say.
@@ -80,6 +82,24 @@ async def wait_acknowledged(stream: SendStream) -> None:
         await stream.wait_acknowledged()
 
 
+def is_stream_error(error: object) -> bool:
+    """Whether ``error`` is a stream failure (``spec/transport-adapter.md`` TA-22): its ``source`` is ``"stream"``.
+
+    The peer reset the stream (TA-19) or stopped it (TA-20). Such an error carries the peer's code as
+    ``stream_error_code``, ``None`` when it is unknown. The error's class is not part of the contract: this
+    reads the shape alone, so any transport's errors are understood.
+    """
+    return getattr(error, "source", None) == "stream"
+
+
+def is_session_error(error: object) -> bool:
+    """Whether ``error`` is a session failure (TA-22): its ``source`` is ``"session"``.
+
+    The session is over, and the operation failed because of it (TA-23), or the dial failed.
+    """
+    return getattr(error, "source", None) == "session"
+
+
 @dataclass(frozen=True, slots=True)
 class BidirectionalStream:
     """A bidirectional stream as its two halves."""
@@ -140,6 +160,8 @@ __all__ = [
     "MoqtTransport",
     "ReceiveStream",
     "SendStream",
+    "is_session_error",
+    "is_stream_error",
     "transport_ended",
     "wait_acknowledged",
 ]

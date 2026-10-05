@@ -18,7 +18,7 @@ from aioquic.quic.connection import stream_is_client_initiated, stream_is_unidir
 
 from moq_core._tasks import observe
 from moq_core.transport import BidirectionalStream
-from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._errors import _session_error, _stream_error
 from mux_relay.quic._streams import _ReceiveHalf, _SendHalf, _StreamQueue
 
 
@@ -36,6 +36,9 @@ class NativeQuicSession:
         observe(self._closed)
         self.close_info: tuple[int, str] | None = None
         """``(code, reason)`` of the dialer's application CONNECTION_CLOSE (frame type 0x1d), once received."""
+        self.reset_codes: dict[int, int] = {}
+        """The code the next reset of a stream carries instead of its reason's: a 62-bit code, which no reason can
+        carry (TA-17 caps it at 2^32-1), for the conformance peer's TA-22 case."""
 
     @property
     def ended(self) -> bool:
@@ -86,8 +89,7 @@ class NativeQuicSession:
         elif isinstance(event, events.StreamReset):
             receive = self._receives.get(event.stream_id)
             if receive is not None:
-                code = event.error_code
-                receive.fail(WebTransportError(f"peer reset the stream (code {code})", code=code))
+                receive.fail(_stream_error("reset", event.error_code))
         elif isinstance(event, events.StopSendingReceived):
             send = self._sends.get(event.stream_id)
             if send is not None:
@@ -117,7 +119,7 @@ class NativeQuicSession:
         if self._closed.done():
             return
         self._closed.set_result(None)
-        error = WebTransportError("the connection is closed")
+        error = _session_error("the connection is closed")
         for receive in self._receives.values():
             receive.fail(error)
         for send in self._sends.values():
@@ -129,7 +131,7 @@ class NativeQuicSession:
 
     def check_live(self) -> None:
         if self.ended:
-            raise WebTransportError("the connection is closed")
+            raise _session_error("the connection is closed")
 
     async def send(self, half: _SendHalf, data: bytes, end_stream: bool) -> None:
         self.check_live()
@@ -140,6 +142,7 @@ class NativeQuicSession:
         await waiter
 
     def reset_stream(self, stream_id: int, code: int) -> None:
+        code = self.reset_codes.pop(stream_id, code)
         if self.ended:
             return
         try:

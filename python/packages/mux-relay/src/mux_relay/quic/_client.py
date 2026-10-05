@@ -18,7 +18,7 @@ from moq_core.transport import BidirectionalStream, SendStream
 
 from ..connect_session import ConnectingTransport
 from ._aioquic import finish_receiving_half, stream_credit_left
-from ._errors import WebTransportError
+from ._errors import QuicTransportError, _session_error
 from ._protocol import QuicProtocol
 from ._session import _CLOSE_DRAIN_TIMEOUT, QuicStreamSession
 from ._udp import open_socket
@@ -97,7 +97,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
         observe(self.ready)
         self.close_info: tuple[int, str] | None = None
         """``(code, reason)`` of the peer's application CONNECTION_CLOSE (frame type 0x1d), once received."""
-        self._peer_close_error: WebTransportError | None = None
+        self._peer_close_error: QuicTransportError | None = None
         """What every operation raises once the peer's application close ended the session (TA-24)."""
         self._configuration = configuration
         # Only the host and port leave this call: the path and the token travel in the core's SETUP (TA-3, TA-6).
@@ -113,7 +113,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
             infos = await loop.getaddrinfo(host, port, type=socket.SOCK_DGRAM)
 
             if not infos:
-                raise WebTransportError(f"could not resolve {host}")
+                raise _session_error(f"could not resolve {host}")
 
             connection = QuicConnection(configuration=self._build_configuration(host))
             sock, addr = open_socket([info[4] for info in infos])
@@ -125,7 +125,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
 
             if self._closing:
                 udp_transport.close()
-                raise WebTransportError("closed before the session was established")
+                raise _session_error("closed before the session was established")
 
             # Attached before the handshake, so a stream the peer opens in the same flight finds this session.
             self._protocol = protocol
@@ -133,7 +133,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
             await protocol.wait_connected()
 
             if protocol.terminated is not None:
-                raise self._ended_error() or WebTransportError("QUIC handshake failed")
+                raise self._ended_error() or _session_error("QUIC handshake failed")
 
             self._select_protocol(protocol)
             self.ready.set_result(None)
@@ -144,11 +144,12 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
                 if ended is not None:
                     # The connection ended first, and how it ended says more (a peer's close carries its code).
                     self.ready.set_exception(ended)
-                elif isinstance(error, WebTransportError):
+                elif isinstance(error, QuicTransportError) and error.source == "session":
                     self.ready.set_exception(error)
                 else:
-                    # The cause stays reachable: a refused port surfaces as the OS error behind TRANSPORT_ERROR.
-                    failure = WebTransportError(f"QUIC connect failed: {error}")
+                    # A failed dial is a session error (TA-22). The cause stays reachable: a refused port
+                    # surfaces as the OS error behind TRANSPORT_ERROR.
+                    failure = _session_error(f"QUIC connect failed: {error}")
                     failure.__cause__ = error
                     self.ready.set_exception(failure)
 
@@ -190,7 +191,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
             error_code=_NO_APPLICATION_PROTOCOL, frame_type=QuicFrameType.PADDING, reason_phrase=message
         )
         protocol.transmit()
-        raise WebTransportError(message)
+        raise _session_error(message)
 
     def _ended_error(self) -> BaseException | None:
         """The error the session already ended with, if it ended with one."""
@@ -225,7 +226,8 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
 
         if not stream_credit_left(protocol._quic, unidirectional):
             kind = "unidirectional" if unidirectional else "bidirectional"
-            raise WebTransportError(f"the peer's {kind} stream limit is exhausted")
+            # Neither a stream nor a session error: the session stays usable (TA-21, TA-23).
+            raise QuicTransportError(f"the peer's {kind} stream limit is exhausted")
 
         return protocol
 
@@ -242,7 +244,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
         protocol = self._protocol
 
         if not self.ready.done():
-            error = WebTransportError("closed before the session was established")
+            error = _session_error("closed before the session was established")
             self.ready.set_exception(error)
             self._finish(error)
             self._connect_task.cancel()
@@ -270,7 +272,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
             raise self._peer_close_error
 
         if not self.ready.done() and not self._closed.done():
-            raise WebTransportError(self._NOT_ESTABLISHED_MESSAGE)
+            raise QuicTransportError(self._NOT_ESTABLISHED_MESSAGE)
 
         super().check_live()
 
@@ -290,11 +292,11 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
 
         code, reason = event.error_code, event.reason_phrase
         self.close_info = (code, reason)
-        error = WebTransportError(
+        error = QuicTransportError(
             f"peer closed the QUIC session: {reason or 'no reason given'} (code 0x{code:x})",
-            code=code,
+            source="session",
+            close_code=code,
             reason=reason,
-            peer_closed=True,
         )
         self._peer_close_error = error
         # Before `ready` the dial fails with the peer's close; after it the session ended cleanly.

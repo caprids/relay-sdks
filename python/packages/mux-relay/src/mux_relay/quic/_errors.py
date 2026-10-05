@@ -2,43 +2,66 @@
 
 from __future__ import annotations
 
+from typing import Literal
 
-class WebTransportError(Exception):
-    """A QUIC session or stream failure. ``code`` is the peer's application error code when known.
+_MAX_SAFE_CODE = 2**53 - 1
+"""The largest code a stream error reports; a larger one is reported as unknown (TA-22)."""
 
-    The name is older than the native QUIC dialing end; #233 replaces this class with an error
-    classified by its shape (TA-19, TA-20, TA-22).
 
-    ``peer_closed`` is true when the peer ended the session with an application close (CONNECTION_CLOSE
-    of frame type 0x1d): ``code`` and ``reason`` are then its close code (for MOQT, a session
-    termination code) and reason, not a QUIC transport or stream error code.
+class QuicTransportError(Exception):
+    """A QUIC stream or session failure, classified by its shape (``spec/transport-adapter.md`` TA-22).
 
-    This is the transport layer's own exception, not a :class:`mux_relay.RelayError`: a Relay
-    operation that fails on the transport raises ``TRANSPORT_ERROR`` with this chained as its cause
-    (``UNAUTHORIZED`` when the peer closed the session for its credentials).
+    ``source`` is ``"stream"`` when the failure belongs to one stream: the peer reset it (TA-19) or
+    stopped it (TA-20), and ``stream_error_code`` is the peer's code, or ``None`` when it is unknown or
+    above 2^53-1, never 0. A stop is a stream error raised on the send half: where it surfaces makes it a
+    stop, not a subclass. ``source`` is ``"session"`` when the session is over, or the dial failed, and
+    the operation failed because of it (TA-23). ``close_code`` and ``reason`` are set when the error
+    reports the peer's application close (TA-24). ``source`` is ``None`` for a failure that is neither,
+    which leaves the session usable: an exhausted stream limit (TA-21), or a write to a stream this end
+    already closed or reset.
+
+    Classify by those fields (:func:`moq_core.transport.is_stream_error`,
+    :func:`~moq_core.transport.is_session_error`), never by this class. It is the transport layer's own
+    exception, not a :class:`mux_relay.RelayError`: a Relay operation that fails on the transport raises
+    ``TRANSPORT_ERROR`` with this chained as its cause (``UNAUTHORIZED`` when the peer closed the session
+    for its credentials).
     """
 
-    def __init__(self, message: str, *, code: int | None = None, reason: str = "", peer_closed: bool = False) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        source: Literal["stream", "session"] | None = None,
+        stream_error_code: int | None = None,
+        close_code: int | None = None,
+        reason: str | None = None,
+    ) -> None:
         super().__init__(message)
-        self.code = code
+        self.source = source
+        self.stream_error_code = (
+            stream_error_code if stream_error_code is not None and 0 <= stream_error_code <= _MAX_SAFE_CODE else None
+        )
+        self.close_code = close_code
         self.reason = reason
-        self.peer_closed = peer_closed
 
 
-class StreamStopped(WebTransportError):
-    """The peer sent STOP_SENDING on a send stream: nothing more written to it will be delivered.
+def _stream_error(action: Literal["reset", "stopped"], code: int | None) -> QuicTransportError:
+    """The peer reset or stopped a stream with ``code``, ``None`` when unknown (TA-19, TA-20)."""
+    detail = "" if code is None else f" (code {code})"
+    return QuicTransportError(f"peer {action} the stream{detail}", source="stream", stream_error_code=code)
 
-    ``code`` is the peer's application error code. A Relay write that fails this way on its own
-    stream raises ``SUBSCRIPTION_CHANGED``, not ``TRANSPORT_ERROR``: the relay stops a subgroup
-    stream when its group is no longer of interest (draft-ietf-moq-transport-20 §11.4).
-    """
+
+def _session_error(message: str) -> QuicTransportError:
+    """The session is over, or the dial failed (TA-23)."""
+    return QuicTransportError(message, source="session")
 
 
 def _error_code_of(reason: object) -> int:
-    if isinstance(reason, WebTransportError) and reason.code is not None:
-        return reason.code
+    """The code a reset or a stop carries for ``reason`` (TA-17): its ``stream_error_code``, else an integer reason.
 
-    # A publisher-side reset reason (the write slot's StreamReset) names the MOQT code it wants sent.
+    Either must be an integer from 0 to 2^32-1, and the code is 0 otherwise. The write slot's ``StreamReset``
+    and a :class:`QuicTransportError` from the peer both carry ``stream_error_code``.
+    """
     stream_error_code = getattr(reason, "stream_error_code", None)
     if (
         isinstance(stream_error_code, int)

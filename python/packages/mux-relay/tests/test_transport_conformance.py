@@ -12,9 +12,9 @@ The Python seam spells some members differently, as the spec's "Python mapping" 
   acknowledged (reset, stopped, or the session ended), whether or not it was closed. TA-15's close is split: ``close()``
   returns once the FIN is handed over, and ``wait_acknowledged()`` returns on acknowledgement.
 - An incoming readable is an async iterator, which ends with ``StopAsyncIteration``.
-- A reason carries its code as ``WebTransportError.code``, a ``stream_error_code`` attribute or an integer (TA-17).
-- Errors are classified by name (``WebTransportError``, ``StreamStopped``), not shape. The cases check that mapping,
-  and the TA-19, TA-20 and TA-22 cases check the TA-22 shape on top of it: known failures until #233.
+- A reason carries its code as a ``stream_error_code`` attribute or as an integer (TA-17).
+- Errors are classified by shape, as in TypeScript (TA-22): ``source``, and ``stream_error_code`` on a stream error. A
+  peer's close reported on a session error is ``close_code`` and ``reason`` (TA-24).
 
 TA-6 binds the core (its SETUP tests cover it), and TA-25 and TA-26 do not apply to asyncio: those tests are skipped
 with their reasons. A known failure is a strict xfail that must fail with the expected assertion, so it goes red
@@ -39,12 +39,11 @@ from relay_helpers.conformance_targets import (
     TARGETS,
     ConformanceTarget,
     ContractFailure,
-    ErrorShapeFailure,
 )
 
 from moq_core._tasks import observe
 from moq_core.transport import AcknowledgedSendStream, MoqtTransport, ReceiveStream, SendStream
-from mux_relay.quic._errors import StreamStopped, WebTransportError
+from mux_relay.quic._errors import QuicTransportError
 
 MOQT_PROTOCOL = "moqt-20"
 
@@ -165,31 +164,22 @@ async def stays_pending(awaitable: Awaitable[Any], what: str, seconds: float = S
 # ── Errors ────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
-def expect_stream_failure(error: BaseException, code: int, what: str, *, stopped: bool = False) -> None:
-    """The Python mapping of a stream error: a ``WebTransportError`` (``StreamStopped`` for a stop) with the code."""
-    kind = StreamStopped if stopped else WebTransportError
-    check(isinstance(error, kind), f"{what}: expected a {kind.__name__}, got {error!r}")
-    check(getattr(error, "code", None) == code, f"{what}: expected code {code}, got {getattr(error, 'code', None)!r}")
+def expect_stream_error(error: BaseException, code: int | None, what: str) -> None:
+    """TA-22: ``source == 'stream'`` and the peer's code as ``stream_error_code``, or ``None`` where it is unknown.
 
-
-def expect_session_failure(error: BaseException, what: str) -> None:
-    """The Python mapping of a session error: a ``WebTransportError``."""
-    check(isinstance(error, WebTransportError), f"{what}: expected a WebTransportError, got {error!r}")
-
-
-def expect_stream_error_shape(error: BaseException, code: int | None, what: str) -> None:
-    """TA-22: ``source == 'stream'`` and the peer's code as ``stream_error_code`` (``None`` where it is unknown)."""
-    if getattr(error, "source", None) != "stream":
-        raise ErrorShapeFailure(f"{what}: expected source 'stream', got {error!r}")
+    A stop is a stream error too: where it surfaces (the send half) makes it one (TA-20). The codes the dialer sends
+    are checked exactly, at the peer.
+    """
+    check(getattr(error, "source", None) == "stream", f"{what}: expected source 'stream', got {error!r}")
     reported = getattr(error, "stream_error_code", "missing")
-    if reported not in (code, None):
-        raise ErrorShapeFailure(f"{what}: expected stream_error_code {code} (or None for unknown), got {reported!r}")
+    check(
+        reported in (code, None), f"{what}: expected stream_error_code {code} (or None for unknown), got {reported!r}"
+    )
 
 
-def expect_session_error_shape(error: BaseException, what: str) -> None:
+def expect_session_error(error: BaseException, what: str) -> None:
     """TA-22: ``source == 'session'``."""
-    if getattr(error, "source", None) != "session":
-        raise ErrorShapeFailure(f"{what}: expected source 'session', got {error!r}")
+    check(getattr(error, "source", None) == "session", f"{what}: expected source 'session', got {error!r}")
 
 
 class CodeReason(Exception):
@@ -447,7 +437,7 @@ async def _ready_rejects_with_a_session_error(ctx: Ctx) -> None:
     check(outcome.state != "fulfilled", f"ready returned, with protocol {protocol!r}")
     check(outcome.state == "rejected", f"ready still pending after {PROMPTLY} s")
     assert outcome.error is not None
-    expect_session_failure(outcome.error, "ready")
+    expect_session_error(outcome.error, "ready")
 
 
 @needs("selectProtocol")
@@ -490,7 +480,7 @@ async def test_ta_9_wait_closed_raises_a_session_error_on_a_quic_layer_close(ctx
     dialed = ctx.dial()
     await resolves(dialed.ready, "ready")
     await ctx.peer.quic_close()
-    expect_session_failure(await rejects(dialed.closed, "wait_closed"), "wait_closed")
+    expect_session_error(await rejects(dialed.closed, "wait_closed"), "wait_closed")
 
 
 @needs("connectionLoss")
@@ -498,7 +488,7 @@ async def test_ta_9_wait_closed_raises_a_session_error_on_connection_loss(ctx: C
     dialed = ctx.dial()
     await resolves(dialed.ready, "ready")
     await ctx.peer.lose_connection()
-    expect_session_failure(await rejects(dialed.closed, "wait_closed", IDLE_TIMEOUT * 3), "wait_closed")
+    expect_session_error(await rejects(dialed.closed, "wait_closed", IDLE_TIMEOUT * 3), "wait_closed")
 
 
 @needs("refuseHandshake")
@@ -506,7 +496,7 @@ async def test_ta_9_wait_closed_raises_a_session_error_on_connection_loss(ctx: C
 async def test_ta_9_wait_closed_raises_a_session_error_when_the_dial_fails(ctx: Ctx) -> None:
     dialed = ctx.dial()
     await rejects(dialed.ready, "ready")
-    expect_session_failure(await rejects(dialed.closed, "wait_closed"), "wait_closed")
+    expect_session_error(await rejects(dialed.closed, "wait_closed"), "wait_closed")
 
 
 async def test_ta_10_close_sends_its_code_and_reason_to_the_peer(ctx: Ctx) -> None:
@@ -541,8 +531,8 @@ async def test_ta_11_close_before_ready_cancels_the_dial(ctx: Ctx) -> None:
     dialed = ctx.dial()
     await stays_pending(dialed.ready, "ready while the handshake is held")
     dialed.transport.close(1, "deadline")
-    expect_session_failure(await rejects(dialed.ready, "ready"), "ready")
-    expect_session_failure(await rejects(dialed.closed, "wait_closed"), "wait_closed")
+    expect_session_error(await rejects(dialed.ready, "ready"), "ready")
+    expect_session_error(await rejects(dialed.closed, "wait_closed"), "wait_closed")
     await ctx.peer.release_handshake()
     await rejects(dialed.transport.create_unidirectional_stream(), "create_unidirectional_stream after the cancel")
 
@@ -566,9 +556,9 @@ async def test_ta_12_pending_stream_operations_raise_a_session_error_on_the_peer
     read = later(receive.read())
     sent = acknowledged(send)
     await ctx.peer.close(5, "gone")
-    expect_session_failure(await rejects(read, "the pending read"), "the pending read")
-    expect_session_failure(await rejects(sent, "wait_acknowledged"), "wait_acknowledged")
-    expect_session_failure(await rejects(send.write(b"late"), "a write after the close"), "a write after the close")
+    expect_session_error(await rejects(read, "the pending read"), "the pending read")
+    expect_session_error(await rejects(sent, "wait_acknowledged"), "wait_acknowledged")
+    expect_session_error(await rejects(send.write(b"late"), "a write after the close"), "a write after the close")
 
 
 @needs("quicClose")
@@ -577,7 +567,7 @@ async def test_ta_12_pending_stream_operations_raise_a_session_error_on_a_quic_l
     send, _ = await open_accepted_uni(ctx, transport)
     sent = acknowledged(send)
     await ctx.peer.quic_close()
-    expect_session_failure(await rejects(sent, "wait_acknowledged"), "wait_acknowledged")
+    expect_session_error(await rejects(sent, "wait_acknowledged"), "wait_acknowledged")
 
 
 async def test_ta_12_incoming_stream_iterators_end_after_a_clean_end(ctx: Ctx) -> None:
@@ -741,10 +731,10 @@ async def test_ta_17_a_reset_carries_the_reasons_stream_error_code_above_255(ctx
     await resets_carry(ctx, HIGH_CODES)
 
 
-async def test_ta_17_a_reset_carries_the_code_of_a_webtransport_error_or_an_integer_reason(ctx: Ctx) -> None:
+async def test_ta_17_a_reset_carries_the_code_of_a_stream_error_or_an_integer_reason(ctx: Ctx) -> None:
     transport = await ctx.open()
     reasons: list[tuple[object, int]] = [
-        (WebTransportError("reset", code=0x12), 0x12),
+        (QuicTransportError("reset", source="stream", stream_error_code=0x12), 0x12),
         (0xFFFF_FFFF, 0xFFFF_FFFF),
         (3, 3),
     ]
@@ -792,8 +782,7 @@ async def test_ta_19_a_peer_reset_errors_the_receive_stream_with_the_peers_code(
     check(await read_bytes(receive, 9) == b"delivered", "the bytes before the reset")
     await ctx.peer.reset(stream_id, 11)
     error = await rejects(receive.read(), "the read after the reset")
-    expect_stream_failure(error, 11, "the read after the reset")
-    expect_stream_error_shape(error, 11, "the read after the reset")
+    expect_stream_error(error, 11, "the read after the reset")
 
 
 async def test_ta_19_a_peer_reset_errors_the_receive_stream_while_nothing_reads_it(ctx: Ctx) -> None:
@@ -811,8 +800,7 @@ async def test_ta_19_a_peer_reset_errors_the_receive_stream_while_nothing_reads_
             break
         check(outcome.value is not None, "the stream ended cleanly after the reset")
     assert outcome.error is not None
-    expect_stream_failure(outcome.error, 11, "the read after the reset")
-    expect_stream_error_shape(outcome.error, 11, "the read after the reset")
+    expect_stream_error(outcome.error, 11, "the read after the reset")
 
 
 async def test_ta_19_a_peer_reset_errors_a_bidirectional_streams_readable(ctx: Ctx) -> None:
@@ -822,8 +810,7 @@ async def test_ta_19_a_peer_reset_errors_a_bidirectional_streams_readable(ctx: C
     stream_id = await resolves(ctx.peer.accept_bi(), "the peer accepting the stream")
     await ctx.peer.reset(stream_id, 0xFFFF_FFFF)
     error = await rejects(stream.readable.read(), "the read after the reset")
-    expect_stream_failure(error, 0xFFFF_FFFF, "the read after the reset")
-    expect_stream_error_shape(error, 0xFFFF_FFFF, "the read after the reset")
+    expect_stream_error(error, 0xFFFF_FFFF, "the read after the reset")
 
 
 async def test_ta_20_a_peer_stop_fails_the_send_stream_while_nothing_is_in_flight(ctx: Ctx) -> None:
@@ -832,11 +819,9 @@ async def test_ta_20_a_peer_stop_fails_the_send_stream_while_nothing_is_in_fligh
     sent = acknowledged(send)
     await ctx.peer.stop(stream_id, 13)
     error = await rejects(sent, "wait_acknowledged")
-    expect_stream_failure(error, 13, "wait_acknowledged", stopped=True)
+    expect_stream_error(error, 13, "wait_acknowledged")
     late = await rejects(send.write(b"late"), "the next write")
-    expect_stream_failure(late, 13, "the next write", stopped=True)
-    expect_stream_error_shape(error, 13, "wait_acknowledged")
-    expect_stream_error_shape(late, 13, "the next write")
+    expect_stream_error(late, 13, "the next write")
 
 
 async def test_ta_20_a_peer_stop_fails_a_write_blocked_on_flow_control(ctx: Ctx) -> None:
@@ -847,11 +832,10 @@ async def test_ta_20_a_peer_stop_fails_a_write_blocked_on_flow_control(ctx: Ctx)
     sent = acknowledged(send)
     await ctx.peer.stop(stream_id, 5)
     error = await rejects(write, "the blocked write")
-    expect_stream_failure(error, 5, "the blocked write", stopped=True)
+    expect_stream_error(error, 5, "the blocked write")
     closed = await rejects(sent, "wait_acknowledged")
-    expect_stream_failure(closed, 5, "wait_acknowledged", stopped=True)
+    expect_stream_error(closed, 5, "wait_acknowledged")
     await ctx.release_peer()
-    expect_stream_error_shape(error, 5, "the blocked write")
 
 
 async def test_ta_20_a_peer_stop_on_a_bidirectional_stream_fails_its_writer(ctx: Ctx) -> None:
@@ -862,8 +846,7 @@ async def test_ta_20_a_peer_stop_on_a_bidirectional_stream_fails_its_writer(ctx:
     sent = acknowledged(stream.writable)
     await ctx.peer.stop(stream_id, 2)
     error = await rejects(sent, "wait_acknowledged")
-    expect_stream_failure(error, 2, "wait_acknowledged", stopped=True)
-    expect_stream_error_shape(error, 2, "wait_acknowledged")
+    expect_stream_error(error, 2, "wait_acknowledged")
 
 
 @needs("maxStreams")
@@ -914,7 +897,7 @@ async def test_ta_22_a_code_above_2_53_minus_1_is_reported_as_none(ctx: Ctx) -> 
     await read_bytes(receive, 1)
     await ctx.peer.reset(stream_id, "4611686018427387903")
     error = await rejects(receive.read(), "the read")
-    expect_stream_error_shape(error, None, "the read after a 62-bit reset")
+    expect_stream_error(error, None, "the read after a 62-bit reset")
 
 
 async def test_ta_22_a_session_error_has_source_session(ctx: Ctx) -> None:
@@ -923,8 +906,7 @@ async def test_ta_22_a_session_error_has_source_session(ctx: Ctx) -> None:
     sent = acknowledged(send)
     await ctx.peer.close(0, "")
     error = await rejects(sent, "wait_acknowledged")
-    expect_session_failure(error, "wait_acknowledged")
-    expect_session_error_shape(error, "wait_acknowledged")
+    expect_session_error(error, "wait_acknowledged")
 
 
 async def test_ta_22_stream_and_session_errors_are_exceptions(ctx: Ctx) -> None:
@@ -951,7 +933,7 @@ async def test_ta_23_a_stream_error_leaves_the_session_usable(ctx: Ctx) -> None:
     send, stream_id = await open_accepted_uni(ctx, transport)
     sent = acknowledged(send)
     await ctx.peer.stop(stream_id, 1)
-    expect_stream_failure(await rejects(sent, "wait_acknowledged"), 1, "wait_acknowledged", stopped=True)
+    expect_stream_error(await rejects(sent, "wait_acknowledged"), 1, "wait_acknowledged")
     await stays_pending(dialed.closed, "wait_closed after a stream error")
     following, following_id = await open_accepted_uni(ctx, transport, b"still open")
     await resolves(following.close(), "close")
@@ -966,9 +948,9 @@ async def test_ta_24_a_session_error_after_the_peers_close_carries_its_code_and_
         sent = acknowledged(send)
         await ctx.peer.close(0x10, "unauthorized")
         error = await rejects(sent, "wait_acknowledged")
-        expect_session_failure(error, "wait_acknowledged")
-        carried = (getattr(error, "peer_closed", None), getattr(error, "code", None), getattr(error, "reason", None))
-        check(carried == (True, 0x10, "unauthorized"), f"(peer_closed, code, reason): {carried!r}")
+        expect_session_error(error, "wait_acknowledged")
+        carried = (getattr(error, "close_code", None), getattr(error, "reason", None))
+        check(carried == (0x10, "unauthorized"), f"(close_code, reason): {carried!r}")
 
 
 # ── Process lifetime ──────────────────────────────────────────────────────────────────────────────────────────────
