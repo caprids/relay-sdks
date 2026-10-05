@@ -8,8 +8,13 @@ at tag `moq-relay-v0.15.8`). [Upstream fix](https://github.com/moq-dev/moq/pull/
 Older moq-relay releases used a length prefix for this parameter. That encoding cannot
 be safely auto-detected: coordinate adoption of these SDK builds with the relay upgrade.
 Old SDK builds fail on subscriptions to populated tracks after the relay upgrade; these
-SDK builds misdecode or reject the old relay's populated-track responses. `INCLUDE_PROPERTIES`
-remains length-prefixed on 0.15.8.
+SDK builds misdecode or reject the old relay's populated-track responses.
+
+`INCLUDE_PROPERTIES` (`0x35`) is one raw byte with no length, matching draft-20 §10.2.21 and
+moq-relay **0.17.0** (`Subscribe` in `rs/moq-net/src/ietf/subscribe.rs` at tag `moq-relay-v0.17.0`).
+0.15.8 and earlier length-prefixed it. Neither relay version sends it upstream, so only an
+application that sets `include_properties` / `includeProperties` on a SUBSCRIBE sees the change,
+and only against a relay older than 0.17.0.
 
 Publishers still retain no history and advertise no `LARGEST_OBJECT`. The relay's
 Next Object + current-group `FILL_PARAMETERS` pull (since 0.14.17, unchanged in 0.15.8's

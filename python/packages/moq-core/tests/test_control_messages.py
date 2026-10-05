@@ -316,17 +316,16 @@ class TestEncodeMessageParameters:
         with pytest.raises(MoqtProtocolError):
             decode_control_message(ControlMessageFrame(type=MESSAGE_TYPE.SUBSCRIBE_OK, body=body + b"\x00"))
 
-    def test_frames_include_properties_as_a_length_prefixed_byte_and_rejects_other_values(self) -> None:
-        assert list(encode_parameters(MessageParameters(include_properties=1))) == [0x01, 0x35, 0x01, 0x01]
+    def test_frames_include_properties_as_a_raw_byte_and_rejects_other_values(self) -> None:
+        # §10.2.21 and moq-relay 0.17.0: a uint8 with no Length.
+        assert list(encode_parameters(MessageParameters(include_properties=0))) == [0x01, 0x35, 0x00]
 
-        writer = ByteWriter()
-        writer.write_varint(1)
-        writer.write_varint(PARAMETER_TYPE.INCLUDE_PROPERTIES)
-        writer.write_varint(1)
-        writer.write_uint8(2)
+        reader = ByteReader(bytes([0x01, 0x35, 0x00]))
+        assert decode_message_parameters(reader) == MessageParameters(include_properties=0)
+        assert reader.remaining == 0
 
         with pytest.raises(MoqtProtocolError, match="INCLUDE_PROPERTIES"):
-            decode_message_parameters(ByteReader(writer.to_bytes()))
+            decode_message_parameters(ByteReader(bytes([0x01, 0x35, 0x02])))
 
     def test_encodes_fill_parameters_as_a_nested_parameter_list(self) -> None:
         encoded = encode_parameters(
