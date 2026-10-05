@@ -49,7 +49,6 @@ from .subscription_events import (
     SubscriptionRequestError,
     UpdateOkEvent,
 )
-from .webtransport import connect_webtransport
 
 DEFAULT_ENDPOINT = "https://sjc.relay.mux.global"
 """The default Relay endpoint pinned in ``spec/protocol.json``."""
@@ -100,7 +99,6 @@ __all__ = [
     "UpdateOkEvent",
     "connect_relay_publisher",
     "connect_relay_subscriber",
-    "connect_webtransport",
     "read_json",
     "read_text",
 ]

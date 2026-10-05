@@ -1,39 +1,34 @@
 """Pins the aioquic internals the adapter reaches into, so a dependency bump fails here first.
 
 ``TestAioquicInternals`` asserts the private members by name and behaviour; ``TestAioquicFunctions`` checks
-each function of ``mux_relay.webtransport._aioquic``, the one module that names those members, against
+each function of ``mux_relay.quic._aioquic``, the one module that names those members, against
 real aioquic objects one state transition at a time.
 """
 
 import asyncio
 
 from aioquic.asyncio.protocol import QuicConnectionProtocol
-from aioquic.h3.connection import ErrorCode, FrameType, H3Connection, H3Stream
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
-from aioquic.quic.events import StreamDataReceived
 from aioquic.quic.packet_builder import QuicDeliveryState, QuicSentPacket
 from aioquic.quic.rangeset import RangeSet
 from aioquic.quic.stream import QuicStream, QuicStreamReceiver, QuicStreamSender
 from relay_helpers.quic_pair import QuicPair
 
-from mux_relay.webtransport._aioquic import (
+from mux_relay.quic._aioquic import (
     acknowledged,
     fin_unsent,
     finish_receiving_half,
     fins_in_flight,
-    forget_h3_stream,
     live_stream,
-    mark_webtransport_stream,
     packets_sent,
-    peer_control_stream_id,
     rearm_fin,
     reset_pending,
     serve_resets_first,
     stream_credit_left,
     transmitted,
 )
-from mux_relay.webtransport._protocol import WebTransportProtocol
+from mux_relay.quic._protocol import QuicProtocol
 
 
 class TestAioquicInternals:
@@ -50,9 +45,8 @@ class TestAioquicInternals:
         # Verified with `uv run --with "aioquic==<version>" pytest <this file> -k aioquic` on:
         #   1.3.0 (the locked version): passes.
         #   1.2.0 (the only other 1.2.x release on PyPI): every QuicStreamSender / QuicStreamReceiver /
-        #     QuicConnection member below exists, but `H3Connection._get_or_create_stream` is a plain method
-        #     there and only became a context manager in 1.3.0; `create_bidirectional_stream` relied on that
-        #     before this test existed, so the adapter's real floor is 1.3.0 despite the `>=1.2` pin.
+        #     QuicConnection member below exists. The floor of 1.3.0 came from the HTTP/3 layer the package no
+        #     longer carries (#232); the test suite's WebTransport accepting end still needs it.
         # Revisit this list, and the members below, with any aioquic bump.
 
         # QuicStreamSender: what write() queues, what a transmit consumes (settling a write), what an
@@ -108,7 +102,6 @@ class TestAioquicInternals:
 
         # QuicConnection / QuicStream: the live stream table the settle and drain paths read.
         connection = QuicConnection(configuration=QuicConfiguration(is_client=True))
-        h3 = H3Connection(connection, enable_webtransport=True)
         stream_id = connection.get_next_available_stream_id(is_unidirectional=True)
         connection.send_stream_data(stream_id, b"x")
         assert isinstance(connection._streams, dict)
@@ -131,17 +124,10 @@ class TestAioquicInternals:
         # QuicConnection._packet_number: the keepalive's send clock, one per packet built.
         assert connection._packet_number == 0
 
-        # QuicConnection._remote_max_streams_uni / _bidi: the peer's MAX_STREAMS, which native QUIC's
+        # QuicConnection._remote_max_streams_uni / _bidi: the peer's MAX_STREAMS, which the session's
         # creates check before opening a stream aioquic would otherwise hold blocked (TA-21).
         assert connection._remote_max_streams_uni == 0
         assert connection._remote_max_streams_bidi == 0
-
-        # H3Connection: the per-stream record the adapter drops once both halves are done.
-        assert isinstance(h3._stream, dict)
-        with h3._get_or_create_stream(stream_id) as h3_stream:
-            assert isinstance(h3_stream, H3Stream)
-        assert stream_id in h3._stream
-        assert h3._peer_control_stream_id is None  # set once the peer's control stream type is read
 
         # QuicConnectionProtocol: the asyncio glue the adapter drives transmits through.
         protocol = QuicConnectionProtocol(connection)
@@ -328,44 +314,6 @@ class TestAioquicFunctions:
         assert stream.receiver.is_finished is True
         finish_receiving_half(quic, 998)  # a stream aioquic does not hold: nothing to do
 
-    def test_mark_webtransport_stream_records_the_frame_type_and_session(self) -> None:
-        quic = self._connection()
-        h3 = H3Connection(quic, enable_webtransport=True)
-        stream_id = quic.get_next_available_stream_id()
-
-        mark_webtransport_stream(h3, stream_id, 4)
-
-        assert h3._stream[stream_id].frame_type == FrameType.WEBTRANSPORT_STREAM
-        assert h3._stream[stream_id].session_id == 4
-
-    def test_forget_h3_stream_drops_the_record(self) -> None:
-        quic = self._connection()
-        h3 = H3Connection(quic, enable_webtransport=True)
-        stream_id = quic.get_next_available_stream_id()
-        mark_webtransport_stream(h3, stream_id, 4)
-
-        forget_h3_stream(h3, stream_id)
-
-        assert stream_id not in h3._stream
-        forget_h3_stream(h3, stream_id)  # already gone: nothing to do
-
-    def test_peer_control_stream_id_names_the_stream_once_its_type_is_read(self) -> None:
-        quic = self._connection()
-        h3 = H3Connection(quic, enable_webtransport=True)
-        assert peer_control_stream_id(h3) is None
-
-        h3.handle_event(StreamDataReceived(data=b"\x00", end_stream=False, stream_id=3))  # stream type CONTROL
-
-        assert peer_control_stream_id(h3) == 3
-
-        # What the protocol holds that stream's FIN back from: aioquic closes the connection with
-        # H3_CLOSED_CRITICAL_STREAM at once and ignores every later event (#14).
-        h3.handle_event(StreamDataReceived(data=b"", end_stream=True, stream_id=3))
-
-        assert quic._close_event is not None
-        assert quic._close_event.error_code == ErrorCode.H3_CLOSED_CRITICAL_STREAM
-        assert h3.handle_event(StreamDataReceived(data=b"\x00\x00", end_stream=False, stream_id=0)) == []
-
     def test_packets_sent_counts_every_packet_built(self) -> None:
         quic = self._connection()
         assert packets_sent(quic) == 0
@@ -409,7 +357,7 @@ class TestProtocolTransmit:
         stream_ids = pair.open_streams(40, 1000)
         pair.client.reset_stream(stream_ids[-1], 0)
         transport = _Transport()
-        protocol = WebTransportProtocol(pair.client)
+        protocol = QuicProtocol(pair.client)
         protocol.connection_made(transport)  # ty: ignore[invalid-argument-type]
         pair.client._loss._pacer.packet_time = None  # count what the congestion window allows
 

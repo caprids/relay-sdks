@@ -11,11 +11,12 @@ from aioquic.h3.events import DataReceived, H3Event, HeadersReceived, WebTranspo
 from aioquic.quic import events as quic_events
 from aioquic.quic.connection import QuicConnection
 
-from ._aioquic import peer_control_stream_id
-from ._quic_protocol import QuicProtocol
+from mux_relay.quic._protocol import QuicProtocol
+
+from .h3 import peer_control_stream_id
 
 if TYPE_CHECKING:
-    from ._session import WebTransportSessionBase
+    from .session import WebTransportSessionBase
 
 _CONTROL_STREAM_FIN_GRACE = 1.0
 """Seconds the peer's HTTP/3 control-stream FIN waits for a CLOSE_WEBTRANSPORT_SESSION capsule before it is fatal.

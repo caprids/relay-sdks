@@ -25,8 +25,8 @@ from mux_relay.quic import connect_quic
 
 from .conformance_peer import IDLE_TIMEOUT, generate_leaf_certificate
 from .native_quic import NativeQuicSession
+from .quic_server import SERVER_NAME
 from .relay_hub import RelayHub
-from .wt_server import SERVER_NAME
 
 Role = Literal["publisher", "subscriber"]
 

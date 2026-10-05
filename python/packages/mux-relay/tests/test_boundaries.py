@@ -4,6 +4,7 @@ import-linter enforces the import graph in the check task; these tests pin the d
 lists and prove the core imports no transport at runtime.
 """
 
+import ast
 import subprocess
 import sys
 import tomllib
@@ -39,6 +40,23 @@ def test_importing_the_core_loads_no_transport_or_product_module() -> None:
         "assert loaded == [], loaded"
     )
     subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_the_sdk_imports_no_http3() -> None:
+    # Native QUIC is the only dialing end (ADR 0004); HTTP/3 and WebTransport live in the test helpers (#232).
+    # import-linter cannot forbid a subpackage of an external package, so every import statement is read here,
+    # the ones inside functions included.
+    imported: list[str] = []
+
+    for path in sorted(Path(mux_relay.__file__).parent.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(), str(path))):
+            if isinstance(node, ast.Import):
+                imported += [f"{path.name}: {alias.name}" for alias in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module is not None and node.level == 0:
+                imported.append(f"{path.name}: {node.module}")
+
+    assert any(name.endswith(": aioquic.quic.connection") for name in imported)  # the scan sees aioquic at all
+    assert [name for name in imported if name.split(": ")[1].startswith("aioquic.h3")] == []
 
 
 def test_the_sdk_leaves_the_protocol_pin_and_limits_to_the_core() -> None:

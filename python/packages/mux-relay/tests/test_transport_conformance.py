@@ -44,8 +44,7 @@ from relay_helpers.conformance_targets import (
 
 from moq_core._tasks import observe
 from moq_core.transport import AcknowledgedSendStream, MoqtTransport, ReceiveStream, SendStream
-from mux_relay.webtransport import WebTransportError
-from mux_relay.webtransport._errors import StreamStopped
+from mux_relay.quic._errors import StreamStopped, WebTransportError
 
 MOQT_PROTOCOL = "moqt-20"
 
@@ -529,8 +528,7 @@ async def test_ta_10_close_without_a_code_sends_code_0_and_an_empty_reason(ctx: 
 async def test_ta_10_close_is_idempotent_and_does_not_raise_after_the_session_ended(ctx: Ctx) -> None:
     dialed = ctx.dial()
     await resolves(dialed.ready, "ready")
-    # Code 0: a nonzero code is TA-9's known failure on the WebTransport dialing end, and would end the case here.
-    await ctx.peer.close(0, "peer first")
+    await ctx.peer.close(3, "peer first")
     await resolves(dialed.closed, "wait_closed")
     dialed.transport.close(4, "late")
     dialed.transport.close()

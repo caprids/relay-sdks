@@ -1,21 +1,18 @@
 """What aioquic 1.3 does not expose: every private member the adapter reads or writes, each behind one name.
 
 The send half's backpressure, the close drain, stream pruning, the dropped-FIN retry, resets served
-first, the held control-stream FIN, the keepalive and native QUIC's stream-credit check depend on state
-aioquic's public API does not expose: ``QuicStreamSender._pending``, ``_pending_eof``, ``_buffer``,
-``_buffer_fin``, ``_acked_fin`` and ``_reset_error_code`` (with the public ``buffer_is_empty``,
-``is_finished`` and ``reset_pending``), ``QuicStreamReceiver.is_finished`` and ``stop_pending``,
-``QuicConnection._streams``, ``_streams_queue``, ``_packet_number``, ``_remote_max_streams_uni``,
-``_remote_max_streams_bidi`` and ``_loss`` (its ``spaces``, their ``sent_packets`` and each packet's
-``delivery_handlers``), ``H3Connection._stream``, ``H3Connection._get_or_create_stream`` and
-``H3Connection._peer_control_stream_id``.
-This module is the only place that names them, so a rename in a later aioquic 1.x fails in
-``tests/test_webtransport_aioquic.py`` (which pins every member and the behaviour of every function here)
-before it can fail silently under load, as a write that never settles or a FIN that is never re-armed.
-The package pins ``aioquic>=1.3,<1.4`` for the same reason; widen it
-after re-running that test module against the new minor.
+first, the keepalive and the stream-credit check depend on state aioquic's public API does not expose:
+``QuicStreamSender._pending``, ``_pending_eof``, ``_buffer``, ``_buffer_fin``, ``_acked_fin`` and
+``_reset_error_code`` (with the public ``buffer_is_empty``, ``is_finished`` and ``reset_pending``),
+``QuicStreamReceiver.is_finished`` and ``stop_pending``, ``QuicConnection._streams``, ``_streams_queue``,
+``_packet_number``, ``_remote_max_streams_uni``, ``_remote_max_streams_bidi`` and ``_loss`` (its ``spaces``,
+their ``sent_packets`` and each packet's ``delivery_handlers``). This module is the only place that names
+them, so a rename in a later aioquic 1.x fails in ``tests/test_quic_aioquic.py`` (which pins every member
+and the behaviour of every function here) before it can fail silently under load, as a write that never
+settles or a FIN that is never re-armed. The package pins ``aioquic>=1.3,<1.4`` for the same reason; widen
+it after re-running that test module against the new minor.
 
-The asyncio glue our own :class:`WebTransportProtocol` subclass reaches on its base class (``_quic``,
+The asyncio glue our own :class:`~._protocol.QuicProtocol` subclass reaches on its base class (``_quic``,
 ``_loop``, ``_transport``, ``_transmit_soon``, ``_process_events``, ``_connected_waiter``) stays in
 ``_protocol``; the pin test covers those names too.
 """
@@ -24,7 +21,6 @@ from __future__ import annotations
 
 from collections.abc import Collection
 
-from aioquic.h3.connection import FrameType, H3Connection
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.stream import QuicStream, QuicStreamSender
 
@@ -144,40 +140,11 @@ def finish_receiving_half(quic: QuicConnection, stream_id: int) -> None:
         stream.receiver.is_finished = True
 
 
-def mark_webtransport_stream(h3: H3Connection, stream_id: int, session_id: int) -> None:
-    """Record a bidirectional stream we opened as a WebTransport stream of ``session_id``.
-
-    aioquic writes the WEBTRANSPORT_STREAM frame header but does not record the stream, so the peer's
-    reply bytes would otherwise be parsed as HTTP/3 frames.
-    """
-    with h3._get_or_create_stream(stream_id) as h3_stream:
-        h3_stream.frame_type = FrameType.WEBTRANSPORT_STREAM
-        h3_stream.session_id = session_id
-
-
-def forget_h3_stream(h3: H3Connection, stream_id: int) -> None:
-    """Drop the HTTP/3 record of a stream aioquic discarded.
-
-    aioquic's HTTP/3 layer forgets a stream only once both halves ended, which it never learns for
-    WebTransport streams whose bytes bypass it: every incoming one, and our bidirectional ones.
-    """
-    h3._stream.pop(stream_id, None)
-
-
-def peer_control_stream_id(h3: H3Connection) -> int | None:
-    """The peer's HTTP/3 control stream, once its stream type has been read; ``None`` before that.
-
-    The protocol needs it to recognise the peer ending that stream (see ``WebTransportProtocol``),
-    which aioquic otherwise turns into a connection close before later events in the same flight.
-    """
-    return h3._peer_control_stream_id
-
-
 def stream_credit_left(quic: QuicConnection, unidirectional: bool) -> bool:
     """Whether the peer's MAX_STREAMS lets this end open one more stream of the kind now (RFC 9000 §4.6).
 
     aioquic opens a stream past the limit anyway and holds it, blocked, until the peer raises the limit,
-    so a create would hang instead of failing; native QUIC checks first (TA-21).
+    so a create would hang instead of failing; the session checks first (TA-21).
     """
     stream_id = quic.get_next_available_stream_id(is_unidirectional=unidirectional)
     limit = quic._remote_max_streams_uni if unidirectional else quic._remote_max_streams_bidi

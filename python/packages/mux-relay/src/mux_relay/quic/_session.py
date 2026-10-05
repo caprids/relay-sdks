@@ -1,9 +1,9 @@
-"""What every session on a :class:`~._quic_protocol.QuicProtocol` shares: the halves' link, settlement, the drain.
+"""What every session on a :class:`~._protocol.QuicProtocol` shares: the halves' link, settlement, the drain.
 
 The session base is the production :class:`~._streams._StreamLink`: the halves ask it to queue bytes,
 reset and stop streams, and it settles their transmissions after every transmit of the connection.
-:class:`~._session.WebTransportSessionBase` adds a WebTransport session's streams, capsules and error-code
-mapping; ``mux_relay.quic`` puts MOQT straight on the connection's streams, codes as they are.
+:class:`~._client.QuicSession` puts MOQT straight on the connection's streams, codes as they are; the test
+suite's WebTransport accepting end adds a WebTransport session's streams, capsules and error-code mapping.
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ from moq_core.transport import BidirectionalStream, ReceiveStream
 
 from ._aioquic import acknowledged, live_stream, reset_pending, transmitted
 from ._errors import WebTransportError
-from ._quic_protocol import QuicProtocol
+from ._protocol import QuicProtocol
 from ._streams import _ReceiveHalf, _SendHalf, _StreamQueue
 
 P = TypeVar("P", bound=QuicProtocol)

@@ -1,11 +1,11 @@
-"""The two halves of a WebTransport stream, the link they need from their session, and the incoming-stream queue.
+"""The two halves of a QUIC stream, the link they need from their session, and the incoming-stream queue.
 
 A half never touches QUIC. It asks its :class:`_StreamLink` to queue bytes or a FIN, to reset or stop a
 stream, and whether the session is still live; the link drives the half back through
 :meth:`_ReceiveHalf.feed` and :meth:`_ReceiveHalf.fail`, and :meth:`_SendHalf.settled`,
 :meth:`_SendHalf.fail_transmit`, :meth:`_SendHalf.finished`, :meth:`_SendHalf.stopped` and
 :meth:`_SendHalf.fail`.
-``WebTransportSessionBase`` is the production link; the tests connect a send half to a receive half
+``QuicStreamSession`` is the production link; the tests connect a send half to a receive half
 directly (``relay_helpers/stream_link.py``).
 """
 
@@ -37,7 +37,7 @@ class _StreamLink(Protocol):
 
 
 class _ReceiveHalf:
-    """The receiving side of a WebTransport stream; satisfies :class:`ReceiveStream`."""
+    """The receiving side of a stream; satisfies :class:`ReceiveStream`."""
 
     __slots__ = ("_cancelled", "_chunks", "_eof", "_error", "_link", "_stream_id", "_waiter")
 
@@ -122,7 +122,7 @@ class _ReceiveHalf:
 
 
 class _SendHalf:
-    """The sending side of a WebTransport stream; satisfies :class:`SendStream`.
+    """The sending side of a stream; satisfies :class:`SendStream`.
 
     aioquic queues written bytes without limit and transmits them as congestion and flow control
     allow, so ``write()`` and ``close()`` settle only once everything queued on the stream so far

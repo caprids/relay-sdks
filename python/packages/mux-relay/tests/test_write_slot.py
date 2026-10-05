@@ -16,8 +16,7 @@ from moq_core.control_messages import STREAM_RESET_CODE
 from mux_relay import RelayError
 from mux_relay._settling_groups import SETTLING_GROUP_LIMIT, SettlingGroups
 from mux_relay._write_slot import RelayTrackWriter, StreamReset, WriteSlotDependencies
-from mux_relay.webtransport import WebTransportError
-from mux_relay.webtransport._errors import StreamStopped
+from mux_relay.quic._errors import StreamStopped, WebTransportError
 
 Stall = Literal["none", "write", "second-write", "fin"]
 SHORT = 0.05

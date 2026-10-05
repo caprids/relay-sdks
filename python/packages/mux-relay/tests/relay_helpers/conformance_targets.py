@@ -16,7 +16,6 @@ from aioquic.quic.configuration import QuicConfiguration
 
 from mux_relay.connect_session import ConnectingTransport
 from mux_relay.quic import connect_quic
-from mux_relay.webtransport import connect_webtransport
 
 IDLE_TIMEOUT = 10.0
 """The dialer's idle timeout: how long the TA-9 connection-loss case waits. aioquic's default is 60 s."""
@@ -80,12 +79,6 @@ _SHAPE = KnownFailure(
     match=r"expected source '(stream|session)', got",
     raises=ErrorShapeFailure,
 )
-_PEER_CLOSE = KnownFailure(
-    "#232: the WebTransport dialing end raises for a peer close with a nonzero code, which is how it reports "
-    "UNAUTHORIZED; native QUIC settles cleanly (#229), and #232 retires this end "
-    "(spec/transport-adapter.md, Python mapping, TA-9)",
-    match=r"wait_closed: raised WebTransportError\('peer closed the WebTransport session",
-)
 _ITERATORS_END = KnownFailure(
     "#235: the incoming stream iterators end cleanly however the session ended "
     "(spec/transport-adapter.md, Python mapping, TA-12)",
@@ -106,43 +99,6 @@ _SHAPE_CASES = dict.fromkeys(
 """The cases that check the TA-22 shape, on every target until #233."""
 
 
-def webtransport_target() -> ConformanceTarget:
-    """The WebTransport dialing end, ``connect_webtransport``, against the peer's default framing. #232 retires it."""
-    return ConformanceTarget(
-        name="webtransport",
-        framing="webtransport",
-        peer_framing="webtransport",
-        host="127.0.0.1",
-        dial=lambda url, protocols, configuration: connect_webtransport(url, protocols, configuration=configuration),
-        capabilities=PEER_CAPABILITIES | {"webtransport"},
-        gaps={
-            "native-quic": "a WebTransport session is not native QUIC",
-            "largeCodes": "only native QUIC carries codes above 2^32-1",
-        },
-        expectations={
-            "test_ta_7_ready_rejects_when_the_peer_selects_no_protocol": KnownFailure(
-                "#232: a WebTransport response that names no protocol is accepted, with protocol_id None; native "
-                "QUIC fails the dial, and #232 retires this end (spec/transport-adapter.md, Python mapping, TA-7)",
-                match=r"^ready returned, with protocol None$",
-            ),
-            "test_ta_9_wait_closed_returns_after_the_peers_application_close": _PEER_CLOSE,
-            "test_ta_11_close_before_ready_cancels_the_dial": KnownFailure(
-                "#232: close() before ready ends a WebTransport session cleanly, so wait_closed() returns; native "
-                "QUIC raises, and #232 retires this end (#234; spec/transport-adapter.md, Python mapping, TA-11)",
-                match=r"^wait_closed: returned None, expected it to raise$",
-            ),
-            "test_ta_12_incoming_stream_iterators_raise_after_a_quic_layer_close": _ITERATORS_END,
-            "test_ta_21_creates_raise_promptly_at_the_peers_stream_limit_and_succeed_once_credit_returns": KnownFailure(
-                "#232: aioquic queues a WebTransport stream beyond the peer's limit as blocked, so the create "
-                "succeeds; native QUIC raises, and #232 retires this end (#236; spec/transport-adapter.md, Python "
-                "mapping, TA-21)",
-                match=r"^create unidirectional stream 5 of 4: returned .*, expected it to raise$",
-            ),
-            **_SHAPE_CASES,
-        },
-    )
-
-
 def native_quic_target() -> ConformanceTarget:
     """The native QUIC dialing end: ``connect_quic``, against ``--framing native-quic``."""
     return ConformanceTarget(
@@ -161,4 +117,4 @@ def native_quic_target() -> ConformanceTarget:
     )
 
 
-TARGETS: tuple[Callable[[], ConformanceTarget], ...] = (webtransport_target, native_quic_target)
+TARGETS: tuple[Callable[[], ConformanceTarget], ...] = (native_quic_target,)

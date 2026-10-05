@@ -40,7 +40,7 @@ from mux_relay import (
     SubscriptionRequestError,
     connect_relay_subscriber,
 )
-from mux_relay.webtransport import WebTransportError
+from mux_relay.quic._errors import WebTransportError
 
 ENDPOINT = "https://relay.example.com/moq"
 

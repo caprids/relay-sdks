@@ -40,11 +40,12 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from mux_relay.webtransport._errors import WebTransportError
-from mux_relay.webtransport._streams import _ReceiveHalf, _SendHalf
-from mux_relay.webtransport._wire import encode_close_session_capsule, parse_sf_list_of_strings, sf_list_of_strings
+from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._streams import _ReceiveHalf, _SendHalf
 from relay_helpers.native_quic import NativeQuicSession
-from relay_helpers.wt_server import SERVER_NAME, Impairment, WebTransportServerProtocol, WebTransportServerSession
+from relay_helpers.quic_server import SERVER_NAME, Impairment
+from relay_helpers.webtransport.wire import encode_close_session_capsule, parse_sf_list_of_strings, sf_list_of_strings
+from relay_helpers.wt_server import WebTransportServerProtocol, WebTransportServerSession
 
 UNOFFERED_PROTOCOL = "moqt-unoffered"
 """What ``select: "unoffered"`` answers with."""

@@ -10,7 +10,7 @@ on:
       - '.github/workflows/ts.yml'
       # The conformance job's accepting end and the aioquic stack under it.
       - 'python/packages/mux-relay/tests/relay_helpers/**'
-      - 'python/packages/mux-relay/src/mux_relay/webtransport/**'
+      - 'python/packages/mux-relay/src/mux_relay/quic/**'
       - 'python/uv.lock'
   pull_request:
     paths:
@@ -19,7 +19,7 @@ on:
       - 'mise.toml'
       - '.github/workflows/ts.yml'
       - 'python/packages/mux-relay/tests/relay_helpers/**'
-      - 'python/packages/mux-relay/src/mux_relay/webtransport/**'
+      - 'python/packages/mux-relay/src/mux_relay/quic/**'
       - 'python/uv.lock'
 
 concurrency:

@@ -536,13 +536,12 @@ subscription errors that carry payload (`SubscriptionRequestError`, `Subscriptio
 `SubscriptionConnectionClosedError`). Branch on `code`, never on the message.
 
 Wrapped transport/session failures preserve the original exception in `__cause__`. The transport's
-own exception is `WebTransportError` (in `mux_relay.webtransport`), on native QUIC too until #233
-classifies transport errors by shape. It is not a `RelayError`; it keeps its numeric `code` and
-`reason`, and a failure surfaced through the Relay connection/publishing API wraps it in a
-`RelayError` with `code == "TRANSPORT_ERROR"` and the `WebTransportError` as `__cause__`. A
-credential refusal is a peer close with code 0x2 and reason `"unauthorized"` from moq-relay: on
-native QUIC an application CONNECTION_CLOSE, on a WebTransport session a CLOSE_WEBTRANSPORT_SESSION
-capsule. Either is reported as `code == "UNAUTHORIZED"` instead. Explicit caller cancellation, including
+own exception keeps its numeric `code` and `reason`, and is not a `RelayError`: a failure surfaced
+through the Relay connection/publishing API wraps it in a `RelayError` with
+`code == "TRANSPORT_ERROR"` and the transport's exception as `__cause__`. That exception has no public
+name until #233 classifies transport errors by shape. A credential refusal is the relay's application
+CONNECTION_CLOSE with code 0x2 and reason `"unauthorized"`, and is reported as
+`code == "UNAUTHORIZED"` instead. Explicit caller cancellation, including
 `asyncio.CancelledError`, is passed through unchanged.
 
 ```python
@@ -578,9 +577,7 @@ subscriber = await connect_relay_subscriber(
 )
 ```
 
-`mux_relay.connect_webtransport`, a WebTransport session over HTTP/3 on aioquic (extended CONNECT
-with `WT-Available-Protocols: "moqt-20"`), takes the same `configuration` through `create_transport`.
-It leaves the package before the first release (#232).
+The package ships no WebTransport session and no HTTP/3: native QUIC is its only dialing end.
 
 ### Receive throughput
 
@@ -601,16 +598,17 @@ async consumption limits bound local buffering only (see
 loopback: native QUIC listeners on `localhost` (aioquic, self-signed certificates) fronting the
 in-memory relay hub (`tests/relay_helpers/quic_hub.py`), so the default transport is exercised end to
 end in `python:check`. It also holds the native QUIC dialing end to the transport adapter rules, one
-test per rule, against the conformance peer's native QUIC mode. `test_webtransport.py` does the same
-for the WebTransport session, which still has its own loopback tests until #232. The stream
-halves and the dropped-FIN retry also have in-process tests that need no socket
-(`test_webtransport_streams.py`, which holds the halves to the same expectations as the core's in-memory
-`Pipe`, and `test_webtransport_fin_retry.py`), and `test_webtransport_aioquic.py` pins the aioquic
-internals the adapter reaches into, all named in `mux_relay/webtransport/_aioquic.py`, along with the
-aioquic behaviour its workarounds exist for. Where a test needs real packets it handshakes a client and
+test per rule, against the conformance peer's native QUIC mode. `test_quic_session.py` drives the
+session against a loopback server on the same QUIC plumbing (`tests/relay_helpers/quic_server.py`), whose
+inbound link it can impair: backpressure, the drain before close, pruning, the keepalive and the socket.
+The stream halves and the dropped-FIN retry also have in-process tests that need no socket
+(`test_quic_streams.py`, which holds the halves to the same expectations as the core's in-memory
+`Pipe`, and `test_quic_fin_retry.py`), and `test_quic_aioquic.py` pins the aioquic internals the adapter
+reaches into, all named in `mux_relay/quic/_aioquic.py`, along with the aioquic behaviour its workarounds
+exist for. Where a test needs real packets it handshakes a client and
 server `QuicConnection` in memory (`tests/relay_helpers/quic_pair.py`). The package pins
 `aioquic>=1.3,<1.4` until that list is re-verified against a newer minor. The live smoke test dials
-native QUIC; `RELAY_FRAMING=webtransport` runs it over a WebTransport session instead.
+native QUIC.
 
 ## Video.js media example
 

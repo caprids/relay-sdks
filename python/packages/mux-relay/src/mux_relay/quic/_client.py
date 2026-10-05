@@ -17,11 +17,11 @@ from moq_core._tasks import observe, spawn
 from moq_core.transport import BidirectionalStream, SendStream
 
 from ..connect_session import ConnectingTransport
-from ..webtransport._aioquic import finish_receiving_half, stream_credit_left
-from ..webtransport._client import _open_socket
-from ..webtransport._errors import WebTransportError
-from ..webtransport._quic_protocol import QuicProtocol
-from ..webtransport._quic_session import _CLOSE_DRAIN_TIMEOUT, QuicStreamSession
+from ._aioquic import finish_receiving_half, stream_credit_left
+from ._errors import WebTransportError
+from ._protocol import QuicProtocol
+from ._session import _CLOSE_DRAIN_TIMEOUT, QuicStreamSession
+from ._udp import open_socket
 
 _DEFAULT_PORT = 443
 _MAX_DATAGRAM_FRAME_SIZE = 65536
@@ -49,7 +49,7 @@ def _dial_target(url: str) -> tuple[str, int]:
 class NativeQuicProtocol(QuicProtocol):
     """An aioquic connection protocol carrying MOQT directly on its streams: one session, no HTTP/3."""
 
-    def __init__(self, quic: QuicConnection, session: QuicSession, **options: Any) -> None:
+    def __init__(self, quic: QuicConnection, session: QuicStreamSession[Any], **options: Any) -> None:
         super().__init__(quic, **options)
         self.session = session
         self.alpn_protocol: str | None = None
@@ -116,7 +116,7 @@ class QuicSession(QuicStreamSession[NativeQuicProtocol]):
                 raise WebTransportError(f"could not resolve {host}")
 
             connection = QuicConnection(configuration=self._build_configuration(host))
-            sock, addr = _open_socket([info[4] for info in infos])
+            sock, addr = open_socket([info[4] for info in infos])
             udp_transport, protocol = await loop.create_datagram_endpoint(
                 lambda: NativeQuicProtocol(connection, self, owns_transport=True, receive_socket=sock, keepalive=True),
                 sock=sock,

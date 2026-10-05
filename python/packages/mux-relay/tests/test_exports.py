@@ -6,6 +6,7 @@ re-exports must match what ``ts/src/index.ts`` re-exports from ``@mux/moq-core``
 """
 
 import dataclasses
+import importlib.util
 import re
 import types
 from pathlib import Path
@@ -14,7 +15,6 @@ import moq_core
 import mux_relay
 import mux_relay.media
 import mux_relay.quic
-import mux_relay.webtransport
 from mux_relay import RelayPublisher, RelaySubscriber, RelaySubscriptionHandlers, RelayTrackWriter
 
 REPO = Path(__file__).resolve().parents[4]
@@ -65,7 +65,6 @@ PUBLIC_NAMES = [
     "UpdateOkEvent",
     "connect_relay_publisher",
     "connect_relay_subscriber",
-    "connect_webtransport",
     "read_json",
     "read_text",
 ]
@@ -79,12 +78,6 @@ MEDIA_NAMES = [
     "FrameWriter",
 ]
 """The public interface of ``mux_relay.media``, the media publishing policy; the root exports none of it."""
-
-WEBTRANSPORT_NAMES = [
-    "WebTransportError",
-    "connect_webtransport",
-]
-"""The public interface of ``mux_relay.webtransport``, the aioquic transport: its factory and its exception."""
 
 QUIC_NAMES = ["connect_quic"]
 """The public interface of ``mux_relay.quic``, the aioquic native QUIC transport: its factory, kept out of the root."""
@@ -103,16 +96,10 @@ def test_the_media_module_is_exactly_the_pinned_list_and_stays_out_of_the_root()
         assert hasattr(mux_relay.media, name)
 
 
-def test_the_webtransport_package_binds_its_factory_and_its_exception_and_nothing_else() -> None:
-    """The server role, the codecs and the session classes are reached through the private submodules."""
-    assert sorted(mux_relay.webtransport.__all__) == sorted(WEBTRANSPORT_NAMES)
-    bound = {
-        name
-        for name, value in vars(mux_relay.webtransport).items()
-        if not name.startswith("_") and not isinstance(value, types.ModuleType)
-    }
-    assert bound == set(WEBTRANSPORT_NAMES)
-    assert mux_relay.connect_webtransport is mux_relay.webtransport.connect_webtransport
+def test_the_package_has_no_webtransport_dialing_end() -> None:
+    """Native QUIC is the only dialing end (ADR 0004); the WebTransport session lives in the test helpers (#232)."""
+    assert importlib.util.find_spec("mux_relay.webtransport") is None
+    assert not hasattr(mux_relay, "connect_webtransport")
 
 
 def test_the_quic_package_binds_its_factory_and_nothing_else() -> None:
@@ -140,7 +127,7 @@ def test_all_matches_the_names_the_package_binds() -> None:
 def test_every_export_appears_in_the_spec() -> None:
     """``spec/vocabulary.md``: a name that exists in one SDK without a row is a bug."""
     spec = (REPO / "spec" / "vocabulary.md").read_text() + (REPO / "spec" / "behavior.md").read_text()
-    names = [*mux_relay.__all__, *mux_relay.media.__all__, *mux_relay.webtransport.__all__, *mux_relay.quic.__all__]
+    names = [*mux_relay.__all__, *mux_relay.media.__all__, *mux_relay.quic.__all__]
     missing = [name for name in names if re.search(rf"\b{re.escape(name)}\b", spec) is None]
     assert missing == []
 
