@@ -377,10 +377,10 @@ stream halves and QUIC plumbing (#232). How the rules map:
 | TA-12 | The incoming readables are async iterators. **Differs:** they end with `StopAsyncIteration` however the session ended, never with its error (#235). |
 | TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. `wait_acknowledged()` also raises when the stream fails between writes, so it stands in for `writer.closed` (TA-12, TA-16, TA-20). A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
 | TA-16 | `abort()` resets until the peer acknowledges the FIN, including after the FIN was transmitted, and `wait_acknowledged()` then raises the reason. Once the FIN is acknowledged it does nothing (the stream is in Data Recvd). A settling group's delivery timeout depends on this (#167). |
-| TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `WebTransportError`'s `code`, else from a `stream_error_code` attribute, else from an integer reason, each within 0 to 2³²−1, else 0. The code goes on the wire as it is. |
-| TA-19, TA-20, TA-22 | **Name-based, not shape-based:** a stream failure is a `WebTransportError` with the peer's code in `code`, and a peer STOP_SENDING is its `StreamStopped` subclass. There is no `source` field (#233). |
+| TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `stream_error_code` attribute (the write slot's `StreamReset`, or a stream error), else from an integer reason, each within 0 to 2³²−1, else 0. The code goes on the wire as it is. |
+| TA-19, TA-20, TA-22 | Errors have the TA-22 shape, spelled `source` and `stream_error_code`: `mux_relay.quic` raises a private `QuicTransportError` with them. A peer STOP_SENDING is a `source="stream"` error on the send half, with no subclass of its own. The core and the SDK classify by `source` alone (`moq_core.transport.is_stream_error`, `is_session_error`). An exhausted stream limit (TA-21), and a write to a stream this end already closed or reset, carry `source=None`. |
 | TA-21 | A create rejects at once when the peer's MAX_STREAMS is used up, and succeeds again once the peer raises it. |
-| TA-24 | `close_info` carries the peer's application close, and so does the error an operation raises once it has ended the session (`peer_closed`, `code` and `reason`). The SDK reports `UNAUTHORIZED` from either, in any phase. |
+| TA-24 | `close_info` carries the peer's application close, and so does the session error an operation raises once it has ended the session (`close_code` and `reason`). The SDK reports `UNAUTHORIZED` from either, in any phase. |
 | TA-25, TA-26 | asyncio holds no process open by itself: the application's own `asyncio.run` decides. |
 
 ## Conformance
@@ -401,9 +401,8 @@ in the Python SDK's `uv run pytest`. Its target (`tests/relay_helpers/conformanc
 dialing end (`connect_quic`), against `--framing native-quic`; the cases only a WebTransport session has are
 skipped, since the package ships none (#232).
 
-Each **Differs** row in the Python mapping, and the name-based classification (TA-19, TA-20, TA-22), is a
-known failure there, naming the issue that closes it. TA-6 and TA-25/TA-26 are skipped, with the reasons the
-mapping gives.
+Each **Differs** row in the Python mapping is a known failure there, naming the issue that closes it. TA-6
+and TA-25/TA-26 are skipped, with the reasons the mapping gives.
 
 Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
 adapter, and the core's SETUP tests cover it. For TA-26 the test is a Node script that has to exit by

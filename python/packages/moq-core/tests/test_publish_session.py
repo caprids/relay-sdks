@@ -101,6 +101,12 @@ def after_subscribe_ok(request: RawRequest, track_alias: int) -> bytes:
     return bytes(request.raw[len(subscribe_ok) :])
 
 
+class SessionOver(Exception):
+    """A transport's session error (TA-22): the shape alone, with no transport behind it."""
+
+    source = "session"
+
+
 class Harness:
     def __init__(self, callbacks: MoqtPublishSessionCallbacks | None = None) -> None:
         self.pair: TransportPair = create_transport_pair()
@@ -241,6 +247,25 @@ class TestCreateMoqtPublishSession:
         solicitation.reset()
         await wait_for(lambda: len(endings) == 1)
         assert isinstance(endings[0], Exception)
+        harness.destroy()
+
+    async def test_does_not_report_on_announce_ended_when_the_carrier_fails_with_a_session_error(self) -> None:
+        endings: list[BaseException | None] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_announce_ended=lambda ended: endings.append(ended.error)))
+
+        await harness.session.ready
+        harness.session.announce(NAMESPACE)
+        register(harness.session, "catalog")
+
+        solicitation = await solicit_namespace(harness.pair.server, [])
+
+        await wait_for(lambda: len(solicitation.received) == 2)
+
+        # TA-23: a failure with source "session" means the session is over, which the closure reports, not a
+        # withdrawal; the shape decides even before the transport says it ended.
+        solicitation.reset(SessionOver())
+        await settle(0.03)
+        assert endings == []
         harness.destroy()
 
     async def test_keeps_the_carrier_alive_across_the_requester_half_closing_its_side(self) -> None:

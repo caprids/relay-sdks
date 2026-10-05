@@ -18,7 +18,7 @@ from aioquic.quic.packet import QuicErrorCode
 from moq_core._tasks import spawn
 from moq_core.transport import BidirectionalStream, SendStream
 from mux_relay.quic._aioquic import finish_receiving_half
-from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._errors import QuicTransportError
 from mux_relay.quic._session import _CLOSE_DRAIN_TIMEOUT, QuicStreamSession
 
 from .h3 import forget_h3_stream, mark_webtransport_stream
@@ -136,11 +136,11 @@ class WebTransportSessionBase(QuicStreamSession[WebTransportProtocol]):
         self._finish(
             None
             if code == 0
-            else WebTransportError(
+            else QuicTransportError(
                 f"peer closed the WebTransport session: {reason or 'no reason given'} (code 0x{code:x})",
-                code=code,
+                source="session",
+                close_code=code,
                 reason=reason,
-                peer_closed=True,
             )
         )
 

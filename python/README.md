@@ -536,12 +536,14 @@ subscription errors that carry payload (`SubscriptionRequestError`, `Subscriptio
 `SubscriptionConnectionClosedError`). Branch on `code`, never on the message.
 
 Wrapped transport/session failures preserve the original exception in `__cause__`. The transport's
-own exception keeps its numeric `code` and `reason`, and is not a `RelayError`: a failure surfaced
-through the Relay connection/publishing API wraps it in a `RelayError` with
-`code == "TRANSPORT_ERROR"` and the transport's exception as `__cause__`. That exception has no public
-name until #233 classifies transport errors by shape. A credential refusal is the relay's application
-CONNECTION_CLOSE with code 0x2 and reason `"unauthorized"`, and is reported as
-`code == "UNAUTHORIZED"` instead. Explicit caller cancellation, including
+own exception is not a `RelayError`: a failure surfaced through the Relay connection/publishing API
+wraps it in a `RelayError` with `code == "TRANSPORT_ERROR"` and the transport's exception as
+`__cause__`. Read that exception by its shape, as in TypeScript, not by its class, which is private:
+`source` is `"stream"` (the peer reset or stopped one stream; `stream_error_code` is the peer's code,
+or `None` when unknown) or `"session"` (the connection is over; `close_code` and `reason` are set when
+the peer closed it). `moq_core.transport.is_stream_error` and `is_session_error` test it. A
+credential refusal is the relay's application CONNECTION_CLOSE with code 0x2 and reason
+`"unauthorized"`, and is reported as `code == "UNAUTHORIZED"` instead. Explicit caller cancellation, including
 `asyncio.CancelledError`, is passed through unchanged.
 
 ```python

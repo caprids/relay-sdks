@@ -49,7 +49,7 @@ from mux_relay import (
 )
 from mux_relay.quic import connect_quic
 from mux_relay.quic._client import QuicSession
-from mux_relay.quic._errors import StreamStopped, WebTransportError
+from mux_relay.quic._errors import QuicTransportError
 
 MOQT = "moqt-20"
 NAMESPACE = ["loopback", "quic"]
@@ -147,17 +147,17 @@ class TestDial:
         await peer.peer.prepare(select="none")
         session, created = peer.dial()
 
-        with pytest.raises(WebTransportError, match="selected no application protocol"):
+        with pytest.raises(QuicTransportError, match="selected no application protocol"):
             await asyncio.wait_for(asyncio.ensure_future(created.ready), 5)
 
-        with pytest.raises(WebTransportError):
+        with pytest.raises(QuicTransportError):
             await asyncio.wait_for(session.wait_closed(), 5)
 
     async def test_ta7_a_peer_that_selects_an_unoffered_protocol_fails_the_dial(self, peer: Peer) -> None:
         await peer.peer.prepare(select="unoffered")
         session, created = peer.dial()
 
-        with pytest.raises(WebTransportError, match="unoffered application protocol 'moqt-unoffered'"):
+        with pytest.raises(QuicTransportError, match="unoffered application protocol 'moqt-unoffered'"):
             await asyncio.wait_for(asyncio.ensure_future(created.ready), 5)
 
         assert session.protocol_id is None
@@ -190,23 +190,23 @@ class TestLifetime:
 
         assert session.close_info == (7, "goodbye")
         # TA-24: an operation that fails because of the peer's close carries its code and reason.
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await stream.write(b"late")
-        assert (failure.value.peer_closed, failure.value.code, failure.value.reason) == (True, 7, "goodbye")
+        assert (failure.value.source, failure.value.close_code, failure.value.reason) == ("session", 7, "goodbye")
 
         for create in (session.create_unidirectional_stream, session.create_bidirectional_stream):
-            with pytest.raises(WebTransportError) as failure:
+            with pytest.raises(QuicTransportError) as failure:
                 await create()
-            assert (failure.value.peer_closed, failure.value.code, failure.value.reason) == (True, 7, "goodbye")
+            assert (failure.value.source, failure.value.close_code, failure.value.reason) == ("session", 7, "goodbye")
 
     async def test_ta9_a_quic_layer_close_raises(self, peer: Peer) -> None:
         session = await ready(*peer.dial())
 
         await peer.peer.quicClose()
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await asyncio.wait_for(session.wait_closed(), 5)
-        assert not failure.value.peer_closed
+        assert (failure.value.source, failure.value.close_code) == ("session", None)
         assert session.close_info is None
 
     async def test_ta9_a_quic_layer_close_with_no_error_still_raises(self, peer: Peer) -> None:
@@ -217,7 +217,7 @@ class TestLifetime:
         protocol._quic.close(error_code=QuicErrorCode.NO_ERROR, frame_type=QuicFrameType.PADDING, reason_phrase="bye")
         protocol.transmit()
 
-        with pytest.raises(WebTransportError):
+        with pytest.raises(QuicTransportError):
             await asyncio.wait_for(session.wait_closed(), 5)
         assert session.close_info is None
 
@@ -226,7 +226,7 @@ class TestLifetime:
 
         await peer.peer.loseConnection()
 
-        with pytest.raises(WebTransportError, match="Idle timeout"):
+        with pytest.raises(QuicTransportError, match="Idle timeout"):
             await asyncio.wait_for(session.wait_closed(), 5)
 
     async def test_ta10_close_ends_the_connection_with_an_application_close_carrying_code_and_reason(
@@ -273,9 +273,9 @@ class TestLifetime:
 
         session.close()
 
-        with pytest.raises(WebTransportError, match="closed before the session was established"):
+        with pytest.raises(QuicTransportError, match="closed before the session was established"):
             await asyncio.wait_for(asyncio.ensure_future(created.ready), 5)
-        with pytest.raises(WebTransportError):
+        with pytest.raises(QuicTransportError):
             await asyncio.wait_for(session.wait_closed(), 5)
 
         await peer.peer.releaseHandshake()
@@ -301,7 +301,7 @@ class TestLifetime:
         loop = asyncio.get_running_loop()
         started = loop.time()
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await asyncio.wait_for(asyncio.ensure_future(created.ready), 5)
 
         assert isinstance(failure.value.__cause__, ConnectionRefusedError)
@@ -399,9 +399,12 @@ class TestStreams:
 
         await peer.peer.reset(stream_id, 0xABCD)
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await asyncio.wait_for(incoming.read(), 5)
-        assert failure.value.code == 0xABCD  # as it was on the wire: no HTTP/3 mapping
+        assert (failure.value.source, failure.value.stream_error_code) == (
+            "stream",
+            0xABCD,
+        )  # as on the wire: no HTTP/3 mapping
         session.close()
 
     async def test_ta13_ta19_a_peer_stream_that_opens_with_a_reset_still_arrives(self, peer: Peer) -> None:
@@ -411,9 +414,9 @@ class TestStreams:
         await peer.peer.reset(stream_id, 5)
 
         incoming = await asyncio.wait_for(anext(aiter(session.incoming_bidirectional_streams())), 5)
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await asyncio.wait_for(incoming.readable.read(), 5)
-        assert failure.value.code == 5
+        assert (failure.value.source, failure.value.stream_error_code) == ("stream", 5)
         # The other half is still the client's to use.
         await incoming.writable.write(b"still here")
         await incoming.writable.close()
@@ -427,9 +430,9 @@ class TestStreams:
         await peer.peer.stop(stream_id, 6)
 
         incoming = await asyncio.wait_for(anext(aiter(session.incoming_bidirectional_streams())), 5)
-        with pytest.raises(StreamStopped) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await incoming.writable.write(b"x")
-        assert failure.value.code == 6
+        assert (failure.value.source, failure.value.stream_error_code) == ("stream", 6)
         session.close()
 
     async def test_ta20_a_peer_stop_fails_the_next_write_with_its_code(self, peer: Peer) -> None:
@@ -441,9 +444,9 @@ class TestStreams:
         await peer.peer.stop(stream_id, 6)
         await asyncio.sleep(0.2)
 
-        with pytest.raises(StreamStopped) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await stream.write(b"y")
-        assert failure.value.code == 6
+        assert (failure.value.source, failure.value.stream_error_code) == ("stream", 6)
         session.close()
 
     async def test_ta21_creates_reject_at_once_without_credit_and_succeed_once_it_returns(self, peer: Peer) -> None:
@@ -452,7 +455,7 @@ class TestStreams:
         first = await session.create_unidirectional_stream()
         await session.create_unidirectional_stream()
 
-        with pytest.raises(WebTransportError, match="unidirectional stream limit"):
+        with pytest.raises(QuicTransportError, match="unidirectional stream limit"):
             await asyncio.wait_for(session.create_unidirectional_stream(), 1)
         await asyncio.wait_for(session.create_bidirectional_stream(), 1)  # the other kind has its own credit
 

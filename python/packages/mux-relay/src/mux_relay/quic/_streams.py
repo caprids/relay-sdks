@@ -17,7 +17,7 @@ from typing import Any, Protocol
 
 from moq_core._tasks import observe
 
-from ._errors import StreamStopped, WebTransportError, _error_code_of
+from ._errors import QuicTransportError, _error_code_of, _stream_error
 
 
 class _StreamLink(Protocol):
@@ -152,7 +152,8 @@ class _SendHalf:
         self._stream_id = stream_id
         self._closed = False
         self._aborted = False
-        self._stopped: int | None = None
+        self._stopped: QuicTransportError | None = None
+        """The peer's STOP_SENDING, once it arrived: what every later operation raises."""
         self._error: BaseException | None = None
         self._transmitted: asyncio.Future[None] | None = None
         """Pending while queued bytes (or the FIN) await transmission; ``None`` when nothing is waiting."""
@@ -183,13 +184,13 @@ class _SendHalf:
             raise self._error
 
         if self._aborted:
-            raise WebTransportError("stream was aborted")
+            raise QuicTransportError("stream was aborted")
 
         if self._closed:
-            raise WebTransportError("stream is closed")
+            raise QuicTransportError("stream is closed")
 
         if self._stopped is not None:
-            raise StreamStopped("peer stopped the stream", code=self._stopped)
+            raise self._stopped
 
         self._link.check_live()
 
@@ -230,20 +231,23 @@ class _SendHalf:
             return
 
         self._aborted = True
-        self._end_delivery(reason if isinstance(reason, BaseException) else WebTransportError("stream was aborted"))
+        self._end_delivery(reason if isinstance(reason, BaseException) else QuicTransportError("stream was aborted"))
         # Fail a pending write with the caller's reason before resetting: `reset_stream` transmits,
         # and the reset branch of the session's settlement would otherwise settle the waiter first with
         # a generic "stream was aborted", masking a `write_timeout`'s WRITE_TIMEOUT error.
-        self.fail_transmit(reason if isinstance(reason, BaseException) else WebTransportError("stream was aborted"))
+        self.fail_transmit(reason if isinstance(reason, BaseException) else QuicTransportError("stream was aborted"))
         self._link.reset_stream(self._stream_id, _error_code_of(reason))
 
     # ------------------------------------------------------------------ driven by the link
 
-    def stopped(self, code: int) -> None:
-        """The peer sent STOP_SENDING: queued bytes will never go out (aioquic answers with a reset of its own)."""
+    def stopped(self, code: int | None) -> None:
+        """The peer sent STOP_SENDING with ``code`` (``None`` when unknown): queued bytes will never go out.
+
+        aioquic answers with a reset of its own. Every later operation raises a ``source="stream"`` error with
+        the code; on a send half that is what makes it a stop (TA-20).
+        """
         if self._stopped is None:
-            self._stopped = code
-            stopped = StreamStopped("peer stopped the stream", code=code)
+            self._stopped = stopped = _stream_error("stopped", code)
             self._end_delivery(stopped)
             self.fail_transmit(stopped)
 
@@ -261,7 +265,7 @@ class _SendHalf:
         For a closed half that was never reset or stopped, that is the peer's acknowledgement of the whole stream.
         """
         if not self._closed or self._aborted or self._stopped is not None:
-            self._end_delivery(WebTransportError("stream was reset"))
+            self._end_delivery(QuicTransportError("stream was reset"))
             return
 
         if self._delivery_error is None and not self._acknowledged:

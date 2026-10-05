@@ -14,7 +14,7 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 
-from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._errors import QuicTransportError, _stream_error
 from mux_relay.quic._streams import _ReceiveHalf, _SendHalf
 
 
@@ -72,11 +72,11 @@ class StreamLink:
 
         def deliver() -> None:
             if receive is not None:
-                receive.fail(WebTransportError(f"peer reset the stream (code {code})", code=code))
+                receive.fail(_stream_error("reset", code))
 
             if send is not None:
                 # The reset branch of the session's settlement: whatever was still queued will not go out.
-                send.fail_transmit(WebTransportError("stream was aborted"))
+                send.fail_transmit(QuicTransportError("stream was aborted"))
 
         self._enqueue(stream_id, deliver)
 

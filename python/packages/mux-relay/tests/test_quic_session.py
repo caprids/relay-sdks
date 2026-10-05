@@ -34,7 +34,7 @@ from mux_relay import (
     connect_relay_subscriber,
 )
 from mux_relay.quic import connect_quic
-from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._errors import QuicTransportError, _stream_error
 from mux_relay.quic._protocol import QuicProtocol
 from mux_relay.quic._udp import open_socket, reports_refusals
 
@@ -246,7 +246,7 @@ class TestSendBackpressure:
             aborted = await transport.create_unidirectional_stream()
             await aborted.write(b"\2")
             aborted.abort()
-            with pytest.raises(WebTransportError):
+            with pytest.raises(QuicTransportError):
                 await asyncio.wait_for(aborted.wait_acknowledged(), 5)
         finally:
             transport.close()
@@ -269,8 +269,8 @@ class TestSendBackpressure:
             try:
                 while (chunk := await stream.read()) is not None:
                     total += len(chunk)
-            except WebTransportError as error:
-                outcomes.append(("reset", error.code if error.code is not None else -1))
+            except QuicTransportError as error:
+                outcomes.append(("reset", error.stream_error_code if error.stream_error_code is not None else -1))
                 return
             outcomes.append(("fin", total))
 
@@ -296,10 +296,10 @@ class TestSendBackpressure:
             await asyncio.sleep(0.2)
             assert not acknowledged.done()
 
-            stream.abort(WebTransportError("delivery timeout", code=2))
+            stream.abort(_stream_error("reset", 2))
 
             sessions[0].impair()
-            with pytest.raises(WebTransportError):
+            with pytest.raises(QuicTransportError):
                 await asyncio.wait_for(acknowledged, 5)
             await wait_for(lambda: len(outcomes) == 1, timeout=5)
             await asyncio.sleep(0.3)  # time for a retransmitted FIN, if one were still coming
@@ -310,7 +310,7 @@ class TestSendBackpressure:
             await done.write(b"\2")
             await done.close()
             await asyncio.wait_for(done.wait_acknowledged(), 5)
-            done.abort(WebTransportError("too late", code=2))
+            done.abort(_stream_error("reset", 2))
             await wait_for(lambda: len(outcomes) == 2, timeout=5)
             await asyncio.sleep(0.2)
             assert outcomes == [("reset", 2), ("fin", 1)]
@@ -724,7 +724,7 @@ class TestClosedPort:
     async def test_a_refused_connect_leaves_no_error_report_to_spin_on(self) -> None:
         created = connect_quic(f"https://127.0.0.1:{_closed_udp_port()}", ["moqt-20"])
 
-        with pytest.raises(WebTransportError):
+        with pytest.raises(QuicTransportError):
             await asyncio.wait_for(created.ready, 2)
 
         transport: Any = created.transport
@@ -770,7 +770,7 @@ class TestClosedPort:
                 assert protocol.refused is None and not transport.ready.done()
             finally:
                 transport.close()
-                with pytest.raises(WebTransportError):
+                with pytest.raises(QuicTransportError):
                     await created.ready
                 assert not reports_refusals(sock)  # closing a pending handshake turns reporting off
                 await asyncio.wait_for(protocol.transport_closed.wait(), 5)
@@ -993,7 +993,7 @@ class TestSocket:
         finally:
             sock.close()
 
-        with pytest.raises(WebTransportError, match="only to IPv6"):
+        with pytest.raises(QuicTransportError, match="only to IPv6"):
             open_socket([("2001:db8::1", 443, 0, 0)])
 
     def test_dual_stack_socket_maps_ipv4_addresses(self) -> None:

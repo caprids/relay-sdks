@@ -78,6 +78,7 @@ from .transport import (
     MoqtTransport,
     ReceiveStream,
     SendStream,
+    is_session_error,
     transport_ended,
     wait_acknowledged,
 )
@@ -666,10 +667,13 @@ class MoqtPublishSession:
         failure that ended the carrier. Silent while closing, destroyed, or migrating (a GOAWAY makes
         the peer's streams ending the orderly drain), and once the transport has ended: an ended
         transport fails every stream before the session learns of it, and that is connection loss,
-        which ``_handle_closed`` reports, not a withdrawal. The transport's own flag decides, not
-        which of the two wakes first.
+        which ``_handle_closed`` reports, not a withdrawal. A ``source="session"`` failure (TA-23) or the
+        transport's own flag decides, not which of the two wakes first.
         """
-        if self._destroyed or self._closing or self._received_goaway or transport_ended(self._transport):
+        if self._destroyed or self._closing or self._received_goaway:
+            return
+
+        if is_session_error(cause) or transport_ended(self._transport):
             return
 
         if any(len(stream.announced) > 0 for stream in self._namespace_streams):

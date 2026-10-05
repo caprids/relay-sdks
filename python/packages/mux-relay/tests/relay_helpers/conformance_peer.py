@@ -40,7 +40,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import ExtendedKeyUsageOID, NameOID
 
-from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._errors import QuicTransportError
 from mux_relay.quic._streams import _ReceiveHalf, _SendHalf
 from relay_helpers.native_quic import NativeQuicSession
 from relay_helpers.quic_server import SERVER_NAME, Impairment
@@ -449,9 +449,11 @@ class ConformancePeer:
         await self._stream(stream).send.close()
 
     async def reset(self, stream: int, code: int | str) -> None:
-        # On native QUIC a code may be a decimal string above 2^53-1; the halves take any code from a WebTransportError.
-        reason = WebTransportError("conformance reset", code=int(code)) if self.framing == "native-quic" else int(code)
-        self._stream(stream).send.abort(reason)
+        session = await self._current()
+        # On native QUIC a code may be a decimal string above 2^53-1, beyond what a reason carries (TA-17).
+        if isinstance(session, NativeQuicSession):
+            session.reset_codes[stream] = int(code)
+        self._stream(stream).send.abort(int(code))
 
     async def stop(self, stream: int, code: int) -> None:
         self._stream(stream).receive.cancel(int(code))
@@ -476,20 +478,20 @@ class ConformancePeer:
                 read += len(chunk)
                 if not discard:
                     out += chunk
-        except WebTransportError as error:
+        except QuicTransportError as error:
             if session.ended:
                 raise
-            return result(False, error.code)
+            return result(False, error.stream_error_code)
         return result(False, None)
 
-    async def stopped(self, stream: int) -> int:
+    async def stopped(self, stream: int) -> int | None:
         send = self._stream(stream).send
         session = await self._current()
         while send._stopped is None:
             if session.ended:
                 raise RuntimeError("the session ended before the dialer stopped the stream")
             await asyncio.sleep(0.01)
-        return send._stopped
+        return send._stopped.stream_error_code
 
     async def close(self, code: int, reason: str) -> None:
         session = await self._current()

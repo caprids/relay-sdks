@@ -17,7 +17,7 @@ from core_helpers.streams import Pipe, StreamClosedError
 from relay_helpers.stream_link import StreamLink
 
 from moq_core.transport import ReceiveStream, SendStream
-from mux_relay.quic._errors import StreamStopped, WebTransportError
+from mux_relay.quic._errors import QuicTransportError, _session_error, _stream_error
 from mux_relay.quic._streams import _StreamQueue
 
 STREAM_ID = 4
@@ -54,7 +54,7 @@ def halves_pair() -> Pair:
         link.transmit()
         await asyncio.sleep(0)
 
-    return Pair(writer=send, reader=receive, closed_error=WebTransportError, hold=hold, settle=settle)
+    return Pair(writer=send, reader=receive, closed_error=QuicTransportError, hold=hold, settle=settle)
 
 
 @pytest.fixture(params=[pipe_pair, halves_pair], ids=["pipe", "halves"])
@@ -191,17 +191,17 @@ class TestSendHalf:
         await closing
         acknowledged = asyncio.ensure_future(send.wait_acknowledged())
         await asyncio.sleep(0)
-        reason = WebTransportError("delivery timeout", code=2)
+        reason = _stream_error("reset", 2)
 
         send.abort(reason)
 
         assert link.resets == [(STREAM_ID, 2)]
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await asyncio.wait_for(acknowledged, 1)
         assert failure.value is reason
 
         send.finished()  # the reset's acknowledgement changes nothing
-        with pytest.raises(WebTransportError):
+        with pytest.raises(QuicTransportError):
             await send.wait_acknowledged()
 
     async def test_abort_after_the_fin_was_acknowledged_sends_no_reset(self) -> None:
@@ -213,7 +213,7 @@ class TestSendHalf:
         await closing
         send.finished()  # the link reports the peer's acknowledgement of the FIN
 
-        send.abort(WebTransportError("too late", code=9))
+        send.abort(_stream_error("reset", 9))
 
         assert link.resets == []
         assert await receive.read() is None
@@ -224,21 +224,21 @@ class TestSendHalf:
         send, receive = link.pair(STREAM_ID)
         closing = asyncio.ensure_future(send.close())
         await asyncio.sleep(0)
-        reason = WebTransportError("giving up", code=7)
+        reason = _stream_error("reset", 7)
 
         send.abort(reason)
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await closing
 
         assert failure.value is reason
         assert link.resets == [(STREAM_ID, 7)]
         link.transmit()
 
-        with pytest.raises(WebTransportError) as peer:
+        with pytest.raises(QuicTransportError) as peer:
             await receive.read()
 
-        assert peer.value.code == 7
+        assert (peer.value.source, peer.value.stream_error_code) == ("stream", 7)
 
     async def test_abort_with_a_plain_reason_fails_the_pending_write_generically_and_maps_the_code(self) -> None:
         link = StreamLink()
@@ -248,7 +248,7 @@ class TestSendHalf:
 
         send.abort(12)
 
-        with pytest.raises(WebTransportError, match="aborted"):
+        with pytest.raises(QuicTransportError, match="aborted"):
             await pending
 
         assert link.resets == [(STREAM_ID, 12)]
@@ -267,15 +267,15 @@ class TestSendHalf:
 
         send.stopped(9)
 
-        with pytest.raises(StreamStopped) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await pending
 
-        assert failure.value.code == 9
+        assert (failure.value.source, failure.value.stream_error_code) == ("stream", 9)
 
-        with pytest.raises(StreamStopped) as refused:
+        with pytest.raises(QuicTransportError) as refused:
             await send.write(b"y")
 
-        assert refused.value.code == 9
+        assert (refused.value.source, refused.value.stream_error_code) == ("stream", 9)
 
     async def test_the_peer_cancelling_reaches_the_send_half_as_a_stop(self) -> None:
         link = StreamLink()
@@ -283,35 +283,35 @@ class TestSendHalf:
         pending = asyncio.ensure_future(send.write(b"x"))
         await asyncio.sleep(0)
 
-        receive.cancel(WebTransportError("enough", code=3))
+        receive.cancel(_stream_error("reset", 3))
         assert link.stops == [(STREAM_ID, 3)]
         link.transmit()
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await pending
 
-        assert failure.value.code == 3
+        assert (failure.value.source, failure.value.stream_error_code) == ("stream", 3)
 
     async def test_a_dead_link_fails_the_pending_write_and_every_later_operation(self) -> None:
         link = StreamLink()
         send, receive = link.pair(STREAM_ID)
         pending = asyncio.ensure_future(send.write(b"x"))
         await asyncio.sleep(0)
-        error = WebTransportError("QUIC connection terminated", code=1)
+        error = _session_error("QUIC connection terminated")
 
         link.end(error)
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await pending
 
         assert failure.value is error
 
-        with pytest.raises(WebTransportError) as later:
+        with pytest.raises(QuicTransportError) as later:
             await send.write(b"y")
 
         assert later.value is error
 
-        with pytest.raises(WebTransportError) as reading:
+        with pytest.raises(QuicTransportError) as reading:
             await receive.read()
 
         assert reading.value is error
@@ -321,11 +321,11 @@ class TestSendHalf:
         send, _ = link.pair(STREAM_ID)
         closing = asyncio.ensure_future(send.close())
         await asyncio.sleep(0)
-        error = WebTransportError("gone")
+        error = _session_error("gone")
 
         link.end(error)
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await closing
 
         assert failure.value is error
@@ -334,9 +334,9 @@ class TestSendHalf:
     async def test_a_closing_session_refuses_new_writes_before_touching_the_stream(self) -> None:
         link = StreamLink()
         send, _ = link.pair(STREAM_ID)
-        link.error = WebTransportError("WebTransport session closed")
+        link.error = _session_error("QUIC session closed")
 
-        with pytest.raises(WebTransportError, match="session closed"):
+        with pytest.raises(QuicTransportError, match="session closed"):
             await send.write(b"x")
 
         assert link.transmits == 0
@@ -351,14 +351,14 @@ class TestReceiveHalf:
         link.transmit()
         await writing
 
-        receive.fail(WebTransportError("peer reset the stream (code 5)", code=5))
+        receive.fail(_stream_error("reset", 5))
         assert receive.ended
         assert await receive.read() == b"head"
 
-        with pytest.raises(WebTransportError) as failure:
+        with pytest.raises(QuicTransportError) as failure:
             await receive.read()
 
-        assert failure.value.code == 5
+        assert (failure.value.source, failure.value.stream_error_code) == ("stream", 5)
 
     async def test_a_retransmitted_fin_is_ignored(self) -> None:
         link = StreamLink()
@@ -387,7 +387,7 @@ class TestReceiveHalf:
         link = StreamLink()
         _, receive = link.pair(STREAM_ID)
         receive.feed(b"", True)
-        receive.fail(WebTransportError("late"))
+        receive.fail(_stream_error("reset", None))
         assert await receive.read() is None
 
     async def test_a_waiting_read_wakes_when_data_arrives(self) -> None:

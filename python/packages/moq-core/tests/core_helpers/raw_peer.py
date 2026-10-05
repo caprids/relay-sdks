@@ -75,10 +75,10 @@ class RawRequest:
         except Exception:
             pass
 
-    def reset(self) -> None:
-        """Reset the peer's side: the actual withdrawal signal."""
+    def reset(self, reason: object = None) -> None:
+        """Reset the peer's side: the actual withdrawal signal. An exception ``reason`` is what the reader raises."""
         assert self._writer is not None
-        self._writer.abort()
+        self._writer.abort(reason)
 
 
 async def open_raw_request(server: MoqtTransport, message: bytes) -> RawRequest:

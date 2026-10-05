@@ -40,7 +40,7 @@ from mux_relay import (
     SubscriptionRequestError,
     connect_relay_subscriber,
 )
-from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._errors import QuicTransportError
 
 ENDPOINT = "https://relay.example.com/moq"
 
@@ -569,7 +569,7 @@ class TestConnectRelay:
     async def test_closes_a_transport_whose_handshake_fails(self) -> None:
         fake = create_fake_transport()
         failed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        cause = WebTransportError("handshake failed", code=42, reason="peer detail")
+        cause = QuicTransportError("handshake failed", source="session")
         failed.set_exception(cause)
 
         with pytest.raises(RelayError, match="handshake failed") as failure:
@@ -577,8 +577,6 @@ class TestConnectRelay:
         assert failure.value.code == "TRANSPORT_ERROR"
         assert failure.value.phase == "connecting"
         assert failure.value.__cause__ is cause
-        assert cause.code == 42
-        assert cause.reason == "peer detail"
 
         assert fake.close_calls == 1
 
@@ -590,7 +588,7 @@ class TestConnectRelay:
     ) -> None:
         fake = create_fake_transport()
         failed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        cause = WebTransportError("peer closed the session", code=close_code, reason=reason, peer_closed=True)
+        cause = QuicTransportError("peer closed the session", source="session", close_code=close_code, reason=reason)
         failed.set_exception(cause)
 
         with pytest.raises(RelayError) as failure:
@@ -605,11 +603,15 @@ class TestConnectRelay:
         "cause",
         [
             # QUIC CONNECTION_REFUSED is 0x2 too, but it is not the peer's session close code.
-            WebTransportError("QUIC connection terminated", code=0x2, reason="refused"),
-            WebTransportError("peer closed the session", code=0x3, reason="protocol violation", peer_closed=True),
+            QuicTransportError("QUIC connection terminated: refused (code 0x2)", source="session"),
+            QuicTransportError(
+                "peer closed the session", source="session", close_code=0x3, reason="protocol violation"
+            ),
+            # A stream error never reports the peer's close (TA-22, TA-24).
+            QuicTransportError("peer reset the stream (code 2)", source="stream", stream_error_code=0x2),
         ],
     )
-    async def test_other_closures_stay_transport_errors(self, cause: WebTransportError) -> None:
+    async def test_other_closures_stay_transport_errors(self, cause: QuicTransportError) -> None:
         fake = create_fake_transport()
         failed: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         failed.set_exception(cause)
@@ -641,7 +643,7 @@ class TestConnectRelay:
         with pytest.raises(RelayError, match="Connection refused") as failure:
             await connect_relay_subscriber("https://127.0.0.1:9/moq", connect_timeout=5)
         assert (failure.value.code, failure.value.phase) == ("TRANSPORT_ERROR", "connecting")
-        assert isinstance(failure.value.__cause__, WebTransportError)
+        assert isinstance(failure.value.__cause__, QuicTransportError)
 
     @pytest.mark.parametrize("connect_timeout", [0, -1, math.nan, math.inf, 2_147_483.648])
     async def test_rejects_invalid_connection_deadlines(self, connect_timeout: float) -> None:

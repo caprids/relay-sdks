@@ -220,8 +220,9 @@ Not adopted: Python-only exception subclasses per code (`RelayClosedError`, `Rel
 so a caller switching languages met two identities for one failure, and `except RelayError as
 error: if error.code == "WRITE_TIMEOUT"` is one line longer than a subclass catch. Also not adopted:
 a `RELAY_ERROR` fallback code for a `RelayError` built without one (`code` is required in both SDKs),
-and a transport error that is itself a Relay error (`WebTransportError` is the transport layer's own
-exception, wrapped as `TRANSPORT_ERROR` at the Relay boundary). Removed without aliases under the
+and a transport error that is itself a Relay error (the transport layer's own exception, a browser's
+`WebTransportError` or Python's `QuicTransportError`, is wrapped as `TRANSPORT_ERROR` at the Relay
+boundary). Removed without aliases under the
 policy above; reversible before the first release, so no ADR.
 
 `UNAUTHORIZED` names a connection whose credentials the relay refused, after the MOQT session
@@ -302,6 +303,27 @@ the namespace is never "ready" for a viewer the relay has not routed yet); `soli
 publisher observes is its own announce leaving, not the relay's request for it); resolving with the
 namespace (the publisher's own, `publisher.namespace` in Python and the caller's option in
 TypeScript).
+
+## Transport errors by shape: `source`, `QuicTransportError`
+
+A transport's stream or session failure is classified by its fields, not its class
+(`spec/transport-adapter.md` TA-22): `source` is `stream` or `session`, a stream error carries the
+peer's code as `streamErrorCode` / `stream_error_code` (`null` / `None` when unknown, never 0), and a
+session error that reports the peer's close carries `closeCode` and `reason` / `close_code` and
+`reason` (TA-24). TypeScript reads them with `isStreamError` from `@mux/moq-core`; Python with
+`is_stream_error` and `is_session_error` from `moq_core.transport`. A peer STOP_SENDING is a stream
+error raised on a send stream; where it surfaces makes it a stop.
+
+`QuicTransportError` is the exception `mux_relay.quic` raises with that shape, the counterpart of
+`@mux/relay-quic`'s internal `NativeQuicSessionError` and the core's `MoqtStreamError` in one class:
+the Python core hands its own reset reasons over (`StreamReset`, with `stream_error_code`), so it
+needs no stream error class. It is private
+(`mux_relay.quic._errors`, not in `mux_relay.quic.__all__`), as `NativeQuicSessionError` is: the
+shape is the contract, and a caller who catches the class instead would be classifying by name. It
+replaced `WebTransportError` and its `StreamStopped` subclass without aliases, under the policy
+above: the package no longer dials WebTransport (#232), so the old name was a misnomer, and the
+subclass made a stop a type rather than a place. Not adopted: `TransportError`, which reads as the
+`TRANSPORT_ERROR` code it is wrapped in, and a `StreamStopped` subclass kept beside the shape.
 
 ## Names considered and left alone
 

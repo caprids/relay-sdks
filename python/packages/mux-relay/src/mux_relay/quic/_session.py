@@ -21,7 +21,7 @@ from moq_core._tasks import observe
 from moq_core.transport import BidirectionalStream, ReceiveStream
 
 from ._aioquic import acknowledged, live_stream, reset_pending, transmitted
-from ._errors import WebTransportError
+from ._errors import QuicTransportError, _session_error, _stream_error
 from ._protocol import QuicProtocol
 from ._streams import _ReceiveHalf, _SendHalf, _StreamQueue
 
@@ -201,15 +201,14 @@ class QuicStreamSession(Generic[P]):
         receive = self._receives.get(stream_id)
 
         if receive is not None:
-            code = self._from_wire_code(error_code)
-            receive.fail(WebTransportError(f"peer reset the stream (code {code})", code=code))
+            receive.fail(_stream_error("reset", self._from_wire_code(error_code)))
             self._watch(stream_id)
 
     def _on_stop_sending(self, stream_id: int, error_code: int) -> None:
         send = self._sends.get(stream_id)
 
         if send is not None:
-            send.stopped(self._from_wire_code(error_code) or 0)
+            send.stopped(self._from_wire_code(error_code))
             # aioquic resets the stream on our behalf; forget it once that reset is acknowledged.
             self._watch(stream_id)
 
@@ -244,7 +243,7 @@ class QuicStreamSession(Generic[P]):
                 if send.closed:
                     send.settled()
                 else:
-                    send.fail_transmit(WebTransportError("stream is closed"))
+                    send.fail_transmit(QuicTransportError("stream is closed"))
 
                 send.finished()
 
@@ -258,7 +257,7 @@ class QuicStreamSession(Generic[P]):
             if send.closed:
                 send.settled()
             else:
-                send.fail_transmit(WebTransportError("stream is closed"))
+                send.fail_transmit(QuicTransportError("stream is closed"))
 
             # The FIN (or a reset) is acknowledged: a settling group settles here (see CONTEXT.md).
             send.finished()
@@ -268,7 +267,7 @@ class QuicStreamSession(Generic[P]):
             return receive is None or receive.ended
 
         if reset_pending(stream):
-            send.fail_transmit(WebTransportError("stream was aborted"))
+            send.fail_transmit(QuicTransportError("stream was aborted"))
             return True  # until the reset is acknowledged
 
         if transmitted(stream):
@@ -291,10 +290,8 @@ class QuicStreamSession(Generic[P]):
         error = (
             None
             if clean
-            else WebTransportError(
-                f"QUIC connection terminated: {event.reason_phrase or 'no reason given'} (code 0x{event.error_code:x})",
-                code=event.error_code,
-                reason=event.reason_phrase,
+            else _session_error(
+                f"QUIC connection terminated: {event.reason_phrase or 'no reason given'} (code 0x{event.error_code:x})"
             )
         )
         self._finish(error)
@@ -313,7 +310,7 @@ class QuicStreamSession(Generic[P]):
             self._closed.set_exception(error)
 
         if stream_error is None:
-            stream_error = error if error is not None else WebTransportError(self._CLOSED_MESSAGE)
+            stream_error = error if error is not None else _session_error(self._CLOSED_MESSAGE)
 
         for receive in self._receives.values():
             receive.fail(stream_error)
@@ -335,15 +332,16 @@ class QuicStreamSession(Generic[P]):
         return self._protocol
 
     def check_live(self) -> None:
-        if self._protocol is None:
-            raise WebTransportError(self._NOT_ESTABLISHED_MESSAGE)
-
         if self._closed.done():
             error = self._closed.exception() if not self._closed.cancelled() else None
-            raise error if error is not None else WebTransportError(self._CLOSED_MESSAGE)
+            raise error if error is not None else _session_error(self._CLOSED_MESSAGE)
 
         if self._closing:
-            raise WebTransportError(self._CLOSED_MESSAGE)
+            raise _session_error(self._CLOSED_MESSAGE)
+
+        if self._protocol is None:
+            # Not a session error: the session is not over, it has not started (TA-23).
+            raise QuicTransportError(self._NOT_ESTABLISHED_MESSAGE)
 
     async def send(self, half: _SendHalf, data: bytes, end_stream: bool) -> None:
         protocol = self._require_live()
