@@ -374,7 +374,7 @@ stream halves and QUIC plumbing (#232). How the rules map:
 | TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. A peer's application close (0x1d) is a clean end whatever its code, and `close_info` holds its `(code, reason)`; a QUIC-layer close, an idle timeout or a failed dial raises. |
 | TA-10 | `close(close_code=0, reason="")` is idempotent and ignored after the session ends. It waits, within a bound, for every send stream to be acknowledged first (#209), then ends the connection with an application CONNECTION_CLOSE carrying the code and reason. |
 | TA-11 | `close()` before `ready` cancels the dial: `ready` and `wait_closed()` raise. |
-| TA-12 | The incoming readables are async iterators. **Differs:** they end with `StopAsyncIteration` however the session ended, never with its error (#235). |
+| TA-12 | The incoming readables are async iterators. After a clean end they raise `StopAsyncIteration`; after any other, they raise the session's error, the same `source="session"` error `wait_closed()` raises. Either way, streams that arrived before the end are yielded first. |
 | TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. `wait_acknowledged()` also raises when the stream fails between writes, so it stands in for `writer.closed` (TA-12, TA-16, TA-20). A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
 | TA-16 | `abort()` resets until the peer acknowledges the FIN, including after the FIN was transmitted, and `wait_acknowledged()` then raises the reason. Once the FIN is acknowledged it does nothing (the stream is in Data Recvd). A settling group's delivery timeout depends on this (#167). |
 | TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `stream_error_code` attribute (the write slot's `StreamReset`, or a stream error), else from an integer reason, each within 0 to 2³²−1, else 0. The code goes on the wire as it is. |
@@ -401,8 +401,9 @@ in the Python SDK's `uv run pytest`. Its target (`tests/relay_helpers/conformanc
 dialing end (`connect_quic`), against `--framing native-quic`; the cases only a WebTransport session has are
 skipped, since the package ships none (#232).
 
-Each **Differs** row in the Python mapping is a known failure there, naming the issue that closes it. TA-6
-and TA-25/TA-26 are skipped, with the reasons the mapping gives.
+The Python mapping has no **Differs** row, so the native QUIC target has no known failure. A Differs row
+added later is a known failure there, naming the issue that closes it. TA-6 and TA-25/TA-26 are skipped,
+with the reasons the mapping gives.
 
 Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
 adapter, and the core's SETUP tests cover it. For TA-26 the test is a Node script that has to exit by

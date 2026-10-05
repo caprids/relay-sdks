@@ -317,12 +317,17 @@ class _SendHalf:
 
 
 class _StreamQueue:
-    """Incoming streams, iterated by the session drivers' accept loops."""
+    """Incoming streams, iterated by the session drivers' accept loops.
+
+    The iterator ends (``StopAsyncIteration``) after :meth:`close`, a clean end, and raises the session's error
+    after :meth:`fail`, any other end (TA-12). Either way, streams queued before it are still yielded first.
+    """
 
     def __init__(self) -> None:
         self._items: deque[Any] = deque()
         self._waiter: asyncio.Future[None] | None = None
         self._closed = False
+        self._error: BaseException | None = None
 
     def push(self, item: Any) -> None:
         if self._closed:
@@ -332,8 +337,17 @@ class _StreamQueue:
         self._wake()
 
     def close(self) -> None:
+        """The session ended cleanly: once the queued streams are taken, the iterator ends."""
         self._closed = True
         self._wake()
+
+    def fail(self, error: BaseException) -> None:
+        """The session ended with ``error``: once the queued streams are taken, the iterator raises it."""
+        if self._closed:
+            return
+
+        self._error = error
+        self.close()
 
     def _wake(self) -> None:
         if self._waiter is not None and not self._waiter.done():
@@ -348,6 +362,9 @@ class _StreamQueue:
         while True:
             if self._items:
                 return self._items.popleft()
+
+            if self._error is not None:
+                raise self._error
 
             if self._closed:
                 raise StopAsyncIteration
