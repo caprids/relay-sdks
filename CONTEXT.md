@@ -59,7 +59,7 @@ message), registration (that is a track's)
 
 **Announce race**:
 A subscribe that reaches the relay before it has processed the announce of its namespace. The relay
-rejects it (request error 16 with reason `unroutable` on moq-relay 0.15.8, 404 on older relays)
+rejects it (request error 16 with reason `unroutable` from moq-relay 0.15.8, 404 on older relays)
 rather than parking it; the application retries within its own budget, the SDK never does.
 _Avoid_: startup race, propagation delay, transient 404 (the same rejection after a retract is
 publisher recovery, a different case)

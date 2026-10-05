@@ -258,8 +258,8 @@ rejection is exempt only because it is a create rejection, which the core never 
 **TA-24.** A session error that reports the peer's close SHOULD carry the peer's `closeCode` and
 `reason`. A session error for a lost connection carries neither.
 **Why:** a refusal for credentials is a peer close with MOQT's UNAUTHORIZED code (draft-20 §3.5),
-which the SDK reports as `UNAUTHORIZED` while connecting. Browsers do not expose it (#14), so it is not
-a MUST.
+which the SDK reports as `UNAUTHORIZED` while connecting. Browsers did not expose it against relays
+before moq-relay 0.17.0 (#14), so it is not a MUST.
 
 ### Process lifetime
 
@@ -314,13 +314,18 @@ adapters MUST NOT copy them.
 - **Chromium `WebTransportError` constructor (TA-17).** Chromium still implements the earlier
   dictionary constructor, `new WebTransportError({ message, streamErrorCode })`. `streamResetReason`
   falls back to it, so the reason still carries the code.
-- **Browser session close codes (TA-9, TA-24).** Against moq-relay 0.15.8, a browser does not expose
-  the peer's close code on a refused connection: the relay tears down HTTP/3 in the same flight as
-  its CLOSE_WEBTRANSPORT_SESSION capsule, so `closed` rejects with "Connection lost." and no
-  `closeCode`, and a credentials refusal reaches the SDK as `TRANSPORT_ERROR` (#14). The relay fix
-  (moq-dev/moq#4429) is merged but not in a release yet.
-  **Evidence:** Chromium against `sjc.relay.mux.global` on 2026-10-02: no token, an empty token, a
-  tampered signature and a wrong path each gave "Connection lost." in 3/3 runs.
+- **Browser session close codes (TA-9, TA-24), fixed from moq-relay 0.17.0.** Against moq-relay
+  0.15.8 and earlier, a browser did not expose the peer's close code on a refused connection: the
+  relay tore down HTTP/3 in the same flight as its CLOSE_WEBTRANSPORT_SESSION capsule, so `closed`
+  rejected with "Connection lost." and no `closeCode`, and a credentials refusal reached the SDK as
+  `TRANSPORT_ERROR` (#14). moq-relay 0.17.0 keeps the session alive until the capsule is delivered
+  (upstream `b14a61f17`, moq-dev/moq#4429), so `closed` resolves with code 2 and reason
+  `unauthorized` and the SDK reports `UNAUTHORIZED` in phase `connecting`. The core needs no change;
+  only a browser against an older relay still sees the deviation.
+  **Evidence:** Chromium against `sjc.relay.mux.global` on 2026-10-02 (0.15.8): no token, an empty
+  token, a tampered signature and a wrong path each gave "Connection lost." in 3/3 runs. On
+  2026-10-05 (0.17.0): a missing, malformed, tampered, expired-looking or wrong-path token each gave
+  `UNAUTHORIZED` in phase `connecting` in 3/3 runs.
 - **Browser stream error codes (TA-22).** A browser's `streamErrorCode` is nullable and is `null`
   when the browser does not know the code, which TA-22 allows.
 - **Chromium `ready` without a selected protocol (TA-7).** When the peer's response names no

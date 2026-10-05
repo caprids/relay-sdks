@@ -1,7 +1,7 @@
 # Recovering after a publisher stops or restarts
 
 Replacing a publisher connection restores an upstream source for new subscriptions. It does
-**not** move existing subscribers to that source (moq-relay 0.15.8 never does), and a new
+**not** move existing subscribers to that source (moq-relay 0.15.8 and 0.17.0 never do), and a new
 subscription need not succeed immediately.
 These are relay lifecycle limits tracked in [#34](https://github.com/muxinc/relay-sdks/issues/34).
 The SDKs do not automatically reconnect or resubscribe.
@@ -20,20 +20,26 @@ The SDKs do not automatically reconnect or resubscribe.
 `SUBSCRIBE_OK` arrives, this timer is disarmed. It is not a time-to-first-object deadline or an
 inactivity detector. Transport keepalive likewise does not prove the publisher is alive.
 
-Measured on mux.global's moq-relay 0.15.8 on 2026-09-28
+Measured on mux.global's moq-relay 0.17.0 on 2026-10-05 with the Python SDK
 ([publisher restarts](relay-interop.md#publisher-restarts-and-resubscription)):
 
-- A publisher that closes cleanly, or whose connection closes, ends existing subscriptions within
-  0.1 s. The done is usually status 2 `track ended`, sometimes 0 `internal error`.
-- After a publisher crash, existing subscriptions sit silent for about 30-35 s, the relay's QUIC
-  idle timeout, before done(0). The subscriber connection stays open throughout. New subscriptions
-  in that interval are accepted but receive only the dead publisher's cached last object.
+- A publisher that closes cleanly ends existing subscriptions within 0.1 s with status 2
+  `track ended`; one whose connection closes without MoQ cleanup, with status 0 `internal error`.
+- After a publisher crash, existing subscriptions sit silent for about 11 s, the relay's QUIC idle
+  timeout, before done(0) (30-35 s on 0.15.8). The subscriber connection stays open throughout.
+  New subscriptions in that interval are accepted but receive only the dead publisher's cached last
+  object, and a replacement that announces during it does not fix that reliably: in 3 of 6 runs new
+  subscriptions went on getting the dead publisher's object until the timeout, because the relay
+  picks between the two announcements effectively at random
+  ([duplicate announce](relay-interop.md#duplicate-announce)).
 - Existing subscriptions are never moved to a replacement publisher on the same namespace, however
   the old one ended.
 - After a clean end, new subscriptions fail with request error 16 `unroutable` until the
   replacement announces, and are served by it at once from then on.
 - While a namespace stays announced after one of its tracks ended cleanly, re-subscribing to that
   track replays its cached last group followed by another done, one round trip later each time.
+  Once the finished track has gone unread for about 30 s the relay forgets it, and a subscribe gets
+  request error 16 `not found`.
 
 See [issue #34](https://github.com/muxinc/relay-sdks/issues/34) and
 [issue #21](https://github.com/muxinc/relay-sdks/issues/21) for the measurements; they do not
@@ -63,8 +69,10 @@ A useful policy is:
    open a replacement connection first. A new connection is not a guaranteed bypass for relay state.
    During a known publisher transition, classify the fresh-namespace rejection (16 `unroutable`, or
    `404` on older relays) and initial-response timeouts as potentially transient and retry within
-   the recovery budget. A subscription accepted before the replacement announces may serve only the
-   old publisher's cached object, so check freshness rather than trusting acceptance. Do not
+   the recovery budget. After a crash, a subscription accepted before the relay's idle timeout may
+   serve only the old publisher's cached object, even after the replacement announces, so check
+   freshness rather than trusting acceptance, and retry a stale one with backoff until it is served
+   by the new generation. Do not
    re-subscribe to a track the publisher ended while it is still announced: that only replays the
    finished track. A status-2 done alone does not prove this, because moq-relay sends one after the
    subscription's own `update()` too; in that case re-subscribing is the recovery. Authentication, invalid input, and protocol failures need their
