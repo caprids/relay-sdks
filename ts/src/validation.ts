@@ -14,7 +14,7 @@ import {
   type KeyValuePair,
   MAX_NAMESPACE_FIELDS,
   MAX_OBJECT_PAYLOAD_LENGTH,
-  MAX_OBJECT_PROPERTIES_LENGTH,
+  MAX_TRACK_PROPERTIES_LENGTH,
 } from '@mux/moq-core';
 import type { PublishProperty } from './publish.js';
 
@@ -30,6 +30,23 @@ export const MAX_PROPERTY_VALUE_LENGTH = 0xffff;
  * Pinned in spec/protocol.json as `relay.limits.maxObjectPropertiesBytes`.
  */
 export const MAX_RELAY_OBJECT_PROPERTIES_LENGTH = 64 * 1024;
+
+/**
+ * moq-relay refuses every subscriber to a track with more track properties than this
+ * (`MAX_PROPERTIES` in 0.17.0, REQUEST_ERROR 18 `too many`) and the publisher hears nothing, so
+ * registration refuses it. Pinned in spec/protocol.json as `relay.limits.maxTrackProperties`.
+ */
+export const MAX_RELAY_TRACK_PROPERTIES = 64;
+
+/**
+ * Track property values draft-ietf-moq-transport-20 restricts (sections 12.4 and 12.5), pinned in
+ * spec/protocol.json under `trackProperties`. moq-relay refuses every subscriber to a track that
+ * breaks them, so registration checks them.
+ */
+export const DEFAULT_PUBLISHER_PRIORITY = 0x0e;
+export const MAX_DEFAULT_PUBLISHER_PRIORITY = 255;
+export const DEFAULT_PUBLISHER_GROUP_ORDER = 0x22;
+export const DEFAULT_PUBLISHER_GROUP_ORDERS: readonly number[] = [1, 2];
 
 /**
  * Check a namespace in its original container and return a fresh copy of its fields. The copy is
@@ -68,20 +85,42 @@ export function payloadBytes(payload: unknown): Uint8Array {
 /**
  * Check track properties and copy any byte values, so later mutation cannot leak in.
  * Integer types and values are bounded by what the core's varint can carry, which in this
- * language is `Number.MAX_SAFE_INTEGER`. Byte values are bounded by their 16-bit wire length, and
- * the whole list by the encoded size the core accepts on an object; both are measured here, with
- * the core's own encoder, so an oversized property fails as an argument error instead of as a
- * transport failure once demand arrives.
+ * language is `Number.MAX_SAFE_INTEGER`, and byte values by their 16-bit wire length. The list
+ * rides in every SUBSCRIBE_OK, so its encoding, measured here with the core's own encoder, must fit
+ * the room that control message leaves; the relay also caps how many pairs it reads and refuses
+ * the values draft-20 rules out. A track that breaks any of these would register and then never
+ * answer a subscription, with the publisher's writes timing out, so each is an argument error here
+ * instead.
  */
-export function propertyPairs(properties: unknown = []): KeyValuePair[] {
+export function trackPropertyPairs(properties: unknown = []): KeyValuePair[] {
   const { pairs, length } = measuredPairs(properties);
-  if (length > MAX_OBJECT_PROPERTIES_LENGTH)
-    throw new RangeError(`Properties exceed the ${MAX_OBJECT_PROPERTIES_LENGTH}-byte encoded limit`);
+  pairs.forEach(({ type, value }, index) => {
+    // Both types are even, so the shape check above already made their values integers.
+    if (typeof value !== 'number') return;
+    if (type === DEFAULT_PUBLISHER_PRIORITY && value > MAX_DEFAULT_PUBLISHER_PRIORITY)
+      throw new RangeError(
+        `Property ${index} (Default Publisher Priority, 0x0E) must be at most ${MAX_DEFAULT_PUBLISHER_PRIORITY}`,
+      );
+    if (type === DEFAULT_PUBLISHER_GROUP_ORDER && !DEFAULT_PUBLISHER_GROUP_ORDERS.includes(value))
+      throw new RangeError(
+        `Property ${index} (Default Publisher Group Order, 0x22) must be 1 (ascending) or 2 (descending)`,
+      );
+  });
+  if (pairs.length > MAX_RELAY_TRACK_PROPERTIES)
+    throw new RangeError(
+      `Track properties hold ${pairs.length} pairs, over the relay's ${MAX_RELAY_TRACK_PROPERTIES}-pair limit, ` +
+        'so the relay would refuse every subscriber',
+    );
+  if (length > MAX_TRACK_PROPERTIES_LENGTH)
+    throw new RangeError(
+      `Track properties encode to ${length} bytes, over the ${MAX_TRACK_PROPERTIES_LENGTH} bytes SUBSCRIBE_OK ` +
+        "has room for, so no subscription could be answered; carry larger data in a track's objects",
+    );
   return pairs;
 }
 
 /**
- * Check one object's properties like {@link propertyPairs}, against the relay's tighter bound. The
+ * Check one object's properties like {@link trackPropertyPairs}, against the relay's object bound. The
  * relay would drop an object whose block is over its limit, silently for the subscriber, so the
  * write fails here instead. The relay forwards no object property but LOC Timestamp anyway.
  */

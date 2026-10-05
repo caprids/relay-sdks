@@ -14,10 +14,9 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 
-from moq_core import MAX_NAMESPACE_FIELDS, MAX_OBJECT_PAYLOAD_LENGTH, KeyValuePair
+from moq_core import MAX_NAMESPACE_FIELDS, MAX_OBJECT_PAYLOAD_LENGTH, MAX_TRACK_PROPERTIES_LENGTH, KeyValuePair
 from moq_core.bytes import ByteWriter
 from moq_core.control_messages import encode_key_value_pairs
-from moq_core.object_stream import MAX_OBJECT_PROPERTIES_LENGTH
 from moq_core.varint import MAX_VARINT_VALUE
 
 #: A key-value pair's byte value carries a 16-bit length on the wire (draft-ietf-moq-transport-20
@@ -28,6 +27,19 @@ MAX_PROPERTY_VALUE_LENGTH = 0xFFFF
 #: since 0.17.0, an implementation limit rather than a draft one), so a write refuses it up front.
 #: Pinned in ``spec/protocol.json`` as ``relay.limits.maxObjectPropertiesBytes``.
 MAX_RELAY_OBJECT_PROPERTIES_LENGTH = 64 * 1024
+
+#: moq-relay refuses every subscriber to a track with more track properties than this (``MAX_PROPERTIES``
+#: in 0.17.0, REQUEST_ERROR 18 ``too many``) and the publisher hears nothing, so registration refuses it.
+#: Pinned in ``spec/protocol.json`` as ``relay.limits.maxTrackProperties``.
+MAX_RELAY_TRACK_PROPERTIES = 64
+
+#: Track property values draft-ietf-moq-transport-20 restricts (sections 12.4 and 12.5), pinned in
+#: ``spec/protocol.json`` under ``trackProperties``. moq-relay refuses every subscriber to a track
+#: that breaks them, so registration checks them.
+DEFAULT_PUBLISHER_PRIORITY = 0x0E
+MAX_DEFAULT_PUBLISHER_PRIORITY = 255
+DEFAULT_PUBLISHER_GROUP_ORDER = 0x22
+DEFAULT_PUBLISHER_GROUP_ORDERS = (1, 2)
 
 _NOT_A_SEQUENCE_OF_FIELDS = (str, bytes, bytearray, memoryview)
 
@@ -67,22 +79,42 @@ def payload_bytes(payload: object) -> bytes:
     return payload if type(payload) is bytes else view.tobytes()
 
 
-def property_pairs(properties: object) -> list[KeyValuePair]:
+def track_property_pairs(properties: object) -> list[KeyValuePair]:
     """Check track properties and copy any byte values, so later mutation cannot leak in.
 
-    Integer types and values are bounded by what the core's varint carries, ``2**64 - 1``. Byte
-    values are bounded by their 16-bit wire length, and the whole list by the encoded size the core
-    accepts on an object; both are measured here, with the core's own encoder, so an oversized
-    property fails as an argument error instead of as a transport failure once demand arrives.
+    Integer types and values are bounded by what the core's varint carries, ``2**64 - 1``, and byte
+    values by their 16-bit wire length. The list rides in every SUBSCRIBE_OK, so its encoding,
+    measured here with the core's own encoder, must fit the room that control message leaves; the
+    relay also caps how many pairs it reads and refuses the values draft-20 rules out. A track that
+    breaks any of these would register and then never answer a subscription, with the publisher's
+    writes timing out, so each is an argument error here instead.
     """
     pairs, length = _measured_pairs(properties)
-    if length > MAX_OBJECT_PROPERTIES_LENGTH:
-        raise ValueError(f"Properties exceed the {MAX_OBJECT_PROPERTIES_LENGTH}-byte encoded limit")
+    for index, prop in enumerate(pairs):
+        priority = prop.value if prop.type == DEFAULT_PUBLISHER_PRIORITY else None
+        if isinstance(priority, int) and priority > MAX_DEFAULT_PUBLISHER_PRIORITY:
+            raise ValueError(
+                f"Property {index} (Default Publisher Priority, 0x0E) must be at most {MAX_DEFAULT_PUBLISHER_PRIORITY}"
+            )
+        if prop.type == DEFAULT_PUBLISHER_GROUP_ORDER and prop.value not in DEFAULT_PUBLISHER_GROUP_ORDERS:
+            raise ValueError(
+                f"Property {index} (Default Publisher Group Order, 0x22) must be 1 (ascending) or 2 (descending)"
+            )
+    if len(pairs) > MAX_RELAY_TRACK_PROPERTIES:
+        raise ValueError(
+            f"Track properties hold {len(pairs)} pairs, over the relay's {MAX_RELAY_TRACK_PROPERTIES}-pair limit,"
+            " so the relay would refuse every subscriber"
+        )
+    if length > MAX_TRACK_PROPERTIES_LENGTH:
+        raise ValueError(
+            f"Track properties encode to {length} bytes, over the {MAX_TRACK_PROPERTIES_LENGTH} bytes SUBSCRIBE_OK"
+            " has room for, so no subscription could be answered; carry larger data in a track's objects"
+        )
     return pairs
 
 
 def object_property_pairs(properties: object) -> list[KeyValuePair]:
-    """Check one object's properties like :func:`property_pairs`, against the relay's tighter bound.
+    """Check one object's properties like :func:`track_property_pairs`, against the relay's object bound.
 
     The relay would drop an object whose block is over its limit, silently for the subscriber, so the
     write fails here instead. The relay forwards no object property but LOC Timestamp anyway.

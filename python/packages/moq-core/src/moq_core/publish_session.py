@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from ._tasks import observe, spawn
 from .bytes import StreamReader, utf8_encode
 from .control_messages import (
+    MAX_CONTROL_MESSAGE_LENGTH,
     MESSAGE_TYPE,
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
@@ -182,6 +183,16 @@ for Stream Count data streams (or a 1 s grace when it cannot count them), finish
 only then FINs its side. A transport closed before that aborts the track, which viewers see as
 PUBLISH_DONE status 0 ``internal error``. The bound covers the relay's grace plus a round trip, so
 a peer that never closes its side costs at most this much.
+"""
+
+
+MAX_TRACK_PROPERTIES_LENGTH = MAX_CONTROL_MESSAGE_LENGTH - 9 - 1
+"""The largest encoded track property block every SUBSCRIBE_OK this session sends can carry.
+
+The properties ride in SUBSCRIBE_OK, a control message whose length field is 16 bits (§10). The
+rest of its body is the track alias, a varint of up to 9 bytes (it is the peer's request ID, so
+it is unknown until a subscription arrives), and the count of message parameters, of which this
+session sends none (1 byte). A longer block registers but can never answer a subscription.
 """
 
 
@@ -1324,6 +1335,7 @@ __all__ = [
     "CLOSE_END_ACK_TIMEOUT",
     "CLOSE_FLUSH_TIMEOUT",
     "DEFAULT_IMPLEMENTATION_NAME",
+    "MAX_TRACK_PROPERTIES_LENGTH",
     "AnnounceEnded",
     "IncomingRequestUpdate",
     "MoqtPublishSession",

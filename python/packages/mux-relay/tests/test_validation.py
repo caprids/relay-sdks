@@ -15,7 +15,7 @@ import pytest
 from core_helpers.fake_transport import FakeTransport, create_fake_transport
 from relay_helpers.relay_hub import create_relay_hub
 
-from moq_core import MAX_OBJECT_PAYLOAD_LENGTH, KeyValuePair, MoqtSubscribeOptions
+from moq_core import MAX_OBJECT_PAYLOAD_LENGTH, MAX_TRACK_PROPERTIES_LENGTH, KeyValuePair, MoqtSubscribeOptions
 from moq_core.bytes import ByteWriter
 from moq_core.control_messages import Subscribe, encode_key_value_pairs
 from mux_relay import (
@@ -28,13 +28,18 @@ from mux_relay import (
     connect_relay_subscriber,
 )
 from mux_relay._validation import (
+    DEFAULT_PUBLISHER_GROUP_ORDER,
+    DEFAULT_PUBLISHER_GROUP_ORDERS,
+    DEFAULT_PUBLISHER_PRIORITY,
+    MAX_DEFAULT_PUBLISHER_PRIORITY,
     MAX_PROPERTY_VALUE_LENGTH,
     MAX_RELAY_OBJECT_PROPERTIES_LENGTH,
+    MAX_RELAY_TRACK_PROPERTIES,
     namespace_fields,
     object_property_pairs,
     payload_bytes,
-    property_pairs,
     track_name,
+    track_property_pairs,
 )
 
 REPO = Path(__file__).resolve().parents[4]
@@ -271,7 +276,7 @@ class TestArgumentsBeforeState:
 
 
 def maximal_values(count: int) -> list[KeyValuePair]:
-    """Sixteen maximal byte values encode past the 1 MiB object bound although each is legal on its own."""
+    """Maximal byte values: each is legal on its own, but two already encode past every property bound."""
     return [KeyValuePair(2 * index + 1, bytes(MAX_PROPERTY_VALUE_LENGTH)) for index in range(count)]
 
 
@@ -313,36 +318,70 @@ class TestProperties:
     )
     def test_rejects_as_a_type_error(self, label: str, properties: Any) -> None:
         with pytest.raises(TypeError):
-            property_pairs(properties)
+            track_property_pairs(properties)
 
     def test_rejects_a_byte_value_longer_than_its_wire_length_as_a_value_error(self) -> None:
         with pytest.raises(ValueError, match="Property 0 value exceeds"):
-            property_pairs([KeyValuePair(3, bytes(MAX_PROPERTY_VALUE_LENGTH + 1))])
+            track_property_pairs([KeyValuePair(3, bytes(MAX_PROPERTY_VALUE_LENGTH + 1))])
 
-    def test_rejects_a_list_whose_encoding_exceeds_the_object_bound_as_a_value_error(self) -> None:
-        with pytest.raises(ValueError, match="encoded limit"):
-            property_pairs(maximal_values(16))
+    def test_rejects_a_track_list_past_the_subscribe_ok_room_as_a_value_error_naming_the_size(self) -> None:
+        # #252: SUBSCRIBE_OK carries the list, and a control message's length is 16 bits.
+        with pytest.raises(ValueError, match="encode to 65526 bytes, over the 65525 bytes SUBSCRIBE_OK has room for"):
+            track_property_pairs(block_of(MAX_TRACK_PROPERTIES_LENGTH + 1))
+        with pytest.raises(ValueError, match="SUBSCRIBE_OK has room for"):
+            track_property_pairs(maximal_values(2))
+
+    def test_rejects_more_track_properties_than_the_relay_reads_as_a_value_error(self) -> None:
+        # moq-relay 0.17.0 refuses every subscriber with REQUEST_ERROR 18 "too many" past 64 pairs (#252).
+        too_many = [KeyValuePair(2 * index + 1, b"") for index in range(MAX_RELAY_TRACK_PROPERTIES + 1)]
+        with pytest.raises(ValueError, match="hold 65 pairs, over the relay's 64-pair limit"):
+            track_property_pairs(too_many)
+
+    @pytest.mark.parametrize(
+        ("properties", "message"),
+        [
+            ([KeyValuePair(DEFAULT_PUBLISHER_PRIORITY, MAX_DEFAULT_PUBLISHER_PRIORITY + 1)], "Priority, 0x0E"),
+            ([KeyValuePair(2, 0), KeyValuePair(DEFAULT_PUBLISHER_GROUP_ORDER, 0)], "Property 1 .*Group Order, 0x22"),
+            ([KeyValuePair(DEFAULT_PUBLISHER_GROUP_ORDER, 3)], "1 \\(ascending\\) or 2 \\(descending\\)"),
+        ],
+    )
+    def test_rejects_track_property_values_draft_20_rules_out_as_a_value_error(
+        self, properties: list[KeyValuePair], message: str
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            track_property_pairs(properties)
 
     def test_admits_the_boundaries(self) -> None:
-        assert len(property_pairs([KeyValuePair(3, bytes(MAX_PROPERTY_VALUE_LENGTH))])) == 1
-        assert len(property_pairs(maximal_values(15))) == 15
-        assert property_pairs([KeyValuePair(2**64 - 2, 2**64 - 1)]) == [KeyValuePair(2**64 - 2, 2**64 - 1)]
+        assert track_property_pairs(block_of(MAX_TRACK_PROPERTIES_LENGTH)) == block_of(MAX_TRACK_PROPERTIES_LENGTH)
+        assert len(track_property_pairs([KeyValuePair(2 * index + 1, b"") for index in range(64)])) == 64
+        assert track_property_pairs([KeyValuePair(2**64 - 2, 2**64 - 1)]) == [KeyValuePair(2**64 - 2, 2**64 - 1)]
+        for order in DEFAULT_PUBLISHER_GROUP_ORDERS:
+            properties = [
+                KeyValuePair(DEFAULT_PUBLISHER_PRIORITY, MAX_DEFAULT_PUBLISHER_PRIORITY),
+                KeyValuePair(DEFAULT_PUBLISHER_GROUP_ORDER, order),
+            ]
+            assert track_property_pairs(properties) == properties
 
     def test_copies_the_bytes_a_view_spans_and_admits_an_absent_list_as_empty(self) -> None:
         backing = bytearray(b"abcd")
-        pairs = property_pairs([pair(3, memoryview(backing)[1:3])])
+        pairs = track_property_pairs([pair(3, memoryview(backing)[1:3])])
         backing[:] = b"xxxx"
         assert pairs == [KeyValuePair(3, b"bc")]
-        assert property_pairs(None) == []
-        assert property_pairs([]) == []
-        assert property_pairs(()) == []
+        assert track_property_pairs(None) == []
+        assert track_property_pairs([]) == []
+        assert track_property_pairs(()) == []
 
     async def test_reports_an_oversized_property_as_an_argument_error_not_a_transport_failure(
         self, cleanup: Cleanup
     ) -> None:
         publisher = await connect_hub_publisher(cleanup)
-        with pytest.raises(ValueError):
-            publisher.register_track("events", track_properties=maximal_values(16))
+        for refused in (
+            maximal_values(2),
+            [KeyValuePair(2 * index + 1, b"") for index in range(MAX_RELAY_TRACK_PROPERTIES + 1)],
+            [KeyValuePair(DEFAULT_PUBLISHER_GROUP_ORDER, 3)],
+        ):
+            with pytest.raises(ValueError):
+                publisher.register_track("events", track_properties=refused)
         track = publisher.register_track("events")
         with pytest.raises(ValueError):
             await track.write(b"\x01", properties=maximal_values(16))
@@ -395,6 +434,22 @@ class TestPayloads:
 
 def test_relay_object_properties_limit_matches_spec() -> None:
     assert PROTOCOL["relay"]["limits"]["maxObjectPropertiesBytes"] == MAX_RELAY_OBJECT_PROPERTIES_LENGTH
+
+
+def test_relay_track_property_count_limit_matches_spec() -> None:
+    assert PROTOCOL["relay"]["limits"]["maxTrackProperties"] == MAX_RELAY_TRACK_PROPERTIES
+
+
+def test_track_property_value_rules_match_spec() -> None:
+    rules = PROTOCOL["trackProperties"]
+    assert rules["defaultPublisherPriority"] == {
+        "type": DEFAULT_PUBLISHER_PRIORITY,
+        "max": MAX_DEFAULT_PUBLISHER_PRIORITY,
+    }
+    assert rules["defaultPublisherGroupOrder"] == {
+        "type": DEFAULT_PUBLISHER_GROUP_ORDER,
+        "values": list(DEFAULT_PUBLISHER_GROUP_ORDERS),
+    }
 
 
 def test_property_value_limit_matches_spec() -> None:

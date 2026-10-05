@@ -5,6 +5,7 @@ from pathlib import Path
 
 from moq_core import MAX_NAMESPACE_FIELDS, MAX_OBJECT_PAYLOAD_LENGTH, MOQT_PROTOCOL_ID
 from moq_core.object_stream import MAX_OBJECT_PROPERTIES_LENGTH
+from moq_core.publish_session import MAX_TRACK_PROPERTIES_LENGTH
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
 SPEC = json.loads((REPOSITORY_ROOT / "spec" / "protocol.json").read_text())
@@ -30,3 +31,7 @@ def test_namespace_field_limit_matches_spec() -> None:
 
 def test_object_properties_limit_matches_spec() -> None:
     assert SPEC["limits"]["maxObjectPropertiesBytes"] == MAX_OBJECT_PROPERTIES_LENGTH
+
+
+def test_track_properties_limit_matches_spec() -> None:
+    assert SPEC["limits"]["maxTrackPropertiesBytes"] == MAX_TRACK_PROPERTIES_LENGTH

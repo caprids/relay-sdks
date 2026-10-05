@@ -34,7 +34,7 @@ from moq_core import (
 
 from ._awaitable import RelayAwaitable
 from ._settling_groups import SettlingGroups
-from ._validation import namespace_fields, property_pairs, track_name
+from ._validation import namespace_fields, track_name, track_property_pairs
 from ._write_slot import RelayGroupWriter, RelayTrackWriter, WriteSlotDependencies, _observe
 from .cancellation import CancellationToken
 from .connect_session import (
@@ -175,7 +175,10 @@ class RelayPublisher:
         when the writer's ``write()`` or ``open_group()`` runs, after waiting for that relay demand.
         No capture starts and no media catalog is published. Track names are unique per publisher
         connection, including after their writer closes.
-        ``track_properties`` is encoded as supplied; the SDK adds no default timescale.
+        ``track_properties`` is encoded as supplied; the SDK adds no default timescale. It rides in
+        every SUBSCRIBE_OK, so it must encode to at most 65525 bytes, hold at most 64 pairs (the
+        relay's limit) and keep 0x0E at most 255 and 0x22 at 1 or 2 (draft-20); otherwise the relay
+        would refuse every subscriber, so ``register_track`` raises ``ValueError`` instead.
         The relay may add, drop, or rewrite properties before delivery to subscribers; see README.
         Properties 0x02 (OBJECT_DELIVERY_TIMEOUT) and 0x06 (SUBGROUP_DELIVERY_TIMEOUT), in
         milliseconds, are also the publisher's delivery timeouts (draft-ietf-moq-transport-20
@@ -184,7 +187,7 @@ class RelayPublisher:
         """
         # Arguments first, then connection state, then the registry.
         name = track_name(track)
-        properties = property_pairs(track_properties)
+        properties = track_property_pairs(track_properties)
 
         validate_timeout("write_timeout", write_timeout)
 

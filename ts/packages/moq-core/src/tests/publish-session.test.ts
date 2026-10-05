@@ -24,6 +24,7 @@ import {
   CLOSE_FLUSH_TIMEOUT_MS,
   createMoqtPublishSession,
   type IncomingSubscribe,
+  MAX_TRACK_PROPERTIES_LENGTH,
   type MoqtPublishSessionCallbacks,
 } from '../protocol/publish-session.js';
 import { createMoqtSession, type MoqtSession, type MoqtTransport, type PublishDone } from '../protocol/session.js';
@@ -495,6 +496,34 @@ describe('createMoqtPublishSession', () => {
       trackAlias: 11,
       trackProperties: [],
     });
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('keeps the track property limit inside a SUBSCRIBE_OK with the largest alias', () => {
+    // One odd pair whose type and length take 4 bytes. The alias is the peer's request ID; the wire
+    // allows a 9-byte varint, one byte more than this core's largest (safe-integer) alias needs.
+    const block = (length: number) => [{ type: 1, value: new Uint8Array(length - 4) }];
+    const largestAlias = Number.MAX_SAFE_INTEGER;
+    expect(encodeSubscribeOk(largestAlias, {}, block(MAX_TRACK_PROPERTIES_LENGTH)).length).toBe(3 + 0xffff - 1);
+    expect(() => encodeSubscribeOk(largestAlias, {}, block(MAX_TRACK_PROPERTIES_LENGTH + 2))).toThrow(
+      /control message exceeds/
+    );
+  });
+
+  it('answers a SUBSCRIBE for a track whose properties fill the limit', async () => {
+    const { pair, session, subscriber } = makePublishHarness();
+
+    await session.ready;
+    const trackProperties = [{ type: 1, value: new Uint8Array(MAX_TRACK_PROPERTIES_LENGTH - 4) }];
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video', trackProperties });
+
+    const subscribe = await rawSubscribe(pair.server, 'video', 11);
+
+    await vi.waitFor(() => {
+      expect(subscribe.received).toHaveLength(1);
+    });
+    expect(subscribe.received[0]).toMatchObject({ kind: 'subscribe-ok', trackAlias: 11, trackProperties });
     session.destroy();
     subscriber.destroy();
   });
