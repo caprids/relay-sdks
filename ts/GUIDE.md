@@ -211,6 +211,8 @@ update, and any update, including `{ forward: 0 }` or an empty one, ends the sub
 round trip with `onPublisherDone` (status 2 `track ended`) and stops delivery; `onUpdateOk` never
 fires. To pause, cancel the subscription and subscribe again later; to change priority or filters,
 open a new subscription ([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)).
+Subscribing with `parameters: { forward: 0 }` does not work either: moq-relay refuses it with request error 3
+`FORWARD=0 not supported` through `onError`, and the connection stays open.
 The protocol allows updates only after acceptance, so an update issued before `onSubscribed` is
 queued in order and sent as soon as the relay accepts; at most eight wait, and a further one throws
 a `RelayError` with code `UPDATE_QUEUE_FULL`. Updating an ended subscription throws `CLOSED`. A
@@ -336,8 +338,8 @@ cannot be withdrawn. If demand disappeared, the next write waits for a new relay
 Connecting announces the namespace once the first track is registered, and `publisher.announced`
 settles when that announce has reached the wire: the relay acknowledges nothing more, and it routes
 subscribes to the namespace about a round trip later. A subscribe that arrives before then is
-rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-relay 0.15.8; relays
-through 0.15.1 answered `404 Broadcast not found`). The SDK does not retry a subscribe, so a
+rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-relay 0.15.8 and later;
+relays through 0.15.1 answered `404 Broadcast not found`). The SDK does not retry a subscribe, so a
 subscriber retries that rejection within its own budget (the demo and the live smoke test share
 `examples/shared/announce-race.js` for it), and a page that owns both sides awaits `announced`
 before subscribing. `announced` stays pending while no solicitation covers the namespace, and the
@@ -361,7 +363,7 @@ past that), is a `RangeError` at the same point: the SDK measures
 the encoding with the core's own encoder, so an oversized property never opens a stream. The SDK adds
 no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB of payload.
 
-Properties are encoded as supplied, but subscribers see the relay's output. With moq-relay 0.15.8,
+Properties are encoded as supplied, but subscribers see the relay's output. With moq-relay 0.17.0,
 only the object Timestamp (`0x10`, or the older `0x06`) survives, rescaled to microseconds by the
 declared Timescale (`0x08`); every other object property, including Video Config, is dropped. Tracks
 without a declared Timescale, and objects without a Timestamp, get relay-clock timestamps. Declaring
@@ -369,6 +371,10 @@ without a declared Timescale, and objects without a Timestamp, get relay-clock t
 Every `SUBSCRIBE_OK` carries the relay's track properties (`0x08` = 1,000,000, `0x0E` = 128 unless
 the publisher set it, `0x22` = 2), not the publisher's, and a `0x0E` above 255 or a `0x22` other
 than 1 or 2 in `trackProperties` makes every subscribe fail with request error 18 `invalid value`.
+The relay also drops any object whose encoded properties exceed 64 KiB, although the SDK accepts up
+to 1 MiB: the write succeeds, and viewers see a missing group with no reset
+([#247](https://github.com/muxinc/relay-sdks/issues/247)). A subscription with `parameters: { includeProperties: 0 }`
+gets no track properties and objects with no properties at all, not even a Timestamp.
 Keep application metadata that must arrive intact in payloads, and read the received track timescale
 when interpreting timestamps. See [Relay property
 handling](../spec/behavior.md#relay-property-handling) for the observations and media guidance.
@@ -456,7 +462,7 @@ an observer, including a pending `next()`.
 
 Demand is the relay's own subscription, not a viewer count and not a liveness signal. The relay
 fans one upstream subscription out to every downstream viewer, so a second viewer produces no new
-`true` and is served from the relay's cache. moq-relay 0.15.x cancels the subscription about one
+`true` and is served from the relay's cache. moq-relay 0.15 and later cancel the subscription about one
 round trip after the last viewer leaves, so the next viewer brings a new `true` and a re-send, and a
 viewer that resubscribes on the same connection within about 30 seconds can receive the relay's
 cached copy before the re-sent one. `true` does not prove anyone is watching. Write only state that
@@ -502,7 +508,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In TypeScript, only native QUIC (`@mux/relay/node`) reports it for now: browsers do not expose the relay's refusal, so there it arrives as `TRANSPORT_ERROR` (#14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. Reported in browsers and over native QUIC (`@mux/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the refusal, so there it arrives as `TRANSPORT_ERROR` (#14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
@@ -525,9 +531,9 @@ acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
 TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-20 §3.5 defines
-it as refusing to establish a session; Python maps it in any phase (#227). TypeScript reports it over
-native QUIC today. Browsers cannot see the relay's close code until a moq-relay release after 0.15.8,
-so in a browser a refusal still arrives as `TRANSPORT_ERROR` (#14). Neither another connection failure nor an uncovered
+it as refusing to establish a session; Python maps it in any phase (#227). TypeScript reports it in
+browsers and over native QUIC; against relays older than moq-relay 0.17.0 a browser does not see the
+relay's close, so a refusal there arrives as `TRANSPORT_ERROR` (#14). Neither another connection failure nor an uncovered
 namespace proves authentication was denied. A subscription outside the token's grant is refused
 per request, through `onError` / `on_error` (MOQT `UNAUTHORIZED`, 0x1), and leaves the connection open.
 

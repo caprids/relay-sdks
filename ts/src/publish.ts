@@ -42,7 +42,7 @@ export interface RegisterTrackOptions {
   track: string;
   /**
    * Track metadata sent to the relay. The SDK adds no default timescale; the relay may
-   * add, drop, or rewrite properties before delivery to subscribers. With moq-relay 0.15.8 every
+   * add, drop, or rewrite properties before delivery to subscribers. With moq-relay 0.17.0 every
    * SUBSCRIBE_OK carries the relay's track properties, not these, and a Timescale (`0x08`) here is
    * what keeps supplied object Timestamps unchanged. See "Relay property handling" in
    * spec/behavior.md.
@@ -163,7 +163,7 @@ export interface RelayPublisher {
    * which is no earlier than the first registered track. It is the strongest fact the publisher
    * has: the relay acknowledges an announce with nothing and routes subscribes for the namespace
    * about a round trip later, so a subscribe that races it is rejected (request error 16
-   * `unroutable` on moq-relay 0.15.8; see spec/behavior.md). It stays pending while no
+   * `unroutable` on moq-relay 0.15.8 and later; see spec/behavior.md). It stays pending while no
    * solicitation covers the namespace, where the first write reports `NAMESPACE_NOT_SOLICITED`, and
    * the connection's closure terminates it if that comes first: the closure's error, or a `CLOSED`
    * RelayError after a clean shutdown. Pre-handled, so nobody has to await it.

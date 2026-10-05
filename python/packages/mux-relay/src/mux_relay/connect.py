@@ -107,8 +107,8 @@ class RelaySubscriptionHandlers:
     later. Back off, and do not resubscribe to a track the publisher ended. A done that follows this
     subscription's own ``update()`` is different: moq-relay ends the subscription on any update, the
     track is still live, and resubscribing is how to apply the change. After a publisher crash the
-    done arrives only at the relay's QUIC idle timeout, about 30 s later. See spec/relay-interop.md,
-    "Publisher restarts".
+    done arrives only at the relay's QUIC idle timeout, about 11 s later on moq-relay 0.17.0. See
+    spec/relay-interop.md, "Publisher restarts".
     """
     on_update_ok: Callable[[], None] | None = None
     """The relay acknowledged an ``update()`` on this subscription (REQUEST_OK).

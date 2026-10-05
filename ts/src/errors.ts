@@ -23,8 +23,9 @@ export type RelayErrorCode =
   | 'TRANSPORT_UNAVAILABLE'
   /**
    * The relay refused the connection's credentials, in phase `connecting`. Over native QUIC (`@mux/relay/node`) a
-   * refusal always reports this. Browsers do not expose moq-relay 0.15.8's CLOSE_WEBTRANSPORT_SESSION code, so there
-   * a refusal arrives as `TRANSPORT_ERROR` until the relay lets the capsule through (muxinc/relay-sdks#14).
+   * refusal always reports this, and so does a browser against moq-relay 0.17.0 or later, which delivers its
+   * CLOSE_WEBTRANSPORT_SESSION (code 2, `unauthorized`). Against older relays a browser loses that close, and a
+   * refusal arrives as `TRANSPORT_ERROR` (muxinc/relay-sdks#14).
    */
   | 'UNAUTHORIZED';
 

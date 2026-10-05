@@ -119,7 +119,7 @@ what the relay asks for on its own behalf; it is not a count of viewers and not 
 
 - The relay fans one upstream subscription out to every downstream viewer. A second viewer joining
   produces no new `true`; later viewers are served from the relay's cache of the last objects.
-- The relay decides when its upstream subscription ends. moq-relay 0.15.x cancels it about one
+- The relay decides when its upstream subscription ends. moq-relay 0.15 and later cancel it about one
   round trip after the last viewer leaves; relays before 0.15 held it for about 30 seconds (see
   [relay demand](relay-interop.md#relay-demand)). `true` does not prove anyone is watching, and
   `false` says only that the relay stopped forwarding.
@@ -227,10 +227,11 @@ policy above; reversible before the first release, so no ADR.
 
 `UNAUTHORIZED` names a connection whose credentials the relay refused, after the MOQT session
 termination code the relay closes with (0x2). Both SDKs list it, as both list `TRANSPORT_UNAVAILABLE`,
-which only TypeScript raises; only Python raises `UNAUTHORIZED` until browsers can see the relay's close
-code (#14). Not adopted: `AUTHENTICATION_FAILED` or `FORBIDDEN`. The relay closes with the same code
-for a missing, invalid, expired or out-of-scope token, so one name covers them, and it is the
-protocol's. A subscription refused for its grant stays a MOQT `RequestError` on `onError` / `on_error`.
+which only TypeScript raises. Both raise `UNAUTHORIZED`; TypeScript in a browser only against moq-relay
+0.17.0 or later, since older relays' close never reached the page (#14). Not adopted:
+`AUTHENTICATION_FAILED` or `FORBIDDEN`. The relay closes with the same code for a missing, invalid,
+expired or out-of-scope token, so one name covers them, and it is the protocol's. A subscription
+refused for its grant stays a MOQT `RequestError` on `onError` / `on_error`.
 
 `DELIVERY_TIMEOUT` names a write whose object outlived the draft's delivery timeout (draft-20 §8)
 before it reached the transport, after the stream reset code the publisher sends with it (0x2). The
@@ -289,7 +290,7 @@ subscription, not a failure of the caller's await, and the connection's `closed`
 acknowledges an announce with nothing: the strongest fact the publisher can have is that the
 NAMESPACE entry was handed to the transport on a solicitation that covers the namespace.
 `announced` settles on that fact, once, with no value. The relay routes subscribes to the namespace
-about a round trip later, so a subscribe that races the announce is rejected (16 `unroutable` on
+about a round trip later, so a subscribe that races the announce is rejected (16 `unroutable` from
 moq-relay 0.15.8, 404 before) and the application retries it (see `behavior.md`); a process that
 owns both sides awaits `announced` before subscribing, which removes most of that race. It stays
 pending while no solicitation covers the namespace, where the first write's

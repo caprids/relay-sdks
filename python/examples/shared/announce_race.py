@@ -1,7 +1,7 @@
 """The announce race (see ``CONTEXT.md``), and the application's side of it.
 
 A subscribe that reaches the relay before it has processed the publisher's announce of the
-namespace is rejected, and the relay parks nothing. moq-relay 0.15.8 answers request error 16
+namespace is rejected, and the relay parks nothing. moq-relay 0.15.8 and later answer request error 16
 (0x10, MOQT's ``DOES_NOT_EXIST``) with reason ``unroutable``; moq-relay through 0.15.1 answered its
 literal 404 (``Broadcast not found``). The SDK reports that rejection like any other and never
 retries a subscribe, so an application that may start before its publisher retries within its own
@@ -36,7 +36,7 @@ FRESH_NAMESPACE_ERROR_CODE = 0x10
 FRESH_NAMESPACE_REASON = "unroutable"
 """The reason that singles the fresh namespace out of ``DOES_NOT_EXIST``.
 
-moq-relay 0.15.8 sends the same code with reason ``not found`` for an unknown track in an announced
+moq-relay 0.15.8 and later send the same code with reason ``not found`` for an unknown track in an announced
 namespace, which no wait fixes; retrying it would spin until the caller's budget ran out.
 """
 

@@ -208,7 +208,9 @@ update, and any update, including `MessageParameters(forward=0)` or an empty one
 subscription within one round trip with `on_publisher_done` (status 2 `track ended`) and stops
 delivery; `on_update_ok` never fires. To pause, cancel the subscription and subscribe again later;
 to change priority or filters, open a new subscription
-([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)). The protocol allows
+([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)). Subscribing with
+`parameters=MessageParameters(forward=0)` does not work either: moq-relay refuses it with request
+error 3 `FORWARD=0 not supported` through `on_error`, and the connection stays open. The protocol allows
 updates only after acceptance, so an update issued before `on_subscribed` is queued in order and
 sent as soon as the relay accepts; at most eight wait, and a further one raises a `RelayError` with
 code `UPDATE_QUEUE_FULL`. Updating an ended subscription raises `RelayError` with code `CLOSED`. A relay
@@ -319,8 +321,8 @@ be withdrawn. If demand disappeared, the next write waits for a new relay subscr
 Connecting announces the namespace once the first track is registered, and `publisher.announced`
 settles when that announce has reached the wire: the relay acknowledges nothing more, and it routes
 subscribes to the namespace about a round trip later. A subscribe that arrives before then is
-rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-relay 0.15.8; relays
-through 0.15.1 answered `404 Broadcast not found`). The SDK does not retry a subscribe, so a
+rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-relay 0.15.8 and later;
+relays through 0.15.1 answered `404 Broadcast not found`). The SDK does not retry a subscribe, so a
 subscriber retries that rejection within its own budget (the examples and the live smoke test share
 `examples/shared/announce_race.py` for it), and a process that owns both sides awaits `announced`
 before subscribing. `announced` stays pending while no solicitation covers the namespace, and the
@@ -344,14 +346,19 @@ measures the encoding with the core's own encoder, so an oversized property neve
 The SDK adds no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB
 of payload.
 
-Properties are encoded as supplied, but subscribers see the relay's output. With moq-relay 0.15.8,
+Properties are encoded as supplied, but subscribers see the relay's output. With moq-relay 0.17.0,
 only the object Timestamp (`0x10`, or the older `0x06`) survives, rescaled to microseconds by the
 declared Timescale (`0x08`); every other object property, including Video Config, is dropped. Tracks
 without a declared Timescale, and objects without a Timestamp, get relay-clock timestamps. Declaring
 `track_properties=[KeyValuePair(0x08, 1_000_000)]` keeps supplied Timestamp values unchanged. Every
 `SUBSCRIBE_OK` carries the relay's track properties (`0x08` = 1,000,000, `0x0E` = 128 unless the
 publisher set it, `0x22` = 2), not the publisher's, and a `0x0E` above 255 or a `0x22` other than 1
-or 2 in `track_properties` makes every subscribe fail with request error 18 `invalid value`. Keep
+or 2 in `track_properties` makes every subscribe fail with request error 18 `invalid value`. The
+relay also drops any object whose encoded properties exceed 64 KiB, although the SDK accepts up to
+1 MiB: the write succeeds, and viewers see a missing group with no reset
+([#247](https://github.com/muxinc/relay-sdks/issues/247)). A subscription with
+`MessageParameters(include_properties=0)` gets no track properties and objects with no properties at
+all, not even a Timestamp. Keep
 application metadata that must arrive intact in payloads, and read the received track timescale when
 interpreting timestamps. See [Relay property handling](../spec/behavior.md#relay-property-handling)
 for the observations and media guidance.
@@ -371,7 +378,7 @@ open. A write waiting for demand fails at whichever of `write_timeout` and the o
 first.
 The subgroup timeout starts when a group's FIN is handed to the transport and resets that settling
 group (code `DELIVERY_TIMEOUT`, 0x2) if the relay has not acknowledged the FIN by then; nothing is
-reported to the track, and the group frees its place under the settling-group limit. moq-relay 0.15.8
+reported to the track, and the group frees its place under the settling-group limit. moq-relay 0.17.0
 neither sends these values upstream nor forwards the properties, so the publisher's own properties are
 the only ones in effect against it. Because `0x06` is now a timeout, do not send the older LOC
 Timestamp id `0x06`; use `0x10`.
@@ -426,7 +433,7 @@ async for demanded in catalog.demand_changes():
 
 Demand is the relay's own subscription, not a viewer count and not a liveness signal. The relay
 fans one upstream subscription out to every downstream viewer, so a second viewer produces no new
-`True` and is served from the relay's cache. moq-relay 0.15.x cancels the subscription about one
+`True` and is served from the relay's cache. moq-relay 0.15 and later cancel the subscription about one
 round trip after the last viewer leaves, so the next viewer brings a new `True` and a re-send, and a
 viewer that resubscribes on the same connection within about 30 seconds can receive the relay's
 cached copy before the re-sent one. `True` does not prove anyone is watching. Write only state that
@@ -498,7 +505,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. Python only for now (browsers do not expose the relay's refusal, so TypeScript reports `TRANSPORT_ERROR`; see #14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later (older relays' refusals reach a browser as `TRANSPORT_ERROR`; see #14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
@@ -520,8 +527,9 @@ application's deduplication policy. Successful writes mean transport acceptance,
 acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too), in
-any phase. It is Python only until browsers can see the relay's close code, so in TypeScript a
-refusal still arrives as `TRANSPORT_ERROR`. Neither another connection failure nor an uncovered
+any phase. TypeScript reports it too, in phase `connecting`; in a browser only against moq-relay
+0.17.0 or later, since older relays' close never reached the page and a refusal arrived as
+`TRANSPORT_ERROR` (#14). Neither another connection failure nor an uncovered
 namespace proves authentication was denied. A subscription outside the token's grant is refused
 per request, through `onError` / `on_error` (MOQT `UNAUTHORIZED`, 0x1), and leaves the connection open.
 
