@@ -39,7 +39,7 @@ import { isStreamStop, RelayError, type RelayErrorPhase, transportError } from '
 import { encodeJSON, encodeText } from './payload.js';
 import type { RelayGroupWriter, RelayTrackWriter } from './publish.js';
 import type { SettlingGroups } from './settling-groups.js';
-import { payloadBytes, propertyPairs } from './validation.js';
+import { objectPropertyPairs, payloadBytes } from './validation.js';
 
 /**
  * Stream reset codes a publisher sends (draft-ietf-moq-transport-20 §3.3.4, registry §15.11.4).
@@ -451,7 +451,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       const startedAt = now();
       // Arguments before slot state: a bad payload is a programming error whatever the slot holds.
       const bytes = payloadBytes(payload);
-      const properties = propertyPairs(writeOptions.properties);
+      const properties = objectPropertyPairs(writeOptions.properties);
       assertWritable();
       const operation = begin('write', writeOptions.signal);
       // The object is the group's first, so its properties can set the publisher's timeouts.
@@ -508,7 +508,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
         async write(payload, writeOptions = {}) {
           const startedAt = now();
           const bytes = payloadBytes(payload);
-          const properties = propertyPairs(writeOptions.properties);
+          const properties = objectPropertyPairs(writeOptions.properties);
           const status = writeOptions.status ?? 'normal';
           if (typeof status !== 'string') throw new TypeError('Object status must be a string');
           if (!['normal', 'end-of-group', 'end-of-track'].includes(status))

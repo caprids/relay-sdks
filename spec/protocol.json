@@ -10,6 +10,10 @@
       "scheme": "jwt-query-parameter",
       "parameter": "jwt",
       "note": "An explicit jwt parameter already present on the URL takes precedence over a token callback. An empty jwt parameter is rejected as an argument error, not treated as absent."
+    },
+    "limits": {
+      "maxObjectPropertiesBytes": 65536,
+      "note": "moq-relay's implementation limit on an object's encoded property block (MAX_OBJECT_EXTENSIONS since 0.17.0; not a draft-20 limit). The relay stops the subgroup stream on a larger block and the object is lost with no error to the subscriber, so both SDKs refuse such a write as an argument error. limits.maxObjectPropertiesBytes stays the core's draft-20 bound and still applies to track properties and to what a subscriber decodes."
     }
   },
   "limits": {

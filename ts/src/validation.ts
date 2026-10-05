@@ -25,6 +25,13 @@ import type { PublishProperty } from './publish.js';
 export const MAX_PROPERTY_VALUE_LENGTH = 0xffff;
 
 /**
+ * moq-relay drops an object whose encoded property block is larger than this (`MAX_OBJECT_EXTENSIONS`
+ * since 0.17.0, an implementation limit rather than a draft one), so a write refuses it up front.
+ * Pinned in spec/protocol.json as `relay.limits.maxObjectPropertiesBytes`.
+ */
+export const MAX_RELAY_OBJECT_PROPERTIES_LENGTH = 64 * 1024;
+
+/**
  * Check a namespace in its original container and return a fresh copy of its fields. The copy is
  * the SDK's own; it is handed to the core (whose namespace type is mutable) and never to the caller.
  */
@@ -59,7 +66,7 @@ export function payloadBytes(payload: unknown): Uint8Array {
 }
 
 /**
- * Check track or object properties and copy any byte values, so later mutation cannot leak in.
+ * Check track properties and copy any byte values, so later mutation cannot leak in.
  * Integer types and values are bounded by what the core's varint can carry, which in this
  * language is `Number.MAX_SAFE_INTEGER`. Byte values are bounded by their 16-bit wire length, and
  * the whole list by the encoded size the core accepts on an object; both are measured here, with
@@ -67,6 +74,30 @@ export function payloadBytes(payload: unknown): Uint8Array {
  * transport failure once demand arrives.
  */
 export function propertyPairs(properties: unknown = []): KeyValuePair[] {
+  const { pairs, length } = measuredPairs(properties);
+  if (length > MAX_OBJECT_PROPERTIES_LENGTH)
+    throw new RangeError(`Properties exceed the ${MAX_OBJECT_PROPERTIES_LENGTH}-byte encoded limit`);
+  return pairs;
+}
+
+/**
+ * Check one object's properties like {@link propertyPairs}, against the relay's tighter bound. The
+ * relay would drop an object whose block is over its limit, silently for the subscriber, so the
+ * write fails here instead. The relay forwards no object property but LOC Timestamp anyway.
+ */
+export function objectPropertyPairs(properties: unknown = []): KeyValuePair[] {
+  const { pairs, length } = measuredPairs(properties);
+  if (length > MAX_RELAY_OBJECT_PROPERTIES_LENGTH)
+    throw new RangeError(
+      `Object properties encode to ${length} bytes, over the relay's ${MAX_RELAY_OBJECT_PROPERTIES_LENGTH}-byte ` +
+        'limit, so the relay would drop the object; it forwards only LOC Timestamp (0x10), so carry larger ' +
+        'data in the payload',
+    );
+  return pairs;
+}
+
+/** Check and copy a property list, returning it with its encoded length. */
+function measuredPairs(properties: unknown): { pairs: KeyValuePair[]; length: number } {
   if (!Array.isArray(properties)) throw new TypeError('Properties must be an array of {type, value} pairs');
   const pairs = (properties as readonly (Partial<PublishProperty> | null | undefined)[]).map(
     (property, index): KeyValuePair => {
@@ -85,11 +116,8 @@ export function propertyPairs(properties: unknown = []): KeyValuePair[] {
       return { type, value: new Uint8Array(value.buffer, value.byteOffset, value.byteLength).slice() };
     },
   );
-  if (pairs.length > 0) {
-    const encoded = new ByteWriter(64);
-    encodeKeyValuePairs(encoded, pairs);
-    if (encoded.length > MAX_OBJECT_PROPERTIES_LENGTH)
-      throw new RangeError(`Properties exceed the ${MAX_OBJECT_PROPERTIES_LENGTH}-byte encoded limit`);
-  }
-  return pairs;
+  if (pairs.length === 0) return { pairs, length: 0 };
+  const encoded = new ByteWriter(64);
+  encodeKeyValuePairs(encoded, pairs);
+  return { pairs, length: encoded.length };
 }

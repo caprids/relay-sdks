@@ -23,8 +23,8 @@ export interface ConnectRelayPublisherOptions extends ConnectRelayOptions {
 /**
  * One MOQT property (a key-value pair) on a registered track or a written object, encoded as
  * supplied. Invalid properties are a TypeError naming the property index; a byte value over 65535
- * bytes, or a list whose encoding exceeds 1 MiB, is a RangeError. Both are raised before a track is
- * registered or a write starts.
+ * bytes, or a list whose encoding exceeds 1 MiB (64 KiB on an object, the relay's limit), is a
+ * RangeError. Both are raised before a track is registered or a write starts.
  */
 export interface PublishProperty {
   /** Non-negative safe integer: even types encode an integer, odd types encode bytes. */

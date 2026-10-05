@@ -5,7 +5,7 @@
  * follow the "Arguments" table in spec/behavior.md.
  */
 import { readFile } from 'node:fs/promises';
-import { MAX_OBJECT_PAYLOAD_LENGTH } from '@mux/moq-core';
+import { ByteWriter, encodeKeyValuePairs, MAX_OBJECT_PAYLOAD_LENGTH } from '@mux/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   connectRelayPublisher,
@@ -17,7 +17,9 @@ import {
 } from '../src/index.js';
 import {
   MAX_PROPERTY_VALUE_LENGTH,
+  MAX_RELAY_OBJECT_PROPERTIES_LENGTH,
   namespaceFields,
+  objectPropertyPairs,
   payloadBytes,
   propertyPairs,
   trackName,
@@ -235,6 +237,15 @@ describe('arguments are checked before connection or slot state', () => {
   });
 });
 
+/** One odd pair whose encoding is exactly `length` bytes: its type and length take 4 bytes. */
+function blockOf(length: number): PublishProperty[] {
+  const properties = [{ type: 1, value: new Uint8Array(length - 4) }];
+  const encoded = new ByteWriter(64);
+  encodeKeyValuePairs(encoded, properties);
+  expect(encoded.length).toBe(length);
+  return properties;
+}
+
 /** Sixteen maximal byte values encode past the 1 MiB object bound although each is legal on its own. */
 const maximalValues = (count: number): PublishProperty[] =>
   Array.from({ length: count }, (_, index) => ({
@@ -280,6 +291,21 @@ describe('properties', () => {
     expect(propertyPairs([{ type: Number.MAX_SAFE_INTEGER - 1, value: Number.MAX_SAFE_INTEGER }])).toEqual([
       { type: Number.MAX_SAFE_INTEGER - 1, value: Number.MAX_SAFE_INTEGER },
     ]);
+  });
+
+  it('admits object properties that encode to exactly the relay limit', () => {
+    expect(objectPropertyPairs(blockOf(MAX_RELAY_OBJECT_PROPERTIES_LENGTH))).toEqual(
+      blockOf(MAX_RELAY_OBJECT_PROPERTIES_LENGTH),
+    );
+    expect(objectPropertyPairs(undefined)).toEqual([]);
+  });
+
+  it('rejects object properties past the relay limit as a RangeError naming the size', () => {
+    expect(() => objectPropertyPairs(blockOf(MAX_RELAY_OBJECT_PROPERTIES_LENGTH + 1))).toThrow(RangeError);
+    expect(() => objectPropertyPairs(blockOf(MAX_RELAY_OBJECT_PROPERTIES_LENGTH + 1))).toThrow(
+      /encode to 65537 bytes, over the relay's 65536-byte limit/,
+    );
+    expect(() => objectPropertyPairs(maximalValues(16))).toThrow(/relay's 65536-byte limit/);
   });
 
   it('copies the bytes a view spans and admits an absent list as empty', () => {

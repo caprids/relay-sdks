@@ -44,7 +44,7 @@ from moq_core import KeyValuePair, ObjectStatus
 from moq_core.control_messages import STREAM_RESET_CODE
 
 from ._settling_groups import SettlingGroups
-from ._validation import payload_bytes, property_pairs
+from ._validation import object_property_pairs, payload_bytes
 from .errors import (
     RelayError,
     RelayErrorPhase,
@@ -523,7 +523,7 @@ class RelayGroupWriter:
         started = self._operation._slot._clock()
         # Arguments before group state: a bad payload is a programming error whatever the group holds.
         data = payload_bytes(payload)
-        object_properties = property_pairs(properties)
+        object_properties = object_property_pairs(properties)
 
         if not isinstance(status, str):
             raise TypeError("Object status must be a string")
@@ -792,7 +792,7 @@ class RelayTrackWriter:
         # that cannot be converted must not leave the slot held, and a programming error is reported
         # the same way whatever the slot holds. `_begin` checks the slot.
         data = payload_bytes(payload)
-        object_properties = property_pairs(properties)
+        object_properties = object_property_pairs(properties)
 
         operation = self._begin("write")
         operation.start_object(started, object_properties)

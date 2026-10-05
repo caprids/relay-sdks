@@ -16,7 +16,8 @@ from core_helpers.fake_transport import FakeTransport, create_fake_transport
 from relay_helpers.relay_hub import create_relay_hub
 
 from moq_core import MAX_OBJECT_PAYLOAD_LENGTH, KeyValuePair, MoqtSubscribeOptions
-from moq_core.control_messages import Subscribe
+from moq_core.bytes import ByteWriter
+from moq_core.control_messages import Subscribe, encode_key_value_pairs
 from mux_relay import (
     CancellationToken,
     ConnectingTransport,
@@ -28,7 +29,9 @@ from mux_relay import (
 )
 from mux_relay._validation import (
     MAX_PROPERTY_VALUE_LENGTH,
+    MAX_RELAY_OBJECT_PROPERTIES_LENGTH,
     namespace_fields,
+    object_property_pairs,
     payload_bytes,
     property_pairs,
     track_name,
@@ -272,6 +275,15 @@ def maximal_values(count: int) -> list[KeyValuePair]:
     return [KeyValuePair(2 * index + 1, bytes(MAX_PROPERTY_VALUE_LENGTH)) for index in range(count)]
 
 
+def block_of(length: int) -> list[KeyValuePair]:
+    """One odd pair whose encoding is exactly ``length`` bytes: its type and length take 4 bytes."""
+    pairs = [KeyValuePair(1, bytes(length - 4))]
+    encoded = ByteWriter()
+    encode_key_value_pairs(encoded, pairs)
+    assert encoded.length == length
+    return pairs
+
+
 def pair(kind: Any, value: Any) -> KeyValuePair:
     """A property the type checker would refuse to spell: the point is to see it rejected at runtime."""
     return KeyValuePair(kind, value)
@@ -338,6 +350,18 @@ class TestProperties:
             await track.write(b"\x01", properties=[KeyValuePair(3, bytes(MAX_PROPERTY_VALUE_LENGTH + 1))])
         assert not track.closed
 
+    def test_object_properties_admit_exactly_the_relay_limit(self) -> None:
+        assert object_property_pairs(block_of(MAX_RELAY_OBJECT_PROPERTIES_LENGTH)) == block_of(
+            MAX_RELAY_OBJECT_PROPERTIES_LENGTH
+        )
+        assert object_property_pairs(None) == []
+
+    def test_object_properties_past_the_relay_limit_are_a_value_error_naming_the_size(self) -> None:
+        with pytest.raises(ValueError, match="encode to 65537 bytes, over the relay's 65536-byte limit"):
+            object_property_pairs(block_of(MAX_RELAY_OBJECT_PROPERTIES_LENGTH + 1))
+        with pytest.raises(ValueError, match="relay's 65536-byte limit"):
+            object_property_pairs(maximal_values(16))
+
 
 class TestPayloads:
     @pytest.mark.parametrize(
@@ -367,6 +391,10 @@ class TestPayloads:
         assert data == b"123"
         assert payload_bytes(bytearray(b"ab")) == b"ab"
         assert payload_bytes(b"") == b""
+
+
+def test_relay_object_properties_limit_matches_spec() -> None:
+    assert PROTOCOL["relay"]["limits"]["maxObjectPropertiesBytes"] == MAX_RELAY_OBJECT_PROPERTIES_LENGTH
 
 
 def test_property_value_limit_matches_spec() -> None:
