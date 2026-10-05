@@ -76,9 +76,10 @@ failed on the other, which is a bug in an adapter or in the
 Any result but `PASS` exits nonzero.
 
 The test waits for the publisher's `announced`, subscribes through the examples' announce-race
-retry and reports how often it retried, checks binary and empty payloads plus independent track
-closure, then closes both connections. It defaults to
-`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
+retry and reports how often it retried, warms each track up until a marker arrives, checks binary
+and empty payloads plus independent track closure, then closes both connections. It defaults to
+`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
+another relay to put the subscribers there. Namespace fields sent by
 the SDK are absolute: include the token's root prefix when required by the relay.
 
 The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
@@ -114,9 +115,10 @@ RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python
 ```
 
 The test waits for the publisher's `announced`, subscribes through the examples' announce-race
-retry and reports how often it retried, checks binary, empty, and text payloads plus independent
-track closure, then closes both connections. It defaults to
-`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Namespace fields sent by
+retry and reports how often it retried, warms each track up until a marker arrives, checks binary,
+empty, and text payloads plus independent track closure, then closes both connections. It defaults to
+`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
+another relay to put the subscribers there. Namespace fields sent by
 the SDK are absolute: include the token's root prefix when required by the relay.
 
 The live test passed against `sjc.relay.mux.global` on 2026-10-03 over the default native QUIC

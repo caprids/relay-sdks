@@ -12,13 +12,21 @@ import { subscribeWithRetry } from '../examples/shared/announce-race.js';
 /**
  * @param {object} options
  * @param {string} options.endpoint The relay's `https://` URL, without a token.
+ * @param {string} [options.subEndpoint] The subscribers' relay, for a cross-relay run; defaults to `endpoint`.
  * @param {string | undefined} options.token The Relay token, or undefined to connect anonymously.
  * @param {string[]} options.namespace The fresh namespace the scenario publishes under.
  * @param {((url: string, protocols: string[]) => unknown) | undefined} options.createTransport The
  *   transport factory both connections use, or undefined for the SDK's default.
  * @param {(value: object) => unknown} options.report Receives each phase as it passes; may return a promise.
  */
-export async function runRelayScenario({ endpoint, token, namespace, createTransport, report }) {
+export async function runRelayScenario({
+  endpoint,
+  subEndpoint = endpoint,
+  token,
+  namespace,
+  createTransport,
+  report,
+}) {
   let publisher;
   let subscriber;
   let lateSubscriber;
@@ -44,6 +52,33 @@ export async function runRelayScenario({ endpoint, token, namespace, createTrans
     }
   };
   const waitForCount = (track, count) => waitFor(() => received[track].length >= count, `${track}: ${count} objects`);
+  const warmUp = new TextEncoder().encode('relay-sdk-smoke warm-up');
+  const isWarmUp = (payload) => payload.length === warmUp.length && payload.every((byte, i) => byte === warmUp[i]);
+  const warmed = new Set();
+  // SUBSCRIBE_OK says the subscriber's relay took the request, not that the path to the publisher is
+  // ready. A relay on another hop first subscribes only to learn the track's info and cancels that within
+  // about 50 ms (spec/relay-interop.md), so the writes it takes are lost. Repeat a marker the handlers
+  // drop until one arrives; the assertion payloads are then written once.
+  const warmUpTrack = async (track, writer) => {
+    const until = performance.now() + 10_000;
+    let writes = 0;
+    while (!warmed.has(track)) {
+      if (errors.length > 0) throw new Error(errors.join('; '));
+      if (performance.now() >= until) throw new Error(`Timed out waiting for ${track}: warm-up object`);
+      try {
+        await writer.write(warmUp);
+      } catch (error) {
+        if (error?.code !== 'SUBSCRIPTION_CHANGED') throw error;
+      }
+      writes += 1;
+      const sent = performance.now();
+      while (!warmed.has(track) && performance.now() - sent < 250) {
+        lifetime.signal.throwIfAborted();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    }
+    return writes;
+  };
   try {
     publisher = await connectRelayPublisher({
       url: endpoint,
@@ -57,7 +92,7 @@ export async function runRelayScenario({ endpoint, token, namespace, createTrans
     const events = publisher.registerTrack({ track: 'events', writeTimeoutMs: 20_000 });
     const status = publisher.registerTrack({ track: 'status', writeTimeoutMs: 20_000 });
     subscriber = await connectRelaySubscriber({
-      url: endpoint,
+      url: subEndpoint,
       getToken: () => token,
       signal: lifetime.signal,
       createTransport,
@@ -78,7 +113,9 @@ export async function runRelayScenario({ endpoint, token, namespace, createTrans
             void report({ phase: 'subscribed', track });
           },
           onObject: (object) => {
-            if (object.status === 'normal') received[track].push(Array.from(object.payload));
+            if (object.status !== 'normal') return;
+            if (isWarmUp(object.payload)) warmed.add(track);
+            else received[track].push(Array.from(object.payload));
           },
           onError: (error) => errors.push(`${track}: ${error.errorCode} ${error.reason}`),
           onSubgroupReset: ({ error }) => errors.push(`${track} reset: ${String(error)}`),
@@ -93,6 +130,8 @@ export async function runRelayScenario({ endpoint, token, namespace, createTrans
       );
     }
     if (errors.length > 0) throw new Error(errors.join('; '));
+    const warmUpWrites = { events: await warmUpTrack('events', events), status: await warmUpTrack('status', status) };
+    await report({ phase: 'warmed up', writes: warmUpWrites });
     for (const payload of expectedEvents) await events.write(new Uint8Array(payload));
     await status.write(new Uint8Array([42]));
     await waitForCount('events', 3);
@@ -104,7 +143,7 @@ export async function runRelayScenario({ endpoint, token, namespace, createTrans
     });
     // A fresh subscriber must decode the relay's SUBSCRIBE_OK for a track with content.
     lateSubscriber = await connectRelaySubscriber({
-      url: endpoint,
+      url: subEndpoint,
       getToken: () => token,
       signal: lifetime.signal,
       createTransport,
@@ -118,7 +157,8 @@ export async function runRelayScenario({ endpoint, token, namespace, createTrans
           if (!lateLargestObject) errors.push('late SUBSCRIBE_OK omitted LARGEST_OBJECT');
         },
         onObject: (object) => {
-          if (object.status === 'normal') received.lateStatus.push(Array.from(object.payload));
+          if (object.status === 'normal' && !isWarmUp(object.payload))
+            received.lateStatus.push(Array.from(object.payload));
         },
         onError: (error) => errors.push(`late status: ${error.errorCode} ${error.reason}`),
       },
@@ -137,10 +177,12 @@ export async function runRelayScenario({ endpoint, token, namespace, createTrans
     if (errors.length > 0) throw new Error(errors.join('; '));
     return {
       endpoint,
+      subscriberEndpoint: subEndpoint,
       namespace,
       events: received.events.length,
       status: received.status.length,
       announceRaceRetries: retries,
+      warmUpWrites,
       binaryAndEmptyPayloads: 'passed',
       independentTrackClose: 'passed',
       lateSubscriberLargestObject: lateLargestObject,

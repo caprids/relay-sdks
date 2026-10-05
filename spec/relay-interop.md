@@ -237,7 +237,10 @@ subscriptions apart: each is a demanded value, the first followed by `false` ([A
 Because publishers retain no history, the second subscription's current-group fill has nothing to
 recover either. A live publisher therefore cannot count on its first objects after demand begins
 reaching a viewer: write state-shaped tracks on every demanded value (the catalog service does), and
-start media at a keyframe after any change (the frame writer does).
+start media at a keyframe after any change (the frame writer does). The live smoke tests repeat a
+warm-up marker on each track until the subscriber receives one before writing what they assert, and
+`RELAY_SUB_URL` puts their subscribers on another relay
+([issue #244](https://github.com/muxinc/relay-sdks/issues/244)).
 
 Relays before 0.15 held the upstream subscription for about 30 seconds after the last viewer left
 (measured against the same endpoint on 2026-09-15, [issue #24](https://github.com/muxinc/relay-sdks/issues/24));
