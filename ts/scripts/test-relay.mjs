@@ -13,10 +13,16 @@ import { summarizeRuns } from './relay-runs.js';
 // folded into a summary that calls out a scenario passing on one runtime and failing on the other.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const endpoint = process.env.RELAY_URL ?? 'https://sjc.relay.mux.global';
-const endpointUrl = new URL(endpoint);
-assert.equal(endpointUrl.protocol, 'https:');
-assert(!endpointUrl.searchParams.has('jwt'), 'Supply the token via stdin or RELAY_TOKEN, not RELAY_URL');
+const readEndpoint = (name, fallback) => {
+  const endpoint = process.env[name] ?? fallback;
+  const url = new URL(endpoint);
+  assert.equal(url.protocol, 'https:', `${name} must be an https URL`);
+  assert(!url.searchParams.has('jwt'), `Supply the token via stdin or RELAY_TOKEN, not ${name}`);
+  return endpoint;
+};
+const endpoint = readEndpoint('RELAY_URL', 'https://sjc.relay.mux.global');
+// The subscribers' relay, for a cross-relay run.
+const subEndpoint = readEndpoint('RELAY_SUB_URL', endpoint);
 let token = process.env.RELAY_TOKEN;
 const anonymous = process.env.RELAY_ANONYMOUS === '1';
 const certificateHash = process.env.RELAY_CERTIFICATE_HASH;
@@ -90,7 +96,7 @@ async function runInNode({ namespace, reportPhase }) {
       ? { ca: await readFile(caFile) }
       : {};
   const createTransport = nativeQuicTransport(trust);
-  return runRelayScenario({ endpoint, token, namespace, createTransport, report: reportPhase });
+  return runRelayScenario({ endpoint, subEndpoint, token, namespace, createTransport, report: reportPhase });
 }
 
 /** The scenario in a headless Chromium page, over WebTransport: the built modules are served to it on localhost. */
@@ -115,7 +121,7 @@ async function runInChromium({ namespace, reportPhase }) {
     await page.exposeFunction('reportPhase', reportPhase);
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     return await page.evaluate(
-      async ({ endpoint, token, namespace, certificateHash }) => {
+      async ({ endpoint, subEndpoint, token, namespace, certificateHash }) => {
         const { runRelayScenario } = await import('/scripts/relay-scenario.js');
         if (typeof WebTransport === 'undefined') throw new Error('This browser does not provide WebTransport');
         const createTransport = certificateHash
@@ -128,9 +134,16 @@ async function runInChromium({ namespace, reportPhase }) {
               return { transport, ready: transport.ready };
             }
           : undefined;
-        return runRelayScenario({ endpoint, token, namespace, createTransport, report: window.reportPhase });
+        return runRelayScenario({
+          endpoint,
+          subEndpoint,
+          token,
+          namespace,
+          createTransport,
+          report: window.reportPhase,
+        });
       },
-      { endpoint, token, namespace, certificateHash },
+      { endpoint, subEndpoint, token, namespace, certificateHash },
     );
   } finally {
     await browser?.close();

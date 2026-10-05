@@ -8,13 +8,15 @@ on aioquic), then asserts the list in ``spec/behavior.md``:
 2. Once the publisher's ``announced`` settles, subscriptions to two tracks on the namespace are
    accepted, retrying the fresh-namespace rejection while the announce propagates; the report
    records the retries.
-3. Binary payloads, an empty payload, and a text payload all arrive intact.
+3. Binary payloads, an empty payload, and a text payload all arrive intact, each written once after
+   a warm-up marker has arrived on its track; the report records the warm-up writes.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes LARGEST_OBJECT and receives the next live object.
 6. All connections close cleanly once the test closes them.
 
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
-(https, without the token), ``RELAY_NAMESPACE_PREFIX`` (a random field is appended). The token is
+(https, without the token), ``RELAY_SUB_URL`` (the subscribers' relay for a cross-relay run, defaulting
+to ``RELAY_URL``), ``RELAY_NAMESPACE_PREFIX`` (a random field is appended). The token is
 never written to disk and is redacted from output. For anonymous local relays, set
 ``RELAY_ANONYMOUS=1``; ``RELAY_CA_FILE`` supplies a local certificate trust root.
 See ``spec/relay-interop.md`` for the local moq-relay 0.17.0 reproduction.
@@ -44,6 +46,7 @@ from mux_relay import (
     MessageParameters,
     MoqtObject,
     RelayAwaitable,
+    RelayError,
     RelayPublisher,
     RelaySubscriber,
     RelaySubscriptionHandlers,
@@ -61,6 +64,8 @@ from shared.announce_race import subscribe_with_retry  # noqa: E402
 
 RUN_DEADLINE = 45.0
 RECEIVE_DEADLINE = 10.0
+WARM_UP = b"relay-sdk-smoke warm-up"
+WARM_UP_INTERVAL = 0.25
 
 
 def read_token() -> str | None:
@@ -84,7 +89,20 @@ def redact(value: str, token: str | None) -> str:
     return value.replace(token, "[redacted]") if token else value
 
 
-async def run(endpoint: str, token: str | None, namespace: list[str], report: Any) -> dict[str, Any]:
+def read_endpoint(name: str, default: str) -> str:
+    endpoint = os.environ.get(name, default)
+    parts = urlsplit(endpoint)
+
+    if parts.scheme != "https":
+        raise SystemExit(f"{name} must be an https URL")
+
+    if "jwt=" in parts.query:
+        raise SystemExit(f"Supply the token via stdin or RELAY_TOKEN, not {name}")
+
+    return endpoint
+
+
+async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: list[str], report: Any) -> dict[str, Any]:
     from aioquic.quic.configuration import QuicConfiguration
 
     from mux_relay.quic import connect_quic
@@ -135,6 +153,38 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
     async def wait_for_count(track: str, count: int) -> None:
         await wait_for(lambda: len(received[track]) >= count, f"{track}: {count} objects")
 
+    warmed: set[str] = set()
+
+    async def warm_up(track: str, writer: Any) -> int:
+        # SUBSCRIBE_OK says the subscriber's relay took the request, not that the path to the publisher
+        # is ready. A relay on another hop first subscribes only to learn the track's info and cancels
+        # that within about 50 ms (spec/relay-interop.md), so the writes it takes are lost. Repeat a
+        # marker the handlers drop until one arrives; the assertion payloads are then written once.
+        until = time.monotonic() + RECEIVE_DEADLINE
+        writes = 0
+
+        while track not in warmed:
+            if errors:
+                raise RuntimeError("; ".join(errors))
+
+            if time.monotonic() >= until:
+                raise TimeoutError(f"Timed out waiting for {track}: warm-up object")
+
+            try:
+                await writer.write(WARM_UP)
+            except RelayError as error:
+                if error.code != "SUBSCRIPTION_CHANGED":
+                    raise
+
+            writes += 1
+            sent = time.monotonic()
+
+            while track not in warmed and time.monotonic() - sent < WARM_UP_INTERVAL:
+                lifetime.throw_if_cancelled()
+                await asyncio.sleep(0.02)
+
+        return writes
+
     try:
         publisher = await connect_relay_publisher(
             endpoint,
@@ -148,7 +198,7 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         events = publisher.register_track("events", write_timeout=20)
         status = publisher.register_track("status", write_timeout=20)
         subscriber = await connect_relay_subscriber(
-            endpoint, get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
+            sub_endpoint, get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
         )
         observe_closed("subscriber", subscriber.closed)
         report({"phase": "subscriber connected"})
@@ -162,7 +212,11 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         for track in ("events", "status"):
 
             def on_object(obj: MoqtObject, track: str = track) -> None:
-                if obj.status == "normal":
+                if obj.status != "normal":
+                    return
+                if obj.payload == WARM_UP:
+                    warmed.add(track)
+                else:
                     received[track].append(obj.payload)
 
             def on_retry(attempt: int, delay: float, track: str = track) -> None:
@@ -185,6 +239,9 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         if errors:
             raise RuntimeError("; ".join(errors))
 
+        warm_up_writes = {"events": await warm_up("events", events), "status": await warm_up("status", status)}
+        report({"phase": "warmed up", "writes": warm_up_writes})
+
         for payload in expected_events:
             await events.write(payload)
 
@@ -196,7 +253,7 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         )
         # Make the relay send LARGEST_OBJECT by joining after content has arrived.
         late_subscriber = await connect_relay_subscriber(
-            endpoint, get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
+            sub_endpoint, get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
         )
         observe_closed("late subscriber", late_subscriber.closed)
 
@@ -207,7 +264,7 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
                 errors.append("late SUBSCRIBE_OK omitted LARGEST_OBJECT")
 
         def on_late_object(obj: MoqtObject) -> None:
-            if obj.status == "normal":
+            if obj.status == "normal" and obj.payload != WARM_UP:
                 received["lateStatus"].append(obj.payload)
 
         late_subscriber.subscribe(
@@ -236,10 +293,12 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
 
         return {
             "endpoint": endpoint,
+            "subscriberEndpoint": sub_endpoint,
             "namespace": namespace,
             "events": len(received["events"]),
             "status": len(received["status"]),
             "announceRaceRetries": retries,
+            "warmUpWrites": warm_up_writes,
             "binaryAndEmptyPayloads": "passed",
             "independentTrackClose": "passed",
             "lateSubscriberLargestObject": {
@@ -264,15 +323,8 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
 
 
 def main() -> int:
-    endpoint = os.environ.get("RELAY_URL", DEFAULT_ENDPOINT)
-    parts = urlsplit(endpoint)
-
-    if parts.scheme != "https":
-        raise SystemExit("RELAY_URL must be an https URL")
-
-    if "jwt=" in parts.query:
-        raise SystemExit("Supply the token via stdin or RELAY_TOKEN, not RELAY_URL")
-
+    endpoint = read_endpoint("RELAY_URL", DEFAULT_ENDPOINT)
+    sub_endpoint = read_endpoint("RELAY_SUB_URL", endpoint)
     token = read_token()
     prefix = [field for field in os.environ.get("RELAY_NAMESPACE_PREFIX", "relay-sdk-smoke").split("/") if field]
     namespace = [*prefix, str(uuid.uuid4())]
@@ -281,7 +333,7 @@ def main() -> int:
         print(redact(json.dumps(value) if not isinstance(value, str) else value, token), flush=True)
 
     try:
-        result = asyncio.run(run(endpoint, token, namespace, report))
+        result = asyncio.run(run(endpoint, sub_endpoint, token, namespace, report))
     except BaseException as error:
         report({"result": "FAIL", "error": redact(str(error) or type(error).__name__, token)})
         return 1

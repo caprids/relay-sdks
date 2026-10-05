@@ -786,6 +786,7 @@ Live tests and examples in every language read the same environment:
 | --- | --- |
 | `RELAY_TOKEN` | Relay JWT. When absent, tooling prompts with input hidden. Never written to disk or printed. |
 | `RELAY_URL` | Overrides the default endpoint in `protocol.json`. Must be https and must not carry the token. |
+| `RELAY_SUB_URL` | Live tests only: the subscribers' relay, for a cross-relay run. Defaults to `RELAY_URL`; same rules. |
 | `RELAY_NAMESPACE_PREFIX` | Namespace prefix the token authorizes. Live tests append a random field so runs never share relay state. |
 
 ## Live smoke test
@@ -797,7 +798,10 @@ and subscribes on the same random namespace, then asserts:
 2. Once the publisher's `announced` settles, subscriptions to two tracks on the namespace are
    accepted, retrying the fresh-namespace rejection while the announce propagates; the report
    records the retries.
-3. Binary payloads, an empty payload, and a text payload all arrive intact.
+3. Binary payloads, an empty payload, and a text payload all arrive intact. Each is written once,
+   after a warm-up marker the subscriber drops has arrived on that track: a `SUBSCRIBE_OK` does not
+   mean the path to the publisher is ready ([a viewer on another relay](relay-interop.md#a-viewer-on-another-relay)).
+   The report records the warm-up writes.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes `LARGEST_OBJECT` from a populated track's `SUBSCRIBE_OK` and receives the next live object.
 6. All connections close cleanly once the test closes them.
