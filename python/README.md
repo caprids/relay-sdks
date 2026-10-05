@@ -338,7 +338,8 @@ metadata as `KeyValuePair` values. Property types and even-type values must be n
 up to `2**64 - 1`, the largest value the core's varint carries (`bool` is not an integer here);
 odd-type values must expose a bytes-like buffer and are copied. Invalid properties raise `TypeError`
 naming the property index before a write starts or a track is registered. A byte value longer than
-65535 bytes, or a list whose encoding exceeds 1 MiB, is a `ValueError` at the same point: the SDK
+65535 bytes, or a list whose encoding exceeds 1 MiB (64 KiB on `write()`, which the relay drops
+silently past that), is a `ValueError` at the same point: the SDK
 measures the encoding with the core's own encoder, so an oversized property never opens a stream.
 The SDK adds no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB
 of payload.

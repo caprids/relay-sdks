@@ -32,6 +32,7 @@ from mux_relay import (
     read_json,
     read_text,
 )
+from mux_relay._validation import MAX_RELAY_OBJECT_PROPERTIES_LENGTH
 
 NAMESPACE = ["testing", "data"]
 URL = "https://relay.example.com/moq"
@@ -575,6 +576,25 @@ async def test_encoding_errors_leave_writers_usable(cleanup: Cleanup) -> None:
     await track.write_text("after")
     await wait_for(lambda: len(received.objects) == 3)
     assert [read_text(obj) for obj in received.objects] == ["false", "false", "after"]
+
+
+async def test_object_properties_past_the_relay_limit_fail_the_write_and_leave_writers_usable(cleanup: Cleanup) -> None:
+    # moq-relay drops an object whose property block is over 64 KiB with no error to either side (#247).
+    _, publisher, subscriber = await connect_hub(cleanup)
+    limit = [KeyValuePair(1, bytes(MAX_RELAY_OBJECT_PROPERTIES_LENGTH - 4))]  # type and length take 4 bytes
+    over = [KeyValuePair(1, bytes(MAX_RELAY_OBJECT_PROPERTIES_LENGTH - 3))]
+    track = publisher.register_track("big")
+    received = Received(subscriber, "big")
+    for grouped in (False, True):
+        writer = await track.open_group() if grouped else track
+        with pytest.raises(ValueError, match="encode to 65537 bytes, over the relay's 65536-byte limit"):
+            await writer.write(b"over", properties=over)
+        await writer.write(b"limit", properties=limit)
+        assert not writer.closed
+        if isinstance(writer, RelayGroupWriter):
+            await writer.close()
+    await wait_for(lambda: len(received.objects) == 2)
+    assert [(obj.payload, obj.properties) for obj in received.objects] == [(b"limit", limit)] * 2
 
 
 async def test_helpers_keep_deadlines_concurrency_and_task_cancellation(cleanup: Cleanup) -> None:

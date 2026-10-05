@@ -12,6 +12,7 @@ import {
   readJSON,
   readText,
 } from '../src/index.js';
+import { MAX_RELAY_OBJECT_PROPERTIES_LENGTH } from '../src/validation.js';
 import { createFakeTransport } from './helpers/relay.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
@@ -946,6 +947,31 @@ describe('text and JSON helpers', () => {
     await track.writeText('after');
     await vi.waitFor(() => expect(objects).toHaveLength(3));
     expect(objects.map(readText)).toEqual(['false', 'false', 'after']);
+  });
+
+  it('fails a write whose object properties pass the relay limit and leaves writers usable', async () => {
+    // moq-relay drops an object whose property block is over 64 KiB with no error to either side (#247).
+    const { publisher, subscriber } = await connectHub();
+    const track = publisher.registerTrack({ track: 'big' });
+    const { objects } = receive(subscriber, 'big');
+    // The pair's type and length take 4 bytes.
+    const limit = [{ type: 1, value: new Uint8Array(MAX_RELAY_OBJECT_PROPERTIES_LENGTH - 4) }];
+    const over = [{ type: 1, value: new Uint8Array(MAX_RELAY_OBJECT_PROPERTIES_LENGTH - 3) }];
+    for (const grouped of [false, true]) {
+      const writer = grouped ? await track.openGroup() : track;
+      await expect(writer.write(new Uint8Array([1]), { properties: over })).rejects.toThrow(
+        /encode to 65537 bytes, over the relay's 65536-byte limit/,
+      );
+      await expect(writer.write(new Uint8Array([1]), { properties: over })).rejects.toBeInstanceOf(RangeError);
+      await writer.write(new Uint8Array([2]), { properties: limit });
+      expect(writer.closed).toBe(false);
+      if (grouped) await writer.close();
+    }
+    await vi.waitFor(() => expect(objects).toHaveLength(2));
+    for (const object of objects) {
+      expect(object.payload).toEqual(new Uint8Array([2]));
+      expect(object.properties).toEqual(limit);
+    }
   });
 });
 

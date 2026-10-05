@@ -24,6 +24,11 @@ from moq_core.varint import MAX_VARINT_VALUE
 #: §1.4.2), pinned in ``spec/protocol.json``. The core enforces the same bound while encoding.
 MAX_PROPERTY_VALUE_LENGTH = 0xFFFF
 
+#: moq-relay drops an object whose encoded property block is larger than this (``MAX_OBJECT_EXTENSIONS``
+#: since 0.17.0, an implementation limit rather than a draft one), so a write refuses it up front.
+#: Pinned in ``spec/protocol.json`` as ``relay.limits.maxObjectPropertiesBytes``.
+MAX_RELAY_OBJECT_PROPERTIES_LENGTH = 64 * 1024
+
 _NOT_A_SEQUENCE_OF_FIELDS = (str, bytes, bytearray, memoryview)
 
 
@@ -63,15 +68,39 @@ def payload_bytes(payload: object) -> bytes:
 
 
 def property_pairs(properties: object) -> list[KeyValuePair]:
-    """Check track or object properties and copy any byte values, so later mutation cannot leak in.
+    """Check track properties and copy any byte values, so later mutation cannot leak in.
 
     Integer types and values are bounded by what the core's varint carries, ``2**64 - 1``. Byte
     values are bounded by their 16-bit wire length, and the whole list by the encoded size the core
     accepts on an object; both are measured here, with the core's own encoder, so an oversized
     property fails as an argument error instead of as a transport failure once demand arrives.
     """
+    pairs, length = _measured_pairs(properties)
+    if length > MAX_OBJECT_PROPERTIES_LENGTH:
+        raise ValueError(f"Properties exceed the {MAX_OBJECT_PROPERTIES_LENGTH}-byte encoded limit")
+    return pairs
+
+
+def object_property_pairs(properties: object) -> list[KeyValuePair]:
+    """Check one object's properties like :func:`property_pairs`, against the relay's tighter bound.
+
+    The relay would drop an object whose block is over its limit, silently for the subscriber, so the
+    write fails here instead. The relay forwards no object property but LOC Timestamp anyway.
+    """
+    pairs, length = _measured_pairs(properties)
+    if length > MAX_RELAY_OBJECT_PROPERTIES_LENGTH:
+        raise ValueError(
+            f"Object properties encode to {length} bytes, over the relay's {MAX_RELAY_OBJECT_PROPERTIES_LENGTH}-byte"
+            " limit, so the relay would drop the object; it forwards only LOC Timestamp (0x10), so carry larger"
+            " data in the payload"
+        )
+    return pairs
+
+
+def _measured_pairs(properties: object) -> tuple[list[KeyValuePair], int]:
+    """Check and copy a property list, returning it with its encoded length."""
     if properties is None:
-        return []
+        return [], 0
     if isinstance(properties, _NOT_A_SEQUENCE_OF_FIELDS) or not isinstance(properties, Iterable):
         raise TypeError("Properties must be a sequence of KeyValuePair")
     pairs: list[KeyValuePair] = []
@@ -96,12 +125,11 @@ def property_pairs(properties: object) -> list[KeyValuePair]:
         if view.nbytes > MAX_PROPERTY_VALUE_LENGTH:
             raise ValueError(f"Property {index} value exceeds the {MAX_PROPERTY_VALUE_LENGTH}-byte limit")
         pairs.append(KeyValuePair(kind, view.tobytes()))
-    if pairs:
-        encoded = ByteWriter()
-        encode_key_value_pairs(encoded, pairs)
-        if encoded.length > MAX_OBJECT_PROPERTIES_LENGTH:
-            raise ValueError(f"Properties exceed the {MAX_OBJECT_PROPERTIES_LENGTH}-byte encoded limit")
-    return pairs
+    if not pairs:
+        return pairs, 0
+    encoded = ByteWriter()
+    encode_key_value_pairs(encoded, pairs)
+    return pairs, encoded.length
 
 
 def _is_varint(value: object) -> bool:

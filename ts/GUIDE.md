@@ -356,7 +356,8 @@ metadata. Property types and even-type integer values must be non-negative integ
 `Number.MAX_SAFE_INTEGER`, the largest value the core's varint carries; odd-type values must be
 `ArrayBufferView`s and are copied as their raw bytes. Invalid properties raise a `TypeError` naming
 the property index before registering a track or starting a write. A byte value longer than 65535
-bytes, or a list whose encoding exceeds 1 MiB, is a `RangeError` at the same point: the SDK measures
+bytes, or a list whose encoding exceeds 1 MiB (64 KiB on `write()`, which the relay drops silently
+past that), is a `RangeError` at the same point: the SDK measures
 the encoding with the core's own encoder, so an oversized property never opens a stream. The SDK adds
 no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB of payload.
 

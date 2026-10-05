@@ -9,10 +9,11 @@ import {
   MAX_OBJECT_PROPERTIES_LENGTH,
   MOQT_PROTOCOL_ID,
 } from '../packages/moq-core/src/index.js';
-import { MAX_PROPERTY_VALUE_LENGTH } from '../src/validation.js';
+import { MAX_PROPERTY_VALUE_LENGTH, MAX_RELAY_OBJECT_PROPERTIES_LENGTH } from '../src/validation.js';
 
 interface ProtocolSpec {
   moqt: { document: string; protocolId: string };
+  relay: { limits: { maxObjectPropertiesBytes: number } };
   limits: {
     maxObjectPayloadBytes: number;
     maxObjectPropertiesBytes: number;
@@ -43,6 +44,10 @@ describe('spec/protocol.json', () => {
 
   it('pins the encoded object properties limit', () => {
     expect(MAX_OBJECT_PROPERTIES_LENGTH).toBe(spec.limits.maxObjectPropertiesBytes);
+  });
+
+  it('pins the relay limit on an object property block, which the SDK checks on write', () => {
+    expect(MAX_RELAY_OBJECT_PROPERTIES_LENGTH).toBe(spec.relay.limits.maxObjectPropertiesBytes);
   });
 
   it('pins the property value length the SDK checks before the core encodes it', () => {
