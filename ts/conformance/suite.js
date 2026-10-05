@@ -110,6 +110,13 @@ function expectStreamError(error, code, what) {
   );
 }
 
+/** TA-27: a stream error whose `streamErrorCode` is exactly `code`, where `null` is no code at all. */
+function expectExactStreamError(error, code, what) {
+  check(typeof error === 'object' && error !== null, `${what}: expected a stream error object, got ${describe(error)}`);
+  check(error.source === 'stream', `${what}: expected source 'stream', got ${describe(error)}`);
+  check(error.streamErrorCode === code, `${what}: expected streamErrorCode ${code}, got ${describe(error)}`);
+}
+
 /** TA-22: a session error has `source: 'session'`. */
 function expectSessionError(error, what) {
   check(
@@ -211,6 +218,19 @@ const LOW_CODES = [0, 1, 7, 0x12, 255];
 const HIGH_CODES = [256, 0x1_0000, 0xffff_ffff];
 /** `streamErrorCode` values TA-17 maps to 0. */
 const INVALID_CODES = [-1, 0x1_0000_0000, 1.5, Number.NaN, '7', null];
+
+/** Where the HTTP/3 encoding puts code 0 (TA-27). */
+const H3_FIRST_CODE = 0x52e4_a40f_a8dbn;
+/** `code` in the HTTP/3 encoding, as a decimal string: one GREASE slot is skipped per 30 codes (TA-27). */
+const h3Code = (code) => String(H3_FIRST_CODE + BigInt(code) + BigInt(Math.floor(code / 0x1e)));
+/** Codes on both sides of the first GREASE slot, and the range's ends. */
+const TA_27_CODES = [0, 7, 0x1d, 0x1e, 0xffff_ffff];
+/** `[wire code, the code the dialer reports]`: encoded codes, a GREASE slot (no code), and a code outside the encoding. */
+const TA_27_PEER_CODES = [
+  ...TA_27_CODES.map((code) => [h3Code(code), code]),
+  [String(H3_FIRST_CODE + 0x1en), null],
+  ['11', 11],
+];
 
 /** TA-17: reset a fresh stream with each of `codes`; the peer must see each one. */
 async function resetsCarry(ctx, codes) {
@@ -860,18 +880,83 @@ export const cases = [
     },
   },
 
+  {
+    rule: 'TA-27',
+    name: 'TA-27 a reset goes out in the HTTP/3 encoding',
+    needs: ['native-quic', 'wireCodes'],
+    async run(ctx) {
+      const transport = await open(ctx);
+      for (const code of TA_27_CODES) {
+        const { writer, id } = await openAcceptedUni(ctx, transport);
+        await writer.abort(ctx.reason(code));
+        await ctx.peer.read(id);
+        equal(await ctx.peer.wireCode(id), h3Code(code), `the wire code for ${code}`);
+      }
+    },
+  },
+  {
+    rule: 'TA-27',
+    name: 'TA-27 a stop goes out in the HTTP/3 encoding',
+    needs: ['native-quic', 'wireCodes'],
+    async run(ctx) {
+      const transport = await open(ctx);
+      for (const code of TA_27_CODES) {
+        const id = await ctx.peer.openUni();
+        await ctx.peer.write(id, text('x'));
+        const reader = (await nextIncoming(transport.incomingUnidirectionalStreams, 'the peer stream')).getReader();
+        await readBytes(reader, 1);
+        await reader.cancel(ctx.reason(code));
+        await resolves(ctx.peer.stopped(id), 'the peer seeing the stop');
+        equal(await ctx.peer.wireCode(id), h3Code(code), `the wire code for ${code}`);
+      }
+    },
+  },
+  {
+    rule: 'TA-27',
+    name: 'TA-27 a peer reset in the HTTP/3 encoding is decoded',
+    needs: ['native-quic', 'wireCodes'],
+    async run(ctx) {
+      const transport = await open(ctx);
+      for (const [wire, code] of TA_27_PEER_CODES) {
+        const id = await ctx.peer.openUni();
+        await ctx.peer.write(id, text('x'));
+        const reader = (await nextIncoming(transport.incomingUnidirectionalStreams, 'the peer stream')).getReader();
+        await readBytes(reader, 1);
+        await ctx.peer.reset(id, wire, { wire: true });
+        expectExactStreamError(await rejects(reader.read(), 'the read'), code, `the read after wire code ${wire}`);
+      }
+    },
+  },
+  {
+    rule: 'TA-27',
+    name: 'TA-27 a peer stop in the HTTP/3 encoding is decoded',
+    needs: ['native-quic', 'wireCodes'],
+    async run(ctx) {
+      const transport = await open(ctx);
+      for (const [wire, code] of TA_27_PEER_CODES) {
+        const { writer, id } = await openAcceptedUni(ctx, transport);
+        await ctx.peer.stop(id, wire, { wire: true });
+        expectExactStreamError(
+          await rejects(writer.closed, 'writer.closed'),
+          code,
+          `writer.closed after wire code ${wire}`,
+        );
+      }
+    },
+  },
+
   // ── Error shape ──────────────────────────────────────────────────────────────────────────────────────────
   {
     rule: 'TA-22',
     name: 'TA-22 a code above 2^53-1 is reported as null',
-    needs: ['native-quic', 'largeCodes'],
+    needs: ['native-quic', 'largeCodes', 'wireCodes'],
     async run(ctx) {
       const transport = await open(ctx);
       const id = await ctx.peer.openUni();
       await ctx.peer.write(id, text('x'));
       const reader = (await nextIncoming(transport.incomingUnidirectionalStreams, 'the peer stream')).getReader();
       await readBytes(reader, 1);
-      await ctx.peer.reset(id, '4611686018427387903');
+      await ctx.peer.reset(id, '4611686018427387903', { wire: true });
       expectStreamError(await rejects(reader.read(), 'the read'), null, 'the read after a 62-bit reset');
     },
   },

@@ -4,32 +4,16 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from mux_relay.quic._errors import _from_h3_error_code, _to_h3_error_code
+
 CAPSULE_CLOSE_WEBTRANSPORT_SESSION = 0x2843
 CAPSULE_DRAIN_WEBTRANSPORT_SESSION = 0x78AE
 
-_WT_FIRST_H3_ERROR_CODE = 0x52E4A40FA8DB
-_WT_LAST_H3_ERROR_CODE = 0x52E5AC983162
+webtransport_to_h3_error_code = _to_h3_error_code
+"""Map a 32-bit WebTransport application error code onto the reserved HTTP/3 range."""
 
-
-def webtransport_to_h3_error_code(code: int) -> int:
-    """Map a 32-bit WebTransport application error code onto the reserved HTTP/3 range."""
-    if code < 0 or code > 0xFFFFFFFF:
-        raise ValueError("WebTransport error codes are 32-bit unsigned integers")
-
-    return _WT_FIRST_H3_ERROR_CODE + code + code // 0x1E
-
-
-def h3_to_webtransport_error_code(code: int) -> int | None:
-    """Recover the application error code from an HTTP/3 stream error, or ``None`` when it is not one."""
-    if code < _WT_FIRST_H3_ERROR_CODE or code > _WT_LAST_H3_ERROR_CODE:
-        return None
-
-    shifted = code - _WT_FIRST_H3_ERROR_CODE
-
-    if shifted % 0x1F == 0x1E:
-        return None
-
-    return shifted - shifted // 0x1F
+h3_to_webtransport_error_code = _from_h3_error_code
+"""Recover the application error code from an HTTP/3 stream error, or ``None`` when it is not one."""
 
 
 def _encode_uint_var(value: int) -> bytes:

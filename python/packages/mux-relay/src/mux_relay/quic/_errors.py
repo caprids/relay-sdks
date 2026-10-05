@@ -7,6 +7,11 @@ from typing import Literal
 _MAX_SAFE_CODE = 2**53 - 1
 """The largest code a stream error reports; a larger one is reported as unknown (TA-22)."""
 
+_H3_FIRST_CODE = 0x52E4A40FA8DB
+"""Where draft-ietf-webtrans-http3 maps application error code 0 into the HTTP/3 error-code space."""
+_H3_LAST_CODE = 0x52E5AC983162
+"""Where it maps 2^32-1, the last application error code."""
+
 
 class QuicTransportError(Exception):
     """A QUIC stream or session failure, classified by its shape (``spec/transport-adapter.md`` TA-22).
@@ -74,3 +79,38 @@ def _error_code_of(reason: object) -> int:
         return reason
 
     return 0
+
+
+def _to_h3_error_code(code: int) -> int:
+    """The HTTP/3 error code that carries the 32-bit application error ``code``, as draft-ietf-webtrans-http3 maps it.
+
+    Every 31st code in the range is a reserved GREASE code point, so each 30 codes skip one.
+    """
+    if code < 0 or code > 0xFFFFFFFF:
+        raise ValueError("application error codes are 32-bit unsigned integers")
+
+    return _H3_FIRST_CODE + code + code // 0x1E
+
+
+def _from_h3_error_code(code: int) -> int | None:
+    """The application error code an HTTP/3 error ``code`` carries; ``None`` outside the range or on a GREASE slot."""
+    if code < _H3_FIRST_CODE or code > _H3_LAST_CODE:
+        return None
+
+    shifted = code - _H3_FIRST_CODE
+
+    if shifted % 0x1F == 0x1E:
+        return None
+
+    return shifted - shifted // 0x1F
+
+
+def _from_native_wire_code(code: int) -> int | None:
+    """The application's code for a reset or a stop that carried ``code`` on native QUIC (TA-27).
+
+    A code in the HTTP/3 range is decoded, and is ``None`` on a GREASE slot; any other code is the peer's as it is.
+    """
+    if _H3_FIRST_CODE <= code <= _H3_LAST_CODE:
+        return _from_h3_error_code(code)
+
+    return code

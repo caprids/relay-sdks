@@ -2,8 +2,9 @@
 
 The session base is the production :class:`~._streams._StreamLink`: the halves ask it to queue bytes,
 reset and stop streams, and it settles their transmissions after every transmit of the connection.
-:class:`~._client.QuicSession` puts MOQT straight on the connection's streams, codes as they are; the test
-suite's WebTransport accepting end adds a WebTransport session's streams, capsules and error-code mapping.
+:class:`~._client.QuicSession` puts MOQT straight on the connection's streams, with stream codes in the HTTP/3
+encoding moq-relay uses there (TA-27); the test suite's WebTransport accepting end adds a WebTransport session's
+streams, capsules and the same error-code mapping.
 """
 
 from __future__ import annotations

@@ -67,6 +67,7 @@ A target is a plain object:
 | `pause` | The peer can drop every datagram from the dialer until it resumes, so it neither receives nor acknowledges (TA-14 to TA-16). |
 | `maxStreams` | The peer can limit the dialer's streams (TA-21). |
 | `largeCodes` | The peer can reset with a code above 2⁵³−1 (TA-22; native QUIC only). |
+| `wireCodes` | The peer can put a stream code on the wire as it is, and report the code the dialer's reset or stop carried there (TA-27; native QUIC only). |
 | `process` | The adapter runs in a process the target can watch (TA-25, TA-26). |
 
 ## The peer
@@ -79,9 +80,10 @@ bytes are a `Uint8Array` going in and an array of numbers coming out, so a remot
 | `acceptUni()`, `acceptBi()` | The id of the next stream the dialer opened. |
 | `openUni()`, `openBi()` | Open a stream to the dialer and return its id. |
 | `write(id, bytes)`, `finish(id)` | Write on the peer's send half, then send the FIN. |
-| `reset(id, code)`, `stop(id, code)` | RESET_STREAM the peer's send half, or STOP_SENDING its receive half. `code` may be a decimal string above 2⁵³−1 with `largeCodes`. |
+| `reset(id, code, { wire })`, `stop(id, code, { wire })` | RESET_STREAM the peer's send half, or STOP_SENDING its receive half. With `wire` (`wireCodes`), `code` goes on the wire as it is, unencoded, and may be a decimal string above 2⁵³−1 (`largeCodes`). |
 | `read(id, { bytes, discard })` | Read until the FIN, a reset, or `bytes` bytes. Resolves `{ bytes, byteLength, fin, resetCode }`. `resetCode` is the dialer's code, or `null`. With `discard`, `bytes` comes back empty. |
 | `stopped(id)` | Resolves with the code once the dialer stops the peer's send half. |
+| `wireCode(id)` | With `wireCodes`: the code the dialer's last reset or stop of the stream carried on the wire, as a decimal string, or `null`. |
 | `close(code, reason)` | The application close: CLOSE_WEBTRANSPORT_SESSION, or CONNECTION_CLOSE 0x1d. |
 | `closed()` | Resolves `{ closeCode, reason }` once the dialer closed the session. |
 | `quicClose()`, `loseConnection()`, `pause()`, `resume()`, `releaseHandshake()` | Need the matching capability. |
@@ -142,8 +144,10 @@ methods:
 - `hold` holds every datagram from the dialer until `releaseHandshake()`, and `refuse` fails the handshake with a TLS
   handshake_failure alert.
 - `maxStreams` is the dialer's whole stream credit, with no HTTP/3 streams to add.
-- `reset` takes a code up to 2⁶²−1, as a decimal string above 2⁵³−1 (`largeCodes`). Codes go on the wire as given,
-  with no HTTP/3 mapping.
+- Stream codes cross in the HTTP/3 encoding, as with moq-relay (TA-27): `reset` and `stop` encode the code, and the
+  peer decodes the dialer's, so a code outside the encoding reads as `null`, the way the relay reads it. With `wire`,
+  `reset` and `stop` put the code on the wire as given, up to 2⁶²−1, and `wireCode` reports the dialer's code as it
+  arrived.
 - `close()` is an application CONNECTION_CLOSE (0x1d), and `closed()` reports the dialer's.
 
 ## Adding a target

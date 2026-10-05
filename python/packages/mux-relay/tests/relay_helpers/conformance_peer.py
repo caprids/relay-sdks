@@ -448,15 +448,31 @@ class ConformancePeer:
     async def finish(self, stream: int) -> None:
         await self._stream(stream).send.close()
 
-    async def reset(self, stream: int, code: int | str) -> None:
-        session = await self._current()
-        # On native QUIC a code may be a decimal string above 2^53-1, beyond what a reason carries (TA-17).
-        if isinstance(session, NativeQuicSession):
-            session.reset_codes[stream] = int(code)
-        self._stream(stream).send.abort(int(code))
+    async def reset(self, stream: int, code: int | str, wire: bool = False) -> None:
+        """Reset with ``code``; with ``wire``, on native QUIC, put ``code`` on the wire as it is, unencoded (TA-27).
 
-    async def stop(self, stream: int, code: int) -> None:
-        self._stream(stream).receive.cancel(int(code))
+        A wire code may be a decimal string above 2^53-1, beyond what a reason carries (TA-17).
+        """
+        if wire:
+            self._native_session(await self._current()).reset_codes[stream] = int(code)
+        self._stream(stream).send.abort(int(code) if int(code) <= 0xFFFFFFFF else 0)
+
+    async def stop(self, stream: int, code: int | str, wire: bool = False) -> None:
+        """Stop with ``code``; with ``wire``, as :meth:`reset`."""
+        if wire:
+            self._native_session(await self._current()).stop_codes[stream] = int(code)
+        self._stream(stream).receive.cancel(int(code) if int(code) <= 0xFFFFFFFF else 0)
+
+    async def wireCode(self, stream: int) -> str | None:
+        """The code the dialer's last reset or stop of ``stream`` carried on the wire, in decimal (TA-27)."""
+        code = self._native_session(await self._current()).wire_codes.get(stream)
+        return None if code is None else str(code)
+
+    @staticmethod
+    def _native_session(session: WebTransportServerSession | NativeQuicSession) -> NativeQuicSession:
+        if not isinstance(session, NativeQuicSession):
+            raise RuntimeError("wire codes exist only on native QUIC")
+        return session
 
     async def read(self, stream: int, count: int | None = None, discard: bool = False) -> dict[str, Any]:
         """Read until the FIN, a reset, or ``count`` bytes; a FIN on a dialer's stream returns one stream of credit."""
@@ -549,6 +565,7 @@ METHODS = {
     "stop",
     "read",
     "stopped",
+    "wireCode",
     "close",
     "closed",
     "quicClose",

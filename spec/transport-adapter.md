@@ -17,7 +17,8 @@ nothing in them. It only narrows what an adapter exposes at the seam the core de
 - [draft-ietf-webtrans-http3] and the [W3C WebTransport] API, for a WebTransport session
 
 Every rule cites the upstream section it narrows. If a rule seems to conflict with one of these
-specifications, the specification wins and the rule is a bug in this document.
+specifications, the specification wins and the rule is a bug in this document. TA-27 is the one
+exception: on native QUIC it follows moq-relay's stream error codes, which differ from draft-20.
 
 [draft-ietf-moq-transport-20]: https://datatracker.ietf.org/doc/draft-ietf-moq-transport/20/
 [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000
@@ -231,6 +232,28 @@ with no signal of why.
 once. With the peer at MAX_STREAMS 4, the fifth create rejected, and credit returned once a stream
 drained.
 
+**TA-27.** On native QUIC, stream codes MUST cross the wire in the HTTP/3 encoding
+draft-ietf-webtrans-http3 gives WebTransport application error codes, as moq-relay uses them there.
+A reset or a stop with code *n* (TA-17, TA-18) MUST carry `0x52E4A40FA8DB + n + floor(n / 0x1E)`.
+A peer's RESET_STREAM or STOP_SENDING code from `0x52E4A40FA8DB` to `0x52E5AC983162` MUST be decoded
+before TA-19, TA-20 and TA-22 report it: *c* − `0x52E4A40FA8DB` = *s* gives *s* − floor(*s* / 0x1F),
+and a GREASE slot (*s* mod 0x1F = 0x1E) carries no code and MUST be reported as `null`. A code
+outside that range MUST be reported as it arrived. Session close codes (TA-9, TA-10, TA-24) MUST NOT
+be mapped. This rule does not apply to a WebTransport session, whose runtime maps codes itself.
+**Why:** `streamErrorCode` must mean the same thing in both framings, and the relay must be able to
+read the codes the core sends. moq-relay reaches raw QUIC through web-transport-moq, whose stream
+wrappers map every reset and stop code through `error_to_http3` and `error_from_http3` (moq-relay
+0.17.0 uses web-transport-moq 1.3.3, `send.rs` and `recv.rs`), while its session close stays raw.
+draft-20 puts stream codes on native QUIC unmapped (§3.3.4, RFC 9000 §19.4, §19.5), so this follows
+the relay rather than the draft (#248). Decoding is lenient: a peer that sends draft-20's raw codes
+is still read correctly, since none of them reaches the range. The encoding on the way out is what
+would have to change if web-transport-moq stopped mapping on raw QUIC.
+**Evidence:** on 2026-10-05, production 0.17.0 reset forwarded subgroups with `0x52E4A40FA8DC`
+(code 1) in 3/3 runs per case, from Python and TS subscribers over native QUIC. A local
+`moqdev/moq-relay:0.17.0` logged a raw reset with code 7 from our publisher as
+`transport: invalid RESET_STREAM: 7`, and the encoded one as `code=7`. Either way the relay forwards
+the reset with code 1 rather than the publisher's (#156), so subscribers read 1 today.
+
 ### Error shape
 
 **TA-22.** Every error an adapter raises for a stream or session failure MUST be an object with a
@@ -377,11 +400,12 @@ stream halves and QUIC plumbing (#232). How the rules map:
 | TA-12 | The incoming readables are async iterators. After a clean end they raise `StopAsyncIteration`; after any other, they raise the session's error, the same `source="session"` error `wait_closed()` raises. Either way, streams that arrived before the end are yielded first. |
 | TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. `wait_acknowledged()` also raises when the stream fails between writes, so it stands in for `writer.closed` (TA-12, TA-16, TA-20). A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
 | TA-16 | `abort()` resets until the peer acknowledges the FIN, including after the FIN was transmitted, and `wait_acknowledged()` then raises the reason. Once the FIN is acknowledged it does nothing (the stream is in Data Recvd). A settling group's delivery timeout depends on this (#167). |
-| TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `stream_error_code` attribute (the write slot's `StreamReset`, or a stream error), else from an integer reason, each within 0 to 2³²−1, else 0. The code goes on the wire as it is. |
+| TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `stream_error_code` attribute (the write slot's `StreamReset`, or a stream error), else from an integer reason, each within 0 to 2³²−1, else 0. The code goes on the wire as TA-27 encodes it. |
 | TA-19, TA-20, TA-22 | Errors have the TA-22 shape, spelled `source` and `stream_error_code`: `mux_relay.quic` raises a private `QuicTransportError` with them. A peer STOP_SENDING is a `source="stream"` error on the send half, with no subclass of its own. The core and the SDK classify by `source` alone (`moq_core.transport.is_stream_error`, `is_session_error`). An exhausted stream limit (TA-21), and a write to a stream this end already closed or reset, carry `source=None`. |
 | TA-21 | A create rejects at once when the peer's MAX_STREAMS is used up, and succeeds again once the peer raises it. |
 | TA-24 | `close_info` carries the peer's application close, and so does the session error an operation raises once it has ended the session (`close_code` and `reason`). The SDK reports `UNAUTHORIZED` from either, in any phase. |
 | TA-25, TA-26 | asyncio holds no process open by itself: the application's own `asyncio.run` decides. |
+| TA-27 | `QuicSession` encodes and decodes stream codes in its `_to_wire_code` and `_from_wire_code` hooks (`mux_relay.quic._errors`). The test suite's native QUIC accepting ends map them the same way, as the relay does. |
 
 ## Conformance
 
