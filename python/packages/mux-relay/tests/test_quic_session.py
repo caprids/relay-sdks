@@ -997,9 +997,11 @@ class TestSocket:
             open_socket([("2001:db8::1", 443, 0, 0)])
 
     def test_dual_stack_socket_maps_ipv4_addresses(self) -> None:
-        try:
-            sock, address = open_socket([("192.0.2.1", 443)])
-        except WebTransportError:
+        sock, address = open_socket([("192.0.2.1", 443)])
+
+        if sock.family != socket.AF_INET6:
+            # An IPv4 address needs no IPv6 socket: without one, open_socket falls back to IPv4.
+            sock.close()
             pytest.skip("no IPv6 socket support on this host")
 
         try:
