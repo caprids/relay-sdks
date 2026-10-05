@@ -1,8 +1,9 @@
-"""What both ends of a WebTransport session share: stream creation, the CONNECT stream's capsules, closure.
+"""A WebTransport session on the SDK's QUIC plumbing: stream creation, the CONNECT stream's capsules, closure.
 
-The stream plumbing (the halves' link, settlement, the close drain) is :class:`~._quic_session.QuicStreamSession`'s;
-this adds what HTTP/3 puts around it: streams opened through the HTTP/3 layer, the CLOSE_WEBTRANSPORT_SESSION
-capsule, and the mapping between application and HTTP/3 error codes.
+The stream plumbing (the halves' link, settlement, the close drain) is the SDK's
+:class:`~mux_relay.quic._session.QuicStreamSession`; this adds what HTTP/3 puts around it: streams opened
+through the HTTP/3 layer, the CLOSE_WEBTRANSPORT_SESSION capsule, and the mapping between application and
+HTTP/3 error codes. The server role is ``relay_helpers.wt_server``'s.
 """
 
 from __future__ import annotations
@@ -16,12 +17,13 @@ from aioquic.quic.packet import QuicErrorCode
 
 from moq_core._tasks import spawn
 from moq_core.transport import BidirectionalStream, SendStream
+from mux_relay.quic._aioquic import finish_receiving_half
+from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._session import _CLOSE_DRAIN_TIMEOUT, QuicStreamSession
 
-from ._aioquic import finish_receiving_half, forget_h3_stream, mark_webtransport_stream
-from ._errors import WebTransportError
-from ._protocol import WebTransportProtocol
-from ._quic_session import _CLOSE_DRAIN_TIMEOUT, QuicStreamSession
-from ._wire import (
+from .h3 import forget_h3_stream, mark_webtransport_stream
+from .protocol import WebTransportProtocol
+from .wire import (
     CAPSULE_CLOSE_WEBTRANSPORT_SESSION,
     _decode_uint_var,
     encode_close_session_capsule,

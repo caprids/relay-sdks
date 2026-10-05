@@ -30,8 +30,8 @@ from relay_helpers.conformance_peer import (
     generate_leaf_certificate,
 )
 from relay_helpers.quic_hub import HubServer, start_quic_hub
+from relay_helpers.quic_server import SERVER_NAME
 from relay_helpers.relay_hub import RelayHub, create_relay_hub
-from relay_helpers.wt_server import SERVER_NAME
 from test_setup_options import option_value, read_client_setup
 
 from moq_core import MoqtObject
@@ -49,8 +49,7 @@ from mux_relay import (
 )
 from mux_relay.quic import connect_quic
 from mux_relay.quic._client import QuicSession
-from mux_relay.webtransport import WebTransportError
-from mux_relay.webtransport._errors import StreamStopped
+from mux_relay.quic._errors import StreamStopped, WebTransportError
 
 MOQT = "moqt-20"
 NAMESPACE = ["loopback", "quic"]
@@ -662,3 +661,16 @@ class TestOverTheRelayHub:
 
         assert isinstance(closed.error, RelayError)
         assert (closed.error.code, closed.error.phase) == ("UNAUTHORIZED", "connection")
+
+    async def test_ta9_a_peer_close_with_another_code_after_setup_ends_the_connection_cleanly(
+        self, hub: tuple[RelayHub, HubServer, HubServer]
+    ) -> None:
+        # Only a refusal's code means anything to the SDK; any other application close is the peer's clean end.
+        _, _, subscribers = hub
+        subscriber = await asyncio.wait_for(
+            connect_relay_subscriber(subscribers.url(), create_transport=subscribers.factory()), 10
+        )
+
+        subscribers.sessions[0].close(0x3, "protocol violation")
+
+        assert await asyncio.wait_for(subscriber.closed, 5) == Closed()

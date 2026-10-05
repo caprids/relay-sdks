@@ -8,8 +8,8 @@ from aioquic.quic.packet_builder import QuicDeliveryState
 from aioquic.quic.stream import QuicStream
 from relay_helpers.quic_pair import QuicPair
 
-from mux_relay.webtransport._aioquic import fin_unsent, live_stream
-from mux_relay.webtransport._fin_retry import DroppedFinRetry
+from mux_relay.quic._aioquic import fin_unsent, live_stream
+from mux_relay.quic._fin_retry import DroppedFinRetry
 
 
 class Harness:

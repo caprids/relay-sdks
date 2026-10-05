@@ -1,6 +1,6 @@
 """An in-process stream link: the aioquic adapter's send and receive halves with no QUIC underneath.
 
-Satisfies ``_StreamLink`` the way ``WebTransportSessionBase`` does, but connects a ``_SendHalf`` straight
+Satisfies ``_StreamLink`` the way ``QuicStreamSession`` does, but connects a ``_SendHalf`` straight
 to the ``_ReceiveHalf`` that models the peer's end of the same stream id. Bytes, FINs and resets cross on
 :meth:`StreamLink.transmit`, which the test calls, or which runs on the next loop turn when the link was
 built with ``auto=True`` (the way the real link's ``_transmit_soon`` behaves), so a test decides when a
@@ -14,8 +14,8 @@ import asyncio
 from collections import deque
 from collections.abc import Callable
 
-from mux_relay.webtransport import WebTransportError
-from mux_relay.webtransport._streams import _ReceiveHalf, _SendHalf
+from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._streams import _ReceiveHalf, _SendHalf
 
 
 class StreamLink:

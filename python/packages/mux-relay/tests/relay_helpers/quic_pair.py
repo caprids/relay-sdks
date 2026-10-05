@@ -7,7 +7,7 @@ from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from aioquic.quic.packet import pull_quic_header
 
-from .wt_server import generate_self_signed_certificate
+from .quic_server import generate_self_signed_certificate
 
 CLIENT_ADDRESS = ("192.0.2.1", 4433)
 SERVER_ADDRESS = ("192.0.2.2", 443)

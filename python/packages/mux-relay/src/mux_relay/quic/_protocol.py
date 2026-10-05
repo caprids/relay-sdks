@@ -1,10 +1,10 @@
-"""The QUIC half of an aioquic connection protocol: what a WebTransport session and native QUIC share.
+"""The QUIC half of an aioquic connection protocol: the workarounds every connection needs, whatever it carries.
 
-Everything here is QUIC-level or socket-level, so both framings need it: the batched receive (#162), resets
-served first (#160), the settling of writes and close drains after every transmit, the dropped-FIN retry
-(#47), the PING keepalive (#158), the ICMP refusal reporting during the handshake (#163), and the release
-of the UDP socket. :class:`~._protocol.WebTransportProtocol` adds HTTP/3 on top; ``mux_relay.quic`` adds
-MOQT straight on the streams.
+Everything here is QUIC-level or socket-level: the batched receive (#162), resets served first (#160), the
+settling of writes and close drains after every transmit, the dropped-FIN retry (#47), the PING keepalive
+(#158), the ICMP refusal reporting during the handshake (#163), and the release of the UDP socket.
+:class:`~._client.NativeQuicProtocol` puts MOQT straight on the streams; the test suite's WebTransport
+accepting end puts HTTP/3 on top.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from ._fin_retry import DroppedFinRetry
 from ._udp import drain_errors, report_refusals
 
 if TYPE_CHECKING:
-    from ._quic_session import QuicStreamSession
+    from ._session import QuicStreamSession
 
 _RECEIVE_BATCH = 64
 """Most datagrams taken in per transmit. Bounds how long one receive holds the loop (and delays ACKs):
@@ -52,7 +52,7 @@ _SOCKET_RELEASE_DELAY = 3.0
 
 
 class QuicProtocol(QuicConnectionProtocol):
-    """An aioquic connection protocol with the QUIC-level workarounds both framings need.
+    """An aioquic connection protocol with the QUIC-level workarounds every framing needs.
 
     Routes RESET_STREAM and STOP_SENDING to the session that owns the stream, settles the sessions'
     waiting writes and drains after every transmit, and hands every other event to

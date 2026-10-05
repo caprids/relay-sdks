@@ -17,9 +17,8 @@ from core_helpers.streams import Pipe, StreamClosedError
 from relay_helpers.stream_link import StreamLink
 
 from moq_core.transport import ReceiveStream, SendStream
-from mux_relay.webtransport import WebTransportError
-from mux_relay.webtransport._errors import StreamStopped
-from mux_relay.webtransport._streams import _StreamQueue
+from mux_relay.quic._errors import StreamStopped, WebTransportError
+from mux_relay.quic._streams import _StreamQueue
 
 STREAM_ID = 4
 

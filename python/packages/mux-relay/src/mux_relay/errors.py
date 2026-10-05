@@ -104,9 +104,9 @@ def _refusal(peer_close: tuple[int, str] | None) -> tuple[int, str] | None:
 
 
 def _credential_refusal(error: Exception) -> tuple[int, str] | None:
-    """The peer's session close, when it closed the WebTransport session because of the credentials."""
-    # Imported here: the webtransport package imports the connection code, which imports this module.
-    from .webtransport import WebTransportError
+    """The peer's application close, when the session failed with one that refused the credentials."""
+    # Imported here: the quic package imports the connection code, which imports this module.
+    from .quic._errors import WebTransportError
 
     if isinstance(error, WebTransportError) and error.peer_closed and error.code is not None:
         return _refusal((error.code, error.reason))
@@ -129,7 +129,7 @@ def _peer_close(transport: object) -> tuple[int, str] | None:
 def _stream_stopped(error: BaseException) -> bool:
     """Whether a send-stream failure is the peer's STOP_SENDING on that stream, not a session failure."""
     # Imported here for the same reason as in `_credential_refusal`.
-    from .webtransport._errors import StreamStopped
+    from .quic._errors import StreamStopped
 
     return isinstance(error, StreamStopped)
 

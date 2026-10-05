@@ -4,11 +4,14 @@ from __future__ import annotations
 
 
 class WebTransportError(Exception):
-    """A WebTransport session or stream failure. ``code`` is the peer's application error code when known.
+    """A QUIC session or stream failure. ``code`` is the peer's application error code when known.
 
-    ``peer_closed`` is true when the peer ended the session with a CLOSE_WEBTRANSPORT_SESSION capsule
-    carrying a nonzero code: ``code`` and ``reason`` are then the capsule's session close code (for
-    MOQT, a session termination code) and reason, not a QUIC, HTTP/3 or stream error code.
+    The name is older than the native QUIC dialing end; #233 replaces this class with an error
+    classified by its shape (TA-19, TA-20, TA-22).
+
+    ``peer_closed`` is true when the peer ended the session with an application close (CONNECTION_CLOSE
+    of frame type 0x1d): ``code`` and ``reason`` are then its close code (for MOQT, a session
+    termination code) and reason, not a QUIC transport or stream error code.
 
     This is the transport layer's own exception, not a :class:`mux_relay.RelayError`: a Relay
     operation that fails on the transport raises ``TRANSPORT_ERROR`` with this chained as its cause

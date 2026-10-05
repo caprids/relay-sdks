@@ -15,7 +15,7 @@ duplicate FIN, if one ever leaves, is harmless: the peer's final size is unchang
 
 To remove the workaround once a fixed aioquic is the floor, delete this module, its construction and
 :meth:`DroppedFinRetry.stop` calls in ``_protocol``, the :meth:`DroppedFinRetry.watch` call in
-``_session`` where a FIN is queued, ``tests/test_webtransport_fin_retry.py``, and ``fin_unsent``,
+``_session`` where a FIN is queued, ``tests/test_quic_fin_retry.py``, and ``fin_unsent``,
 ``fins_in_flight`` and ``rearm_fin`` in ``_aioquic`` with their block of the pin test.
 """
 

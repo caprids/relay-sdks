@@ -1,7 +1,7 @@
 """The accepting end of a native QUIC session: MOQT straight on a QUIC connection, with no HTTP/3 or WebTransport.
 
-:class:`NativeQuicSession` is a :class:`~mux_relay.webtransport._streams._StreamLink` over raw QUIC streams, so the
-conformance peer drives the very stream halves the WebTransport session uses. Codes go on the wire as they are: there
+:class:`NativeQuicSession` is a :class:`~mux_relay.quic._streams._StreamLink` over raw QUIC streams, so the
+conformance peer drives the very stream halves the SDK's session uses. Codes go on the wire as they are: there
 is no HTTP/3 error-code mapping to undo. The session never waits for acknowledgements; a write settles once it was
 handed to aioquic, which is all the peer needs.
 """
@@ -18,8 +18,8 @@ from aioquic.quic.connection import stream_is_client_initiated, stream_is_unidir
 
 from moq_core._tasks import observe
 from moq_core.transport import BidirectionalStream
-from mux_relay.webtransport._errors import WebTransportError
-from mux_relay.webtransport._streams import _ReceiveHalf, _SendHalf, _StreamQueue
+from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._streams import _ReceiveHalf, _SendHalf, _StreamQueue
 
 
 class NativeQuicSession:

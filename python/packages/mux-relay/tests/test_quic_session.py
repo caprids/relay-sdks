@@ -1,9 +1,9 @@
-"""The aioquic WebTransport adapter over a real QUIC loopback: the session, backpressure, pruning, teardown.
+"""The native QUIC session over a real QUIC loopback: backpressure, pruning, teardown, the keepalive and the socket.
 
-The SDK's default is native QUIC (``test_quic.py`` runs the smoke-test assertion list over it); these tests
-dial the WebTransport session through ``create_transport`` until #232 retires it from the package. The wire
-codecs are covered in ``test_webtransport_wire.py`` and the aioquic internals the adapter relies on in
-``test_webtransport_aioquic.py``.
+``test_quic.py`` checks the dialing end rule by rule (TA-n) against the conformance peer; these tests drive
+:class:`mux_relay.quic._client.QuicSession` against ``relay_helpers.quic_server``, whose accepting end runs the same
+QUIC plumbing, so each side's stream state can be inspected and its inbound link impaired. The aioquic internals the
+session relies on are pinned in ``test_quic_aioquic.py``.
 """
 
 import asyncio
@@ -13,189 +13,44 @@ import select
 import socket
 import sys
 import warnings
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from aioquic.h3.connection import ErrorCode
-from aioquic.h3.events import HeadersReceived, WebTransportStreamDataReceived
 from aioquic.quic import events as quic_events
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from core_helpers.waiting import wait_for
+from relay_helpers.quic_hub import HubServer, start_quic_hub
+from relay_helpers.quic_server import LoopbackQuicServer, start_quic_server
 from relay_helpers.relay_hub import RelayHub, create_relay_hub
-from relay_helpers.wt_server import (
-    LoopbackWebTransportServer,
-    WebTransportServerSession,
-    start_webtransport_server,
-)
 
 from moq_core import MoqtObject
 from moq_core.transport import ReceiveStream, SendStream
 from mux_relay import (
-    ConnectingTransport,
     RelayError,
     RelaySubscriptionHandlers,
     connect_relay_publisher,
     connect_relay_subscriber,
 )
-from mux_relay.webtransport import WebTransportError, connect_webtransport
-from mux_relay.webtransport._client import WebTransportSession
-from mux_relay.webtransport._protocol import WebTransportProtocol
-from mux_relay.webtransport._udp import reports_refusals
-from mux_relay.webtransport._wire import encode_close_session_capsule
+from mux_relay.quic import connect_quic
+from mux_relay.quic._errors import WebTransportError
+from mux_relay.quic._protocol import QuicProtocol
+from mux_relay.quic._udp import open_socket, reports_refusals
 
 NAMESPACE = ["loopback", "data"]
 
 
 @pytest.fixture
-async def loopback() -> AsyncIterator[tuple[LoopbackWebTransportServer, RelayHub, list[WebTransportServerSession]]]:
-    hub = create_relay_hub()
-    sessions: list[WebTransportServerSession] = []
-
-    def on_session(session: WebTransportServerSession) -> None:
-        sessions.append(session)
-
-        if session.path.startswith("/publish"):
-            hub.serve_publisher(session)
-        else:
-            hub.serve_subscriber(session)
-
-    server = await start_webtransport_server(on_session)
+async def hub() -> AsyncIterator[tuple[RelayHub, HubServer, HubServer]]:
+    relay = create_relay_hub()
+    servers = await start_quic_hub(relay)
 
     try:
-        yield server, hub, sessions
+        yield relay, servers.publishers, servers.subscribers
     finally:
-        hub.destroy()
-        server.close()
-        await asyncio.sleep(0.05)
-
-
-def _hub_on_session(hub: RelayHub):
-    def on_session(session: WebTransportServerSession) -> None:
-        if session.path.startswith("/publish"):
-            hub.serve_publisher(session)
-        else:
-            hub.serve_subscriber(session)
-
-    return on_session
-
-
-def factory_for(server: LoopbackWebTransportServer):
-    def create_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
-        return connect_webtransport(url, protocols, configuration=server.client_configuration())
-
-    return create_transport
-
-
-class TestLoopback:
-    async def test_negotiates_the_moqt_protocol_over_a_real_webtransport_session(
-        self, loopback: tuple[LoopbackWebTransportServer, RelayHub, list[WebTransportServerSession]]
-    ) -> None:
-        server, _, sessions = loopback
-        created = connect_webtransport(
-            server.url_for("/subscribe?jwt=test"), ["moqt-20"], configuration=server.client_configuration()
-        )
-        await asyncio.wait_for(created.ready, 5)
-        transport: Any = created.transport
-
-        assert transport.protocol_id == "moqt-20"
-        await wait_for(lambda: len(sessions) == 1)
-        assert sessions[0].path == "/subscribe?jwt=test"
-        assert sessions[0].protocol_id == "moqt-20"
-
-        transport.close()
-        await asyncio.wait_for(transport.wait_closed(), 5)
-        # The peer observed the CLOSE_WEBTRANSPORT_SESSION capsule as a clean end.
-        await asyncio.wait_for(sessions[0].wait_closed(), 5)
-        assert sessions[0].close_info == (0, "")
-
-    async def test_closing_a_session_whose_connect_is_unanswered_fails_ready_at_once(self) -> None:
-        requests: list[dict[bytes, bytes]] = []
-        server = await start_webtransport_server(
-            lambda session: None, respond_to_connect=False, on_request=requests.append
-        )
-
-        try:
-            created = connect_webtransport(
-                server.url_for("/hung"), ["moqt-20"], configuration=server.client_configuration()
-            )
-            await wait_for(lambda: len(requests) == 1, timeout=5)  # the CONNECT reached the server; no answer is coming
-
-            created.transport.close()
-
-            with pytest.raises(WebTransportError, match="closed before the session was established"):
-                await asyncio.wait_for(created.ready, 2)
-
-            await asyncio.wait_for(created.transport.wait_closed(), 2)
-        finally:
-            server.close()
-
-    async def test_closing_an_unanswered_connect_rejects_ready_before_the_drain(self) -> None:
-        requests: list[dict[bytes, bytes]] = []
-        server = await start_webtransport_server(
-            lambda session: None, respond_to_connect=False, on_request=requests.append
-        )
-
-        try:
-            created = connect_webtransport(
-                server.url_for("/hung"), ["moqt-20"], configuration=server.client_configuration()
-            )
-            await wait_for(lambda: len(requests) == 1, timeout=5)  # the CONNECT reached the server; no answer yet
-
-            session = created.transport
-            assert isinstance(session, WebTransportSession)
-            session.close()
-
-            # In the same turn as close(), not once the connection drains: a peer that stopped
-            # acknowledging would otherwise hold the handshake for the whole drain bound.
-            assert session.ready.done()
-
-            with pytest.raises(WebTransportError, match="closed before the session was established"):
-                session.ready.result()
-
-            # A 2xx that crossed with the close must not revive a session that already rejects writes.
-            session._on_connect_headers(
-                HeadersReceived(
-                    headers=[(b":status", b"200"), (b"sec-webtransport-http3-draft", b"draft02")],
-                    stream_id=session.session_id,
-                    stream_ended=False,
-                )
-            )
-
-            with pytest.raises(WebTransportError, match="closed before the session was established"):
-                session.ready.result()
-
-            with pytest.raises(WebTransportError, match="WebTransport session closed"):
-                await session.create_unidirectional_stream()
-
-            await asyncio.wait_for(session.wait_closed(), 5)
-        finally:
-            server.close()
-
-    async def test_a_connection_dropped_before_the_connect_answer_fails_ready(self) -> None:
-        requests: list[dict[bytes, bytes]] = []
-        server = await start_webtransport_server(
-            lambda session: None, respond_to_connect=False, on_request=requests.append
-        )
-        created = connect_webtransport(
-            server.url_for("/hung"), ["moqt-20"], configuration=server.client_configuration()
-        )
-        await wait_for(lambda: len(requests) == 1, timeout=5)
-
-        # The server goes away: the QUIC connection terminates with an error, and so must `ready`.
-        server.close()
-
-        with pytest.raises(WebTransportError):
-            await asyncio.wait_for(created.ready, 5)
-
-    async def test_reports_a_rejected_connect(self) -> None:
-        # A plain HTTPS/QUIC server that is not there: the handshake never completes.
-        created = connect_webtransport("https://127.0.0.1:9/", ["moqt-20"])
-
-        with pytest.raises(WebTransportError, match="closed before the session was established"):
-            created.transport.close()
-            await created.ready
+        relay.destroy()
+        await servers.close()
 
 
 async def _drain_uni_streams(session: Any, into: list[int | BaseException]) -> None:
@@ -228,10 +83,8 @@ class TestSendBackpressure:
     counterpart of the live checks in the issues.
     """
 
-    async def _connect(self, server: LoopbackWebTransportServer) -> Any:
-        created = connect_webtransport(
-            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
-        )
+    async def _connect(self, server: LoopbackQuicServer) -> Any:
+        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         return created.transport
 
@@ -248,7 +101,7 @@ class TestSendBackpressure:
             sessions.append(session)
             drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
         sessions[0].impair(rate=64_000)  # 64 kB/s: about 15 s per MiB, far past the deadline below
@@ -279,7 +132,7 @@ class TestSendBackpressure:
         def on_session(session: Any) -> None:
             drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
 
         try:
@@ -305,7 +158,7 @@ class TestSendBackpressure:
             sessions.append(session)
             drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
         sessions[0].impair(rate=200_000)  # 200 kB/s: 512 KiB takes ~2.5 s, past the old drain window
@@ -321,12 +174,11 @@ class TestSendBackpressure:
         server.close()
         await asyncio.sleep(0.05)
 
-    async def test_close_sends_the_session_close_only_after_the_streams_are_acknowledged(self) -> None:
-        # The peer ends the session as soon as it reads CLOSE_WEBTRANSPORT_SESSION, resetting every
-        # stream of it, so a FIN still being retransmitted when the capsule arrives was lost: the flake
-        # of #209, a tail drop on the rate-capped link. Here a blackout makes both wait for the same
-        # retransmission, and the peer reads the capsule first; the capsule must not be sent until the
-        # stream is acknowledged, so the peer reads the stream to its end inside the session.
+    async def test_close_sends_the_application_close_only_after_the_streams_are_acknowledged(self) -> None:
+        # A CONNECTION_CLOSE ends the connection the moment the peer reads it, so a FIN still being
+        # retransmitted when the close arrives is lost: the flake of #209, a tail drop on the rate-capped
+        # link. Here a blackout makes both wait for the same retransmission; the close must not be sent
+        # until the stream is acknowledged, so the peer reads the stream to its end inside the session.
         sessions: list[Any] = []
         readers: list[asyncio.Task[None]] = []
         ended_at_fin: list[bool] = []
@@ -342,7 +194,7 @@ class TestSendBackpressure:
             sessions.append(session)
             readers.append(asyncio.ensure_future(read_while_open(session)))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
 
@@ -373,7 +225,7 @@ class TestSendBackpressure:
             sessions.append(session)
             drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
 
@@ -430,7 +282,7 @@ class TestSendBackpressure:
             sessions.append(session)
             readers.append(asyncio.ensure_future(accept(session)))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
 
@@ -468,16 +320,16 @@ class TestSendBackpressure:
             server.close()
             await asyncio.sleep(0.05)
 
-    async def test_per_stream_state_is_pruned_as_streams_finish(self) -> None:
+    async def test_per_stream_state_is_pruned_as_streams_finish(
+        self, hub: tuple[RelayHub, HubServer, HubServer]
+    ) -> None:
         # Every single-object write is one stream; finished streams must leave no permanent per-stream
         # state in the adapter's maps or in aioquic's live stream table (#4).
-        hub = create_relay_hub()
-        server = await start_webtransport_server(_hub_on_session(hub))
-        create_transport = factory_for(server)
+        _, publishers, subscribers = hub
         publisher = await connect_relay_publisher(
-            server.url_for("/publish"), namespace=NAMESPACE, create_transport=create_transport
+            publishers.url(), namespace=NAMESPACE, create_transport=publishers.factory()
         )
-        subscriber = await connect_relay_subscriber(server.url_for("/subscribe"), create_transport=create_transport)
+        subscriber = await connect_relay_subscriber(subscribers.url(), create_transport=subscribers.factory())
 
         try:
             track = publisher.register_track("events", write_timeout=10)
@@ -495,7 +347,6 @@ class TestSendBackpressure:
             baseline_sends = len(session._sends)
             baseline_owners = len(protocol.stream_owners)
             baseline_quic = len(protocol._quic._streams)
-            baseline_h3 = len(protocol.h3._stream)
 
             count = 200
 
@@ -512,16 +363,12 @@ class TestSendBackpressure:
                     len(session._sends) <= baseline_sends + 3
                     and len(protocol.stream_owners) <= baseline_owners + 3
                     and len(protocol._quic._streams) <= baseline_quic + 3
-                    and len(protocol.h3._stream) <= baseline_h3 + 3
                 )
 
             await wait_for(maps_are_back_at_baseline, timeout=10)
         finally:
             await asyncio.wait_for(publisher.close(), 10)
             subscriber.close()
-            hub.destroy()
-            server.close()
-            await asyncio.sleep(0.05)
 
     async def test_many_concurrent_slow_streams_drain_after_the_link_heals(self) -> None:
         # Hundreds of blocked single-object streams at once used to strand some forever; when the link
@@ -534,7 +381,7 @@ class TestSendBackpressure:
             sessions.append(session)
             drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
         impairment = sessions[0].impair(delay=0.05, jitter=0.02)
@@ -584,7 +431,7 @@ class TestSendBackpressure:
 
             tasks.append(asyncio.ensure_future(open_fin_then_read_the_reply()))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
         pair = await asyncio.wait_for(anext(transport.incoming_bidirectional_streams()), 5)
         assert await pair.readable.read() == b"hello"
@@ -599,11 +446,7 @@ class TestSendBackpressure:
 
         # Exactly what aioquic emits for a retransmitted FIN: its receiver reports end-of-stream again.
         session: Any = transport
-        session._on_stream_data(
-            WebTransportStreamDataReceived(
-                stream_id=stream_id, data=b"", session_id=session.session_id, stream_ended=True
-            )
-        )
+        session._on_stream_bytes(stream_id, b"", True)
 
         assert len(transport.incoming_bidirectional_streams()._items) == 0  # no phantom second stream
         assert session._sends[stream_id] is pair.writable  # the open send half was not replaced
@@ -631,7 +474,7 @@ class TestSendBackpressure:
             sessions.append(session)
             drainers.append(asyncio.ensure_future(_drain_uni_streams(session, received)))
 
-        server = await start_webtransport_server(on_session)
+        server = await start_quic_server(on_session)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
         sessions[0].impair(paused=True)
@@ -665,7 +508,7 @@ class TestCancelledHandshake:
         loop.set_exception_handler(lambda _loop, context: errors.append(context))
         try:
             connection = QuicConnection(configuration=QuicConfiguration(is_client=True))
-            protocol = WebTransportProtocol(connection)
+            protocol = QuicProtocol(connection)
             waiting = asyncio.create_task(protocol.wait_connected())
             await asyncio.sleep(0)
             assert protocol._connected_waiter is not None
@@ -694,15 +537,13 @@ class TestKeepalive:
 
     @pytest.fixture(autouse=True)
     def _short_interval(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from mux_relay.webtransport import _quic_protocol as _protocol
+        from mux_relay.quic import _protocol
 
         assert _protocol._KEEPALIVE_INTERVAL == 5.0
         monkeypatch.setattr(_protocol, "_KEEPALIVE_INTERVAL", self.INTERVAL)
 
-    async def _connect(self, server: LoopbackWebTransportServer) -> tuple[Any, list[float]]:
-        created = connect_webtransport(
-            server.url_for("/idle"), ["moqt-20"], configuration=server.client_configuration()
-        )
+    async def _connect(self, server: LoopbackQuicServer) -> tuple[Any, list[float]]:
+        created = connect_quic(server.url_for("/idle"), ["moqt-20"], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         transport: Any = created.transport
         protocol = transport._protocol
@@ -719,7 +560,7 @@ class TestKeepalive:
 
     async def test_an_idle_connection_pings_after_the_interval_without_sending(self) -> None:
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
+        server = await start_quic_server(sessions.append)
         transport, pings = await self._connect(server)
         protocol = transport._protocol
 
@@ -736,7 +577,7 @@ class TestKeepalive:
 
     async def test_a_connection_that_keeps_sending_sends_no_ping(self) -> None:
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
+        server = await start_quic_server(sessions.append)
         transport, pings = await self._connect(server)
 
         try:
@@ -754,7 +595,7 @@ class TestKeepalive:
 
     async def test_close_leaves_no_keepalive_timer_or_resource_warning(self) -> None:
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
+        server = await start_quic_server(sessions.append)
         transport, pings = await self._connect(server)
         protocol = transport._protocol
         assert protocol._keepalive is not None
@@ -776,7 +617,7 @@ class TestKeepalive:
 
     async def test_a_server_connection_does_not_ping(self) -> None:
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
+        server = await start_quic_server(sessions.append)
         transport, _ = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
 
@@ -862,10 +703,8 @@ class TestClosedPort:
 
     async def test_the_socket_stays_unconnected_and_stops_reporting_after_the_handshake(self) -> None:
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
-        created = connect_webtransport(
-            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
-        )
+        server = await start_quic_server(sessions.append)
+        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         transport: Any = created.transport
         sock = transport._protocol._transport.get_extra_info("socket")
@@ -883,7 +722,7 @@ class TestClosedPort:
 
     @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
     async def test_a_refused_connect_leaves_no_error_report_to_spin_on(self) -> None:
-        created = connect_webtransport(f"https://127.0.0.1:{_closed_udp_port()}", ["moqt-20"])
+        created = connect_quic(f"https://127.0.0.1:{_closed_udp_port()}", ["moqt-20"])
 
         with pytest.raises(WebTransportError):
             await asyncio.wait_for(created.ready, 2)
@@ -905,7 +744,7 @@ class TestClosedPort:
     async def test_an_error_ignored_during_the_handshake_is_drained(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as blackhole:
             blackhole.bind(("127.0.0.1", 0))
-            created = connect_webtransport(f"https://127.0.0.1:{blackhole.getsockname()[1]}", ["moqt-20"])
+            created = connect_quic(f"https://127.0.0.1:{blackhole.getsockname()[1]}", ["moqt-20"])
             transport: Any = created.transport
             await wait_for(lambda: transport._transport_protocol() is not None, timeout=2)
             protocol = transport._transport_protocol()
@@ -938,10 +777,8 @@ class TestClosedPort:
 
     async def test_a_refusal_after_the_handshake_changes_nothing(self) -> None:
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
-        created = connect_webtransport(
-            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
-        )
+        server = await start_quic_server(sessions.append)
+        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         transport: Any = created.transport
         protocol = transport._protocol
@@ -964,10 +801,8 @@ class TestClosedPort:
 class TestReceivePruning:
     """Per-stream state for peer-initiated streams is dropped once aioquic discards the stream."""
 
-    async def _connect(self, server: LoopbackWebTransportServer) -> Any:
-        created = connect_webtransport(
-            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
-        )
+    async def _connect(self, server: LoopbackQuicServer) -> Any:
+        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         return created.transport
 
@@ -977,7 +812,6 @@ class TestReceivePruning:
         return (
             len(transport._receives),
             len(protocol.stream_owners),
-            len(protocol.h3._stream),
             len(protocol._quic._streams),
             len(protocol._settling),
         )
@@ -986,7 +820,7 @@ class TestReceivePruning:
         # Hundreds of received groups must not grow the adapter's maps, the settle map or the FIN
         # sweep: a peer-initiated unidirectional stream has no send half of ours to finish.
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
+        server = await start_quic_server(sessions.append)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
         protocol = transport._protocol
@@ -1027,7 +861,7 @@ class TestReceivePruning:
         # The application stops reading (STOP_SENDING) and the peer's FIN crosses with it. The half
         # ignores the FIN, but the stream is over as far as QUIC is concerned, so its entries must go.
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
+        server = await start_quic_server(sessions.append)
         transport = await self._connect(server)
         await wait_for(lambda: len(sessions) == 1, timeout=5)
         protocol = transport._protocol
@@ -1051,7 +885,6 @@ class TestReceivePruning:
                 lambda: (
                     stream_id not in transport._receives
                     and stream_id not in protocol.stream_owners
-                    and stream_id not in protocol.h3._stream
                     and stream_id not in protocol._quic._streams
                     and stream_id not in protocol._settling
                 ),
@@ -1069,15 +902,13 @@ class TestReceiveBatching:
 
     async def test_waiting_datagrams_share_one_transmit_and_are_still_acknowledged(self) -> None:
         sessions: list[Any] = []
-        server = await start_webtransport_server(sessions.append)
-        created = connect_webtransport(
-            server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration()
-        )
+        server = await start_quic_server(sessions.append)
+        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         transport: Any = created.transport
         await wait_for(lambda: len(sessions) == 1, timeout=5)
-        protocol: WebTransportProtocol = transport._protocol
-        peer: WebTransportProtocol = sessions[0]._protocol
+        protocol: QuicProtocol = transport._protocol
+        peer: QuicProtocol = sessions[0]._protocol
         udp: Any = protocol._transport  # a selector datagram transport, which can pause its reads
         assert udp is not None
         received: list[bytes] = []
@@ -1135,180 +966,54 @@ class TestReceiveBatching:
             await asyncio.sleep(0.05)
 
 
-class TestPeerRefusal:
-    """The peer refuses a session the way moq-relay 0.15.8 refuses credentials (#14).
+class TestSocket:
+    """The client's UDP socket: unconnected, so the relay can migrate, and reporting refusals for the handshake."""
 
-    After ``:status 200`` and the client's SETUP, the relay sends CLOSE_WEBTRANSPORT_SESSION (code
-    0x2, "unauthorized") with FIN on the CONNECT stream, FIN on its HTTP/3 control stream, and
-    STOP_SENDING on the client's streams, all in one flight. aioquic on its own turns the control-stream
-    FIN into a 0x104 connection close and drops the capsule; the adapter must surface the capsule.
-    """
-
-    @staticmethod
-    async def _refuse(session: WebTransportServerSession, order: str) -> None:
-        # Like the relay, answer only once the client's control stream (its SETUP) has arrived.
-        async for _control in session.incoming_unidirectional_streams():
-            break
-
-        protocol = session._protocol
-        assert protocol is not None
-        quic = protocol._quic
-        control_stream_id = protocol.h3._local_control_stream_id
-        assert control_stream_id is not None
-
-        def send_capsule() -> None:
-            protocol.h3.send_data(session.session_id, encode_close_session_capsule(2, "unauthorized"), end_stream=True)
-
-        def end_control_stream() -> None:
-            quic.send_stream_data(control_stream_id, b"", end_stream=True)
-
-        def stop_client_streams() -> None:
-            for stream_id in list(session._receives):
-                quic.stop_stream(stream_id, 0)
-
-        if order == "control stream first":  # two datagrams, in this order
-            end_control_stream()
-            stop_client_streams()
-            protocol.transmit()
-            send_capsule()
-            protocol.transmit()
-        elif order == "capsule first":  # two datagrams, in this order
-            send_capsule()
-            protocol.transmit()
-            stop_client_streams()
-            end_control_stream()
-            protocol.transmit()
-        elif order == "one datagram":
-            send_capsule()
-            stop_client_streams()
-            end_control_stream()
-            protocol.transmit()
-        elif order == "control stream only":  # a genuine control-stream closure: no capsule follows
-            end_control_stream()
-            protocol.transmit()
-        else:
-            raise AssertionError(order)
-
-    async def _serve_refusing(self, order: str) -> tuple[LoopbackWebTransportServer, list[WebTransportSession]]:
-        refusals: list[asyncio.Task[None]] = []
-        server = await start_webtransport_server(
-            lambda session: refusals.append(asyncio.ensure_future(self._refuse(session, order)))
-        )
-        self._refusals = refusals  # keep the tasks referenced
-        return server, []
-
-    @staticmethod
-    def _capturing_factory(server: LoopbackWebTransportServer, created: list[WebTransportSession]):
-        def create_transport(url: str, protocols: Sequence[str]) -> ConnectingTransport:
-            connecting = connect_webtransport(url, protocols, configuration=server.client_configuration())
-            assert isinstance(connecting.transport, WebTransportSession)
-            created.append(connecting.transport)
-            return connecting
-
-        return create_transport
-
-    @pytest.mark.parametrize("order", ["control stream first", "capsule first", "one datagram"])
-    async def test_a_refused_subscriber_reports_unauthorized(self, order: str) -> None:
-        server, created = await self._serve_refusing(order)
-
-        try:
-            with pytest.raises(RelayError) as failure:
-                await connect_relay_subscriber(
-                    server.url_for("/subscribe"),
-                    create_transport=self._capturing_factory(server, created),
-                    connect_timeout=5,
-                )
-
-            error = failure.value
-            assert (error.code, error.phase) == ("UNAUTHORIZED", "connecting")
-            assert (
-                str(error) == "Relay refused the connection's credentials: unauthorized (session closed with code 0x2)"
-            )
-            cause = error.__cause__
-            assert isinstance(cause, WebTransportError)
-            assert (cause.peer_closed, cause.code, cause.reason) == (True, 2, "unauthorized")
-
-            session = created[0]
-            assert session.close_info == (2, "unauthorized")
-            protocol = session._protocol
-            assert protocol is not None
-
-            if order == "control stream first":
-                # The FIN really was held for the capsule, and the capsule settled it.
-                assert protocol._control_stream_fin is not None
-                assert protocol._control_stream_fin.cancelled()
-
-            # The client closed the connection itself, cleanly: the held FIN never became a 0x104 close.
-            await asyncio.wait_for(protocol.terminated_event.wait(), 5)
-            assert protocol.terminated is not None
-            assert protocol.terminated.error_code == ErrorCode.H3_NO_ERROR
-        finally:
-            server.close()
-
-    async def test_a_refused_publisher_reports_unauthorized(self) -> None:
-        server, created = await self._serve_refusing("control stream first")
-
-        try:
-            with pytest.raises(RelayError) as failure:
-                await connect_relay_publisher(
-                    server.url_for("/publish"),
-                    namespace=NAMESPACE,
-                    create_transport=self._capturing_factory(server, created),
-                    connect_timeout=5,
-                )
-
-            assert (failure.value.code, failure.value.phase) == ("UNAUTHORIZED", "connecting")
-        finally:
-            server.close()
-
-    async def test_a_control_stream_closed_without_a_capsule_still_fails_the_connection(self) -> None:
-        server, created = await self._serve_refusing("control stream only")
-
-        try:
-            with pytest.raises(RelayError) as failure:
-                await connect_relay_subscriber(
-                    server.url_for("/subscribe"),
-                    create_transport=self._capturing_factory(server, created),
-                    connect_timeout=5,
-                )
-
-            error = failure.value
-            assert (error.code, error.phase) == ("TRANSPORT_ERROR", "connecting")
-            assert "Closing control stream is not allowed (code 0x104)" in str(error)
-            cause = error.__cause__
-            assert isinstance(cause, WebTransportError)
-            assert not cause.peer_closed
-            assert cause.code == ErrorCode.H3_CLOSED_CRITICAL_STREAM
-        finally:
-            server.close()
-
-    async def test_a_session_closed_with_code_0x2_after_setup_reports_unauthorized(
-        self, loopback: tuple[LoopbackWebTransportServer, RelayHub, list[WebTransportServerSession]]
+    def test_socket_fallback_picks_an_ipv4_address_when_ipv6_sockets_are_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        server, _, sessions = loopback
-        subscriber = await connect_relay_subscriber(
-            server.url_for("/subscribe"), create_transport=factory_for(server), connect_timeout=5
-        )
-        await wait_for(lambda: len(sessions) == 1)
+        import socket as socket_module
 
-        sessions[0].close(2, "unauthorized")
-        closed = await asyncio.wait_for(subscriber.closed, 5)
+        real_socket = socket_module.socket
 
-        assert isinstance(closed.error, RelayError)
-        assert (closed.error.code, closed.error.phase) == ("UNAUTHORIZED", "connection")
+        def no_ipv6(family: int = socket_module.AF_INET, *args: Any, **kwargs: Any) -> Any:
+            if family == socket_module.AF_INET6:
+                raise OSError("IPv6 is unavailable")
 
-    async def test_a_session_closed_with_another_code_is_a_transport_error(
-        self, loopback: tuple[LoopbackWebTransportServer, RelayHub, list[WebTransportServerSession]]
-    ) -> None:
-        server, _, sessions = loopback
-        subscriber = await connect_relay_subscriber(
-            server.url_for("/subscribe"), create_transport=factory_for(server), connect_timeout=5
-        )
-        await wait_for(lambda: len(sessions) == 1)
+            return real_socket(family, *args, **kwargs)
 
-        sessions[0].close(0x3, "protocol violation")
-        closed = await asyncio.wait_for(subscriber.closed, 5)
+        monkeypatch.setattr(socket_module, "socket", no_ipv6)
+        # The resolver put an IPv6 address first; the IPv4 socket must not be pointed at it.
+        sock, address = open_socket([("2001:db8::1", 443, 0, 0), ("192.0.2.1", 443)])
 
-        assert isinstance(closed.error, RelayError)
-        assert (closed.error.code, closed.error.phase) == ("TRANSPORT_ERROR", "connection")
-        assert str(closed.error) == "peer closed the WebTransport session: protocol violation (code 0x3)"
+        try:
+            assert sock.family == socket_module.AF_INET
+            assert address == ("192.0.2.1", 443)
+            _assert_unconnected_and_reporting(sock)
+        finally:
+            sock.close()
+
+        with pytest.raises(WebTransportError, match="only to IPv6"):
+            open_socket([("2001:db8::1", 443, 0, 0)])
+
+    def test_dual_stack_socket_maps_ipv4_addresses(self) -> None:
+        sock, address = open_socket([("192.0.2.1", 443)])
+
+        if sock.family != socket.AF_INET6:
+            # An IPv4 address needs no IPv6 socket: without one, open_socket falls back to IPv4.
+            sock.close()
+            pytest.skip("no IPv6 socket support on this host")
+
+        try:
+            assert address == ("::ffff:192.0.2.1", 443, 0, 0)
+            _assert_unconnected_and_reporting(sock)
+        finally:
+            sock.close()
+
+
+def _assert_unconnected_and_reporting(sock: Any) -> None:
+    # Unconnected, so the kernel picks the source address per packet; ICMP reports on for the handshake.
+    with pytest.raises(OSError):
+        sock.getpeername()
+
+    assert reports_refusals(sock) is sys.platform.startswith("linux")
