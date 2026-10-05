@@ -17,7 +17,7 @@ import {
   STREAM_RESET_CODE,
   type TrackNamespace,
 } from '../protocol/control-messages.js';
-import { SESSION_ERROR } from '../protocol/errors.js';
+import { MoqtProtocolError, SESSION_ERROR } from '../protocol/errors.js';
 import type { MoqtObject } from '../protocol/object-stream.js';
 import {
   CLOSE_END_ACK_TIMEOUT_MS,
@@ -524,6 +524,49 @@ describe('createMoqtPublishSession', () => {
       expect(subscribe.received).toHaveLength(1);
     });
     expect(subscribe.received[0]).toMatchObject({ kind: 'subscribe-ok', trackAlias: 11, trackProperties });
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it('refuses a SUBSCRIBE whose SUBSCRIBE_OK cannot be encoded with INTERNAL_ERROR', async () => {
+    const failures: { requestId: number; trackName: string; error: unknown }[] = [];
+    const { pair, session, subscriber } = makePublishHarness({ onSubscribeFailed: (info) => failures.push(info) });
+
+    await session.ready;
+    // Two bytes past the limit the SDK enforces at registration, which the core does not check: with
+    // this core's largest alias, an 8-byte varint, SUBSCRIBE_OK overflows its frame.
+    session.registerTrack({
+      trackNamespace: NAMESPACE,
+      trackName: 'video',
+      trackProperties: [{ type: 1, value: new Uint8Array(MAX_TRACK_PROPERTIES_LENGTH - 2) }],
+    });
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'audio' });
+
+    const subscribe = await rawSubscribe(pair.server, 'video', Number.MAX_SAFE_INTEGER);
+
+    // A local failure is not a peer cancel: the peer gets a prompt REQUEST_ERROR, then the FIN.
+    await vi.waitFor(() => {
+      expect(subscribe.ended()).toBe(true);
+    });
+    expect(subscribe.failure()).toBeUndefined();
+    expect(subscribe.received).toHaveLength(1);
+    expect(subscribe.received[0]).toMatchObject({
+      kind: 'request-error',
+      errorCode: REQUEST_ERROR_CODE.INTERNAL_ERROR,
+      reason: 'could not encode SUBSCRIBE_OK',
+    });
+    expect(failures.map(({ requestId, trackName }) => ({ requestId, trackName }))).toEqual([
+      { requestId: Number.MAX_SAFE_INTEGER, trackName: 'video' },
+    ]);
+    expect(failures[0]?.error).toBeInstanceOf(MoqtProtocolError);
+
+    // The session stays up and keeps serving: the other track still answers SUBSCRIBE_OK.
+    const audio = await rawSubscribe(pair.server, 'audio', 11);
+
+    await vi.waitFor(() => {
+      expect(audio.received).toHaveLength(1);
+    });
+    expect(audio.received[0]).toMatchObject({ kind: 'subscribe-ok', trackAlias: 11 });
     session.destroy();
     subscriber.destroy();
   });

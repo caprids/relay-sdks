@@ -95,6 +95,12 @@ export interface MoqtPublishSessionCallbacks {
   /** A subscription ended (the peer's FIN or reset, or our PUBLISH_DONE). */
   onSubscribeEnd?(info: { requestId: number }): void;
   /**
+   * The session could not build its SUBSCRIBE_OK for a SUBSCRIBE to a registered track, and answered REQUEST_ERROR
+   * `INTERNAL_ERROR` instead. The track stays registered and the session stays up, but a cause that lies in the track
+   * (its properties) fails every subscription to it. `error` is the encoder's failure.
+   */
+  onSubscribeFailed?(info: { requestId: number; trackName: string; error: unknown }): void;
+  /**
    * A track's effective alias binding changed. The most recent live subscription wins the binding (a replaced one ends
    * with PUBLISH_DONE `TRACK_ENDED` — a clean end for that request, covering the peer's resubscribe races), and only
    * while its Forward State
@@ -324,6 +330,23 @@ function trackKey(namespace: TrackNamespace, name: string): string {
 
 function isNamespacePrefix(prefix: TrackNamespace, namespace: TrackNamespace): boolean {
   return prefix.length <= namespace.length && prefix.every((part, i) => namespace[i] === part);
+}
+
+/** Answer a request with REQUEST_ERROR and close it both ways. */
+async function refuse(
+  writer: WritableStreamDefaultWriter<Uint8Array>,
+  reader: StreamReader,
+  code: number,
+  reason: string
+): Promise<void> {
+  try {
+    await writer.write(encodeRequestError(code, reason));
+    await writer.close();
+  } catch {
+    // Peer cancelled.
+  }
+
+  await reader.cancel();
 }
 
 // =============================================================================
@@ -1107,14 +1130,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     const writer = stream.writable.getWriter();
 
     if (!track || track.done) {
-      try {
-        await writer.write(encodeRequestError(REQUEST_ERROR_CODE.DOES_NOT_EXIST, 'unknown track'));
-        await writer.close();
-      } catch {
-        // Peer cancelled.
-      }
-
-      await reader.cancel();
+      await refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, 'unknown track');
       return;
     }
 
@@ -1122,6 +1138,23 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // track alias — binding one alias to two live request IDs is a
     // session-fatal Duplicate on moq-lite-rs.
     const trackAlias = subscribe.requestId;
+
+    // Encoded before the write's guard: only a failed write is the peer
+    // cancelling. A response this side cannot build (the properties
+    // overflow the message, say) is refused promptly, so the peer is not
+    // left waiting on a request that never gets an answer.
+    let subscribeOk: Uint8Array;
+    try {
+      subscribeOk = encodeSubscribeOk(trackAlias, {}, track.trackProperties);
+    } catch (error) {
+      // The encoder refused the response; the peer did nothing wrong.
+      await refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, 'could not encode SUBSCRIBE_OK');
+
+      if (!this.#destroyed) {
+        this.#callbacks.onSubscribeFailed?.({ requestId: subscribe.requestId, trackName: track.trackName, error });
+      }
+      return;
+    }
     let settleRequest!: () => void;
     const requestEnded = new Promise<void>((resolve) => {
       settleRequest = resolve;
@@ -1156,7 +1189,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     track.subscribers.push(subscriber);
 
     try {
-      await writer.write(encodeSubscribeOk(trackAlias, {}, track.trackProperties));
+      await writer.write(subscribeOk);
       subscriber.accepted = true;
     } catch {
       // Peer cancelled before the response landed.
