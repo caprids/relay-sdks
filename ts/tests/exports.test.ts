@@ -23,6 +23,8 @@ describe('public vocabulary', () => {
       'SubscriptionRequestError',
       'connectRelayPublisher',
       'connectRelaySubscriber',
+      'connectSupervisedPublisher',
+      'connectSupervisedSubscriber',
       'readJSON',
       'readText',
     ]);

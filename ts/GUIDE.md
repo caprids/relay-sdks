@@ -356,6 +356,54 @@ times in 40 on the publisher's relay and every time on another relay
 namespace has gone since; wait for its next `announced` rather than retrying on a timer. See the
 [discovery contract](../spec/behavior.md#discovery).
 
+## Stay connected: supervised connections
+
+`connectRelayPublisher` and `connectRelaySubscriber` never reconnect or resubscribe. A live
+application that has to survive network loss can use the supervisors instead. A browser's QUIC
+connection ends after about 5 s without connectivity ([browser transport limits](#browser-transport-limits)).
+The supervisors take the same connection options and resolve once their first connection is up.
+
+```js
+import { connectSupervisedPublisher, connectSupervisedSubscriber } from '@mux/relay';
+
+const publisher = await connectSupervisedPublisher({
+  url,
+  namespace: ['room', participantId], // the root: each connection serves root + one generation field
+  getToken,
+  onStatus: (status, error) => console.log('publisher', status, error),
+});
+const video = publisher.registerTrack({ track: 'video' }); // the same writer across reconnects
+
+const subscriber = await connectSupervisedSubscriber({ url, getToken });
+subscriber.want(
+  'alice/video',
+  { namespace: ['room', 'alice'], track: 'video', generations: true, staleAfterMs: 3000 },
+  {
+    onObject: (object) => decoder.push(object),
+    onRestarted: () => decoder.reset(), // the next object starts a new subscription; the gap is not filled
+    onError: (error) => console.error('gave up on alice/video', error),
+  },
+);
+```
+
+The supervised publisher reconnects with backoff (from 500 ms up to 10 s) whenever its connection
+ends. Each connection is a new **generation** with its own namespace, the root plus a field that
+sorts by start time. Each one gets a fresh namespace because moq-relay 0.17.0 never hands existing
+subscriptions to a reconnected publisher, and can keep serving a dead one's cached objects
+([publisher recovery](../spec/publisher-recovery.md)). Every registered track is registered again on
+each generation. Writes are never replayed: while no generation is up, a write fails at once with
+`RECONNECTING`, and an operation the connection's end interrupted fails the same way, so write the
+next object, or the next keyframe, when it is live again.
+
+`want(key, ...)` keeps one track subscribed until `unwant(key)`. It retries the announce race,
+resubscribes after `PUBLISH_DONE` or a rejection a wait may fix (from 250 ms up to 8 s), and moves
+to the replacement connection. With `staleAfterMs`, it also resubscribes a track that went silent.
+Set that only for tracks that are never silent while live. With `generations: true`, it discovers
+the publisher's root and stays on the newest generation, moving as soon as a newer one is
+announced, with no application channel. Rejections no wait fixes, such as credentials or a
+malformed request, reach `onError`, and the want stops. See the
+[supervised contract](../spec/behavior.md#supervised-connections).
+
 ## Publishing lifecycle
 
 A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate
@@ -374,11 +422,12 @@ settles when that announce has reached the wire: the relay acknowledges nothing 
 subscribes to the namespace about a round trip later. A subscribe that arrives before then is
 rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-relay 0.15.8 and later;
 relays through 0.15.1 answered `404 Broadcast not found`). A subscriber on another relay of the
-cluster waits longer still, until its relay learns the route. The SDK does not retry a subscribe, so
-a subscriber either waits for [discovery](#discover-namespaces) to report the namespace `announced`,
-which avoids the race, or retries that rejection within its own budget (the demo and the live smoke
-test share `examples/shared/announce-race.js` for it). A page that owns both sides awaits
-`announced` before subscribing, which narrows the race but does not close it. `announced` stays pending while no solicitation covers the namespace, and the
+cluster waits longer still, until its relay learns the route. `subscribe()` does not retry, so a
+subscriber either waits for [discovery](#discover-namespaces) to report the namespace `announced`,
+which avoids the race, or retries that rejection within its own budget, or uses a supervised
+subscriber's `want`, which retries it for you (the demo and the live smoke test do). A page that
+owns both sides awaits `announced` before subscribing, which narrows the race but does not close
+it. `announced` stays pending while no solicitation covers the namespace, and the
 connection's closure rejects it if that comes first; it is pre-handled, so nobody has to await it.
 
 Each write copies its bytes and sends one independent group containing one object. The payload is a

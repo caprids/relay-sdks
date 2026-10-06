@@ -50,6 +50,15 @@ without a row here is a bug.
 | Consume one subscription as an async iterator | `subscriber.subscribeEvents(options)` returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
 | One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
+| Open a publisher that reconnects, one generation per connection | `connectSupervisedPublisher(options)` returns `SupervisedPublisher` | `connect_supervised_publisher(url, namespace=...)` returns `SupervisedPublisher` (planned) |
+| Open a subscriber that reconnects and keeps tracks subscribed | `connectSupervisedSubscriber(options)` returns `SupervisedSubscriber` | `connect_supervised_subscriber(url, ...)` returns `SupervisedSubscriber` (planned) |
+| One supervised publisher connection and the namespace it serves | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `onGeneration(info)` | `publisher.generation`, `on_generation(info)` (planned) |
+| Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | the same strings, to `on_status(status, error)` (planned) |
+| Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, handlers, ...)`, `subscriber.unwant(key)` (planned) |
+| Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` (planned) |
+| Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (planned) |
+| A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason` | `on_restarted(info)` (planned) |
+| Backoff bounds between attempts | `SupervisionBackoff` (`initialDelayMs`, `maxDelayMs`), given as `reconnect` or `retry` | `reconnect=`, `retry=` (planned) |
 | The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
@@ -272,6 +281,29 @@ the relay's state interchangeably); `watchNamespaces()` (a verb, where every oth
 for what it yields); `subscribeNamespace()` (the core's protocol name, which `trackSource` already
 keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
 message).
+
+## Supervised connections: `connectSupervised*`, generation, `want`, `onRestarted`
+
+The supervisors are opt-in policy over the primitives ([behavior.md](behavior.md#supervised-connections)).
+Their entry points keep the `connect` verb, because each resolves once a connection is up, and add
+`Supervised` instead of an option on `connectRelay*`: they return different types (a `generation`
+and `want`, which the primitives lack), and one function with two return shapes would hide that.
+They live in `@mux/relay` and `mux_relay` themselves, not in a separate package.
+
+**Generation** names one supervised publisher connection and the namespace field it serves. Each
+reconnect is a new publisher to the relay, and the word says so: it is not a session, an epoch, or a
+reconnect count.
+
+`want(key, ...)` is declarative: it states which track the application wants, keyed by a name the
+application chooses, and the supervisor owns how that stays true. `unwant` undoes it. Not adopted:
+`subscribe` (the primitive's verb, which returns one subscription that ends); `follow` and `watch`
+(they suggest observing without receiving data); `ensureSubscribed` (a verb phrase for a standing
+wish).
+
+`onRestarted` tells a decoder that the next object starts a new subscription. It is named for that
+fact rather than for the cause, which `reason` carries. `RECONNECTING` names the publisher's state
+when a write fails between generations, and keeps it apart from `CLOSED`, which retires a frame
+writer.
 
 ## Subscription readiness and termination: `RelaySubscription`, `subscribed`, `ended`
 
