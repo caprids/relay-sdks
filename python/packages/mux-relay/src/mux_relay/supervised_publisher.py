@@ -30,6 +30,7 @@ from ._supervision import (
     is_setup_failure,
     new_generation,
     rotate_before_option,
+    rotation_deadline,
     rotation_due,
     supervisor_closed,
     wait_any,
@@ -69,8 +70,12 @@ class _Generation:
     """Set once the connection ended or the supervisor stopped using it."""
     up_at: float = 0.0
     """When it went live, on the loop's clock, for resetting the backoff."""
+    rotate_at: float | None = None
+    """When it is due to rotate, on the loop's clock; ``None`` for an unknown expiry."""
     busy: int = 0
     """Operations and open groups running on it; a rotation closes it only once none are left."""
+    group_holds: set[Callable[[], None]] = field(default_factory=set)
+    """The holds of groups open on it, released when it ends: the connection closed them."""
     idle: asyncio.Future[None] | None = None
     """Set by a rotation waiting for it; resolved whenever ``busy`` drops to zero."""
 
@@ -245,11 +250,14 @@ class _SupervisedTrackWriter(RelayTrackWriter):
 
             def release() -> None:
                 self._group_holds.discard(release)
+                generation.group_holds.discard(release)
                 hold()
 
             self._group_holds.add(release)
-            # The connection's end closes the group under the application, which may never close it itself.
-            generation.publisher.closed.add_done_callback(lambda _: release())
+            generation.group_holds.add(release)
+            # Opened under a connection that has ended meanwhile: nothing will release it on the end.
+            if generation.ended:
+                release()
             return _SupervisedGroupWriter(group, self, generation, writer, release)
 
         return await self._on_live(open_on)
@@ -765,11 +773,19 @@ async def _supervise_relay_publisher(
             with contextlib.suppress(Exception):
                 await publisher.close()
             return None
-        live = _Generation(PublisherGeneration(generation, fields), publisher, up_at=loop.time())
+        live = _Generation(
+            PublisherGeneration(generation, fields),
+            publisher,
+            up_at=loop.time(),
+            rotate_at=rotation_deadline(publisher.expires_at, rotate_margin),
+        )
 
         # Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
         def mark_ended(_: object, live: _Generation = live) -> None:
             live.ended = True
+            # The connection's end closed its groups under the application, which may never close them itself.
+            for release in list(live.group_holds):
+                release()
 
         publisher.closed.add_done_callback(mark_ended)
         return live
@@ -834,7 +850,7 @@ async def _supervise_relay_publisher(
         settled = asyncio.ensure_future(moved_and_idle())
         _observe(settled)
         # So does the next generation's own rotation falling due, for a credential shorter than the overlap.
-        next_due = asyncio.ensure_future(rotation_due(nxt.publisher.expires_at, rotate_margin, loop.create_future()))
+        next_due = asyncio.ensure_future(rotation_due(nxt.rotate_at, loop.create_future()))
         _observe(next_due)
         try:
             # The next generation ending cuts the overlap short too: its tracks need the generation after it now.
@@ -867,9 +883,7 @@ async def _supervise_relay_publisher(
         while True:
             asked: asyncio.Future[None] = loop.create_future()
             state.rotation = asked
-            due = asyncio.ensure_future(
-                rotation_due(live.publisher.expires_at if automatic else None, rotate_margin, asked)
-            )
+            due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, asked))
             _observe(due)
             try:
                 await wait_any([stopping], settles=[live.publisher.closed, due])

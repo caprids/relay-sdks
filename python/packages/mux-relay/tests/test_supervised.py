@@ -1446,3 +1446,34 @@ async def test_rotates_a_short_lived_replacement_during_the_overlap_instead_of_l
     await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
     s.connections[1].subscriptions[0].accept()
     await until(lambda: len(s.connections) == 3, "the replacement rotated well within the 10 s overlap", 2.0)
+
+
+# ------------------------------------------------------------------ Codex pass 6 fixes (#261)
+
+
+async def test_keeps_a_replacements_rotation_deadline_from_when_it_connected_overlap_or_not(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    connections: list[FakeSubscriber] = []
+    connected_at: list[float] = []
+    lifetimes = [None, 0.6, 3600.0]
+    loop = asyncio.get_running_loop()
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        lifetime = lifetimes[len(connections)]
+        fake = FakeSubscriber(None if lifetime is None else _in(lifetime))
+        connections.append(fake)
+        connected_at.append(loop.time())
+        return fake
+
+    subscriber = await _supervise_relay_subscriber(connect, reconnect=FAST)
+    cleanup.append(subscriber.close)
+    subscriber.want("silent", ["room"], "silent", retry=FAST)
+    await until(lambda: len(connections[0].subscriptions) == 1, "subscribe")
+    connections[0].subscriptions[0].accept()  # silent: the overlap lasts until the replacement's own rotation
+    subscriber.rotate()
+    await until(lambda: len(connections) == 2 and len(connections[1].subscriptions) == 1, "resubscribe")
+    connections[1].subscriptions[0].accept()
+    await until(lambda: len(connections) == 3, "second rotation", 2.0)
+    # Half of the 600 ms credential: 300 ms after the replacement connected, not 300 ms plus half what was left.
+    assert connected_at[2] - connected_at[1] < 0.4

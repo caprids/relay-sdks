@@ -54,6 +54,7 @@ from ._supervision import (
     is_setup_failure,
     on_cancel,
     rotate_before_option,
+    rotation_deadline,
     rotation_due,
     supervisor_closed,
     wait_any,
@@ -133,6 +134,8 @@ class _Connection:
     """Attempts and handoffs still using this connection; a rotation closes it once none are left."""
     idle: asyncio.Future[None] | None = None
     """Set by a rotation; resolved whenever ``holds`` drops to zero."""
+    rotate_at: float | None = None
+    """When it is due to rotate, on the loop's clock; ``None`` for an unknown expiry."""
 
     def hold(self) -> Callable[[], None]:
         """Count a use of this connection until the returned release runs."""
@@ -510,7 +513,9 @@ async def _supervise_relay_subscriber(
         if state.stopped:
             subscriber.close()
             return None
-        live = _Connection(subscriber, CancellationToken())
+        live = _Connection(
+            subscriber, CancellationToken(), rotate_at=rotation_deadline(subscriber.expires_at, rotate_margin)
+        )
         # Cancelled the moment the connection ends, so a rotation in progress sees it and falls back to reconnecting.
         subscriber.closed.add_done_callback(lambda _: live.ended.cancel())
         return live
@@ -572,7 +577,7 @@ async def _supervise_relay_subscriber(
             old.idle.set_result(None)
         # The replacement ending cuts the overlap short too: the wants on it need the next connection now. So
         # does its own rotation falling due, for a credential shorter than the overlap.
-        next_due = asyncio.ensure_future(rotation_due(nxt.subscriber.expires_at, rotate_margin, loop.create_future()))
+        next_due = asyncio.ensure_future(rotation_due(nxt.rotate_at, loop.create_future()))
         _observe(next_due)
         try:
             await wait_any(
@@ -595,9 +600,7 @@ async def _supervise_relay_subscriber(
         while True:
             asked: asyncio.Future[None] = loop.create_future()
             state.rotation = asked
-            due = asyncio.ensure_future(
-                rotation_due(live.subscriber.expires_at if automatic else None, rotate_margin, asked)
-            )
+            due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, asked))
             _observe(due)
             try:
                 await wait_any([lifetime], settles=[live.subscriber.closed, due])

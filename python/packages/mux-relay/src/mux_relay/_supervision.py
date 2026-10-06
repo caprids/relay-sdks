@@ -108,13 +108,23 @@ def rotation_delay(expires_at: datetime | None, rotate_before: float, now: float
     return max(0.0, left - rotate_before, left / 2)
 
 
-async def rotation_due(expires_at: datetime | None, rotate_before: float, manual: asyncio.Future[None]) -> None:
-    """Return once a connection should be replaced: its rotation delay passed, or ``manual`` resolved.
+def rotation_deadline(expires_at: datetime | None, rotate_before: float) -> float | None:
+    """When, on the event loop's clock, a connection whose credential expires at ``expires_at`` is replaced.
 
-    With no known expiry only ``manual`` ends the wait. Cancel the task to stop waiting.
+    See :func:`rotation_delay`. Computed once, when it connects, so time spent in a rotation's
+    overlap does not push it back. ``None`` for an unknown expiry.
     """
     delay = rotation_delay(expires_at, rotate_before)
-    await wait_any(settles=(manual,), limit=delay)
+    return None if delay is None else asyncio.get_running_loop().time() + delay
+
+
+async def rotation_due(deadline: float | None, manual: asyncio.Future[None]) -> None:
+    """Return once ``deadline`` (from :func:`rotation_deadline`) passed, or ``manual`` resolved.
+
+    With no deadline only ``manual`` ends the wait. Cancel the task to stop waiting.
+    """
+    limit = None if deadline is None else max(0.0, deadline - asyncio.get_running_loop().time())
+    await wait_any(settles=(manual,), limit=limit)
 
 
 def backoff_delay(attempt: int, backoff: _Backoff) -> float:
@@ -284,6 +294,7 @@ __all__ = [
     "new_generation",
     "on_cancel",
     "rotate_before_option",
+    "rotation_deadline",
     "rotation_delay",
     "rotation_due",
     "supervisor_closed",
