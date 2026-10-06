@@ -6,7 +6,13 @@
  * Objects are never fetched to fill a gap: a replacement subscription starts live, and `onRestarted` tells the
  * application to drop state that assumed continuity. See spec/behavior.md, "Supervised connections".
  */
-import type { MessageParameters, MoqtObject, PublishDone, SubscribeOk } from '@mux/moq-core';
+import {
+  isMoqtProtocolError,
+  type MessageParameters,
+  type MoqtObject,
+  type PublishDone,
+  type SubscribeOk,
+} from '@mux/moq-core';
 import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelaySubscriber } from './connect.js';
 import { assertTimeoutMs } from './connect-session.js';
 import { RelayError } from './errors.js';
@@ -107,7 +113,8 @@ export interface WantHandlers {
 export interface SupervisedSubscriber {
   /**
    * Keep a subscription to a track open until `unwant(key)`. Wanting a key again with the same namespace, track,
-   * parameters and `generations` only swaps the handlers; with anything else it replaces the want. Arguments are
+   * parameters, `generations` and `staleAfterMs` only swaps the handlers and the retry backoff; with anything else
+   * it replaces the want. Arguments are
    * checked at once.
    */
   want(key: string, options: WantOptions, handlers?: WantHandlers): void;
@@ -323,13 +330,13 @@ export async function superviseRelaySubscriber(
       const retryBackoff = backoffOptions('retry', retry, RESUBSCRIBE_BACKOFF);
       if (stopped) throw new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
 
-      const identity = JSON.stringify([namespace, track, generations, parameters ?? null], (_, value) =>
-        typeof value === 'bigint' ? `${value}n` : value,
+      const identity = JSON.stringify(
+        [namespace, track, generations, staleAfterMs ?? null, parameters ?? null],
+        (_, value) => (typeof value === 'bigint' ? `${value}n` : value),
       );
       const existing = wants.get(key);
       if (existing && existing.identity === identity) {
         existing.handlers = handlers;
-        existing.options = { ...existing.options, staleAfterMs };
         existing.retry = retryBackoff;
         return;
       }
@@ -361,7 +368,8 @@ export async function superviseRelaySubscriber(
  * is the connection ending before the supervisor has heard of it.
  */
 function refusedForGood(error: unknown): boolean {
-  if (error instanceof TypeError || error instanceof RangeError) return true;
+  // The core's encoders refuse a request the wire cannot carry (a field too long to encode) the same way every time.
+  if (error instanceof TypeError || error instanceof RangeError || isMoqtProtocolError(error)) return true;
   return error instanceof RelayError && error.code === 'PREFIX_OVERLAP';
 }
 
@@ -433,7 +441,9 @@ async function backoff(want: Want, connection: Connection, delayMs: number): Pro
   // the delay, so failing discovery is retried no faster than the backoff.
   const changed = () => {
     if (!held || held.watch.failure()) return;
-    if (held.watch.current() !== want.generation) wake.abort();
+    // A fresh discovery starts empty; no generation yet is not a newer one.
+    const newest = held.watch.current();
+    if (newest !== undefined && newest !== want.generation) wake.abort();
   };
   const unwatch = held?.watch.onChange(changed);
   try {
@@ -441,6 +451,7 @@ async function backoff(want: Want, connection: Connection, delayMs: number): Pro
     await sleep(delayMs, scope).catch(() => {});
   } finally {
     unwatch?.();
+    if (held) want.controller.signal.removeEventListener('abort', held.release);
     held?.release();
   }
 }

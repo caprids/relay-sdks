@@ -488,8 +488,8 @@ Both supervisors:
 ### Supervised subscriber
 
 - `want(key, options, handlers)` keeps a subscription to one track open until `unwant(key)`.
-  Wanting a key again with the same namespace, track, parameters and generation-following only
-  swaps the handlers. Anything else replaces the want. Arguments are checked at once.
+  Wanting a key again with the same namespace, track, parameters, generation-following and stale
+  threshold only swaps the handlers and the retry backoff. Anything else replaces the want. Arguments are checked at once.
 - Each want runs one subscription at a time on the live connection:
   - **Retried at once**, without backoff: the connection ended (the want moves to the replacement
     connection), or the followed generation changed.

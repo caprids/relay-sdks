@@ -17,6 +17,7 @@ import {
   type RelayPublisher,
   type RelayTrackWriter,
 } from './publish.js';
+import { CLOSURE_GRACE_MS } from './subscription.js';
 import {
   backoffDelay,
   backoffOptions,
@@ -202,6 +203,10 @@ export async function superviseRelayPublisher(
         return;
       }
       const live: Generation = { info: { generation, namespace }, publisher, ended: false };
+      // Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
+      void publisher.closed.then(() => {
+        live.ended = true;
+      });
       current = live;
       const upAt = performance.now();
       for (const track of tracks.values()) track.bind(live);
@@ -280,10 +285,25 @@ function reconnecting(cause?: unknown): RelayError {
   );
 }
 
-/** Whether a failure from a generation's writer means its connection ended under the operation. */
-function endedUnder(error: unknown, generation: Generation): boolean {
+/**
+ * Whether a failure from a generation's writer means its connection ended under the operation. Only the generation's
+ * end decides, never the code: `CLOSED` also means a write to a finished group or an abort without a reason, while
+ * the generation stays live. An operation can fail a little before the connection reports its end, so a RelayError
+ * waits up to the closure grace for that report.
+ */
+async function endedUnder(error: unknown, generation: Generation): Promise<boolean> {
   if (!(error instanceof RelayError)) return false;
-  return generation.ended || error.code === 'CLOSED' || error.phase === 'connection';
+  if (!generation.ended) {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    await Promise.race([
+      generation.publisher.closed,
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, CLOSURE_GRACE_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+  }
+  return generation.ended;
 }
 
 type WriteOptions = { properties?: readonly PublishProperty[]; signal?: AbortSignal };
@@ -312,7 +332,7 @@ class SupervisedTrack {
       try {
         return await operation(binding.writer, binding.generation);
       } catch (error) {
-        if (!track.#closed && endedUnder(error, binding.generation)) throw reconnecting(error);
+        if (!track.#closed && (await endedUnder(error, binding.generation))) throw reconnecting(error);
         throw error;
       }
     };
@@ -446,7 +466,7 @@ function supervisedGroup(
     try {
       return await operation();
     } catch (error) {
-      if (!aborted && !trackClosed() && endedUnder(error, generation)) throw reconnecting(error);
+      if (!aborted && !trackClosed() && (await endedUnder(error, generation))) throw reconnecting(error);
       throw error;
     }
   };

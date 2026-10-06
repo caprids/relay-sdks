@@ -131,10 +131,13 @@ describe('connectSupervisedPublisher', () => {
   it('reports an operation the connection end interrupted as RECONNECTING, not CLOSED', async () => {
     const { publisher, connections } = await start();
     const writer = publisher.registerTrack({ track: 'video' });
-    connections[0]!.tracks.get('video')!.failNext = new RelayError('CLOSED', 'Published track is closed', 'writing');
-    await expect(writer.write(new Uint8Array([1]))).rejects.toMatchObject({ code: 'RECONNECTING' });
     connections[0]!.tracks.get('video')!.failNext = new RelayError('WRITE_TIMEOUT', 'slow', 'waiting-for-demand');
     await expect(writer.write(new Uint8Array([1]))).rejects.toMatchObject({ code: 'WRITE_TIMEOUT' });
+    // The write fails a moment before the connection reports its end, as it does on a real transport loss.
+    connections[0]!.tracks.get('video')!.failNext = new RelayError('CLOSED', 'Published track is closed', 'writing');
+    const failing = writer.write(new Uint8Array([1]));
+    setTimeout(() => connections[0]!.end(new Error('lost')), 20);
+    await expect(failing).rejects.toMatchObject({ code: 'RECONNECTING' });
   });
 
   it('reports demand across generations: false when one is lost, then the next one', async () => {
@@ -628,5 +631,84 @@ describe('connectSupervisedSubscriber (second review fixes)', () => {
     }
     // One request at the start, one per 100-200 ms delay, and one opened in each delay: far from one per response.
     expect(connections[0]!.discoveries.length).toBeLessThanOrEqual(8);
+  });
+});
+
+describe('PR review fixes: Bugbot and Codex pass 3', () => {
+  it('keeps CLOSED while the generation is live, e.g. an abort without a reason', async () => {
+    const connections: FakePublisher[] = [];
+    const publisher = await superviseRelayPublisher(
+      async (options) => {
+        const fake = fakePublisher([...options.namespace]);
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', namespace: ['room'], reconnect: fast },
+    );
+    cleanup.push(() => publisher.close());
+    const writer = publisher.registerTrack({ track: 'v' });
+    connections[0]!.tracks.get('v')!.failNext = new RelayError('CLOSED', 'Publish operation aborted', 'writing');
+    await expect(writer.write(new Uint8Array([1]))).rejects.toMatchObject({ code: 'CLOSED' });
+    expect(publisher.status).toBe('live');
+  });
+
+  async function subscriberWith() {
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: fast },
+    );
+    cleanup.push(() => subscriber.close());
+    return { subscriber, connections };
+  }
+
+  it('replaces the want when only staleAfterMs changes, so the new threshold applies', async () => {
+    const { subscriber, connections } = await subscriberWith();
+    subscriber.want('v', { namespace: ['room'], track: 'v' });
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    connections[0]!.subscriptions[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'v', staleAfterMs: 20, retry: fast });
+    await until(() => connections[0]!.subscriptions.length === 2, 'replacement');
+    connections[0]!.subscriptions[1]!.accept();
+    await until(() => connections[0]!.subscriptions.length === 3, 'stale resubscribe under the new threshold');
+  });
+
+  it('does not cut a backoff short for a fresh, still empty discovery', async () => {
+    const { subscriber, connections } = await subscriberWith();
+    const { SubscriptionRequestError } = await import('../src/subscription.js');
+    subscriber.want('v', {
+      namespace: ['room'],
+      track: 'v',
+      generations: true,
+      retry: { initialDelayMs: 60_000, maxDelayMs: 60_000 },
+    });
+    await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+    const generation = newGeneration();
+    connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', generation] });
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    connections[0]!.subscriptions[0]!.accept();
+    connections[0]!.discoveries[0]!.fail(
+      new SubscriptionRequestError({ errorCode: 0x0, retryInterval: 0, reason: 'internal error' }),
+    );
+    await until(() => connections[0]!.discoveries.length === 2, 'discovery reopened during the backoff');
+    connections[0]!.discoveries[1]!.push({ type: 'announced', namespace: ['room', generation] });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(connections[0]!.subscriptions).toHaveLength(1);
+  });
+
+  it('surfaces a request the core cannot encode instead of retrying it', async () => {
+    const { subscriber, connections } = await subscriberWith();
+    const { MoqtProtocolError } = await import('../packages/moq-core/src/index.js');
+    connections[0]!.subscribe = () => {
+      throw new MoqtProtocolError('field too long to encode');
+    };
+    const errors: unknown[] = [];
+    subscriber.want('v', { namespace: ['room'], track: 'v' }, { onError: (e) => errors.push(e) });
+    await until(() => errors.length === 1, 'onError');
+    expect(errors[0]).toBeInstanceOf(MoqtProtocolError);
   });
 });
