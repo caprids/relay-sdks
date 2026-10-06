@@ -2392,3 +2392,33 @@ async def test_keeps_skipping_repeats_when_the_old_subscription_went_stale_durin
     replacement.send_object(9)  # late, already behind what was delivered
     replacement.send_object(11)
     assert seen == [10, 11]
+
+
+# ------------------------------------------------------------------ Codex review of the merge, pass 3 (#261)
+
+
+async def test_reports_no_false_when_the_old_generation_loses_demand_as_the_next_one_gains_it(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("video")
+    p.connections[0].tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    await asyncio.sleep(0.005)
+    changes = writer.demand_changes()
+    assert await asyncio.wait_for(anext(changes), 1) is True
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "next generation")
+    # In one turn: the viewer leaves the old generation and arrives on the next one.
+    p.connections[0].tracks["video"].set_demand(False)
+    p.connections[1].tracks["video"].set_demand(True)
+    await until(lambda: p.connections[0].close_calls == 1, "moved and closed")
+    # Everything the track reported through the handoff, before any real loss of demand.
+    values: list[bool] = []
+    while True:
+        try:
+            values.append(await asyncio.wait_for(anext(changes), 0.02))
+        except TimeoutError:
+            break
+    assert False not in values
+    await changes.aclose()  # ty: ignore[unresolved-attribute]

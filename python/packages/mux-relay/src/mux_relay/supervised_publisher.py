@@ -422,6 +422,13 @@ class _SupervisedTrackWriter(RelayTrackWriter):
                     break
                 if pending is not None:
                     pending.heard = value
+                # Demand leaving a generation a rotation is moving off: move first if the next one has demand, so
+                # the track reports no False it did not have.
+                if bound and not value and self._pending is not None:
+                    self._maybe_move()
+                    if self._binding is None or self._binding.generation is not generation:
+                        first = False
+                        continue
                 # The first value is the new connection's current state; False repeats the lost generation's.
                 if bound and not (first and not value):
                     self._emit_demand(value)
@@ -824,7 +831,9 @@ async def _supervise_relay_publisher(
                 stop(thrown)
 
         live.publisher.closed.add_done_callback(on_live_closed)
-        while not state.stopped and not live.ended:
+        # Checked on the future itself too: the callback that marks `ended` runs a turn later, and a connect that
+        # fails without suspending would never let it.
+        while not state.stopped and not live.ended and not live.publisher.closed.done():
             try:
                 nxt = await connect_generation()
                 break
@@ -844,7 +853,7 @@ async def _supervise_relay_publisher(
             return None
         # Consulted whatever happened to the old generation: a queued rotate() is answered by this replacement.
         asked = manual()
-        if not live.ended and not asked:
+        if not live.ended and not live.publisher.closed.done() and not asked:
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = live.publisher.expires_at, nxt.publisher.expires_at
             if was is not None and (now is None or now <= was):

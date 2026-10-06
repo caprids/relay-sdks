@@ -583,7 +583,9 @@ async def _supervise_relay_subscriber(
                     stop(thrown)
 
         old.subscriber.closed.add_done_callback(on_old_closed)
-        while not state.stopped and not old.ended.cancelled:
+        # Checked on the future itself too: the callback that cancels `ended` runs a turn later, and a connect that
+        # fails without suspending would never let it.
+        while not state.stopped and not old.ended.cancelled and not old.subscriber.closed.done():
             try:
                 nxt = await connect_once()
                 break
@@ -601,7 +603,7 @@ async def _supervise_relay_subscriber(
             return None
         # Consulted whatever happened to the old connection: a queued rotate() is answered by this replacement.
         asked = manual()
-        if not old.ended.cancelled and not asked:
+        if not old.ended.cancelled and not old.subscriber.closed.done() and not asked:
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = old.subscriber.expires_at, nxt.subscriber.expires_at
             if was is not None and (now is None or now <= was):
