@@ -39,9 +39,16 @@ export interface ConnectSupervisedPublisherOptions extends ConnectRelayOptions {
   namespace: readonly string[];
   /** Backoff between connection attempts. Default from 500 ms, doubling up to 10 s, with jitter. */
   reconnect?: SupervisionBackoff;
-  /** Called once each generation's connection is up and every registered track is bound to it. */
+  /**
+   * Called once each generation's connection is up and every registered track is bound to it. A throw stops the
+   * supervisor with that error, as `onStatus` does.
+   */
   onGeneration?(info: PublisherGeneration): void;
-  /** Called on every status change; `error` is what ended the previous connection or failed the last attempt. */
+  /**
+   * Called on every status change; `error` is what ended the previous connection or failed the last attempt. A throw
+   * stops the supervisor with that error: a pending `connectSupervisedPublisher` rejects with it and `closed` resolves
+   * with it. A throw reporting `closed` rejects the `close()` that caused it; `closed` resolves either way.
+   */
   onStatus?(status: SupervisedStatus, error?: unknown): void;
 }
 
@@ -163,9 +170,14 @@ export async function superviseRelayPublisher(
         live.ended = true;
         await live.publisher.close().catch(() => {});
       }
-      setStatus('closed');
-      resolveClosed(result);
+      try {
+        setStatus('closed');
+      } finally {
+        resolveClosed(result);
+      }
     })();
+    // A throwing onStatus fails `close()` for the caller that made it; a stop nobody awaits leaves it observed.
+    shutdown.catch(() => {});
     return shutdown;
   };
   const onAbort = () => void stop({ error: signal?.reason });
@@ -211,9 +223,9 @@ export async function superviseRelayPublisher(
       const upAt = performance.now();
       for (const track of tracks.values()) track.bind(live);
       setStatus('live');
+      onGeneration?.({ generation, namespace: [...namespace] });
       first?.resolve();
       first = undefined;
-      onGeneration?.({ generation, namespace: [...namespace] });
 
       const { error } = await publisher.closed;
       live.ended = true;
@@ -226,7 +238,16 @@ export async function superviseRelayPublisher(
       await sleep(backoffDelay(attempt++, backoff), stopping.signal).catch(() => {});
     }
   };
-  void run();
+  const supervise = async () => {
+    try {
+      await run();
+    } catch (error) {
+      // An application callback (onStatus, onGeneration) threw: stop rather than leave the supervisor neither
+      // reconnecting nor closed, and fail a caller still waiting to connect.
+      void stop({ error });
+    }
+  };
+  void supervise();
   try {
     await started;
   } catch (error) {
