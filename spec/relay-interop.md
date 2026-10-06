@@ -430,8 +430,9 @@ LOCATION_FILTER and a FILL_PARAMETERS, and nothing the viewer asked for beyond t
 
 To re-check after a relay upgrade, run the probe below. It subscribes with each ignored parameter
 set, records the relay's upstream SUBSCRIBE and any REQUEST_UPDATE as the publisher receives them,
-the group order SUBSCRIBE_OK states, and the order a late subscriber's cached groups arrive in. It
-exits non-zero, with the differing rows, when the relay no longer does what this table says. It is
+and the group order SUBSCRIBE_OK states, and it exits non-zero, with the differing rows, when any
+of those no longer match this table. It also prints the order a late subscriber's cached groups
+arrive in, for reading only: QUIC streams have no cross-stream order, so that is not compared. It is
 a relay fact, not an SDK contract, so only the Python SDK runs it.
 
 ```sh

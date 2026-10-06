@@ -12,7 +12,8 @@ updating, not that the SDK is wrong.
    and the group order the relay states in its SUBSCRIBE_OK.
 2. The publisher writes a burst of large groups the relay caches. A second subscriber asks for them
    from an absolute start with ``group_order="ascending"`` and ``new_group_request=0``; the probe
-   records the order in which their first objects arrive, and whether the relay sends the publisher
+   reports the order in which their first objects arrive (for reading only: QUIC streams have no
+   cross-stream order, so it is not compared), and records whether the relay sends the publisher
    a REQUEST_UPDATE for the new-group request (draft-22 §9.20.19 says it MUST, for a value of 0 on an
    established subscription to a track with dynamic groups; SDK publishers do not declare
    DYNAMIC_GROUPS, so this records only whether the relay forwards anything).
@@ -67,7 +68,6 @@ DOCUMENTED: dict[str, Any] = {
     "upstream object_delivery_timeout": None,
     "upstream subgroup_delivery_timeout": None,
     "SUBSCRIBE_OK group order": "descending",
-    "backlog arrived ascending": False,
     "upstream REQUEST_UPDATEs": 0,
 }
 
@@ -253,6 +253,8 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         )
         await wait_for(lambda: len(arrivals) >= BURST_GROUPS, f"{BURST_GROUPS} cached groups")
         await asyncio.sleep(UPDATE_GRACE)
+        # Diagnostic only: streams have no cross-stream delivery order, so an ascending arrival can
+        # happen by chance even while the relay ignores GROUP_ORDER.
         report(
             {"phase": "backlog", "arrivals": arrivals, "late SUBSCRIBE_OK group order": stated_group_order(late_oks[0])}
         )
@@ -263,7 +265,6 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
             "upstream object_delivery_timeout": upstream.object_delivery_timeout,
             "upstream subgroup_delivery_timeout": upstream.subgroup_delivery_timeout,
             "SUBSCRIBE_OK group order": stated_group_order(oks[0]),
-            "backlog arrived ascending": arrivals == sorted(arrivals),
             "upstream REQUEST_UPDATEs": len(updates) - updates_before,
         }
     finally:
