@@ -1093,7 +1093,7 @@ async def _follow(
     # Old subscriptions draining after a cutover, each with the timer that cancels it.
     draining: dict[_Slot, asyncio.TimerHandle] = {}
     # A move whose replacement failed, retried after the backoff unless the want asks for something else first.
-    retry_move: tuple[_Slot, asyncio.TimerHandle] | None = None
+    retry_move: tuple[_Slot, asyncio.TimerHandle, Callable[[], None]] | None = None
     move_failures = 0
     # The target of the latest move, whose failures ``move_failures`` counts.
     move_target: tuple[tuple[str, ...], str, MessageParameters | None] | None = None
@@ -1178,6 +1178,7 @@ async def _follow(
         nonlocal retry_move
         if retry_move is not None:
             retry_move[1].cancel()
+            retry_move[2]()
             retry_move = None
 
     def stop_drain(slot: _Slot) -> None:
@@ -1222,14 +1223,26 @@ async def _follow(
         # The active subscription keeps delivering; the move is retried after the backoff.
 
         def retry_now() -> None:
-            nonlocal retry_move
             if retry_move is not None and retry_move[0] is slot:
-                retry_move = None
+                clear_retry()
                 reconcile()
+
+        on = slot.connection
+
+        # The connection the move is to be retried on closing leaves nothing to retry on: restart now, not after
+        # the delay.
+        def closed(_: object = None) -> None:
+            if retry_move is None or retry_move[0] is not slot or over():
+                return
+            clear_retry()
+            settle(cancelled_or_connection(accepted()))
 
         delay = backoff_delay(move_failures, want.retry)
         move_failures += 1
-        retry_move = (slot, loop.call_later(delay, retry_now))
+        on.ended.add_callback(closed)
+        retry_move = (slot, loop.call_later(delay, retry_now), lambda: on.ended.remove_callback(closed))
+        if on.ended.cancelled:
+            closed()
 
     def cutover(slot: _Slot, obj: MoqtObject) -> None:
         nonlocal active, pending, move_failures, last_object_at, watch, release_watch, rotation_to, unwatch

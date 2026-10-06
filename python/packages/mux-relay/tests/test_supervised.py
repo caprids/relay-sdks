@@ -2457,3 +2457,51 @@ async def test_reports_the_loss_of_demand_when_the_old_generation_loses_it_as_th
     assert not writer.has_demand
     assert await asyncio.wait_for(anext(changes), 0.05) is False
     await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+# ------------------------------------------------------------------ Codex review of the merge, pass 5 (#261)
+
+
+async def test_reports_demand_that_came_back_after_a_false_the_writer_no_longer_had(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("catalog")
+    track = p.connections[0].tracks["catalog"]
+    track.set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    await asyncio.sleep(0.005)
+    changes = writer.demand_changes()
+    assert await asyncio.wait_for(anext(changes), 1) is True
+    # The relay replaced its upstream subscription: False then True, both queued before the supervisor runs.
+    track.set_demand(False)
+    track.set_demand(True)
+    assert await asyncio.wait_for(anext(changes), 0.05) is True
+    await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+async def test_restarts_at_once_when_the_connection_a_failed_rotation_would_retry_on_closes(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    connections: list[FakeSubscriber] = []
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        fake = FakeSubscriber()
+        connections.append(fake)
+        return fake
+
+    subscriber = await _supervise_relay_subscriber(connect, reconnect=FAST)
+    cleanup.append(subscriber.close)
+    subscriber.want("v", ["room"], "v", retry=SLOW)
+    await until(lambda: len(connections[0].subscriptions) == 1, "subscribe")
+    connections[0].subscriptions[0].accept()
+    subscriber.rotate()
+    await until(lambda: len(connections) == 2 and len(connections[1].subscriptions) == 1, "replacement")
+    connections[1].subscriptions[0].reject(0x10, "unroutable")  # retried on the new connection after a minute
+    connections[0].end()  # the old connection goes
+    await asyncio.sleep(0.01)
+    connections[1].end(RuntimeError("lost"))  # and so does the one the retry was for
+    await until(
+        lambda: len(connections) == 3 and len(connections[2].subscriptions) == 1,
+        "subscribed on the next connection at once",
+    )

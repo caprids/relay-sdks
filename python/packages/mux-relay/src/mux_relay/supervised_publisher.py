@@ -136,8 +136,13 @@ async def _ended_under(error: BaseException, generation: _Generation, writer: Re
 
 @dataclass(slots=True, eq=False)
 class _Binding:
+    """The live generation's writer."""
+
     generation: _Generation
     writer: RelayTrackWriter
+    covered: bool = False
+    """Set when a move reported the writer's True: its iterator's next True is that same demand, not a new one,
+    unless a False came first."""
 
 
 @dataclass(slots=True, eq=False)
@@ -369,7 +374,7 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         self._pending = None
         if binding is not None and not binding.generation.ended:
             self._retired_writers[binding.generation] = binding.writer
-        self._binding = _Binding(pending.generation, pending.writer)
+        self._binding = _Binding(pending.generation, pending.writer, covered=pending.writer.has_demand)
         # The move reports the next generation's demand as it is now: True again if it has demand, so
         # demand-driven state reaches it, or the loss of demand. Values its iterator had queued before the move
         # are stale and not reported.
@@ -416,7 +421,8 @@ class _SupervisedTrackWriter(RelayTrackWriter):
                 bound = self._binding is not None and self._binding.generation is generation
                 if not bound and (self._pending is None or self._pending.generation is not generation):
                     break
-                repeated = value and previous is True
+                # Any True after this iterator's first value is new demand: a repeat, or demand back after a False.
+                renewed = value and previous is not None
                 previous = value
                 # Demand leaving a generation a rotation is moving off: move first if the next one has demand, so
                 # the track reports no False it did not have. The move reports the next generation's own demand.
@@ -424,11 +430,17 @@ class _SupervisedTrackWriter(RelayTrackWriter):
                     self._maybe_move()
                     if self._binding is None or self._binding.generation is not generation:
                         continue
-                # Report only what is true of the writer now: a value queued before a move or a newer change is
-                # stale. A change is reported, and so is a repeated True, which demand-driven state is written
-                # again on.
-                if bound and value == writer.has_demand and (value != self._last_demand or repeated):
-                    self._emit_demand(value)
+                binding = self._binding
+                if bound and binding is not None:
+                    # A False is not reported when the writer has demand again by now, but the True after it is
+                    # renewed demand all the same, which demand-driven state (a catalog) is written again on. Only
+                    # the move's own True is not repeated.
+                    if not value:
+                        binding.covered = False
+                    if value and binding.covered:
+                        binding.covered = False
+                    elif value == writer.has_demand and (value != self._last_demand or renewed):
+                        self._emit_demand(value)
                 # Demand arriving on the next generation, or leaving the current one, moves a rotating track.
                 self._maybe_move()
         finally:
