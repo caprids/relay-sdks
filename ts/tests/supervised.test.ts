@@ -1354,6 +1354,39 @@ describe('make-before-break moves (#282)', () => {
     expect(seen).toEqual([]);
   });
 
+  it('surfaces a replacement refused for good after a re-want', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'pending b');
+    subs(connections[0]!)[1]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+    await until(() => seen.includes('error SUBSCRIPTION_REQUEST_FAILED'), 'error');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(subs(connections[0]!)).toHaveLength(2);
+  });
+
+  it('tries a target wanted from onRestarted at once, not after the old backoff', async () => {
+    const { subscriber, connections } = await start();
+    const retry = { initialDelayMs: 60_000, maxDelayMs: 60_000 };
+    let rewanted = false;
+    const handlers: WantHandlers = {
+      onRestarted: () => {
+        if (rewanted) return;
+        rewanted = true;
+        subscriber.want('v', { namespace: ['room'], track: 'b', retry }, handlers);
+      },
+    };
+    subscriber.want('v', { namespace: ['room'], track: 'a', retry }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subs(connections[0]!)[0]!.done();
+    await until(() => subs(connections[0]!).length === 2, 'b subscribed at once');
+    expect(subs(connections[0]!)[1]!.options.track).toBe('b');
+  });
+
   it('still restarts when the generation is withdrawn with none newer', async () => {
     const { connections, seen, discovery, old } = await onOldGeneration();
     discovery.push({ type: 'unannounced', namespace: ['room', old] });

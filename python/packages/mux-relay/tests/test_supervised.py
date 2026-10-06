@@ -1199,6 +1199,41 @@ async def test_a_rewant_after_the_old_target_failed_for_good_is_kept(cleanup: li
     assert r.seen == []
 
 
+async def test_a_replacement_refused_for_good_after_a_rewant_is_surfaced(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = MoveRecorder()
+    subscriber.want("v", ["room"], "a", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.want("v", ["room"], "b", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 2, "pending b")
+    s.first.subscriptions[1].reject(0x1, "unauthorized")
+    await until(lambda: "error SUBSCRIPTION_REQUEST_FAILED" in r.seen, "error")
+    await asyncio.sleep(0.01)
+    assert len(s.first.subscriptions) == 2
+
+
+async def test_a_target_wanted_from_on_restarted_is_tried_at_once(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    retry = SupervisionBackoff(initial_delay=60, max_delay=60)
+    rewanted: list[bool] = []
+
+    def on_restarted(_reason: str, _namespace: tuple[str, ...]) -> None:
+        if not rewanted:
+            rewanted.append(True)
+            subscriber.want("v", ["room"], "b", handlers, retry=retry)
+
+    handlers = WantHandlers(on_restarted=on_restarted)
+    subscriber.want("v", ["room"], "a", handlers, retry=retry)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].done()
+    await until(lambda: len(s.first.subscriptions) == 2, "b subscribed at once")
+    assert s.first.subscriptions[1].track == "b"
+
+
 async def test_a_withdrawn_generation_with_none_newer_still_restarts(cleanup: list[Callable[[], object]]) -> None:
     g, first = await on_old_generation(cleanup)
     g.s.first.discoveries[0].push("unannounced", ["room", g.old])

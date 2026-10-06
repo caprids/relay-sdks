@@ -225,6 +225,8 @@ interface Want {
   retry: Required<SupervisionBackoff>;
   until: (object: MoqtObject) => boolean;
   drainMs: number;
+  /** The target when the latest attempt settled: a later re-want supersedes that attempt's outcome. */
+  settledTarget?: string | undefined;
   /** Told when a re-want changes the want in place, by whichever attempt or backoff is running. */
   changes: Set<() => void>;
   controller: AbortController;
@@ -526,8 +528,9 @@ async function superviseWant(
       const connection = await liveConnection(scope);
       // A want replaced while waiting must not open anything: its replacement may already hold an overlapping root.
       if (!connection || scope.aborted) return;
-      const asked = want.target;
+      want.settledTarget = undefined;
       const outcome = await attempt(want, connection);
+      const asked = want.settledTarget ?? want.target;
       if (scope.aborted) return;
       if (outcome.kind === 'cancelled') return;
       // A re-want that came after the attempt settled asks for another track or parameters: the old target's failure
@@ -704,6 +707,7 @@ async function follow(
   const settle = (next: AttemptOutcome) => {
     if (outcome) return;
     outcome = next;
+    want.settledTarget = want.target;
     settled.abort();
   };
   const over = () => outcome !== undefined || scope.aborted;
@@ -975,6 +979,7 @@ async function follow(
   try {
     active = open(namespace, generation);
   } catch (error) {
+    want.settledTarget = want.target;
     // An argument the relay can never take is the want's fault; anything else is the connection ending under the call.
     if (scope.aborted || !refusedForGood(error)) return cancelledOrConnection(false);
     return { kind: 'fatal', error };

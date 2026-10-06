@@ -179,6 +179,8 @@ class _Want:
     generation: str | None = None
     """The generation the latest subscription was made on, when following one."""
     deferred: BaseException | None = None
+    settled_target: tuple[str, MessageParameters | None] | None = None
+    """The track and parameters when the latest attempt settled: a later re-want supersedes its outcome."""
     """A discovery failure no wait fixes, seen while backing off, for the loop to surface."""
 
     def call(self, name: str, *args: object) -> None:
@@ -621,8 +623,9 @@ async def _supervise_want(
             # overlapping root.
             if connection is None or scope.cancelled:
                 return
-            asked = (want.options.track, want.options.parameters)
+            want.settled_target = None
             outcome = await _attempt(want, connection)
+            asked = want.settled_target or (want.options.track, want.options.parameters)
             if scope.cancelled or outcome.kind == "cancelled":
                 return
             # A re-want that came after the attempt settled asks for another track or parameters: the old
@@ -650,7 +653,8 @@ async def _supervise_want(
                 # The request can see the end before the connection reports it; wait for that rather than spin on it.
                 await wait_any([connection.ended, scope], limit=1.0)
                 continue
-            if outcome.kind != "retry" or superseded:
+            # on_restarted is application code: it may have wanted another target.
+            if outcome.kind != "retry" or (want.options.track, want.options.parameters) != asked:
                 continue
             # Cached objects followed by a done are not progress: only a later group resets the backoff.
             if outcome.progressed:
@@ -822,6 +826,7 @@ async def _follow(
         nonlocal outcome
         if outcome is None:
             outcome = next_outcome
+            want.settled_target = (want.options.track, want.options.parameters)
             settled.cancel()
 
     def over() -> bool:
@@ -1090,6 +1095,7 @@ async def _follow(
     try:
         active = open_slot(namespace, generation)
     except Exception as error:
+        want.settled_target = (want.options.track, want.options.parameters)
         # An argument the relay can never take is the want's fault; anything else is the connection ending
         # under the call.
         if any(token.cancelled for token in scope) or not _refused_for_good(error):
