@@ -737,7 +737,7 @@ describe('PR review fixes: Codex pass 4', () => {
       { namespace: ['room', 'alice'], track: 'v', generations: true },
       { onError: (e) => errors.push(e) },
     );
-    await until(() => connections[0]!.discoveries.length >= 1, 'discovery');
+    await until(() => connections[0]!.discoveries.length > 0, 'discovery');
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(connections[0]!.discoveries.map((d) => d.prefix)).toEqual([['room', 'alice']]);
     expect(errors).toEqual([]);
