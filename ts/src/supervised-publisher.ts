@@ -286,6 +286,17 @@ export async function superviseRelayPublisher(
   const rotateFrom = async (live: Generation, manual: boolean): Promise<Generation | undefined> => {
     let failures = 0;
     let next: Generation | undefined;
+    // The live generation ending while its replacement is still connecting is a reconnect: report it at once.
+    void live.publisher.closed.then(({ error }) => {
+      if (stopped || current !== live) return;
+      current = undefined;
+      for (const track of tracks.values()) track.unbind(live);
+      try {
+        setStatus('reconnecting', error);
+      } catch (thrown) {
+        void stop({ error: thrown });
+      }
+    });
     while (!stopped && !live.ended) {
       try {
         next = await connectGeneration();
@@ -313,6 +324,7 @@ export async function superviseRelayPublisher(
     current = next;
     retiring = live;
     const moved = [...tracks.values()].map((track) => track.handOver(next));
+    setStatus('live');
     report(next);
     // Every track moved and every write or group still on the old generation finished, or the overlap ran out.
     // The next generation ending cuts the overlap short too: its tracks need the generation after it now.
@@ -327,7 +339,11 @@ export async function superviseRelayPublisher(
     live.ended = true;
     if (retiring === live) retiring = undefined;
     await live.publisher.close().catch(() => {});
-    for (const track of tracks.values()) track.forget(live);
+    for (const track of tracks.values()) {
+      track.forget(live);
+      // A track whose next generation ended before it moved is still bound here: it has no generation now.
+      track.unbind(live);
+    }
     return next;
   };
 
@@ -406,7 +422,8 @@ export async function superviseRelayPublisher(
       live.ended = true;
       current = undefined;
       for (const track of tracks.values()) track.unbind(live);
-      setStatus('reconnecting', outcome.error);
+      // Already reported if the generation ended while a rotation's replacement was connecting.
+      if (status !== 'reconnecting') setStatus('reconnecting', outcome.error);
       // A generation that stayed up longer than the longest delay was a success: start the backoff over.
       if (performance.now() - live.upAt > backoff.maxDelayMs) attempt = 0;
       await sleep(backoffDelay(attempt++, backoff), stopping.signal).catch(() => {});
@@ -509,7 +526,15 @@ class SupervisedTrack {
   readonly writer: RelayTrackWriter;
   #binding: { generation: Generation; writer: RelayTrackWriter } | undefined;
   /** The generation a rotation is moving this track to, until it moves. */
-  #pending: { generation: Generation; writer: RelayTrackWriter; moved(): void } | undefined;
+  #pending:
+    | {
+        generation: Generation;
+        writer: RelayTrackWriter;
+        moved(): void;
+        /** The demand its iterator last reported while pending, reported on the move; later values follow it. */
+        heard?: boolean;
+      }
+    | undefined;
   /** Writers on generations a rotation moved this track off, kept until they close: their open groups end with it. */
   #retired = new Map<Generation, RelayTrackWriter>();
   #closed = false;
@@ -636,7 +661,8 @@ class SupervisedTrack {
     this.#pending = undefined;
     if (binding && !binding.generation.ended) this.#retired.set(binding.generation, binding.writer);
     this.#binding = { generation: pending.generation, writer: pending.writer };
-    this.#emitDemand(pending.writer.hasDemand);
+    // Reported here only once its iterator caught up; otherwise the iterator reports the values still queued, in order.
+    if (pending.heard !== undefined && pending.heard === pending.writer.hasDemand) this.#emitDemand(pending.heard);
     pending.moved();
   }
 
@@ -672,7 +698,9 @@ class SupervisedTrack {
     try {
       for await (const value of changes) {
         const bound = this.#binding?.generation === generation;
-        if (!bound && this.#pending?.generation !== generation) break;
+        const pending = this.#pending?.generation === generation ? this.#pending : undefined;
+        if (!bound && !pending) break;
+        if (pending) pending.heard = value;
         // The first value is the new connection's current state; `false` repeats what the lost generation reported.
         if (bound && !(firstValue && !value)) this.#emitDemand(value);
         firstValue = false;
@@ -685,7 +713,9 @@ class SupervisedTrack {
   }
 
   #emitDemand(value: boolean): void {
-    if (value === this.#lastDemand) return;
+    // A repeated `true` is kept: a new upstream subscription, or a move to a generation with demand, is when demand-driven
+    // state (a catalog) is written again. Only a `false` that changes nothing is dropped.
+    if (!value && !this.#lastDemand) return;
     this.#lastDemand = value;
     for (const listener of this.#demandListeners) listener(value);
   }

@@ -389,6 +389,20 @@ export async function superviseRelaySubscriber(
     const old = opened.live;
     let failures = 0;
     let next: Opened | undefined;
+    // The live connection ending while its replacement is still connecting is a reconnect: report it at once.
+    void old.subscriber.closed.then(({ error }) => {
+      if (stopped || current !== old) return;
+      current = undefined;
+      try {
+        setStatus('reconnecting', error);
+      } catch (thrown) {
+        try {
+          stop({ error: thrown });
+        } catch {
+          // A throwing onStatus while reporting `closed`: `closed` is settled either way.
+        }
+      }
+    });
     while (!stopped && !old.signal.aborted) {
       try {
         next = await connectOnce();
@@ -414,6 +428,7 @@ export async function superviseRelaySubscriber(
     }
     current = next.live;
     retiring = old;
+    setStatus('live');
     for (const wake of connectionWaiters.splice(0)) wake();
     const idle = new Promise<void>((resolve) => {
       old.onIdle = resolve;
@@ -511,7 +526,8 @@ export async function superviseRelaySubscriber(
       settleEnded(opened);
       if (stopped) return;
       current = undefined;
-      setStatus('reconnecting', outcome.error);
+      // Already reported if the connection ended while a rotation's replacement was connecting.
+      if (status !== 'reconnecting') setStatus('reconnecting', outcome.error);
       if (performance.now() - upAt > backoff.maxDelayMs) attempt = 0;
       await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
     }
@@ -938,9 +954,19 @@ async function subscribeOnce(
         const reason = moved ? 'generation' : 'rotation';
         // Only a subscription the application is hearing from is worth keeping; one move at a time.
         if (reported && !want.handoff) {
+          // A subscription that delivered nothing new itself inherits what its predecessor delivered.
+          const inherited = want.cutoff;
           want.cutoff =
             reason === 'rotation'
-              ? { owner: subscription, namespace: [...namespace], latest: () => latest }
+              ? {
+                  owner: subscription,
+                  namespace: [...namespace],
+                  latest: () =>
+                    latest ??
+                    (inherited && inherited.namespace.join('/') === namespace.join('/')
+                      ? inherited.latest()
+                      : undefined),
+                }
               : undefined;
           handedOff = handOff(want, connection, subscription, reason, namespace, () => {
             delivering = false;
