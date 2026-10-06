@@ -45,7 +45,7 @@ from moq_core._tasks import observe
 from moq_core.transport import AcknowledgedSendStream, MoqtTransport, ReceiveStream, SendStream
 from mux_relay.quic._errors import QuicTransportError
 
-MOQT_PROTOCOL = "moqt-20"
+MOQT_PROTOCOL = "moqt-22"
 
 PROMPTLY = 2.0
 """Seconds a case may wait for something that must happen promptly."""
@@ -349,7 +349,7 @@ def acknowledged(send: SendStream) -> asyncio.Future[None]:
 
 
 LOW_CODES = (0, 1, 7, 0x12, 255)
-"""Codes a reset or stop must carry: all the MOQT codes the core sends (draft-20 §3.3.4) fit in these."""
+"""Codes a reset or stop must carry: all the MOQT codes the core sends (draft-22 §12.5) fit in these."""
 HIGH_CODES = (256, 0x1_0000, 0xFFFF_FFFF)
 """The rest of TA-17's range."""
 INVALID_CODES: tuple[object, ...] = (-1, 0x1_0000_0000, 1.5, math.nan, "7", None, True)

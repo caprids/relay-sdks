@@ -14,9 +14,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 
 from moq_core.control_messages import (
+    MOQT_PROTOCOL_ID,
     ControlMessage,
     ControlMessageDeframer,
     MessageParameters,
+    MoqtProtocolId,
     NextObjectFilter,
     RelativeGroupFilter,
     Subscribe,
@@ -68,7 +70,7 @@ class RawRequest:
         self._reader.cancel()
 
     async def fin(self) -> None:
-        """FIN the peer's side: half-closure, NOT a withdrawal (§3.3.2)."""
+        """FIN the peer's side: half-closure, NOT a withdrawal (§6.4.2.2)."""
         assert self._writer is not None
         try:
             await self._writer.close()
@@ -118,7 +120,11 @@ def solicit_namespace(server: MoqtTransport, prefix: Sequence[str], request_id: 
 
 
 def raw_subscribe(
-    server: MoqtTransport, track_namespace: Sequence[str], track_name: str, request_id: int
+    server: MoqtTransport,
+    track_namespace: Sequence[str],
+    track_name: str,
+    request_id: int,
+    protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
 ) -> asyncio.Future[RawRequest]:
     """The relay's per-track pull, with the parameters moq-relay 0.14.17 and 0.15.8 send on draft-20.
 
@@ -139,7 +145,8 @@ def raw_subscribe(
                         fill_parameters=MessageParameters(location_filter=RelativeGroupFilter(groups_before_next=1)),
                         group_order="descending",
                     ),
-                )
+                ),
+                protocol,
             ),
         )
     )

@@ -15,6 +15,7 @@ import {
   isStreamFailure,
   type MessageParameters,
   type MoqtObject,
+  type MoqtProtocolId,
   type PublishDone,
   REQUEST_ERROR_CODE,
   type RequestError,
@@ -163,6 +164,8 @@ export interface SubscriptionConsumer {
 export interface SubscriptionDependencies {
   /** The core session's subscribe, already bound to the track options. */
   subscribe(handlers: SubscriptionHandlers): Subscription;
+  /** The connection's negotiated MOQT version, which `update()` encodes for. */
+  protocol: MoqtProtocolId;
   /**
    * Observe the connection's closure in the turn it happens, ahead of the request failures the
    * core synthesizes while tearing down. The returned function removes the observer.
@@ -285,7 +288,7 @@ export function synchronousCallback(
 
 /**
  * How many `update()` calls may wait for SUBSCRIBE_OK. REQUEST_UPDATE is legal only on an accepted
- * subscription (draft-ietf-moq-transport-20 §5.1), so earlier updates queue here in order.
+ * subscription (draft-ietf-moq-transport-22 §3.1), so earlier updates queue here in order.
  */
 export const UPDATE_QUEUE_BOUND = 8;
 
@@ -446,7 +449,7 @@ export function createSubscription(
       // flush on SUBSCRIBE_OK, so it is encoded exactly as the flush will encode it. The queue
       // holds a snapshot, so later mutation of the caller's object cannot change what is sent, as
       // an immediate send would have serialized it at once.
-      encodeRequestUpdate(handle().requestId, parameters);
+      encodeRequestUpdate(handle().requestId, parameters, deps.protocol);
       queuedUpdates.push(structuredClone(parameters));
     },
     cancel(reason) {

@@ -26,7 +26,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.x509.oid import NameOID
 
-from moq_core import MOQT_PROTOCOL_ID
+from moq_core import MOQT_PROTOCOL_IDS
 from moq_core._tasks import spawn
 from moq_core.transport import BidirectionalStream, SendStream
 from mux_relay.quic._aioquic import finish_receiving_half
@@ -240,7 +240,7 @@ async def start_quic_server(on_session: SessionHandler) -> LoopbackQuicServer:
     """Listen on a loopback port, selecting the MOQT protocol, and hand every accepted session to ``on_session``."""
     certificate, key, pem = generate_self_signed_certificate()
     configuration = QuicConfiguration(
-        is_client=False, alpn_protocols=[MOQT_PROTOCOL_ID], max_datagram_frame_size=65536, idle_timeout=20.0
+        is_client=False, alpn_protocols=list(MOQT_PROTOCOL_IDS), max_datagram_frame_size=65536, idle_timeout=20.0
     )
     configuration.certificate = certificate
     configuration.private_key = key

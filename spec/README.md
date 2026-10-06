@@ -5,7 +5,7 @@ lockstep.
 
 | File | Purpose | How it is enforced |
 | --- | --- | --- |
-| `protocol.json` | Machine-readable pins: the MOQT draft (`draft-ietf-moq-transport-20`, wire identifier `moqt-20`), default Relay endpoint, authentication convention, object size limit, LOC/MSF drafts and media defaults | Every SDK has a test asserting its constants equal these values |
+| `protocol.json` | Machine-readable pins: the MOQT draft (`draft-ietf-moq-transport-22`, wire identifier `moqt-22`, with `moqt-20` as the offered fallback), default Relay endpoint, authentication convention, object size limit, LOC/MSF drafts and media defaults | Every SDK has a test asserting its constants equal these values |
 | `behavior.md` | The observable semantics every SDK must exhibit, in language-neutral terms | Review, plus the live smoke test assertion list it defines |
 | [vocabulary.md](vocabulary.md) | Public product and media format names across languages, with the rationale for each | Export-surface tests, paired media tests, and API review |
 | [transport-adapter.md](transport-adapter.md) | The transport adapter contract: what every adapter the SDKs run over (browser WebTransport, aioquic, native QUIC, test pairs) must do, as numbered `TA-n` rules under the MOQT and QUIC specifications | The transport adapter conformance suite (#193), whose tests are named after the rules |

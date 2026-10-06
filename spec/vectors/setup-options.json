@@ -1,5 +1,5 @@
 {
-  "source": "spec/transport-adapter.md TA-1, TA-4, TA-6; draft-ietf-moq-transport-20 §10.3.1.1 (AUTHORITY), §10.3.1.2 (PATH); URL serialisation per the WHATWG URL Standard",
+  "source": "spec/transport-adapter.md TA-1, TA-4, TA-6; draft-ietf-moq-transport-22 §9.1.1 (AUTHORITY), §9.1.2 (PATH); URL serialisation per the WHATWG URL Standard",
   "note": "The setup options the core adds to CLIENT_SETUP for the endpoint, by framing. `url` is the endpoint the caller passes. `token` is what getToken returns; absent means no getToken. `framing` is what the transport factory declares; absent means it declares nothing, which is a WebTransport session. `path` and `authority` are the exact UTF-8 values of PATH (0x01) and AUTHORITY (0x05); null means the option MUST NOT be sent. The token reaches PATH through the URL's jwt query parameter, so its encoding is the URL Standard's application/x-www-form-urlencoded serialiser.",
   "cases": [
     {

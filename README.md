@@ -153,8 +153,8 @@ versions speak which draft:
 
 | SDK | Version | MOQT draft |
 | --- | --- | --- |
-| `@mux/relay` (`ts/`) | unreleased | `moqt-20` |
-| `mux-relay` (`python/`) | unreleased | `moqt-20` |
+| `@mux/relay` (`ts/`) | unreleased | `moqt-22`, falling back to `moqt-20` |
+| `mux-relay` (`python/`) | unreleased | `moqt-22`, falling back to `moqt-20` |
 
 Publishers end a track with PUBLISH_DONE, which needs moq-relay 0.15.4 or later: on 0.15.1 to
 0.15.3 every track end reaches viewers as an aborted track. For that boundary, the 0.14.17 one, and

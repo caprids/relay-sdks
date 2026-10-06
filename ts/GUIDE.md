@@ -445,7 +445,7 @@ metadata. Property types and even-type integer values must be non-negative integ
 the property index before registering a track or starting a write. A `RangeError` at the same
 point covers: a byte value longer than 65535 bytes; `trackProperties` that encode to more than 65525
 bytes (what `SUBSCRIBE_OK` has room for), hold more than 64 pairs (the relay's limit), or carry a
-`0x0E` above 255 or a `0x22` other than 1 or 2 (values draft-20 rules out), any of which would leave
+`0x0E` above 255 or a `0x22` other than 1 or 2 (values draft-22 rules out), any of which would leave
 the track unsubscribable; and object `properties` on `write()` that encode to more than 64 KiB,
 which the relay drops silently. The SDK measures the encoding with the core's own encoder, so an
 oversized property never opens a stream. The SDK adds
@@ -621,7 +621,7 @@ application's deduplication policy. Successful writes mean transport acceptance,
 acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
-TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-20 §3.5 defines
+TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-22 §12.2 defines
 it as refusing to establish a session; Python maps it in any phase (#227). TypeScript reports it in
 browsers and over native QUIC; against relays older than moq-relay 0.17.0 a browser does not see the
 relay's close, so a refusal there arrives as `TRANSPORT_ERROR` (#14). Neither another connection failure nor an uncovered
@@ -672,7 +672,7 @@ become a separately maintained protocol fork. See `packages/moq-core/UPSTREAM.js
 
 This slice supports one connection, arbitrary reliable-stream track subscriptions, subscription
 updates and cancellation, plus data-only publication on a dedicated connection. The borrowed generic interface also exposes FETCH and TRACK_STATUS.
-The protocol is pinned to `moqt-20`, matching the extracted implementation.
+The SDK offers `moqt-22`, then `moqt-20` as a fallback, and speaks whichever the relay selects.
 
 Automatic reconnection, token refresh on a live session, datagram reception, discovery of
 tracks within a namespace, and a Video.js adapter are not implemented yet. A GOAWAY ends the connection with an error; subscriptions still awaiting their first response end with it (`subscribed` rejects with `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `onError`;

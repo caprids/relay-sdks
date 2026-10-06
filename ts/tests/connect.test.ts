@@ -385,14 +385,14 @@ describe('connectRelaySubscriber', () => {
     expect(close).not.toHaveBeenCalled();
   });
 
-  it('adds Relay authentication to the connection URL and negotiates the pinned protocol', async () => {
+  it('adds Relay authentication to the connection URL and offers moqt-22, then moqt-20', async () => {
     const getToken = vi.fn(async () => 'token with/&?');
     const { createTransport } = await connectFake({ url: `${endpoint}?keep=1`, getToken });
     const url = new URL(createTransport.mock.calls[0]![0]);
 
     expect(url.searchParams.get('keep')).toBe('1');
     expect(url.searchParams.get('jwt')).toBe('token with/&?');
-    expect(createTransport.mock.calls[0]![1]).toEqual(['moqt-20']);
+    expect(createTransport.mock.calls[0]![1]).toEqual(['moqt-22', 'moqt-20']);
     expect(getToken).toHaveBeenCalledOnce();
   });
 
@@ -402,7 +402,7 @@ describe('connectRelaySubscriber', () => {
     });
     const { createTransport } = await connectFake({ url: `${endpoint}?jwt=explicit`, getToken });
 
-    expect(createTransport).toHaveBeenCalledWith(`${endpoint}?jwt=explicit`, ['moqt-20']);
+    expect(createTransport).toHaveBeenCalledWith(`${endpoint}?jwt=explicit`, ['moqt-22', 'moqt-20']);
     expect(getToken).not.toHaveBeenCalled();
   });
 
@@ -532,7 +532,7 @@ describe('connectRelaySubscriber', () => {
     expect(close).toHaveBeenCalledOnce();
   });
 
-  // draft-20 §3.5 UNAUTHORIZED; moq-relay closes with it, reason "unauthorized", after reading SETUP (#14, TA-9).
+  // draft-22 §12.2 UNAUTHORIZED; moq-relay closes with it, reason "unauthorized", after reading SETUP (#14, TA-9).
   it('reports a peer close with UNAUTHORIZED before server SETUP as a credentials refusal', async () => {
     const fake = createFakeTransport();
     const connecting = connectRelaySubscriber({
@@ -646,7 +646,7 @@ describe('connectRelaySubscriber', () => {
         return Object.assign(fake.transport, { ready: Promise.resolve() });
       });
       if (options.protocol) {
-        Object.defineProperty(StubWebTransport.prototype, 'protocol', { get: () => 'moqt-20' });
+        Object.defineProperty(StubWebTransport.prototype, 'protocol', { get: () => 'moqt-22' });
       }
       vi.stubGlobal('WebTransport', StubWebTransport);
       return { fake, constructed: StubWebTransport.mock.calls };
@@ -675,7 +675,7 @@ describe('connectRelaySubscriber', () => {
 
       fake.sendServerSetup();
       connections.push(await connecting);
-      expect(constructed).toEqual([[endpoint, { protocols: ['moqt-20'] }]]);
+      expect(constructed).toEqual([[endpoint, { protocols: ['moqt-22', 'moqt-20'] }]]);
     });
   });
 

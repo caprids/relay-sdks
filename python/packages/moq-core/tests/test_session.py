@@ -9,14 +9,19 @@ from core_helpers.waiting import settle, wait_for
 
 from moq_core.bytes import ByteWriter, utf8_encode
 from moq_core.control_messages import (
+    MOQT_PROTOCOL_ID,
+    MOQT_PROTOCOL_IDS,
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
+    AbsoluteLocationFilter,
     ControlMessage,
     ControlMessageDeframer,
     ControlMessageFrame,
     Fetch,
     Location,
     MessageParameters,
+    MoqtProtocolId,
+    NextObjectFilter,
     Publish,
     PublishNamespace,
     RelativeGroupFilter,
@@ -36,6 +41,7 @@ from moq_core.control_messages import (
     encode_request_error,
     encode_request_ok,
     encode_setup,
+    encode_subscribe,
     encode_subscribe_ok,
 )
 from moq_core.errors import SESSION_ERROR
@@ -84,8 +90,10 @@ class Harness:
         self.session = session
 
 
-def create_session_harness(callbacks: MoqtSessionCallbacks | None = None, **config: Any) -> Harness:
-    fake = create_fake_transport()
+def create_session_harness(
+    callbacks: MoqtSessionCallbacks | None = None, *, protocol_id: MoqtProtocolId = MOQT_PROTOCOL_ID, **config: Any
+) -> Harness:
+    fake = create_fake_transport(protocol_id)
     settings = MoqtSessionConfig(callbacks=callbacks or MoqtSessionCallbacks(), unknown_alias_timeout=0.2, **config)
     return Harness(fake, create_moqt_session(fake, settings))
 
@@ -154,6 +162,42 @@ class _WriteRecordingTransport(FakeTransport):
 
     async def create_unidirectional_stream(self) -> SendStream:
         return _RecordingSendStream(await super().create_unidirectional_stream(), self.uni_writes)
+
+
+class TestNegotiatedProtocol:
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_encodes_and_decodes_location_filter_for_the_negotiated_draft(self, protocol: MoqtProtocolId) -> None:
+        harness = create_session_harness(protocol_id=protocol)
+        harness.fake.send_server_setup()
+        parameters = MessageParameters(
+            location_filter=NextObjectFilter(), fill_parameters=MessageParameters(location_filter=CURRENT_GROUP)
+        )
+
+        harness.session.subscribe(options(["live"], "video", parameters))
+        stream = await harness.fake.next_request_stream()
+
+        assert await stream.first_message == Subscribe(
+            request_id=0, track_namespace=["live"], track_name="video", parameters=parameters
+        )
+        raw = b"".join(stream.raw)
+        assert raw == encode_subscribe(
+            Subscribe(request_id=0, track_namespace=["live"], track_name="video", parameters=parameters), protocol
+        )
+        # Draft-22 spells Next Object as its type alone; draft-20 as a length-prefixed {0,0}.
+        assert (bytes([0x21, 0x05]) if protocol == "moqt-22" else bytes([0x21, 0x02, 0x00, 0x00])) in raw
+
+        # A filter the publisher reports in PUBLISH_STATE_NOTIFY decodes for the same draft.
+        update = MessageParameters(location_filter=AbsoluteLocationFilter(start=Location(4, 0)))
+        notified = Recorder()
+        harness.session.subscribe(options(["live"], "audio"), SubscriptionHandlers(on_state_notify=notified))
+        audio = await harness.fake.next_request_stream()
+        await audio.first_message
+        await audio.send(encode_subscribe_ok(2, MessageParameters(), (), protocol))
+        await audio.send(encode_publish_state_notify(update, protocol))
+
+        await wait_for(lambda: notified.called)
+        assert notified.last == update
+        harness.session.destroy()
 
 
 class TestCreateMoqtSession:
@@ -263,7 +307,7 @@ class TestCreateMoqtSession:
         assert on_error.last.reason == "no such track"
         harness.session.destroy()
 
-    # §3.3.2 leaves "was this FIN premature?" to the caller; the session is the only layer that
+    # §6.4.2.2 leaves "was this FIN premature?" to the caller; the session is the only layer that
     # knows a SUBSCRIBE needs a SUBSCRIBE_OK. Without these the subscription sits pending forever
     # with neither response nor error.
     async def test_fails_a_subscription_when_the_peer_fins_before_subscribe_ok(self) -> None:
@@ -437,7 +481,7 @@ class TestCreateMoqtSession:
         await request.send(encode_publish_done(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, "ended"))
         await settle()
 
-        # PUBLISH_DONE alone does not complete the request (§3.3.2): the publisher's FIN does.
+        # PUBLISH_DONE alone does not complete the request (§6.4.2.2): the publisher's FIN does.
         assert not request.client_end.done()
 
         await request.fin()
@@ -873,7 +917,7 @@ class TestCreateMoqtSession:
         await wait_for(lambda: on_state_notify.called)
         assert on_state_notify.last == MessageParameters(largest_object=Location(12, 3))
 
-        # §10.10: unilateral; no REQUEST_OK or REQUEST_ERROR goes back.
+        # §9.10: unilateral; no REQUEST_OK or REQUEST_ERROR goes back.
         await settle()
         assert len(request.messages) == 1
         harness.session.destroy()
@@ -892,7 +936,7 @@ class TestCreateMoqtSession:
         assert harness.fake.close_info is not None
         assert harness.fake.close_info.close_code == 0x3
 
-    # §10.1 counts REQUEST_UPDATE among the messages that consume a Request ID; reusing the
+    # §6.4.2.1 counts REQUEST_UPDATE among the messages that consume a Request ID; reusing the
     # subscription's would be a duplicate the peer closes on.
     async def test_gives_each_request_update_a_fresh_request_id(self) -> None:
         harness = create_session_harness()
@@ -923,7 +967,7 @@ class TestCreateMoqtSession:
         await request.first_message
         await request.send(encode_subscribe_ok(7))
 
-        # Status, the 9-byte varint 2^64-1 (§10.12's sentinel), empty reason.
+        # Status, the 9-byte varint 2^64-1 (§9.9's sentinel), empty reason.
         body = bytes([PUBLISH_DONE_STATUS.TRACK_ENDED, *([0xFF] * 9), 0x00])
         frame = ByteWriter()
         frame.write_varint(0x0B)

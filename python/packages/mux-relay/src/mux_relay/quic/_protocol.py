@@ -36,7 +36,7 @@ _MAX_DATAGRAM_SIZE = 65535
 _KEEPALIVE_INTERVAL = 5.0
 """Seconds of send silence after which an established connection sends a QUIC PING.
 
-Draft-20 §13.6.1 leaves idle-connection keepalive to the transport (QUIC PING frames among the
+Draft-22 §15.6.1 leaves idle-connection keepalive to the transport (QUIC PING frames among the
 options). aioquic has none, and a receive-only client sends nothing when nothing reaches it, so after a
 NAT rebinding the relay would keep sending to the old address until its idle timeout. The next PING
 leaves from the new address and the relay migrates (RFC 9000 §9.3). Chromium does the same for the

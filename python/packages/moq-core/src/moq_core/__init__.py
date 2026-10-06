@@ -2,13 +2,15 @@
 
 The Python counterpart of ``ts/packages/moq-core``: protocol encoding, sessions, and stream
 handling over an abstract transport, with no runtime dependencies and no knowledge of Relay.
-``MOQT_PROTOCOL_ID`` is the draft pin every SDK shares; ``spec/protocol.json`` is its source of
-truth and ``tests/test_spec_protocol.py`` checks the two agree.
+``MOQT_PROTOCOL_ID`` is the default draft every SDK shares and ``MOQT_PROTOCOL_IDS`` the drafts a
+client offers; ``spec/protocol.json`` is their source of truth and ``tests/test_spec_protocol.py``
+checks they agree.
 """
 
 from .control_messages import (
     MAX_NAMESPACE_FIELDS,
     MOQT_PROTOCOL_ID,
+    MOQT_PROTOCOL_IDS,
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
     AbsoluteLocationFilter,
@@ -19,6 +21,7 @@ from .control_messages import (
     Location,
     LocationFilter,
     MessageParameters,
+    MoqtProtocolId,
     NextObjectFilter,
     NoLocationFilter,
     PublishDone,
@@ -80,6 +83,7 @@ __all__ = [
     "MAX_OBJECT_PAYLOAD_LENGTH",
     "MAX_TRACK_PROPERTIES_LENGTH",
     "MOQT_PROTOCOL_ID",
+    "MOQT_PROTOCOL_IDS",
     "PUBLISH_DONE_STATUS",
     "REQUEST_ERROR_CODE",
     "SESSION_ERROR",
@@ -105,6 +109,7 @@ __all__ = [
     "MoqtFetchOptions",
     "MoqtObject",
     "MoqtProtocolError",
+    "MoqtProtocolId",
     "MoqtPublishSession",
     "MoqtPublishSessionCallbacks",
     "MoqtPublishSessionConfig",

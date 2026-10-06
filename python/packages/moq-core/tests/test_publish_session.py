@@ -19,12 +19,16 @@ from core_helpers.waiting import settle, wait_for
 
 from moq_core import KeyValuePair, publish_session
 from moq_core.control_messages import (
+    MOQT_PROTOCOL_ID,
+    MOQT_PROTOCOL_IDS,
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
     ControlMessage,
     ControlMessageDeframer,
     MessageParameters,
+    MoqtProtocolId,
     Namespace,
+    NextObjectFilter,
     Publish,
     PublishDone,
     RelativeGroupFilter,
@@ -66,9 +70,11 @@ from moq_core.session import (
 NAMESPACE = ["live", "abc123"]
 
 
-def raw_subscribe(server: PairTransport, track_name: str, request_id: int) -> asyncio.Future[RawRequest]:
+def raw_subscribe(
+    server: PairTransport, track_name: str, request_id: int, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+) -> asyncio.Future[RawRequest]:
     """The relay's per-track pull under the test namespace."""
-    return raw_subscribe_to(server, NAMESPACE, track_name, request_id)
+    return raw_subscribe_to(server, NAMESPACE, track_name, request_id, protocol)
 
 
 def register(session: MoqtPublishSession, track_name: str) -> Any:
@@ -76,7 +82,7 @@ def register(session: MoqtPublishSession, track_name: str) -> Any:
 
 
 def publish_done_bytes(status: int, stream_count: int, reason: str) -> bytes:
-    """PUBLISH_DONE spelled out byte by byte (§10.12), for statuses and counts under 64."""
+    """PUBLISH_DONE spelled out byte by byte (§9.9), for statuses and counts under 64."""
     encoded = reason.encode()
     body = bytes([status, stream_count, len(encoded)]) + encoded
     return bytes([0x0B, 0x00, len(body)]) + body
@@ -110,8 +116,10 @@ class SessionOver(Exception):
 
 
 class Harness:
-    def __init__(self, callbacks: MoqtPublishSessionCallbacks | None = None) -> None:
-        self.pair: TransportPair = create_transport_pair()
+    def __init__(
+        self, callbacks: MoqtPublishSessionCallbacks | None = None, protocol_id: MoqtProtocolId = MOQT_PROTOCOL_ID
+    ) -> None:
+        self.pair: TransportPair = create_transport_pair(protocol_id)
         self.subscriber: MoqtSession = create_moqt_session(
             with_server_request_ids(self.pair.server), MoqtSessionConfig(unknown_alias_timeout=0.5)
         )
@@ -136,6 +144,28 @@ class CollectedTrack:
 
 def decode_frames(data: bytes) -> list[ControlMessage]:
     return [decode_control_message(frame) for frame in ControlMessageDeframer().push(data)]
+
+
+class TestNegotiatedProtocol:
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_decodes_an_incoming_subscribes_location_filter_for_the_negotiated_draft(
+        self, protocol: MoqtProtocolId
+    ) -> None:
+        subscribes: list[Subscribe] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_subscribe=subscribes.append), protocol)
+
+        await harness.session.ready
+        register(harness.session, "video")
+        request = await raw_subscribe(harness.pair.server, "video", 41, protocol)
+
+        await wait_for(lambda: len(subscribes) == 1)
+        parameters = subscribes[0].parameters
+        assert parameters.location_filter == NextObjectFilter()
+        assert parameters.fill_parameters is not None
+        assert parameters.fill_parameters.location_filter == RelativeGroupFilter(groups_before_next=1)
+        assert parameters.group_order == "descending"
+        await wait_for(lambda: len(request.received) == 1)
+        harness.destroy()
 
 
 class TestCreateMoqtPublishSession:
@@ -282,7 +312,7 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: solicitation.kinds() == ["request-ok", "namespace"])
 
-        # §3.3.2: a clean requester FIN only commits to sending no updates. It is not a withdrawal,
+        # §6.4.2.2: a clean requester FIN only commits to sending no updates. It is not a withdrawal,
         # and the response side keeps carrying the announce.
         await solicitation.fin()
         await settle(0.03)
@@ -305,7 +335,7 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: broad.kinds() == ["request-ok", "namespace"])
 
-        # §10.18: a second solicitation whose prefix nests with an established one would produce
+        # §9.17: a second solicitation whose prefix nests with an established one would produce
         # duplicate namespace state: refused, and the established carrier is untouched.
         narrow = await solicit_namespace(harness.pair.server, ["live"], 3)
 
@@ -326,7 +356,7 @@ class TestCreateMoqtPublishSession:
         register(harness.session, "catalog")
 
         # Both solicitations are in flight before either REQUEST_OK write settles: request handlers
-        # run concurrently, so §10.18's single-carrier rule must hold across the acceptance await,
+        # run concurrently, so §9.17's single-carrier rule must hold across the acceptance await,
         # not only at the synchronous check.
         broad, narrow = await asyncio.gather(
             solicit_namespace(harness.pair.server, [], 1), solicit_namespace(harness.pair.server, ["live"], 3)
@@ -385,7 +415,7 @@ class TestCreateMoqtPublishSession:
         await wait_for(lambda: len(subscribes) == 2)
         updated.update(MessageParameters(subscriber_priority=9))
         # The update is attributed to the subscription it rode in on, while consuming a Request ID of
-        # its own (§10.1).
+        # its own (§6.4.2.1).
         await wait_for(lambda: len(updates) == 1 and len(update_acks) == 1)
         assert updates[0][0] == updated.request_id + 1
         assert updates[0][1] != updated.request_id + 1
@@ -546,7 +576,7 @@ class TestCreateMoqtPublishSession:
         assert ended_requests == [21]
         assert bindings[-1] is None
         await wait_for(lambda: subscribe.ended())
-        # PUBLISH_DONE before the FIN (§3.3.2): TRACK_ENDED, no data streams opened, then the FIN.
+        # PUBLISH_DONE before the FIN (§6.4.2.2): TRACK_ENDED, no data streams opened, then the FIN.
         # moq-relay 0.15.4 and later treat a FIN without it as a failed request.
         assert subscribe.failure() is None
         assert after_subscribe_ok(subscribe, 21) == publish_done_bytes(0x2, 0, "track ended")
@@ -712,7 +742,7 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: sub.kinds() == ["subscribe-ok"] and bindings == [None])
 
-        # Each REQUEST_UPDATE consumes a Request ID of its own (§10.1).
+        # Each REQUEST_UPDATE consumes a Request ID of its own (§6.4.2.1).
         await sub.send(encode_request_update(83, MessageParameters(forward=1)))
         await wait_for(lambda: bindings[-1] == 81)
 
@@ -817,8 +847,8 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: len(solicitation.received) == 2)
 
-        # A legal §10.9 update (on a fresh Request ID) must never be session-fatal; v1 applies no
-        # prefix changes, so per §10.9.1 the update is answered with an error and the request stream
+        # A legal §9.5 update (on a fresh Request ID) must never be session-fatal; v1 applies no
+        # prefix changes, so per §9.5.1 the update is answered with an error and the request stream
         # closes, which costs the announce carrier, surfaced as announce loss.
         await solicitation.send(encode_request_update(3, MessageParameters(subscriber_priority=5)))
         await wait_for(
@@ -845,7 +875,7 @@ class TestCreateMoqtPublishSession:
         await wait_for(lambda: len(first.received) == 1)
 
         # Aliases ARE the peer's request ids: a reused id would hand two tracks the same alias and
-        # make their subgroup streams indistinguishable. Session-fatal with INVALID_REQUEST_ID (§10.1).
+        # make their subgroup streams indistinguishable. Session-fatal with INVALID_REQUEST_ID (§6.4.2.1).
         await raw_subscribe(harness.pair.server, "audio", 101)
         await wait_for(lambda: len(closes) == 1)
         assert isinstance(closes[0].error, Exception)
@@ -861,7 +891,7 @@ class TestCreateMoqtPublishSession:
         await harness.session.ready
         register(harness.session, "video")
 
-        # The peer is the server, so its request ids are odd (§10.1).
+        # The peer is the server, so its request ids are odd (§6.4.2.1).
         await raw_subscribe(harness.pair.server, "video", 100)
         await wait_for(lambda: len(closes) == 1)
         assert harness.pair.client._shared.close_info == CloseInfo(
@@ -880,7 +910,7 @@ class TestCreateMoqtPublishSession:
 
         await wait_for(lambda: sub.kinds() == ["subscribe-ok"])
 
-        # REQUEST_UPDATE consumes a Request ID of its own (§10.1); riding on the subscription's id is
+        # REQUEST_UPDATE consumes a Request ID of its own (§6.4.2.1); riding on the subscription's id is
         # the same duplicate as a repeated SUBSCRIBE.
         await sub.send(encode_request_update(111, MessageParameters(subscriber_priority=9)))
         await wait_for(lambda: len(closes) == 1)
@@ -963,14 +993,14 @@ class TestCreateMoqtPublishSession:
                 and bindings[-1] is None
             )
         )
-        # A failed update terminates the subscription with PUBLISH_DONE UPDATE_FAILED (§10.9.1).
+        # A failed update terminates the subscription with PUBLISH_DONE UPDATE_FAILED (§9.5.1).
         assert sub.received[-1] == PublishDone(
             status_code=PUBLISH_DONE_STATUS.UPDATE_FAILED, stream_count=0, reason="unsupported subscription update"
         )
         harness.destroy()
 
     async def test_reports_the_subscriptions_delivery_timeouts_and_accepts_an_update_that_changes_them(self) -> None:
-        # §8, §10.2.3, §10.2.4 (#167): the values reach the publisher on the binding, and REQUEST_UPDATE
+        # §5.2, §9.20.3, §9.20.4 (#167): the values reach the publisher on the binding, and REQUEST_UPDATE
         # carrying either is applied and acknowledged rather than refused as unsupported.
         ended_requests: list[int] = []
         bindings: list[TrackBinding] = []
@@ -1102,7 +1132,7 @@ class TestCreateMoqtPublishSession:
 
         await subscribe.fin()
         # The response direction closes too: a peer-initiated unsubscribe must not leak a half-open
-        # stream. The subscription was Established, so PUBLISH_DONE precedes that FIN (§3.3.2).
+        # stream. The subscription was Established, so PUBLISH_DONE precedes that FIN (§6.4.2.2).
         await wait_for(lambda: bindings == [41, None] and subscribe.ended())
         assert after_subscribe_ok(subscribe, 41) == publish_done_bytes(0x0, 0, "subscriber closed its request stream")
         harness.destroy()
@@ -1122,7 +1152,7 @@ class TestCreateMoqtPublishSession:
         pipes = record_data_pipes(harness.pair.client)
         await harness.session.open_uni_stream(43)
 
-        # A reset is a cancellation (§3.3.3): no PUBLISH_DONE, and open data streams are reset (§5.1.1).
+        # A reset is a cancellation (§6.4.2.3): no PUBLISH_DONE, and open data streams are reset (§3.1.2).
         subscribe.reset()
         await wait_for(lambda: bindings == [43, None] and subscribe.ended())
         assert after_subscribe_ok(subscribe, 43) == b""
@@ -1149,7 +1179,7 @@ class TestCreateMoqtPublishSession:
         assert after_subscribe_ok(subscribe, 61) == publish_done_bytes(0x2, 2, "track ended")
 
         # In issue order: the caller's FIN, the session's reset of the stream still open, then
-        # PUBLISH_DONE and the request stream's FIN (§10.12: "MUST NOT send PUBLISH_DONE until it
+        # PUBLISH_DONE and the request stream's FIN (§9.9: "MUST NOT send PUBLISH_DONE until it
         # has closed all streams").
         underlying = {pipes[0]: "finished", pipes[1]: "still open"}
         request_pipe = next(pipe for pipe, kind, data in harness.pair.events if data[:1] == b"\x0b")

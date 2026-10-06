@@ -402,7 +402,7 @@ odd-type values must expose a bytes-like buffer and are copied. Invalid properti
 naming the property index before a write starts or a track is registered. A `ValueError` at the
 same point covers: a byte value longer than 65535 bytes; `track_properties` that encode to more
 than 65525 bytes (what `SUBSCRIBE_OK` has room for), hold more than 64 pairs (the relay's limit), or
-carry a `0x0E` above 255 or a `0x22` other than 1 or 2 (values draft-20 rules out), any of which
+carry a `0x0E` above 255 or a `0x22` other than 1 or 2 (values draft-22 rules out), any of which
 would leave the track unsubscribable; and object `properties` on `write()` that encode to more than
 64 KiB, which the relay drops silently. The SDK measures the encoding with the core's own encoder, so
 an oversized property never opens a stream.
@@ -425,7 +425,7 @@ application metadata that must arrive intact in payloads, and read the received 
 interpreting timestamps. See [Relay property handling](../spec/behavior.md#relay-property-handling)
 for the observations and media guidance.
 
-Two properties also set delivery timeouts (draft-ietf-moq-transport-20 §8), in milliseconds:
+Two properties also set delivery timeouts (draft-ietf-moq-transport-22 §5.2), in milliseconds:
 `0x02` (`OBJECT_DELIVERY_TIMEOUT`) and `0x06` (`SUBGROUP_DELIVERY_TIMEOUT`). Set either as a track
 property, or on a group's first object to override the track for that group; on any later object it
 is only sent. The relay subscription's own values, if it sends any, combine with them: the smaller
@@ -639,7 +639,7 @@ except RelayError as error:
 
 `connect_relay_subscriber` and `connect_relay_publisher` default to `mux_relay.quic.connect_quic`,
 native QUIC on aioquic: the wire path `@mux/relay-quic` uses on Node. MOQT runs straight on the QUIC
-connection with ALPN `moqt-20` and no HTTP/3, and SETUP carries the endpoint's path (with the token)
+connection with ALPN `moqt-22` (or `moqt-20`, offered second as a fallback) and no HTTP/3, and SETUP carries the endpoint's path (with the token)
 and authority ([ADR 0004](../docs/adr/0004-python-dialing-end-speaks-native-quic.md)). The connection
 ends with an application CONNECTION_CLOSE. TLS verification uses the system CA bundle that ships with
 `certifi`. Pass `create_transport` to supply a `QuicConfiguration` (custom CAs, QUIC parameters) or
@@ -745,7 +745,8 @@ The observable behavior is the same; the spelling follows Python conventions:
 
 This slice supports one connection, arbitrary reliable-stream track subscriptions, subscription
 updates and cancellation, plus data-only publication on a dedicated connection. The generic core
-also exposes FETCH and TRACK_STATUS. The protocol is pinned to `moqt-20`.
+also exposes FETCH and TRACK_STATUS. The SDK offers `moqt-22`, then `moqt-20` as a fallback, and
+speaks whichever the relay selects.
 
 Token refresh on a live session, datagram reception, and discovery of
 tracks within a namespace are not implemented yet. Namespace discovery is `namespace_events`

@@ -90,7 +90,7 @@ export function createRelayQuicTarget({ port, certificateHash, call }) {
       await call('prepare', { handshake, select, maxStreams });
       return {
         peer,
-        dial({ path = '/conformance', protocols = ['moqt-20'] } = {}) {
+        dial({ path = '/conformance', protocols = ['moqt-22'] } = {}) {
           const url = origin + path;
           return { ...factory(url, protocols), url };
         },

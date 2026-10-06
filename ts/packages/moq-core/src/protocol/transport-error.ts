@@ -28,7 +28,7 @@ export class MoqtStreamError extends Error {
   override readonly name = 'MoqtStreamError';
   /** Always `'stream'`: the failure belongs to one stream. */
   readonly source = 'stream';
-  /** The stream error code (draft-20 §3.3.4), or `null` when it is not known. */
+  /** The stream error code (draft-22 §12.5), or `null` when it is not known. */
   readonly streamErrorCode: number | null;
 
   /**

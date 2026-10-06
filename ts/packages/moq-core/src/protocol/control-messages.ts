@@ -1,5 +1,5 @@
 /**
- * MOQT control-message wire codecs (moq-transport draft-20 §10).
+ * MOQT control-message wire codecs (moq-transport draft-22 §9).
  *
  * Every control or request-stream message is framed as:
  *
@@ -29,13 +29,30 @@ import { decodeVarint, MAX_VARINT_VALUE } from './varint.js';
 // ============================================================================
 
 /**
- * ALPN / WebTransport protocol identifier for the implemented draft (§3.1: `moqt-` plus the draft number). Version
- * negotiation happens at connection time (`WT-Available-Protocols` in WebTransport, ALPN in native QUIC) — not in
- * SETUP.
+ * ALPN / WebTransport protocol identifiers the core implements, in the order a client offers them (§6.2: `moqt-` plus
+ * the draft number). Version negotiation happens at connection time (`WT-Available-Protocols` in WebTransport, ALPN in
+ * native QUIC) — not in SETUP. Draft-22 is the default; draft-20 stays as a fallback for a peer that does not speak
+ * draft-22. The two differ on the wire only in the LOCATION_FILTER parameter (§9.20.9), so one codec serves both, and
+ * every function that encodes or decodes message parameters takes the negotiated identifier.
  */
-export const MOQT_PROTOCOL_ID = 'moqt-20';
+export const MOQT_PROTOCOL_IDS = ['moqt-22', 'moqt-20'] as const;
 
-/** Control/request message type codes (§10, Table 5). */
+/** A protocol identifier the core implements. */
+export type MoqtProtocolId = (typeof MOQT_PROTOCOL_IDS)[number];
+
+/** The preferred protocol identifier, and the codec's default when a caller names none. */
+export const MOQT_PROTOCOL_ID: MoqtProtocolId = 'moqt-22';
+
+/**
+ * The codec for a transport's negotiated `protocol`. The connecting layer refuses any protocol outside
+ * `MOQT_PROTOCOL_IDS` before a session starts (spec/transport-adapter.md TA-8), so a value outside it here (a test
+ * transport that names none) gets the default.
+ */
+export function resolveMoqtProtocol(protocol: string): MoqtProtocolId {
+  return (MOQT_PROTOCOL_IDS as readonly string[]).includes(protocol) ? (protocol as MoqtProtocolId) : MOQT_PROTOCOL_ID;
+}
+
+/** Control/request message type codes (§9, Table 5). */
 export const MESSAGE_TYPE = {
   SETUP: 0x2f00,
   GOAWAY: 0x10,
@@ -59,34 +76,34 @@ export const MESSAGE_TYPE = {
 } as const;
 
 /**
- * Setup Option types (§10.3.1). A namespace separate from message parameters. A session sends
+ * Setup Option types (§9.1). A namespace separate from message parameters. A session sends
  * options of these types through its `setupOptions` config, beside the MOQT_IMPLEMENTATION it adds
  * itself.
  */
 export const SETUP_OPTION = {
-  /** The endpoint's path and query, sent only on native QUIC (§10.3.1.2). */
+  /** The endpoint's path and query, sent only on native QUIC (§9.1.2). */
   PATH: 0x01,
-  /** A token authorizing the session (§10.3.1.4). */
+  /** A token authorizing the session (§9.1.4). */
   AUTHORIZATION_TOKEN: 0x03,
-  /** How many bytes of registered tokens the sender will cache (§10.3.1.3). */
+  /** How many bytes of registered tokens the sender will cache (§9.1.3). */
   MAX_AUTH_TOKEN_CACHE_SIZE: 0x04,
-  /** The endpoint's host and port, sent only on native QUIC (§10.3.1.1). */
+  /** The endpoint's host and port, sent only on native QUIC (§9.1.1). */
   AUTHORITY: 0x05,
-  /** The most ranges the sender accepts in one location filter (§10.3.1.6). */
+  /** The most ranges the sender accepts in one location filter (§9.1.6). */
   MAX_FILTER_RANGES: 0x06,
-  /** The sender's implementation name (§10.3.1.5). */
+  /** The sender's implementation name (§9.1.5). */
   MOQT_IMPLEMENTATION: 0x07,
-  /** The most REQUEST_UPDATE messages the sender accepts unanswered on one request stream (§10.3.1.7). */
+  /** The most REQUEST_UPDATE messages the sender accepts unanswered on one request stream (§9.1.7). */
   MAX_REQUEST_UPDATES: 0x08,
   /**
-   * The MoQ Solicit extension (draft-lcurley-moq-solicit-00), not a draft-20 option: `1` asks the peer to advertise
+   * The MoQ Solicit extension (draft-lcurley-moq-solicit-00), not a draft-22 option: `1` asks the peer to advertise
    * namespaces only on a SUBSCRIBE_NAMESPACE, never as unsolicited PUBLISH_NAMESPACE. moq-relay honors it from 0.17.0.
    * Even, so the value is a bare varint.
    */
   SOLICIT: 0x40b5a,
 } as const;
 
-/** Message parameter types (§10.2, §15.7). */
+/** Message parameter types (§9.20, §16.7). */
 export const PARAMETER_TYPE = {
   OBJECT_DELIVERY_TIMEOUT: 0x02,
   AUTHORIZATION_TOKEN: 0x03,
@@ -111,7 +128,7 @@ export const PARAMETER_TYPE = {
 } as const;
 
 /**
- * Track Property types (§10.8) — the KVP block trailing SUBSCRIBE_OK / PUBLISH / FETCH_OK. A registry of its own,
+ * Track Property types (§9.7) — the KVP block trailing SUBSCRIBE_OK / PUBLISH / FETCH_OK. A registry of its own,
  * distinct from both Setup Options and message parameters.
  */
 export const TRACK_PROPERTY = {
@@ -123,7 +140,7 @@ export const TRACK_PROPERTY = {
   TIMESCALE: 0x08,
 } as const;
 
-/** REQUEST_ERROR codes (§15.11.2). */
+/** REQUEST_ERROR codes (§16.11.2). */
 export const REQUEST_ERROR_CODE = {
   /** An implementation-specific or otherwise unclassified error. */
   INTERNAL_ERROR: 0x0,
@@ -163,7 +180,7 @@ export const REQUEST_ERROR_CODE = {
   INVALID_FILTER: 0x36,
 } as const;
 
-/** PUBLISH_DONE status codes (§10.12). */
+/** PUBLISH_DONE status codes (§12.4). */
 export const PUBLISH_DONE_STATUS = {
   /** An implementation-specific or otherwise unclassified error. */
   INTERNAL_ERROR: 0x0,
@@ -238,7 +255,7 @@ export function isRetryablePublishDoneStatus(statusCode: number): boolean {
   return !PERMANENT_PUBLISH_DONE_STATUSES.has(statusCode);
 }
 
-/** Stream reset / STOP_SENDING error codes (§3.3.4). */
+/** Stream reset / STOP_SENDING error codes (§12.5). */
 export const STREAM_RESET_CODE = {
   INTERNAL_ERROR: 0x0,
   CANCELLED: 0x1,
@@ -267,7 +284,7 @@ const MAX_LOCATION_FILTER_FIELDS = 4;
 // Shared structures
 // ============================================================================
 
-/** A particular Object in a Group within a Track (§1.4.2). */
+/** A particular Object in a Group within a Track (§8.2). */
 export interface Location {
   /** Group ID. */
   group: number;
@@ -352,7 +369,7 @@ function readLocation(reader: ByteReader): Location {
   return { group: reader.readVarint(), object: reader.readVarint() };
 }
 
-/** LARGEST_OBJECT is two bare varints in draft-17 onward (§10.2), matching moq-relay 0.14.17 and 0.15.8 (moq-dev/moq#3561). */
+/** LARGEST_OBJECT is two bare varints in draft-17 onward (§9.20), matching moq-relay 0.14.17 and 0.15.8 (moq-dev/moq#3561). */
 function writeLocationParameter(writer: ByteWriter, location: Location): void {
   writeLocation(writer, location);
 }
@@ -362,7 +379,7 @@ function readLocationParameter(reader: ByteReader): Location {
 }
 
 // ============================================================================
-// Key-Value-Pairs (§1.4.3) — Setup Options and Track Properties
+// Key-Value-Pairs (§8.3) — Setup Options and Track Properties
 // ============================================================================
 
 /**
@@ -425,25 +442,27 @@ export function decodeKeyValuePairs(reader: ByteReader, endOffset: number): KeyV
 }
 
 // ============================================================================
-// Location Filters (§5.1.2) — carried in the LOCATION_FILTER parameter
+// Location Filters (§3.3.1) — carried in the LOCATION_FILTER parameter (§9.20.9)
 // ============================================================================
 
 /**
- * Which Objects a subscription or fetch covers. On the wire the LOCATION_FILTER value is up to four varints —
- * StartGroup, StartObject, EndGroupDelta, EndObject — and how many are present selects the meaning:
+ * Which Objects a subscription or fetch covers. Draft-22 opens the LOCATION_FILTER value with a Location Filter Type
+ * that selects the fields after it; draft-20 length-prefixes up to four varints (StartGroup, StartObject,
+ * EndGroupDelta, EndObject) and the number present selects the meaning. The variants mean the same on both:
  *
- * - `none` — zero fields: no location constraint, the same as sending no LOCATION_FILTER at all. A fetch covers `{0,0}`
- *   up to Largest Object. A subscription passes all Objects published or received via upstream subscriptions; the draft
- *   does not say whether that reaches back into Objects a relay cached before the subscription, so what an ongoing track
- *   delivers is the relay's choice, and a relay may start at the live edge. `relative-group` and `absolute` ask for
- *   earlier groups explicitly. In REQUEST_UPDATE it clears the filter.
- * - `relative-group` — one field. Start at `{Largest.Group + 1 − groupsBeforeNext, 0}`, open-ended: `0` is the next
- *   group, `1` the start of the current group (a decodable join), `N` N−1 groups before it.
- * - `next-object` — the two-field spelling `{0,0}`: `{Largest.Group, Largest.Object + 1}`, the live edge, which can begin
- *   mid-group.
- * - `absolute` — two to four fields: an explicit start, optionally bounded by an end group (delta from the start group,
- *   whole group included unless `endObject` narrows it). An open-ended absolute `{0,0}` is unfiltered by definition and
- *   encodes as `none` — its two-field spelling would read as `next-object`.
+ * - `none` — no location constraint, the same as sending no LOCATION_FILTER at all (type 0x00; zero fields on
+ *   draft-20). A fetch covers `{0,0}` up to Largest Object. A subscription passes all Objects published or received via
+ *   upstream subscriptions; the draft does not say whether that reaches back into Objects a relay cached before the
+ *   subscription, so what an ongoing track delivers is the relay's choice, and a relay may start at the live edge.
+ *   `relative-group` and `absolute` ask for earlier groups explicitly. In REQUEST_UPDATE it clears the filter.
+ * - `relative-group` — start at `{Largest.Group + 1 − groupsBeforeNext, 0}`, open-ended: `0` is the next group, `1` the
+ *   start of the current group (a decodable join), `N` N−1 groups before it (type 0x01; one field on draft-20).
+ * - `next-object` — `{Largest.Group, Largest.Object + 1}`, the live edge, which can begin mid-group (type 0x05; the
+ *   two-field spelling `{0,0}` on draft-20).
+ * - `absolute` — an explicit start, optionally bounded by an end group (delta from the start group, whole group
+ *   included unless `endObject` narrows it) (types 0x02 to 0x04; two to four fields on draft-20). On draft-20 an
+ *   open-ended absolute `{0,0}` is unfiltered by definition and encodes as `none`, since its two-field spelling reads as
+ *   `next-object`; draft-22 has a spelling for it.
  */
 export type LocationFilter =
   | {
@@ -471,10 +490,68 @@ export type LocationFilter =
       endObject?: number;
     };
 
-/** Serialize a filter as the LOCATION_FILTER parameter's value (without its length prefix). */
-export function encodeLocationFilter(filter: LocationFilter): Uint8Array {
+/** Draft-22's Location Filter Type (§9.20.9, Table 6). */
+const LOCATION_FILTER_TYPE = {
+  NONE: 0x00,
+  RELATIVE_START: 0x01,
+  ABSOLUTE_START: 0x02,
+  ABSOLUTE_START_GROUP_END: 0x03,
+  ABSOLUTE_RANGE: 0x04,
+  NEXT_OBJECT: 0x05,
+} as const;
+
+/**
+ * Serialize a filter as the LOCATION_FILTER parameter's value as it follows the Parameter Type: on draft-22 the
+ * Location Filter Type and the fields it selects, on draft-20 the field list without its length prefix.
+ */
+export function encodeLocationFilter(filter: LocationFilter, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID): Uint8Array {
   const writer = new ByteWriter(32);
 
+  if (filter.type === 'absolute' && filter.endObject !== undefined && filter.endGroupDelta === undefined) {
+    throw new MoqtProtocolError('location filter end object requires an end group');
+  }
+
+  if (protocol === 'moqt-20') {
+    writeDraft20LocationFields(writer, filter);
+  } else {
+    writeLocationFilter(writer, filter);
+  }
+
+  return writer.toBytes();
+}
+
+function writeLocationFilter(writer: ByteWriter, filter: LocationFilter): void {
+  switch (filter.type) {
+    case 'none':
+      writer.writeVarint(LOCATION_FILTER_TYPE.NONE);
+      break;
+    case 'next-object':
+      writer.writeVarint(LOCATION_FILTER_TYPE.NEXT_OBJECT);
+      break;
+    case 'relative-group':
+      writer.writeVarint(LOCATION_FILTER_TYPE.RELATIVE_START);
+      writer.writeVarint(filter.groupsBeforeNext);
+      break;
+    case 'absolute': {
+      const { start, endGroupDelta, endObject } = filter;
+      let type: number = LOCATION_FILTER_TYPE.ABSOLUTE_START;
+
+      if (endObject !== undefined) type = LOCATION_FILTER_TYPE.ABSOLUTE_RANGE;
+      else if (endGroupDelta !== undefined) type = LOCATION_FILTER_TYPE.ABSOLUTE_START_GROUP_END;
+
+      writer.writeVarint(type);
+      writeLocation(writer, start);
+
+      if (endGroupDelta !== undefined) writer.writeVarint(endGroupDelta);
+
+      if (endObject !== undefined) writer.writeVarint(endObject);
+
+      break;
+    }
+  }
+}
+
+function writeDraft20LocationFields(writer: ByteWriter, filter: LocationFilter): void {
   switch (filter.type) {
     case 'none':
       break;
@@ -488,10 +565,6 @@ export function encodeLocationFilter(filter: LocationFilter): Uint8Array {
     case 'absolute': {
       const { start, endGroupDelta, endObject } = filter;
 
-      if (endObject !== undefined && endGroupDelta === undefined) {
-        throw new MoqtProtocolError('location filter end object requires an end group');
-      }
-
       if (start.group === 0 && start.object === 0 && endGroupDelta === undefined) break;
 
       writeLocation(writer, start);
@@ -503,11 +576,61 @@ export function encodeLocationFilter(filter: LocationFilter): Uint8Array {
       break;
     }
   }
-
-  return writer.toBytes();
 }
 
-export function decodeLocationFilter(bytes: Uint8Array): LocationFilter {
+/** Decode a LOCATION_FILTER value as `encodeLocationFilter` produces it; every byte must belong to the filter. */
+export function decodeLocationFilter(bytes: Uint8Array, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID): LocationFilter {
+  if (protocol === 'moqt-20') return decodeDraft20LocationFields(bytes);
+
+  const reader = new ByteReader(bytes);
+  const filter = readLocationFilter(reader);
+
+  if (reader.remaining > 0) throw new MoqtProtocolError('location filter has trailing bytes');
+
+  return filter;
+}
+
+/** Read a draft-22 LOCATION_FILTER value, which delimits itself: its type says how many fields follow. */
+function readLocationFilter(reader: ByteReader): LocationFilter {
+  const type = reader.readVarint();
+
+  switch (type) {
+    case LOCATION_FILTER_TYPE.NONE:
+      return { type: 'none' };
+    case LOCATION_FILTER_TYPE.RELATIVE_START:
+      return { type: 'relative-group', groupsBeforeNext: reader.readVarint() };
+    case LOCATION_FILTER_TYPE.NEXT_OBJECT:
+      return { type: 'next-object' };
+    case LOCATION_FILTER_TYPE.ABSOLUTE_START:
+    case LOCATION_FILTER_TYPE.ABSOLUTE_START_GROUP_END:
+    case LOCATION_FILTER_TYPE.ABSOLUTE_RANGE: {
+      const filter: LocationFilter = { type: 'absolute', start: readLocation(reader) };
+
+      if (type === LOCATION_FILTER_TYPE.ABSOLUTE_START) return filter;
+
+      filter.endGroupDelta = readEndGroupDelta(reader, filter.start.group);
+
+      if (type === LOCATION_FILTER_TYPE.ABSOLUTE_RANGE) filter.endObject = reader.readVarint();
+
+      return filter;
+    }
+    default:
+      // §9.20.9: any other Location Filter Type is a PROTOCOL_VIOLATION.
+      throw new MoqtProtocolError(`unknown Location Filter Type ${type}`);
+  }
+}
+
+function readEndGroupDelta(reader: ByteReader, startGroup: number): number {
+  const endGroupDelta = reader.readVarint();
+
+  if (startGroup + endGroupDelta > MAX_VARINT_VALUE) {
+    throw new MoqtProtocolError('location filter end group exceeds supported range');
+  }
+
+  return endGroupDelta;
+}
+
+function decodeDraft20LocationFields(bytes: Uint8Array): LocationFilter {
   const reader = new ByteReader(bytes);
   const fields: number[] = [];
 
@@ -542,7 +665,7 @@ export function decodeLocationFilter(bytes: Uint8Array): LocationFilter {
 }
 
 // ============================================================================
-// Message Parameters (§10.2)
+// Message Parameters (§9.20)
 // ============================================================================
 
 /** GROUP_ORDER: the order in which the publisher delivers groups. */
@@ -550,7 +673,7 @@ export type GroupOrder = 'ascending' | 'descending';
 
 /**
  * Decoded message parameters. Unlike Setup Options, message parameters use per-type encodings (uint8 / varint /
- * length-prefixed), so the codec is registry-driven. Per §10.2 an unknown parameter type is a PROTOCOL_VIOLATION
+ * length-prefixed), so the codec is registry-driven. Per §9.20 an unknown parameter type is a PROTOCOL_VIOLATION
  * (parameters cannot be skipped — the block is bounded by count, not length).
  */
 export interface MessageParameters {
@@ -562,7 +685,7 @@ export interface MessageParameters {
   rendezvousTimeout?: number;
   /** FILL_TIMEOUT value. */
   fillTimeout?: number;
-  /** Serialized Token structures (§10.2.2). May repeat. */
+  /** Serialized Token structures (§9.20.2). May repeat. */
   authorizationTokens?: Uint8Array[];
   /** EXPIRES value. */
   expires?: number;
@@ -577,14 +700,14 @@ export interface MessageParameters {
   /** GROUP_ORDER: the order the requester wants groups delivered in. */
   groupOrder?: GroupOrder;
   /**
-   * FILL_PARAMETERS (§10.2.15): asks the publisher to deliver a fill range on a fetch stream alongside the subscription
+   * FILL_PARAMETERS (§9.20.15): asks the publisher to deliver a fill range on a fetch stream alongside the subscription
    * — its presence alone requests the fill. A nested parameter scope: only the fill-scoped subset is legal inside, and
    * omitted entries inherit the subscription's own values.
    */
   fillParameters?: FillParameters;
   /** NEW_GROUP_REQUEST value. */
   newGroupRequest?: number;
-  /** Range-filter parameters (§5.1.4), kept opaque — the engine never sends or interprets them. */
+  /** Range-filter parameters (§3.3.2), kept opaque — the engine never sends or interprets them. */
   rangeFilters?: {
     /** Parameter type. */
     type: number;
@@ -593,11 +716,11 @@ export interface MessageParameters {
   }[];
   /** TRACK_NAMESPACE_PREFIX: the namespace prefix the request applies to. */
   trackNamespacePrefix?: TrackNamespace;
-  /** INCLUDE_PROPERTIES (§10.2.21): `0` asks the responder to send empty Track Properties. Default `1`. */
+  /** INCLUDE_PROPERTIES (§9.20.21): `0` asks the responder to send empty Track Properties. Default `1`. */
   includeProperties?: 0 | 1;
 }
 
-/** The parameters FILL_PARAMETERS may carry (§10.2.15, Table 6). */
+/** The parameters FILL_PARAMETERS may carry (§9.20.15, Table 7). */
 export type FillParameters = Pick<
   MessageParameters,
   'fillTimeout' | 'subscriberPriority' | 'locationFilter' | 'groupOrder' | 'rangeFilters'
@@ -623,7 +746,7 @@ interface ParameterEntry {
   write(writer: ByteWriter): void;
 }
 
-function collectParameterEntries(parameters: MessageParameters): ParameterEntry[] {
+function collectParameterEntries(parameters: MessageParameters, protocol: MoqtProtocolId): ParameterEntry[] {
   const entries: ParameterEntry[] = [];
   const push = (type: number, write: (writer: ByteWriter) => void) => entries.push({ type, write });
 
@@ -664,9 +787,13 @@ function collectParameterEntries(parameters: MessageParameters): ParameterEntry[
   }
 
   if (parameters.locationFilter !== undefined) {
-    push(PARAMETER_TYPE.LOCATION_FILTER, (w) =>
-      w.writeLengthPrefixed(encodeLocationFilter(parameters.locationFilter!))
-    );
+    push(PARAMETER_TYPE.LOCATION_FILTER, (w) => {
+      const value = encodeLocationFilter(parameters.locationFilter!, protocol);
+
+      // Draft-20 length-prefixes the field list; draft-22's Location Filter Type delimits it (§9.20.9).
+      if (protocol === 'moqt-20') w.writeLengthPrefixed(value);
+      else w.writeBytes(value);
+    });
   }
 
   if (parameters.groupOrder !== undefined) {
@@ -675,7 +802,7 @@ function collectParameterEntries(parameters: MessageParameters): ParameterEntry[
 
   if (parameters.fillParameters !== undefined) {
     push(PARAMETER_TYPE.FILL_PARAMETERS, (w) =>
-      w.writeLengthPrefixed(encodeFillParameters(parameters.fillParameters!))
+      w.writeLengthPrefixed(encodeFillParameters(parameters.fillParameters!, protocol))
     );
   }
 
@@ -700,14 +827,15 @@ function collectParameterEntries(parameters: MessageParameters): ParameterEntry[
 
 /**
  * Serialize as `Number of Parameters (vi64)` + delta-typed parameter list. The `'fill'` scope is the nested list inside
- * FILL_PARAMETERS, where only Table 6's types are legal.
+ * FILL_PARAMETERS, where only Table 7's types are legal.
  */
 export function encodeMessageParameters(
   writer: ByteWriter,
   parameters: MessageParameters = {},
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
   scope: ParameterScope = 'message'
 ): void {
-  const entries = collectParameterEntries(parameters).sort((a, b) => a.type - b.type);
+  const entries = collectParameterEntries(parameters, protocol).sort((a, b) => a.type - b.type);
 
   if (scope === 'fill') {
     const disallowed = entries.find((entry) => !FILL_SCOPE_TYPES.has(entry.type));
@@ -727,11 +855,11 @@ export function encodeMessageParameters(
   }
 }
 
-/** FILL_PARAMETERS' value: a parameter list encoded as if for a separate message (§10.2.15). */
-function encodeFillParameters(fill: FillParameters): Uint8Array {
+/** FILL_PARAMETERS' value: a parameter list encoded as if for a separate message (§9.20.15). */
+function encodeFillParameters(fill: FillParameters, protocol: MoqtProtocolId): Uint8Array {
   const writer = new ByteWriter(64);
 
-  encodeMessageParameters(writer, fill, 'fill');
+  encodeMessageParameters(writer, fill, protocol, 'fill');
   return writer.toBytes();
 }
 
@@ -743,7 +871,11 @@ const RANGE_FILTER_TYPES: readonly number[] = [
   PARAMETER_TYPE.TRACK_PROPERTY_FILTER,
 ];
 
-export function decodeMessageParameters(reader: ByteReader, scope: ParameterScope = 'message'): MessageParameters {
+export function decodeMessageParameters(
+  reader: ByteReader,
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
+  scope: ParameterScope = 'message'
+): MessageParameters {
   const count = reader.readVarint();
   const parameters: MessageParameters = {};
   let previousType = 0;
@@ -753,7 +885,7 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
 
     previousType = type;
 
-    // §10.2.15: a type outside Table 6 inside FILL_PARAMETERS is a
+    // §9.20.15: a type outside Table 7 inside FILL_PARAMETERS is a
     // PROTOCOL_VIOLATION, the nested scope included.
     if (scope === 'fill' && !FILL_SCOPE_TYPES.has(type)) {
       throw new MoqtProtocolError(`parameter type ${type} is not allowed inside FILL_PARAMETERS`);
@@ -796,7 +928,10 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
         parameters.subscriberPriority = reader.readUint8();
         break;
       case PARAMETER_TYPE.LOCATION_FILTER:
-        parameters.locationFilter = decodeLocationFilter(reader.readBytes(reader.readVarint()));
+        parameters.locationFilter =
+          protocol === 'moqt-20'
+            ? decodeLocationFilter(reader.readBytes(reader.readVarint()), protocol)
+            : readLocationFilter(reader);
         break;
       case PARAMETER_TYPE.GROUP_ORDER: {
         const order = reader.readUint8();
@@ -808,7 +943,7 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
       case PARAMETER_TYPE.FILL_PARAMETERS: {
         const value = new ByteReader(reader.readBytes(reader.readVarint()));
 
-        parameters.fillParameters = decodeMessageParameters(value, 'fill');
+        parameters.fillParameters = decodeMessageParameters(value, protocol, 'fill');
 
         if (value.remaining !== 0) throw new MoqtProtocolError('FILL_PARAMETERS has trailing bytes');
 
@@ -821,7 +956,7 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
         parameters.trackNamespacePrefix = readTrackNamespace(reader);
         break;
       case PARAMETER_TYPE.INCLUDE_PROPERTIES: {
-        // §10.2.21: a uint8 with no Length, as moq-relay frames it since 0.17.0
+        // §9.20.21: a uint8 with no Length, as moq-relay frames it since 0.17.0
         // (0.15.8 and earlier added a Length by the odd-type parity rule).
         const include = reader.readUint8();
         if (include !== 0 && include !== 1) throw new MoqtProtocolError(`invalid INCLUDE_PROPERTIES value ${include}`);
@@ -838,7 +973,7 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
           break;
         }
 
-        // §10.2: unknown parameters cannot be skipped (the block is bounded
+        // §9.20: unknown parameters cannot be skipped (the block is bounded
         // by count, and the value encoding is per-type) — session error.
         throw new MoqtProtocolError(`unknown message parameter type ${type}`);
       }
@@ -849,7 +984,7 @@ export function decodeMessageParameters(reader: ByteReader, scope: ParameterScop
 }
 
 // ============================================================================
-// Authorization tokens (§10.2.2)
+// Authorization tokens (§9.20.2)
 // ============================================================================
 
 /**
@@ -964,7 +1099,7 @@ export class ControlMessageDeframer {
 // Encoders (subscriber → publisher)
 // ============================================================================
 
-/** SETUP (§10.3) — first message on the endpoint's control stream. */
+/** SETUP (§9.1) — first message on the endpoint's control stream. */
 export function encodeSetup(options: readonly KeyValuePair[] = []): Uint8Array {
   const body = new ByteWriter();
 
@@ -980,36 +1115,36 @@ export interface SubscribeRequest {
 }
 
 /**
- * FETCH (§10.13) has the SUBSCRIBE body: the range is `parameters.locationFilter`, evaluated with the fetch rules of
- * §5.1.2 — relative starts count back from Largest Object, an omitted end stops there, and no filter means the whole
+ * FETCH (§9.11) has the SUBSCRIBE body: the range is `parameters.locationFilter`, evaluated with the fetch rules of
+ * §3.3.1 — relative starts count back from Largest Object, an omitted end stops there, and no filter means the whole
  * track. Nothing selects "standalone" or "joining" any more; a join is a subscription with FILL_PARAMETERS.
  */
 export type FetchRequest = SubscribeRequest;
 
 /** SUBSCRIBE, TRACK_STATUS, and FETCH share one body: Request ID, Full Track Name, Parameters. */
-function encodeTrackRequest(type: number, request: SubscribeRequest): Uint8Array {
+function encodeTrackRequest(type: number, request: SubscribeRequest, protocol: MoqtProtocolId): Uint8Array {
   const body = new ByteWriter();
 
   body.writeVarint(request.requestId);
   writeTrackNamespace(body, request.trackNamespace);
   body.writeLengthPrefixed(utf8Encode(request.trackName));
-  encodeMessageParameters(body, request.parameters);
+  encodeMessageParameters(body, request.parameters, protocol);
   return frameMessage(type, body);
 }
 
-/** SUBSCRIBE (§10.7) — first message on a new request stream. */
-export function encodeSubscribe(request: SubscribeRequest): Uint8Array {
-  return encodeTrackRequest(MESSAGE_TYPE.SUBSCRIBE, request);
+/** SUBSCRIBE (§9.6) — first message on a new request stream. */
+export function encodeSubscribe(request: SubscribeRequest, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID): Uint8Array {
+  return encodeTrackRequest(MESSAGE_TYPE.SUBSCRIBE, request, protocol);
 }
 
-/** TRACK_STATUS (§10.15) — identical wire format to SUBSCRIBE. */
-export function encodeTrackStatus(request: SubscribeRequest): Uint8Array {
-  return encodeTrackRequest(MESSAGE_TYPE.TRACK_STATUS, request);
+/** TRACK_STATUS (§9.13) — identical wire format to SUBSCRIBE. */
+export function encodeTrackStatus(request: SubscribeRequest, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID): Uint8Array {
+  return encodeTrackRequest(MESSAGE_TYPE.TRACK_STATUS, request, protocol);
 }
 
-/** FETCH (§10.13) — first message on a new request stream. */
-export function encodeFetch(request: FetchRequest): Uint8Array {
-  return encodeTrackRequest(MESSAGE_TYPE.FETCH, request);
+/** FETCH (§9.11) — first message on a new request stream. */
+export function encodeFetch(request: FetchRequest, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID): Uint8Array {
+  return encodeTrackRequest(MESSAGE_TYPE.FETCH, request, protocol);
 }
 
 export interface SubscribeNamespaceRequest {
@@ -1018,31 +1153,38 @@ export interface SubscribeNamespaceRequest {
   parameters?: MessageParameters | undefined;
 }
 
-/** SUBSCRIBE_NAMESPACE (§10.19) — first message on a new request stream. */
-export function encodeSubscribeNamespace(request: SubscribeNamespaceRequest): Uint8Array {
+/** SUBSCRIBE_NAMESPACE (§9.15) — first message on a new request stream. */
+export function encodeSubscribeNamespace(
+  request: SubscribeNamespaceRequest,
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+): Uint8Array {
   const body = new ByteWriter();
 
   body.writeVarint(request.requestId);
   writeTrackNamespace(body, request.trackNamespacePrefix);
-  encodeMessageParameters(body, request.parameters);
+  encodeMessageParameters(body, request.parameters, protocol);
   return frameMessage(MESSAGE_TYPE.SUBSCRIBE_NAMESPACE, body);
 }
 
 /**
- * REQUEST_UPDATE (§10.9) — sent on an existing request stream. `requestId` is the update's own, freshly allocated
- * Request ID (§10.1 counts REQUEST_UPDATE among the messages that consume one); the stream identifies the request being
+ * REQUEST_UPDATE (§9.5) — sent on an existing request stream. `requestId` is the update's own, freshly allocated
+ * Request ID (§6.4.2.1 counts REQUEST_UPDATE among the messages that consume one); the stream identifies the request being
  * updated.
  */
-export function encodeRequestUpdate(requestId: number, parameters: MessageParameters = {}): Uint8Array {
+export function encodeRequestUpdate(
+  requestId: number,
+  parameters: MessageParameters = {},
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+): Uint8Array {
   const body = new ByteWriter();
 
   body.writeVarint(requestId);
-  encodeMessageParameters(body, parameters);
+  encodeMessageParameters(body, parameters, protocol);
   return frameMessage(MESSAGE_TYPE.REQUEST_UPDATE, body);
 }
 
 /**
- * GOAWAY (§10.4). Clients MUST send a zero-length New Session URI, so the encoder takes only the timeout (milliseconds;
+ * GOAWAY (§9.2). Clients MUST send a zero-length New Session URI, so the encoder takes only the timeout (milliseconds;
  * 0 = no specific timeout).
  */
 export function encodeGoaway(timeout = 0): Uint8Array {
@@ -1054,20 +1196,23 @@ export function encodeGoaway(timeout = 0): Uint8Array {
 }
 
 /**
- * REQUEST_OK (§10.5). The subscriber sends this to accept an incoming PUBLISH (PUBLISH_OK). Track Properties are always
+ * REQUEST_OK (§9.3). The subscriber sends this to accept an incoming PUBLISH (PUBLISH_OK). Track Properties are always
  * empty in that role, and since draft-20 so are the parameters — a subscriber changes subscription parameters with
- * REQUEST_UPDATE, not in PUBLISH_OK (§10.11); the session driver's `accept()` therefore takes none. The parameter slot
+ * REQUEST_UPDATE, not in PUBLISH_OK (§9.8); the session driver's `accept()` therefore takes none. The parameter slot
  * stays for the publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK), which the fake peer in tests
  * exercises.
  */
-export function encodeRequestOk(parameters: MessageParameters = {}): Uint8Array {
+export function encodeRequestOk(
+  parameters: MessageParameters = {},
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+): Uint8Array {
   const body = new ByteWriter();
 
-  encodeMessageParameters(body, parameters);
+  encodeMessageParameters(body, parameters, protocol);
   return frameMessage(MESSAGE_TYPE.REQUEST_OK, body);
 }
 
-/** REQUEST_ERROR (§10.6) without a Redirect — enough to reject incoming requests. */
+/** REQUEST_ERROR (§9.4) without a Redirect — enough to reject incoming requests. */
 export function encodeRequestError(errorCode: number, reason = '', retryInterval = 0): Uint8Array {
   const body = new ByteWriter();
 
@@ -1085,21 +1230,22 @@ export function encodeRequestError(errorCode: number, reason = '', retryInterval
 // path would build on).
 // ============================================================================
 
-/** SUBSCRIBE_OK (§10.8). */
+/** SUBSCRIBE_OK (§9.7). */
 export function encodeSubscribeOk(
   trackAlias: number,
   parameters: MessageParameters = {},
-  trackProperties: readonly KeyValuePair[] = []
+  trackProperties: readonly KeyValuePair[] = [],
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
 ): Uint8Array {
   const body = new ByteWriter();
 
   body.writeVarint(trackAlias);
-  encodeMessageParameters(body, parameters);
+  encodeMessageParameters(body, parameters, protocol);
   encodeKeyValuePairs(body, trackProperties);
   return frameMessage(MESSAGE_TYPE.SUBSCRIBE_OK, body);
 }
 
-/** PUBLISH_DONE (§10.12). */
+/** PUBLISH_DONE (§9.9). */
 export function encodePublishDone(statusCode: number, streamCount: number, reason = ''): Uint8Array {
   const body = new ByteWriter();
 
@@ -1109,34 +1255,39 @@ export function encodePublishDone(statusCode: number, streamCount: number, reaso
   return frameMessage(MESSAGE_TYPE.PUBLISH_DONE, body);
 }
 
-/** PUBLISH_STATE_NOTIFY (§10.10) — the publisher's unilateral "these subscription parameters changed". */
-export function encodePublishStateNotify(parameters: MessageParameters = {}): Uint8Array {
+/** PUBLISH_STATE_NOTIFY (§9.10) — the publisher's unilateral "these subscription parameters changed". */
+export function encodePublishStateNotify(
+  parameters: MessageParameters = {},
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+): Uint8Array {
   const body = new ByteWriter();
 
-  encodeMessageParameters(body, parameters);
+  encodeMessageParameters(body, parameters, protocol);
   return frameMessage(MESSAGE_TYPE.PUBLISH_STATE_NOTIFY, body);
 }
 
-/** FETCH_OK (§10.14). */
+/** FETCH_OK (§9.12). */
 export function encodeFetchOk(
   endOfTrack: boolean,
   endLocation: Location,
   parameters: MessageParameters = {},
-  trackProperties: readonly KeyValuePair[] = []
+  trackProperties: readonly KeyValuePair[] = [],
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
 ): Uint8Array {
   const body = new ByteWriter();
 
   body.writeUint8(endOfTrack ? 1 : 0);
   writeLocation(body, endLocation);
-  encodeMessageParameters(body, parameters);
+  encodeMessageParameters(body, parameters, protocol);
   encodeKeyValuePairs(body, trackProperties);
   return frameMessage(MESSAGE_TYPE.FETCH_OK, body);
 }
 
-/** PUBLISH (§10.11). */
+/** PUBLISH (§9.8). */
 export function encodePublish(
   request: SubscribeRequest & { trackAlias: number },
-  trackProperties: readonly KeyValuePair[] = []
+  trackProperties: readonly KeyValuePair[] = [],
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
 ): Uint8Array {
   const body = new ByteWriter();
 
@@ -1144,7 +1295,7 @@ export function encodePublish(
   writeTrackNamespace(body, request.trackNamespace);
   body.writeLengthPrefixed(utf8Encode(request.trackName));
   body.writeVarint(request.trackAlias);
-  encodeMessageParameters(body, request.parameters);
+  encodeMessageParameters(body, request.parameters, protocol);
   encodeKeyValuePairs(body, trackProperties);
   return frameMessage(MESSAGE_TYPE.PUBLISH, body);
 }
@@ -1155,18 +1306,21 @@ export interface PublishNamespaceRequest {
   parameters?: MessageParameters;
 }
 
-/** PUBLISH_NAMESPACE (§10.16) — a publisher announcing a namespace. */
-export function encodePublishNamespace(request: PublishNamespaceRequest): Uint8Array {
+/** PUBLISH_NAMESPACE (§9.14) — a publisher announcing a namespace. */
+export function encodePublishNamespace(
+  request: PublishNamespaceRequest,
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+): Uint8Array {
   const body = new ByteWriter();
 
   body.writeVarint(request.requestId);
   writeTrackNamespace(body, request.trackNamespace);
-  encodeMessageParameters(body, request.parameters);
+  encodeMessageParameters(body, request.parameters, protocol);
   return frameMessage(MESSAGE_TYPE.PUBLISH_NAMESPACE, body);
 }
 
 /**
- * NAMESPACE (§10.17) — announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream. The body is
+ * NAMESPACE (§9.16) — announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream. The body is
  * the namespace suffix relative to that stream's subscribed prefix and nothing else: peers bound-check the tuple
  * against the frame length (moq-lite-rs treats even a zero parameter count as a malformed entry and kills the announce
  * stream), so no parameter block is written.
@@ -1178,7 +1332,7 @@ export function encodeNamespace(trackNamespaceSuffix: TrackNamespace): Uint8Arra
   return frameMessage(MESSAGE_TYPE.NAMESPACE, body);
 }
 
-/** NAMESPACE_DONE (§10.18) — retract a NAMESPACE announcement (same body shape). */
+/** NAMESPACE_DONE (§9.17) — retract a NAMESPACE announcement (same body shape). */
 export function encodeNamespaceDone(trackNamespaceSuffix: TrackNamespace): Uint8Array {
   const body = new ByteWriter();
 
@@ -1232,7 +1386,7 @@ export type ControlMessage =
   | {
       kind: 'publish-done';
       statusCode: number;
-      /** `undefined` when the publisher could not count its streams (the 2^64−1 sentinel, §10.12). */
+      /** `undefined` when the publisher could not count its streams (the 2^64−1 sentinel, §9.9). */
       streamCount: number | undefined;
       reason: string;
     }
@@ -1268,21 +1422,24 @@ function readRedirect(reader: ByteReader): Redirect {
 }
 
 /**
- * Decode one control-message frame into a typed message. Throws `MoqtProtocolError` for unknown message types (§10: "An
+ * Decode one control-message frame into a typed message. Throws `MoqtProtocolError` for unknown message types (§9: "An
  * endpoint that receives an unknown message type MUST close the session") and for malformed bodies.
  */
-export function decodeControlMessage(frame: ControlMessageFrame): ControlMessage {
+export function decodeControlMessage(
+  frame: ControlMessageFrame,
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+): ControlMessage {
   const reader = new ByteReader(frame.body);
   const end = frame.body.length;
   let message: ControlMessage;
 
   try {
-    message = decodeControlMessageBody(frame.type, reader, end);
+    message = decodeControlMessageBody(frame.type, reader, end, protocol);
   } catch (error) {
     // Field reads past the declared frame length surface as `RangeError`
     // from `ByteReader`. Normalize them: the session's stream loops treat
     // only `MoqtProtocolError` as fatal, and a truncated body must
-    // terminate the session (§10) rather than vanish as a read error.
+    // terminate the session (§9) rather than vanish as a read error.
     if (error instanceof RangeError) {
       throw new MoqtProtocolError(`control message 0x${frame.type.toString(16)} body is truncated`);
     }
@@ -1297,7 +1454,12 @@ export function decodeControlMessage(frame: ControlMessageFrame): ControlMessage
   return message;
 }
 
-function decodeControlMessageBody(type: number, reader: ByteReader, end: number): ControlMessage {
+function decodeControlMessageBody(
+  type: number,
+  reader: ByteReader,
+  end: number,
+  protocol: MoqtProtocolId
+): ControlMessage {
   switch (type) {
     case MESSAGE_TYPE.SETUP:
       return { kind: 'setup', options: decodeKeyValuePairs(reader, end) };
@@ -1314,12 +1476,12 @@ function decodeControlMessageBody(type: number, reader: ByteReader, end: number)
     }
     case MESSAGE_TYPE.SUBSCRIBE_OK: {
       const trackAlias = reader.readVarint();
-      const parameters = decodeMessageParameters(reader);
+      const parameters = decodeMessageParameters(reader, protocol);
 
       return { kind: 'subscribe-ok', trackAlias, parameters, trackProperties: decodeKeyValuePairs(reader, end) };
     }
     case MESSAGE_TYPE.REQUEST_OK: {
-      const parameters = decodeMessageParameters(reader);
+      const parameters = decodeMessageParameters(reader, protocol);
 
       return { kind: 'request-ok', parameters, trackProperties: decodeKeyValuePairs(reader, end) };
     }
@@ -1337,13 +1499,13 @@ function decodeControlMessageBody(type: number, reader: ByteReader, end: number)
     case MESSAGE_TYPE.REQUEST_UPDATE: {
       const requestId = reader.readVarint();
 
-      return { kind: 'request-update', requestId, parameters: decodeMessageParameters(reader) };
+      return { kind: 'request-update', requestId, parameters: decodeMessageParameters(reader, protocol) };
     }
     case MESSAGE_TYPE.PUBLISH_STATE_NOTIFY:
-      return { kind: 'publish-state-notify', parameters: decodeMessageParameters(reader) };
+      return { kind: 'publish-state-notify', parameters: decodeMessageParameters(reader, protocol) };
     case MESSAGE_TYPE.PUBLISH_DONE: {
       const statusCode = reader.readVarint();
-      // A publisher that cannot count its streams MUST send 2^64−1 (§10.12),
+      // A publisher that cannot count its streams MUST send 2^64−1 (§9.9),
       // which is above this codec's varint ceiling — read that one value as
       // "unknown" rather than failing the session over a legitimate
       // PUBLISH_DONE. Any other count past the ceiling stays a protocol error.
@@ -1356,7 +1518,7 @@ function decodeControlMessageBody(type: number, reader: ByteReader, end: number)
       const trackNamespace = readTrackNamespace(reader);
       const trackName = utf8Decode(reader.readBytes(reader.readVarint()));
       const trackAlias = reader.readVarint();
-      const parameters = decodeMessageParameters(reader);
+      const parameters = decodeMessageParameters(reader, protocol);
 
       return {
         kind: 'publish',
@@ -1372,7 +1534,12 @@ function decodeControlMessageBody(type: number, reader: ByteReader, end: number)
       const requestId = reader.readVarint();
       const trackNamespace = readTrackNamespace(reader);
 
-      return { kind: 'publish-namespace', requestId, trackNamespace, parameters: decodeMessageParameters(reader) };
+      return {
+        kind: 'publish-namespace',
+        requestId,
+        trackNamespace,
+        parameters: decodeMessageParameters(reader, protocol),
+      };
     }
     case MESSAGE_TYPE.FETCH_OK: {
       const endOfTrackWire = reader.readUint8();
@@ -1380,7 +1547,7 @@ function decodeControlMessageBody(type: number, reader: ByteReader, end: number)
 
       const endOfTrack = endOfTrackWire === 1;
       const endLocation = readLocation(reader);
-      const parameters = decodeMessageParameters(reader);
+      const parameters = decodeMessageParameters(reader, protocol);
 
       return {
         kind: 'fetch-ok',
@@ -1396,7 +1563,7 @@ function decodeControlMessageBody(type: number, reader: ByteReader, end: number)
       const requestId = reader.readVarint();
       const trackNamespace = readTrackNamespace(reader);
       const trackName = utf8Decode(reader.readBytes(reader.readVarint()));
-      const parameters = decodeMessageParameters(reader);
+      const parameters = decodeMessageParameters(reader, protocol);
 
       if (type === MESSAGE_TYPE.FETCH) {
         return { kind: 'fetch', request: { requestId, trackNamespace, trackName, parameters } };
@@ -1414,7 +1581,7 @@ function decodeControlMessageBody(type: number, reader: ByteReader, end: number)
         kind: 'subscribe-namespace',
         requestId,
         trackNamespacePrefix,
-        parameters: decodeMessageParameters(reader),
+        parameters: decodeMessageParameters(reader, protocol),
       };
     }
     case MESSAGE_TYPE.NAMESPACE:

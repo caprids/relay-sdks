@@ -186,8 +186,11 @@ export async function runRelayScenario({
       createTransport,
     });
     observeClosed('late subscriber', lateSubscriber);
+    // Start at the next group, the next live object. Not Next Object: moq-relay 0.17.0 frames LOCATION_FILTER the
+    // draft-20 way on moqt-22 too, and closes the session on draft-22's Next Object spelling (spec/relay-interop.md,
+    // "Draft-22 LOCATION_FILTER framing"). A relative start of 0 is the same bytes in both drafts.
     lateSubscriber.subscribe(
-      { namespace, track: 'status', parameters: { locationFilter: { type: 'next-object' } } },
+      { namespace, track: 'status', parameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 0 } } },
       {
         onSubscribed: (ok) => {
           lateLargestObject = ok.parameters.largestObject;

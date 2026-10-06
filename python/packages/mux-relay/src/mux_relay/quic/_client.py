@@ -25,7 +25,7 @@ from ._udp import open_socket
 
 _DEFAULT_PORT = 443
 _MAX_DATAGRAM_FRAME_SIZE = 65536
-"""MOQT requires the QUIC DATAGRAM extension (draft-20 §3.1), so the dialer offers it; the core sends none."""
+"""MOQT requires the QUIC DATAGRAM extension (draft-22 §6.2), so the dialer offers it; the core sends none."""
 
 _NO_APPLICATION_PROTOCOL = QuicErrorCode.CRYPTO_ERROR + 120
 """The CONNECTION_CLOSE code for TLS's ``no_application_protocol`` alert (RFC 9001 §4.8, RFC 7301 §3.2)."""

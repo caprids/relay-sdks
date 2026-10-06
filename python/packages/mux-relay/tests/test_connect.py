@@ -430,7 +430,7 @@ class TestConnectRelay:
         assert errors[0].reason == "missing track"
         assert fake.close_calls == 0
 
-    async def test_adds_relay_authentication_to_the_url_and_negotiates_the_pinned_protocol(
+    async def test_adds_relay_authentication_to_the_url_and_offers_moqt_22_then_moqt_20(
         self, connections: list[RelaySubscriber]
     ) -> None:
         calls = 0
@@ -447,7 +447,7 @@ class TestConnectRelay:
         assert urlsplit(url).path == "/moq"
         assert query["keep"] == ["1"]
         assert query["jwt"] == ["token with/&?"]
-        assert protocols == ["moqt-20"]
+        assert protocols == ["moqt-22", "moqt-20"]
         assert calls == 1
 
     async def test_does_not_mint_a_token_when_the_endpoint_already_contains_an_explicit_jwt(
@@ -458,7 +458,7 @@ class TestConnectRelay:
 
         _, _, factory = await connect_fake(connections, url=f"{ENDPOINT}?jwt=explicit", get_token=get_token)
 
-        assert factory.calls == [(f"{ENDPOINT}?jwt=explicit", ["moqt-20"])]
+        assert factory.calls == [(f"{ENDPOINT}?jwt=explicit", ["moqt-22", "moqt-20"])]
 
     @pytest.mark.parametrize("query", ["?jwt=", "?jwt", "?keep=1&jwt=", "?jwt=&jwt=explicit", "?jwt=explicit&jwt="])
     async def test_rejects_an_empty_jwt_on_the_endpoint_before_the_token_provider_or_transport(

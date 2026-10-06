@@ -1,7 +1,7 @@
 import { MoqtStreamError } from './transport-error.js';
 
 /**
- * The reason to hand a stream's `abort()` so the reset carries `code` (§3.3.4, spec/transport-adapter.md TA-17).
+ * The reason to hand a stream's `abort()` so the reset carries `code` (§12.5, spec/transport-adapter.md TA-17).
  *
  * A browser's WebTransport takes the reset code only from a native `WebTransportError`'s `streamErrorCode`; any other
  * reason resets with code 0. So where `WebTransportError` exists, the reason is one. Elsewhere (native QUIC adapters,

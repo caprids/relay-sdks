@@ -27,7 +27,7 @@ it('tries the next address when the first one the host resolves to does not answ
     await ipv4.call('prepare');
     const value = Uint8Array.from(ipv4.certificateHash.match(/../g), (byte) => Number.parseInt(byte, 16));
     const factory = nativeQuicTransport({ serverCertificateHashes: [{ algorithm: 'sha-256', value }] });
-    const { transport, ready } = factory(`https://localhost:${ipv4.port}/`, ['moqt-20']);
+    const { transport, ready } = factory(`https://localhost:${ipv4.port}/`, ['moqt-22']);
     transport.closed.catch(() => {});
     await ready;
     transport.close();
@@ -47,7 +47,7 @@ it('TA-7 ready rejects when the offer is empty and the peer selects no protocol'
 
 it('keeps reading a stream whose bytes trickle in, as the read and the reset watch hand over between them', async () => {
   await peer.call('prepare');
-  const { transport, ready } = target.dialFactory(`https://localhost:${peer.port}/`, ['moqt-20']);
+  const { transport, ready } = target.dialFactory(`https://localhost:${peer.port}/`, ['moqt-22']);
   transport.closed.catch(() => {});
   await ready;
   const id = await peer.call('openUni');
@@ -74,7 +74,7 @@ describe('@mux/relay-quic trust', () => {
   it('trusts a ca anchor added to the platform roots', async () => {
     await peer.call('prepare');
     const { transport, ready } = nativeQuicTransport({ ca: peer.certificatePem })(`https://localhost:${peer.port}/`, [
-      'moqt-20',
+      'moqt-22',
     ]);
     transport.closed.catch(() => {});
     await ready;
@@ -84,7 +84,7 @@ describe('@mux/relay-quic trust', () => {
 
   it('fails the dial with a session error when the certificate is not trusted', async () => {
     await peer.call('prepare');
-    const { transport, ready } = nativeQuicTransport()(`https://localhost:${peer.port}/`, ['moqt-20']);
+    const { transport, ready } = nativeQuicTransport()(`https://localhost:${peer.port}/`, ['moqt-22']);
     transport.closed.catch(() => {});
     await expect(ready).rejects.toMatchObject({ source: 'session' });
     await expect(transport.closed).rejects.toMatchObject({ source: 'session' });

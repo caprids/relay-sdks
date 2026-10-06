@@ -15,7 +15,7 @@ import { nativeQuicTransport } from '@mux/relay-quic';
 const [origin, certificateHash, kind] = process.argv.slice(2);
 const value = Uint8Array.from(certificateHash.match(/../g), (byte) => Number.parseInt(byte, 16));
 const factory = nativeQuicTransport({ serverCertificateHashes: [{ algorithm: 'sha-256', value }] });
-const { transport, ready } = factory(`${origin}/conformance`, ['moqt-20']);
+const { transport, ready } = factory(`${origin}/conformance`, ['moqt-22']);
 transport.closed.catch(() => {});
 
 if (kind === 'exits-after-cancel') {

@@ -7,7 +7,7 @@ function bytes(...values: number[]): Uint8Array {
   return new Uint8Array(values);
 }
 
-// Golden vectors from moq-transport draft-19 §1.4.1, Table 2.
+// Golden vectors from moq-transport draft-22 §8.1, Table 4.
 const SPEC_VECTORS: [Uint8Array, number][] = [
   [bytes(0x25), 37],
   [bytes(0x80, 0x25), 37],

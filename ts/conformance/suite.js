@@ -7,7 +7,7 @@
  */
 
 /** The MOQT protocol identifier the cases offer by default. */
-export const MOQT_PROTOCOL = 'moqt-20';
+export const MOQT_PROTOCOL = 'moqt-22';
 
 /** How long a case may wait for something that must happen promptly. */
 const PROMPTLY_MS = 2_000;
@@ -212,7 +212,7 @@ async function releasePeer(ctx) {
   if (ctx.target.capabilities.includes('pause')) await ctx.peer.resume();
 }
 
-/** Codes a reset or stop must carry through, up to 255: all the MOQT codes the core sends (draft-20 §3.3.4). */
+/** Codes a reset or stop must carry through, up to 255: all the MOQT codes the core sends (draft-22 §12.5). */
 const LOW_CODES = [0, 1, 7, 0x12, 255];
 /** The rest of TA-17's range, which some browsers cannot send (Known deviations). */
 const HIGH_CODES = [256, 0x1_0000, 0xffff_ffff];

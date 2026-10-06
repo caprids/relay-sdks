@@ -314,7 +314,7 @@ class TestConnectRelayPublisher:
         )
         cleanup.append(publisher.close)
 
-        assert calls == [(f"{URL}?jwt=publish-token", ["moqt-20"])]
+        assert calls == [(f"{URL}?jwt=publish-token", ["moqt-22", "moqt-20"])]
 
     async def test_preserves_explicit_track_properties_and_defaults_other_tracks_to_no_timescale(
         self, cleanup: Cleanup

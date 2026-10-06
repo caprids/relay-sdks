@@ -160,7 +160,7 @@ describe('publisher namespace coverage', () => {
     '%s distinguishes an uncovered namespace and recovers after a later matching solicitation',
     async (method) => {
       const { pair, subscriber, track } = await connectPublisher();
-      // Raw ids clear of the subscriber's (1, 3, ...): one session, one request id space (§10.1).
+      // Raw ids clear of the subscriber's (1, 3, ...): one session, one request id space (§6.4.2.1).
       const unrelated = await solicitNamespace(pair.server, ['other'], 101);
       await vi.waitFor(() => expect(unrelated.received.map((message) => message.kind)).toEqual(['request-ok']));
 

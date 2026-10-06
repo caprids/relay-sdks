@@ -60,7 +60,7 @@ describe('@mux/relay/node', () => {
     expect(quic.nativeQuicTransport).toHaveBeenCalledWith();
     const shared = quic.nativeQuicTransport.mock.results[0]!.value;
     expect(shared).toHaveBeenCalledTimes(2);
-    expect(shared).toHaveBeenNthCalledWith(1, url, ['moqt-20']);
+    expect(shared).toHaveBeenNthCalledWith(1, url, ['moqt-22', 'moqt-20']);
   });
 
   it('gives a connection with trust options a factory of its own', async () => {

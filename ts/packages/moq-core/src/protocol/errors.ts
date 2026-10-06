@@ -1,5 +1,5 @@
 /**
- * MOQT session-termination error codes (moq-transport draft-20 §3.5). Used as the close code when terminating the
+ * MOQT session-termination error codes (moq-transport draft-22 §12.2). Used as the close code when terminating the
  * transport session and as the `code` carried by `MoqtProtocolError`.
  */
 export const SESSION_ERROR = {
@@ -52,7 +52,7 @@ const MOQT_PROTOCOL_ERROR_SYMBOL = Symbol.for('@videojs/spf/moqt-protocol-error'
 
 /**
  * A wire-protocol violation detected while encoding or decoding MOQT data. `code` is the session-termination code
- * (§3.5) the session driver should close the transport with — defaults to `PROTOCOL_VIOLATION`.
+ * (§12.2) the session driver should close the transport with — defaults to `PROTOCOL_VIOLATION`.
  */
 export class MoqtProtocolError extends Error {
   /** Brand that {@link isMoqtProtocolError} checks, so the test works across copies of this package. */

@@ -28,7 +28,7 @@ async def test_namespace_demand_deadline_and_recovery(prefix: list[str] | None, 
     try:
         track = publisher.register_track("events", write_timeout=0.05)
         if prefix is not None:
-            # Raw ids clear of the peer session's (1, 3, ...): one session, one request id space (§10.1).
+            # Raw ids clear of the peer session's (1, 3, ...): one session, one request id space (§6.4.2.1).
             request = await solicit_namespace(pair.server, prefix, 101)
             await wait_for(lambda: "request-ok" in request.kinds())
 

@@ -72,11 +72,11 @@ export interface FakeTransport {
 
 /** Options for {@link createFakeTransport}. */
 export interface FakeTransportOptions {
-  /** The protocol the transport reports as negotiated (TA-8). Default `moqt-20`. */
+  /** The protocol the transport reports as negotiated (TA-8). Default `moqt-22`. */
   protocol?: string;
 }
 
-export function createFakeTransport({ protocol = 'moqt-20' }: FakeTransportOptions = {}): FakeTransport {
+export function createFakeTransport({ protocol = 'moqt-22' }: FakeTransportOptions = {}): FakeTransport {
   const incomingUni = pushChannel<ReadableStream<Uint8Array>>();
   const incomingBidi = pushChannel<BidirectionalStreamLike>();
   const clientUniStreams: ReadableStream<Uint8Array>[] = [];

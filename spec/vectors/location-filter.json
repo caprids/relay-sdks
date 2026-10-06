@@ -1,0 +1,44 @@
+{
+  "description": "The LOCATION_FILTER message parameter (type 0x21) in each draft the SDKs speak, as a one-parameter list: Number of Parameters, the type delta, then the value. Draft-ietf-moq-transport-22 §9.20.9 opens the value with a Location Filter Type that selects the fields after it and has no Length. Draft-ietf-moq-transport-20 §5.1.2 length-prefixes up to four fields and the number present selects the meaning. The two spellings coincide when the field count equals the type and every field is a one-byte varint; they differ for Next Object, for an open-ended absolute {0,0}, and for any field of 128 or more.",
+  "sources": [
+    "filters: one of each shape in draft-22 §9.20.9 Table 6 and its draft-20 §5.1.2 spelling, plus a two-byte StartGroup derived from the encoding rules",
+    "encodeOnly: draft-20 §5.1.2 says an open-ended filter from absolute {0,0} is equivalent to unfiltered, so its draft-20 encoding is the no-filter one; draft-22 has a spelling for it",
+    "rejected: draft-22 §9.20.9 ('Any other Location Filter Type is a PROTOCOL_VIOLATION') and a value missing a field its type selects; draft-20 §5.1.2 allows at most four fields"
+  ],
+  "filters": [
+    { "filter": { "type": "none" }, "moqt-22": "012100", "moqt-20": "012100" },
+    { "filter": { "type": "next-object" }, "moqt-22": "012105", "moqt-20": "0121020000" },
+    { "filter": { "type": "relative-group", "groupsBeforeNext": "0" }, "moqt-22": "01210100", "moqt-20": "01210100" },
+    { "filter": { "type": "relative-group", "groupsBeforeNext": "1" }, "moqt-22": "01210101", "moqt-20": "01210101" },
+    { "filter": { "type": "absolute", "start": { "group": "3", "object": "9" } }, "moqt-22": "0121020309", "moqt-20": "0121020309" },
+    { "filter": { "type": "absolute", "start": { "group": "300", "object": "9" } }, "moqt-22": "012102812c09", "moqt-20": "012103812c09" },
+    {
+      "filter": { "type": "absolute", "start": { "group": "3", "object": "9" }, "endGroupDelta": "2" },
+      "moqt-22": "012103030902",
+      "moqt-20": "012103030902"
+    },
+    {
+      "filter": { "type": "absolute", "start": { "group": "3", "object": "9" }, "endGroupDelta": "2", "endObject": "7" },
+      "moqt-22": "01210403090207",
+      "moqt-20": "01210403090207"
+    },
+    {
+      "filter": { "type": "absolute", "start": { "group": "0", "object": "0" }, "endGroupDelta": "3" },
+      "moqt-22": "012103000003",
+      "moqt-20": "012103000003"
+    }
+  ],
+  "encodeOnly": [
+    {
+      "filter": { "type": "absolute", "start": { "group": "0", "object": "0" } },
+      "moqt-22": "0121020000",
+      "moqt-20": "012100",
+      "moqt-20 decodes as": { "type": "none" }
+    }
+  ],
+  "rejected": [
+    { "protocol": "moqt-22", "bytes": "012106", "reason": "unknown Location Filter Type" },
+    { "protocol": "moqt-22", "bytes": "0121040309", "reason": "type 0x04 selects four fields; two are present" },
+    { "protocol": "moqt-20", "bytes": "0121050102030405", "reason": "more than four fields" }
+  ]
+}

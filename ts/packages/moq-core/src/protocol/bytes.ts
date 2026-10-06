@@ -44,7 +44,7 @@ export class ByteReader {
   }
 
   /**
-   * Read a count whose "unknown" sentinel is the maximal varint 2^64−1 — PUBLISH_DONE's Stream Count (§10.12). Exactly
+   * Read a count whose "unknown" sentinel is the maximal varint 2^64−1 — PUBLISH_DONE's Stream Count (§9.9). Exactly
    * that sentinel reads as `undefined`; any other value above this codec's 2^53−1 ceiling is still the protocol error
    * `readVarint` raises, since no real count gets there.
    */
@@ -110,7 +110,7 @@ export class ByteWriter {
     this.#buffer = grown;
   }
 
-  /** Appends a MOQT varint (§1.4.1). Throws `RangeError` unless `value` is a non-negative safe integer. */
+  /** Appends a MOQT varint (§8.1). Throws `RangeError` unless `value` is a non-negative safe integer. */
   writeVarint(value: number): void {
     this.#ensure(varintByteLength(value));
     this.#length += encodeVarintInto(this.#buffer, this.#length, value);

@@ -388,7 +388,7 @@ describe('readFetchEntries', () => {
     await expect(collect(readFetchEntries(reader))).rejects.toThrow(/payload length .* exceeds/);
   });
 
-  it('yields end-of-range markers for all three statuses (§11.4.4, Table 7)', async () => {
+  it('yields end-of-range markers for all three statuses (§11.4.1, Table 7)', async () => {
     const bytes = encodeFetchStream((w) => {
       w.writeVarint(0x8c); // End of Non-Existent Range
       w.writeVarint(4);

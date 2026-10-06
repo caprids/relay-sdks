@@ -1,5 +1,5 @@
 /**
- * MOQT variable-length integers (moq-transport draft-20 §1.4.1).
+ * MOQT variable-length integers (moq-transport draft-22 §8.1).
  *
  * NOT the QUIC RFC 9000 varint: draft-15 replaced it with a leading-ones scheme. The number of leading 1 bits of the
  * first byte gives the encoded length minus one (1-9 bytes); the bits after the first 0, plus any subsequent bytes,

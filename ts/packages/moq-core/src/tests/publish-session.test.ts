@@ -12,6 +12,8 @@ import {
   encodeSubscribe,
   encodeSubscribeNamespace,
   encodeSubscribeOk,
+  MOQT_PROTOCOL_IDS,
+  type MoqtProtocolId,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
   STREAM_RESET_CODE,
@@ -45,23 +47,32 @@ import {
 const NAMESPACE = ['live', 'abc123'];
 
 /** The relay's per-track pull under the test namespace. */
-function rawSubscribe(server: Parameters<typeof rawSubscribeTo>[0], trackName: string, requestId: number) {
-  return rawSubscribeTo(server, NAMESPACE, trackName, requestId);
+function rawSubscribe(
+  server: Parameters<typeof rawSubscribeTo>[0],
+  trackName: string,
+  requestId: number,
+  protocol?: MoqtProtocolId
+) {
+  return rawSubscribeTo(server, NAMESPACE, trackName, requestId, protocol);
 }
 
 function makePublishHarness(
   callbacks: MoqtPublishSessionCallbacks = {},
-  { bufferBytes }: { bufferBytes?: number } = {}
+  { bufferBytes, protocol }: { bufferBytes?: number; protocol?: MoqtProtocolId } = {}
 ) {
   const events: PipeEvent[] = [];
-  const pair = createTransportPair({ events, ...(bufferBytes === undefined ? {} : { bufferBytes }) });
+  const pair = createTransportPair({
+    events,
+    ...(bufferBytes === undefined ? {} : { bufferBytes }),
+    ...(protocol === undefined ? {} : { protocol }),
+  });
   const subscriber = createMoqtSession(withServerRequestIds(pair.server), { unknownAliasTimeoutMs: 500 });
   const session = createMoqtPublishSession(pair.client, { callbacks });
 
   return { pair, session, subscriber, events };
 }
 
-/** PUBLISH_DONE spelled out byte by byte (§10.12), for statuses and counts under 64. */
+/** PUBLISH_DONE spelled out byte by byte (§9.9), for statuses and counts under 64. */
 function publishDoneBytes(status: number, streamCount: number, reason: string): number[] {
   const encoded = [...new TextEncoder().encode(reason)];
   const body = [status, streamCount, encoded.length, ...encoded];
@@ -112,10 +123,33 @@ function collectTrack(
 }
 
 function decodeFrames(bytes: Uint8Array): ControlMessage[] {
-  return new ControlMessageDeframer().push(bytes).map(decodeControlMessage);
+  return new ControlMessageDeframer().push(bytes).map((frame) => decodeControlMessage(frame));
 }
 
 describe('createMoqtPublishSession', () => {
+  it.each(MOQT_PROTOCOL_IDS)("decodes an incoming SUBSCRIBE's LOCATION_FILTER for %s", async (protocol) => {
+    const subscribes: IncomingSubscribe[] = [];
+    const { pair, session, subscriber } = makePublishHarness(
+      { onSubscribe: (subscribe) => subscribes.push(subscribe) },
+      { protocol }
+    );
+
+    await session.ready;
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+    const request = await rawSubscribe(pair.server, 'video', 41, protocol);
+
+    await vi.waitFor(() => expect(subscribes).toHaveLength(1));
+    expect(subscribes[0]!.parameters).toMatchObject({
+      locationFilter: { type: 'next-object' },
+      fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
+      groupOrder: 'descending',
+    });
+    await vi.waitFor(() => expect(request.received).toHaveLength(1));
+    session.destroy();
+    subscriber.destroy();
+  });
+
   it('completes SETUP both ways against the existing subscribe driver', async () => {
     const { session, subscriber } = makePublishHarness();
 
@@ -286,7 +320,7 @@ describe('createMoqtPublishSession', () => {
       expect(solicitation.received.map((m) => m.kind)).toEqual(['request-ok', 'namespace']);
     });
 
-    // §3.3.2: a clean requester FIN only commits to sending no updates —
+    // §6.4.2.2: a clean requester FIN only commits to sending no updates —
     // it is not a withdrawal, and the response side keeps carrying the
     // announce.
     void solicitation.fin();
@@ -317,7 +351,7 @@ describe('createMoqtPublishSession', () => {
       expect(broad.received.map((m) => m.kind)).toEqual(['request-ok', 'namespace']);
     });
 
-    // §10.18: a second solicitation whose prefix nests with an
+    // §9.17: a second solicitation whose prefix nests with an
     // established one would produce duplicate namespace state — refused,
     // and the established carrier is untouched.
     const narrow = await solicitNamespace(pair.server, ['live'], 3);
@@ -345,7 +379,7 @@ describe('createMoqtPublishSession', () => {
     session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'catalog' });
 
     // Both solicitations are in flight before either REQUEST_OK write
-    // settles — request handlers run concurrently, so §10.18's
+    // settles — request handlers run concurrently, so §9.17's
     // single-carrier rule must hold across the acceptance await, not
     // only at the synchronous check.
     const [broad, narrow] = await Promise.all([
@@ -412,7 +446,7 @@ describe('createMoqtPublishSession', () => {
     updated.update({ subscriberPriority: 9 });
     await vi.waitFor(() => {
       // The update is attributed to the subscription it rode in on, while
-      // consuming a Request ID of its own (§10.1).
+      // consuming a Request ID of its own (§6.4.2.1).
       expect(updates).toEqual([{ requestId: updated.requestId + 1, updateRequestId: expect.any(Number) }]);
       expect(updates[0]?.updateRequestId).not.toBe(updated.requestId + 1);
       expect(updateAcks).toHaveLength(1);
@@ -615,7 +649,7 @@ describe('createMoqtPublishSession', () => {
     await vi.waitFor(() => {
       expect(subscribe.ended()).toBe(true);
     });
-    // PUBLISH_DONE before the FIN (§3.3.2): TRACK_ENDED, no data streams
+    // PUBLISH_DONE before the FIN (§6.4.2.2): TRACK_ENDED, no data streams
     // opened, then the FIN. moq-relay 0.15.4 and later treat a FIN
     // without it as a failed request.
     expect(subscribe.failure()).toBeUndefined();
@@ -813,7 +847,7 @@ describe('createMoqtPublishSession', () => {
       expect(bindings).toEqual([undefined]);
     });
 
-    // Each REQUEST_UPDATE consumes a Request ID of its own (§10.1).
+    // Each REQUEST_UPDATE consumes a Request ID of its own (§6.4.2.1).
     await sub.send(encodeRequestUpdate(83, { forward: 1 }));
     await vi.waitFor(() => {
       expect(bindings.at(-1)).toBe(81);
@@ -959,8 +993,8 @@ describe('createMoqtPublishSession', () => {
       expect(solicitation.received).toHaveLength(2);
     });
 
-    // A legal §10.9 update (on a fresh Request ID) must never be
-    // session-fatal; v1 applies no prefix changes, so per §10.9.1 the
+    // A legal §9.5 update (on a fresh Request ID) must never be
+    // session-fatal; v1 applies no prefix changes, so per §9.5.1 the
     // update is answered with an error and the request stream closes —
     // which costs the announce carrier, surfaced as announce loss.
     await solicitation.send(encodeRequestUpdate(3, { subscriberPriority: 5 }));
@@ -993,7 +1027,7 @@ describe('createMoqtPublishSession', () => {
 
     // Aliases ARE the peer's request ids: a reused id would hand two
     // tracks the same alias and make their subgroup streams
-    // indistinguishable — session-fatal with INVALID_REQUEST_ID (§10.1).
+    // indistinguishable — session-fatal with INVALID_REQUEST_ID (§6.4.2.1).
     await rawSubscribe(pair.server, 'audio', 101);
     await vi.waitFor(() => {
       expect(closes).toHaveLength(1);
@@ -1015,7 +1049,7 @@ describe('createMoqtPublishSession', () => {
     await session.ready;
     session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
 
-    // The peer is the server, so its request ids are odd (§10.1).
+    // The peer is the server, so its request ids are odd (§6.4.2.1).
     await rawSubscribe(pair.server, 'video', 100);
     await vi.waitFor(() => {
       expect(closes).toHaveLength(1);
@@ -1042,7 +1076,7 @@ describe('createMoqtPublishSession', () => {
       expect(sub.received.map((m) => m.kind)).toEqual(['subscribe-ok']);
     });
 
-    // REQUEST_UPDATE consumes a Request ID of its own (§10.1); riding on
+    // REQUEST_UPDATE consumes a Request ID of its own (§6.4.2.1); riding on
     // the subscription's id is the same duplicate as a repeated SUBSCRIBE.
     await sub.send(encodeRequestUpdate(111, { subscriberPriority: 9 }));
     await vi.waitFor(() => {
@@ -1138,7 +1172,7 @@ describe('createMoqtPublishSession', () => {
       expect(bindings.at(-1)).toBeUndefined();
     });
     // A failed update terminates the subscription with PUBLISH_DONE
-    // UPDATE_FAILED (§10.9.1).
+    // UPDATE_FAILED (§9.5.1).
     expect(sub.received.at(-1)).toEqual({
       kind: 'publish-done',
       statusCode: PUBLISH_DONE_STATUS.UPDATE_FAILED,
@@ -1149,7 +1183,7 @@ describe('createMoqtPublishSession', () => {
     subscriber.destroy();
   });
 
-  it('acknowledges a subscription update carrying delivery timeouts and hands them to its caller (§8)', async () => {
+  it('acknowledges a subscription update carrying delivery timeouts and hands them to its caller (§5.2)', async () => {
     const updates: unknown[] = [];
     const endedRequests: number[] = [];
     const { pair, session, subscriber } = makePublishHarness({
@@ -1233,7 +1267,7 @@ describe('createMoqtPublishSession', () => {
       expect(subscribe.ended()).toBe(true);
     });
     // The subscription was Established, so PUBLISH_DONE precedes that FIN
-    // (§3.3.2).
+    // (§6.4.2.2).
     expect(afterSubscribeOk(subscribe, 41)).toEqual(publishDoneBytes(0x0, 0, 'subscriber closed its request stream'));
     session.destroy();
     subscriber.destroy();
@@ -1257,8 +1291,8 @@ describe('createMoqtPublishSession', () => {
 
     await session.openUniStream(43);
 
-    // A reset is a cancellation (§3.3.3): no PUBLISH_DONE, and open data
-    // streams are reset (§5.1.1).
+    // A reset is a cancellation (§6.4.2.3): no PUBLISH_DONE, and open data
+    // streams are reset (§3.1.2).
     void subscribe.reset();
     await vi.waitFor(() => {
       expect(bindings).toEqual([43, undefined]);
@@ -1297,7 +1331,7 @@ describe('createMoqtPublishSession', () => {
     expect(afterSubscribeOk(subscribe, 61)).toEqual(publishDoneBytes(0x2, 2, 'track ended'));
 
     // In issue order: the caller's FIN, the session's reset of the stream
-    // still open, then PUBLISH_DONE and the request stream's FIN (§10.12:
+    // still open, then PUBLISH_DONE and the request stream's FIN (§9.9:
     // "MUST NOT send PUBLISH_DONE until it has closed all streams").
     const requestStream = events.find((event) => event.bytes[0] === PUBLISH_DONE_TYPE)?.stream;
     const label = new Map([

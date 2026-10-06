@@ -1,7 +1,7 @@
 /** Derived from Video.js; Copyright 2025-present Video.js contributors. SPDX-License-Identifier: Apache-2.0 */
 /**
  * In-memory MoQ relay hub for cross-engine tests: real publish engine on one side, real playback engine(s) on the
- * other, draft-20 bytes in the middle over `createTransportPair` transports.
+ * other, the negotiated draft's bytes in the middle over `createTransportPair` transports.
  *
  * Publisher side (`connectPublisher`) mirrors moq-relay 0.14.17's announce-and-serve ingest. After the SETUP exchange
  * the hub opens a bidi stream and solicits announces (SUBSCRIBE_NAMESPACE, empty prefix, odd server-side request ids)
@@ -13,8 +13,8 @@
  * NAMESPACE_DONE; both land in `trackEnds`, the churn signal the source-switch regression tests assert on.
  *
  * Subscriber side (`connectSubscriber`): answers SUBSCRIBE with SUBSCRIBE_OK (carrying LARGEST_OBJECT once the track
- * has content) and forwards objects one-per-subgroup-stream, resolving the request's Location Filter (draft-20 §5.1.2)
- * using the draft-20 Location Filter rules — `relative-group 1` replays the current group from object 0 then follows live
+ * has content) and forwards objects one-per-subgroup-stream, resolving the request's Location Filter (draft-22 §3.3.1)
+ * using the draft-22 Location Filter rules — `relative-group 1` replays the current group from object 0 then follows live
  * (catalog joins), `relative-group 0` forwards only groups that start after the subscribe (video joins), and
  * `next-object` is strict: nothing already published is replayed (audio joins). FETCH is answered with REQUEST_ERROR;
  * the draft-20 player never sends one. A downstream subscribe registers standing upstream demand for its track; an
@@ -37,6 +37,10 @@ import {
   type KeyValuePair,
   type Location,
   type LocationFilter,
+  type MessageParameters,
+  MOQT_PROTOCOL_ID,
+  MOQT_PROTOCOL_IDS,
+  type MoqtProtocolId,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
   type TrackNamespace,
@@ -95,9 +99,13 @@ export interface RelayHub {
   /** Transport seam for the publish engine's `connectTransport`. */
   connectPublisher: ConnectPublishTransport;
   /** Transport seam for the playback engine's `createMoqTransport`. */
-  connectSubscriber: () => { transport: MoqtTransport; ready: Promise<void> };
+  connectSubscriber: (url?: string, protocols?: string[]) => { transport: MoqtTransport; ready: Promise<void> };
   /** Upstream track SUBSCRIBEs sent to the publisher, in order (a retry appends again). */
   readonly subscribes: string[];
+  /** The draft each connection negotiated, in connection order. */
+  readonly negotiated: MoqtProtocolId[];
+  /** The parameters of each SUBSCRIBE received from subscribers, as decoded for that connection's draft. */
+  readonly downstreamSubscribes: MessageParameters[];
   /** Every upstream end observed — subscribe-stream FINs and NAMESPACE_DONE retractions. */
   readonly trackEnds: ObservedTrackEnd[];
   /**
@@ -133,12 +141,16 @@ const SUBSCRIBE_RETRY_DELAY_MS = 25;
 // =============================================================================
 
 /** Read one length-framed control message (type varint already consumed). */
-async function readControlFrame(reader: StreamReader, type: number): Promise<ControlMessage> {
+async function readControlFrame(
+  reader: StreamReader,
+  type: number,
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
+): Promise<ControlMessage> {
   const high = await reader.readUint8();
   const low = await reader.readUint8();
   const body = await reader.readBytes(high * 256 + low);
 
-  return decodeControlMessage({ type, body });
+  return decodeControlMessage({ type, body }, protocol);
 }
 
 function locationOf(object: BufferedObject): Location {
@@ -152,7 +164,7 @@ function isAtOrAfter(a: Location, b: Location): boolean {
 
 /**
  * Where a new subscription starts, resolved against the track's Largest Object using the
- * draft-20 Location Filter rules (§5.1.2): `next-object` is strict (nothing already published is replayed), `relative-group`
+ * draft-22 Location Filter rules (§3.3.1): `next-object` is strict (nothing already published is replayed), `relative-group`
  * counts back from the next group (`0` = the next group, `1` = the current group from object 0), an absolute start is
  * honored as given (the hub never sees an end), and an unfiltered request starts at the current group like moq-lite.
  */
@@ -172,12 +184,29 @@ function resolveStart(filter: LocationFilter | undefined, largest: Location | un
   return { group: largest?.group ?? 0, object: 0 };
 }
 
-export function createRelayHub(): RelayHub {
+/**
+ * `protocols` are the drafts the hub speaks, in its preference order: a connection gets the first one the client offers
+ * (TA-7), and the hub encodes and decodes that connection for it.
+ */
+export function createRelayHub({
+  protocols = MOQT_PROTOCOL_IDS,
+}: {
+  protocols?: readonly MoqtProtocolId[];
+} = {}): RelayHub {
   let destroyed = false;
   let nextSubscriberAlias = 1;
   let publisherConnections = 0;
 
   const subscribes: string[] = [];
+  const negotiated: MoqtProtocolId[] = [];
+  const downstreamSubscribes: MessageParameters[] = [];
+  const select = (offered: readonly string[] = []): MoqtProtocolId => {
+    const selected = protocols.find((protocol) => offered.length === 0 || offered.includes(protocol));
+
+    if (selected === undefined) throw new Error(`the hub speaks none of the offered protocols ${offered.join(', ')}`);
+    negotiated.push(selected);
+    return selected;
+  };
   const trackEnds: ObservedTrackEnd[] = [];
   const tracks = new Map<string, TrackRecord>();
   const closers = new Set<() => void>();
@@ -233,9 +262,10 @@ export function createRelayHub(): RelayHub {
   // Publisher side — announce-and-serve, mirroring moq-relay 0.14.17
   // ---------------------------------------------------------------------------
 
-  const connectPublisher: ConnectPublishTransport = () => {
+  const connectPublisher: ConnectPublishTransport = (_url, offered) => {
     publisherConnections++;
-    const pair = createTransportPair();
+    const protocol = select(offered);
+    const pair = createTransportPair({ protocol });
     const server = pair.server;
     // Aliases are publisher-assigned in SUBSCRIBE_OK and scoped to one session.
     const aliasToTrack = new Map<number, TrackRecord>();
@@ -265,11 +295,13 @@ export function createRelayHub(): RelayHub {
       const reader = new StreamReader(stream.readable);
 
       try {
-        await writer.write(encodeSubscribeNamespace({ requestId: 1, trackNamespacePrefix: [], parameters: {} }));
+        await writer.write(
+          encodeSubscribeNamespace({ requestId: 1, trackNamespacePrefix: [], parameters: {} }, protocol),
+        );
 
         while (!(await reader.atEnd())) {
           const type = await reader.readVarint();
-          const message = await readControlFrame(reader, type);
+          const message = await readControlFrame(reader, type, protocol);
 
           if (message.kind === 'namespace') {
             // Empty solicited prefix ⇒ the suffix IS the full namespace.
@@ -308,26 +340,29 @@ export function createRelayHub(): RelayHub {
 
         try {
           await writer.write(
-            encodeSubscribe({
-              requestId,
-              trackNamespace,
-              trackName,
-              // moq-relay 0.14.17 and 0.15.8 request Next Object plus a current-group fill.
-              // Our publisher advertises no cached content, so the fill settles immediately.
-              parameters: {
-                forward: 1,
-                subscriberPriority: 0,
-                locationFilter: { type: 'next-object' },
-                fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
-                groupOrder: 'descending',
+            encodeSubscribe(
+              {
+                requestId,
+                trackNamespace,
+                trackName,
+                // moq-relay 0.14.17 and 0.15.8 request Next Object plus a current-group fill.
+                // Our publisher advertises no cached content, so the fill settles immediately.
+                parameters: {
+                  forward: 1,
+                  subscriberPriority: 0,
+                  locationFilter: { type: 'next-object' },
+                  fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
+                  groupOrder: 'descending',
+                },
               },
-            }),
+              protocol,
+            ),
           );
           subscribes.push(trackName);
 
           while (!(await reader.atEnd())) {
             const type = await reader.readVarint();
-            const message = await readControlFrame(reader, type);
+            const message = await readControlFrame(reader, type, protocol);
 
             if (message.kind === 'subscribe-ok') {
               accepted = true;
@@ -442,7 +477,7 @@ export function createRelayHub(): RelayHub {
 
       try {
         const type = await reader.readVarint();
-        const message = await readControlFrame(reader, type);
+        const message = await readControlFrame(reader, type, protocol);
 
         await writer.write(
           message.kind === 'publish'
@@ -510,8 +545,9 @@ export function createRelayHub(): RelayHub {
   // Subscriber side
   // ---------------------------------------------------------------------------
 
-  const connectSubscriber = (): { transport: MoqtTransport; ready: Promise<void> } => {
-    const pair = createTransportPair();
+  const connectSubscriber = (_url?: string, offered?: string[]): { transport: MoqtTransport; ready: Promise<void> } => {
+    const protocol = select(offered);
+    const pair = createTransportPair({ protocol });
     const server = pair.server;
     let open = true;
 
@@ -550,9 +586,10 @@ export function createRelayHub(): RelayHub {
       try {
         while (!(await reader.atEnd())) {
           const type = await reader.readVarint();
-          const message = await readControlFrame(reader, type);
+          const message = await readControlFrame(reader, type, protocol);
 
           if (message.kind === 'subscribe') {
+            downstreamSubscribes.push(message.parameters);
             // Downstream demand is what makes the hub pull the track from
             // the publisher (announce-and-serve is pull-through).
             ensureUpstream(message.trackName);
@@ -560,8 +597,10 @@ export function createRelayHub(): RelayHub {
             const trackAlias = nextSubscriberAlias++;
 
             // Like the relay on draft-20, SUBSCRIBE_OK reports the Largest
-            // Object once the track has content (two bare varints, §10.2.17).
-            await writer.write(encodeSubscribeOk(trackAlias, track.largest ? { largestObject: track.largest } : {}));
+            // Object once the track has content (two bare varints, §9.20.17).
+            await writer.write(
+              encodeSubscribeOk(trackAlias, track.largest ? { largestObject: track.largest } : {}, [], protocol),
+            );
             subscription = {
               trackAlias,
               start: resolveStart(message.parameters.locationFilter, track.largest),
@@ -656,6 +695,8 @@ export function createRelayHub(): RelayHub {
     connectPublisher,
     connectSubscriber,
     subscribes,
+    negotiated,
+    downstreamSubscribes,
     trackEnds,
     subscribeUpstream: ensureUpstream,
     publisherConnections: () => publisherConnections,

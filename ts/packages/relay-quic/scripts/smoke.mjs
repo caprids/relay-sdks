@@ -76,7 +76,7 @@ async function probe() {
   const socket = createSocket('udp4');
   await new Promise((done) => socket.bind(0, '127.0.0.1', done));
   const initial = new Promise((done) => socket.once('message', done));
-  const { transport, ready } = factory(`https://127.0.0.1:${socket.address().port}/smoke`, ['moqt-20']);
+  const { transport, ready } = factory(`https://127.0.0.1:${socket.address().port}/smoke`, ['moqt-22']);
   transport.closed.catch(() => {});
   const packet = await within(initial, 5_000, 'no QUIC packet reached the local socket');
   // A long header Initial (form, fixed and type bits 1, 1, 00) of QUIC version 1 (RFC 9000 §17.2.2).

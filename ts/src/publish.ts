@@ -49,11 +49,11 @@ export interface RegisterTrackOptions {
    * what keeps supplied object Timestamps unchanged. See "Relay property handling" in
    * spec/behavior.md. The list rides in every SUBSCRIBE_OK, so it must encode to at most 65525
    * bytes, hold at most 64 pairs (the relay's limit) and keep `0x0E` at most 255 and `0x22` at 1
-   * or 2 (draft-20); otherwise the relay would refuse every subscriber, so `registerTrack` throws a
+   * or 2 (draft-22); otherwise the relay would refuse every subscriber, so `registerTrack` throws a
    * RangeError instead.
    *
    * An OBJECT_DELIVERY_TIMEOUT (`0x02`) or SUBGROUP_DELIVERY_TIMEOUT (`0x06`) here, in milliseconds,
-   * is the publisher's delivery timeout (draft-20 §8), which the first object of a group can
+   * is the publisher's delivery timeout (draft-22 §5.2), which the first object of a group can
    * override for that group. An object still short of the transport when the object timeout
    * expires fails its write with `DELIVERY_TIMEOUT`; a completed group the relay has not
    * acknowledged when the subgroup timeout expires is reset, and nothing is reported. 0 means no
@@ -93,7 +93,7 @@ export interface RelayGroupWriter {
   close(): Promise<void>;
   /**
    * Reset this group and free the track for the next random-access point. After a clean `close()`
-   * this has no effect: the FIN already ended the stream (draft-20 §11.4.3).
+   * this has no effect: the FIN already ended the stream (draft-22 §11.3.2).
    */
   abort(reason?: unknown): void;
   /** Encode UTF-8 text and write one object with the same options and semantics as write(). */
@@ -200,7 +200,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   // One write slot per registered track; the session's binding callback and the connection's end
   // reach the slots through here.
   const tracks = new Map<string, WriteSlot>();
-  // Each relay subscription's delivery timeouts (§8), by its request ID, which the core also uses as
+  // Each relay subscription's delivery timeouts (§5.2), by its request ID, which the core also uses as
   // its track alias: SUBSCRIBE's parameters, as REQUEST_UPDATE changes them.
   const subscriptionTimeouts = new Map<number, DeliveryTimeouts>();
   // Groups whose FIN the transport took but the relay has not acknowledged, shared by every track.

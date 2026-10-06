@@ -11,7 +11,7 @@ The implementation and regression tests originate in Video.js under Apache-2.0. 
 extraction preserves the wire implementation; ESM imports, test-runner imports, and the default SETUP implementation identifier are adapted.
 See `NOTICE` and `UPSTREAM.json`. The original Video.js modules remain pending dependency migration.
 
-This package follows MOQT draft 20 and receives subscription objects over reliable streams. It does
+This package follows MOQT draft 22, and draft 20 for a peer that selects it, and receives subscription objects over reliable streams. It does
 not implement application timing, decoding, datagram reception, or automatic session recovery.
 
 `createMoqtPublishSession` serves a namespace and its registered tracks over a separate transport.

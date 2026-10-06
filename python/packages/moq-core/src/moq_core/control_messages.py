@@ -1,4 +1,4 @@
-"""MOQT control-message wire codecs (moq-transport draft-20 §10).
+"""MOQT control-message wire codecs (moq-transport draft-22 §9).
 
 Every control or request-stream message is framed as::
 
@@ -40,16 +40,38 @@ from .varint import MAX_VARINT_VALUE, decode_varint
 # Wire constants
 # ============================================================================
 
-MOQT_PROTOCOL_ID = "moqt-20"
-"""ALPN / WebTransport protocol identifier for the implemented draft (§3.1: ``moqt-`` plus the draft number).
+MoqtProtocolId: TypeAlias = Literal["moqt-22", "moqt-20"]
+"""A protocol identifier the core implements."""
 
-Version negotiation happens at connection time (``WT-Available-Protocols`` in WebTransport, ALPN in
-native QUIC), not in SETUP.
+MOQT_PROTOCOL_IDS: tuple[MoqtProtocolId, ...] = ("moqt-22", "moqt-20")
+"""ALPN / WebTransport protocol identifiers the core implements, in the order a client offers them.
+
+§6.2: ``moqt-`` plus the draft number. Version negotiation happens at connection time
+(``WT-Available-Protocols`` in WebTransport, ALPN in native QUIC), not in SETUP. Draft-22 is the
+default; draft-20 stays as a fallback for a peer that does not speak draft-22. The two differ on the
+wire only in the LOCATION_FILTER parameter (§9.20.9), so one codec serves both, and every function
+that encodes or decodes message parameters takes the negotiated identifier.
 """
+
+MOQT_PROTOCOL_ID: MoqtProtocolId = "moqt-22"
+"""The preferred protocol identifier, and the codec's default when a caller names none."""
+
+
+def resolve_moqt_protocol(protocol: str | None) -> MoqtProtocolId:
+    """The codec for a transport's negotiated ``protocol``.
+
+    The connecting layer refuses any protocol outside ``MOQT_PROTOCOL_IDS`` before a session starts
+    (spec/transport-adapter.md TA-8), so a value outside it here (a test transport that names none)
+    gets the default.
+    """
+    if protocol == "moqt-20":
+        return "moqt-20"
+
+    return MOQT_PROTOCOL_ID
 
 
 class MESSAGE_TYPE(IntEnum):
-    """Control/request message type codes (§10, Table 5)."""
+    """Control/request message type codes (§9, Table 5)."""
 
     SETUP = 0x2F00
     GOAWAY = 0x10
@@ -73,7 +95,7 @@ class MESSAGE_TYPE(IntEnum):
 
 
 class SETUP_OPTION(IntEnum):
-    """Setup Option types (§10.3.1). A namespace separate from message parameters."""
+    """Setup Option types (§9.1). A namespace separate from message parameters."""
 
     PATH = 0x01
     AUTHORIZATION_TOKEN = 0x03
@@ -83,7 +105,7 @@ class SETUP_OPTION(IntEnum):
     MOQT_IMPLEMENTATION = 0x07
     MAX_REQUEST_UPDATES = 0x08
     SOLICIT = 0x40B5A
-    """The MoQ Solicit extension (draft-lcurley-moq-solicit-00), not a draft-20 option.
+    """The MoQ Solicit extension (draft-lcurley-moq-solicit-00), not a draft-22 option.
 
     ``1`` asks the peer to advertise namespaces only on a SUBSCRIBE_NAMESPACE, never as unsolicited
     PUBLISH_NAMESPACE. moq-relay honors it from 0.17.0. Even, so the value is a bare varint.
@@ -91,7 +113,7 @@ class SETUP_OPTION(IntEnum):
 
 
 class PARAMETER_TYPE(IntEnum):
-    """Message parameter types (§10.2, §15.7)."""
+    """Message parameter types (§9.20, §16.7)."""
 
     OBJECT_DELIVERY_TIMEOUT = 0x02
     AUTHORIZATION_TOKEN = 0x03
@@ -116,7 +138,7 @@ class PARAMETER_TYPE(IntEnum):
 
 
 class TRACK_PROPERTY(IntEnum):
-    """Track Property types (§10.8): the KVP block trailing SUBSCRIBE_OK / PUBLISH / FETCH_OK.
+    """Track Property types (§9.7): the KVP block trailing SUBSCRIBE_OK / PUBLISH / FETCH_OK.
 
     A registry of its own, distinct from both Setup Options and message parameters.
     """
@@ -130,7 +152,7 @@ class TRACK_PROPERTY(IntEnum):
 
 
 class REQUEST_ERROR_CODE(IntEnum):
-    """REQUEST_ERROR codes (§15.11.2)."""
+    """REQUEST_ERROR codes (§16.11.2)."""
 
     INTERNAL_ERROR = 0x0
     UNAUTHORIZED = 0x1
@@ -153,7 +175,7 @@ class REQUEST_ERROR_CODE(IntEnum):
 
 
 class PUBLISH_DONE_STATUS(IntEnum):
-    """PUBLISH_DONE status codes (§10.12)."""
+    """PUBLISH_DONE status codes (§12.4)."""
 
     INTERNAL_ERROR = 0x0
     UNAUTHORIZED = 0x1
@@ -167,7 +189,7 @@ class PUBLISH_DONE_STATUS(IntEnum):
 
 
 class STREAM_RESET_CODE(IntEnum):
-    """Stream reset / STOP_SENDING error codes (§3.3.4)."""
+    """Stream reset / STOP_SENDING error codes (§12.5)."""
 
     INTERNAL_ERROR = 0x0
     CANCELLED = 0x1
@@ -248,7 +270,7 @@ _MAX_LOCATION_FILTER_FIELDS = 4
 
 @dataclass(frozen=True, slots=True)
 class Location:
-    """A particular Object in a Group within a Track (§1.4.2)."""
+    """A particular Object in a Group within a Track (§8.2)."""
 
     group: int
     object: int
@@ -327,7 +349,7 @@ def _read_location(reader: ByteReader) -> Location:
 
 
 def _write_location_parameter(writer: ByteWriter, location: Location) -> None:
-    # Draft-17 onward (§10.2): two bare varints, matching moq-relay 0.14.17 and 0.15.8 (moq-dev/moq#3561).
+    # Draft-17 onward (§9.20): two bare varints, matching moq-relay 0.14.17 and 0.15.8 (moq-dev/moq#3561).
     _write_location(writer, location)
 
 
@@ -336,7 +358,7 @@ def _read_location_parameter(reader: ByteReader) -> Location:
 
 
 # ============================================================================
-# Key-Value-Pairs (§1.4.3): Setup Options and Track Properties
+# Key-Value-Pairs (§8.3): Setup Options and Track Properties
 # ============================================================================
 
 
@@ -400,19 +422,20 @@ def decode_key_value_pairs(reader: ByteReader, end_offset: int) -> list[KeyValue
 
 
 # ============================================================================
-# Location Filters (§5.1.2), carried in the LOCATION_FILTER parameter
+# Location Filters (§3.3.1), carried in the LOCATION_FILTER parameter (§9.20.9)
 # ============================================================================
 
 
 @dataclass(frozen=True, slots=True)
 class NoLocationFilter:
-    """Zero fields: no location constraint, and the same as sending no LOCATION_FILTER at all.
+    """No location constraint, and the same as sending no LOCATION_FILTER at all.
 
-    A fetch covers ``{0,0}`` up to Largest Object. A subscription passes all objects published or
-    received via upstream subscriptions (§5.1.2); the draft does not say whether that reaches back
-    into objects a relay cached before the subscription, so what an ongoing track delivers is the
-    relay's choice, and a relay may start at the live edge. :class:`RelativeGroupFilter` and
-    :class:`AbsoluteLocationFilter` ask for earlier groups explicitly.
+    Type 0x00 on draft-22, zero fields on draft-20. A fetch covers ``{0,0}`` up to Largest Object. A
+    subscription passes all objects published or received via upstream subscriptions (§3.3.1); the
+    draft does not say whether that reaches back into objects a relay cached before the subscription,
+    so what an ongoing track delivers is the relay's choice, and a relay may start at the live edge.
+    :class:`RelativeGroupFilter` and :class:`AbsoluteLocationFilter` ask for earlier groups explicitly.
+    In REQUEST_UPDATE it clears the filter.
     """
 
     type: ClassVar[Literal["none"]] = "none"
@@ -420,17 +443,20 @@ class NoLocationFilter:
 
 @dataclass(frozen=True, slots=True)
 class NextObjectFilter:
-    """The two-field spelling ``{0,0}``: ``{Largest.Group, Largest.Object + 1}``, the live edge."""
+    """``{Largest.Group, Largest.Object + 1}``, the live edge, which can begin mid-group.
+
+    Type 0x05 on draft-22, the two-field spelling ``{0,0}`` on draft-20.
+    """
 
     type: ClassVar[Literal["next-object"]] = "next-object"
 
 
 @dataclass(frozen=True, slots=True)
 class RelativeGroupFilter:
-    """One field: start at ``{Largest.Group + 1 - groups_before_next, 0}``, open-ended.
+    """Start at ``{Largest.Group + 1 - groups_before_next, 0}``, open-ended.
 
     ``0`` is the next group, ``1`` the start of the current group (a decodable join), ``N`` N-1 groups
-    before it.
+    before it. Type 0x01 on draft-22, one field on draft-20.
     """
 
     groups_before_next: int
@@ -439,11 +465,13 @@ class RelativeGroupFilter:
 
 @dataclass(frozen=True, slots=True)
 class AbsoluteLocationFilter:
-    """Two to four fields: an explicit start, optionally bounded by an end group.
+    """An explicit start, optionally bounded by an end group.
 
     The end group is a delta from the start group and is included whole unless ``end_object``
-    narrows it. An open-ended absolute ``{0,0}`` is unfiltered by definition and encodes as
-    :class:`NoLocationFilter`; its two-field spelling would read as :class:`NextObjectFilter`.
+    narrows it. Types 0x02 to 0x04 on draft-22, two to four fields on draft-20. On draft-20 an
+    open-ended absolute ``{0,0}`` is unfiltered by definition and encodes as
+    :class:`NoLocationFilter`, since its two-field spelling reads as :class:`NextObjectFilter`;
+    draft-22 has a spelling for it.
     """
 
     start: Location
@@ -453,13 +481,75 @@ class AbsoluteLocationFilter:
 
 
 LocationFilter: TypeAlias = NoLocationFilter | NextObjectFilter | RelativeGroupFilter | AbsoluteLocationFilter
-"""Which Objects a subscription or fetch covers; the field count selects the meaning."""
+"""Which Objects a subscription or fetch covers.
+
+Draft-22 opens the LOCATION_FILTER value with a Location Filter Type that selects the fields after
+it; draft-20 length-prefixes up to four varints and the number present selects the meaning.
+"""
 
 
-def encode_location_filter(location_filter: LocationFilter) -> bytes:
-    """Serialize a filter as the LOCATION_FILTER parameter's value (without its length prefix)."""
+class _LOCATION_FILTER_TYPE(IntEnum):
+    """Draft-22's Location Filter Type (§9.20.9, Table 6)."""
+
+    NONE = 0x00
+    RELATIVE_START = 0x01
+    ABSOLUTE_START = 0x02
+    ABSOLUTE_START_GROUP_END = 0x03
+    ABSOLUTE_RANGE = 0x04
+    NEXT_OBJECT = 0x05
+
+
+def encode_location_filter(location_filter: LocationFilter, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
+    """Serialize a filter as the LOCATION_FILTER parameter's value as it follows the Parameter Type.
+
+    On draft-22 that is the Location Filter Type and the fields it selects, on draft-20 the field
+    list without its length prefix.
+    """
+    if (
+        isinstance(location_filter, AbsoluteLocationFilter)
+        and location_filter.end_object is not None
+        and location_filter.end_group_delta is None
+    ):
+        raise MoqtProtocolError("location filter end object requires an end group")
+
     writer = ByteWriter()
 
+    if protocol == "moqt-20":
+        _write_draft20_location_fields(writer, location_filter)
+    else:
+        _write_location_filter(writer, location_filter)
+
+    return writer.to_bytes()
+
+
+def _write_location_filter(writer: ByteWriter, location_filter: LocationFilter) -> None:
+    match location_filter:
+        case NoLocationFilter():
+            writer.write_varint(_LOCATION_FILTER_TYPE.NONE)
+        case NextObjectFilter():
+            writer.write_varint(_LOCATION_FILTER_TYPE.NEXT_OBJECT)
+        case RelativeGroupFilter(groups_before_next=groups_before_next):
+            writer.write_varint(_LOCATION_FILTER_TYPE.RELATIVE_START)
+            writer.write_varint(groups_before_next)
+        case AbsoluteLocationFilter(start=start, end_group_delta=end_group_delta, end_object=end_object):
+            if end_object is not None:
+                filter_type = _LOCATION_FILTER_TYPE.ABSOLUTE_RANGE
+            elif end_group_delta is not None:
+                filter_type = _LOCATION_FILTER_TYPE.ABSOLUTE_START_GROUP_END
+            else:
+                filter_type = _LOCATION_FILTER_TYPE.ABSOLUTE_START
+
+            writer.write_varint(filter_type)
+            _write_location(writer, start)
+
+            if end_group_delta is not None:
+                writer.write_varint(end_group_delta)
+
+            if end_object is not None:
+                writer.write_varint(end_object)
+
+
+def _write_draft20_location_fields(writer: ByteWriter, location_filter: LocationFilter) -> None:
     match location_filter:
         case NoLocationFilter():
             pass
@@ -469,11 +559,8 @@ def encode_location_filter(location_filter: LocationFilter) -> bytes:
         case RelativeGroupFilter(groups_before_next=groups_before_next):
             writer.write_varint(groups_before_next)
         case AbsoluteLocationFilter(start=start, end_group_delta=end_group_delta, end_object=end_object):
-            if end_object is not None and end_group_delta is None:
-                raise MoqtProtocolError("location filter end object requires an end group")
-
             if start.group == 0 and start.object == 0 and end_group_delta is None:
-                return b""
+                return
 
             _write_location(writer, start)
 
@@ -483,10 +570,61 @@ def encode_location_filter(location_filter: LocationFilter) -> bytes:
             if end_object is not None:
                 writer.write_varint(end_object)
 
-    return writer.to_bytes()
+
+def decode_location_filter(data: bytes, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> LocationFilter:
+    """Decode a LOCATION_FILTER value as :func:`encode_location_filter` produces it.
+
+    Every byte must belong to the filter.
+    """
+    if protocol == "moqt-20":
+        return _decode_draft20_location_fields(data)
+
+    reader = ByteReader(data)
+    location_filter = _read_location_filter(reader)
+
+    if reader.remaining > 0:
+        raise MoqtProtocolError("location filter has trailing bytes")
+
+    return location_filter
 
 
-def decode_location_filter(data: bytes) -> LocationFilter:
+def _read_location_filter(reader: ByteReader) -> LocationFilter:
+    """Read a draft-22 LOCATION_FILTER value, which delimits itself: its type says how many fields follow."""
+    filter_type = reader.read_varint()
+
+    if filter_type == _LOCATION_FILTER_TYPE.NONE:
+        return NoLocationFilter()
+
+    if filter_type == _LOCATION_FILTER_TYPE.RELATIVE_START:
+        return RelativeGroupFilter(groups_before_next=reader.read_varint())
+
+    if filter_type == _LOCATION_FILTER_TYPE.NEXT_OBJECT:
+        return NextObjectFilter()
+
+    if filter_type not in (
+        _LOCATION_FILTER_TYPE.ABSOLUTE_START,
+        _LOCATION_FILTER_TYPE.ABSOLUTE_START_GROUP_END,
+        _LOCATION_FILTER_TYPE.ABSOLUTE_RANGE,
+    ):
+        # §9.20.9: any other Location Filter Type is a PROTOCOL_VIOLATION.
+        raise MoqtProtocolError(f"unknown Location Filter Type {filter_type}")
+
+    start = _read_location(reader)
+
+    if filter_type == _LOCATION_FILTER_TYPE.ABSOLUTE_START:
+        return AbsoluteLocationFilter(start=start)
+
+    end_group_delta = reader.read_varint()
+
+    if start.group + end_group_delta > MAX_VARINT_VALUE:
+        raise MoqtProtocolError("location filter end group exceeds supported range")
+
+    end_object = reader.read_varint() if filter_type == _LOCATION_FILTER_TYPE.ABSOLUTE_RANGE else None
+
+    return AbsoluteLocationFilter(start=start, end_group_delta=end_group_delta, end_object=end_object)
+
+
+def _decode_draft20_location_fields(data: bytes) -> LocationFilter:
     reader = ByteReader(data)
     fields: list[int] = []
 
@@ -516,7 +654,7 @@ def decode_location_filter(data: bytes) -> LocationFilter:
 
 
 # ============================================================================
-# Message Parameters (§10.2)
+# Message Parameters (§9.20)
 # ============================================================================
 
 GroupOrder: TypeAlias = Literal["ascending", "descending"]
@@ -524,7 +662,7 @@ GroupOrder: TypeAlias = Literal["ascending", "descending"]
 
 @dataclass(frozen=True, slots=True)
 class RangeFilter:
-    """A range-filter parameter (§5.1.4), kept opaque: the SDK never sends or interprets them."""
+    """A range-filter parameter (§3.3.2), kept opaque: the SDK never sends or interprets them."""
 
     type: int
     value: bytes
@@ -535,12 +673,12 @@ class MessageParameters:
     """Decoded message parameters.
 
     Unlike Setup Options, message parameters use per-type encodings (uint8 / varint /
-    length-prefixed), so the codec is registry-driven. Per §10.2 an unknown parameter type is a
+    length-prefixed), so the codec is registry-driven. Per §9.20 an unknown parameter type is a
     PROTOCOL_VIOLATION (parameters cannot be skipped; the block is bounded by count, not length).
 
-    ``fill_parameters`` (§10.2.15) asks the publisher to deliver a fill range on a fetch stream
+    ``fill_parameters`` (§9.20.15) asks the publisher to deliver a fill range on a fetch stream
     alongside the subscription; its presence alone requests the fill. It is a nested parameter scope:
-    only the fill-scoped subset (Table 6) is legal inside, and omitted entries inherit the
+    only the fill-scoped subset (Table 7) is legal inside, and omitted entries inherit the
     subscription's own values.
     """
 
@@ -549,7 +687,7 @@ class MessageParameters:
     rendezvous_timeout: int | None = None
     fill_timeout: int | None = None
     authorization_tokens: list[bytes] | None = None
-    """Serialized Token structures (§10.2.2). May repeat."""
+    """Serialized Token structures (§9.20.2). May repeat."""
     expires: int | None = None
     largest_object: Location | None = None
     forward: int | None = None
@@ -562,7 +700,7 @@ class MessageParameters:
     range_filters: list[RangeFilter] | None = None
     track_namespace_prefix: TrackNamespace | None = None
     include_properties: int | None = None
-    """INCLUDE_PROPERTIES (§10.2.21): ``0`` asks the responder to send empty Track Properties. Default ``1``."""
+    """INCLUDE_PROPERTIES (§9.20.21): ``0`` asks the responder to send empty Track Properties. Default ``1``."""
 
 
 ParameterScope: TypeAlias = Literal["message", "fill"]
@@ -593,7 +731,9 @@ _RANGE_FILTER_TYPES: frozenset[int] = frozenset(
 )
 
 
-def _collect_parameter_entries(parameters: MessageParameters) -> list[tuple[int, Callable[[ByteWriter], None]]]:
+def _collect_parameter_entries(
+    parameters: MessageParameters, protocol: MoqtProtocolId
+) -> list[tuple[int, Callable[[ByteWriter], None]]]:
     entries: list[tuple[int, Callable[[ByteWriter], None]]] = []
 
     def varint(parameter_type: int, value: int) -> None:
@@ -634,13 +774,19 @@ def _collect_parameter_entries(parameters: MessageParameters) -> list[tuple[int,
         uint8(PARAMETER_TYPE.SUBSCRIBER_PRIORITY, parameters.subscriber_priority)
 
     if parameters.location_filter is not None:
-        prefixed(PARAMETER_TYPE.LOCATION_FILTER, encode_location_filter(parameters.location_filter))
+        location_value = encode_location_filter(parameters.location_filter, protocol)
+
+        # Draft-20 length-prefixes the field list; draft-22's Location Filter Type delimits it (§9.20.9).
+        if protocol == "moqt-20":
+            prefixed(PARAMETER_TYPE.LOCATION_FILTER, location_value)
+        else:
+            entries.append((PARAMETER_TYPE.LOCATION_FILTER, lambda w: w.write_bytes(location_value)))
 
     if parameters.group_order is not None:
         uint8(PARAMETER_TYPE.GROUP_ORDER, _GROUP_ORDER_WIRE[parameters.group_order])
 
     if parameters.fill_parameters is not None:
-        prefixed(PARAMETER_TYPE.FILL_PARAMETERS, _encode_fill_parameters(parameters.fill_parameters))
+        prefixed(PARAMETER_TYPE.FILL_PARAMETERS, _encode_fill_parameters(parameters.fill_parameters, protocol))
 
     if parameters.new_group_request is not None:
         varint(PARAMETER_TYPE.NEW_GROUP_REQUEST, parameters.new_group_request)
@@ -659,13 +805,18 @@ def _collect_parameter_entries(parameters: MessageParameters) -> list[tuple[int,
 
 
 def encode_message_parameters(
-    writer: ByteWriter, parameters: MessageParameters | None = None, scope: ParameterScope = "message"
+    writer: ByteWriter,
+    parameters: MessageParameters | None = None,
+    protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
+    scope: ParameterScope = "message",
 ) -> None:
     """Serialize as ``Number of Parameters (vi64)`` + delta-typed parameter list.
 
-    The ``"fill"`` scope is the nested list inside FILL_PARAMETERS, where only Table 6's types are legal.
+    The ``"fill"`` scope is the nested list inside FILL_PARAMETERS, where only Table 7's types are legal.
     """
-    entries = sorted(_collect_parameter_entries(parameters or MessageParameters()), key=lambda entry: entry[0])
+    entries = sorted(
+        _collect_parameter_entries(parameters or MessageParameters(), protocol), key=lambda entry: entry[0]
+    )
 
     if scope == "fill":
         for parameter_type, _ in entries:
@@ -681,14 +832,16 @@ def encode_message_parameters(
         write(writer)
 
 
-def _encode_fill_parameters(fill: MessageParameters) -> bytes:
-    """FILL_PARAMETERS' value: a parameter list encoded as if for a separate message (§10.2.15)."""
+def _encode_fill_parameters(fill: MessageParameters, protocol: MoqtProtocolId) -> bytes:
+    """FILL_PARAMETERS' value: a parameter list encoded as if for a separate message (§9.20.15)."""
     writer = ByteWriter()
-    encode_message_parameters(writer, fill, "fill")
+    encode_message_parameters(writer, fill, protocol, "fill")
     return writer.to_bytes()
 
 
-def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "message") -> MessageParameters:
+def decode_message_parameters(
+    reader: ByteReader, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID, scope: ParameterScope = "message"
+) -> MessageParameters:
     count = reader.read_varint()
     parameters = MessageParameters()
     previous_type = 0
@@ -697,7 +850,7 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
         parameter_type = previous_type + reader.read_varint()
         previous_type = parameter_type
 
-        # §10.2.15: a type outside Table 6 inside FILL_PARAMETERS is a PROTOCOL_VIOLATION, the
+        # §9.20.15: a type outside Table 7 inside FILL_PARAMETERS is a PROTOCOL_VIOLATION, the
         # nested scope included.
         if scope == "fill" and parameter_type not in _FILL_SCOPE_TYPES:
             raise MoqtProtocolError(f"parameter type {parameter_type} is not allowed inside FILL_PARAMETERS")
@@ -730,7 +883,10 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
         elif parameter_type == PARAMETER_TYPE.SUBSCRIBER_PRIORITY:
             parameters.subscriber_priority = reader.read_uint8()
         elif parameter_type == PARAMETER_TYPE.LOCATION_FILTER:
-            parameters.location_filter = decode_location_filter(reader.read_bytes(reader.read_varint()))
+            if protocol == "moqt-20":
+                parameters.location_filter = decode_location_filter(reader.read_bytes(reader.read_varint()), protocol)
+            else:
+                parameters.location_filter = _read_location_filter(reader)
         elif parameter_type == PARAMETER_TYPE.GROUP_ORDER:
             order = reader.read_uint8()
             if order not in (0x1, 0x2):
@@ -739,7 +895,7 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
             parameters.group_order = "ascending" if order == 0x1 else "descending"
         elif parameter_type == PARAMETER_TYPE.FILL_PARAMETERS:
             value = ByteReader(reader.read_bytes(reader.read_varint()))
-            parameters.fill_parameters = decode_message_parameters(value, "fill")
+            parameters.fill_parameters = decode_message_parameters(value, protocol, "fill")
 
             if value.remaining != 0:
                 raise MoqtProtocolError("FILL_PARAMETERS has trailing bytes")
@@ -748,7 +904,7 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
         elif parameter_type == PARAMETER_TYPE.TRACK_NAMESPACE_PREFIX:
             parameters.track_namespace_prefix = _read_track_namespace(reader)
         elif parameter_type == PARAMETER_TYPE.INCLUDE_PROPERTIES:
-            # §10.2.21: a uint8 with no Length, as moq-relay frames it since 0.17.0 (0.15.8 and
+            # §9.20.21: a uint8 with no Length, as moq-relay frames it since 0.17.0 (0.15.8 and
             # earlier added a Length by the odd-type parity rule).
             include = reader.read_uint8()
             if include not in (0, 1):
@@ -763,7 +919,7 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
 
             parameters.range_filters.append(RangeFilter(parameter_type, value_bytes))
         else:
-            # §10.2: unknown parameters cannot be skipped (the block is bounded by count, and the
+            # §9.20: unknown parameters cannot be skipped (the block is bounded by count, and the
             # value encoding is per-type); session error.
             raise MoqtProtocolError(f"unknown message parameter type {parameter_type}")
 
@@ -771,7 +927,7 @@ def decode_message_parameters(reader: ByteReader, scope: ParameterScope = "messa
 
 
 # ============================================================================
-# Authorization tokens (§10.2.2)
+# Authorization tokens (§9.20.2)
 # ============================================================================
 
 
@@ -890,7 +1046,7 @@ class Setup:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Goaway:
-    """GOAWAY (§10.4): the peer intends to close the session soon and asks for no new requests."""
+    """GOAWAY (§9.2): the peer intends to close the session soon and asks for no new requests."""
 
     kind: ClassVar[Literal["goaway"]] = "goaway"
     new_session_uri: str = ""
@@ -910,7 +1066,7 @@ class Subscribe:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class TrackStatus:
-    """TRACK_STATUS (§10.15): identical wire format to SUBSCRIBE."""
+    """TRACK_STATUS (§9.13): identical wire format to SUBSCRIBE."""
 
     kind: ClassVar[Literal["track-status"]] = "track-status"
     request_id: int
@@ -921,9 +1077,9 @@ class TrackStatus:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class Fetch:
-    """FETCH (§10.13) has the SUBSCRIBE body.
+    """FETCH (§9.11) has the SUBSCRIBE body.
 
-    The range is ``parameters.location_filter``, evaluated with the fetch rules of §5.1.2: relative
+    The range is ``parameters.location_filter``, evaluated with the fetch rules of §3.3.1: relative
     starts count back from Largest Object, an omitted end stops there, and no filter means the whole
     track. Nothing selects "standalone" or "joining" any more; a join is a subscription with
     FILL_PARAMETERS.
@@ -946,7 +1102,7 @@ class SubscribeNamespace:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class SubscribeOk:
-    """SUBSCRIBE_OK (§10.8): the publisher accepted a subscription.
+    """SUBSCRIBE_OK (§9.7): the publisher accepted a subscription.
 
     ``track_alias`` is the alias its data streams carry; ``parameters`` and ``track_properties`` are
     as the publisher sent them.
@@ -967,7 +1123,7 @@ class RequestOk:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class RequestError:
-    """REQUEST_ERROR (§10.6): the peer refused a request.
+    """REQUEST_ERROR (§9.4): the peer refused a request.
 
     The session also reports a request that fails on its stream (FIN before any response, a reset,
     or the response timeout) in this shape, so a consumer has one failure path.
@@ -995,7 +1151,7 @@ class PublishStateNotify:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class PublishDone:
-    """PUBLISH_DONE (§10.12): the publisher finished a subscription.
+    """PUBLISH_DONE (§9.9): the publisher finished a subscription.
 
     ``status_code`` is one of the PUBLISH_DONE status codes; ``stream_count`` is how many data streams
     it opened for the subscription, so a subscriber can tell when all of them have arrived.
@@ -1004,7 +1160,7 @@ class PublishDone:
     kind: ClassVar[Literal["publish-done"]] = "publish-done"
     status_code: int
     stream_count: int | None
-    """``None`` when the publisher could not count its streams (the 2^64-1 sentinel, §10.12)."""
+    """``None`` when the publisher could not count its streams (the 2^64-1 sentinel, §9.9)."""
     reason: str = ""
 
 
@@ -1029,13 +1185,13 @@ class PublishNamespace:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FetchOk:
-    """FETCH_OK (§10.14): the publisher accepted a fetch; its objects follow on a fetch data stream."""
+    """FETCH_OK (§9.12): the publisher accepted a fetch; its objects follow on a fetch data stream."""
 
     kind: ClassVar[Literal["fetch-ok"]] = "fetch-ok"
     end_of_track: bool
     """The track is complete and ``end_location`` is its final Location."""
     end_location: Location
-    """Where the fetched range ends."""
+    """Where the fetched range ends, inclusive (§9.12)."""
     parameters: MessageParameters = field(default_factory=MessageParameters)
     track_properties: list[KeyValuePair] = field(default_factory=list)
 
@@ -1086,7 +1242,7 @@ ControlMessage: TypeAlias = (
 
 
 def encode_setup(options: Sequence[KeyValuePair] = ()) -> bytes:
-    """SETUP (§10.3): first message on the endpoint's control stream."""
+    """SETUP (§9.1): first message on the endpoint's control stream."""
     body = ByteWriter()
     encode_key_value_pairs(body, options)
     return _frame_message(MESSAGE_TYPE.SETUP, body)
@@ -1098,81 +1254,101 @@ def _encode_track_request(
     track_namespace: Sequence[str],
     track_name: str,
     parameters: MessageParameters | None,
+    protocol: MoqtProtocolId,
 ) -> bytes:
     """SUBSCRIBE, TRACK_STATUS, and FETCH share one body: Request ID, Full Track Name, Parameters."""
     body = ByteWriter()
     body.write_varint(request_id)
     _write_track_namespace(body, track_namespace)
     body.write_length_prefixed(utf8_encode(track_name))
-    encode_message_parameters(body, parameters)
+    encode_message_parameters(body, parameters, protocol)
     return _frame_message(message_type, body)
 
 
-def encode_subscribe(request: Subscribe) -> bytes:
-    """SUBSCRIBE (§10.7): first message on a new request stream."""
+def encode_subscribe(request: Subscribe, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
+    """SUBSCRIBE (§9.6): first message on a new request stream."""
     return _encode_track_request(
-        MESSAGE_TYPE.SUBSCRIBE, request.request_id, request.track_namespace, request.track_name, request.parameters
+        MESSAGE_TYPE.SUBSCRIBE,
+        request.request_id,
+        request.track_namespace,
+        request.track_name,
+        request.parameters,
+        protocol,
     )
 
 
-def encode_track_status(request: TrackStatus) -> bytes:
-    """TRACK_STATUS (§10.15): identical wire format to SUBSCRIBE."""
+def encode_track_status(request: TrackStatus, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
+    """TRACK_STATUS (§9.13): identical wire format to SUBSCRIBE."""
     return _encode_track_request(
-        MESSAGE_TYPE.TRACK_STATUS, request.request_id, request.track_namespace, request.track_name, request.parameters
+        MESSAGE_TYPE.TRACK_STATUS,
+        request.request_id,
+        request.track_namespace,
+        request.track_name,
+        request.parameters,
+        protocol,
     )
 
 
-def encode_fetch(request: Fetch) -> bytes:
-    """FETCH (§10.13): first message on a new request stream."""
+def encode_fetch(request: Fetch, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
+    """FETCH (§9.11): first message on a new request stream."""
     return _encode_track_request(
-        MESSAGE_TYPE.FETCH, request.request_id, request.track_namespace, request.track_name, request.parameters
+        MESSAGE_TYPE.FETCH,
+        request.request_id,
+        request.track_namespace,
+        request.track_name,
+        request.parameters,
+        protocol,
     )
 
 
-def encode_subscribe_namespace(request: SubscribeNamespace) -> bytes:
-    """SUBSCRIBE_NAMESPACE (§10.19): first message on a new request stream."""
+def encode_subscribe_namespace(request: SubscribeNamespace, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
+    """SUBSCRIBE_NAMESPACE (§9.15): first message on a new request stream."""
     body = ByteWriter()
     body.write_varint(request.request_id)
     _write_track_namespace(body, request.track_namespace_prefix)
-    encode_message_parameters(body, request.parameters)
+    encode_message_parameters(body, request.parameters, protocol)
     return _frame_message(MESSAGE_TYPE.SUBSCRIBE_NAMESPACE, body)
 
 
-def encode_request_update(request_id: int, parameters: MessageParameters | None = None) -> bytes:
-    """REQUEST_UPDATE (§10.9), sent on an existing request stream.
+def encode_request_update(
+    request_id: int, parameters: MessageParameters | None = None, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+) -> bytes:
+    """REQUEST_UPDATE (§9.5), sent on an existing request stream.
 
-    ``request_id`` is the update's own, freshly allocated Request ID (§10.1 counts REQUEST_UPDATE
+    ``request_id`` is the update's own, freshly allocated Request ID (§6.4.2.1 counts REQUEST_UPDATE
     among the messages that consume one); the stream identifies the request being updated.
     """
     body = ByteWriter()
     body.write_varint(request_id)
-    encode_message_parameters(body, parameters)
+    encode_message_parameters(body, parameters, protocol)
     return _frame_message(MESSAGE_TYPE.REQUEST_UPDATE, body)
 
 
 def encode_goaway(timeout: int = 0) -> bytes:
-    """GOAWAY (§10.4). Clients MUST send a zero-length New Session URI, so only the timeout (ms; 0 = none) is taken."""
+    """GOAWAY (§9.2). Clients MUST send a zero-length New Session URI, so only the timeout (ms; 0 = none) is taken."""
     body = ByteWriter()
     body.write_varint(0)
     body.write_varint(timeout)
     return _frame_message(MESSAGE_TYPE.GOAWAY, body)
 
 
-def encode_request_ok(parameters: MessageParameters | None = None) -> bytes:
-    """REQUEST_OK (§10.5).
+def encode_request_ok(
+    parameters: MessageParameters | None = None, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+) -> bytes:
+    """REQUEST_OK (§9.3).
 
     The subscriber sends this to accept an incoming PUBLISH (PUBLISH_OK). Track Properties are always
     empty in that role, and since draft-20 so are the parameters: a subscriber changes subscription
-    parameters with REQUEST_UPDATE, not in PUBLISH_OK (§10.11). The parameter slot stays for the
+    parameters with REQUEST_UPDATE, not in PUBLISH_OK (§9.8). The parameter slot stays for the
     publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK).
     """
     body = ByteWriter()
-    encode_message_parameters(body, parameters)
+    encode_message_parameters(body, parameters, protocol)
     return _frame_message(MESSAGE_TYPE.REQUEST_OK, body)
 
 
 def encode_request_error(error_code: int, reason: str = "", retry_interval: int = 0) -> bytes:
-    """REQUEST_ERROR (§10.6) without a Redirect: enough to reject incoming requests."""
+    """REQUEST_ERROR (§9.4) without a Redirect: enough to reject incoming requests."""
     body = ByteWriter()
     body.write_varint(error_code)
     body.write_varint(retry_interval)
@@ -1191,17 +1367,18 @@ def encode_subscribe_ok(
     track_alias: int,
     parameters: MessageParameters | None = None,
     track_properties: Sequence[KeyValuePair] = (),
+    protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
 ) -> bytes:
-    """SUBSCRIBE_OK (§10.8)."""
+    """SUBSCRIBE_OK (§9.7)."""
     body = ByteWriter()
     body.write_varint(track_alias)
-    encode_message_parameters(body, parameters)
+    encode_message_parameters(body, parameters, protocol)
     encode_key_value_pairs(body, track_properties)
     return _frame_message(MESSAGE_TYPE.SUBSCRIBE_OK, body)
 
 
 def encode_publish_done(status_code: int, stream_count: int, reason: str = "") -> bytes:
-    """PUBLISH_DONE (§10.12)."""
+    """PUBLISH_DONE (§9.9)."""
     body = ByteWriter()
     body.write_varint(status_code)
     body.write_varint(stream_count)
@@ -1209,10 +1386,12 @@ def encode_publish_done(status_code: int, stream_count: int, reason: str = "") -
     return _frame_message(MESSAGE_TYPE.PUBLISH_DONE, body)
 
 
-def encode_publish_state_notify(parameters: MessageParameters | None = None) -> bytes:
-    """PUBLISH_STATE_NOTIFY (§10.10): the publisher's unilateral "these subscription parameters changed"."""
+def encode_publish_state_notify(
+    parameters: MessageParameters | None = None, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+) -> bytes:
+    """PUBLISH_STATE_NOTIFY (§9.10): the publisher's unilateral "these subscription parameters changed"."""
     body = ByteWriter()
-    encode_message_parameters(body, parameters)
+    encode_message_parameters(body, parameters, protocol)
     return _frame_message(MESSAGE_TYPE.PUBLISH_STATE_NOTIFY, body)
 
 
@@ -1221,39 +1400,40 @@ def encode_fetch_ok(
     end_location: Location,
     parameters: MessageParameters | None = None,
     track_properties: Sequence[KeyValuePair] = (),
+    protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
 ) -> bytes:
-    """FETCH_OK (§10.14)."""
+    """FETCH_OK (§9.12)."""
     body = ByteWriter()
     body.write_uint8(1 if end_of_track else 0)
     _write_location(body, end_location)
-    encode_message_parameters(body, parameters)
+    encode_message_parameters(body, parameters, protocol)
     encode_key_value_pairs(body, track_properties)
     return _frame_message(MESSAGE_TYPE.FETCH_OK, body)
 
 
-def encode_publish(request: Publish) -> bytes:
-    """PUBLISH (§10.11)."""
+def encode_publish(request: Publish, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
+    """PUBLISH (§9.8)."""
     body = ByteWriter()
     body.write_varint(request.request_id)
     _write_track_namespace(body, request.track_namespace)
     body.write_length_prefixed(utf8_encode(request.track_name))
     body.write_varint(request.track_alias)
-    encode_message_parameters(body, request.parameters)
+    encode_message_parameters(body, request.parameters, protocol)
     encode_key_value_pairs(body, request.track_properties)
     return _frame_message(MESSAGE_TYPE.PUBLISH, body)
 
 
-def encode_publish_namespace(request: PublishNamespace) -> bytes:
-    """PUBLISH_NAMESPACE (§10.16): a publisher announcing a namespace."""
+def encode_publish_namespace(request: PublishNamespace, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
+    """PUBLISH_NAMESPACE (§9.14): a publisher announcing a namespace."""
     body = ByteWriter()
     body.write_varint(request.request_id)
     _write_track_namespace(body, request.track_namespace)
-    encode_message_parameters(body, request.parameters)
+    encode_message_parameters(body, request.parameters, protocol)
     return _frame_message(MESSAGE_TYPE.PUBLISH_NAMESPACE, body)
 
 
 def encode_namespace(track_namespace_suffix: Sequence[str]) -> bytes:
-    """NAMESPACE (§10.17): announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream.
+    """NAMESPACE (§9.16): announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream.
 
     The body is the namespace suffix relative to that stream's subscribed prefix and nothing else:
     peers bound-check the tuple against the frame length (moq-lite-rs treats even a zero parameter
@@ -1265,13 +1445,13 @@ def encode_namespace(track_namespace_suffix: Sequence[str]) -> bytes:
 
 
 def encode_namespace_done(track_namespace_suffix: Sequence[str]) -> bytes:
-    """NAMESPACE_DONE (§10.18): retract a NAMESPACE announcement (same body shape)."""
+    """NAMESPACE_DONE (§9.17): retract a NAMESPACE announcement (same body shape)."""
     body = ByteWriter()
     _write_track_namespace(body, track_namespace_suffix)
     return _frame_message(MESSAGE_TYPE.NAMESPACE_DONE, body)
 
 
-def encode_control_message(message: ControlMessage) -> bytes:
+def encode_control_message(message: ControlMessage, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
     """Encode any decoded message back to its frame. The per-message encoders above are the primary API."""
     match message:
         case Setup(options=options):
@@ -1285,18 +1465,18 @@ def encode_control_message(message: ControlMessage) -> bytes:
 
             return encode_goaway(timeout)
         case Subscribe():
-            return encode_subscribe(message)
+            return encode_subscribe(message, protocol)
         case TrackStatus():
-            return encode_track_status(message)
+            return encode_track_status(message, protocol)
         case Fetch():
-            return encode_fetch(message)
+            return encode_fetch(message, protocol)
         case SubscribeNamespace():
-            return encode_subscribe_namespace(message)
+            return encode_subscribe_namespace(message, protocol)
         case SubscribeOk(track_alias=alias, parameters=parameters, track_properties=properties):
-            return encode_subscribe_ok(alias, parameters, properties)
+            return encode_subscribe_ok(alias, parameters, properties, protocol)
         case RequestOk(parameters=parameters, track_properties=properties):
             body = ByteWriter()
-            encode_message_parameters(body, parameters)
+            encode_message_parameters(body, parameters, protocol)
             encode_key_value_pairs(body, properties)
             return _frame_message(MESSAGE_TYPE.REQUEST_OK, body)
         case RequestError(error_code=code, retry_interval=retry, reason=reason, redirect=redirect):
@@ -1312,17 +1492,17 @@ def encode_control_message(message: ControlMessage) -> bytes:
 
             return encode_request_error(code, reason, retry)
         case RequestUpdate(request_id=request_id, parameters=parameters):
-            return encode_request_update(request_id, parameters)
+            return encode_request_update(request_id, parameters, protocol)
         case PublishStateNotify(parameters=parameters):
-            return encode_publish_state_notify(parameters)
+            return encode_publish_state_notify(parameters, protocol)
         case PublishDone(status_code=status, stream_count=count, reason=reason):
             return encode_publish_done(status, MAX_VARINT_VALUE if count is None else count, reason)
         case Publish():
-            return encode_publish(message)
+            return encode_publish(message, protocol)
         case PublishNamespace():
-            return encode_publish_namespace(message)
+            return encode_publish_namespace(message, protocol)
         case FetchOk(end_of_track=end, end_location=location, parameters=parameters, track_properties=properties):
-            return encode_fetch_ok(end, location, parameters, properties)
+            return encode_fetch_ok(end, location, parameters, properties, protocol)
         case Namespace(track_namespace_suffix=suffix):
             return encode_namespace(suffix)
         case NamespaceDone(track_namespace_suffix=suffix):
@@ -1348,21 +1528,21 @@ def _read_redirect(reader: ByteReader) -> Redirect:
     return Redirect(connect_uri=connect_uri, track_namespace=track_namespace, track_name=track_name)
 
 
-def decode_control_message(frame: ControlMessageFrame) -> ControlMessage:
+def decode_control_message(frame: ControlMessageFrame, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> ControlMessage:
     """Decode one control-message frame into a typed message.
 
-    Raises :class:`MoqtProtocolError` for unknown message types (§10: "An endpoint that receives an
+    Raises :class:`MoqtProtocolError` for unknown message types (§9: "An endpoint that receives an
     unknown message type MUST close the session") and for malformed bodies.
     """
     reader = ByteReader(frame.body)
     end = len(frame.body)
 
     try:
-        message = _decode_control_message_body(frame.type, reader, end)
+        message = _decode_control_message_body(frame.type, reader, end, protocol)
     except IncompleteInputError:
         # Field reads past the declared frame length surface as IncompleteInputError from
         # ByteReader. Normalize them: the session's stream loops treat only MoqtProtocolError as
-        # fatal, and a truncated body must terminate the session (§10) rather than vanish as a read
+        # fatal, and a truncated body must terminate the session (§9) rather than vanish as a read
         # error.
         raise MoqtProtocolError(f"control message 0x{frame.type:x} body is truncated") from None
 
@@ -1372,7 +1552,9 @@ def decode_control_message(frame: ControlMessageFrame) -> ControlMessage:
     return message
 
 
-def _decode_control_message_body(message_type: int, reader: ByteReader, end: int) -> ControlMessage:
+def _decode_control_message_body(
+    message_type: int, reader: ByteReader, end: int, protocol: MoqtProtocolId
+) -> ControlMessage:
     if message_type == MESSAGE_TYPE.SETUP:
         return Setup(options=decode_key_value_pairs(reader, end))
 
@@ -1387,13 +1569,13 @@ def _decode_control_message_body(message_type: int, reader: ByteReader, end: int
 
     if message_type == MESSAGE_TYPE.SUBSCRIBE_OK:
         track_alias = reader.read_varint()
-        parameters = decode_message_parameters(reader)
+        parameters = decode_message_parameters(reader, protocol)
         return SubscribeOk(
             track_alias=track_alias, parameters=parameters, track_properties=decode_key_value_pairs(reader, end)
         )
 
     if message_type == MESSAGE_TYPE.REQUEST_OK:
-        parameters = decode_message_parameters(reader)
+        parameters = decode_message_parameters(reader, protocol)
         return RequestOk(parameters=parameters, track_properties=decode_key_value_pairs(reader, end))
 
     if message_type == MESSAGE_TYPE.REQUEST_ERROR:
@@ -1405,14 +1587,14 @@ def _decode_control_message_body(message_type: int, reader: ByteReader, end: int
 
     if message_type == MESSAGE_TYPE.REQUEST_UPDATE:
         request_id = reader.read_varint()
-        return RequestUpdate(request_id=request_id, parameters=decode_message_parameters(reader))
+        return RequestUpdate(request_id=request_id, parameters=decode_message_parameters(reader, protocol))
 
     if message_type == MESSAGE_TYPE.PUBLISH_STATE_NOTIFY:
-        return PublishStateNotify(parameters=decode_message_parameters(reader))
+        return PublishStateNotify(parameters=decode_message_parameters(reader, protocol))
 
     if message_type == MESSAGE_TYPE.PUBLISH_DONE:
         status_code = reader.read_varint()
-        # A publisher that cannot count its streams MUST send 2^64-1 (§10.12): read that one value
+        # A publisher that cannot count its streams MUST send 2^64-1 (§9.9): read that one value
         # as "unknown" rather than failing the session over a legitimate PUBLISH_DONE.
         stream_count = reader.read_count_varint()
         return PublishDone(status_code=status_code, stream_count=stream_count, reason=_read_reason_phrase(reader))
@@ -1422,7 +1604,7 @@ def _decode_control_message_body(message_type: int, reader: ByteReader, end: int
         track_namespace = _read_track_namespace(reader)
         track_name = utf8_decode(reader.read_bytes(reader.read_varint()))
         track_alias = reader.read_varint()
-        parameters = decode_message_parameters(reader)
+        parameters = decode_message_parameters(reader, protocol)
         return Publish(
             request_id=request_id,
             track_namespace=track_namespace,
@@ -1436,7 +1618,9 @@ def _decode_control_message_body(message_type: int, reader: ByteReader, end: int
         request_id = reader.read_varint()
         track_namespace = _read_track_namespace(reader)
         return PublishNamespace(
-            request_id=request_id, track_namespace=track_namespace, parameters=decode_message_parameters(reader)
+            request_id=request_id,
+            track_namespace=track_namespace,
+            parameters=decode_message_parameters(reader, protocol),
         )
 
     if message_type == MESSAGE_TYPE.FETCH_OK:
@@ -1445,7 +1629,7 @@ def _decode_control_message_body(message_type: int, reader: ByteReader, end: int
             raise MoqtProtocolError(f"invalid FETCH_OK end-of-track value {end_of_track_wire}")
 
         end_location = _read_location(reader)
-        parameters = decode_message_parameters(reader)
+        parameters = decode_message_parameters(reader, protocol)
         return FetchOk(
             end_of_track=end_of_track_wire == 1,
             end_location=end_location,
@@ -1457,7 +1641,7 @@ def _decode_control_message_body(message_type: int, reader: ByteReader, end: int
         request_id = reader.read_varint()
         track_namespace = _read_track_namespace(reader)
         track_name = utf8_decode(reader.read_bytes(reader.read_varint()))
-        parameters = decode_message_parameters(reader)
+        parameters = decode_message_parameters(reader, protocol)
 
         if message_type == MESSAGE_TYPE.FETCH:
             return Fetch(
@@ -1479,7 +1663,7 @@ def _decode_control_message_body(message_type: int, reader: ByteReader, end: int
         return SubscribeNamespace(
             request_id=request_id,
             track_namespace_prefix=track_namespace_prefix,
-            parameters=decode_message_parameters(reader),
+            parameters=decode_message_parameters(reader, protocol),
         )
 
     if message_type == MESSAGE_TYPE.NAMESPACE:
@@ -1500,6 +1684,7 @@ __all__ = [
     "MAX_CONTROL_MESSAGE_LENGTH",
     "MESSAGE_TYPE",
     "MOQT_PROTOCOL_ID",
+    "MOQT_PROTOCOL_IDS",
     "PARAMETER_TYPE",
     "PUBLISH_DONE_STATUS",
     "REQUEST_ERROR_CODE",
@@ -1518,6 +1703,7 @@ __all__ = [
     "Location",
     "LocationFilter",
     "MessageParameters",
+    "MoqtProtocolId",
     "Namespace",
     "NamespaceDone",
     "NextObjectFilter",
@@ -1569,4 +1755,5 @@ __all__ = [
     "encode_track_status",
     "is_retryable_publish_done_status",
     "is_retryable_request_error_code",
+    "resolve_moqt_protocol",
 ]

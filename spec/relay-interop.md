@@ -1,7 +1,9 @@
 # moq-relay interoperability
 
-Both SDKs speak only `moqt-20`. Their `LARGEST_OBJECT` message parameter is two bare
-varints (Group, Object), matching draft-20 §10.2 and moq-relay from **0.14.17** through
+Both SDKs offer `moqt-22`, then `moqt-20`, and speak whichever the relay selects; moq-relay selects
+`moqt-22` from 0.15.0 ([draft-22 LOCATION_FILTER framing](#draft-22-location_filter-framing)).
+Their `LARGEST_OBJECT` message parameter is two bare
+varints (Group, Object), matching draft-22 §9.20 and moq-relay from **0.14.17** through
 **0.17.0**, the production relay since 2026-10-05 (`SubscribeOk` in `rs/moq-net/src/ietf/subscribe.rs`
 at tag `moq-relay-v0.17.0`). [Upstream fix](https://github.com/moq-dev/moq/pull/3561).
 
@@ -10,7 +12,7 @@ be safely auto-detected: coordinate adoption of these SDK builds with the relay 
 Old SDK builds fail on subscriptions to populated tracks after the relay upgrade; these
 SDK builds misdecode or reject the old relay's populated-track responses.
 
-`INCLUDE_PROPERTIES` (`0x35`) is one raw byte with no length, matching draft-20 §10.2.21 and
+`INCLUDE_PROPERTIES` (`0x35`) is one raw byte with no length, matching draft-22 §9.20.21 and
 moq-relay **0.17.0** (`Subscribe` in `rs/moq-net/src/ietf/subscribe.rs` at tag `moq-relay-v0.17.0`).
 0.15.8 and earlier length-prefixed it. Neither relay version sends it upstream, so only an
 application that sets `include_properties` / `includeProperties` on a SUBSCRIBE sees the change.
@@ -18,6 +20,36 @@ An SDK build from before [PR #246](https://github.com/muxinc/relay-sdks/pull/246
 against 0.17.0 gets its whole session closed with PROTOCOL_VIOLATION (0x3) `wrong frame size`
 (measured on production on 2026-10-05, 3 of 3); a current build against a relay older than 0.17.0
 is misread the other way.
+
+## Draft-22 LOCATION_FILTER framing
+
+Draft-22's one wire change from draft-20 is the LOCATION_FILTER parameter (`0x21`): it opens with a
+Location Filter Type that says which fields follow and has no length
+([draft-22 §9.20.9](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.20.9)).
+Draft-20 length-prefixed up to four fields and read the meaning from how many were present
+([docs/research/moqt-22-delta.md](../docs/research/moqt-22-delta.md)). The SDKs encode the filter
+for the negotiated draft. moq-relay negotiates `moqt-22` from 0.15.0 but frames LOCATION_FILTER
+the draft-20 way on every draft from 20 on (`Filter::is_draft20` and `Param for Filter` in
+`rs/moq-net/src/ietf/filter.rs` at tag `moq-relay-v0.17.0`, unchanged on upstream `main` on
+2026-10-06). The two spellings are the same bytes when the field count equals the type and every
+field is under 128 (`spec/vectors/location-filter.json`), so most filters work; the ones that do
+not are:
+
+| filter | draft-22 bytes the SDK sends | what moq-relay 0.17.0 does on `moqt-22` |
+| --- | --- | --- |
+| Next Object (`next-object` / `NextObjectFilter`) | `21 05` | reads `05` as a length and closes the session with PROTOCOL_VIOLATION (0x3) `short buffer` |
+| open-ended absolute `{0,0}` | `21 02 00 00` | reads it as Next Object, the draft-20 meaning of those bytes |
+| any start group, start object, end delta or end object of 128 or more | type, then multi-byte fields | misreads the length and the fields that follow |
+
+Measured on production (sjc, 0.17.0) on 2026-10-06: a subscription with no filter, the explicit
+no-filter type `0x00`, `relative-group` 1 and an absolute start at group 3 were all accepted and
+delivered on `moqt-22`; Next Object closed the session as above. The relay's own upstream SUBSCRIBE
+to an SDK publisher carries `21 02 00 00` (Next Object, in the draft-20 framing) and a fill of
+`21 01 01`, which read under draft-22 as an absolute start at `{0,0}` and a relative start of 1. No
+SDK publisher acts on a subscription's filter, so that changes nothing. On `moqt-20` every shape
+works, Next Object included. Until the relay frames the filter by the draft-22 rules, a live-edge
+subscriber uses a relative start of 0 (the next group) rather than Next Object, as the live smoke
+tests do, or leaves the filter out ([issue #275](https://github.com/muxinc/relay-sdks/issues/275)).
 
 Publishers still retain no history and advertise no `LARGEST_OBJECT`. The relay's
 Next Object + current-group `FILL_PARAMETERS` pull (since 0.14.17, unchanged through 0.17.0, whose
@@ -210,7 +242,7 @@ protocol makes.
 
 moq-relay 0.17.0 serves SUBSCRIBE_NAMESPACE from client sessions
 (`run_subscribe_namespace_stream` in `rs/moq-net/src/ietf/publisher.rs` at tag
-`moq-relay-v0.17.0`). On draft-20 it answers REQUEST_OK without a request id, then writes NAMESPACE
+`moq-relay-v0.17.0`). On draft-20 and draft-22 it answers REQUEST_OK without a request id, then writes NAMESPACE
 and NAMESPACE_DONE entries named relative to the prefix. Its source is the relay's origin, which
 includes routes learned from cluster peers.
 
@@ -224,7 +256,7 @@ includes routes learned from cluster peers.
   the pushed PUBLISH_NAMESPACE with NOT_SUPPORTED and retry interval 0, which the relay reads as
   "never offer this again" (`refusal()` in `publisher.rs`) for the rest of the session.
 - A prefix outside the session's grant gets REQUEST_OK and no entries, not an error.
-- It does not answer an overlapping SUBSCRIBE_NAMESPACE with PREFIX_OVERLAP, as draft-20 §10.19
+- It does not answer an overlapping SUBSCRIBE_NAMESPACE with PREFIX_OVERLAP, as draft-22 §9.15
   requires: a probe on 2026-10-06 held `[a, b, c]` and `[a, b, c, pre]` open on one session, and
   both received the namespace they share. The SDKs refuse an overlapping prefix before sending it, so
   applications see the same rule against any relay.
@@ -406,7 +438,7 @@ the relay's raw-QUIC sessions still map codes as for WebTransport: code 1 arrive
 2026-10-05 (3 of 3 per case, both SDKs) and the same on a local 0.15.8. Treat a subgroup reset as
 "this group was abandoned" and nothing more.
 
-## Draft-20 deviations
+## Draft-22 deviations
 
 The relay behavior behind the [relay interop deviations](behavior.md#relay-interop-deviations).
 The constraints came into this repository with the Video.js core extraction
@@ -415,7 +447,7 @@ a recorded relay version. On 2026-09-28 they were checked by reading the moq-rel
 `rs/moq-net`) at tags `moq-relay-v0.14.17` (commit `b2f26b92`), `moq-relay-v0.15.1` and
 `moq-relay-v0.15.8`. The PUBLISH_DONE row was also measured live the same day, below. Close codes
 for 0.14.17 are moq-net's own `Error::to_code` values; from 0.15.1 a session close carries the
-draft-20 Section 3.5 code.
+draft-22 Section 12.2 code.
 
 | SDK choice | relay behavior by version | where | effect |
 | --- | --- | --- | --- |
@@ -440,8 +472,8 @@ REQUEST_ERROR 3 (`NOT_SUPPORTED`) `FORWARD=0 not supported`, and the session sta
 closed the session (upstream `9e2b77d08`, "decode every legal request and refuse per request").
 
 The alias row refines what the core headers said before 0.15, that any alias bound to two live
-request IDs closes the session. That holds only for two different tracks, which draft-20 Section
-11.1 makes fatal anyway; for one track the relay cancels the newer subscription, because it cannot
+request IDs closes the session. That holds only for two different tracks, which draft-22 Section
+3.1.3 makes fatal anyway; for one track the relay cancels the newer subscription, because it cannot
 demultiplex subscriptions with identical filters. Unique aliases avoid both.
 
 Live check of the PUBLISH_DONE row on 2026-09-28: a publisher wrote three objects, then closed the

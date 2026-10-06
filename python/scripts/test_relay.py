@@ -43,7 +43,7 @@ from getpass import getpass
 from typing import Any
 from urllib.parse import urlsplit
 
-from moq_core import NextObjectFilter
+from moq_core import RelativeGroupFilter
 from mux_relay import (
     DEFAULT_ENDPOINT,
     CancellationToken,
@@ -311,6 +311,10 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             if obj.status == "normal" and obj.payload != WARM_UP:
                 received["lateStatus"].append(obj.payload)
 
+        # Start at the next group, the next live object. Not Next Object: moq-relay 0.17.0 frames
+        # LOCATION_FILTER the draft-20 way on moqt-22 too, and closes the session on draft-22's Next
+        # Object spelling (spec/relay-interop.md, "Draft-22 LOCATION_FILTER framing"). A relative start
+        # of 0 is the same bytes in both drafts.
         late_subscriber.subscribe(
             namespace,
             "status",
@@ -319,7 +323,7 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
                 on_object=on_late_object,
                 on_error=lambda error: errors.append(f"late status: {error.error_code} {error.reason}"),
             ),
-            parameters=MessageParameters(location_filter=NextObjectFilter()),
+            parameters=MessageParameters(location_filter=RelativeGroupFilter(groups_before_next=0)),
         )
         await wait_for(lambda: late_largest_object is not None, "late SUBSCRIBE_OK with LARGEST_OBJECT")
         # The track's end would make its want resubscribe and replay the cached group (spec/publisher-recovery.md).

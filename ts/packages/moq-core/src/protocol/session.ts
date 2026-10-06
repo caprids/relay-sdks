@@ -1,8 +1,8 @@
 /**
- * Pure MOQT session protocol driver (moq-transport draft-20), subscribe side only.
+ * Pure MOQT session protocol driver (moq-transport draft-22), subscribe side only.
  *
  * Owns the protocol mechanics over an established transport: the SETUP exchange on paired unidirectional control
- * streams (§3.3), request-stream bookkeeping keyed by Request ID (§10.1 — client IDs are even, starting at 0), routing
+ * streams (§6.3), request-stream bookkeeping keyed by Request ID (§6.4.2.1 — client IDs are even, starting at 0), routing
  * of incoming data streams to subscriptions (by Track Alias) and fetches (by Request ID), GOAWAY handling, and session
  * termination.
  *
@@ -33,8 +33,10 @@ import {
   type KeyValuePair,
   MESSAGE_TYPE,
   type MessageParameters,
+  type MoqtProtocolId,
   REQUEST_ERROR_CODE,
   type Redirect,
+  resolveMoqtProtocol,
   SETUP_OPTION,
   type TrackNamespace,
 } from './control-messages.js';
@@ -113,7 +115,7 @@ export interface SubscribeOk {
 export interface PublishDone {
   /** A {@link @mux/moq-core!PUBLISH_DONE_STATUS} value. */
   statusCode: number;
-  /** Data streams the publisher opened; `undefined` when it could not count them (§10.12). */
+  /** Data streams the publisher opened; `undefined` when it could not count them (§9.9). */
   streamCount: number | undefined;
   /** Reason phrase; empty when the publisher gave none. */
   reason: string;
@@ -139,7 +141,7 @@ export interface SubscriptionHandlers {
   /** Response to a REQUEST_UPDATE sent on this subscription. */
   onUpdateOk?(): void;
   /**
-   * PUBLISH_STATE_NOTIFY (§10.10): the publisher changed subscription state on its own — `parameters` carries only what
+   * PUBLISH_STATE_NOTIFY (§9.10): the publisher changed subscription state on its own — `parameters` carries only what
    * changed, with LARGEST_OBJECT marking where. Informational; the session sends no reply.
    */
   onStateNotify?(parameters: MessageParameters): void;
@@ -197,9 +199,9 @@ function synchronousSubscriptionHandlers(handlers: SubscriptionHandlers): Subscr
 export interface Subscription {
   /** Request ID of the SUBSCRIBE. */
   readonly requestId: number;
-  /** Modify the subscription (REQUEST_UPDATE, §10.9). */
+  /** Modify the subscription (REQUEST_UPDATE, §9.5). */
   update(parameters: MessageParameters): void;
-  /** Tear the subscription down. MOQT has no UNSUBSCRIBE message — teardown is the request stream's lifecycle (§3.3.3). */
+  /** Tear the subscription down. MOQT has no UNSUBSCRIBE message — teardown is the request stream's lifecycle (§6.4.2.3). */
   cancel(reason?: unknown): void;
 }
 
@@ -207,7 +209,7 @@ export interface Subscription {
 export interface FetchOk {
   /** FETCH_OK's End Of Track flag. */
   endOfTrack: boolean;
-  /** FETCH_OK's End Location. */
+  /** FETCH_OK's End Location, the last Location the fetch covers (inclusive, §9.12). */
   endLocation: {
     /** Group ID. */
     group: number;
@@ -270,14 +272,14 @@ export interface NamespaceSubscriptionHandlers {
   /** The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure. */
   onError?(error: RequestError): void;
   /**
-   * NAMESPACE (§10.17): a namespace under the prefix is available. A peer may name one again (moq-relay does when its
+   * NAMESPACE (§9.16): a namespace under the prefix is available. A peer may name one again (moq-relay does when its
    * route changes); each call is passed on.
    */
   onNamespace?(trackNamespaceSuffix: TrackNamespace): void;
   /**
-   * NAMESPACE_DONE (§10.18): a namespace the peer named is no longer available. Also called for each namespace still
-   * active when the accepted request ends (§10.19), just before `onEnd`. One for a namespace never named closes the
-   * session with PROTOCOL_VIOLATION (§10.19).
+   * NAMESPACE_DONE (§9.17): a namespace the peer named is no longer available. Also called for each namespace still
+   * active when the accepted request ends (§9.15), just before `onEnd`. One for a namespace never named closes the
+   * session with PROTOCOL_VIOLATION (§9.15).
    */
   onNamespaceDone?(trackNamespaceSuffix: TrackNamespace): void;
   /**
@@ -330,7 +332,7 @@ export interface MoqtSessionCallbacks {
    * UNINTERESTED (a subscribe-only client).
    *
    * `accept` sends a bare PUBLISH_OK: since draft-20 the subscription parameters (FORWARD, LOCATION_FILTER, …) are
-   * legal only on PUBLISH and REQUEST_UPDATE, and a parameter in the wrong message is a PROTOCOL_VIOLATION (§10.2.1).
+   * legal only on PUBLISH and REQUEST_UPDATE, and a parameter in the wrong message is a PROTOCOL_VIOLATION (§9.20.1).
    */
   onIncomingPublish?(
     publish: IncomingPublish,
@@ -344,16 +346,16 @@ export interface MoqtSessionCallbacks {
 export interface MoqtSessionConfig {
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
-  /** Identifies this implementation in SETUP (§10.3.1.5). */
+  /** Identifies this implementation in SETUP (§9.1.5). */
   implementationName?: string;
   /**
    * How long to hold an incoming data stream whose Track Alias has no registered subscription yet (objects can outrace
-   * SUBSCRIBE_OK). §11.4.2 allows brief buffering; expired streams are dropped. Default 2000ms.
+   * SUBSCRIBE_OK). §11.3.1 allows brief buffering; expired streams are dropped. Default 2000ms.
    */
   unknownAliasTimeoutMs?: number;
   /**
    * How long to wait for a request's first response (SUBSCRIBE_OK / FETCH_OK / REQUEST_OK / REQUEST_ERROR) before
-   * failing it. The draft expects implementations to bound control exchanges (§3.5's CONTROL_MESSAGE_TIMEOUT); without
+   * failing it. The draft expects implementations to bound control exchanges (§12.2's CONTROL_MESSAGE_TIMEOUT); without
    * this a relay that accepts the stream and then goes quiet leaves the request pending forever. Default 10000ms.
    */
   requestTimeoutMs?: number | undefined;
@@ -372,7 +374,7 @@ export interface MoqtSubscribeOptions {
 }
 
 /**
- * FETCH (§10.13) takes the SUBSCRIBE shape; the range is `parameters.locationFilter`, read with fetch rules (§5.1.2): a
+ * FETCH (§9.11) takes the SUBSCRIBE shape; the range is `parameters.locationFilter`, read with fetch rules (§3.3.1): a
  * relative start counts back from Largest Object, an omitted end stops there, no filter means `{0,0}` up to Largest
  * Object. A subscription reads the same filter with subscription rules; see `LocationFilter` in control-messages.ts.
  */
@@ -382,14 +384,14 @@ export type MoqtFetchOptions = MoqtSubscribeOptions;
 export interface MoqtSession {
   /** Resolves when the server's SETUP has been received. */
   readonly ready: Promise<void>;
-  /** Send SUBSCRIBE (§10.7) on a new request stream. Results arrive through `handlers`. */
+  /** Send SUBSCRIBE (§9.6) on a new request stream. Results arrive through `handlers`. */
   subscribe(options: MoqtSubscribeOptions, handlers?: SubscriptionHandlers): Subscription;
-  /** Send FETCH (§10.13) on a new request stream. Results arrive through `handlers`. */
+  /** Send FETCH (§9.11) on a new request stream. Results arrive through `handlers`. */
   fetch(options: MoqtFetchOptions, handlers?: FetchHandlers): FetchHandle;
-  /** Send TRACK_STATUS (§10.15) on a new request stream and report its one response through `handlers`. */
+  /** Send TRACK_STATUS (§9.13) on a new request stream and report its one response through `handlers`. */
   trackStatus(options: MoqtSubscribeOptions, handlers?: TrackStatusHandlers): void;
   /**
-   * Send SUBSCRIBE_NAMESPACE (§10.19) on a new request stream: the peer answers REQUEST_OK, then names the namespaces
+   * Send SUBSCRIBE_NAMESPACE (§9.15) on a new request stream: the peer answers REQUEST_OK, then names the namespaces
    * under the prefix with NAMESPACE / NAMESPACE_DONE on the same stream. A relay that pushes unsolicited
    * PUBLISH_NAMESPACE instead only stops doing so when SETUP carried `SETUP_OPTION.SOLICIT`.
    */
@@ -490,11 +492,13 @@ class MoqtSessionImpl implements MoqtSession {
   readonly ready: Promise<void>;
 
   #transport: MoqtTransport;
+  /** The negotiated draft, which selects the parameter codec. */
+  #protocol: MoqtProtocolId;
   #config: MoqtSessionConfig;
   #callbacks: MoqtSessionCallbacks;
 
-  #nextRequestId = 0; // client request IDs: even, starting at 0 (§10.1)
-  /** Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§10.1). */
+  #nextRequestId = 0; // client request IDs: even, starting at 0 (§6.4.2.1)
+  /** Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§6.4.2.1). */
   #peerRequestIds = new Set<number>();
   #subscriptions = new Map<number, SubscriptionRecord>();
   #fetches = new Map<number, FetchRecord>();
@@ -512,6 +516,7 @@ class MoqtSessionImpl implements MoqtSession {
 
   constructor(transport: MoqtTransport, config: MoqtSessionConfig = {}) {
     this.#transport = transport;
+    this.#protocol = resolveMoqtProtocol(transport.protocol);
     this.#config = config;
     this.#callbacks = config.callbacks ?? {};
     this.ready = new Promise((resolve, reject) => {
@@ -531,7 +536,7 @@ class MoqtSessionImpl implements MoqtSession {
   async #start(): Promise<void> {
     // Accept loops start first: the peer's streams must be processed even
     // while our own SETUP write is still propagating (either peer may send
-    // stream data first, §3.3).
+    // stream data first, §6.3).
     void this.#acceptUnidirectionalStreams();
     void this.#acceptBidirectionalStreams();
     void this.#transport.closed.then(
@@ -666,7 +671,7 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   /**
-   * Request IDs are consumed once per session (§10.1), by every request-initiating message, accepted or not. This
+   * Request IDs are consumed once per session (§6.4.2.1), by every request-initiating message, accepted or not. This
    * endpoint is always the client, so the peer's ids are odd; a reused id or an even one closes the session with
    * INVALID_REQUEST_ID.
    */
@@ -689,12 +694,15 @@ class MoqtSessionImpl implements MoqtSession {
 
     this.#subscriptions.set(requestId, record);
 
-    const message = encodeSubscribe({
-      requestId,
-      trackNamespace: options.trackNamespace,
-      trackName: options.trackName,
-      parameters: options.parameters,
-    });
+    const message = encodeSubscribe(
+      {
+        requestId,
+        trackNamespace: options.trackNamespace,
+        trackName: options.trackName,
+        parameters: options.parameters,
+      },
+      this.#protocol
+    );
 
     void this.#openRequest(
       message,
@@ -705,7 +713,7 @@ class MoqtSessionImpl implements MoqtSession {
         handlers.onError?.(error);
       },
       () => {
-        // §3.3.2: once the publisher's FIN after PUBLISH_DONE completes the request, the requester
+        // §6.4.2.2: once the publisher's FIN after PUBLISH_DONE completes the request, the requester
         // SHOULD FIN too. A publisher closing waits for it before closing the transport.
         if (record.publisherDone) record.stream?.finWrite().catch(() => {});
       }
@@ -714,10 +722,10 @@ class MoqtSessionImpl implements MoqtSession {
     return {
       requestId,
       update: (parameters) => {
-        // REQUEST_UPDATE consumes a Request ID of its own (§10.1); the stream
+        // REQUEST_UPDATE consumes a Request ID of its own (§6.4.2.1); the stream
         // it travels on is what names the subscription. Reusing the
         // subscription's id would be a duplicate the peer MUST close on.
-        record.stream?.send(encodeRequestUpdate(this.#allocateRequestId(), parameters)).catch(() => {});
+        record.stream?.send(encodeRequestUpdate(this.#allocateRequestId(), parameters, this.#protocol)).catch(() => {});
       },
       cancel: (reason) => this.#cancelSubscription(record, reason),
     };
@@ -738,7 +746,7 @@ class MoqtSessionImpl implements MoqtSession {
     const request: FetchRequest = { requestId, ...options };
 
     void this.#openRequest(
-      encodeFetch(request),
+      encodeFetch(request, this.#protocol),
       record,
       (msg) => this.#handleFetchMessage(record, msg),
       (error) => {
@@ -762,12 +770,15 @@ class MoqtSessionImpl implements MoqtSession {
     // requests leave the map — nothing else arrives on their stream.
     this.#trackStatuses.set(requestId, record);
 
-    const message = encodeTrackStatus({
-      requestId,
-      trackNamespace: options.trackNamespace,
-      trackName: options.trackName,
-      parameters: options.parameters,
-    });
+    const message = encodeTrackStatus(
+      {
+        requestId,
+        trackNamespace: options.trackNamespace,
+        trackName: options.trackName,
+        parameters: options.parameters,
+      },
+      this.#protocol
+    );
 
     void this.#openRequest(
       message,
@@ -804,11 +815,14 @@ class MoqtSessionImpl implements MoqtSession {
       settled: false,
       active: new Map(),
     };
-    const message = encodeSubscribeNamespace({
-      requestId,
-      trackNamespacePrefix: options.trackNamespacePrefix,
-      parameters: options.parameters,
-    });
+    const message = encodeSubscribeNamespace(
+      {
+        requestId,
+        trackNamespacePrefix: options.trackNamespacePrefix,
+        parameters: options.parameters,
+      },
+      this.#protocol
+    );
 
     this.#namespaceSubscriptions.set(requestId, record);
 
@@ -817,7 +831,7 @@ class MoqtSessionImpl implements MoqtSession {
       if (!this.#namespaceSubscriptions.delete(requestId)) return;
       // A failed stream is dropped here: session teardown only reaches the records it still holds.
       if (error !== undefined) record.stream?.cancel(error);
-      // §10.19: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
+      // §9.15: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
       const active = [...record.active.values()];
       record.active.clear();
       for (const suffix of active) handlers.onNamespaceDone?.(suffix);
@@ -835,7 +849,7 @@ class MoqtSessionImpl implements MoqtSession {
         handlers.onError?.(error);
       },
       () => {
-        // §3.3.2: the requester SHOULD FIN once the peer's FIN completes the request.
+        // §6.4.2.2: the requester SHOULD FIN once the peer's FIN completes the request.
         record.stream?.finWrite().catch(() => {});
         end();
       },
@@ -908,29 +922,34 @@ class MoqtSessionImpl implements MoqtSession {
       }, timeout);
     }
 
-    record.stream = openRequestStream(stream, message, {
-      onMessage,
-      onFin: () => {
-        if (!record.settled) {
-          fail(streamFailure('request stream closed before a response'));
-        } else if (!record.cancelled && !this.#destroyed) {
-          onEnd?.();
-        }
-      },
-      onError: (error) => {
-        if (isMoqtProtocolError(error)) {
-          this.#fatal(error);
-          return;
-        }
+    record.stream = openRequestStream(
+      stream,
+      message,
+      {
+        onMessage,
+        onFin: () => {
+          if (!record.settled) {
+            fail(streamFailure('request stream closed before a response'));
+          } else if (!record.cancelled && !this.#destroyed) {
+            onEnd?.();
+          }
+        },
+        onError: (error) => {
+          if (isMoqtProtocolError(error)) {
+            this.#fatal(error);
+            return;
+          }
 
-        if (record.settled) {
-          if (!record.cancelled && !this.#destroyed) onSettledError?.(error);
-          return;
-        }
+          if (record.settled) {
+            if (!record.cancelled && !this.#destroyed) onSettledError?.(error);
+            return;
+          }
 
-        fail(streamFailure(error instanceof Error ? error.message : 'request stream failed'));
+          fail(streamFailure(error instanceof Error ? error.message : 'request stream failed'));
+        },
       },
-    });
+      this.#protocol
+    );
 
     // A cancel that raced the stream opening lands here.
     if (record.cancelled) record.stream.cancel(record.pendingCancelReason);
@@ -994,12 +1013,12 @@ class MoqtSessionImpl implements MoqtSession {
       case 'publish-done':
         // Data streams may still be inbound; the alias route stays until
         // the subscription is cancelled or the session ends, so late
-        // subgroups still deliver (§10.12 leaves the timing policy to us).
+        // subgroups still deliver (§9.9 leaves the timing policy to us).
         record.publisherDone = true;
         record.handlers.onDone?.(message);
         break;
       case 'publish-state-notify':
-        // Unilateral (§10.10): no REQUEST_OK back, and it does not count
+        // Unilateral (§9.10): no REQUEST_OK back, and it does not count
         // against MAX_REQUEST_UPDATES.
         record.handlers.onStateNotify?.(message.parameters);
         break;
@@ -1023,7 +1042,7 @@ class MoqtSessionImpl implements MoqtSession {
         });
         break;
       // Some deployed relays accept a FETCH with the generic REQUEST_OK
-      // instead of the FETCH_OK §10.13 mandates. It
+      // instead of the FETCH_OK §9.11 mandates. It
       // carries no End Location/End Of Track, so `onOk` can't fire — the
       // fetch's actual completion still surfaces via onEntry/onEnd on the
       // data stream, which this response has no bearing on. It is still
@@ -1074,7 +1093,7 @@ class MoqtSessionImpl implements MoqtSession {
         break;
       case 'namespace':
       case 'namespace-done':
-        // Entries follow REQUEST_OK (§10.19); one before it, or after REQUEST_ERROR, is outside the
+        // Entries follow REQUEST_OK (§9.15); one before it, or after REQUEST_ERROR, is outside the
         // stream's grammar.
         if (!record.accepted) {
           this.#fatal(
@@ -1089,7 +1108,7 @@ class MoqtSessionImpl implements MoqtSession {
         } else if (record.active.delete(JSON.stringify(message.trackNamespaceSuffix))) {
           record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix);
         } else {
-          // §10.19: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
+          // §9.15: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
           this.#fatal(
             new MoqtProtocolError('NAMESPACE_DONE before its NAMESPACE on a subscribe-namespace request stream')
           );
@@ -1196,7 +1215,7 @@ class MoqtSessionImpl implements MoqtSession {
     const low = await reader.readUint8();
     const body = await reader.readBytes(high * 256 + low);
 
-    return decodeControlMessage({ type, body });
+    return decodeControlMessage({ type, body }, this.#protocol);
   }
 
   async #runControlStream(reader: StreamReader): Promise<void> {
@@ -1226,13 +1245,13 @@ class MoqtSessionImpl implements MoqtSession {
       this.#callbacks.onGoaway?.(message);
     }
 
-    // A closed control stream ends the session (§3.3).
+    // A closed control stream ends the session (§6.3).
     if (!this.#destroyed) {
       this.#fatal(new MoqtProtocolError('peer closed its control stream'));
     }
   }
 
-  /** Wait briefly for a subscription to claim `trackAlias` (§11.4.2 buffering). */
+  /** Wait briefly for a subscription to claim `trackAlias` (§11.3.1 buffering). */
   #waitForAlias(trackAlias: number): Promise<SubscriptionRecord | undefined> {
     const known = this.#aliasRoutes.get(trackAlias);
     if (known || this.#destroyed) return Promise.resolve(known);
@@ -1301,7 +1320,7 @@ class MoqtSessionImpl implements MoqtSession {
     const record = this.#fetches.get(requestId);
 
     // A FETCH_HEADER naming no fetch of ours is dropped, not fatal. That
-    // includes a fill fetch stream (§5.1.3), keyed by a SUBSCRIBE's Request
+    // includes a fill fetch stream (§3.4), keyed by a SUBSCRIBE's Request
     // ID — this subscriber never asks for one, so none is expected.
     if (!record || record.cancelled) {
       await reader.cancel();
@@ -1393,7 +1412,7 @@ class MoqtSessionImpl implements MoqtSession {
             if (responded) return;
 
             responded = true;
-            void respond(encodeRequestOk());
+            void respond(encodeRequestOk({}, this.#protocol));
           },
           reject: (errorCode = REQUEST_ERROR_CODE.UNINTERESTED, reason = '') => {
             if (responded) return;

@@ -5,7 +5,7 @@ export type RelayErrorCode =
   | 'CONNECTION_TIMEOUT'
   | 'WRITE_TIMEOUT'
   /**
-   * An object outlived its delivery timeout (draft-ietf-moq-transport-20 §8) before it reached the transport: the
+   * An object outlived its delivery timeout (draft-ietf-moq-transport-22 §5.2) before it reached the transport: the
    * smaller non-zero of the publisher's OBJECT_DELIVERY_TIMEOUT (`0x02`) and the relay subscription's. The data is
    * stale; do not retry it as it is.
    */
@@ -20,7 +20,7 @@ export type RelayErrorCode =
   | 'UPDATE_QUEUE_FULL'
   /**
    * `namespaceEvents` refused a prefix that overlaps (equals, contains or falls under) one this connection is already
-   * discovering, in phase `subscription`; nothing was sent. Draft-20 §10.19 allows one SUBSCRIBE_NAMESPACE per prefix
+   * discovering, in phase `subscription`; nothing was sent. Draft-22 §9.15 allows one SUBSCRIBE_NAMESPACE per prefix
    * tree on a session. Widen one iterator's prefix and filter, or use a second connection.
    */
   | 'PREFIX_OVERLAP'
@@ -89,7 +89,7 @@ export function isStreamStop(error: unknown): boolean {
 }
 
 /**
- * MOQT session termination codes (draft-20 §3.5) that mean the relay refused the connection's credentials. moq-relay
+ * MOQT session termination codes (draft-22 §12.2) that mean the relay refused the connection's credentials. moq-relay
  * sends `UNAUTHORIZED` (0x2) for every refusal: no token, a bad signature, a malformed or expired token, a path outside
  * the token's root. The core never closes with any of them itself.
  */

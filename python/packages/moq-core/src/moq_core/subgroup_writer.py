@@ -1,4 +1,4 @@
-"""MOQT subgroup data-stream writing (moq-transport draft-20 §11.4.2).
+"""MOQT subgroup data-stream writing (moq-transport draft-22 §11.3.1).
 
 The publish-direction complement to the reader in ``object_stream``.
 
@@ -75,7 +75,7 @@ def _encode_object(
 
     writer = ByteWriter()
 
-    # First object carries its absolute ID; the rest are `delta + 1` (§11.4.2).
+    # First object carries its absolute ID; the rest are `delta + 1` (§11.3.1).
     writer.write_varint(object_id if previous_object_id is None else object_id - previous_object_id - 1)
 
     if has_properties:
@@ -149,7 +149,7 @@ class SubgroupWriter:
         """Serialize one object. Returns when the transport accepted the bytes.
 
         ``object_id`` is absolute and must increase monotonically within the stream. ``status`` is
-        only meaningful for zero-length payloads (§11.2.1.1).
+        only meaningful for zero-length payloads (§11.1.1).
         """
         if self._finished or self._finishing:
             raise MoqtProtocolError("subgroup stream already finished")
@@ -200,7 +200,7 @@ class SubgroupWriter:
         A FIN the transport has not taken yet is reset too, and the pending :meth:`fin` raises
         ``reason``: the send half turns a closed-but-untransmitted stream into a RESET_STREAM. So is
         a FIN that was taken but not yet acknowledged, which is how a settling group's
-        SUBGROUP_DELIVERY_TIMEOUT resets it (§8); :meth:`wait_acknowledged` then raises. Once the
+        SUBGROUP_DELIVERY_TIMEOUT resets it (§5.2); :meth:`wait_acknowledged` then raises. Once the
         whole stream is acknowledged the transport has nothing left to reset. Idempotent.
         """
         if self._aborted:

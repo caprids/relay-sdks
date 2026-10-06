@@ -25,6 +25,9 @@ import {
   type LocationFilter,
   MESSAGE_TYPE,
   type MessageParameters,
+  MOQT_PROTOCOL_ID,
+  MOQT_PROTOCOL_IDS,
+  type MoqtProtocolId,
   PARAMETER_TYPE,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
@@ -47,13 +50,13 @@ function frames(...messages: Uint8Array[]): Uint8Array {
 function decodeAll(bytes: Uint8Array) {
   const deframer = new ControlMessageDeframer();
 
-  return deframer.push(bytes).map(decodeControlMessage);
+  return deframer.push(bytes).map((frame) => decodeControlMessage(frame));
 }
 
-function encodeParameters(parameters: MessageParameters): Uint8Array {
+function encodeParameters(parameters: MessageParameters, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID): Uint8Array {
   const writer = new ByteWriter();
 
-  encodeMessageParameters(writer, parameters);
+  encodeMessageParameters(writer, parameters, protocol);
   return writer.toBytes();
 }
 
@@ -392,7 +395,7 @@ describe('encodeMessageParameters', () => {
   );
 
   it('frames INCLUDE_PROPERTIES as a raw byte and rejects values other than 0 and 1', () => {
-    // §10.2.21 and moq-relay 0.17.0: a uint8 with no Length.
+    // §9.20.21 and moq-relay 0.17.0: a uint8 with no Length.
     expect(Array.from(encodeParameters({ includeProperties: 0 }))).toEqual([0x01, 0x35, 0x00]);
 
     const reader = new ByteReader(Uint8Array.of(0x01, 0x35, 0x00));
@@ -409,11 +412,12 @@ describe('encodeMessageParameters', () => {
       fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
     });
 
-    // count 1, type 0x23, length 4, then the nested list: count 1, type 0x21, length 1, StartGroup 1.
+    // count 1, type 0x23, length 4, then the nested list: count 1, type 0x21, Location Filter Type 0x01 (Relative
+    // Start), StartGroup 1. The draft-20 spelling is the same bytes: length 1, then StartGroup 1.
     expect(Array.from(bytes)).toEqual([0x01, 0x23, 0x04, 0x01, 0x21, 0x01, 0x01]);
   });
 
-  it('rejects parameters outside Table 6 inside FILL_PARAMETERS, on both sides', () => {
+  it('rejects parameters outside Table 7 inside FILL_PARAMETERS, on both sides', () => {
     // Decode: FILL_PARAMETERS whose nested list carries FORWARD (0x10).
     const writer = new ByteWriter();
 
@@ -435,60 +439,143 @@ describe('encodeMessageParameters', () => {
 });
 
 describe('encodeLocationFilter', () => {
-  it('round-trips every filter shape', () => {
-    const filters: LocationFilter[] = [
-      { type: 'none' },
-      { type: 'next-object' },
-      { type: 'relative-group', groupsBeforeNext: 0 },
-      { type: 'relative-group', groupsBeforeNext: 1 },
-      { type: 'relative-group', groupsBeforeNext: 5 },
-      { type: 'absolute', start: { group: 3, object: 9 } },
-      { type: 'absolute', start: { group: 3, object: 9 }, endGroupDelta: 0 },
-      { type: 'absolute', start: { group: 3, object: 9 }, endGroupDelta: 2, endObject: 7 },
-    ];
+  const filters: LocationFilter[] = [
+    { type: 'none' },
+    { type: 'next-object' },
+    { type: 'relative-group', groupsBeforeNext: 0 },
+    { type: 'relative-group', groupsBeforeNext: 1 },
+    { type: 'relative-group', groupsBeforeNext: 5 },
+    { type: 'absolute', start: { group: 3, object: 9 } },
+    { type: 'absolute', start: { group: 3, object: 9 }, endGroupDelta: 0 },
+    { type: 'absolute', start: { group: 3, object: 9 }, endGroupDelta: 2, endObject: 7 },
+  ];
 
+  it.each(MOQT_PROTOCOL_IDS)('round-trips every filter shape on %s', (protocol) => {
     for (const filter of filters) {
-      expect(decodeLocationFilter(encodeLocationFilter(filter))).toEqual(filter);
+      expect(decodeLocationFilter(encodeLocationFilter(filter, protocol), protocol)).toEqual(filter);
     }
   });
 
-  it('selects the meaning by field count (§5.1.2)', () => {
-    expect(Array.from(encodeLocationFilter({ type: 'none' }))).toEqual([]);
-    expect(Array.from(encodeLocationFilter({ type: 'relative-group', groupsBeforeNext: 1 }))).toEqual([1]);
-    expect(Array.from(encodeLocationFilter({ type: 'next-object' }))).toEqual([0, 0]);
-    expect(Array.from(encodeLocationFilter({ type: 'absolute', start: { group: 3, object: 9 } }))).toEqual([3, 9]);
-    expect(
-      Array.from(
-        encodeLocationFilter({ type: 'absolute', start: { group: 3, object: 9 }, endGroupDelta: 2, endObject: 7 })
-      )
-    ).toEqual([3, 9, 2, 7]);
+  it.each(MOQT_PROTOCOL_IDS)(
+    'round-trips every filter shape as a parameter on %s, nested in FILL_PARAMETERS too',
+    (protocol) => {
+      for (const filter of filters) {
+        const parameters: MessageParameters = {
+          locationFilter: filter,
+          groupOrder: 'ascending',
+          fillParameters: { locationFilter: filter, groupOrder: 'descending' },
+        };
+        const reader = new ByteReader(encodeParameters(parameters, protocol));
+
+        expect(decodeMessageParameters(reader, protocol)).toEqual(parameters);
+        expect(reader.remaining).toBe(0);
+      }
+    }
+  );
+
+  it('defaults to draft-22', () => {
+    expect(MOQT_PROTOCOL_ID).toBe('moqt-22');
+    expect(Array.from(encodeLocationFilter({ type: 'next-object' }))).toEqual([0x05]);
   });
 
-  it('normalizes an open-ended absolute {0,0} to no filter rather than the Next Object spelling', () => {
-    expect(Array.from(encodeLocationFilter({ type: 'absolute', start: { group: 0, object: 0 } }))).toEqual([]);
+  it('opens with the Location Filter Type on draft-22 (§9.20.9, Table 6)', () => {
+    const encode = (filter: LocationFilter) => Array.from(encodeLocationFilter(filter, 'moqt-22'));
+
+    expect(encode({ type: 'none' })).toEqual([0x00]);
+    expect(encode({ type: 'relative-group', groupsBeforeNext: 1 })).toEqual([0x01, 1]);
+    expect(encode({ type: 'absolute', start: { group: 3, object: 9 } })).toEqual([0x02, 3, 9]);
+    expect(encode({ type: 'absolute', start: { group: 3, object: 9 }, endGroupDelta: 2 })).toEqual([0x03, 3, 9, 2]);
+    expect(encode({ type: 'absolute', start: { group: 3, object: 9 }, endGroupDelta: 2, endObject: 7 })).toEqual([
+      0x04, 3, 9, 2, 7,
+    ]);
+    expect(encode({ type: 'next-object' })).toEqual([0x05]);
+    // Draft-22 has a spelling for an open-ended absolute {0,0}, so it is not normalized away.
+    expect(encode({ type: 'absolute', start: { group: 0, object: 0 } })).toEqual([0x02, 0, 0]);
+  });
+
+  it('writes the draft-22 parameter without a length prefix', () => {
+    // count 1, type 0x21, Location Filter Type 0x05 (Next Object), and nothing else.
+    expect(Array.from(encodeParameters({ locationFilter: { type: 'next-object' } }, 'moqt-22'))).toEqual([
+      0x01, 0x21, 0x05,
+    ]);
+    // A following parameter's delta comes straight after the filter's last field.
+    expect(
+      Array.from(
+        encodeParameters(
+          { locationFilter: { type: 'absolute', start: { group: 3, object: 9 } }, groupOrder: 'descending' },
+          'moqt-22'
+        )
+      )
+    ).toEqual([0x02, 0x21, 0x02, 3, 9, 0x01, 0x02]);
+  });
+
+  it('selects the meaning by field count on draft-20 (draft-20 §5.1.2)', () => {
+    const encode = (filter: LocationFilter) => Array.from(encodeLocationFilter(filter, 'moqt-20'));
+
+    expect(encode({ type: 'none' })).toEqual([]);
+    expect(encode({ type: 'relative-group', groupsBeforeNext: 1 })).toEqual([1]);
+    expect(encode({ type: 'next-object' })).toEqual([0, 0]);
+    expect(encode({ type: 'absolute', start: { group: 3, object: 9 } })).toEqual([3, 9]);
+    expect(encode({ type: 'absolute', start: { group: 3, object: 9 }, endGroupDelta: 2, endObject: 7 })).toEqual([
+      3, 9, 2, 7,
+    ]);
+    // The draft-20 parameter is length-prefixed.
+    expect(Array.from(encodeParameters({ locationFilter: { type: 'next-object' } }, 'moqt-20'))).toEqual([
+      0x01, 0x21, 0x02, 0, 0,
+    ]);
+  });
+
+  it('normalizes an open-ended absolute {0,0} to no filter on draft-20 rather than the Next Object spelling', () => {
+    expect(Array.from(encodeLocationFilter({ type: 'absolute', start: { group: 0, object: 0 } }, 'moqt-20'))).toEqual(
+      []
+    );
     // Bounded, {0,0} is a real absolute start.
     expect(
-      Array.from(encodeLocationFilter({ type: 'absolute', start: { group: 0, object: 0 }, endGroupDelta: 3 }))
+      Array.from(
+        encodeLocationFilter({ type: 'absolute', start: { group: 0, object: 0 }, endGroupDelta: 3 }, 'moqt-20')
+      )
     ).toEqual([0, 0, 3]);
   });
 
-  it('rejects an end object without an end group', () => {
-    expect(() => encodeLocationFilter({ type: 'absolute', start: { group: 1, object: 0 }, endObject: 4 })).toThrow(
+  it.each(MOQT_PROTOCOL_IDS)('rejects an end object without an end group on %s', (protocol) => {
+    expect(() =>
+      encodeLocationFilter({ type: 'absolute', start: { group: 1, object: 0 }, endObject: 4 }, protocol)
+    ).toThrow(MoqtProtocolError);
+  });
+
+  it('rejects an unknown Location Filter Type on draft-22', () => {
+    expect(() => decodeLocationFilter(Uint8Array.of(0x06), 'moqt-22')).toThrow(/Location Filter Type/);
+    expect(() => decodeMessageParameters(new ByteReader(Uint8Array.of(0x01, 0x21, 0x06)), 'moqt-22')).toThrow(
       MoqtProtocolError
     );
   });
 
-  it('rejects more than four fields', () => {
-    expect(() => decodeLocationFilter(Uint8Array.of(1, 2, 3, 4, 5))).toThrow(MoqtProtocolError);
+  it('rejects a draft-22 filter missing the fields its type selects, or with bytes left over', () => {
+    expect(() => decodeLocationFilter(Uint8Array.of(0x04, 3, 9, 2), 'moqt-22')).toThrow(RangeError);
+    expect(() => decodeLocationFilter(Uint8Array.of(0x05, 0), 'moqt-22')).toThrow(MoqtProtocolError);
+    expect(() =>
+      decodeControlMessage(
+        { type: MESSAGE_TYPE.REQUEST_UPDATE, body: Uint8Array.of(2, 1, 0x21, 0x03, 3, 9) },
+        'moqt-22'
+      )
+    ).toThrow(MoqtProtocolError);
   });
 
-  it('rejects an end group past the supported range', () => {
+  it('rejects more than four fields on draft-20', () => {
+    expect(() => decodeLocationFilter(Uint8Array.of(1, 2, 3, 4, 5), 'moqt-20')).toThrow(MoqtProtocolError);
+  });
+
+  it.each([
+    ['moqt-22', [0x03]],
+    ['moqt-20', []],
+  ] as const)('rejects an end group past the supported range on %s', (protocol, prefix) => {
     const writer = new ByteWriter();
 
+    for (const byte of prefix) writer.writeVarint(byte);
     writer.writeVarint(Number.MAX_SAFE_INTEGER);
     writer.writeVarint(0);
     writer.writeVarint(1);
-    expect(() => decodeLocationFilter(writer.toBytes())).toThrow(MoqtProtocolError);
+    expect(() => decodeLocationFilter(writer.toBytes(), protocol)).toThrow(MoqtProtocolError);
   });
 });
 

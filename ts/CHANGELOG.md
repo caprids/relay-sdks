@@ -14,7 +14,7 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 - `@mux/relay`: `subscriber.namespaceEvents({ prefix })` discovers which namespaces under a prefix are announced
   ([#259](https://github.com/muxinc/relay-sdks/issues/259)). The subscriber's SETUP now carries the SOLICIT option,
   so the relay advertises namespaces only when asked. A prefix overlapping one the connection already discovers is
-  refused with the new `PREFIX_OVERLAP` code (draft-20 §10.19). `@mux/moq-core` gains `session.subscribeNamespace` and
+  refused with the new `PREFIX_OVERLAP` code (draft-22 §9.15). `@mux/moq-core` gains `session.subscribeNamespace` and
   `SETUP_OPTION.SOLICIT`.
 - `@mux/relay`: opt-in supervised connections ([#260](https://github.com/muxinc/relay-sdks/issues/260)).
   `connectSupervisedPublisher` reconnects with backoff, serving the root namespace plus a fresh generation field per
@@ -28,5 +28,12 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `announce-race.js` is retired: the demo and the live smoke test subscribe through `want`.
 - `@mux/relay-quic`: the native QUIC transport adapter for Node, with prebuilt binaries for Linux (x64 and arm64,
   glibc and musl), macOS (arm64 and x64) and Windows (x64).
-- `@mux/moq-core`: the transport-independent MOQT draft-20 sessions the SDK is built on.
+- `@mux/moq-core`: the transport-independent MOQT sessions the SDK is built on.
+- MOQT draft-22 by default ([#274](https://github.com/muxinc/relay-sdks/issues/274)): connections offer `moqt-22`,
+  then `moqt-20` as a fallback, and speak whichever the relay selects. The drafts differ on the wire only in the
+  LOCATION_FILTER parameter, which `@mux/moq-core` now encodes for the negotiated draft: its encoders and decoders that
+  carry message parameters take a trailing `protocol` argument (default `moqt-22`), and it exports `MOQT_PROTOCOL_IDS`.
+  `MOQT_PROTOCOL_ID` is now `moqt-22`. moq-relay 0.17.0 frames LOCATION_FILTER the draft-20 way on `moqt-22`, so a
+  Next Object filter closes the session there; use a relative start of 0
+  ([#275](https://github.com/muxinc/relay-sdks/issues/275)).
 - `@mux/moq-media` and `@mux/moq-mediabunny`: LOC and MSF format helpers, and an optional Mediabunny adapter.
