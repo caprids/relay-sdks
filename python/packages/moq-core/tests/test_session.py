@@ -1102,6 +1102,20 @@ class TestSubscribeNamespace:
         assert harness.fake.close_info is not None
         assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
 
+    async def test_reports_no_entry_decoded_after_a_frame_that_closed_the_session(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_namespace = Recorder()
+        harness.session.subscribe_namespace(_room(), NamespaceSubscriptionHandlers(on_namespace=on_namespace))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_ok() + encode_request_ok() + encode_namespace(["alice"]))
+
+        await wait_for(lambda: harness.fake.close_info is not None)
+        await asyncio.sleep(0.02)
+        assert not on_namespace.called
+
     async def test_closes_the_session_on_namespace_after_request_error(self) -> None:
         harness = create_session_harness()
         harness.fake.send_server_setup()

@@ -254,3 +254,16 @@ async def test_an_already_cancelled_token_sends_nothing(connected: tuple[FakeTra
         await anext(events)
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(fake.next_request_stream(), 0.05)
+
+
+async def test_raises_when_the_core_cannot_encode_the_prefix_and_leaves_the_connection_usable(
+    connected: tuple[FakeTransport, RelaySubscriber],
+) -> None:
+    fake, connection = connected
+    with pytest.raises(Exception):  # noqa: B017 - whichever encoding error the core raises
+        connection.namespace_events(["x" * 70_000])
+    async with connection.namespace_events(["room"]):
+        request = await fake.next_request_stream()
+        message = await request.first_message
+        assert isinstance(message, SubscribeNamespace)
+        assert message.track_namespace_prefix == ["room"]

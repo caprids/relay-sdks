@@ -78,15 +78,20 @@ class _NamespaceRequest:
         if self._ended:
             return
 
-        self._core = dependencies.subscribe_namespace(
-            MoqtSubscribeNamespaceOptions(track_namespace_prefix=list(prefix)),
-            NamespaceSubscriptionHandlers(
-                on_namespace=lambda suffix: self._change("announced", suffix),
-                on_namespace_done=lambda suffix: self._change("unannounced", suffix),
-                on_error=self._fail,
-                on_end=self._on_end,
-            ),
-        )
+        try:
+            self._core = dependencies.subscribe_namespace(
+                MoqtSubscribeNamespaceOptions(track_namespace_prefix=list(prefix)),
+                NamespaceSubscriptionHandlers(
+                    on_namespace=lambda suffix: self._change("announced", suffix),
+                    on_namespace_done=lambda suffix: self._change("unannounced", suffix),
+                    on_error=self._fail,
+                    on_end=self._on_end,
+                ),
+            )
+        except BaseException:
+            # Encoding can refuse the request (a field too long for the wire); leave nothing observing.
+            self._end(None)
+            raise
         if self._ended:
             self._core.cancel()
 

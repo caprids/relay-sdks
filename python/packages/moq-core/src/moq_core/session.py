@@ -1019,7 +1019,8 @@ class MoqtSession:
                 self._fatal(MoqtProtocolError(f"unexpected {message.kind} on a fetch request stream"))
 
     def _handle_namespace_message(self, record: _NamespaceSubscriptionRecord, message: ControlMessage) -> None:
-        if record.cancelled:
+        # Frames decoded in one read keep arriving after a frame among them closed the session.
+        if record.cancelled or self._destroyed:
             return
         match message:
             case RequestOk():

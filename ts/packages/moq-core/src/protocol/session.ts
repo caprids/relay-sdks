@@ -1028,7 +1028,8 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   #handleNamespaceMessage(record: NamespaceSubscriptionRecord, message: ControlMessage): void {
-    if (record.cancelled) return;
+    // Frames decoded in one read keep arriving after a frame among them closed the session.
+    if (record.cancelled || this.#destroyed) return;
     switch (message.kind) {
       case 'request-ok':
         if (record.settled) {

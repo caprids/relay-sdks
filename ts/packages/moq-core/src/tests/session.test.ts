@@ -1188,6 +1188,31 @@ describe('createMoqtSession', () => {
       expect(onNamespace).not.toHaveBeenCalled();
     });
 
+    it('reports no entry decoded after a frame that closed the session', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onNamespace = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onNamespace });
+      const request = await harness.nextRequestStream();
+      const frames = [encodeRequestOk(), encodeRequestOk(), encodeNamespace(['alice'])];
+      const chunk = new Uint8Array(frames.reduce((length, frame) => length + frame.length, 0));
+      let offset = 0;
+
+      for (const frame of frames) {
+        chunk.set(frame, offset);
+        offset += frame.length;
+      }
+      await request.firstMessage;
+      await request.send(chunk);
+
+      await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(onNamespace).not.toHaveBeenCalled();
+    });
+
     it('cancels without reporting anything further', async () => {
       const harness = createSessionHarness();
 

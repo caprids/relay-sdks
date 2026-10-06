@@ -96,22 +96,29 @@ function openNamespaceRequest(
 
   removeClosed = deps.observeClosed((error) => finish(new SubscriptionConnectionClosedError(error)));
   if (!ended) {
-    core = deps.subscribeNamespace(
-      { trackNamespacePrefix: prefix },
-      {
-        onNamespace: (suffix) => change('announced', suffix),
-        onNamespaceDone: (suffix) => change('unannounced', suffix),
-        onError: (error) => fail(error, isStreamFailure(error) && error.errorCode !== REQUEST_ERROR_CODE.TIMEOUT),
-        onEnd: ({ error }) => {
-          // A finished stream is the relay ending the request on purpose; a failed one may be a lost connection.
-          if (error === undefined) finish();
-          else {
-            const reason = error instanceof Error ? error.message : 'namespace request stream failed';
-            fail({ errorCode: REQUEST_ERROR_CODE.INTERNAL_ERROR, retryInterval: 0, reason }, true);
-          }
+    try {
+      core = deps.subscribeNamespace(
+        { trackNamespacePrefix: prefix },
+        {
+          onNamespace: (suffix) => change('announced', suffix),
+          onNamespaceDone: (suffix) => change('unannounced', suffix),
+          onError: (error) => fail(error, isStreamFailure(error) && error.errorCode !== REQUEST_ERROR_CODE.TIMEOUT),
+          onEnd: ({ error }) => {
+            // A finished stream is the relay ending the request on purpose; a failed one may be a lost connection.
+            if (error === undefined) finish();
+            else {
+              const reason = error instanceof Error ? error.message : 'namespace request stream failed';
+              fail({ errorCode: REQUEST_ERROR_CODE.INTERNAL_ERROR, retryInterval: 0, reason }, true);
+            }
+          },
         },
-      },
-    );
+      );
+    } catch (error) {
+      // Encoding can refuse the request (a field too long for the wire); leave nothing observing.
+      ended = true;
+      removeClosed();
+      throw error;
+    }
     if (ended) core.cancel();
   }
   return { cancel: (reason) => finish(reason) };

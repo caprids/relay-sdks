@@ -96,6 +96,15 @@ it('checks the prefix before connection state and before sending anything', asyn
   expect(() => connection.namespaceEvents({ prefix: ['room'] })).toThrow(expect.objectContaining({ code: 'CLOSED' }));
 });
 
+it('throws when the core cannot encode the prefix, and leaves the connection usable', async () => {
+  const { fake, connection } = await setup();
+  expect(() => connection.namespaceEvents({ prefix: ['x'.repeat(70_000)] })).toThrow();
+  const events = connection.namespaceEvents({ prefix: ['room'] });
+  const request = await fake.nextRequestStream();
+  expect(await request.firstMessage).toMatchObject({ kind: 'subscribe-namespace', trackNamespacePrefix: ['room'] });
+  events.close();
+});
+
 it('ends with SubscriptionRequestError when the relay rejects the request', async () => {
   const { fake, connection } = await setup();
   const events = connection.namespaceEvents({ prefix: ['room'] });
