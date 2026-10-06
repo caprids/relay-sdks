@@ -1247,6 +1247,24 @@ async def test_a_replacement_object_queued_as_the_old_subscription_ended_cuts_ov
     assert switched_at(g.r.seen[1:]) == ["object 10", SWITCHED, "object 0"]
 
 
+async def test_a_rewant_superseding_a_move_that_failed_for_good_reports_a_restart(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = MoveRecorder()
+    subscriber.want("v", ["room"], "a", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.want("v", ["room"], "b", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 2, "pending b")
+    s.first.subscriptions[1].reject(0x1, "unauthorized")
+    await asyncio.sleep(0)
+    subscriber.want("v", ["room"], "c", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 3, "subscribe to c")
+    s.first.subscriptions[2].accept()
+    assert r.seen == ["subscribed room", "restarted terminated", "subscribed room"]
+
+
 async def test_a_withdrawn_generation_with_none_newer_still_restarts(cleanup: list[Callable[[], object]]) -> None:
     g, first = await on_old_generation(cleanup)
     g.s.first.discoveries[0].push("unannounced", ["room", g.old])

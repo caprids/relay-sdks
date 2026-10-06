@@ -1400,6 +1400,22 @@ describe('make-before-break moves (#282)', () => {
     expect(seen.slice(1)).toEqual(['object 10', expect.stringMatching(/^switched/), 'object 0']);
   });
 
+  it('reports a restart when a re-want supersedes a move that failed for good', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'pending b');
+    subs(connections[0]!)[1]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+    await Promise.resolve();
+    subscriber.want('v', { namespace: ['room'], track: 'c' }, handlers);
+    await until(() => subs(connections[0]!).length === 3, 'subscribe to c');
+    subs(connections[0]!)[2]!.accept();
+    expect(seen).toEqual(['subscribed room', 'restarted terminated', 'subscribed room']);
+  });
+
   it('still restarts when the generation is withdrawn with none newer', async () => {
     const { connections, seen, discovery, old } = await onOldGeneration();
     discovery.push({ type: 'unannounced', namespace: ['room', old] });

@@ -629,10 +629,11 @@ async def _supervise_want(
             if scope.cancelled or outcome.kind == "cancelled":
                 return
             # A re-want that came after the attempt settled asks for another track or parameters: the old
-            # target's failure is not the new one's, so try the new one at once.
+            # target's failure is not the new one's, so try the new one at once. A subscription the failed
+            # move cancelled was a restart.
             superseded = (want.options.track, want.options.parameters) != asked
             if outcome.kind == "fatal" and superseded:
-                continue
+                outcome = _Outcome("retry", accepted=outcome.accepted, reason="terminated")
             if outcome.kind == "fatal":
                 forget()
                 assert outcome.error is not None
@@ -825,7 +826,9 @@ async def _follow(
     def settle(next_outcome: _Outcome) -> None:
         nonlocal outcome
         if outcome is None:
-            outcome = next_outcome
+            # A failure no wait fixes still ends an accepted subscription, which a superseding re-want
+            # reports as a restart.
+            outcome = replace(next_outcome, accepted=accepted()) if next_outcome.kind == "fatal" else next_outcome
             want.settled_target = (want.options.track, want.options.parameters)
             settled.cancel()
 
