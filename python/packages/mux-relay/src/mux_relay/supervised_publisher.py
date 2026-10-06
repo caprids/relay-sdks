@@ -74,7 +74,7 @@ class _Generation:
     """When it is due to rotate, on the loop's clock; ``None`` for an unknown expiry."""
     busy: int = 0
     """Operations and open groups running on it; a rotation closes it only once none are left."""
-    group_holds: set[Callable[[], None]] = field(default_factory=set)
+    group_holds: dict[Callable[[], None], RelayGroupWriter] = field(default_factory=dict)
     """The holds of groups open on it, released when it ends: the connection closed them."""
     idle: asyncio.Future[None] | None = None
     """Set by a rotation waiting for it; resolved whenever ``busy`` drops to zero."""
@@ -250,11 +250,11 @@ class _SupervisedTrackWriter(RelayTrackWriter):
 
             def release() -> None:
                 self._group_holds.discard(release)
-                generation.group_holds.discard(release)
+                generation.group_holds.pop(release, None)
                 hold()
 
             self._group_holds.add(release)
-            generation.group_holds.add(release)
+            generation.group_holds[release] = group
             # Opened under a connection that has ended meanwhile: nothing will release it on the end.
             if generation.ended:
                 release()
@@ -858,13 +858,28 @@ async def _supervise_relay_publisher(
         set_status("live")
         report(nxt)
 
+        # A group can close without the wrapper hearing of it (the relay resetting demand): release its hold
+        # once it is closed, whatever closed it.
+        def sweep() -> None:
+            for release, group in list(live.group_holds.items()):
+                if group.closed:
+                    release()
+
+        async def keep_sweeping() -> None:
+            while True:
+                await asyncio.sleep(0.05)
+                sweep()
+
         async def moved_and_idle() -> None:
             await asyncio.gather(*moved)
+            sweep()
             await live.wait_idle()
 
         # Every track moved and every write or group still on the old generation finished, or the overlap ran out.
         settled = asyncio.ensure_future(moved_and_idle())
         _observe(settled)
+        sweeper = asyncio.ensure_future(keep_sweeping())
+        _observe(sweeper)
         # So does the next generation's own rotation falling due, for a credential shorter than the overlap.
         next_due = asyncio.ensure_future(rotation_due(nxt.rotate_at, loop.create_future()))
         _observe(next_due)
@@ -877,6 +892,7 @@ async def _supervise_relay_publisher(
             )
         finally:
             settled.cancel()
+            sweeper.cancel()
             next_due.cancel()
             live.idle = None
         for track in list(state.tracks.values()):

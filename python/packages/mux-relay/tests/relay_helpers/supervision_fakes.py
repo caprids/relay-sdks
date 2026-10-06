@@ -44,7 +44,13 @@ class FakeTrack:
         self.closed = False
         self._demand = False
         self._queues: set[asyncio.Queue[bool | None]] = set()
+        self.groups: list[FakeGroup] = []
         self.writer = _FakeWriter(self)
+
+    def reset_groups(self) -> None:
+        """Close every open group the way the primitive does when the relay resets demand: no wrapper method runs."""
+        for group in self.groups:
+            group.closed = True
 
     def set_demand(self, value: bool) -> None:
         self._demand = value
@@ -111,6 +117,7 @@ class FakeGroup:
         self.group_id = len(track.writes)
         self.objects: list[bytes] = []
         self.closed = False
+        track.groups.append(self)
 
     @property
     def object_count(self) -> int:

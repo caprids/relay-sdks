@@ -1785,3 +1785,46 @@ async def test_answers_a_queued_rotate_with_the_replacement_even_when_the_old_co
     await until(lambda: len(connections) == 2 and subscriber.status == "live", "replacement adopted")
     await asyncio.sleep(0.05)
     assert len(connections) == 2
+
+
+# ------------------------------------------------------------------ Codex pass 13 fixes (#261)
+
+
+async def test_does_not_promote_a_replacement_that_ended_in_the_turn_the_old_connection_did(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[int] = []
+    subscriber.want("v", ["room"], "v", WantHandlers(on_object=lambda o: seen.append(o.group_id)), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(7)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].accept()
+    s.connections[1].subscriptions[0].terminate(0x0, "internal error")
+    s.first.end()  # the same turn
+    await until(lambda: len(s.connections[1].subscriptions) == 2, "retry")
+    retry = s.connections[1].subscriptions[1]
+    retry.accept()
+    retry.send_object(7)
+    retry.send_object(8)
+    assert seen == [7, 8]
+
+
+async def test_releases_the_old_generation_when_the_relay_resets_demand_under_an_open_group_there(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("video")
+    p.connections[0].tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    await writer.open_group()
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "next generation")
+    p.connections[1].tracks["video"].set_demand(True)
+    await writer.write(b"\x07")
+    await asyncio.sleep(0.02)
+    assert p.connections[0].close_calls == 0
+    p.connections[0].tracks["video"].reset_groups()
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed once the group was reset", 0.5)

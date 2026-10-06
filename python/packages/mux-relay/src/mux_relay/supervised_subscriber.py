@@ -978,7 +978,8 @@ async def _subscribe_once(
         handoff = want.handoff
         # The previous subscription keeps delivering until this one's first object: report this one then.
         if handoff is not None:
-            handoff.held = lambda: report(info)
+            # Not if it ended meanwhile: a replacement that never took over is not the one the application hears of.
+            handoff.held = lambda: None if subscription.ended.done() else report(info)
         else:
             report(info)
 
