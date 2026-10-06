@@ -206,8 +206,9 @@ when you are finished with it.
 accepted subscription delivers. **moq-relay does not implement it**: the relay never acknowledges an
 update, and any update, including `MessageParameters(forward=0)` or an empty one, ends the
 subscription within one round trip with `on_publisher_done` (status 2 `track ended`) and stops
-delivery; `on_update_ok` never fires. To pause, cancel the subscription and subscribe again later;
-to change priority or filters, open a new subscription
+delivery; `on_update_ok` never fires. To pause, cancel the subscription and subscribe again later.
+To change the track, the priority or the filter, use a [switchable subscription](#switching-tracks),
+which opens the new subscription before it cancels the old one
 ([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)). Subscribing with
 `parameters=MessageParameters(forward=0)` does not work either: moq-relay refuses it with request
 error 3 `FORWARD=0 not supported` through `on_error`, and the connection stays open. The protocol allows
@@ -254,6 +255,55 @@ in [protocol.json](../spec/protocol.json) and exceeding it is a `ValueError`. Tr
 non-empty strings. Both rules apply to publishing and subscribing alike, and are checked before the
 token provider, the transport factory, or any connection state is consulted; see the Arguments table
 in [behavior.md](../spec/behavior.md#arguments).
+
+### Switching tracks
+
+REQUEST_UPDATE names no track, so moving a viewer between layers (`video-hi`, `video-mid`,
+`video-lo`) takes a new subscription. `subscribe_switchable` keeps one set of handlers on whichever
+subscription is active and moves them make-before-break: `switch_to` subscribes to the new track
+while the old one keeps delivering, and cuts over once a new object passes `until`.
+
+```python
+from mux_relay import CancellationToken, SwitchableHandlers
+
+switchable = subscriber.subscribe_switchable(
+    namespace,
+    "video-mid",
+    SwitchableHandlers(
+        on_switched=lambda info: decoder.reset(),  # the next object starts the new layer
+        on_object=lambda obj, track: decoder.decode(obj, track),
+    ),
+)
+await switchable.subscribed
+
+
+def near_playhead(obj) -> bool:
+    # Your own timestamps, not group IDs: no later than the next frame, a few frames behind at most.
+    t = timestamp_of(obj)
+    return last_delivered - 5 * frame_duration <= t <= last_delivered + frame_duration
+
+
+# Keep the old layer open for a second to deliver groups still in flight on it.
+probe = CancellationToken()
+asyncio.get_running_loop().call_later(5, probe.cancel)
+await switchable.switch_to("video-hi", until=near_playhead, drain=1.0, cancellation=probe)
+```
+
+- Handlers see only the active subscription, and get its track name as their last argument.
+  `on_switched` receives a `SwitchedInfo` (`from_track`, `to_track`, `subscribed`) before the first
+  object of the new track. A switchable has no `update()`; switch to the same track with new
+  `parameters` to change a filter or priority. Parameters are not inherited.
+- `until` defaults to `"first-object"`. That is fine where delivery is in order, but it can skip
+  media: the relay starts a subscription at its cached latest group, which can be stale, and a
+  subscriber on another relay can lose the first object
+  ([#243](https://github.com/muxinc/relay-sdks/issues/243)). Compare your own timeline, not group IDs:
+  each track numbers its own groups.
+- `switch_to` starts at once and returns a `RelayAwaitable`. A timed-out `wait_for` on it leaves the
+  switch pending; pass `cancellation=` to abandon it. If the new subscription fails, a newer `switch_to`
+  supersedes it, or the token is cancelled, the awaitable raises and the old track keeps playing.
+  `ended` settles when the active subscription ends; `cancel()` cancels everything. See
+  [switching tracks](../spec/behavior.md#switching-tracks) for the full contract and measured
+  cutover times.
 
 ## Consume asynchronously
 

@@ -36,9 +36,12 @@ export async function runRelayScenario({
   let watcher;
   const supervisedPublishers = [];
   let lateSubscriber;
+  let layerPublisher;
+  let layerSwitch;
   let lateLargestObject;
   let discovery;
   const discovered = [];
+  const announcedNamespaces = new Set();
   const lifetime = new AbortController();
   const deadline = setTimeout(() => lifetime.abort(new Error('Live relay test exceeded 45 seconds')), 45_000);
   const received = { events: [], status: [], lateStatus: [] };
@@ -117,6 +120,7 @@ export async function runRelayScenario({
     void (async () => {
       try {
         for await (const event of discovery) {
+          if (event.type === 'announced') announcedNamespaces.add(JSON.stringify(event.namespace));
           if (JSON.stringify(event.namespace) === ours) {
             discovered.push({ type: event.type, ms: Math.round(performance.now() - discoveryStarted) });
           }
@@ -291,6 +295,114 @@ export async function runRelayScenario({
     watcher.unwant('beat');
     if (errors.length > 0) throw new Error(errors.join('; '));
 
+    // Assertion 9. A switchable subscription moves from one layer to another make-before-break: the
+    // layers carry the same frame numbers, one group per frame, and the frames the handlers receive
+    // leave no gap across the cutover (issue #264). The frame number stands in for a media timestamp:
+    // the switch waits for a new-layer frame within a few of the latest the old layer delivered, as a
+    // player compares timestamps. The first object can be stale: the relay caches the layer's latest
+    // group, and the publisher skips a layer nobody watches. A subscriber on another relay can also
+    // lose the first object (issue #243). The drain delivers older frames still in flight on the old layer: across relays
+    // groups arrive out of order, and cancelling at the cutover can cut one off.
+    layerPublisher = await connectRelayPublisher({
+      url: endpoint,
+      createTransport,
+      namespace: [...namespace, 'layers'],
+      getToken: () => token,
+      signal: lifetime.signal,
+    });
+    observeClosed('layer publisher', layerPublisher);
+    const layers = ['video-lo', 'video-hi'].map((track) =>
+      layerPublisher.registerTrack({ track, writeTimeoutMs: 2_000 }),
+    );
+    // Subscribe once discovery reports the announce, so the relay cannot refuse it as unroutable.
+    await layerPublisher.announced;
+    await waitFor(
+      () => announcedNamespaces.has(JSON.stringify([...namespace, 'layers'])),
+      'discovery: layers announced',
+    );
+    const layerErrors = [];
+    const lostWrites = [];
+    let frameNumber = 0;
+    let writingLayers = true;
+    const layerWrites = (async () => {
+      while (writingLayers) {
+        const payload = new TextEncoder().encode(String(frameNumber++));
+        await Promise.all(
+          layers
+            .filter((layer) => layer.hasDemand)
+            .map((layer) =>
+              layer.write(payload).catch((error) => {
+                if (!['SUBSCRIPTION_CHANGED', 'WRITE_TIMEOUT'].includes(error?.code)) throw error;
+                lostWrites.push([
+                  layer === layers[0] ? 'video-lo' : 'video-hi',
+                  Number(new TextDecoder().decode(payload)),
+                  error.code,
+                ]);
+              }),
+            ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    })().catch((error) => {
+      layerErrors.push(`layer write: ${String(error)}`);
+    });
+    const frames = [];
+    const frameOf = (object) => Number(new TextDecoder().decode(object.payload));
+    let switches = 0;
+    const switchable = subscriber.subscribeSwitchable(
+      { namespace: [...namespace, 'layers'], track: 'video-lo' },
+      {
+        onObject: (object, track) => {
+          if (object.status === 'normal') frames.push([track, frameOf(object)]);
+        },
+        onSwitched: () => {
+          switches += 1;
+        },
+        onError: (error, track) => layerErrors.push(`${track}: ${error.errorCode} ${error.reason}`),
+        onSubgroupReset: ({ groupId }, track) => layerErrors.push(`${track} reset group ${groupId}`),
+      },
+    );
+    try {
+      await switchable.subscribed;
+      await waitFor(() => frames.length >= 10, 'video-lo: 10 frames');
+      const switchStartedAt = performance.now();
+      const switched = await switchable.switchTo('video-hi', {
+        until: (object) => {
+          const latest = Math.max(...frames.map(([, n]) => n));
+          return frameOf(object) <= latest + 1 && frameOf(object) >= latest - 5;
+        },
+        drainMs: 1_000,
+      });
+      const cutoverMs = Math.round(performance.now() - switchStartedAt);
+      const atCutover = frames.length;
+      await waitFor(() => frames.length >= atCutover + 10, 'video-hi: 10 frames');
+      writingLayers = false;
+      await layerWrites;
+      if (layerErrors.length > 0) throw new Error(layerErrors.join('; '));
+      const numbers = [...new Set(frames.map(([, n]) => n))].sort((a, b) => a - b);
+      const missing = [];
+      for (let n = numbers[0]; n <= numbers.at(-1); n += 1) if (!numbers.includes(n)) missing.push(n);
+      const tracks = [...new Set(frames.map(([track]) => track))];
+      if (missing.length > 0 || switches !== 1 || JSON.stringify(tracks) !== '["video-lo","video-hi"]') {
+        throw new Error(
+          `Layer switch left a gap: missing ${JSON.stringify(missing)}, ${switches} switches, lost writes ${JSON.stringify(lostWrites)}, ${JSON.stringify(frames)}`,
+        );
+      }
+      const firstHi = frames.findIndex(([track]) => track === 'video-hi');
+      layerSwitch = {
+        cutoverMs,
+        from: switched.from,
+        to: switched.to,
+        lastOld: frames[firstHi - 1][1],
+        firstNew: frames[firstHi][1],
+        frames: frames.length,
+      };
+      await report({ phase: 'switched layers', ...layerSwitch });
+    } finally {
+      writingLayers = false;
+      switchable.cancel();
+    }
+
     return {
       endpoint,
       subscriberEndpoint: subEndpoint,
@@ -303,6 +415,7 @@ export async function runRelayScenario({
       lateSubscriberLargestObject: lateLargestObject,
       discovery: { announced: 'passed', withdrawnAfterMs },
       generationSwitch: { afterMs: switchedAfterMs, restarts },
+      layerSwitch,
     };
   } finally {
     closing = true;
@@ -310,7 +423,11 @@ export async function runRelayScenario({
     discovery?.close();
     watcher?.close();
     try {
-      await Promise.all([publisher?.close(), ...supervisedPublishers.map((supervised) => supervised.close())]);
+      await Promise.all([
+        publisher?.close(),
+        layerPublisher?.close(),
+        ...supervisedPublishers.map((supervised) => supervised.close()),
+      ]);
     } finally {
       subscriber?.close();
       lateSubscriber?.close();

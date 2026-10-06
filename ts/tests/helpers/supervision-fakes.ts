@@ -245,6 +245,9 @@ export function fakeSubscriber(): FakeSubscriber {
       } as unknown as RelaySubscription;
       return subscription;
     },
+    subscribeSwitchable() {
+      throw new Error('not used by the supervisor');
+    },
     subscribeEvents() {
       throw new Error('not used');
     },

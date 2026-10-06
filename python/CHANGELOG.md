@@ -18,6 +18,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `MoqtProtocolId`. `MOQT_PROTOCOL_ID` is now `moqt-22`. moq-relay 0.17.0 frames LOCATION_FILTER the draft-20 way on
   `moqt-22`, so a Next Object filter closes the session there; use a relative start of 0
   ([#275](https://github.com/muxinc/relay-sdks/issues/275)).
+- `mux-relay`: `subscriber.subscribe_switchable(namespace, track, handlers)` moves one set of handlers between tracks
+  make-before-break ([#264](https://github.com/muxinc/relay-sdks/issues/264)). `switch_to(track, parameters=...,
+  until=..., drain=..., cancellation=...)` subscribes to the new track while the old one keeps delivering, cuts over on
+  the first object `until` accepts, reports `on_switched`, and can keep the old subscription open briefly for groups
+  still in flight. It is how to change a track, filter or priority, which `update()` cannot do against moq-relay.
 - `mux-moq-media` (imported as `moq_media`): LOC and MSF format helpers.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
