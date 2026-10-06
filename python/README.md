@@ -202,6 +202,13 @@ gap in group IDs ([subgroup resets](../spec/relay-interop.md#subgroup-resets)). 
 precede trailing objects in transit, and it does not end the subscription. Cancel the subscription
 when you are finished with it.
 
+The SDK sends every `MessageParameters` field you set, but moq-relay acts on only some of them. It
+honors `subscriber_priority` and `location_filter` on the subscribe, and ignores `group_order` (the
+relay always serves Descending), `new_group_request`, both delivery timeouts and a per-request
+`authorization_tokens`. With `new_group_request` ignored there is no protocol key-frame request through
+the relay: an application that needs one sends it to the publisher on a track of its own. See
+[subscription parameters](../spec/relay-interop.md#subscription-parameters).
+
 `subscription.update(parameters)` sends REQUEST_UPDATE, the protocol's way to change what an
 accepted subscription delivers. **moq-relay does not implement it**: the relay never acknowledges an
 update, and any update, including `MessageParameters(forward=0)` or an empty one, ends the

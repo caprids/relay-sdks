@@ -205,6 +205,13 @@ begun forwarding, so an aborted group can leave no trace except a gap in group I
 `onPublisherDone` is the publisher's control notification: it may precede trailing objects in
 transit, and it does not end the subscription. Cancel the subscription when you are finished with it.
 
+The SDK sends every subscription parameter you set, but moq-relay acts on only some of them. It
+honors `subscriberPriority` and `locationFilter` on the subscribe, and ignores `groupOrder` (the
+relay always serves Descending), `newGroupRequest`, both delivery timeouts and a per-request
+`authorizationTokens`. With `newGroupRequest` ignored there is no protocol key-frame request through
+the relay: an application that needs one sends it to the publisher on a track of its own. See
+[subscription parameters](../spec/relay-interop.md#subscription-parameters).
+
 `subscription.update(parameters)` sends REQUEST_UPDATE, the protocol's way to change what an
 accepted subscription delivers. **moq-relay does not implement it**: the relay never acknowledges an
 update, and any update, including `{ forward: 0 }` or an empty one, ends the subscription within one
