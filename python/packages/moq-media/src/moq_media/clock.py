@@ -53,19 +53,45 @@ class SampleTimeline:
         return self.first_sample_us + sample_index * MICROSECONDS_PER_SECOND // self.sample_rate
 
 
+class SourceTimeline:
+    """Maps timestamps from a capture clock with its own, unknown origin onto the broadcast timeline.
+
+    The first timestamp mapped is anchored at the clock's ``now_us()``; later ones keep their spacing from it.
+    """
+
+    def __init__(self, clock: "BroadcastClock") -> None:
+        self._clock = clock
+        self._anchor: tuple[float, int] | None = None
+
+    @property
+    def first_source_us(self) -> float | None:
+        """The first source timestamp mapped, which anchors the rest; ``None`` until then."""
+        return None if self._anchor is None else self._anchor[0]
+
+    def timestamp_us(self, source_us: int) -> int:
+        """Return the broadcast time of this source timestamp, rounded to whole microseconds."""
+        _finite(source_us, "source_us")
+        if self._anchor is None:
+            self._anchor = (source_us, self._clock.now_us())
+        first_source, first_timestamp = self._anchor
+        return first_timestamp + _round(source_us - first_source)
+
+
 class BroadcastClock:
     """A publisher's single clock: every track in the broadcast is stamped from it, in microseconds since its origin.
 
     ``now_us`` is the time source in microseconds, ``time.monotonic_ns() // 1000`` by default. ``origin_us`` is the
-    broadcast's zero on that source, at or before the first capture; it defaults to the source's time now.
+    broadcast's zero on that source in integer microseconds, at or before the first capture; it defaults to the
+    source's time now, rounded to whole microseconds.
     """
 
     def __init__(self, *, now_us: Callable[[], int] | None = None, origin_us: int | None = None) -> None:
         self._source = now_us or _monotonic_us
-        self._origin_us = _finite(self._source() if origin_us is None else origin_us, "origin_us")
+        origin = _round(_finite(self._source(), "now_us")) if origin_us is None else origin_us
+        self._origin_us = _integer(origin, "origin_us", -_SAFE_INTEGER)
 
     @property
-    def origin_us(self) -> float:
+    def origin_us(self) -> int:
         """The broadcast's zero, on the source clock."""
         return self._origin_us
 
@@ -74,11 +100,16 @@ class BroadcastClock:
         return self.from_source_us(self._source())
 
     def from_source_us(self, source_us: int) -> int:
-        """Map a timestamp on the source clock to the broadcast timeline, rounded to whole microseconds.
+        """Map a timestamp on this clock's own source to the broadcast timeline, rounded to whole microseconds.
 
-        A time before the origin maps to a negative number, which the LOC helpers refuse.
+        A time before the origin maps to a negative number, which the LOC helpers refuse. For a capture clock with
+        another origin, use :meth:`source_timeline`.
         """
         return _round(_finite(source_us, "source_us") - self._origin_us)
+
+    def source_timeline(self) -> SourceTimeline:
+        """Anchor a capture clock with its own origin at the broadcast time its first timestamp arrives."""
+        return SourceTimeline(self)
 
     def sample_timeline(self, sample_rate: int, *, first_sample_us: int | None = None) -> SampleTimeline:
         """Anchor a sample counter at ``first_sample_us`` on the timeline (default: now).

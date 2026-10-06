@@ -56,6 +56,17 @@ def test_sample_timeline_vectors(vector: dict[str, Any]) -> None:
         assert timeline.timestamp_us(int(index)) == int(timestamp)
 
 
+@pytest.mark.parametrize("vector", VECTORS["sourceTimelines"], ids=lambda vector: vector["name"])
+def test_source_timeline_vectors(vector: dict[str, Any]) -> None:
+    source = Source(int(vector["createdAt"]))
+    timeline = BroadcastClock(now_us=source).source_timeline()
+    assert timeline.first_source_us is None
+    for step in vector["steps"]:
+        source.current = int(step["at"])
+        assert timeline.timestamp_us(int(step["source"])) == int(step["expect"])
+    assert timeline.first_source_us == int(vector["steps"][0]["source"])
+
+
 @pytest.mark.parametrize("vector", VECTORS["playout"], ids=lambda vector: vector["name"])
 def test_playout_clock_vectors(vector: dict[str, Any]) -> None:
     source = Source(0)
@@ -86,6 +97,10 @@ class TestBroadcastClock:
         assert before <= clock.origin_us <= time.monotonic_ns() // 1000
         assert 0 <= clock.now_us() < 1_000_000
 
+    def test_rounds_a_fractional_default_origin(self) -> None:
+        clock = BroadcastClock(now_us=lambda: 1000.25)  # ty: ignore[invalid-argument-type]
+        assert clock.origin_us == 1000
+
     def test_rounds_fractional_source_times_to_the_nearest_microsecond_ties_upward(self) -> None:
         clock = BroadcastClock(now_us=lambda: 0, origin_us=0)
         assert clock.from_source_us(10.5) == 11  # ty: ignore[invalid-argument-type]
@@ -95,7 +110,13 @@ class TestBroadcastClock:
     def test_rejects_bad_origins_source_times_rates_and_indexes(self) -> None:
         with pytest.raises(ValueError):
             BroadcastClock(now_us=lambda: 0, origin_us=float("nan"))  # ty: ignore[invalid-argument-type]
+        with pytest.raises(ValueError):
+            BroadcastClock(now_us=lambda: 0, origin_us=0.5)  # ty: ignore[invalid-argument-type]
+        with pytest.raises(ValueError):
+            BroadcastClock(now_us=lambda: float("nan"))  # ty: ignore[invalid-argument-type]
         clock = BroadcastClock(now_us=lambda: 0)
+        with pytest.raises(ValueError):
+            clock.source_timeline().timestamp_us(float("nan"))  # ty: ignore[invalid-argument-type]
         with pytest.raises(ValueError):
             clock.from_source_us(float("inf"))  # ty: ignore[invalid-argument-type]
         with pytest.raises(ValueError):

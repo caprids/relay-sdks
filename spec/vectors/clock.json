@@ -49,6 +49,18 @@
       ]
     }
   ],
+  "sourceTimelines": [
+    {
+      "name": "a capture clock with its own origin is anchored at the broadcast time its first timestamp arrives",
+      "createdAt": "5000000",
+      "steps": [
+        { "at": "5010000", "source": "123456789000", "expect": "10000" },
+        { "at": "5090000", "source": "123456822333", "expect": "43333" },
+        { "at": "5090000", "source": "123456788000", "expect": "9000" },
+        { "at": "9000000", "source": "123456789000", "expect": "10000" }
+      ]
+    }
+  ],
   "playout": [
     {
       "name": "the first frame anchors wall pacing; wait, show, the late boundary, then drop",

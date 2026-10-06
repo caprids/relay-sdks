@@ -46,9 +46,11 @@ data resolved from `initRef` to bytes. It rejects unsupported versions and delta
 unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as declared.
 
 Every media track in one catalog shares one timeline: LOC timestamps in microseconds from one origin,
-with the timescale declared on each track. `createBroadcastClock()` fixes that origin. Stamp encoder
-input with `clock.fromSourceUs(videoFrame.timestamp)` (Chromium's `MediaStreamTrackProcessor` uses
-the `performance.now()` clock) and audio sample counters with `clock.sampleTimeline(48_000)`. On
+with the timescale declared on each track. `createBroadcastClock()` fixes that origin on the
+`performance.now()` clock. Stamp encoder input from Chromium's `MediaStreamTrackProcessor` through
+`clock.sourceTimeline()`, since its timestamps count from the system's monotonic zero rather than
+`performance.now()`'s. Stamp audio sample counters with `clock.sampleTimeline(48_000)`, and times
+taken from `performance.now()` itself with `clock.fromSourceUs`. On
 the player, `createPlayoutClock()` makes audio the master. The audio path calls
 `reportAudio(timestampUs)` for what is audible now, after its buffer and output latency, and video
 asks `due(timestampUs)` for a `wait`, `show`, or `drop` decision. With no audio it paces by wall
@@ -57,8 +59,9 @@ clock. Neither clock needs the DOM; see
 
 ```ts
 const clock = createBroadcastClock();
+const camera = clock.sourceTimeline();
 const audio = clock.sampleTimeline(48_000);
-const video = new VideoFrame(captured, { timestamp: clock.fromSourceUs(captured.timestamp) });
+const video = new VideoFrame(captured, { timestamp: camera.timestampUs(captured.timestamp) });
 const audioTimestampUs = audio.timestampUs(samplesSoFar);
 
 const playout = createPlayoutClock();

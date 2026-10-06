@@ -18,6 +18,7 @@ from .clock import (
     PlayoutDecision,
     PlayoutMode,
     SampleTimeline,
+    SourceTimeline,
 )
 from .h264 import (
     H264Config,
@@ -73,6 +74,7 @@ __all__ = [
     "PlayoutDecision",
     "PlayoutMode",
     "SampleTimeline",
+    "SourceTimeline",
     "VideoTrackInfo",
     "annexb_to_avcc",
     "avc_codec_string",

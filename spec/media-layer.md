@@ -275,14 +275,24 @@ the timescale on every media track. The format helpers do this by default.
 
 `createBroadcastClock()` / `BroadcastClock()` fixes the origin and maps the common timestamp
 sources onto the timeline. It reads an injected monotonic microsecond source. The default source
-is `performance.now()` in TypeScript and `time.monotonic_ns()` in Python, which is the clock that
-Chromium's `MediaStreamTrackProcessor` stamps `VideoFrame` and `AudioData` with.
+is `performance.now()` in TypeScript and `time.monotonic_ns()` in Python.
+
+Capture clocks do not share that source's origin. Chromium's `MediaStreamTrackProcessor` stamps
+`VideoFrame` and `AudioData` with microseconds from the system's monotonic zero, not from the
+page's time origin that `performance.now()` counts from
+([Chromium](https://chromium.googlesource.com/chromium/src/+/211cf780d86979929937ef73b6a27f13b9ea8e70%5E!/)),
+and JavaScript cannot read the difference. Map those timestamps through a source timeline. It
+anchors the first timestamp at the moment it arrives, and later ones keep the capture clock's own
+spacing. The capture-to-callback delay of that first frame becomes a constant offset, a few
+milliseconds at most. An application that knows the delay can subtract it.
 
 | Operation | TypeScript | Python | Result |
 | --- | --- | --- | --- |
-| Origin, on the source clock | `originUs` | `origin_us` | Defaults to the source's time at creation |
+| Origin, on the source clock | `originUs` | `origin_us` | Integer µs; defaults to the source's time at creation, rounded |
 | Time on the timeline now | `now()` | `now_us()` | `source − origin`, integer µs |
-| Map a source timestamp | `fromSourceUs(t)` | `from_source_us(t)` | `t − origin`, rounded to integer µs |
+| Map a time on the clock's own source | `fromSourceUs(t)` | `from_source_us(t)` | `t − origin`, rounded to integer µs, ties upward |
+| Anchor a capture clock with another origin | `sourceTimeline()` | `source_timeline()` | A mapper, anchored by its first timestamp |
+| Capture timestamp to timestamp | `timeline.timestampUs(t)` | `timeline.timestamp_us(t)` | `now()` at the first call `+ round(t − first t)` |
 | Anchor a sample counter | `sampleTimeline(rate, { firstSampleUs })` | `sample_timeline(rate, first_sample_us=)` | A mapper; the anchor defaults to `now()` |
 | Sample index to timestamp | `timeline.timestampUs(n)` | `timeline.timestamp_us(n)` | `anchor + floor(n × 1,000,000 / rate)` |
 
@@ -290,7 +300,8 @@ A source time before the origin maps to a negative number, which the LOC helpers
 was captured before the broadcast started: create the clock before you start capturing, or pass the
 earliest capture time as the origin. Stamp the encoder's input (`new VideoFrame(frame, { timestamp })`,
 the `AudioData` timestamp) and the encoded chunks carry the timeline, so `chunkToLocFrame` passes it
-through unchanged. If a chunk still carries source time, `timestampOffsetUs: -clock.originUs` maps it.
+through unchanged. If a chunk still carries the clock's own source time, `timestampOffsetUs:
+-clock.originUs` maps it; the origin is a whole number of microseconds so that offset is valid.
 A sample counter runs on the audio device's clock, which drifts against the monotonic source by up
 to about 100 ppm. Over a long broadcast, re-anchor with a new `sampleTimeline` when the two disagree
 by more than a frame.

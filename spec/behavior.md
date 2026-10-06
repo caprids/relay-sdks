@@ -1020,8 +1020,10 @@ to both languages.
   track one catalog lists is stamped in microseconds from one origin at or before the first capture,
   with Timescale declared on the track. A timeline belongs to one catalog namespace, so a new
   supervised generation starts a new one. The broadcast clock (`createBroadcastClock` /
-  `BroadcastClock`) maps source times as `source − origin`, rounded to whole microseconds with ties
-  upward, and sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
+  `BroadcastClock`) has an integer-microsecond origin. It maps times on its own source as
+  `source − origin`, rounded to whole microseconds with ties upward. It maps a capture clock with
+  another origin (Chromium's `MediaStreamTrackProcessor`) by anchoring that clock's first timestamp
+  at `now()`. It maps sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
   (`createPlayoutClock` / `PlayoutClock`) is master-audio: its position is the latest audio report
   plus elapsed local time. It paces by wall clock while idle, after `stopAudio` / `stop_audio`,
   and after `audioTimeoutUs` (500 ms) without a report. `due` answers `wait` (early by at most

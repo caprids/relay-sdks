@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { createBroadcastClock, createPlayoutClock, type PlayoutDecision } from '@mux/moq-media';
+import { chunkToLocFrame, createBroadcastClock, createPlayoutClock, type PlayoutDecision } from '@mux/moq-media';
 import { describe, expect, it, vi } from 'vitest';
 
 type Step = {
@@ -25,6 +25,7 @@ type Vectors = {
     firstSampleUs?: string;
     samples: [string, string][];
   }[];
+  sourceTimelines: { name: string; createdAt: string; steps: { at: string; source: string; expect: string }[] }[];
   playout: { name: string; options?: Record<string, string>; steps: Step[] }[];
 };
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/clock.json', import.meta.url), 'utf8')) as Vectors;
@@ -66,6 +67,17 @@ describe('spec/vectors/clock.json', () => {
       expect(timeline.timestampUs(Number(index))).toBe(Number(timestamp));
   });
 
+  it.each(vectors.sourceTimelines)('source timeline: $name', ({ createdAt, steps }) => {
+    const time = source(Number(createdAt));
+    const timeline = createBroadcastClock({ now: time.now }).sourceTimeline();
+    expect(timeline.firstSourceUs).toBeUndefined();
+    for (const step of steps) {
+      time.set(Number(step.at));
+      expect(timeline.timestampUs(Number(step.source))).toBe(Number(step.expect));
+    }
+    expect(timeline.firstSourceUs).toBe(Number(steps[0]?.source));
+  });
+
   it.each(vectors.playout)('playout clock: $name', ({ options = {}, steps }) => {
     const time = source(0);
     const clock = createPlayoutClock({
@@ -98,11 +110,22 @@ describe('createBroadcastClock', () => {
       expect(clock.originUs).toBe(2_000_250);
       now.mockReturnValue(2033.5);
       expect(clock.now()).toBe(33_250);
-      // A VideoFrame.timestamp from MediaStreamTrackProcessor is on the same clock.
       expect(clock.fromSourceUs(2_100_000)).toBe(99_750);
     } finally {
       now.mockRestore();
     }
+  });
+
+  it('rounds a fractional default origin, so it can offset encoded chunks still on source time', () => {
+    const clock = createBroadcastClock({ now: () => 1000.25 });
+    expect(clock.originUs).toBe(1000);
+    const chunk = {
+      type: 'key',
+      timestamp: 34_333,
+      byteLength: 1,
+      copyTo: (destination: Uint8Array) => destination.set([0x65]),
+    } as unknown as EncodedVideoChunk;
+    expect(chunkToLocFrame(chunk, { timestampOffsetUs: -clock.originUs }).timestampUs).toBe(clock.fromSourceUs(34_333));
   });
 
   it('rounds a fractional source time to the nearest microsecond, ties upward', () => {
@@ -113,6 +136,13 @@ describe('createBroadcastClock', () => {
 
   it('rejects a non-finite origin or source time and an invalid sample rate or index', () => {
     expect(() => createBroadcastClock({ now: () => 0, originUs: Number.NaN })).toThrow(RangeError);
+    expect(() => createBroadcastClock({ now: () => 0, originUs: 0.5 })).toThrow(RangeError);
+    expect(() => createBroadcastClock({ now: () => Number.NaN })).toThrow(RangeError);
+    expect(() =>
+      createBroadcastClock({ now: () => 0 })
+        .sourceTimeline()
+        .timestampUs(Number.NaN),
+    ).toThrow(RangeError);
     const clock = createBroadcastClock({ now: () => 0 });
     expect(() => clock.fromSourceUs(Number.POSITIVE_INFINITY)).toThrow(RangeError);
     expect(() => clock.sampleTimeline(0)).toThrow(RangeError);

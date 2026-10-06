@@ -54,6 +54,6 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   ([#284](https://github.com/muxinc/relay-sdks/issues/284)).
 - `@mux/moq-media`: one timeline per broadcast, and a playout clock for audio/video sync
   ([#285](https://github.com/muxinc/relay-sdks/issues/285)). `createBroadcastClock` stamps every track from one origin
-  (`fromSourceUs` for `MediaStreamTrackProcessor` timestamps, `sampleTimeline` for sample counters).
+  (`sourceTimeline` for `MediaStreamTrackProcessor` timestamps, `sampleTimeline` for sample counters).
   `createPlayoutClock` takes audio reports and answers `due(timestampUs)` with wait, show, or drop, falling back to
   wall-clock pacing without audio. Both are DOM-free.

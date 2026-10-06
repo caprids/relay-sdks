@@ -23,9 +23,12 @@ function safeInteger(value: number, name: string, minimum: number): number {
 
 /** Options for {@link createBroadcastClock}. */
 export interface BroadcastClockOptions {
-  /** The time source, in microseconds. Defaults to `performance.now()`, the clock Chromium stamps captured frames with. */
+  /** The time source, in microseconds. Defaults to `performance.now()`. */
   now?: MicrosecondClock;
-  /** The broadcast's zero on the source clock: at or before the first capture. Defaults to the source's time now. */
+  /**
+   * The broadcast's zero on the source clock, in integer microseconds: at or before the first capture. Defaults to
+   * the source's time now, rounded to whole microseconds.
+   */
   originUs?: number;
 }
 
@@ -45,6 +48,20 @@ export interface SampleTimeline {
   timestampUs(sampleIndex: number): number;
 }
 
+/**
+ * Maps timestamps from a capture clock with its own, unknown origin, such as Chromium's `MediaStreamTrackProcessor`
+ * (`VideoFrame` and `AudioData` timestamps count from the system's monotonic zero, not from `performance.now()`'s).
+ */
+export interface SourceTimeline {
+  /** The first source timestamp mapped, which anchors the rest; `undefined` until then. */
+  readonly firstSourceUs: number | undefined;
+  /**
+   * The broadcast time of this source timestamp. The first call anchors it at the clock's `now()`, and later
+   * timestamps keep their spacing from it, rounded to whole microseconds.
+   */
+  timestampUs(sourceUs: number): number;
+}
+
 /** A publisher's single clock: every track in the broadcast is stamped from it, in microseconds since its origin. */
 export interface BroadcastClock {
   /** The broadcast's zero, on the source clock. */
@@ -52,10 +69,13 @@ export interface BroadcastClock {
   /** Microseconds since the broadcast started. */
   now(): number;
   /**
-   * Map a timestamp on the source clock, such as a `VideoFrame.timestamp` from `MediaStreamTrackProcessor`, to the
-   * broadcast timeline. A time before the origin maps to a negative number, which the LOC helpers refuse.
+   * Map a timestamp on this clock's own source, such as `performance.now()` microseconds taken at capture, to the
+   * broadcast timeline. A time before the origin maps to a negative number, which the LOC helpers refuse. For a
+   * capture clock with another origin, use {@link BroadcastClock.sourceTimeline}.
    */
   fromSourceUs(sourceUs: number): number;
+  /** Anchor a capture clock with its own origin at the broadcast time its first timestamp arrives. */
+  sourceTimeline(): SourceTimeline;
   /**
    * Anchor a sample counter that starts at zero. The device clock that drives it drifts against the source, so
    * re-anchor with a fresh timeline when the two disagree by more than a frame.
@@ -66,13 +86,27 @@ export interface BroadcastClock {
 /** Fix a broadcast's origin and map capture timestamps and sample counters onto its microsecond timeline. */
 export function createBroadcastClock(options: BroadcastClockOptions = {}): BroadcastClock {
   const source = options.now ?? performanceMicroseconds;
-  const originUs = finite(options.originUs ?? source(), 'originUs');
+  const originUs = options.originUs === undefined ? Math.round(finite(source(), 'Source time')) : options.originUs;
+  safeInteger(originUs, 'originUs', Number.MIN_SAFE_INTEGER);
   const fromSourceUs = (sourceUs: number) => Math.round(finite(sourceUs, 'Source time') - originUs);
   const now = () => fromSourceUs(source());
   return {
     originUs,
     now,
     fromSourceUs,
+    sourceTimeline() {
+      let anchor: { sourceUs: number; timestampUs: number } | undefined;
+      return {
+        get firstSourceUs() {
+          return anchor?.sourceUs;
+        },
+        timestampUs(sourceUs) {
+          finite(sourceUs, 'Source time');
+          anchor ??= { sourceUs, timestampUs: now() };
+          return anchor.timestampUs + Math.round(sourceUs - anchor.sourceUs);
+        },
+      };
+    },
     sampleTimeline(sampleRate, { firstSampleUs = now() } = {}) {
       safeInteger(sampleRate, 'sampleRate', 1);
       safeInteger(firstSampleUs, 'firstSampleUs', Number.MIN_SAFE_INTEGER);

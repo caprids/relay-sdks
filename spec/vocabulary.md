@@ -495,7 +495,9 @@ uses classes, like `CatalogService` and `FrameWriter`.
 | The publisher's one clock for every track | `createBroadcastClock(options?)` → `BroadcastClock` (`BroadcastClockOptions`) | `BroadcastClock(now_us=None, origin_us=None)` |
 | The broadcast's zero on the source clock | `clock.originUs` | `clock.origin_us` |
 | Microseconds since the broadcast started | `clock.now()` | `clock.now_us()` |
-| Map a source timestamp onto the timeline | `clock.fromSourceUs(t)` | `clock.from_source_us(t)` |
+| Map a time on the clock's own source onto the timeline | `clock.fromSourceUs(t)` | `clock.from_source_us(t)` |
+| Anchor a capture clock with another origin | `clock.sourceTimeline()` → `SourceTimeline` | `clock.source_timeline()` → `SourceTimeline` |
+| Capture timestamp to timestamp | `timeline.timestampUs(t)`; `timeline.firstSourceUs` | `timeline.timestamp_us(t)`; `timeline.first_source_us` |
 | Anchor a sample counter | `clock.sampleTimeline(rate, { firstSampleUs })` → `SampleTimeline` (`SampleTimelineOptions`) | `clock.sample_timeline(rate, first_sample_us=None)` → `SampleTimeline` |
 | Sample index to timestamp | `timeline.timestampUs(n)` | `timeline.timestamp_us(n)` |
 | The player's clock | `createPlayoutClock(options?)` → `PlayoutClock` (`PlayoutClockOptions`) | `PlayoutClock(now_us=None, late_drop_us=40_000, max_video_delay_us=1_000_000, audio_timeout_us=500_000)` |
