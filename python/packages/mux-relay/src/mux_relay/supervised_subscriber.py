@@ -1094,8 +1094,8 @@ async def _follow(
     holds: dict[_Connection, Callable[[], None]] = {}
     # Stop observing each connection the attempt observed.
     observed: list[Callable[[], None]] = []
-    # Set once any subscription of the attempt heard PUBLISH_DONE: a restarted publisher numbers its groups from 0,
-    # so a rotation's replacement no longer skips what the active subscription delivered.
+    # Set when a pending replacement heard PUBLISH_DONE, until the next cutover: a restarted publisher numbers its
+    # groups from 0, so a rotation's replacement no longer skips what the active subscription delivered.
     publisher_ended = False
 
     def observe(on: _Connection) -> None:
@@ -1214,10 +1214,11 @@ async def _follow(
 
     def cutover(slot: _Slot, obj: MoqtObject) -> None:
         nonlocal active, pending, move_failures, last_object_at, watch, release_watch, rotation_to, unwatch
-        nonlocal unwatch_next
+        nonlocal unwatch_next, publisher_ended
         previous = active
         # A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
         silent = rotating(slot)
+        publisher_ended = False
         pending = None
         clear_retry()
         move_failures = 0
@@ -1353,8 +1354,10 @@ async def _follow(
         nonlocal publisher_ended
         if over():
             return
-        publisher_ended = True
+        # Heard on the replacement: the publisher behind both ended. An old subscription a move left behind
+        # hearing its own publisher end says nothing about the current one.
         if slot is pending:
+            publisher_ended = True
             pending_failed(slot, None)
         elif slot is active and slot.ended is None:
             active_ended("publisher-done")

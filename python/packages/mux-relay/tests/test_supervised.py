@@ -2263,6 +2263,36 @@ async def test_moves_a_followed_generation_to_the_new_connection_silently(
     await until(lambda: s.first.subscriptions[0].cancelled, "old subscription cancelled")
 
 
+async def test_keeps_skipping_repeats_on_a_rotation_after_the_generation_a_move_left_behind_ended(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s, seen = await _following(cleanup)
+    older = new_generation(1_000)
+    newer = new_generation(2_000)
+    discovery = s.first.discoveries[0]
+    discovery.push("announced", ["room", older])
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.subscriptions[0]
+    first.accept()
+    first.send_object(5)
+    discovery.push("announced", ["room", newer])
+    await until(lambda: len(s.first.subscriptions) == 2, "move")
+    moved = s.first.subscriptions[1]
+    moved.accept()
+    moved.send_object(0)
+    first.done()  # the old generation's publisher closed after the move: not the current publisher
+    moved.send_object(1)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].discoveries) == 1, "discovery on the next")
+    s.connections[1].discoveries[0].push("announced", ["room", newer])
+    await until(lambda: len(s.connections[1].subscriptions) == 1, "replacement")
+    replacement = s.connections[1].subscriptions[0]
+    replacement.accept()
+    replacement.send_object(1)  # already delivered
+    replacement.send_object(2)
+    assert seen == ["object 5", f"switched {older} -> {newer}", "object 0", "object 1", "object 2"]
+
+
 async def test_reports_a_newer_generation_found_on_the_new_connection_as_a_move(
     cleanup: list[Callable[[], object]],
 ) -> None:
