@@ -1234,6 +1234,19 @@ async def test_a_target_wanted_from_on_restarted_is_tried_at_once(cleanup: list[
     assert s.first.subscriptions[1].track == "b"
 
 
+async def test_a_replacement_object_queued_as_the_old_subscription_ended_cuts_over(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    g, first = await on_old_generation(cleanup, until=lambda _obj: False)
+    second = await g.announce_replacement()
+    second.accept()
+    # The relay ends the old subscription, and the replacement's object arrives before on_ended runs.
+    first.terminate(0x0, "internal")
+    second.send_object(0)
+    await asyncio.sleep(0.01)
+    assert switched_at(g.r.seen[1:]) == ["object 10", SWITCHED, "object 0"]
+
+
 async def test_a_withdrawn_generation_with_none_newer_still_restarts(cleanup: list[Callable[[], object]]) -> None:
     g, first = await on_old_generation(cleanup)
     g.s.first.discoveries[0].push("unannounced", ["room", g.old])

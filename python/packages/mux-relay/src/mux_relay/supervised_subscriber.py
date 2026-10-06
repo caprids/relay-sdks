@@ -966,6 +966,11 @@ async def _follow(
         if slot is not pending:
             return
         last_object_at = loop.time()
+        # The active subscription's ending reaches on_ended a turn later; one already recorded counts now.
+        if active.ended is None and active.subscription is not None and active.subscription.ended.done():
+            on_ended(active, active.subscription.ended.result())
+            if over() or pending is not slot:
+                return
         # With the active subscription gone there is nothing left to compare with: the next object cuts over.
         passed = True
         if active.ended is None:

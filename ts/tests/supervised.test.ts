@@ -1387,6 +1387,19 @@ describe('make-before-break moves (#282)', () => {
     expect(subs(connections[0]!)[1]!.options.track).toBe('b');
   });
 
+  it('cuts over on a replacement object queued in the turn the old subscription ended', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration({ until: () => false });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    second.accept();
+    // The relay ends the old subscription, and the replacement's object arrives before `ended` settles.
+    first.terminate({ errorCode: 0x0, retryInterval: 0, reason: 'internal' });
+    second.object(0);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen.slice(1)).toEqual(['object 10', expect.stringMatching(/^switched/), 'object 0']);
+  });
+
   it('still restarts when the generation is withdrawn with none newer', async () => {
     const { connections, seen, discovery, old } = await onOldGeneration();
     discovery.push({ type: 'unannounced', namespace: ['room', old] });

@@ -20,7 +20,7 @@ import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelayS
 import { assertTimeoutMs } from './connect-session.js';
 import { RelayError } from './errors.js';
 import type { NamespaceEvents } from './namespace-events.js';
-import type { RelaySubscription, SubscriptionEnd } from './subscription.js';
+import type { ProductSubscription, RelaySubscription, SubscriptionEnd } from './subscription.js';
 import { SubscriptionConnectionClosedError, SubscriptionRequestError, synchronousCallback } from './subscription.js';
 import {
   backoffDelay,
@@ -853,6 +853,12 @@ async function follow(
     }
     if (slot !== pending) return;
     lastObjectAt = performance.now();
+    // The active subscription's ending reaches `ended` a turn later; one already recorded counts now.
+    const activeEnd = (active.subscription as Partial<ProductSubscription>).end;
+    if (!active.ended && activeEnd) {
+      onEnded(active, activeEnd);
+      if (over() || pending !== slot) return;
+    }
     // With the active subscription gone there is nothing left to compare with: the next object cuts over.
     let passed = true;
     if (!active.ended) {
@@ -866,6 +872,18 @@ async function follow(
     // The predicate is application code: it may have moved the want again or cancelled it.
     if (!passed) holdEvent(slot.held, { type: 'object', value: object });
     else if (!over() && pending === slot) cutover(slot, object);
+  };
+
+  /** One subscription's ending; safe to run again for the same slot. */
+  const onEnded = (slot: Slot, end: SubscriptionEnd) => {
+    if (over()) return;
+    if (draining.has(slot)) stopDrain(slot);
+    else if (slot === pending) pendingFailed(slot, end);
+    else if (slot === active && !slot.ended) {
+      const next = classify(end, accepted(), slot.progressed, cancelledOrConnection);
+      if (next.kind === 'retry' && next.reason) activeEnded(next.reason);
+      else settle(next);
+    }
   };
 
   const open = (target: string[], targetGeneration: string | undefined): Slot => {
@@ -911,16 +929,7 @@ async function follow(
     };
     slot = opened;
     void subscription.subscribed.catch(() => {});
-    void subscription.ended.then((end) => {
-      if (over()) return;
-      if (draining.has(opened)) stopDrain(opened);
-      else if (opened === pending) pendingFailed(opened, end);
-      else if (opened === active && !opened.ended) {
-        const next = classify(end, accepted(), opened.progressed, cancelledOrConnection);
-        if (next.kind === 'retry' && next.reason) activeEnded(next.reason);
-        else settle(next);
-      }
-    });
+    void subscription.ended.then((end) => onEnded(opened, end));
     return opened;
   };
 
