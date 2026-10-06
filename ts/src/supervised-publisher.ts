@@ -325,6 +325,12 @@ export async function superviseRelayPublisher(
       }
     }
     if (!next) return undefined;
+    // `close()` may have run while the helper's result was on its way here: it could not see this connection.
+    if (stopped) {
+      next.ended = true;
+      await next.publisher.close().catch(() => {});
+      return undefined;
+    }
     if (!live.ended && !manual()) {
       // A credential that expires no later than the live one replaces nothing: the relay would end both together.
       const was = live.publisher.expiresAt?.getTime();
@@ -447,6 +453,12 @@ export async function superviseRelayPublisher(
           continue;
         }
         if (!live) return;
+        // `close()` may have run while the helper's result was on its way here: it could not see this connection.
+        if (stopped) {
+          live.ended = true;
+          await live.publisher.close().catch(() => {});
+          return;
+        }
         current = live;
         for (const track of tracks.values()) track.bind(live);
         setStatus('live');

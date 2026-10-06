@@ -1607,4 +1607,63 @@ describe('rotation before the credential expires (#261)', () => {
       expect(publisher.generation?.namespace).toEqual(connections[1]!.namespace);
     });
   });
+  describe('Codex pass 9 fixes', () => {
+    it('closes a replacement subscriber that close() could not see yet', async () => {
+      const connections: FakeSubscriber[] = [];
+      const statuses: string[] = [];
+      let supervised: SupervisedSubscriber | undefined;
+      const subscriber = await superviseRelaySubscriber(
+        async () => {
+          const fake = fakeSubscriber();
+          if (connections.length === 1) {
+            // Read once the helper has checked for shutdown and is handing the connection back.
+            Object.defineProperty(fake, 'expiresAt', {
+              get: () => {
+                supervised?.close();
+                return undefined;
+              },
+            });
+          }
+          connections.push(fake);
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', reconnect: fast, onStatus: (status) => statuses.push(status) },
+      );
+      supervised = subscriber;
+      subscriber.rotate();
+      await until(() => statuses.includes('closed'), 'closed');
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(statuses).toEqual(['live', 'closed']);
+      let replacementEnded = false;
+      void connections[1]!.closed.then(() => {
+        replacementEnded = true;
+      });
+      await until(() => replacementEnded, 'replacement closed');
+    });
+
+    it('closes a replacement generation that close() could not see yet', async () => {
+      const connections: FakePublisher[] = [];
+      let supervised: SupervisedPublisher | undefined;
+      const publisher = await superviseRelayPublisher(
+        async (options) => {
+          const fake = fakePublisher([...options.namespace]);
+          if (connections.length === 1) {
+            Object.defineProperty(fake, 'expiresAt', {
+              get: () => {
+                void supervised?.close();
+                return undefined;
+              },
+            });
+          }
+          connections.push(fake);
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', namespace: ['room'], reconnect: fast },
+      );
+      supervised = publisher;
+      publisher.rotate();
+      await until(() => connections.length === 2 && connections[1]!.closeCalls === 1, 'replacement closed');
+      expect(publisher.status).toBe('closed');
+    });
+  });
 });

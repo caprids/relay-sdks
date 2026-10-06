@@ -423,6 +423,11 @@ export async function superviseRelaySubscriber(
       }
     }
     if (!next) return undefined;
+    // `close()` may have run while the helper's result was on its way here: it could not see this connection.
+    if (stopped) {
+      next.live.subscriber.close();
+      return undefined;
+    }
     if (!old.signal.aborted && !manual()) {
       // A credential that expires no later than the live one replaces nothing: the relay would end both together.
       const was = old.subscriber.expiresAt?.getTime();
@@ -537,6 +542,11 @@ export async function superviseRelaySubscriber(
           continue;
         }
         if (!opened) return;
+        // `close()` may have run while the helper's result was on its way here: it could not see this connection.
+        if (stopped) {
+          opened.live.subscriber.close();
+          return;
+        }
         current = opened.live;
         setStatus('live');
         first?.resolve();
