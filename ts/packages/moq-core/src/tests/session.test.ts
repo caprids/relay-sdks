@@ -1108,6 +1108,8 @@ describe('createMoqtSession', () => {
 
       await vi.waitFor(() => expect(onError).toHaveBeenCalled());
       expect(isStreamFailure(onError.mock.calls[0]![0])).toBe(true);
+      // The failed request's own direction ends too; teardown cannot reach it once its record is gone.
+      await expect(request.clientEnd).resolves.toBe('reset');
       harness.session.destroy();
     });
 
@@ -1147,6 +1149,7 @@ describe('createMoqtSession', () => {
 
       await vi.waitFor(() => expect(onEnd).toHaveBeenCalledWith({ error: expect.anything() }));
       expect(onError).not.toHaveBeenCalled();
+      await expect(request.clientEnd).resolves.toBe('reset');
       harness.session.destroy();
     });
 

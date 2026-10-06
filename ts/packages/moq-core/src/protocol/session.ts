@@ -800,6 +800,8 @@ class MoqtSessionImpl implements MoqtSession {
     // Once only, and never after REQUEST_ERROR answered the request: that removes the record first.
     const end = (error?: unknown) => {
       if (!this.#namespaceSubscriptions.delete(requestId)) return;
+      // A failed stream is dropped here: session teardown only reaches the records it still holds.
+      if (error !== undefined) record.stream?.cancel(error);
       handlers.onEnd?.(error === undefined ? {} : { error });
     };
 
@@ -808,6 +810,8 @@ class MoqtSessionImpl implements MoqtSession {
       record,
       (msg) => this.#handleNamespaceMessage(record, msg),
       (error) => {
+        // Removing the record puts the stream out of teardown's reach, so drop it now.
+        record.stream?.cancel(error);
         this.#namespaceSubscriptions.delete(requestId);
         handlers.onError?.(error);
       },

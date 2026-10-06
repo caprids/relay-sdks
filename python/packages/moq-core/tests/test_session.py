@@ -1086,6 +1086,7 @@ class TestSubscribeNamespace:
         await wait_for(lambda: on_end.called)
         assert isinstance(on_end.last, BaseException)
         assert not on_error.called
+        assert await asyncio.wait_for(request.client_end, 1) == "reset"
         harness.session.destroy()
 
     async def test_closes_the_session_on_namespace_before_request_ok(self) -> None:
