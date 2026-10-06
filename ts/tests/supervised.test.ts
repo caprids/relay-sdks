@@ -2607,4 +2607,37 @@ describe('rotation before the credential expires (#261)', () => {
       expect(seen).toEqual(['object 5', 'object 6']);
     });
   });
+  describe('Bugbot on 910723d', () => {
+    it('does not restart a followed rotation when a move was waiting to be retried on the old connection', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: string[] = [];
+      const handlers: WantHandlers = {
+        onObject: (object) => seen.push(`object ${object.groupId}`),
+        onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
+        onSwitched: ({ to }) => seen.push(`switched to ${to.track}`),
+      };
+      const options = { namespace: ['room'], generations: true, retry: { initialDelayMs: 60_000, maxDelayMs: 60_000 } };
+      subscriber.want('v', { ...options, track: 'a' }, handlers);
+      await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+      const generation = newGeneration(1_000);
+      connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', generation] });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe a');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(5);
+      subscriber.want('v', { ...options, track: 'b' }, handlers);
+      await until(() => connections[0]!.subscriptions.length === 2, 'move to b');
+      connections[0]!.subscriptions[1]!.reject(UNROUTABLE); // the move waits a minute to be retried
+      subscriber.rotate();
+      await until(() => connections[1]?.discoveries.length === 1, 'discovery on the new connection');
+      connections[0]!.end(); // the old connection closes before the new discovery answers
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      connections[1]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', generation] });
+      await until(() => connections[1]!.subscriptions.length === 1, 'b on the new connection');
+      const replacement = connections[1]!.subscriptions[0]!;
+      expect(replacement.options.track).toBe('b');
+      replacement.accept();
+      replacement.object(0);
+      expect(seen).toEqual(['object 5', 'switched to b', 'object 0']);
+    });
+  });
 });
