@@ -152,6 +152,8 @@ class _Pending:
     generation: _Generation
     writer: RelayTrackWriter
     moved: asyncio.Future[None]
+    seen: bool | None = None
+    """The value its demand iterator yielded last, while pending."""
 
 
 class _SupervisedTrackWriter(RelayTrackWriter):
@@ -374,7 +376,10 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         self._pending = None
         if binding is not None and not binding.generation.ended:
             self._retired_writers[binding.generation] = binding.writer
-        self._binding = _Binding(pending.generation, pending.writer, covered=pending.writer.has_demand)
+        # The move reports True for demand the iterator has not yielded yet; one it already yielded is not covered,
+        # so the next True it yields is new demand.
+        covered = pending.writer.has_demand and pending.seen is not True
+        self._binding = _Binding(pending.generation, pending.writer, covered=covered)
         # The move reports the next generation's demand as it is now: True again if it has demand, so
         # demand-driven state reaches it, or the loss of demand. Values its iterator had queued before the move
         # are stale and not reported.
@@ -419,8 +424,13 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         try:
             async for value in changes:
                 bound = self._binding is not None and self._binding.generation is generation
-                if not bound and (self._pending is None or self._pending.generation is not generation):
+                pending = (
+                    self._pending if self._pending is not None and self._pending.generation is generation else None
+                )
+                if not bound and pending is None:
                     break
+                if pending is not None:
+                    pending.seen = value
                 # Any True after this iterator's first value is new demand: a repeat, or demand back after a False.
                 renewed = value and previous is not None
                 previous = value

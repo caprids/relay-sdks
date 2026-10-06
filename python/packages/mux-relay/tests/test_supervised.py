@@ -2505,3 +2505,28 @@ async def test_restarts_at_once_when_the_connection_a_failed_rotation_would_retr
         lambda: len(connections) == 3 and len(connections[2].subscriptions) == 1,
         "subscribed on the next connection at once",
     )
+
+
+# ------------------------------------------------------------------ Codex review of the merge, pass 6 (#261)
+
+
+async def test_reports_the_relay_renewing_demand_after_a_move_its_own_demand_triggered(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("catalog")
+    p.connections[0].tracks["catalog"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    await asyncio.sleep(0.005)
+    changes = writer.demand_changes()
+    assert await asyncio.wait_for(anext(changes), 1) is True
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "catalog" in p.connections[1].tracks, "next generation")
+    await asyncio.sleep(0.005)
+    nxt = p.connections[1].tracks["catalog"]
+    nxt.set_demand(True)  # its iterator yields this and moves the track
+    assert await asyncio.wait_for(anext(changes), 1) is True  # the move
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed")
+    nxt.set_demand(True)  # the relay replaced its upstream subscription
+    assert await asyncio.wait_for(anext(changes), 0.05) is True
+    await changes.aclose()  # ty: ignore[unresolved-attribute]
