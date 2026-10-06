@@ -43,6 +43,7 @@ from ._subscription import (
     _observe,
     synchronous_callback,
 )
+from ._validation import track_name
 from .cancellation import CancellationToken
 from .errors import RelayError
 
@@ -311,6 +312,8 @@ class SwitchableSubscription:
         ``until`` raised; the active subscription carries on. Raises at once for an invalid track or
         options, a closed connection, or an ended switchable.
         """
+        # Arguments before the switchable's or the connection's state (spec/behavior.md, Arguments).
+        track_name(track)
         predicate = _until_predicate(until)
         if isinstance(drain, bool) or not isinstance(drain, (int, float)) or not math.isfinite(drain) or drain < 0:
             raise TypeError("drain must be a finite number of seconds, 0 or more")
@@ -400,7 +403,8 @@ class SwitchableSubscription:
             return
         try:
             passed = pending.until(event.value)
-        except Exception as error:
+        except (Exception, asyncio.CancelledError) as error:
+            # CancelledError is a BaseException; left uncaught it would escape into the stream reader.
             if self._end is None and self._pending is pending:
                 self._abandon(pending, error)
             return

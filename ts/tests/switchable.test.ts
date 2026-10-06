@@ -422,6 +422,13 @@ describe('subscribeSwitchable', () => {
     }
   });
 
+  it('checks the track before its own ended state', async () => {
+    const { switchable } = harness();
+    switchable.cancel();
+    expect(() => switchable.switchTo('')).toThrow(TypeError);
+    expect(() => switchable.switchTo('video-hi')).toThrow(expect.objectContaining({ code: 'CLOSED' }));
+  });
+
   it('checks its arguments at once and leaves a pending switch alone when one is bad', async () => {
     const { switchable, track } = harness();
     track('video-mid').core.onOk?.(OK);

@@ -17,6 +17,7 @@ import {
   type SubscriptionEnd,
   synchronousCallback,
 } from './subscription.js';
+import { trackName } from './validation.js';
 
 /**
  * Callbacks for a switchable subscription. Each runs synchronously, for the active subscription's
@@ -389,6 +390,8 @@ export function createSwitchable(
     switchTo(track, options = {}) {
       if (typeof options !== 'object' || options === null) throw new TypeError('switchTo options must be an object');
       const { parameters: params, until, signal, drainMs = 0 } = options;
+      // Arguments before the switchable's or the connection's state (spec/behavior.md, Arguments).
+      trackName(track);
       const predicate = untilPredicate(until);
       if (typeof drainMs !== 'number' || !Number.isFinite(drainMs) || drainMs < 0)
         throw new TypeError('drainMs must be a finite number of milliseconds, 0 or more');

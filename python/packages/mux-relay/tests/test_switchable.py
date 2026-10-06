@@ -441,6 +441,29 @@ class TestSwitchable:
             await switched
         assert returned[0].cr_frame is None
 
+    async def test_checks_the_track_before_its_own_ended_state(self) -> None:
+        harness = Harness()
+        harness.switchable.cancel()
+        with pytest.raises(TypeError):
+            harness.switchable.switch_to("")
+        with pytest.raises(RelayError):
+            harness.switchable.switch_to("video-hi")
+
+    async def test_abandons_a_switch_whose_predicate_raises_cancelled_error(self) -> None:
+        harness = Harness()
+        harness.track("video-mid").ok()
+
+        def until(_value: MoqtObject) -> bool:
+            raise asyncio.CancelledError
+
+        switched = harness.switchable.switch_to("video-hi", until=until)
+        harness.track("video-hi").ok()
+        harness.track("video-hi").object(obj(1))
+        with pytest.raises(asyncio.CancelledError):
+            await switched
+        harness.track("video-hi").cancel.assert_called_once()
+        assert harness.switchable.pending is None
+
     async def test_checks_its_arguments_at_once_and_leaves_a_pending_switch_alone_when_one_is_bad(self) -> None:
         harness = Harness()
         harness.track("video-mid").ok()
