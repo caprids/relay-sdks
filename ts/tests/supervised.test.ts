@@ -2459,4 +2459,40 @@ describe('rotation before the credential expires (#261)', () => {
       await changes.return?.();
     });
   });
+  describe('Codex review of the merge, pass 4', () => {
+    it('reports the loss of demand when the old generation loses it as the track moves', async () => {
+      const gate = deferred();
+      const connections: FakePublisher[] = [];
+      const publisher = await superviseRelayPublisher(
+        async (options) => {
+          if (connections.length === 1) await gate.promise;
+          const fake = fakePublisher([...options.namespace]);
+          connections.push(fake);
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', namespace: ['room'], reconnect: fast },
+      );
+      cleanup.push(() => publisher.close());
+      const writer = publisher.registerTrack({ track: 'video' });
+      connections[0]!.tracks.get('video')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const changes = writer.demandChanges();
+      expect((await changes.next()).value).toBe(true);
+      publisher.rotate();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      // The viewer leaves in the turn the next generation connects: the track moves before any iterator runs.
+      gate.resolve();
+      await Promise.resolve();
+      connections[0]!.tracks.get('video')!.setDemand(false);
+      await until(() => connections[0]!.closeCalls === 1, 'moved and closed');
+      expect(writer.hasDemand).toBe(false);
+      const next = await Promise.race([
+        changes.next(),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50)),
+      ]);
+      expect(next?.value).toBe(false);
+      await changes.return?.();
+    });
+  });
 });

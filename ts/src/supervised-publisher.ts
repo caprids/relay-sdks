@@ -593,8 +593,6 @@ class SupervisedTrack {
         generation: Generation;
         writer: RelayTrackWriter;
         moved(): void;
-        /** The demand its iterator last reported while pending, reported on the move; later values follow it. */
-        heard?: boolean;
       }
     | undefined;
   /** The holds of groups open on any generation, released when the track closes and ends them. */
@@ -745,8 +743,9 @@ class SupervisedTrack {
     this.#pending = undefined;
     if (binding && !binding.generation.ended) this.#retired.set(binding.generation, binding.writer);
     this.#binding = { generation: pending.generation, writer: pending.writer };
-    // Reported here only once its iterator caught up; otherwise the iterator reports the values still queued, in order.
-    if (pending.heard !== undefined && pending.heard === pending.writer.hasDemand) this.#emitDemand(pending.heard);
+    // The move reports the next generation's demand as it is now: `true` again if it has demand, so demand-driven state
+    // reaches it, or the loss of demand. Values its iterator had queued before the move are stale and not reported.
+    this.#emitDemand(pending.writer.hasDemand);
     pending.moved();
   }
 
@@ -779,25 +778,23 @@ class SupervisedTrack {
 
   async #follow(generation: Generation, writer: RelayTrackWriter): Promise<void> {
     const changes = writer.demandChanges();
-    let firstValue = true;
+    /** The value this iterator yielded last: a `true` after `true` is the relay replacing its upstream subscription. */
+    let previous: boolean | undefined;
     try {
       for await (const value of changes) {
         const bound = this.#binding?.generation === generation;
-        const pending = this.#pending?.generation === generation ? this.#pending : undefined;
-        if (!bound && !pending) break;
-        if (pending) pending.heard = value;
+        if (!bound && this.#pending?.generation !== generation) break;
+        const repeated = value && previous === true;
+        previous = value;
         // Demand leaving a generation a rotation is moving off: move first if the next one has demand, so the track
-        // reports no `false` it did not have.
+        // reports no `false` it did not have. The move reports the next generation's own demand.
         if (bound && !value && this.#pending) {
           this.#maybeMove();
-          if (this.#binding?.generation !== generation) {
-            firstValue = false;
-            continue;
-          }
+          if (this.#binding?.generation !== generation) continue;
         }
-        // The first value is the new connection's current state; `false` repeats what the lost generation reported.
-        if (bound && !(firstValue && !value)) this.#emitDemand(value);
-        firstValue = false;
+        // Report only what is true of the writer now: a value queued before a move or a newer change is stale. A
+        // change is reported, and so is a repeated `true`, which demand-driven state is written again on.
+        if (bound && value === writer.hasDemand && (value !== this.#lastDemand || repeated)) this.#emitDemand(value);
         // Demand arriving on the next generation, or leaving the current one, is what moves a rotating track.
         this.#maybeMove();
       }
