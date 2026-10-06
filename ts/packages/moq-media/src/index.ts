@@ -1,9 +1,11 @@
 export {
   type AudioTrackInfo,
   buildMsfCatalog,
+  buildMsfEndCatalog,
   type DataTrackInfo,
   MSF_CATALOG_VERSION,
   type MsfCatalogInput,
+  type MsfEndCatalogInput,
   type VideoTrackInfo,
 } from './catalog.js';
 export { avcCodecString } from './h264.js';

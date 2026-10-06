@@ -73,7 +73,7 @@ class TestCatalog:
         catalog = json.loads(document)
 
         assert catalog["version"] == "draft-01"
-        assert catalog["isComplete"] is True
+        assert "isComplete" not in catalog  # msf-01 §5.1.3: a live broadcast is not complete
         assert catalog["generatedAt"] == 1_700_000_000_000
         video, audio = catalog["tracks"]
         assert video == {

@@ -30,7 +30,9 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`). A generation move no longer reports
   `on_restarted("generation", ...)`; handle `on_switched` instead, where decoders reset. Wanting a key again with only
   `stale_after` changed now swaps it without resubscribing. Another namespace or `generations` still replaces the want.
-- `mux-moq-media` (imported as `moq_media`): LOC and MSF format helpers.
+- `mux-moq-media` (imported as `moq_media`): LOC and MSF format helpers. `build_msf_catalog` leaves `isComplete`
+  out, since a live broadcast is not complete (msf-01 §5.1.3), and `build_msf_end_catalog` builds the §11.3 catalog
+  that ends a broadcast: `isComplete: true` and no tracks ([#284](https://github.com/muxinc/relay-sdks/issues/284)).
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
   subscriber's SETUP now sends the MoQ Solicit option, so the relay advertises namespaces only on that request.

@@ -108,7 +108,10 @@ function registerInitData(entries: MsfInitDataEntry[], name: string, initData: U
 }
 
 /**
- * Build the publisher's independent MSF catalog JSON.
+ * Build the publisher's independent MSF catalog JSON for a live broadcast.
+ *
+ * The catalog leaves `isComplete` out: msf-01 §5.1.3 forbids it while false, and once present it can never be
+ * removed. End a broadcast with {@link buildMsfEndCatalog}.
  *
  * Namespaces are emitted explicitly per track as the slash-joined string form `parseMsfCatalog` splits back into
  * tuple fields — the catalog dialect's encoding, which msf-01 leaves open, so the pair stays self-consistent whatever
@@ -177,25 +180,42 @@ export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
     );
   }
 
+  return encodeCatalog({
+    version: MSF_CATALOG_VERSION,
+    generatedAt: input.generatedAt,
+    tracks,
+    initDataList: initDataList.length > 0 ? initDataList : undefined,
+  });
+}
+
+/** What {@link buildMsfEndCatalog} stamps on the end-of-broadcast catalog. */
+export interface MsfEndCatalogInput {
+  /** Catalog generation time (§5.2.24), epoch milliseconds. */
+  generatedAt?: number;
+}
+
+/**
+ * Build the catalog that ends a broadcast (msf-01 §11.3): `isComplete: true` and no tracks.
+ *
+ * It commits that no track will be added and no content published, so send it only for a broadcast that ends on
+ * purpose, once every media track has ended (closing a track sends PUBLISH_DONE Track Ended), and never on a crash
+ * or lost connection.
+ */
+export function buildMsfEndCatalog(input: MsfEndCatalogInput = {}): Uint8Array {
+  return encodeCatalog({ version: MSF_CATALOG_VERSION, generatedAt: input.generatedAt, isComplete: true, tracks: [] });
+}
+
+function encodeCatalog(catalog: Record<string, unknown>): Uint8Array {
   return new TextEncoder().encode(
-    JSON.stringify(
-      pruneUndefined({
-        version: MSF_CATALOG_VERSION,
-        generatedAt: input.generatedAt,
-        isComplete: true,
-        tracks,
-        initDataList: initDataList.length > 0 ? initDataList : undefined,
-      }),
-      (_key, value: unknown) => {
-        if (typeof value === 'string' && /[\uD800-\uDFFF]/u.test(value))
-          throw new Error('catalog strings must be valid Unicode');
-        if (typeof value === 'number') {
-          if (!Number.isFinite(value)) throw new Error('catalog numbers must be finite');
-          if (Number.isInteger(value) && !Number.isSafeInteger(value))
-            throw new Error('catalog integers must be safe integers');
-        }
-        return value;
+    JSON.stringify(pruneUndefined(catalog), (_key, value: unknown) => {
+      if (typeof value === 'string' && /[\uD800-\uDFFF]/u.test(value))
+        throw new Error('catalog strings must be valid Unicode');
+      if (typeof value === 'number') {
+        if (!Number.isFinite(value)) throw new Error('catalog numbers must be finite');
+        if (Number.isInteger(value) && !Number.isSafeInteger(value))
+          throw new Error('catalog integers must be safe integers');
       }
-    )
+      return value;
+    })
   );
 }

@@ -23,6 +23,8 @@ interface RawCatalog {
 interface Vectors {
   catalogs: { name: string; input: RawCatalog; json: string; parsed: unknown }[];
   catalogErrors: { name: string; input: RawCatalog }[];
+  endCatalogs: { name: string; input: { generatedAt?: string }; json: string; parsed: unknown }[];
+  endCatalogErrors: { name: string; input: { generatedAt?: string } }[];
   catalogReads: { name: string; catalogNamespace: string[]; json: string; parsed: unknown }[];
   catalogReadErrors: { name: string; catalogNamespace: string[]; json: string }[];
   loc: {
@@ -78,6 +80,19 @@ describe('shared media vectors', () => {
   }
   for (const vector of vectors.catalogErrors) {
     it(`rejects catalog ${vector.name}`, () => expect(() => media.buildMsfCatalog(input(vector.input))).toThrow());
+  }
+  const endInput = (raw: { generatedAt?: string }): media.MsfEndCatalogInput =>
+    raw.generatedAt !== undefined ? { generatedAt: Number(raw.generatedAt) } : {};
+  for (const vector of vectors.endCatalogs) {
+    it(`end catalog ${vector.name}: exact bytes and reader round trip`, () => {
+      const document = media.buildMsfEndCatalog(endInput(vector.input));
+      expect(hex(document)).toBe(hex(new TextEncoder().encode(vector.json)));
+      expect(readable(media.parseMsfCatalog(document, { catalogNamespace: ['room'] }))).toEqual(vector.parsed);
+    });
+  }
+  for (const vector of vectors.endCatalogErrors) {
+    it(`rejects end catalog ${vector.name}`, () =>
+      expect(() => media.buildMsfEndCatalog(endInput(vector.input))).toThrow());
   }
   for (const vector of vectors.catalogReads) {
     it(`reads catalog ${vector.name}`, () => {

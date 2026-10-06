@@ -437,6 +437,7 @@ names from the original examples; the mappings below are explicit.
 | Data description | `DataTrackInfo` | `DataTrackInfo` |
 | Catalog input | `MsfCatalogInput` | `build_msf_catalog` keyword arguments |
 | Build independent catalog bytes | `buildMsfCatalog` | `build_msf_catalog` |
+| Build the end-of-broadcast catalog (msf-01 §11.3) | `buildMsfEndCatalog` / `MsfEndCatalogInput` | `build_msf_end_catalog` keyword arguments |
 | Read an independent catalog object's payload | `parseMsfCatalog(payload, { catalogNamespace })` | `parse_msf_catalog(payload, catalog_namespace=...)` |
 | Catalog as read | `MsfCatalog` | `MsfCatalog` |
 | Track description as read | `MsfCatalogTrack` | `MsfCatalogTrack` |

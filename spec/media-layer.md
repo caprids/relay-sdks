@@ -48,7 +48,7 @@ above that line is rebuilt inside the example:
 | Timing | Declares Timescale 1,000,000 as a track property on every track and puts Timestamp and Timescale on every object, with Video Config on keyframes | draft-ietf-moq-loc-04 registry; [issue #23](https://github.com/muxinc/relay-sdks/issues/23) for why the track property is mandatory against the relay |
 | Decoder configuration | Opens the encoder with global headers, splits the Annex B extradata into NAL units, keeps SPS and PPS, builds an avcC, and reads `avc1.PPCCLL` out of its bytes 1 to 3 | ISO/IEC 14496-15, RFC 6381 §3.3 |
 | Bitstream contract | Re-frames every access unit from Annex B start codes to 4-byte length prefixes and drops SPS, PPS, and AUD, because `avc1` promises parameter sets out of band | ISO/IEC 14496-15 |
-| Catalog document | Assembles `version`, `isComplete`, a slash-joined `namespace` per track, `packaging: "loc"`, `isLive`, `role`, codec and dimensions, and `initDataList` with base64 inline entries and per-track `initRef` | draft-ietf-moq-msf-01 §5, read against the Video.js parser for the exact dialect |
+| Catalog document | Assembles `version`, a slash-joined `namespace` per track, `packaging: "loc"`, `isLive`, `role`, codec and dimensions, and `initDataList` with base64 inline entries and per-track `initRef`; leaves out `isComplete`, which would declare the live broadcast over ([#284](https://github.com/muxinc/relay-sdks/issues/284)) | draft-ietf-moq-msf-01 §5, read against the Video.js parser for the exact dialect |
 | Catalog track | Registers a track named `catalog` and re-sends the document on every relay subscription, retrying transient failures while demand remains | Video.js `parse-source.ts`; the demand semantics in `behavior.md` |
 | Group mapping | Opens a video group on each keyframe and appends deltas; sends audio as one group per frame; after any failure or loss of demand, discards deltas until the next keyframe | MSF group mapping; Video.js `track-publisher.ts` |
 | Source URL | Composes `moqt://host/path#msf:<ns>--catalog&c4m=<token>`, escaping every byte outside `[A-Za-z0-9_]` in each namespace field as `.xx` | msf-01 §11.1; Video.js `parse-source.ts` |
@@ -179,7 +179,9 @@ The stateful part, which wraps `RelayTrackWriter` and therefore lives beside the
 call registers the catalog track and every media track with the LOC timescale declared, builds
 the first catalog, and starts serving it. It returns a handle with one frame writer per media
 track, the raw catalog writer for anyone who wants it, and a `close()` that ends the catalog
-service and the tracks.
+service and the tracks. A deliberate `close()` follows msf-01 §11.3: it ends the media tracks,
+then sends the end-of-broadcast catalog (`isComplete: true`, no tracks) before closing the catalog
+track. A failure does not send it.
 
 The catalog service is the loop `serve_catalog()` runs today, generalized:
 

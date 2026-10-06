@@ -8,6 +8,7 @@ from .catalog import (
     MsfCatalogTrack,
     VideoTrackInfo,
     build_msf_catalog,
+    build_msf_end_catalog,
     parse_msf_catalog,
 )
 from .h264 import (
@@ -63,6 +64,7 @@ __all__ = [
     "avc_codec_string",
     "build_avcc",
     "build_msf_catalog",
+    "build_msf_end_catalog",
     "compose_player_url",
     "encode_name_component",
     "encode_namespace_name",

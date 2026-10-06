@@ -21,6 +21,12 @@ Construction from SPS/PPS supports Baseline, Main, and Extended profiles. Other 
 extension fields and are rejected; callers can still supply an encoder-generated High-profile avcC
 to the catalog builder.
 
+`build_msf_catalog` describes a live broadcast and leaves `isComplete` out: msf-01 §5.1.3 forbids
+the field while false, and once a catalog carries it, it can never be removed. When a broadcast
+ends on purpose, close the media tracks first (each close tells subscribers the track ended), then
+write `build_msf_end_catalog(generated_at_ms=...)` to the catalog track if it has demand, then
+close it (msf-01 §11.3). Do not send it after a crash or a lost connection.
+
 `parse_msf_catalog` reads an independent catalog object's payload back into an `MsfCatalog` of
 `MsfCatalogTrack` descriptions: namespace tuple, name, packaging, live status, role, codec,
 dimensions, rates, bitrate, and init data resolved from `initRef` to bytes. It raises `ValueError`

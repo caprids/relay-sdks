@@ -34,6 +34,12 @@ video, catalog serving, groups, bounded buffering, and cleanup. For files that n
 the optional [Mediabunny packet adapter](../moq-mediabunny/README.md). Python retains its Annex B
 helpers for the PyAV publisher.
 
+`buildMsfCatalog` describes a live broadcast and leaves `isComplete` out: msf-01 §5.1.3 forbids the
+field while false, and once a catalog carries it, it can never be removed. When a broadcast ends on
+purpose, close the media tracks first (each close tells subscribers the track ended), then write
+`buildMsfEndCatalog({ generatedAt })` to the catalog track if it has demand, then close it
+(msf-01 §11.3). Do not send it after a crash or a lost connection.
+
 `parseMsfCatalog` reads an independent catalog object's payload back into track descriptions:
 namespace tuple, name, packaging, live status, role, codec, dimensions, rates, bitrate, and init
 data resolved from `initRef` to bytes. It rejects unsupported versions and delta updates, ignores
