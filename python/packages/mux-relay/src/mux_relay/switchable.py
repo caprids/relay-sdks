@@ -138,6 +138,12 @@ def _until_predicate(until: Until) -> Callable[[MoqtObject], bool]:
     def predicate(obj: MoqtObject) -> bool:
         passed = until(obj)
         if not isinstance(passed, bool):
+            # An awaitable is never awaited: close or cancel it, and observe its failure.
+            if inspect.iscoroutine(passed):
+                passed.close()
+            elif isinstance(passed, asyncio.Future):
+                passed.cancel()
+                _observe(passed)
             raise TypeError("until must return a bool")
         return passed
 
@@ -395,9 +401,11 @@ class SwitchableSubscription:
         try:
             passed = pending.until(event.value)
         except Exception as error:
-            self._abandon(pending, error)
+            if self._end is None and self._pending is pending:
+                self._abandon(pending, error)
             return
-        if passed:
+        # The predicate is application code: it may have switched again or cancelled.
+        if passed and self._end is None and self._pending is pending:
             self._cutover(pending, event.value)
 
     def _slot_ended(self, slot: _Slot, end: SubscriptionEnd) -> None:

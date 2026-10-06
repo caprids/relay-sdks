@@ -385,6 +385,43 @@ describe('subscribeSwitchable', () => {
     await expect(switchedAgain).resolves.toMatchObject({ from: 'video-hi', to: 'video-lo' });
   });
 
+  it('ignores a predicate that switched again, and leaves the newer switch pending', async () => {
+    const { switchable, track } = harness();
+    track('video-mid').core.onOk?.(OK);
+    let replacement: Promise<SwitchedInfo> | undefined;
+    const first = switchable.switchTo('video-hi', {
+      until: () => {
+        replacement = switchable.switchTo('video-lo');
+        return true;
+      },
+    });
+    track('video-hi').core.onOk?.(OK);
+    track('video-hi').core.onObject?.(object(1));
+    await expect(first).rejects.toMatchObject({ code: 'CLOSED' });
+    expect(switchable.track).toBe('video-mid');
+    expect(switchable.pending).toBe('video-lo');
+    track('video-lo').core.onOk?.(OK);
+    track('video-lo').core.onObject?.(object(2));
+    await expect(replacement).resolves.toMatchObject({ from: 'video-mid', to: 'video-lo', subscribed: OK });
+  });
+
+  it('observes a promise a predicate returned before refusing it', async () => {
+    const unhandled = vi.fn();
+    process.on('unhandledRejection', unhandled);
+    try {
+      const { switchable, track } = harness();
+      track('video-mid').core.onOk?.(OK);
+      const switched = switchable.switchTo('video-hi', { until: (() => Promise.reject(new Error('async'))) as never });
+      track('video-hi').core.onOk?.(OK);
+      track('video-hi').core.onObject?.(object(1));
+      await expect(switched).rejects.toBeInstanceOf(TypeError);
+      await flush();
+      expect(unhandled).not.toHaveBeenCalled();
+    } finally {
+      process.off('unhandledRejection', unhandled);
+    }
+  });
+
   it('checks its arguments at once and leaves a pending switch alone when one is bad', async () => {
     const { switchable, track } = harness();
     track('video-mid').core.onOk?.(OK);

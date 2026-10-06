@@ -400,6 +400,47 @@ class TestSwitchable:
         info = await again[0]
         assert (info.from_track, info.to_track) == ("video-hi", "video-lo")
 
+    async def test_ignores_a_predicate_that_switched_again_and_leaves_the_newer_switch_pending(self) -> None:
+        harness = Harness()
+        harness.track("video-mid").ok()
+        replacement: list[Awaitable[SwitchedInfo]] = []
+
+        def until(_value: MoqtObject) -> bool:
+            replacement.append(harness.switchable.switch_to("video-lo"))
+            return True
+
+        first = harness.switchable.switch_to("video-hi", until=until)
+        harness.track("video-hi").ok()
+        harness.track("video-hi").object(obj(1))
+        with pytest.raises(RelayError):
+            await first
+        assert harness.switchable.track == "video-mid"
+        assert harness.switchable.pending == "video-lo"
+        harness.track("video-lo").ok()
+        harness.track("video-lo").object(obj(2))
+        info = await replacement[0]
+        assert (info.from_track, info.to_track, info.subscribed) == ("video-mid", "video-lo", OK)
+
+    async def test_closes_a_coroutine_a_predicate_returned_before_refusing_it(self) -> None:
+        async def later() -> bool:
+            return True
+
+        returned: list[Any] = []
+
+        def until(_value: MoqtObject) -> bool:
+            coroutine = later()
+            returned.append(coroutine)
+            return cast(Any, coroutine)
+
+        harness = Harness()
+        harness.track("video-mid").ok()
+        switched = harness.switchable.switch_to("video-hi", until=until)
+        harness.track("video-hi").ok()
+        harness.track("video-hi").object(obj(1))
+        with pytest.raises(TypeError):
+            await switched
+        assert returned[0].cr_frame is None
+
     async def test_checks_its_arguments_at_once_and_leaves_a_pending_switch_alone_when_one_is_bad(self) -> None:
         harness = Harness()
         harness.track("video-mid").ok()

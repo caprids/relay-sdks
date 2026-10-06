@@ -196,7 +196,17 @@ function untilPredicate(until: SwitchOptions['until']): (object: MoqtObject) => 
     throw new TypeError('until must be synchronous');
   return (object) => {
     const passed: unknown = until(object);
-    if (typeof passed !== 'boolean') throw new TypeError('until must return a boolean');
+    if (typeof passed !== 'boolean') {
+      // A promise is never awaited; observe its rejection so refusing it cannot surface as unhandled.
+      if (
+        passed &&
+        (typeof passed === 'object' || typeof passed === 'function') &&
+        'then' in passed &&
+        typeof passed.then === 'function'
+      )
+        void Promise.resolve(passed).catch(() => {});
+      throw new TypeError('until must return a boolean');
+    }
     return passed;
   };
 }
@@ -334,14 +344,16 @@ export function createSwitchable(
         return;
       }
       if (self !== pending || event.type !== 'object') return;
+      const switching = pending;
       let passed: boolean;
       try {
-        passed = pending.until(event.value);
+        passed = switching.until(event.value);
       } catch (error) {
-        abandon(pending, error);
+        if (!end && pending === switching) abandon(switching, error);
         return;
       }
-      if (passed) cutover(pending, event.value);
+      // The predicate is application code: it may have switched again or cancelled.
+      if (passed && !end && pending === switching) cutover(switching, event.value);
     },
     ended(subscriptionEnd) {
       const self = slot();
