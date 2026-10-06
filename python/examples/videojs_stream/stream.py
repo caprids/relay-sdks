@@ -1266,12 +1266,14 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
         # A clean finish (the deadline, or a file without --loop running out) ends the broadcast.
         # A failure did not end it on purpose, and Ctrl-C cancels the run before it could write.
-        if stopped_normally and failure is None:
-            await end_broadcast(catalog_track, log)
-
-        catalog_track.close()
-        await publisher.close()
-        stats.finished = time.monotonic()
+        try:
+            if stopped_normally and failure is None:
+                await end_broadcast(catalog_track, log)
+        finally:
+            # Ctrl-C during that write must not skip the connection's shutdown.
+            catalog_track.close()
+            await publisher.close()
+            stats.finished = time.monotonic()
 
     if failure is not None:
         raise failure
