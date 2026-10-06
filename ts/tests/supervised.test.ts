@@ -1532,4 +1532,56 @@ describe('rotation before the credential expires (#261)', () => {
       expect(connectedAt[2]! - connectedAt[1]!).toBeLessThan(400);
     });
   });
+  describe('Codex pass 7 fixes', () => {
+    it('serves the next generation while the old one drains, and close() waits for the drain', async () => {
+      const drained = deferred();
+      const connections: FakePublisher[] = [];
+      const publisher = await superviseRelayPublisher(
+        async (options) => {
+          const fake = fakePublisher([...options.namespace]);
+          if (connections.length === 0) {
+            const close = fake.close.bind(fake);
+            fake.close = async () => {
+              fake.closeCalls += 1;
+              await drained.promise;
+              await close();
+            };
+          }
+          connections.push(fake);
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', namespace: ['room'], reconnect: fast },
+      );
+      cleanup.push(() => {
+        drained.resolve();
+        return publisher.close();
+      });
+      publisher.rotate();
+      await until(() => connections[0]!.closeCalls === 1, 'old generation draining');
+      publisher.rotate(); // the next generation is served while the old one drains
+      await until(() => connections.length === 3, 'a rotation during the drain');
+      let closed = false;
+      const closing = publisher.close().then(() => {
+        closed = true;
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(closed).toBe(false);
+      drained.resolve();
+      await closing;
+    });
+
+    it('takes up a rotate() made during the overlap once the overlap ends', async () => {
+      const { subscriber, connections } = await subscribers();
+      subscriber.want('silent', { namespace: ['room'], track: 'silent', retry: fast });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      subscriber.rotate(); // during the overlap: the silent old subscription still holds it open
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(connections).toHaveLength(2);
+      connections[0]!.end();
+      await until(() => connections.length === 3, 'the rotation asked for during the overlap');
+    });
+  });
 });

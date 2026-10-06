@@ -188,6 +188,8 @@ export async function superviseRelayPublisher(
   let current: Generation | undefined;
   /** The generation a rotation is replacing, while its tracks move off it. */
   let retiring: Generation | undefined;
+  /** Retired generations still closing: draining groups the relay has not acknowledged. `close()` waits for them. */
+  const draining = new Set<Promise<void>>();
   let status: SupervisedStatus = 'connecting';
   let stopped = false;
   let shutdown: Promise<void> | undefined;
@@ -201,6 +203,8 @@ export async function superviseRelayPublisher(
   let attemptInProgress: AbortController | undefined;
   /** Asks the live generation to rotate; replaced for each generation served. */
   let requestRotation: () => void = () => {};
+  /** A `rotate()` made during a rotation's overlap, for the replacement once it is served. */
+  let rotateNext = false;
 
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
@@ -227,12 +231,13 @@ export async function superviseRelayPublisher(
       current = undefined;
       retiring = undefined;
       for (const track of tracks.values()) track.retire();
-      await Promise.all(
-        open.map((generation) => {
+      await Promise.all([
+        ...open.map((generation) => {
           generation.ended = true;
           return generation.publisher.close().catch(() => {});
         }),
-      );
+        ...draining,
+      ]);
       try {
         setStatus('closed');
       } finally {
@@ -332,6 +337,10 @@ export async function superviseRelayPublisher(
     }
     current = next;
     retiring = live;
+    // The replacement is live: a `rotate()` from now on is for it, taken up once the overlap ends.
+    requestRotation = () => {
+      rotateNext = true;
+    };
     const moved = [...tracks.values()].map((track) => track.handOver(next));
     setStatus('live');
     report(next);
@@ -350,13 +359,19 @@ export async function superviseRelayPublisher(
     live.onIdle = undefined;
     for (const track of tracks.values()) track.settle();
     live.ended = true;
+    // A track whose next generation ended before it moved is still bound here: it has no generation now.
+    for (const track of tracks.values()) track.unbind(live);
     if (retiring === live) retiring = undefined;
-    await live.publisher.close().catch(() => {});
-    for (const track of tracks.values()) {
-      track.forget(live);
-      // A track whose next generation ended before it moved is still bound here: it has no generation now.
-      track.unbind(live);
-    }
+    // Closing drains the old generation's unacknowledged groups for up to a write deadline; the next generation is
+    // served meanwhile, and `close()` waits for the drain.
+    const drain: Promise<void> = live.publisher
+      .close()
+      .catch(() => {})
+      .then(() => {
+        draining.delete(drain);
+        for (const track of tracks.values()) track.forget(live);
+      });
+    draining.add(drain);
     return next;
   };
 
@@ -374,6 +389,10 @@ export async function superviseRelayPublisher(
             resolve();
           };
         });
+        if (rotateNext) {
+          rotateNext = false;
+          requestRotation();
+        }
         const due = rotationDue(
           automatic ? live.rotateAt : undefined,
           asked,

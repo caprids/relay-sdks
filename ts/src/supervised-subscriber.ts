@@ -288,6 +288,8 @@ export async function superviseRelaySubscriber(
   let retiring: Connection | undefined;
   /** Asks the live connection to rotate; replaced for each connection served. */
   let requestRotation: () => void = () => {};
+  /** A `rotate()` made during a rotation's overlap, for the replacement once it is served. */
+  let rotateNext = false;
 
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
@@ -432,6 +434,10 @@ export async function superviseRelaySubscriber(
     }
     current = next.live;
     retiring = old;
+    // The replacement is live: a `rotate()` from now on is for it, taken up once the overlap ends.
+    requestRotation = () => {
+      rotateNext = true;
+    };
     setStatus('live');
     for (const wake of connectionWaiters.splice(0)) wake();
     const idle = new Promise<void>((resolve) => {
@@ -473,6 +479,10 @@ export async function superviseRelaySubscriber(
             resolve();
           };
         });
+        if (rotateNext) {
+          rotateNext = false;
+          requestRotation();
+        }
         const due = rotationDue(
           automatic ? opened.live.rotateAt : undefined,
           asked,
