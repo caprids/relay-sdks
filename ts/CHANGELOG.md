@@ -11,6 +11,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 
 - `@mux/relay`: `connectRelayPublisher` and `connectRelaySubscriber` for browsers over WebTransport, and
   `@mux/relay/node` for Node 24+ over native QUIC.
+- `@mux/relay`: `subscriber.namespaceEvents({ prefix })` discovers which namespaces under a prefix are announced
+  ([#259](https://github.com/muxinc/relay-sdks/issues/259)). The subscriber's SETUP now carries the SOLICIT option,
+  so the relay advertises namespaces only when asked. A prefix overlapping one the connection already discovers is
+  refused with the new `PREFIX_OVERLAP` code (draft-20 §10.19). `@mux/moq-core` gains `session.subscribeNamespace` and
+  `SETUP_OPTION.SOLICIT`.
 - `@mux/relay-quic`: the native QUIC transport adapter for Node, with prebuilt binaries for Linux (x64 and arm64,
   glibc and musl), macOS (arm64 and x64) and Windows (x64).
 - `@mux/moq-core`: the transport-independent MOQT draft-20 sessions the SDK is built on.

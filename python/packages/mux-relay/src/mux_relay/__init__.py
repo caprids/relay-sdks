@@ -32,6 +32,7 @@ from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import ConnectingTransport, RelayTransportFactory
 from .errors import RelayError, RelayErrorCode, RelayErrorPhase
+from .namespace_events import NamespaceEvent, NamespaceEvents
 from .payload import read_json, read_text
 from .publish import RelayGroupWriter, RelayPublisher, RelayTrackWriter, connect_relay_publisher
 from .subscription_events import (
@@ -67,6 +68,8 @@ __all__ = [
     "MoqTrackSource",
     "MoqtObject",
     "MoqtTransport",
+    "NamespaceEvent",
+    "NamespaceEvents",
     "ObjectEvent",
     "PublishDone",
     "PublisherDoneEvent",

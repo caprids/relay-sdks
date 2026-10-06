@@ -29,6 +29,11 @@ RelayErrorCode = Literal[
     "SUBSCRIPTION_REQUEST_FAILED",
     "SUBSCRIPTION_OVERFLOW",
     "UPDATE_QUEUE_FULL",
+    # ``namespace_events`` refused a prefix that overlaps (equals, contains or falls under) one this
+    # connection is already discovering, in phase ``subscription``; nothing was sent. Draft-20 §10.19
+    # allows one SUBSCRIBE_NAMESPACE per prefix tree on a session. Widen one iterator's prefix and
+    # filter, or use a second connection.
+    "PREFIX_OVERLAP",
     "GOAWAY",
     "TRANSPORT_ERROR",
     "TRANSPORT_UNAVAILABLE",

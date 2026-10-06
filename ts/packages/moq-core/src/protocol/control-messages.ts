@@ -78,6 +78,12 @@ export const SETUP_OPTION = {
   MOQT_IMPLEMENTATION: 0x07,
   /** The most REQUEST_UPDATE messages the sender accepts unanswered on one request stream (§10.3.1.7). */
   MAX_REQUEST_UPDATES: 0x08,
+  /**
+   * The MoQ Solicit extension (draft-lcurley-moq-solicit-00), not a draft-20 option: `1` asks the peer to advertise
+   * namespaces only on a SUBSCRIBE_NAMESPACE, never as unsolicited PUBLISH_NAMESPACE. moq-relay honors it from 0.17.0.
+   * Even, so the value is a bare varint.
+   */
+  SOLICIT: 0x40b5a,
 } as const;
 
 /** Message parameter types (§10.2, §15.7). */
@@ -1009,7 +1015,7 @@ export function encodeFetch(request: FetchRequest): Uint8Array {
 export interface SubscribeNamespaceRequest {
   requestId: number;
   trackNamespacePrefix: TrackNamespace;
-  parameters?: MessageParameters;
+  parameters?: MessageParameters | undefined;
 }
 
 /** SUBSCRIBE_NAMESPACE (§10.19) — first message on a new request stream. */
@@ -1160,7 +1166,7 @@ export function encodePublishNamespace(request: PublishNamespaceRequest): Uint8A
 }
 
 /**
- * NAMESPACE (§10.19) — announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream. The body is
+ * NAMESPACE (§10.17) — announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream. The body is
  * the namespace suffix relative to that stream's subscribed prefix and nothing else: peers bound-check the tuple
  * against the frame length (moq-lite-rs treats even a zero parameter count as a malformed entry and kills the announce
  * stream), so no parameter block is written.
@@ -1172,7 +1178,7 @@ export function encodeNamespace(trackNamespaceSuffix: TrackNamespace): Uint8Arra
   return frameMessage(MESSAGE_TYPE.NAMESPACE, body);
 }
 
-/** NAMESPACE_DONE (§10.20) — retract a NAMESPACE announcement (same body shape). */
+/** NAMESPACE_DONE (§10.18) — retract a NAMESPACE announcement (same body shape). */
 export function encodeNamespaceDone(trackNamespaceSuffix: TrackNamespace): Uint8Array {
   const body = new ByteWriter();
 

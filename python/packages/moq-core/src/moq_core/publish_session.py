@@ -5,7 +5,7 @@ The publish-side sibling of the subscribe-only driver in ``session``.
 Owns the protocol mechanics over an established transport: the SETUP exchange on paired
 unidirectional control streams (§3.3), and the announce-and-serve ingest flow. The peer's
 SUBSCRIBE_NAMESPACE solicitation is answered with REQUEST_OK and a NAMESPACE entry for the announced
-namespace (§10.18-19), then the per-track SUBSCRIBEs the peer routes back are served (answered with
+namespace (§10.19, §10.17), then the per-track SUBSCRIBEs the peer routes back are served (answered with
 SUBSCRIBE_OK carrying a publisher-assigned track alias, §10.8) for as long as each subscription's
 request stream stays open.
 

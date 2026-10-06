@@ -48,6 +48,7 @@ describe('public vocabulary', () => {
   it('names the subscriber, the publisher, and the track writer by role and by demand', () => {
     const subscriber = {
       subscribeEvents: true,
+      namespaceEvents: true,
       subscribe: true,
       trackSource: true,
       closed: true,

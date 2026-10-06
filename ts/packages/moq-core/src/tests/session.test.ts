@@ -5,6 +5,8 @@ import {
   type ControlMessage,
   ControlMessageDeframer,
   decodeControlMessage,
+  encodeNamespace,
+  encodeNamespaceDone,
   encodePublish,
   encodePublishDone,
   encodePublishNamespace,
@@ -1031,6 +1033,277 @@ describe('createMoqtSession', () => {
     expect(messages[0]).toMatchObject({ kind: 'request-error', errorCode: REQUEST_ERROR_CODE.NOT_SUPPORTED });
 
     harness.session.destroy();
+  });
+
+  describe('subscribeNamespace', () => {
+    it('sends SUBSCRIBE_NAMESPACE and reports REQUEST_OK, then NAMESPACE and NAMESPACE_DONE suffixes', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const events: unknown[] = [];
+
+      harness.session.subscribeNamespace(
+        { trackNamespacePrefix: ['room'] },
+        {
+          onOk: () => events.push('ok'),
+          onNamespace: (suffix) => events.push(['namespace', suffix]),
+          onNamespaceDone: (suffix) => events.push(['done', suffix]),
+        }
+      );
+      const request = await harness.nextRequestStream();
+
+      expect(await request.firstMessage).toEqual({
+        kind: 'subscribe-namespace',
+        requestId: 0,
+        trackNamespacePrefix: ['room'],
+        parameters: {},
+      });
+      await request.send(encodeRequestOk());
+      await request.send(encodeNamespace(['alice']));
+      await request.send(encodeNamespace([]));
+      await request.send(encodeNamespaceDone(['alice']));
+
+      await vi.waitFor(() => expect(events).toHaveLength(4));
+      expect(events).toEqual(['ok', ['namespace', ['alice']], ['namespace', []], ['done', ['alice']]]);
+      harness.session.destroy();
+    });
+
+    it('surfaces REQUEST_ERROR and does not report an end after it', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onError = vi.fn();
+      const onEnd = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onError, onEnd });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeRequestError(REQUEST_ERROR_CODE.UNAUTHORIZED, 'no'));
+      await request.fin();
+
+      await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+      expect(onError).toHaveBeenCalledWith(
+        expect.objectContaining({ errorCode: REQUEST_ERROR_CODE.UNAUTHORIZED, reason: 'no' })
+      );
+      await vi.waitFor(() => expect(request.clientEnd).resolves.toBe('fin'));
+      expect(onEnd).not.toHaveBeenCalled();
+      harness.session.destroy();
+    });
+
+    it('fails the request when the peer FINs before REQUEST_OK', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onError = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onError });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.fin();
+
+      await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+      expect(isStreamFailure(onError.mock.calls[0]![0])).toBe(true);
+      // The failed request's own direction ends too; teardown cannot reach it once its record is gone.
+      await expect(request.clientEnd).resolves.toBe('reset');
+      harness.session.destroy();
+    });
+
+    it('closes the session on NAMESPACE_DONE for a namespace never named (§10.19)', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onNamespaceDone = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onNamespaceDone });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeRequestOk());
+      await request.send(encodeNamespace(['alice']));
+      await request.send(encodeNamespaceDone(['bob']));
+
+      await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+      expect(onNamespaceDone).not.toHaveBeenCalled();
+    });
+
+    it('withdraws each active namespace when the accepted request ends (§10.19)', async () => {
+      for (const ending of ['fin', 'reset'] as const) {
+        const harness = createSessionHarness();
+
+        harness.sendServerSetup();
+
+        const calls: unknown[] = [];
+
+        harness.session.subscribeNamespace(
+          { trackNamespacePrefix: ['room'] },
+          {
+            onNamespaceDone: (suffix) => calls.push(['done', suffix]),
+            onEnd: (info) => calls.push(['end', 'error' in info]),
+          }
+        );
+        const request = await harness.nextRequestStream();
+
+        await request.firstMessage;
+        await request.send(encodeRequestOk());
+        await request.send(encodeNamespace(['alice']));
+        await request.send(encodeNamespace(['bob']));
+        await request.send(encodeNamespaceDone(['bob']));
+        if (ending === 'fin') await request.fin();
+        else request.reset(new Error('gone'));
+
+        await vi.waitFor(() => expect(calls).toHaveLength(3));
+        expect(calls).toEqual([
+          ['done', ['bob']],
+          ['done', ['alice']],
+          ['end', ending === 'reset'],
+        ]);
+        harness.session.destroy();
+      }
+    });
+
+    it('reports a FIN after REQUEST_OK as a clean end and FINs back', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onEnd = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onEnd });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeRequestOk());
+      await request.fin();
+
+      await vi.waitFor(() => expect(onEnd).toHaveBeenCalledWith({}));
+      await expect(request.clientEnd).resolves.toBe('fin');
+      harness.session.destroy();
+    });
+
+    it('reports a reset after REQUEST_OK as an end with the error', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onEnd = vi.fn();
+      const onError = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onEnd, onError });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeRequestOk());
+      request.reset(new Error('gone'));
+
+      await vi.waitFor(() => expect(onEnd).toHaveBeenCalledWith({ error: expect.anything() }));
+      expect(onError).not.toHaveBeenCalled();
+      await expect(request.clientEnd).resolves.toBe('reset');
+      harness.session.destroy();
+    });
+
+    it('closes the session on NAMESPACE before REQUEST_OK', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeNamespace(['alice']));
+
+      await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+    });
+
+    it('closes the session on NAMESPACE after REQUEST_ERROR, without reporting it', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onNamespace = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onNamespace });
+      const request = await harness.nextRequestStream();
+      const error = encodeRequestError(REQUEST_ERROR_CODE.UNAUTHORIZED, 'no');
+      const entry = encodeNamespace(['alice']);
+      const both = new Uint8Array(error.length + entry.length);
+
+      both.set(error);
+      both.set(entry, error.length);
+      await request.firstMessage;
+      await request.send(both);
+
+      await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+      expect(onNamespace).not.toHaveBeenCalled();
+    });
+
+    it('reports no entry decoded after a frame that closed the session', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onNamespace = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onNamespace });
+      const request = await harness.nextRequestStream();
+      const frames = [encodeRequestOk(), encodeRequestOk(), encodeNamespace(['alice'])];
+      const chunk = new Uint8Array(frames.reduce((length, frame) => length + frame.length, 0));
+      let offset = 0;
+
+      for (const frame of frames) {
+        chunk.set(frame, offset);
+        offset += frame.length;
+      }
+      await request.firstMessage;
+      await request.send(chunk);
+
+      await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(onNamespace).not.toHaveBeenCalled();
+    });
+
+    it('cancels without reporting anything further', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onNamespace = vi.fn();
+      const onEnd = vi.fn();
+      const handle = harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onNamespace, onEnd });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeRequestOk());
+      handle.cancel();
+      await expect(request.clientEnd).resolves.toBe('reset');
+      await request.send(encodeNamespace(['alice'])).catch(() => {});
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(onNamespace).not.toHaveBeenCalled();
+      expect(onEnd).not.toHaveBeenCalled();
+      harness.session.destroy();
+    });
+
+    it('fails a pending request when the transport drops', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onError = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onError });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      harness.dropTransport();
+
+      await vi.waitFor(() => expect(onError).toHaveBeenCalled());
+    });
   });
 
   describe('inbound request IDs (§10.1)', () => {

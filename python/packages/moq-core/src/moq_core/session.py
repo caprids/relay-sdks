@@ -42,6 +42,8 @@ from .control_messages import (
     GroupOrder,
     KeyValuePair,
     MessageParameters,
+    Namespace,
+    NamespaceDone,
     Publish,
     PublishDone,
     PublishNamespace,
@@ -60,6 +62,7 @@ from .control_messages import (
     encode_request_update,
     encode_setup,
     encode_subscribe,
+    encode_subscribe_namespace,
     encode_track_status,
 )
 from .errors import SESSION_ERROR, MoqtProtocolError, is_moqt_protocol_error
@@ -185,6 +188,39 @@ class TrackStatusHandlers:
     """The request failed: a REQUEST_ERROR, or a stream failure or timeout in the same shape."""
 
 
+@dataclass(slots=True, kw_only=True)
+class NamespaceSubscriptionHandlers:
+    """Callbacks for :meth:`MoqtSession.subscribe_namespace`. Every one is optional.
+
+    NAMESPACE and NAMESPACE_DONE entries name a namespace by its suffix relative to the requested
+    prefix; an empty suffix is the prefix itself.
+    """
+
+    on_ok: Callable[[], None] | None = None
+    """REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream."""
+    on_error: Callable[[RequestError], None] | None = None
+    """The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure or timeout."""
+    on_namespace: Callable[[list[str]], None] | None = None
+    """NAMESPACE (§10.17): a namespace under the prefix is available.
+
+    A peer may name one again (moq-relay does when its route changes); each call is passed on.
+    """
+    on_namespace_done: Callable[[list[str]], None] | None = None
+    """NAMESPACE_DONE (§10.18): a namespace the peer named is no longer available.
+
+    Also called for each namespace still active when the accepted request ends (§10.19), just before
+    ``on_end``. One for a namespace never named closes the session with PROTOCOL_VIOLATION (§10.19).
+    """
+    on_end: Callable[[BaseException | None], None] | None = None
+    """The accepted request ended; no entry follows.
+
+    ``None`` when the peer finished its side of the stream, the transport's error when the stream
+    failed. Not called for a local cancel, after REQUEST_ERROR, or when the session ends.
+    """
+    on_goaway: Callable[[Goaway], None] | None = None
+    """GOAWAY on this request stream: re-issue the request (possibly elsewhere)."""
+
+
 class PublishResponder:
     """Answer a server-initiated PUBLISH. Call exactly one of the two methods; later calls are ignored."""
 
@@ -271,6 +307,16 @@ class MoqtSubscribeOptions:
 
     track_namespace: Sequence[str]
     track_name: str
+    parameters: MessageParameters | None = None
+    """``None`` is the same as an empty :class:`MessageParameters`."""
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MoqtSubscribeNamespaceOptions:
+    """The prefix and parameters for a SUBSCRIBE_NAMESPACE (§10.19)."""
+
+    track_namespace_prefix: Sequence[str]
+    """Namespace prefix to discover; NAMESPACE entries name namespaces relative to it."""
     parameters: MessageParameters | None = None
     """``None`` is the same as an empty :class:`MessageParameters`."""
 
@@ -379,6 +425,15 @@ class _TrackStatusRecord(_RequestRecord):
     handlers: TrackStatusHandlers
 
 
+@dataclass(slots=True, kw_only=True)
+class _NamespaceSubscriptionRecord(_RequestRecord):
+    handlers: NamespaceSubscriptionHandlers
+    accepted: bool = False
+    """REQUEST_OK arrived. Settlement alone is not acceptance: REQUEST_ERROR settles the request too."""
+    active: dict[tuple[str, ...], list[str]] = field(default_factory=dict)
+    """Suffixes named by NAMESPACE and not yet withdrawn."""
+
+
 @dataclass(slots=True)
 class _AliasWaiter:
     future: asyncio.Future[_SubscriptionRecord | None]
@@ -435,6 +490,25 @@ class FetchHandle:
         self._session._cancel_fetch(self._record, reason)
 
 
+class NamespaceSubscription:
+    """A live SUBSCRIBE_NAMESPACE request returned by :meth:`MoqtSession.subscribe_namespace`."""
+
+    __slots__ = ("_record", "_session")
+
+    def __init__(self, session: MoqtSession, record: _NamespaceSubscriptionRecord) -> None:
+        self._session = session
+        self._record = record
+
+    @property
+    def request_id(self) -> int:
+        """The Request ID the SUBSCRIBE_NAMESPACE carried (§10.1)."""
+        return self._record.request_id
+
+    def cancel(self, reason: object = None) -> None:
+        """Tear the request down; the peer withdraws nothing it already sent. Idempotent."""
+        self._session._cancel_namespace_subscription(self._record, reason)
+
+
 # ============================================================================
 # Session driver
 # ============================================================================
@@ -454,6 +528,7 @@ class MoqtSession:
         self._subscriptions: dict[int, _SubscriptionRecord] = {}
         self._fetches: dict[int, _FetchRecord] = {}
         self._track_statuses: dict[int, _TrackStatusRecord] = {}
+        self._namespace_subscriptions: dict[int, _NamespaceSubscriptionRecord] = {}
         self._alias_routes: dict[int, _SubscriptionRecord] = {}
         self._alias_waiters: dict[int, list[_AliasWaiter]] = {}
 
@@ -543,10 +618,11 @@ class MoqtSession:
         # (transport drop) is a failure each of them has to hear about; otherwise a dropped transport
         # leaves subscribers pending forever. A deliberate `close()` is ordinary teardown, and
         # cancelled requests already have their answer.
-        records: list[_SubscriptionRecord | _FetchRecord | _TrackStatusRecord] = [
+        records: list[_SubscriptionRecord | _FetchRecord | _TrackStatusRecord | _NamespaceSubscriptionRecord] = [
             *self._subscriptions.values(),
             *self._fetches.values(),
             *self._track_statuses.values(),
+            *self._namespace_subscriptions.values(),
         ]
         pending = [] if expected else [record for record in records if not record.settled and not record.cancelled]
 
@@ -560,6 +636,7 @@ class MoqtSession:
         self._subscriptions.clear()
         self._fetches.clear()
         self._track_statuses.clear()
+        self._namespace_subscriptions.clear()
         self._alias_routes.clear()
         self._control_writer = None
 
@@ -729,6 +806,67 @@ class MoqtSession:
 
         spawn(self._open_request(message, record, on_message, on_failure))
 
+    def subscribe_namespace(
+        self, options: MoqtSubscribeNamespaceOptions, handlers: NamespaceSubscriptionHandlers | None = None
+    ) -> NamespaceSubscription:
+        """Send SUBSCRIBE_NAMESPACE (§10.19) on a new request stream and return its handle at once.
+
+        The peer answers REQUEST_OK, then names the namespaces under the prefix with NAMESPACE /
+        NAMESPACE_DONE on the same stream. A relay that pushes unsolicited PUBLISH_NAMESPACE instead
+        only stops doing so when SETUP carried ``SETUP_OPTION.SOLICIT``.
+        """
+        handlers = handlers or NamespaceSubscriptionHandlers()
+        request_id = self._allocate_request_id()
+        message = encode_subscribe_namespace(
+            SubscribeNamespace(
+                request_id=request_id,
+                track_namespace_prefix=list(options.track_namespace_prefix),
+                parameters=options.parameters or MessageParameters(),
+            )
+        )
+        record = _NamespaceSubscriptionRecord(request_id=request_id, handlers=handlers)
+        self._namespace_subscriptions[request_id] = record
+
+        def end(error: BaseException | None) -> None:
+            # Once only, and never after REQUEST_ERROR answered the request: that removes the record first.
+            if self._namespace_subscriptions.pop(request_id, None) is None:
+                return
+            # A failed stream is dropped here, since a cancel after the end no longer touches it.
+            if error is not None and record.stream is not None:
+                record.stream.cancel(error)
+            # §10.19: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
+            active = list(record.active.values())
+            record.active.clear()
+            for suffix in active:
+                _call(handlers.on_namespace_done, list(suffix))
+            _call(handlers.on_end, error)
+
+        def on_failure(error: RequestError) -> None:
+            # Removing the record puts the stream out of a later cancel's reach, so drop it now.
+            if record.stream is not None:
+                record.stream.cancel(error)
+            self._namespace_subscriptions.pop(request_id, None)
+            _call(handlers.on_error, error)
+
+        def on_end() -> None:
+            # §3.3.2: the requester SHOULD FIN once the peer's FIN completes the request.
+            if record.stream is not None:
+                spawn(record.stream.fin_write())
+            end(None)
+
+        spawn(
+            self._open_request(
+                message,
+                record,
+                lambda msg: self._handle_namespace_message(record, msg),
+                on_failure,
+                on_end,
+                end,
+            )
+        )
+
+        return NamespaceSubscription(self, record)
+
     async def _open_request(
         self,
         message: bytes,
@@ -736,6 +874,7 @@ class MoqtSession:
         on_message: Callable[[ControlMessage], None],
         on_failure: Callable[[RequestError], None],
         on_end: Callable[[], None] | None = None,
+        on_settled_error: Callable[[BaseException], None] | None = None,
     ) -> None:
         """Open a request stream and bind its lifecycle to ``record``.
 
@@ -744,7 +883,8 @@ class MoqtSession:
         given request kind requires. It fires for a FIN before any response, a non-protocol stream
         error (transport reset), and the response timeout; a protocol error still kills the whole
         session. Once ``record.settled`` is set the same events are ordinary end-of-request signals
-        and are ignored, except that a FIN calls ``on_end``.
+        and are ignored, except that a FIN calls ``on_end`` and a stream error calls
+        ``on_settled_error`` when given.
         """
 
         def fail(error: RequestError) -> None:
@@ -785,6 +925,11 @@ class MoqtSession:
         def on_error(error: BaseException) -> None:
             if is_moqt_protocol_error(error):
                 self._fatal(error)
+                return
+
+            if record.settled:
+                if on_settled_error is not None and not record.cancelled and not self._destroyed:
+                    on_settled_error(error)
                 return
 
             fail(_stream_failure(_describe(error, "request stream failed")))
@@ -886,6 +1031,74 @@ class MoqtSession:
                 _call(record.handlers.on_goaway, message)
             case _:
                 self._fatal(MoqtProtocolError(f"unexpected {message.kind} on a fetch request stream"))
+
+    def _handle_namespace_message(self, record: _NamespaceSubscriptionRecord, message: ControlMessage) -> None:
+        # Frames decoded in one read keep arriving after a frame among them closed the session.
+        if record.cancelled or self._destroyed:
+            return
+        match message:
+            case RequestOk():
+                if record.settled:
+                    self._fatal(MoqtProtocolError("second REQUEST_OK on a subscribe-namespace request stream"))
+                    return
+
+                self._settle_request(record)
+                record.accepted = True
+                _call(record.handlers.on_ok)
+            case RequestError():
+                # After REQUEST_OK the response is spent: an error then is outside the stream's grammar.
+                if record.settled:
+                    self._fatal(
+                        MoqtProtocolError("REQUEST_ERROR after REQUEST_OK on a subscribe-namespace request stream")
+                    )
+                    return
+
+                self._settle_request(record)
+                self._namespace_subscriptions.pop(record.request_id, None)
+                _call(record.handlers.on_error, message)
+                if record.stream is not None:
+                    spawn(record.stream.fin_write())
+            case Namespace() | NamespaceDone():
+                # Entries follow REQUEST_OK (§10.19); one before it, or after REQUEST_ERROR, is outside
+                # the stream's grammar.
+                if not record.accepted:
+                    self._fatal(
+                        MoqtProtocolError(f"{message.kind} before REQUEST_OK on a subscribe-namespace request stream")
+                    )
+                    return
+
+                suffix = list(message.track_namespace_suffix)
+                if isinstance(message, Namespace):
+                    record.active[tuple(suffix)] = suffix
+                    _call(record.handlers.on_namespace, list(suffix))
+                elif record.active.pop(tuple(suffix), None) is not None:
+                    _call(record.handlers.on_namespace_done, suffix)
+                else:
+                    # §10.19: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
+                    self._fatal(
+                        MoqtProtocolError("NAMESPACE_DONE before its NAMESPACE on a subscribe-namespace request stream")
+                    )
+            case Goaway():
+                _call(record.handlers.on_goaway, message)
+            case _:
+                self._fatal(MoqtProtocolError(f"unexpected {message.kind} on a subscribe-namespace request stream"))
+
+    def _cancel_namespace_subscription(self, record: _NamespaceSubscriptionRecord, reason: object = None) -> None:
+        if record.cancelled:
+            return
+
+        # A request that already ended (the peer's FIN, REQUEST_ERROR, a failed stream, the session
+        # ending) has left the map. Its stream is finishing or gone; a reset now would turn the FIN
+        # this side is sending into one.
+        if self._namespace_subscriptions.pop(record.request_id, None) is None:
+            record.cancelled = True
+            return
+
+        record.cancelled = True
+        record.pending_cancel_reason = reason
+        self._settle_request(record)
+        if record.stream is not None:
+            record.stream.cancel(reason)
 
     def _cancel_subscription(self, record: _SubscriptionRecord, reason: object = None) -> None:
         if record.cancelled:
@@ -1149,7 +1362,10 @@ __all__ = [
     "MoqtSession",
     "MoqtSessionCallbacks",
     "MoqtSessionConfig",
+    "MoqtSubscribeNamespaceOptions",
     "MoqtSubscribeOptions",
+    "NamespaceSubscription",
+    "NamespaceSubscriptionHandlers",
     "PublishResponder",
     "SubgroupEnd",
     "SubgroupReset",

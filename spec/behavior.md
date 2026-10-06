@@ -52,6 +52,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
 | `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
 | `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
+| `PREFIX_OVERLAP` | `namespaceEvents` / `namespace_events` was given a prefix that equals, contains or falls under one this connection is already discovering (draft-20 §10.19). Nothing was sent. Widen one iterator's prefix and filter, end the other iterator first, or use another connection. |
 | `UPDATE_QUEUE_FULL` | More than eight updates were issued before the subscription was accepted; await acceptance (`onSubscribed` / `on_subscribed`) before updating again. Nothing was sent for the refused update. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. It can be group-level: the relay may stop one group's stream while its subscription continues, so check `hasDemand` / `has_demand` rather than assume demand ended. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
@@ -124,14 +125,14 @@ connection state, because it depends on the connection's registry.
 
 | Argument | Rule | `TypeError` in both languages | `RangeError` (TypeScript) / `ValueError` (Python) | Checked at |
 | --- | --- | --- | --- | --- |
-| Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe` |
+| Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. A discovery prefix follows the same rule. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe`; the prefix of `namespaceEvents` / `namespace_events` |
 | Track name | A non-empty string, in both roles. | anything else | | `registerTrack` / `register_track`; the three subscriber entry points |
 | Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length). A track's properties encode to at most `limits.maxTrackPropertiesBytes` (65,525 bytes, the room SUBSCRIBE_OK leaves them), hold at most `relay.limits.maxTrackProperties` (64) pairs, and keep Default Publisher Priority (`0x0E`) at most 255 and Default Publisher Group Order (`0x22`) at 1 or 2 (`trackProperties`, draft-20 §12.4 and §12.5), because otherwise the track registers but every subscribe to it fails while the publisher's writes time out. An object's properties on `write` encode to at most `relay.limits.maxObjectPropertiesBytes` (64 KiB), because the relay drops a larger object without an error to either side. The SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds its bound; track properties with more than 64 pairs, or a `0x0E` or `0x22` value draft-20 rules out | `registerTrack` / `register_track`; `write` on a track or group writer |
 | Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. | not a string; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
 | Deadline | A number in (0, 2147483647] milliseconds in TypeScript, (0, 2147483.647] seconds in Python: the largest delay a JavaScript timer holds, and the same bound in both SDKs. The connection, request and write deadlines share one check. | not a number, including a boolean | zero, negative, NaN, infinite, or above the bound | `connectTimeoutMs` / `connect_timeout` on both connect calls; `requestTimeoutMs` / `request_timeout`; `writeTimeoutMs` / `write_timeout` on `registerTrack` / `register_track` |
 | Track registration | A track name not yet registered on this publisher connection, including after its writer closed. Checked after the track name, properties and deadline, and after connection state. | | a name already registered | `registerTrack` / `register_track` |
 | Object status | `normal`, `end-of-group` or `end-of-track`; defaults to `normal`. | not a string | any other string | `write`, `writeText`, `writeJSON` on a group writer |
-| Event capacity | A positive integer (a safe integer in TypeScript); defaults to 64. | not a number, including a boolean | zero, negative, fractional, NaN, or infinite | `subscribeEvents` / `subscribe_events` |
+| Event capacity | A positive integer (a safe integer in TypeScript); defaults to 64. | not a number, including a boolean | zero, negative, fractional, NaN, or infinite | `subscribeEvents` / `subscribe_events`, `namespaceEvents` / `namespace_events` |
 | Payload | A byte sequence: any `ArrayBufferView` in TypeScript; any object supporting the buffer protocol in Python (`bytes`, `bytearray`, `memoryview`, ...). Copied once. At most `limits.maxObjectPayloadBytes`. | a string, an `ArrayBuffer`, a list of integers, anything else | longer than the object payload limit | `write`, `writeText`, `writeJSON` on a track or group writer |
 
 Messages are not a compatibility contract; the class and the point of rejection are.
@@ -370,6 +371,62 @@ rejection and local/session teardown now cancel the request stream and active su
 Teardown suppresses subsequent end/reset callbacks and protocol errors from those cancelled readers;
 it does not report cancellation as a network gap. An actual reset while the subscription is active
 still invokes the gap callback. Publisher completion leaves readers active for trailing objects.
+
+## Discovery
+
+A subscriber can learn which namespaces under a prefix are announced, without an application
+channel of its own. `subscriber.namespaceEvents({ prefix, capacity, signal })` in TS and
+`subscriber.namespace_events(prefix, capacity=..., cancellation=...)` in Python send one
+SUBSCRIBE_NAMESPACE for the prefix. They return a bounded iterator with the same ownership,
+capacity, overflow and cancellation rules as [async subscription consumption](#async-subscription-consumption).
+The iterator owns the request, never the connection.
+
+- Each event is `announced` or `unannounced`, with the full namespace: the prefix's fields followed
+  by the rest, sent verbatim. The relay names each namespace relative to the prefix, and the SDK
+  joins the two. A namespace equal to the prefix is reported as the prefix itself.
+- The events are edge-triggered per namespace. Draft-20 lets a relay name a namespace again, and
+  moq-relay does when its route changes. Those repeats are dropped, so an application that tracks
+  the `announced` set holds the relay's current view. A NAMESPACE_DONE for a namespace the relay
+  never named closes the connection with `PROTOCOL_VIOLATION`, as draft-20 §10.19 requires.
+- The prefix follows the namespace argument rules (1 to 32 non-empty fields), checked before
+  connection state. Draft-20 also allows an empty prefix, meaning every namespace; the SDK does
+  not. The prefix matches whole fields: `['room', 'a']` does not cover `['room', 'ab']`.
+- One connection discovers each prefix tree once. Draft-20 §10.19 has a relay answer a
+  SUBSCRIBE_NAMESPACE whose prefix overlaps one already open on the session (equal, shorter or
+  longer, field by field) with PREFIX_OVERLAP. moq-relay 0.17.0 does not enforce this, so the SDK
+  refuses such a prefix itself, with `PREFIX_OVERLAP` in phase `subscription`, before anything is
+  sent, and behaves the same against every relay. The prefix is free again once its iterator has
+  ended. To watch both `['room']` and `['room', 'a']`, discover `['room']` and filter.
+- The subscriber connection's SETUP carries the SOLICIT option (`0x40B5A` = 1,
+  draft-lcurley-moq-solicit-00), so the relay advertises namespaces only on these requests. Without
+  it, moq-relay 0.17.0 pushes an unsolicited PUBLISH_NAMESPACE for everything in scope right after
+  SETUP, and a SUBSCRIBE_NAMESPACE stream then carries nothing. The publisher connection does not
+  send SOLICIT: it never asks for namespaces.
+- The relay sends no marker between the initial snapshot and later changes. Measured on moq-relay
+  0.17.0 at `*.relay.mux.global` (2026-10-06):
+
+  | What | Same relay (sjc) | Subscriber on another relay (fra) |
+  | --- | --- | --- |
+  | Already-announced namespaces arrive after the request | ~50 ms | ~110 ms |
+  | A new announce arrives after the publisher's `announced` settles | ~50 ms | ~140 ms |
+  | `unannounced` after the publisher's clean `close()` | ~50 to 300 ms | ~150 to 400 ms |
+  | `unannounced` after the publisher process is killed | ~12 s (QUIC idle timeout) | ~12 s |
+
+  An announce learned from a cluster peer looks the same as a local one. Nothing in the event says
+  which relay holds the publisher.
+- A prefix the token does not cover is accepted and stays silent; the relay does not reject it.
+  An event is about the relay's routing table, not a publisher's health: `announced` does not mean
+  any track has content, and a namespace two publishers announce
+  ([duplicate announce](relay-interop.md#duplicate-announce)) is reported once.
+- Endings: a REQUEST_ERROR, the request timeout, or the request's stream failing raises
+  `SubscriptionRequestError`. A stream that fails without a REQUEST_ERROR first waits up to the
+  same closure grace as a subscription. The connection ending raises
+  `SubscriptionConnectionClosedError`, a full queue `SubscriptionOverflowError`, and the signal or
+  cancellation its reason. A relay that finishes the request cleanly ends the iterator without an
+  error, after `unannounced` for every namespace still announced (draft-20 §10.19 treats the end
+  of the response stream as a withdrawal of each), and after any events still queued, which a
+  clean end does not discard. After an error ending, treat every namespace as withdrawn. A GOAWAY
+  on the request stream is not surfaced; the connection's GOAWAY ends the connection.
 
 ## Publishing
 
@@ -804,16 +861,19 @@ and subscribes on the same random namespace, then asserts:
    The report records the warm-up writes.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes `LARGEST_OBJECT` from a populated track's `SUBSCRIBE_OK` and receives the next live object.
-6. All connections close cleanly once the test closes them.
+6. The subscriber's [discovery](#discovery) on the namespace's parent prefix reports the namespace
+   `announced` once the publisher's `announced` settles, then `unannounced` after the publisher's
+   clean `close()`, and nothing else for that namespace. The report records how long the withdrawal took.
+7. All connections close cleanly once the test closes them.
 
 Adding an assertion here means adding it to every SDK's smoke test.
 See [relay interoperability](relay-interop.md#reproduce-against-a-local-relay) for a local moq-relay 0.17.0 test.
 
 ## Not yet specified
 
-Automatic reconnection, token refresh on a live session, datagram reception, product resource
-discovery, and player adapters are not implemented in any SDK and have no contract yet. Add them
-here when the first SDK gains them.
+Automatic reconnection, token refresh on a live session, datagram reception, discovery of tracks
+within a namespace (namespace discovery is [specified](#discovery)), and player adapters are not
+implemented in any SDK and have no contract yet. Add them here when the first SDK gains them.
 
 ## Draft-20 protocol boundaries
 

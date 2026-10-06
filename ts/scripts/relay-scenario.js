@@ -31,15 +31,18 @@ export async function runRelayScenario({
   let subscriber;
   let lateSubscriber;
   let lateLargestObject;
+  let discovery;
+  const discovered = [];
   const lifetime = new AbortController();
   const deadline = setTimeout(() => lifetime.abort(new Error('Live relay test exceeded 45 seconds')), 45_000);
   const received = { events: [], status: [], lateStatus: [] };
   const errors = [];
   const expectedEvents = [[0, 255, 128, 1], Array.from(new TextEncoder().encode('hello from Relay SDK')), []];
   let closing = false;
+  const closedOnPurpose = new Set();
   const observeClosed = (label, connection) => {
     void connection.closed.then(({ error }) => {
-      if (!closing) errors.push(`${label} closed: ${String(error ?? 'peer closure')}`);
+      if (!closing && !closedOnPurpose.has(label)) errors.push(`${label} closed: ${String(error ?? 'peer closure')}`);
     });
   };
   const waitFor = async (predicate, label) => {
@@ -99,10 +102,30 @@ export async function runRelayScenario({
     });
     observeClosed('subscriber', subscriber);
     await report({ phase: 'subscriber connected' });
+    // Discovery: the subscriber watches the parent prefix, where other runs may announce too, so
+    // only this run's namespace counts.
+    const prefix = namespace.length > 1 ? namespace.slice(0, -1) : namespace;
+    const ours = JSON.stringify(namespace);
+    const discoveryStarted = performance.now();
+    discovery = subscriber.namespaceEvents({ prefix, signal: lifetime.signal });
+    void (async () => {
+      try {
+        for await (const event of discovery) {
+          if (JSON.stringify(event.namespace) === ours) {
+            discovered.push({ type: event.type, ms: Math.round(performance.now() - discoveryStarted) });
+          }
+        }
+        if (!closing) errors.push('discovery ended early');
+      } catch (error) {
+        if (!closing) errors.push(`discovery: ${String(error)}`);
+      }
+    })();
     // Assertion 2. The announce left with the first registered track; the relay routes subscribes to
     // the namespace about a round trip later, so the subscribe retries the rejection it may still answer.
     await publisher.announced;
     await report({ phase: 'announced' });
+    await waitFor(() => discovered.some((event) => event.type === 'announced'), 'discovery: announced');
+    await report({ phase: 'discovered', afterMs: discovered[0].ms });
     const retries = { events: 0, status: 0 };
     for (const track of ['events', 'status']) {
       await subscribeWithRetry(
@@ -175,6 +198,16 @@ export async function runRelayScenario({
       throw new Error(`Payload mismatch: ${JSON.stringify(received)}`);
     }
     if (errors.length > 0) throw new Error(errors.join('; '));
+    // A clean publisher close withdraws the announce; the subscriber's discovery hears it.
+    const closedAt = performance.now();
+    closedOnPurpose.add('publisher');
+    await publisher.close();
+    await waitFor(() => discovered.some((event) => event.type === 'unannounced'), 'discovery: unannounced');
+    const withdrawnAfterMs = Math.round(performance.now() - closedAt);
+    await report({ phase: 'undiscovered', afterMs: withdrawnAfterMs });
+    if (JSON.stringify(discovered.map((event) => event.type)) !== '["announced","unannounced"]') {
+      throw new Error(`Discovery mismatch: ${JSON.stringify(discovered)}`);
+    }
     return {
       endpoint,
       subscriberEndpoint: subEndpoint,
@@ -186,10 +219,12 @@ export async function runRelayScenario({
       binaryAndEmptyPayloads: 'passed',
       independentTrackClose: 'passed',
       lateSubscriberLargestObject: lateLargestObject,
+      discovery: { announced: 'passed', withdrawnAfterMs },
     };
   } finally {
     closing = true;
     clearTimeout(deadline);
+    discovery?.close();
     try {
       await publisher?.close();
     } finally {

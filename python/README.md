@@ -660,6 +660,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | --- | --- |
 | `connectRelaySubscriber({ url, getToken, signal, connectTimeoutMs })` | `connect_relay_subscriber(url, get_token=..., cancellation=CancellationToken(), connect_timeout=seconds)` |
 | `subscriber.subscribeEvents(options, { capacity, signal })` | `subscriber.subscribe_events(namespace, track, capacity=..., cancellation=...)` |
+| `subscriber.namespaceEvents({ prefix, capacity, signal })` | `subscriber.namespace_events(prefix, capacity=..., cancellation=...)`; `NamespaceEvent.namespace` is a tuple, and a prefix overlapping one the connection already discovers raises `RelayError` with code `PREFIX_OVERLAP` |
 | `subscriber.subscribe({ namespace, track, parameters }, handlers)` | `subscriber.subscribe(namespace, track, RelaySubscriptionHandlers(...), parameters=...)` |
 | `onSubscribed`, `onPublisherDone` | `on_subscribed`, `on_publisher_done` |
 | `publisher.registerTrack({ track, trackProperties, writeTimeoutMs })` | `publisher.register_track(track, track_properties=..., write_timeout=seconds)` |
@@ -681,8 +682,9 @@ This slice supports one connection, arbitrary reliable-stream track subscription
 updates and cancellation, plus data-only publication on a dedicated connection. The generic core
 also exposes FETCH and TRACK_STATUS. The protocol is pinned to `moqt-20`.
 
-Automatic reconnection, token refresh on a live session, datagram reception, and product resource
-discovery are not implemented yet. A GOAWAY ends the connection with a `RelayError` of code `GOAWAY`;
+Automatic reconnection, token refresh on a live session, datagram reception, and discovery of
+tracks within a namespace are not implemented yet. Namespace discovery is `namespace_events`
+([discovery contract](../spec/behavior.md#discovery)). A GOAWAY ends the connection with a `RelayError` of code `GOAWAY`;
 subscriptions still awaiting their first response end with it (`subscribed` raises
 `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `on_error`;
 callers can open a replacement.

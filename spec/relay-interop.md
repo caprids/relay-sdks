@@ -90,7 +90,7 @@ knows:
   with the new parameters. That is the documented way to change them against moq-relay.
 - **The publisher ended the track** (the application knows from the publisher side, its catalog or
   its own discovery). Do not re-subscribe to it: wait for a signal that new content exists (a new
-  track name in the catalog, a new namespace, or a new announce seen through your own discovery),
+  track name in the catalog, or a new namespace or announce seen through [discovery](#namespace-discovery)),
   and back off any re-subscribe you do make. Publish restarted content under a new track name rather
   than reusing the finished one.
 
@@ -178,6 +178,38 @@ retry is still needed. Measured on 2026-10-05 through the examples' retry: with 
 first attempts at once after `register_track` and 1 / 30 after `announced` were rejected
 `unroutable`; with the TypeScript SDK, 4 / 10 and 0 / 10. Every rejected Python trial was accepted
 on the second attempt, and an unknown track still came back `not found` in both SDKs.
+
+## Namespace discovery
+
+moq-relay 0.17.0 serves SUBSCRIBE_NAMESPACE from client sessions
+(`run_subscribe_namespace_stream` in `rs/moq-net/src/ietf/publisher.rs` at tag
+`moq-relay-v0.17.0`). On draft-20 it answers REQUEST_OK without a request id, then writes NAMESPACE
+and NAMESPACE_DONE entries named relative to the prefix. Its source is the relay's origin, which
+includes routes learned from cluster peers.
+
+- Which of two paths carries the advertisements depends on the peer's SETUP
+  (`rs/moq-net/src/ietf/solicit.rs`). A peer that sends no SOLICIT option gets an unsolicited
+  PUBLISH_NAMESPACE for everything in scope right after SETUP, and its SUBSCRIBE_NAMESPACE streams
+  stay open but carry nothing. A peer that sends SOLICIT=1 gets only the solicited path. The relay
+  itself always sends SOLICIT=1. A peer that writes the option at all, even as 0, declares it
+  implements the extension, and the relay then holds it to never advertising unasked. The subscriber
+  connection sends SOLICIT=1 ([behavior.md](behavior.md#discovery)). Before this, both SDKs refused
+  the pushed PUBLISH_NAMESPACE with NOT_SUPPORTED and retry interval 0, which the relay reads as
+  "never offer this again" (`refusal()` in `publisher.rs`) for the rest of the session.
+- A prefix outside the session's grant gets REQUEST_OK and no entries, not an error.
+- It does not answer an overlapping SUBSCRIBE_NAMESPACE with PREFIX_OVERLAP, as draft-20 §10.19
+  requires: a probe on 2026-10-06 held `[a, b, c]` and `[a, b, c, pre]` open on one session, and
+  both received the namespace they share. The SDKs refuse an overlapping prefix before sending it, so
+  applications see the same rule against any relay.
+- The relay writes NAMESPACE again for a namespace it already advertised when that namespace's
+  route changes, so entries are not edge-triggered on the wire. The SDKs drop those repeats.
+- Measured on 2026-10-06 against sjc, and from fra for a publisher on sjc (TypeScript SDK, Node):
+  the snapshot arrived one round trip after the request (~50 ms, ~110 ms). A new announce arrived
+  ~50 ms (~140 ms) after the publisher's `announced`, and a clean close was withdrawn within
+  ~400 ms. A SIGKILLed publisher was withdrawn after ~12.2 s (~12.3 s), at the QUIC idle timeout.
+  Across the four smoke runs that day (both SDKs), the subscribes issued after the namespace was
+  discovered were never rejected `unroutable` (0 of 8). That is too few to drop the
+  [announce race](#announce-propagation) retry.
 
 ## Relay demand
 

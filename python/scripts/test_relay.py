@@ -12,7 +12,9 @@ on aioquic), then asserts the list in ``spec/behavior.md``:
    a warm-up marker has arrived on its track; the report records the warm-up writes.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes LARGEST_OBJECT and receives the next live object.
-6. All connections close cleanly once the test closes them.
+6. The subscriber's discovery on the namespace's parent prefix reports the namespace ``announced``,
+   then ``unannounced`` after the publisher's clean ``close()``; the report records how long that took.
+7. All connections close cleanly once the test closes them.
 
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
 (https, without the token), ``RELAY_SUB_URL`` (the subscribers' relay for a cross-relay run, defaulting
@@ -128,10 +130,13 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
     subscriber: RelaySubscriber | None = None
     late_subscriber: RelaySubscriber | None = None
     late_largest_object = None
+    discovered: list[str] = []
+    discovery_task: asyncio.Task[None] | None = None
+    closed_on_purpose: set[str] = set()
 
     def observe_closed(label: str, closed: RelayAwaitable[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
-            if not closing:
+            if not closing and label not in closed_on_purpose:
                 errors.append(f"{label} closed: {future.result().error or 'peer closure'}")
 
         closed.add_done_callback(done)
@@ -203,10 +208,30 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
         observe_closed("subscriber", subscriber.closed)
         report({"phase": "subscriber connected"})
 
+        # Discovery: the parent prefix may hold other runs' namespaces, so only this run's counts.
+        prefix = namespace[:-1] if len(namespace) > 1 else namespace
+        discovery = subscriber.namespace_events(prefix, cancellation=lifetime)
+
+        async def discover() -> None:
+            try:
+                async with discovery:
+                    async for event in discovery:
+                        if list(event.namespace) == namespace:
+                            discovered.append(event.type)
+                if not closing:
+                    errors.append("discovery ended early")
+            except Exception as error:
+                if not closing:
+                    errors.append(f"discovery: {error!r}")
+
+        discovery_task = asyncio.create_task(discover())
+
         # Assertion 2. The announce left with the first registered track; the relay routes subscribes to
         # the namespace about a round trip later, so the subscribe retries the rejection it may still answer.
         await publisher.announced
         report({"phase": "announced"})
+        await wait_for(lambda: "announced" in discovered, "discovery: announced")
+        report({"phase": "discovered"})
         retries = {"events": 0, "status": 0}
 
         for track in ("events", "status"):
@@ -291,6 +316,16 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
         if errors:
             raise RuntimeError("; ".join(errors))
 
+        # A clean publisher close withdraws the announce; the subscriber's discovery hears it.
+        closed_at = time.monotonic()
+        closed_on_purpose.add("publisher")
+        await publisher.close()
+        await wait_for(lambda: "unannounced" in discovered, "discovery: unannounced")
+        withdrawn_after_ms = round((time.monotonic() - closed_at) * 1000)
+        report({"phase": "undiscovered", "afterMs": withdrawn_after_ms})
+        if discovered != ["announced", "unannounced"]:
+            raise RuntimeError(f"Discovery mismatch: {discovered!r}")
+
         return {
             "endpoint": endpoint,
             "subscriberEndpoint": sub_endpoint,
@@ -307,10 +342,13 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             }
             if late_largest_object is not None
             else None,
+            "discovery": {"announced": "passed", "withdrawnAfterMs": withdrawn_after_ms},
         }
     finally:
         closing = True
         deadline.cancel()
+        if discovery_task is not None:
+            discovery_task.cancel()
 
         try:
             if publisher is not None:

@@ -4,7 +4,7 @@
  *
  * Owns the protocol mechanics over an established transport: the SETUP exchange on paired unidirectional control
  * streams (§3.3), and the announce-and-serve ingest flow — answering the peer's SUBSCRIBE_NAMESPACE solicitation with
- * REQUEST_OK and a NAMESPACE entry for the announced namespace (§10.18–19), then serving the per-track SUBSCRIBEs the
+ * REQUEST_OK and a NAMESPACE entry for the announced namespace (§10.19, §10.17), then serving the per-track SUBSCRIBEs the
  * peer routes back (answered with SUBSCRIBE_OK carrying a publisher-assigned track alias, §10.8) for as long as each
  * subscription's request stream stays open.
  *
