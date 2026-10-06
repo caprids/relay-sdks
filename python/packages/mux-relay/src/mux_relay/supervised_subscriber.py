@@ -1057,14 +1057,12 @@ async def _subscribe_once(
                 # Only a subscription the application is hearing from is worth keeping; one move at a time.
                 if reported and want.handoff is None:
                     # A subscription that delivered nothing new itself inherits what its predecessor delivered.
+                    # Its predecessor finished delivering before this one took over: keep its location, not the cutoff.
                     inherited = want.cutoff
+                    before = inherited.latest() if inherited is not None and inherited.namespace == namespace else None
 
                     def cutoff_latest() -> tuple[int, int] | None:
-                        if latest is not None:
-                            return latest
-                        if inherited is not None and inherited.namespace == namespace:
-                            return inherited.latest()
-                        return None
+                        return latest if latest is not None else before
 
                     want.cutoff = _Cutoff(subscription, namespace, cutoff_latest) if kind == "rotation" else None
                     handed_off = _hand_off(want, connection, subscription, kind, namespace, stop_delivering)

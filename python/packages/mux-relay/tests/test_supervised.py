@@ -1411,3 +1411,22 @@ async def test_unbinds_a_track_left_on_the_old_generation_when_the_next_one_ends
     assert not writer.has_demand
     assert await asyncio.wait_for(anext(changes), 1) is False
     await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+# ------------------------------------------------------------------ Codex pass 4 fixes (#261)
+
+
+async def test_closes_the_old_generation_at_once_when_a_track_with_a_group_open_on_it_closes(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("video")
+    p.connections[0].tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    await writer.open_group()
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "next generation")
+    p.connections[1].tracks["video"].set_demand(True)
+    await writer.write(b"\x07")
+    writer.close()
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed well before the overlap ends", 0.5)

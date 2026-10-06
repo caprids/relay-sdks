@@ -156,6 +156,7 @@ class _SupervisedTrackWriter(RelayTrackWriter):
     __slots__ = (
         "_binding",
         "_demand_queues",
+        "_group_holds",
         "_last_demand",
         "_pending",
         "_release",
@@ -177,6 +178,8 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         self._pending: _Pending | None = None
         # Writers on generations a rotation moved this track off, kept until they close: their open groups end with it.
         self._retired_writers: dict[_Generation, RelayTrackWriter] = {}
+        # The holds of groups open on any generation, released when the track closes and ends them.
+        self._group_holds: set[Callable[[], None]] = set()
         self._retired = False
         # The demand the iterators last reported, so a lost generation reports False only after True.
         self._last_demand = False
@@ -238,7 +241,14 @@ class _SupervisedTrackWriter(RelayTrackWriter):
             group = await writer.open_group()
             # The generation the group was opened on, read before the await: a disconnect clears the binding.
             # The group holds the generation open until it is closed or aborted.
-            return _SupervisedGroupWriter(group, self, generation, writer, generation.use())
+            hold = generation.use()
+
+            def release() -> None:
+                self._group_holds.discard(release)
+                hold()
+
+            self._group_holds.add(release)
+            return _SupervisedGroupWriter(group, self, generation, writer, release)
 
         return await self._on_live(open_on)
 
@@ -254,6 +264,9 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         retired, self._retired_writers = list(self._retired_writers.values()), {}
         for writer in retired:
             writer.close()
+        # Closing the writers ended their groups: none holds a rotating generation open any more.
+        for release in list(self._group_holds):
+            release()
         self._drop_pending(close=True)
         self._end_demand()
 
