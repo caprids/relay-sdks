@@ -781,3 +781,218 @@ describe('PR review fixes: Codex pass 4', () => {
     await until(() => errors.length === 1, 'onError');
   });
 });
+
+describe('callback failures and progress (#272)', () => {
+  const url = 'https://relay.example.com/moq';
+  const boom = new Error('callback failed');
+
+  function publishers() {
+    const connections: FakePublisher[] = [];
+    const connect = async (options: ConnectRelayPublisherOptions) => {
+      const fake = fakePublisher([...options.namespace]);
+      connections.push(fake);
+      return fake;
+    };
+    return { connections, connect };
+  }
+
+  function subscribers() {
+    const connections: FakeSubscriber[] = [];
+    const connect = async () => {
+      const fake = fakeSubscriber();
+      connections.push(fake);
+      return fake;
+    };
+    return { connections, connect };
+  }
+
+  const throwOn =
+    (when: string) =>
+    (status: string): void => {
+      if (status === when) throw boom;
+    };
+
+  it('rejects connectSupervisedPublisher and closes the connection when a callback throws on the first', async () => {
+    const live = publishers();
+    await expect(
+      superviseRelayPublisher(live.connect, { url, namespace: ['room'], onStatus: throwOn('live') }),
+    ).rejects.toBe(boom);
+    await until(() => live.connections[0]!.closeCalls === 1, 'first connection closed');
+
+    const generation = publishers();
+    await expect(
+      superviseRelayPublisher(generation.connect, {
+        url,
+        namespace: ['room'],
+        onGeneration: () => {
+          throw boom;
+        },
+      }),
+    ).rejects.toBe(boom);
+    await until(() => generation.connections[0]!.closeCalls === 1, 'first connection closed');
+  });
+
+  it('stops the publisher with the error when a callback throws on a later generation', async () => {
+    let generations = 0;
+    const secondGeneration = () => {
+      generations += 1;
+      if (generations === 2) throw boom;
+    };
+    for (const callbacks of [{ onStatus: throwOn('reconnecting') }, { onGeneration: secondGeneration }]) {
+      const { connections, connect } = publishers();
+      const publisher = await superviseRelayPublisher(connect, {
+        url,
+        namespace: ['room'],
+        reconnect: fast,
+        ...callbacks,
+      });
+      connections[0]!.end(new Error('lost'));
+      await expect(publisher.closed).resolves.toEqual({ error: boom });
+      expect(publisher.status).toBe('closed');
+      expect(publisher.generation).toBeUndefined();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      // Nothing reconnects after the stop, and a generation the callback threw on is closed.
+      expect(connections.at(-1)!.closeCalls).toBe(connections.length - 1);
+    }
+  });
+
+  it('settles the publisher closed when onStatus throws reporting it', async () => {
+    const { connect } = publishers();
+    const publisher = await superviseRelayPublisher(connect, { url, namespace: ['room'], onStatus: throwOn('closed') });
+    await expect(publisher.close()).rejects.toBe(boom);
+    await expect(publisher.closed).resolves.toEqual({});
+    expect(publisher.status).toBe('closed');
+
+    const owner = new AbortController();
+    const reason = new Error('owner done');
+    const aborted = await superviseRelayPublisher(publishers().connect, {
+      url,
+      namespace: ['room'],
+      onStatus: throwOn('closed'),
+      signal: owner.signal,
+    });
+    owner.abort(reason);
+    await expect(aborted.closed).resolves.toEqual({ error: reason });
+  });
+
+  it('rejects connectSupervisedSubscriber and closes the connection when onStatus throws on the first', async () => {
+    const { connections, connect } = subscribers();
+    await expect(superviseRelaySubscriber(connect, { url, onStatus: throwOn('live') })).rejects.toBe(boom);
+    await expect(connections[0]!.closed).resolves.toEqual({});
+  });
+
+  it('stops the subscriber with the error when onStatus throws after the first connection', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, {
+      url,
+      reconnect: fast,
+      onStatus: throwOn('reconnecting'),
+    });
+    connections[0]!.end(new Error('lost'));
+    await expect(subscriber.closed).resolves.toEqual({ error: boom });
+    expect(subscriber.status).toBe('closed');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(connections).toHaveLength(1);
+  });
+
+  it('settles the subscriber closed when onStatus throws reporting it', async () => {
+    const subscriber = await superviseRelaySubscriber(subscribers().connect, { url, onStatus: throwOn('closed') });
+    expect(() => subscriber.close()).toThrow(boom);
+    await expect(subscriber.closed).resolves.toEqual({});
+    expect(subscriber.status).toBe('closed');
+
+    const owner = new AbortController();
+    const reason = new Error('owner done');
+    const aborted = await superviseRelaySubscriber(subscribers().connect, {
+      url,
+      onStatus: throwOn('closed'),
+      signal: owner.signal,
+    });
+    owner.abort(reason);
+    await expect(aborted.closed).resolves.toEqual({ error: reason });
+  });
+
+  async function silenced(body: (logged: unknown[]) => Promise<void>): Promise<unknown[]> {
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (error: unknown) => logged.push(error);
+    try {
+      await body(logged);
+    } finally {
+      console.error = original;
+    }
+    return logged;
+  }
+
+  it('keeps a want subscribed when onRestarted throws, and logs the failure', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, { url });
+    cleanup.push(() => subscriber.close());
+    const objects: number[] = [];
+    const logged = await silenced(async () => {
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v', retry: fast },
+        {
+          onObject: (object) => objects.push(object.groupId),
+          onRestarted: () => {
+            throw boom;
+          },
+        },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.done();
+      await until(() => connections[0]!.subscriptions.length === 2, 'resubscribed despite the throwing callback');
+    });
+    connections[0]!.subscriptions[1]!.accept();
+    connections[0]!.subscriptions[1]!.object(7);
+    expect(objects).toEqual([7]);
+    expect(logged).toHaveLength(1);
+    expect((logged[0] as Error).cause).toBe(boom);
+  });
+
+  it('forgets a want whose loop fails unexpectedly, here a throwing onError, and logs it', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, { url });
+    cleanup.push(() => subscriber.close());
+    const logged = await silenced(async (logged) => {
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v' },
+        {
+          onError: () => {
+            throw boom;
+          },
+        },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+      await until(() => logged.length === 1, 'logged');
+    });
+    expect((logged[0] as Error).cause).toBe(boom);
+    // Forgotten: wanting the same key again subscribes afresh instead of swapping handlers on a dead entry.
+    subscriber.want('v', { namespace: ['room'], track: 'v' });
+    await until(() => connections[0]!.subscriptions.length === 2, 'subscribed again');
+  });
+
+  it('counts only a later group as progress: cached groups replayed newest first do not reset the backoff', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, { url });
+    cleanup.push(() => subscriber.close());
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 40, maxDelayMs: 1_000 } });
+    const started: number[] = [];
+    for (let count = 1; count <= 4; count++) {
+      await until(() => connections[0]!.subscriptions.length === count, `subscription ${count}`);
+      started.push(performance.now());
+      // A finished track still announced: its cached groups, newest first, then a done.
+      const subscription = connections[0]!.subscriptions.at(-1)!;
+      subscription.accept();
+      subscription.object(10);
+      subscription.object(9);
+      subscription.done();
+    }
+    // The delays keep doubling (20-40, 40-80, 80-160 ms): nothing reset the backoff.
+    expect(started[3]! - started[2]!).toBeGreaterThanOrEqual(80);
+  });
+});

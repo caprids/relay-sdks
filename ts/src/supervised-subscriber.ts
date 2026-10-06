@@ -38,7 +38,11 @@ import { namespaceFields, trackName } from './validation.js';
 export interface ConnectSupervisedSubscriberOptions extends ConnectRelaySubscriberOptions {
   /** Backoff between connection attempts. Default from 500 ms, doubling up to 10 s, with jitter. */
   reconnect?: SupervisionBackoff;
-  /** Called on every status change; `error` is what ended the previous connection or failed the last attempt. */
+  /**
+   * Called on every status change; `error` is what ended the previous connection or failed the last attempt. A throw
+   * stops the supervisor with that error: a pending `connectSupervisedSubscriber` rejects with it and `closed` resolves
+   * with it. A throw reporting `closed` is rethrown from the `close()` that caused it; `closed` resolves either way.
+   */
   onStatus?(status: SupervisedStatus, error?: unknown): void;
 }
 
@@ -228,10 +232,19 @@ export async function superviseRelaySubscriber(
     current?.subscriber.close();
     current = undefined;
     for (const wake of connectionWaiters.splice(0)) wake();
-    setStatus('closed');
-    resolveClosed(result);
+    try {
+      setStatus('closed');
+    } finally {
+      resolveClosed(result);
+    }
   };
-  const onAbort = () => stop({ error: signal?.reason });
+  const onAbort = () => {
+    try {
+      stop({ error: signal?.reason });
+    } catch {
+      // A throwing onStatus while reporting `closed`: `closed` is settled, and an abort listener has no caller to tell.
+    }
+  };
   signal?.addEventListener('abort', onAbort, { once: true });
 
   /** The live connection, waiting for one while reconnecting; `undefined` once `scope` aborts. */
@@ -291,7 +304,17 @@ export async function superviseRelaySubscriber(
       await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
     }
   };
-  void run();
+  const supervise = async () => {
+    try {
+      await run();
+    } catch (error) {
+      // An application callback (onStatus) threw: stop rather than leave the supervisor neither reconnecting nor
+      // closed, and fail a caller still waiting to connect.
+      stop({ error });
+    }
+  };
+  // A second throw, from onStatus reporting `closed`, has nowhere to go: `closed` is settled either way.
+  void supervise().catch(() => {});
   try {
     await started;
   } catch (error) {
@@ -351,7 +374,7 @@ export async function superviseRelaySubscriber(
         controller: new AbortController(),
       };
       wants.set(key, want);
-      void superviseWant(want, liveConnection, () => forget(key, want));
+      void runWant(want, liveConnection, () => forget(key, want));
     },
     unwant(key) {
       const want = wants.get(key);
@@ -388,6 +411,21 @@ type AttemptOutcome =
   /** Anything else; resubscribe after the backoff. */
   | { kind: 'retry'; accepted: boolean; progressed: boolean; reason?: RestartReason | undefined };
 
+/** Supervise `want`; a failure its loop did not expect forgets it rather than leave it registered but dead. */
+async function runWant(
+  want: Want,
+  liveConnection: (scope: AbortSignal) => Promise<Connection | undefined>,
+  forget: () => void,
+): Promise<void> {
+  try {
+    await superviseWant(want, liveConnection, forget);
+  } catch (error) {
+    forget();
+    // biome-ignore lint/suspicious/noConsole: the want has no caller left to report its failure to
+    console.error(new Error('A want stopped on an unexpected failure and was forgotten', { cause: error }));
+  }
+}
+
 /** Keep `want` subscribed until it is cancelled or fails for good. */
 async function superviseWant(
   want: Want,
@@ -416,7 +454,15 @@ async function superviseWant(
     }
     const reason: RestartReason | undefined =
       outcome.kind === 'connection' ? 'connection' : outcome.kind === 'generation' ? 'generation' : outcome.reason;
-    if (outcome.accepted && reason) want.handlers.onRestarted?.({ reason, namespace: [...(want.namespace ?? [])] });
+    if (outcome.accepted && reason) {
+      try {
+        want.handlers.onRestarted?.({ reason, namespace: [...(want.namespace ?? [])] });
+      } catch (error) {
+        // A delivery callback's failure is the application's; the want keeps its track subscribed.
+        // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+        console.error(new Error('onRestarted threw; the want resubscribes regardless', { cause: error }));
+      }
+    }
     if (outcome.kind === 'connection') {
       // The request can see the end before the connection reports it; wait for that rather than spin on it.
       await Promise.race([whenAborted(connection.signal), sleep(1_000, scope).catch(() => {})]);
@@ -549,7 +595,7 @@ async function subscribeOnce(
         onObject: (object) => {
           lastObjectAt = performance.now();
           if (firstGroup === undefined) firstGroup = object.groupId;
-          else if (object.groupId !== firstGroup) progressed = true;
+          else if (object.groupId > firstGroup) progressed = true;
           handlers().onObject?.(object);
         },
         onSubgroupEnd: (info) => handlers().onSubgroupEnd?.(info),
