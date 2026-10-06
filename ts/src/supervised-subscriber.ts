@@ -355,6 +355,16 @@ export async function superviseRelaySubscriber(
   };
 }
 
+/**
+ * Whether a request refused at the call is the want's own fault, which no connection fixes: an argument, or a root
+ * overlapping another followed root. Anything else thrown there (CLOSED, the connection's TRANSPORT_ERROR or GOAWAY)
+ * is the connection ending before the supervisor has heard of it.
+ */
+function refusedForGood(error: unknown): boolean {
+  if (error instanceof TypeError || error instanceof RangeError) return true;
+  return error instanceof RelayError && error.code === 'PREFIX_OVERLAP';
+}
+
 /** What ended one attempt, and what the want does next. */
 type AttemptOutcome =
   /** The want or the supervisor was cancelled. */
@@ -417,9 +427,13 @@ async function backoff(want: Want, connection: Connection, delayMs: number): Pro
       // The attempt itself reports a discovery it cannot open.
     }
   }
+  // Released in the turn the want is cancelled, as in an attempt, so a replacement can claim an overlapping root.
+  if (held) want.controller.signal.addEventListener('abort', held.release, { once: true });
+  // Only a newer generation wakes the wait. A discovery that fails again does not: the next attempt reports it after
+  // the delay, so failing discovery is retried no faster than the backoff.
   const changed = () => {
-    if (!held) return;
-    if (held.watch.failure() || held.watch.current() !== want.generation) wake.abort();
+    if (!held || held.watch.failure()) return;
+    if (held.watch.current() !== want.generation) wake.abort();
   };
   const unwatch = held?.watch.onChange(changed);
   try {
@@ -447,9 +461,8 @@ async function attempt(want: Want, connection: Connection): Promise<AttemptOutco
       // Released in the turn the want is cancelled, so a replacement want can claim an overlapping root at once.
       scope.addEventListener('abort', release, { once: true });
     } catch (error) {
-      // As for a subscribe: a connection that already ended refuses the request with CLOSED.
-      if (scope.aborted || (error instanceof RelayError && error.code === 'CLOSED'))
-        return cancelledOrConnection(false);
+      // As for a subscribe: a connection ending under the call refuses the request with its own error.
+      if (scope.aborted || !refusedForGood(error)) return cancelledOrConnection(false);
       return { kind: 'fatal', error };
     }
   }
@@ -514,8 +527,8 @@ async function subscribeOnce(
       },
     );
   } catch (error) {
-    // The connection ended between the check and the call; anything else is an argument the relay can never take.
-    if (scope.aborted || (error instanceof RelayError && error.code === 'CLOSED')) return cancelledOrConnection(false);
+    // An argument the relay can never take is the want's fault; anything else is the connection ending under the call.
+    if (scope.aborted || !refusedForGood(error)) return cancelledOrConnection(false);
     return { kind: 'fatal', error };
   }
   void subscription.subscribed.catch(() => {});

@@ -303,12 +303,14 @@ class SupervisedTrack {
     this.options = options;
     const track = this;
     /** Run `operation` on the live generation's writer, mapping an interruption by the connection's end. */
-    const onLive = async <T>(operation: (writer: RelayTrackWriter) => Promise<T>): Promise<T> => {
+    const onLive = async <T>(
+      operation: (writer: RelayTrackWriter, generation: Generation) => Promise<T>,
+    ): Promise<T> => {
       if (track.#closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
       const binding = track.#binding;
       if (!binding) throw reconnecting();
       try {
-        return await operation(binding.writer);
+        return await operation(binding.writer, binding.generation);
       } catch (error) {
         if (!track.#closed && endedUnder(error, binding.generation)) throw reconnecting(error);
         throw error;
@@ -323,9 +325,10 @@ class SupervisedTrack {
       },
       demandChanges: () => track.#demandChanges(),
       openGroup: (options) =>
-        onLive(async (writer) => {
+        onLive(async (writer, generation) => {
           const group = await writer.openGroup(options);
-          return supervisedGroup(group, () => track.#closed, track.#binding?.generation);
+          // The generation the group was opened on, read before the await: a disconnect meanwhile clears the binding.
+          return supervisedGroup(group, () => track.#closed, generation);
         }),
       write: (payload, options?: WriteOptions) => onLive((writer) => writer.write(payload, options)),
       writeText: (text, options?: WriteOptions) => onLive((writer) => writer.writeText(text, options)),
@@ -436,14 +439,14 @@ class SupervisedTrack {
 function supervisedGroup(
   group: RelayGroupWriter,
   trackClosed: () => boolean,
-  generation: Generation | undefined,
+  generation: Generation,
 ): RelayGroupWriter {
   let aborted = false;
   const mapped = async <T>(operation: () => Promise<T>): Promise<T> => {
     try {
       return await operation();
     } catch (error) {
-      if (!aborted && !trackClosed() && generation && endedUnder(error, generation)) throw reconnecting(error);
+      if (!aborted && !trackClosed() && endedUnder(error, generation)) throw reconnecting(error);
       throw error;
     }
   };

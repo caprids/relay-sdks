@@ -578,3 +578,55 @@ describe('connectSupervisedSubscriber following generations (review fixes)', () 
     await until(() => connections[0]!.subscriptions.length === 2, 'resubscribe at once');
   });
 });
+
+describe('connectSupervisedSubscriber (second review fixes)', () => {
+  async function start() {
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: fast },
+    );
+    cleanup.push(() => subscriber.close());
+    return { subscriber, connections };
+  }
+
+  it('keeps a want whose subscribe the closing connection refused with its own error', async () => {
+    const { subscriber, connections } = await start();
+    const errors: unknown[] = [];
+    const first = await (async () => {
+      await until(() => connections.length === 1, 'connection');
+      return connections[0]!;
+    })();
+    first.subscribe = () => {
+      throw new RelayError('TRANSPORT_ERROR', 'lost', 'connection');
+    };
+    subscriber.want('v', { namespace: ['room'], track: 'v' }, { onError: (e) => errors.push(e) });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    first.end(new Error('lost'));
+    await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe on the replacement');
+    expect(errors).toEqual([]);
+  });
+
+  it('retries a discovery that keeps failing no faster than the backoff', async () => {
+    const { subscriber, connections } = await start();
+    const { SubscriptionRequestError } = await import('../src/subscription.js');
+    subscriber.want('v', {
+      namespace: ['room'],
+      track: 'v',
+      generations: true,
+      retry: { initialDelayMs: 200, maxDelayMs: 200 },
+    });
+    const failing = () => new SubscriptionRequestError({ errorCode: 0x0, retryInterval: 0, reason: 'internal error' });
+    const started = Date.now();
+    while (Date.now() - started < 300) {
+      for (const discovery of connections[0]!.discoveries) if (!discovery.closed) discovery.fail(failing());
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // One request at the start, one per 100-200 ms delay, and one opened in each delay: far from one per response.
+    expect(connections[0]!.discoveries.length).toBeLessThanOrEqual(8);
+  });
+});
