@@ -2366,4 +2366,45 @@ describe('rotation before the credential expires (#261)', () => {
       expect(seen).toEqual(['object 3', `switched ${older} -> ${newer}`, 'object 0']);
     });
   });
+  describe('Codex review of the merge', () => {
+    it('skips an object the old subscription delivered that reaches the replacement late, after the cutover', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: number[] = [];
+      subscriber.want('v', { namespace: ['room'], track: 'v', retry: fast }, { onObject: (o) => seen.push(o.groupId) });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(4);
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      const replacement = connections[1]!.subscriptions[0]!;
+      replacement.accept();
+      replacement.object(5); // cuts over
+      replacement.object(4); // group 4's stream arrives late
+      replacement.object(6);
+      expect(seen).toEqual([4, 5, 6]);
+    });
+
+    it("keeps skipping repeats when only another target's publisher ended", async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: string[] = [];
+      const handlers = { onObject: (o: { groupId: number }) => seen.push(`${o.groupId}`) } as never;
+      subscriber.want('v', { namespace: ['room'], track: 'a', retry: fast }, handlers);
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe a');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(4);
+      subscriber.want('v', { namespace: ['room'], track: 'b', retry: fast }, handlers);
+      await until(() => connections[0]!.subscriptions.length === 2, 'pending b');
+      connections[0]!.subscriptions[1]!.done(); // b's publisher ended
+      subscriber.want('v', { namespace: ['room'], track: 'a', retry: fast }, handlers); // back to a
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'replacement for a');
+      const replacement = connections[1]!.subscriptions[0]!;
+      expect(replacement.options.track).toBe('a');
+      replacement.accept();
+      replacement.object(4); // a's cached group, already delivered
+      replacement.object(5);
+      expect(seen).toEqual(['4', '5']);
+    });
+  });
 });

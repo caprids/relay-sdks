@@ -936,6 +936,11 @@ interface Slot {
   largestGroup?: number;
   /** The latest object it delivered, by location: a rotation's replacement skips what is at or before it. */
   latest?: { groupId: number; objectId: number };
+  /**
+   * After a rotation's silent cutover, the latest object its predecessor delivered: an earlier object arriving late on
+   * another stream was delivered already, and is skipped.
+   */
+  skipThrough?: { groupId: number; objectId: number } | undefined;
   /** Whether it delivered an object from a later group than its first. */
   progressed: boolean;
   /** While draining after a cutover: the largest group it had delivered, through which its events still reach the handlers. */
@@ -950,6 +955,15 @@ interface Slot {
 function atOrBefore(object: MoqtObject, latest: { groupId: number; objectId: number } | undefined): boolean {
   if (latest === undefined) return false;
   return object.groupId < latest.groupId || (object.groupId === latest.groupId && object.objectId <= latest.objectId);
+}
+
+type Location = { groupId: number; objectId: number };
+
+/** The later of two locations, either of which may be unknown. */
+function later(a: Location | undefined, b: Location | undefined): Location | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return a.groupId > b.groupId || (a.groupId === b.groupId && a.objectId >= b.objectId) ? a : b;
 }
 
 /** Record `object` as the latest `slot` delivered, if it is later than what it had. */
@@ -1011,15 +1025,13 @@ async function follow(
   let releaseWatch = () => {};
   /** The connections a subscription of this attempt is on, each held so a rotation closes it only once none are. */
   const holds = new Map<Connection, () => void>();
-  /** Stop observing each connection the attempt observed. */
-  const observed: (() => void)[] = [];
-  const watched = new Set<Connection>();
+  /** How to stop observing each connection the attempt observes; dropped with its hold. */
+  const observed = new Map<Connection, () => void>();
   const observe = (on: Connection) => {
-    if (watched.has(on)) return;
-    watched.add(on);
+    if (observed.has(on)) return;
     const onRetiring = () => void rotate(on);
     on.retiring.addEventListener('abort', onRetiring, { once: true });
-    observed.push(() => on.retiring.removeEventListener('abort', onRetiring));
+    observed.set(on, () => on.retiring.removeEventListener('abort', onRetiring));
     if (on.retiring.aborted) queueMicrotask(onRetiring);
   };
 
@@ -1038,13 +1050,16 @@ async function follow(
       if (used) continue;
       holds.delete(on);
       release();
+      observed.get(on)?.();
+      observed.delete(on);
     }
   };
   /**
-   * Set when a pending replacement heard PUBLISH_DONE, until the next cutover: a restarted publisher numbers its groups
-   * from 0, so a rotation's replacement no longer skips what the active subscription delivered.
+   * The targets a pending replacement heard PUBLISH_DONE on, until the next cutover: a restarted publisher numbers its
+   * groups from 0, so a rotation's replacement for that target no longer skips what the active subscription delivered.
+   * Another target's publisher ending says nothing about the active one's.
    */
-  let publisherEnded = false;
+  const endedTargets = new Set<string>();
   /** Whether `slot` replaces the active subscription on the next connection, with the same target. */
   const rotating = (slot: Slot) => slot.connection !== active.connection && slot.key === active.key;
 
@@ -1112,7 +1127,11 @@ async function follow(
     const from = active;
     // A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
     const silent = rotating(slot);
-    publisherEnded = false;
+    // Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
+    if (silent && !endedTargets.has(slot.key) && (!from.ended || from.ended === 'connection')) {
+      slot.skipThrough = later(from.latest, from.skipThrough);
+    }
+    endedTargets.clear();
     pending = undefined;
     clearRetry();
     moveFailures = 0;
@@ -1186,6 +1205,7 @@ async function follow(
     if (!slot || over()) return;
     if (slot === active) {
       if (slot.ended) return;
+      if (atOrBefore(object, slot.skipThrough)) return;
       lastObjectAt = performance.now();
       if (slot.firstGroup === undefined) slot.firstGroup = object.groupId;
       else if (object.groupId > slot.firstGroup) slot.progressed = true;
@@ -1209,7 +1229,7 @@ async function follow(
     // A rotation's replacement starts at the latest group, which the active subscription may have delivered: skip it.
     // Not once the publisher ended or the subscription was ended by it: a restarted publisher numbers from 0 again.
     const rotation = rotating(slot);
-    const continues = !publisherEnded && (!active.ended || active.ended === 'connection');
+    const continues = !endedTargets.has(slot.key) && (!active.ended || active.ended === 'connection');
     if (rotation && continues && atOrBefore(object, active.latest)) return;
     // With the active subscription gone there is nothing left to compare with: the next object cuts over. A rotation's
     // replacement continues the same stream, so its first new object does too.
@@ -1276,7 +1296,7 @@ async function follow(
           if (!slot || over()) return;
           // Heard on the replacement: the publisher behind both ended. An old subscription a move left behind hearing
           // its own publisher end says nothing about the current one.
-          if (slot === pending) publisherEnded = true;
+          if (slot === pending) endedTargets.add(slot.key);
           if (slot === pending) pendingFailed(slot, undefined);
           else if (slot === active && !slot.ended) {
             activeEnded('publisher-done');
@@ -1449,7 +1469,8 @@ async function follow(
     clearRetry();
     unwatch?.();
     unwatchNext?.();
-    for (const stop of observed) stop();
+    for (const stop of observed.values()) stop();
+    observed.clear();
     want.changes.delete(changed);
     for (const slot of [...draining.keys()]) stopDrain(slot);
     pending?.subscription.cancel();
