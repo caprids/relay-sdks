@@ -47,25 +47,41 @@ unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as decl
 
 Every media track in one catalog shares one timeline: LOC timestamps in microseconds from one origin,
 with the timescale declared on each track. `createBroadcastClock()` fixes that origin on the
-`performance.now()` clock. Stamp encoder input from Chromium's `MediaStreamTrackProcessor` through
-`clock.sourceTimeline()`, since its timestamps count from the system's monotonic zero rather than
-`performance.now()`'s. Stamp audio sample counters with `clock.sampleTimeline(48_000)`, and times
-taken from `performance.now()` itself with `clock.fromSourceUs`. On
-the player, `createPlayoutClock()` makes audio the master. The audio path calls
-`reportAudio(timestampUs)` for what is audible now, after its buffer and output latency, and video
-asks `due(timestampUs)` for a `wait`, `show`, or `drop` decision. With no audio it paces by wall
-clock. Neither clock needs the DOM; see
+`performance.now()` clock.
+
+The publisher path below works in Chromium, Firefox and Safari:
+
+- **Video.** Stamp frames drawn from the camera with `clock.now()`.
+- **Audio.** Route the microphone through an `AudioContext`. Stamp audio from the context clock
+  through `clock.sourceTimeline()`, and calibrate it about once a second from
+  `getOutputTimestamp()`.
+- **Device changes.** The context resamples whatever device is connected and keeps running while
+  devices change, so switching microphones does not shift the timeline.
+- **Chromium alternative.** Where `MediaStreamTrackProcessor` exists, its timestamps count from the
+  system's monotonic zero, so map them through an uncalibrated `sourceTimeline()`.
+- **Microphone latency.** No browser reports a microphone's own input latency. Bluetooth input
+  arrives late by an amount the timeline cannot see; see
+  [#290](https://github.com/muxinc/relay-sdks/issues/290).
+
+On the player, `createPlayoutClock()` makes audio the master. Report what is audible with
+`reportAudio(mediaUs, atUs)`, read fresh from `getOutputTimestamp()` each time, because the output
+delay changes with the device. Video asks `due(timestampUs)` for a `wait`, `show`, or `drop`
+decision. With no audio, the clock paces by wall clock. Neither clock needs the DOM; see
 [spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
 
 ```ts
 const clock = createBroadcastClock();
-const camera = clock.sourceTimeline();
-const audio = clock.sampleTimeline(48_000);
-const video = new VideoFrame(captured, { timestamp: camera.timestampUs(captured.timestamp) });
-const audioTimestampUs = audio.timestampUs(samplesSoFar);
+const video = new VideoFrame(canvas, { timestamp: clock.now() });
+
+// AudioWorklet chunks carry their context time; recalibrate about once a second.
+const context = clock.sourceTimeline();
+const { contextTime, performanceTime } = audioContext.getOutputTimestamp();
+context.calibrate(contextTime * 1e6, performanceTime * 1000);
+const audioTimestampUs = context.timestampUs(chunkContextTime * 1e6);
 
 const playout = createPlayoutClock();
-playout.reportAudio(playedTimestampUs); // from the audio output, after its buffer and latency
+const out = audioContext.getOutputTimestamp(); // fresh on every report
+playout.reportAudio(mediaTimestampAt(out.contextTime), out.performanceTime * 1000);
 const decision = playout.due(frame.timestamp);
 if (decision.action === 'wait') setTimeout(retry, decision.waitUs / 1000);
 ```

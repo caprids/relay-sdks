@@ -61,6 +61,34 @@
       ]
     }
   ],
+  "calibratedTimelines": [
+    {
+      "name": "measured pairs anchor, correct drift beyond the tolerance, and restart after a discontinuity",
+      "createdAt": "0",
+      "steps": [
+        { "calibrate": "1000000", "calibrateAt": "10000", "expect": true },
+        { "source": "1020000", "expect": "30000" },
+        { "calibrate": "2000000", "calibrateAt": "1013000", "expect": false },
+        { "source": "2000000", "expect": "1010000" },
+        { "calibrate": "3000000", "calibrateAt": "2015000", "expect": false },
+        { "calibrate": "3000000", "calibrateAt": "2015001", "expect": true },
+        { "source": "3000000", "expect": "2015001" },
+        { "calibrate": "0", "calibrateAt": "3000000", "expect": true },
+        { "source": "20000", "expect": "3020000" }
+      ]
+    },
+    {
+      "name": "a tolerance of zero follows every differing measurement",
+      "createdAt": "0",
+      "toleranceUs": "0",
+      "steps": [
+        { "calibrate": "0", "calibrateAt": "0", "expect": true },
+        { "calibrate": "1000", "calibrateAt": "1000", "expect": false },
+        { "calibrate": "2000", "calibrateAt": "2001", "expect": true },
+        { "source": "3000", "expect": "3001" }
+      ]
+    }
+  ],
   "playout": [
     {
       "name": "the first frame anchors wall pacing; wait, show, the late boundary, then drop",
@@ -112,6 +140,17 @@
         { "at": "100000", "due": "500000", "expect": { "action": "drop", "offsetUs": "-100000" } },
         { "at": "150000", "mode": "audio", "position": "650000" },
         { "at": "150001", "mode": "wall", "position": "650001" }
+      ]
+    },
+    {
+      "name": "a step in output delay, as when switching to Bluetooth earbuds, holds video once and stays in sync",
+      "steps": [
+        { "at": "0", "report": "1000000" },
+        { "at": "20000", "due": "1020000", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "40000", "report": "840000" },
+        { "at": "40000", "due": "1040000", "expect": { "action": "wait", "offsetUs": "200000", "waitUs": "200000" } },
+        { "at": "240000", "due": "1040000", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "273333", "due": "1073333", "expect": { "action": "show", "offsetUs": "0" } }
       ]
     },
     {

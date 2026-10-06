@@ -60,11 +60,23 @@ def test_sample_timeline_vectors(vector: dict[str, Any]) -> None:
 def test_source_timeline_vectors(vector: dict[str, Any]) -> None:
     source = Source(int(vector["createdAt"]))
     timeline = BroadcastClock(now_us=source).source_timeline()
-    assert timeline.first_source_us is None
+    assert timeline.anchor_source_us is None
     for step in vector["steps"]:
         source.current = int(step["at"])
         assert timeline.timestamp_us(int(step["source"])) == int(step["expect"])
-    assert timeline.first_source_us == int(vector["steps"][0]["source"])
+    assert timeline.anchor_source_us == int(vector["steps"][0]["source"])
+
+
+@pytest.mark.parametrize("vector", VECTORS["calibratedTimelines"], ids=lambda vector: vector["name"])
+def test_calibrated_timeline_vectors(vector: dict[str, Any]) -> None:
+    tolerance = vector.get("toleranceUs")
+    clock = BroadcastClock(now_us=Source(int(vector["createdAt"])))
+    timeline = clock.source_timeline() if tolerance is None else clock.source_timeline(tolerance_us=int(tolerance))
+    for step in vector["steps"]:
+        if "calibrate" in step:
+            assert timeline.calibrate(int(step["calibrate"]), at_us=int(step["calibrateAt"])) is step["expect"]
+        else:
+            assert timeline.timestamp_us(int(step["source"])) == int(step["expect"])
 
 
 @pytest.mark.parametrize("vector", VECTORS["playout"], ids=lambda vector: vector["name"])
@@ -97,6 +109,14 @@ class TestBroadcastClock:
         assert before <= clock.origin_us <= time.monotonic_ns() // 1000
         assert 0 <= clock.now_us() < 1_000_000
 
+    def test_calibrates_at_the_time_source_now_by_default(self) -> None:
+        source = Source(0)
+        context = BroadcastClock(now_us=source).source_timeline()
+        source.current = 250_000
+        assert context.calibrate(7_000_000) is True
+        assert context.anchor_source_us == 7_000_000
+        assert context.timestamp_us(7_020_000) == 270_000
+
     def test_rounds_a_fractional_default_origin(self) -> None:
         clock = BroadcastClock(now_us=lambda: 1000.25)  # ty: ignore[invalid-argument-type]
         assert clock.origin_us == 1000
@@ -117,6 +137,10 @@ class TestBroadcastClock:
         clock = BroadcastClock(now_us=lambda: 0)
         with pytest.raises(ValueError):
             clock.source_timeline().timestamp_us(float("nan"))  # ty: ignore[invalid-argument-type]
+        with pytest.raises(ValueError):
+            clock.source_timeline(tolerance_us=-1)
+        with pytest.raises(ValueError):
+            clock.source_timeline().calibrate(0, at_us=float("nan"))  # ty: ignore[invalid-argument-type]
         with pytest.raises(ValueError):
             clock.from_source_us(float("inf"))  # ty: ignore[invalid-argument-type]
         with pytest.raises(ValueError):

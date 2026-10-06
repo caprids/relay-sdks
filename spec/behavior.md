@@ -1022,8 +1022,10 @@ to both languages.
   supervised generation starts a new one. The broadcast clock (`createBroadcastClock` /
   `BroadcastClock`) has an integer-microsecond origin. It maps times on its own source as
   `source − origin`, rounded to whole microseconds with ties upward. It maps a capture clock with
-  another origin (Chromium's `MediaStreamTrackProcessor`) by anchoring that clock's first timestamp
-  at `now()`. It maps sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
+  another origin and rate (an `AudioContext`, Chromium's `MediaStreamTrackProcessor`) through a
+  source timeline: `anchor + round(s − anchor s)`. A calibration pair `(s, at)` re-anchors when there
+  is no anchor, or when the anchor is off by more than `toleranceUs` (5 ms). Uncalibrated, the first
+  timestamp anchors at `now()`. No helper knows a microphone's input latency (#290). It maps sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
   (`createPlayoutClock` / `PlayoutClock`) is master-audio: its position is the latest audio report
   plus elapsed local time. It paces by wall clock while idle, after `stopAudio` / `stop_audio`,
   and after `audioTimeoutUs` (500 ms) without a report arriving (measured from arrival, not

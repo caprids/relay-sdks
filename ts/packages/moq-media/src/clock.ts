@@ -48,16 +48,30 @@ export interface SampleTimeline {
   timestampUs(sampleIndex: number): number;
 }
 
+/** Options for {@link BroadcastClock.sourceTimeline}. */
+export interface SourceTimelineOptions {
+  /** How far a calibration may disagree with the current anchor before it replaces it, in µs. Default 5,000. */
+  toleranceUs?: number;
+}
+
 /**
- * Maps timestamps from a capture clock with its own, unknown origin, such as Chromium's `MediaStreamTrackProcessor`
- * (`VideoFrame` and `AudioData` timestamps count from the system's monotonic zero, not from `performance.now()`'s).
+ * Maps timestamps from a clock with its own origin and rate onto the broadcast timeline: an `AudioContext`'s time
+ * (works in every browser), or Chromium's `MediaStreamTrackProcessor` timestamps, which count from the system's
+ * monotonic zero, not from `performance.now()`'s.
  */
 export interface SourceTimeline {
-  /** The first source timestamp mapped, which anchors the rest; `undefined` until then. */
-  readonly firstSourceUs: number | undefined;
+  /** The source time of the current anchor; `undefined` until the first calibration or timestamp. */
+  readonly anchorSourceUs: number | undefined;
   /**
-   * The broadcast time of this source timestamp. The first call anchors it at the clock's `now()`, and later
-   * timestamps keep their spacing from it, rounded to whole microseconds.
+   * Record that source time `sourceUs` happened at `atUs` on the broadcast clock's own source (default: now), for
+   * example `AudioContext.getOutputTimestamp()`'s `contextTime` and `performanceTime`, both in microseconds. The pair
+   * becomes the anchor when there is none, or when the current anchor predicts it more than `toleranceUs` off: the
+   * source drifted, or jumped, as an `AudioContext` does when it is replaced. Returns whether the anchor changed.
+   */
+  calibrate(sourceUs: number, atUs?: number): boolean;
+  /**
+   * The broadcast time of this source timestamp: the anchor's broadcast time plus the source's own elapsed time,
+   * rounded to whole microseconds. Without an anchor, the first call anchors this timestamp at the clock's `now()`.
    */
   timestampUs(sourceUs: number): number;
 }
@@ -74,8 +88,8 @@ export interface BroadcastClock {
    * capture clock with another origin, use {@link BroadcastClock.sourceTimeline}.
    */
   fromSourceUs(sourceUs: number): number;
-  /** Anchor a capture clock with its own origin at the broadcast time its first timestamp arrives. */
-  sourceTimeline(): SourceTimeline;
+  /** Map a clock with its own origin and rate, kept on the broadcast timeline by calibration. */
+  sourceTimeline(options?: SourceTimelineOptions): SourceTimeline;
   /**
    * Anchor a sample counter that starts at zero. The device clock that drives it drifts against the source, so
    * re-anchor with a fresh timeline when the two disagree by more than a frame.
@@ -94,11 +108,24 @@ export function createBroadcastClock(options: BroadcastClockOptions = {}): Broad
     originUs,
     now,
     fromSourceUs,
-    sourceTimeline() {
+    sourceTimeline({ toleranceUs = 5_000 } = {}) {
+      if (!(finite(toleranceUs, 'toleranceUs') >= 0)) throw new RangeError('toleranceUs must not be negative');
       let anchor: { sourceUs: number; timestampUs: number } | undefined;
       return {
-        get firstSourceUs() {
+        get anchorSourceUs() {
           return anchor?.sourceUs;
+        },
+        calibrate(sourceUs, atUs) {
+          finite(sourceUs, 'Source time');
+          const measured = atUs === undefined ? now() : fromSourceUs(atUs);
+          if (
+            anchor &&
+            Math.abs(anchor.timestampUs + Math.round(sourceUs - anchor.sourceUs) - measured) <= toleranceUs
+          ) {
+            return false;
+          }
+          anchor = { sourceUs, timestampUs: measured };
+          return true;
         },
         timestampUs(sourceUs) {
           finite(sourceUs, 'Source time');

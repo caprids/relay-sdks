@@ -26,6 +26,12 @@ type Vectors = {
     samples: [string, string][];
   }[];
   sourceTimelines: { name: string; createdAt: string; steps: { at: string; source: string; expect: string }[] }[];
+  calibratedTimelines: {
+    name: string;
+    createdAt: string;
+    toleranceUs?: string;
+    steps: { calibrate?: string; calibrateAt?: string; source?: string; expect: string | boolean }[];
+  }[];
   playout: { name: string; options?: Record<string, string>; steps: Step[] }[];
 };
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/clock.json', import.meta.url), 'utf8')) as Vectors;
@@ -70,12 +76,26 @@ describe('spec/vectors/clock.json', () => {
   it.each(vectors.sourceTimelines)('source timeline: $name', ({ createdAt, steps }) => {
     const time = source(Number(createdAt));
     const timeline = createBroadcastClock({ now: time.now }).sourceTimeline();
-    expect(timeline.firstSourceUs).toBeUndefined();
+    expect(timeline.anchorSourceUs).toBeUndefined();
     for (const step of steps) {
       time.set(Number(step.at));
       expect(timeline.timestampUs(Number(step.source))).toBe(Number(step.expect));
     }
-    expect(timeline.firstSourceUs).toBe(Number(steps[0]?.source));
+    expect(timeline.anchorSourceUs).toBe(Number(steps[0]?.source));
+  });
+
+  it.each(vectors.calibratedTimelines)('calibrated timeline: $name', ({ createdAt, toleranceUs, steps }) => {
+    const time = source(Number(createdAt));
+    const timeline = createBroadcastClock({ now: time.now }).sourceTimeline(
+      toleranceUs !== undefined ? { toleranceUs: Number(toleranceUs) } : {},
+    );
+    for (const step of steps) {
+      if (step.calibrate !== undefined) {
+        expect(timeline.calibrate(Number(step.calibrate), Number(step.calibrateAt))).toBe(step.expect);
+      } else {
+        expect(timeline.timestampUs(Number(step.source))).toBe(Number(step.expect));
+      }
+    }
   });
 
   it.each(vectors.playout)('playout clock: $name', ({ options = {}, steps }) => {
@@ -128,6 +148,16 @@ describe('createBroadcastClock', () => {
     expect(chunkToLocFrame(chunk, { timestampOffsetUs: -clock.originUs }).timestampUs).toBe(clock.fromSourceUs(34_333));
   });
 
+  it('calibrates at the time source now by default', () => {
+    let now = 0;
+    const clock = createBroadcastClock({ now: () => now });
+    const context = clock.sourceTimeline();
+    now = 250_000;
+    expect(context.calibrate(7_000_000)).toBe(true);
+    expect(context.anchorSourceUs).toBe(7_000_000);
+    expect(context.timestampUs(7_020_000)).toBe(270_000);
+  });
+
   it('rounds a fractional source time to the nearest microsecond, ties upward', () => {
     const clock = createBroadcastClock({ now: () => 10.5, originUs: 0 });
     expect(clock.now()).toBe(11);
@@ -142,6 +172,12 @@ describe('createBroadcastClock', () => {
       createBroadcastClock({ now: () => 0 })
         .sourceTimeline()
         .timestampUs(Number.NaN),
+    ).toThrow(RangeError);
+    expect(() => createBroadcastClock({ now: () => 0 }).sourceTimeline({ toleranceUs: -1 })).toThrow(RangeError);
+    expect(() =>
+      createBroadcastClock({ now: () => 0 })
+        .sourceTimeline()
+        .calibrate(0, Number.NaN),
     ).toThrow(RangeError);
     const clock = createBroadcastClock({ now: () => 0 });
     expect(() => clock.fromSourceUs(Number.POSITIVE_INFINITY)).toThrow(RangeError);

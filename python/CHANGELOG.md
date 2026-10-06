@@ -35,8 +35,8 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   that ends a broadcast: `isComplete: true` and no tracks ([#284](https://github.com/muxinc/relay-sdks/issues/284)).
 - `mux-moq-media`: one timeline per broadcast, and a playout clock for audio/video sync
   ([#285](https://github.com/muxinc/relay-sdks/issues/285)). `BroadcastClock` stamps every track from one origin
-  (`from_source_us`, `source_timeline` for a capture clock with its own origin, and `sample_timeline` for sample
-  counters). `PlayoutClock` takes audio reports and answers
+  (`from_source_us`, a calibrated `source_timeline` for a clock with its own origin and rate, and
+  `sample_timeline` for sample counters). `PlayoutClock` takes audio reports and answers
   `due(timestamp_us)` with a `PlayoutDecision` to wait, show, or drop, falling back to wall-clock pacing without audio.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The

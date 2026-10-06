@@ -277,24 +277,59 @@ the timescale on every media track. The format helpers do this by default.
 sources onto the timeline. It reads an injected monotonic microsecond source. The default source
 is `performance.now()` in TypeScript and `time.monotonic_ns()` in Python.
 
-Capture clocks do not share that source's origin. Chromium's `MediaStreamTrackProcessor` stamps
-`VideoFrame` and `AudioData` with microseconds from the system's monotonic zero, not from the
-page's time origin that `performance.now()` counts from
-([Chromium](https://chromium.googlesource.com/chromium/src/+/211cf780d86979929937ef73b6a27f13b9ea8e70%5E!/)),
-and JavaScript cannot read the difference. Map those timestamps through a source timeline. It
-anchors the first timestamp at the moment it arrives, and later ones keep the capture clock's own
-spacing. The capture-to-callback delay of that first frame becomes a constant offset, a few
-milliseconds at most. An application that knows the delay can subtract it.
+Every other clock a publisher reads has its own origin, and often its own rate. A source timeline
+maps one of them onto the broadcast timeline. The application calibrates it with measured pairs:
+"source time `s` happened at `at` on the broadcast clock's source". A pair replaces the current
+anchor when there is none, or when the anchor predicts it more than `toleranceUs` off (default
+5 ms): the source drifted, or it jumped. Between anchors, timestamps keep the source's own spacing.
+A timeline never calibrated anchors its first timestamp at the moment it arrives.
 
 | Operation | TypeScript | Python | Result |
 | --- | --- | --- | --- |
 | Origin, on the source clock | `originUs` | `origin_us` | Integer µs; defaults to the source's time at creation, rounded |
 | Time on the timeline now | `now()` | `now_us()` | `source − origin`, integer µs |
 | Map a time on the clock's own source | `fromSourceUs(t)` | `from_source_us(t)` | `t − origin`, rounded to integer µs, ties upward |
-| Anchor a capture clock with another origin | `sourceTimeline()` | `source_timeline()` | A mapper, anchored by its first timestamp |
-| Capture timestamp to timestamp | `timeline.timestampUs(t)` | `timeline.timestamp_us(t)` | `now()` at the first call `+ round(t − first t)` |
+| Map a clock with another origin | `sourceTimeline({ toleranceUs })` | `source_timeline(tolerance_us=)` | A mapper; tolerance defaults to 5,000 |
+| Measured pair | `timeline.calibrate(s, at?)` | `timeline.calibrate(s, at_us=)` | Re-anchors (returns true) when unanchored or off by more than the tolerance |
+| Source time to timestamp | `timeline.timestampUs(s)` | `timeline.timestamp_us(s)` | `anchor + round(s − anchor s)`; unanchored, the first call anchors at `now()` |
 | Anchor a sample counter | `sampleTimeline(rate, { firstSampleUs })` | `sample_timeline(rate, first_sample_us=)` | A mapper; the anchor defaults to `now()` |
 | Sample index to timestamp | `timeline.timestampUs(n)` | `timeline.timestamp_us(n)` | `anchor + floor(n × 1,000,000 / rate)` |
+
+#### Browser capture
+
+The recipe has to work in Chromium, Firefox and Safari. `MediaStreamTrackProcessor` cannot be the
+default, because Firefox has none and Safari's handles video only, in workers (MDN compat data,
+2026-10). The portable path:
+
+- **Video.** Draw the camera into a canvas, or wrap a `<video>` element in a `VideoFrame`, and stamp
+  each frame with `clock.now()` when it is captured. That clock is `performance.now()`, which
+  every browser has.
+- **Audio.** Route the microphone through an `AudioContext` (`MediaStreamAudioSourceNode` into an
+  `AudioWorkletNode`), and stamp each chunk with the context time of its first frame, in
+  microseconds, through a source timeline. About once a second, call
+  `calibrate(contextTime × 1e6, performanceTime × 1000)` with the pair from
+  `AudioContext.getOutputTimestamp()` (Chrome 57, Firefox 70, Safari 14.1).
+- **Why the AudioContext.** The context runs at one fixed sample rate whatever the microphone is,
+  because the browser resamples. When the user switches devices, say from a laptop microphone at
+  48 kHz to Bluetooth earbuds at 16 kHz, the count does not change rate. The context also keeps
+  running through the gap while the device switches, emitting silence, so the count never stalls.
+- **Drift.** The context clock follows the output device, so it drifts against
+  `performance.now()`, and it changes when the output device does. Regular calibration absorbs
+  both. A new `AudioContext` restarts its time at zero, and the next calibration is far enough
+  off to re-anchor.
+- **The Chromium alternative.** Where `MediaStreamTrackProcessor` exists, its `VideoFrame` and
+  `AudioData` timestamps count from the system's monotonic zero, not from `performance.now()`'s
+  ([Chromium](https://chromium.googlesource.com/chromium/src/+/211cf780d86979929937ef73b6a27f13b9ea8e70%5E!/)).
+  Map them through an uncalibrated source timeline. The first frame's capture-to-callback delay
+  becomes a constant offset of a few milliseconds.
+
+No browser API reports a microphone's own input latency. Bluetooth input can arrive 100–200 ms
+later than a built-in microphone, and a timeline built from when samples reach the page cannot see
+that. Audio from such a device is stamped late by that amount, so a player plays it late against
+video. Subtract a known capture latency from the audio timestamps if you have one. Measuring it on
+real devices is [issue #290](https://github.com/muxinc/relay-sdks/issues/290).
+
+#### Stamping
 
 A source time before the origin maps to a negative number, which the LOC helpers refuse. That frame
 was captured before the broadcast started: create the clock before you start capturing, or pass the
@@ -302,9 +337,10 @@ earliest capture time as the origin. Stamp the encoder's input (`new VideoFrame(
 the `AudioData` timestamp) and the encoded chunks carry the timeline, so `chunkToLocFrame` passes it
 through unchanged. If a chunk still carries the clock's own source time, `timestampOffsetUs:
 -clock.originUs` maps it; the origin is a whole number of microseconds so that offset is valid.
-A sample counter runs on the audio device's clock, which drifts against the monotonic source by up
-to about 100 ppm. Over a long broadcast, re-anchor with a new `sampleTimeline` when the two disagree
-by more than a frame.
+A sample timeline suits sources with no clock of their own to calibrate against, such as a file
+or a synthetic tone. A live device's counter drifts against the monotonic source by up to about
+100 ppm, and it changes rate and stalls when the device changes. Use a calibrated source timeline
+for live capture instead.
 
 ### Playout clock (player)
 
@@ -314,9 +350,16 @@ injected time source as the broadcast clock, so a Python player or a test drives
 
 Audio is the master. The audio path calls `reportAudio(timestampUs, atUs?)` /
 `report_audio(timestamp_us, at_us=None)` with the timeline timestamp that is audible at local time
-`at` (default: now). That is the timestamp leaving the speaker: what was handed to the output,
-less the jitter-buffer depth, `AudioContext.outputLatency`, and any extra path, such as a WebRTC
-loopback for echo cancellation. Between reports the clock extrapolates at real-time rate:
+`at` (default: now). That is the timestamp leaving the speaker. In a browser,
+`AudioContext.getOutputTimestamp()` gives this in every engine: the context time reaching the
+output (`contextTime`) and when (`performanceTime`). The player maps that context time to the
+media timestamp it scheduled there, then reports `reportAudio(mediaUs, performanceTime × 1000)`.
+Read it fresh for every report: the output delay changes with the device. Switching to Bluetooth
+earbuds can add 150 ms or more, and a value cached at startup leaves video that far ahead. Where
+an application reports at handover time instead, it subtracts the jitter-buffer depth, the
+current `outputLatency`, and any extra path, such as a WebRTC loopback for echo cancellation. A
+step in the output delay moves the position once. Video then holds frames, or drops them, by that
+step and stays in sync after it. Between reports the clock extrapolates at real-time rate:
 `position = reported + (now − at)`. Reports re-anchor it, so the audio device's drift never builds
 up. Audio silence is measured from when the latest report arrived, not from its `at`, so a report
 that describes a moment slightly in the past still counts as fresh.

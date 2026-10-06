@@ -54,27 +54,46 @@ class SampleTimeline:
 
 
 class SourceTimeline:
-    """Maps timestamps from a capture clock with its own, unknown origin onto the broadcast timeline.
+    """Maps timestamps from a clock with its own origin and rate onto the broadcast timeline.
 
-    The first timestamp mapped is anchored at the clock's ``now_us()``; later ones keep their spacing from it.
+    Calibrate it with measured pairs of source time and time on the broadcast clock's own source; without a
+    calibration, the first timestamp mapped is anchored at the clock's ``now_us()``.
     """
 
-    def __init__(self, clock: "BroadcastClock") -> None:
+    def __init__(self, clock: "BroadcastClock", tolerance_us: int) -> None:
         self._clock = clock
+        self._tolerance_us = tolerance_us
         self._anchor: tuple[float, int] | None = None
 
     @property
-    def first_source_us(self) -> float | None:
-        """The first source timestamp mapped, which anchors the rest; ``None`` until then."""
+    def anchor_source_us(self) -> float | None:
+        """The source time of the current anchor; ``None`` until the first calibration or timestamp."""
         return None if self._anchor is None else self._anchor[0]
 
+    def calibrate(self, source_us: int, *, at_us: int | None = None) -> bool:
+        """Record that source time ``source_us`` happened at ``at_us`` on the clock's own source (default: now).
+
+        The pair becomes the anchor when there is none, or when the current anchor predicts it more than the
+        tolerance off: the source drifted, or jumped. Returns whether the anchor changed.
+        """
+        _finite(source_us, "source_us")
+        measured = self._clock.now_us() if at_us is None else self._clock.from_source_us(at_us)
+        anchor = self._anchor
+        if anchor is not None and abs(anchor[1] + _round(source_us - anchor[0]) - measured) <= self._tolerance_us:
+            return False
+        self._anchor = (source_us, measured)
+        return True
+
     def timestamp_us(self, source_us: int) -> int:
-        """Return the broadcast time of this source timestamp, rounded to whole microseconds."""
+        """Return the broadcast time of this source timestamp, rounded to whole microseconds.
+
+        Without an anchor, the first call anchors this timestamp at the clock's ``now_us()``.
+        """
         _finite(source_us, "source_us")
         if self._anchor is None:
             self._anchor = (source_us, self._clock.now_us())
-        first_source, first_timestamp = self._anchor
-        return first_timestamp + _round(source_us - first_source)
+        anchor_source, anchor_timestamp = self._anchor
+        return anchor_timestamp + _round(source_us - anchor_source)
 
 
 class BroadcastClock:
@@ -107,9 +126,15 @@ class BroadcastClock:
         """
         return _round(_finite(source_us, "source_us") - self._origin_us)
 
-    def source_timeline(self) -> SourceTimeline:
-        """Anchor a capture clock with its own origin at the broadcast time its first timestamp arrives."""
-        return SourceTimeline(self)
+    def source_timeline(self, *, tolerance_us: int = 5_000) -> SourceTimeline:
+        """Map a clock with its own origin and rate, kept on the broadcast timeline by calibration.
+
+        An ``AudioContext``-style clock, or capture timestamps from another origin. ``tolerance_us`` is how far a
+        calibration may disagree with the current anchor before it replaces it.
+        """
+        if _finite(tolerance_us, "tolerance_us") < 0:
+            raise ValueError("tolerance_us must not be negative")
+        return SourceTimeline(self, tolerance_us)
 
     def sample_timeline(self, sample_rate: int, *, first_sample_us: int | None = None) -> SampleTimeline:
         """Anchor a sample counter at ``first_sample_us`` on the timeline (default: now).

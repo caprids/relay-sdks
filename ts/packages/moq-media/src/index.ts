@@ -24,6 +24,7 @@ export {
   type SampleTimeline,
   type SampleTimelineOptions,
   type SourceTimeline,
+  type SourceTimelineOptions,
 } from './clock.js';
 export { avcCodecString } from './h264.js';
 export {
