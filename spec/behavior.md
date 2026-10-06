@@ -531,7 +531,9 @@ taken over.
   or has none on the old one, and then moves at the start of its next write or group, never under
   one: a group opened on the old generation finishes there. Subscribers following generations move
   to the new one when it is announced, which creates its demand. `hasDemand` and `demandChanges()`
-  follow the generation the writer is on, and report no `false` when demand carries over. When the
+  follow the generation the writer is on, and report no `false` when demand carries over. They report
+  `true` again on the move, as they do when the relay replaces its upstream subscription, so state an
+  application writes on demand (a catalog) reaches the new generation. When the
   overlap runs out, every track moves regardless of demand, and the old generation closes as
   `close()` closes it.
 - **Subscriber.** The replacement is a new connection. Every want subscribes on it at once, and its
