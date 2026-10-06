@@ -9,6 +9,7 @@
  * (`subscription.ts`); this module only routes their events and owns the switchable's own ending.
  */
 import type { Goaway, MessageParameters, MoqtObject, PublishDone, RequestError, SubscribeOk } from '@mux/moq-core';
+import { MAX_TIMEOUT_MS } from './connect-session.js';
 import { RelayError } from './errors.js';
 import {
   endError,
@@ -88,8 +89,8 @@ export interface SwitchOptions {
    */
   until?: 'first-object' | ((object: MoqtObject) => boolean);
   /**
-   * How long the old subscription stays open after the cutover, in milliseconds; default 0, which
-   * cancels it at once. Groups arrive out of order across streams, most of all through another
+   * How long the old subscription stays open after the cutover, in milliseconds, from 0 to
+   * 2147483647, the longest a timer holds; default 0, which cancels it at once. Groups arrive out of order across streams, most of all through another
    * relay, so at the cutover an older group of the old track can still be in flight, or the rest of
    * one it began. While it drains, its objects, subgroup ends and resets from groups no later than
    * the largest it had delivered still reach the handlers, with the old track's name, after
@@ -393,8 +394,10 @@ export function createSwitchable(
       // Arguments before the switchable's or the connection's state (spec/behavior.md, Arguments).
       trackName(track);
       const predicate = untilPredicate(until);
-      if (typeof drainMs !== 'number' || !Number.isFinite(drainMs) || drainMs < 0)
-        throw new TypeError('drainMs must be a finite number of milliseconds, 0 or more');
+      if (typeof drainMs !== 'number') throw new TypeError('drainMs must be a number of milliseconds');
+      // A timer holds at most MAX_TIMEOUT_MS; a larger delay would fire at once and end the drain early.
+      if (!Number.isFinite(drainMs) || drainMs < 0 || drainMs > MAX_TIMEOUT_MS)
+        throw new RangeError(`drainMs must be between 0 and ${MAX_TIMEOUT_MS} milliseconds`);
       if (signal !== undefined && !(signal instanceof AbortSignal))
         throw new TypeError('signal must be an AbortSignal');
       if (end) {

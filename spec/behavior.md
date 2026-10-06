@@ -426,7 +426,9 @@ primitive subscriber. A supervised want still replaces its subscription break-be
   ([issue #243](https://github.com/muxinc/relay-sdks/issues/243)).
 - **Drain.** Groups arrive out of order across streams, especially through another relay, so an
   older group of the old track can still be in flight at the cutover. `drainMs` / `drain` (default
-  0) keeps the old subscription open for that long. While it drains, its objects, subgroup ends
+  0) keeps the old subscription open for that long. It takes 0 up to the bound every SDK deadline
+  has (2147483647 ms, 2147483.647 s), the longest a JavaScript timer holds; beyond it, or negative,
+  is a `RangeError` / `ValueError`, and a non-number a `TypeError`. While it drains, its objects, subgroup ends
   and resets still reach the handlers, with the old track's name, if they belong to a group no
   later than the largest it had delivered. Its later groups and other events are discarded. When
   the time is up, it is cancelled. An old subscription that had delivered nothing is cancelled at

@@ -436,7 +436,9 @@ describe('subscribeSwitchable', () => {
     expect(() => switchable.switchTo('video-lo', { until: 'never' as never })).toThrow(TypeError);
     expect(() => switchable.switchTo('video-lo', { until: (async () => true) as never })).toThrow(TypeError);
     expect(() => switchable.switchTo('video-lo', null as never)).toThrow(TypeError);
-    expect(() => switchable.switchTo('video-lo', { drainMs: -1 })).toThrow(TypeError);
+    expect(() => switchable.switchTo('video-lo', { drainMs: -1 })).toThrow(RangeError);
+    expect(() => switchable.switchTo('video-lo', { drainMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => switchable.switchTo('video-lo', { drainMs: '5' as never })).toThrow(TypeError);
     expect(switchable.pending).toBe('video-hi');
     expect(() => snapshotSwitchableHandlers({ onObject: async () => {} } as never)).toThrow(TypeError);
     await flush();

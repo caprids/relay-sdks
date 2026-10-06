@@ -476,8 +476,12 @@ class TestSwitchable:
             harness.switchable.switch_to("video-lo", until=cast(Any, "never"))
         with pytest.raises(TypeError):
             harness.switchable.switch_to("video-lo", until=cast(Any, async_until))
-        with pytest.raises(TypeError):
+        with pytest.raises(ValueError):
             harness.switchable.switch_to("video-lo", drain=-1)
+        with pytest.raises(ValueError):
+            harness.switchable.switch_to("video-lo", drain=2_147_483.648)
+        with pytest.raises(TypeError):
+            harness.switchable.switch_to("video-lo", drain=cast(Any, "5"))
         with pytest.raises(TypeError):
             harness.switchable.switch_to("video-lo", cancellation=cast(Any, object()))
         assert harness.switchable.pending == "video-hi"

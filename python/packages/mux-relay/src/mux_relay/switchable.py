@@ -45,6 +45,7 @@ from ._subscription import (
 )
 from ._validation import track_name
 from .cancellation import CancellationToken
+from .connect_session import MAX_TIMEOUT
 from .errors import RelayError
 
 
@@ -299,7 +300,8 @@ class SwitchableSubscription:
         subscription can also start with a stale cached group, or lose its first object through
         another relay (issue #243); a timeline predicate absorbs both.
 
-        ``drain`` keeps the old subscription open that many seconds after the cutover. Groups arrive
+        ``drain`` keeps the old subscription open that many seconds after the cutover, from 0 to
+        ``MAX_TIMEOUT`` (2147483.647, as for every SDK deadline). Groups arrive
         out of order across streams, most of all through another relay, so an older group of the old
         track can still be in flight at the cutover. While it drains, its objects, subgroup ends and
         resets from groups no later than the largest it had delivered still reach the handlers, with
@@ -315,8 +317,11 @@ class SwitchableSubscription:
         # Arguments before the switchable's or the connection's state (spec/behavior.md, Arguments).
         track_name(track)
         predicate = _until_predicate(until)
-        if isinstance(drain, bool) or not isinstance(drain, (int, float)) or not math.isfinite(drain) or drain < 0:
-            raise TypeError("drain must be a finite number of seconds, 0 or more")
+        if isinstance(drain, bool) or not isinstance(drain, (int, float)):
+            raise TypeError("drain must be a number of seconds")
+        # The same bound as every SDK deadline, which the TypeScript SDK's timers impose.
+        if not math.isfinite(drain) or not 0 <= drain <= MAX_TIMEOUT:
+            raise ValueError(f"drain must be between 0 and {MAX_TIMEOUT} seconds")
         if cancellation is not None and not isinstance(cancellation, CancellationToken):
             raise TypeError("cancellation must be a CancellationToken")
         if self._end is not None:
