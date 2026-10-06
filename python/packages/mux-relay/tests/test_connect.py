@@ -758,7 +758,14 @@ class TestCredentialExpiry:
 
     @pytest.mark.parametrize(
         "token",
-        ["opaque", _jwt({"root": "room"}), _jwt({"exp": "1900000000"}), _jwt({"exp": True}), "a.!!!.c"],
+        [
+            "opaque",
+            _jwt({"root": "room"}),
+            _jwt({"exp": "1900000000"}),
+            _jwt({"exp": True}),
+            _jwt({"exp": 10**400}),
+            "a.!!!.c",
+        ],
     )
     async def test_knows_no_expiry_otherwise(self, connections: list[RelaySubscriber], token: str) -> None:
         _, connection, _ = await connect_fake(connections, get_token=lambda: token)

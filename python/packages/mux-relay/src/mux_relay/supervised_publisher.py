@@ -248,6 +248,8 @@ class _SupervisedTrackWriter(RelayTrackWriter):
                 hold()
 
             self._group_holds.add(release)
+            # The connection's end closes the group under the application, which may never close it itself.
+            generation.publisher.closed.add_done_callback(lambda _: release())
             return _SupervisedGroupWriter(group, self, generation, writer, release)
 
         return await self._on_live(open_on)
@@ -390,6 +392,8 @@ class _SupervisedTrackWriter(RelayTrackWriter):
 
     def _retire(self) -> None:
         """The supervisor stopped: the track is closed for good."""
+        for release in list(self._group_holds):
+            release()
         if self._retired:
             return
         self._retired = True
@@ -829,13 +833,19 @@ async def _supervise_relay_publisher(
         # Every track moved and every write or group still on the old generation finished, or the overlap ran out.
         settled = asyncio.ensure_future(moved_and_idle())
         _observe(settled)
+        # So does the next generation's own rotation falling due, for a credential shorter than the overlap.
+        next_due = asyncio.ensure_future(rotation_due(nxt.publisher.expires_at, rotate_margin, loop.create_future()))
+        _observe(next_due)
         try:
             # The next generation ending cuts the overlap short too: its tracks need the generation after it now.
             await wait_any(
-                [stopping], settles=[settled, live.publisher.closed, nxt.publisher.closed], limit=ROTATION_OVERLAP
+                [stopping],
+                settles=[settled, live.publisher.closed, nxt.publisher.closed, next_due],
+                limit=ROTATION_OVERLAP,
             )
         finally:
             settled.cancel()
+            next_due.cancel()
             live.idle = None
         for track in list(state.tracks.values()):
             track._settle()

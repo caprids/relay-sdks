@@ -570,10 +570,18 @@ async def _supervise_relay_subscriber(
         old.retiring.cancel()
         if old.holds == 0:
             old.idle.set_result(None)
-        # The replacement ending cuts the overlap short too: the wants on it need the next connection now.
-        await wait_any(
-            [lifetime, old.ended, nxt.ended], settles=[old.idle, old.subscriber.closed], limit=ROTATION_OVERLAP
-        )
+        # The replacement ending cuts the overlap short too: the wants on it need the next connection now. So
+        # does its own rotation falling due, for a credential shorter than the overlap.
+        next_due = asyncio.ensure_future(rotation_due(nxt.subscriber.expires_at, rotate_margin, loop.create_future()))
+        _observe(next_due)
+        try:
+            await wait_any(
+                [lifetime, old.ended, nxt.ended],
+                settles=[old.idle, old.subscriber.closed, next_due],
+                limit=ROTATION_OVERLAP,
+            )
+        finally:
+            next_due.cancel()
         if state.retiring is old:
             state.retiring = None
         old.subscriber.close()

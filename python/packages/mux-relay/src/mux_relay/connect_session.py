@@ -82,10 +82,13 @@ def jwt_expiry(token: str) -> datetime | None:
 
     exp = claims.get("exp") if isinstance(claims, dict) else None
 
-    if not isinstance(exp, int | float) or isinstance(exp, bool) or not math.isfinite(exp):
+    if not isinstance(exp, int | float) or isinstance(exp, bool):
         return None
 
+    # A huge integer `exp` overflows float conversion, in isfinite as in fromtimestamp: no known expiry either.
     try:
+        if not math.isfinite(exp):
+            return None
         return datetime.fromtimestamp(exp, UTC)
     except (OverflowError, OSError, ValueError):
         return None

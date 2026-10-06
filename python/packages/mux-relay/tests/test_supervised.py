@@ -1430,3 +1430,19 @@ async def test_closes_the_old_generation_at_once_when_a_track_with_a_group_open_
     await writer.write(b"\x07")
     writer.close()
     await until(lambda: p.connections[0].close_calls == 1, "old generation closed well before the overlap ends", 0.5)
+
+
+# ------------------------------------------------------------------ Codex pass 5 fixes (#261)
+
+
+async def test_rotates_a_short_lived_replacement_during_the_overlap_instead_of_letting_it_expire(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup, [None, _in(0.3), _in(3600)])
+    subscriber.want("silent", ["room"], "silent", retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()  # silent: no object will take the handoff over
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].accept()
+    await until(lambda: len(s.connections) == 3, "the replacement rotated well within the 10 s overlap", 2.0)
