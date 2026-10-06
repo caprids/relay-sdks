@@ -47,3 +47,10 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   connections, follows a supervised publisher's newest generation through discovery, and reports `on_restarted`. The
   primitives are unchanged. The examples' shared `announce_race.py` is retired: the demo, the Video.js example's
   `--verify` viewer and the live smoke test subscribe through `want`.
+- `mux-relay`: sessions end at the token's expiry, and the supervisors now rotate before it, as in the TypeScript SDK
+  ([#261](https://github.com/muxinc/relay-sdks/issues/261)). `get_token` may return a `RelayCredential`
+  (`token`, an aware `expires_at`); every connection exposes `expires_at`, from that or the JWT's `exp` claim. Both
+  supervisors take `rotate_before` (seconds, default 60) and `rotate()`, and replace their connection
+  make-before-break: the publisher moves each track to the next generation once it has demand there, and every want
+  moves its subscription to the new connection as a move does. A want whose target is unchanged cuts over on the first
+  object the old subscription did not deliver, with no callback, so nothing is lost or repeated.

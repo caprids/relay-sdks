@@ -396,6 +396,57 @@ describe('connectRelaySubscriber', () => {
     expect(getToken).toHaveBeenCalledOnce();
   });
 
+  describe('credential expiry', () => {
+    const base64url = (value: string) => btoa(value).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const jwt = (claims: unknown) => `${base64url('{"alg":"HS256"}')}.${base64url(JSON.stringify(claims))}.sig`;
+
+    it('takes the expiry a RelayCredential gives and sends its token', async () => {
+      const expiresAt = new Date('2030-01-02T03:04:05Z');
+      const { connection, createTransport } = await connectFake({
+        getToken: async () => ({ token: 'opaque', expiresAt }),
+      });
+
+      expect(createTransport.mock.calls[0]![0]).toBe(`${endpoint}?jwt=opaque`);
+      expect(connection.expiresAt).toEqual(expiresAt);
+      expect(connection.expiresAt).not.toBe(expiresAt);
+    });
+
+    it("reads a bare JWT's exp claim without verifying it", async () => {
+      const { connection } = await connectFake({ getToken: () => jwt({ exp: 1_900_000_000, root: 'room' }) });
+      expect(connection.expiresAt).toEqual(new Date(1_900_000_000_000));
+    });
+
+    it('reads the exp claim of a jwt already on the endpoint', async () => {
+      const { connection } = await connectFake({ url: `${endpoint}?jwt=${jwt({ exp: 1_900_000_001 })}` });
+      expect(connection.expiresAt).toEqual(new Date(1_900_000_001_000));
+    });
+
+    it.each([
+      ['an opaque token', 'opaque'],
+      ['a JWT without exp', jwt({ root: 'room' })],
+      ['a JWT with a string exp', jwt({ exp: '1900000000' })],
+      ['a malformed payload', 'a.!!!.c'],
+    ])('knows no expiry for %s', async (_, token) => {
+      const { connection } = await connectFake({ getToken: () => token });
+      expect(connection.expiresAt).toBeUndefined();
+    });
+
+    it('rejects a credential of the wrong shape as a TypeError and an invalid date as a RangeError', async () => {
+      for (const resolved of [42, { token: 1, expiresAt: new Date() }, { token: 't', expiresAt: 1_900_000_000 }]) {
+        await expect(
+          connectRelaySubscriber({ url: endpoint, getToken: () => resolved as never, createTransport: vi.fn() }),
+        ).rejects.toThrow(TypeError);
+      }
+      await expect(
+        connectRelaySubscriber({
+          url: endpoint,
+          getToken: () => ({ token: 't', expiresAt: new Date(Number.NaN) }),
+          createTransport: vi.fn(),
+        }),
+      ).rejects.toThrow(RangeError);
+    });
+  });
+
   it('does not mint a token when the endpoint already contains an explicit jwt', async () => {
     const getToken = vi.fn(() => {
       throw new Error('must not run');
@@ -602,12 +653,42 @@ describe('connectRelaySubscriber', () => {
     await expect(connecting).rejects.toMatchObject({ code: 'TRANSPORT_ERROR', phase: 'connecting' });
   });
 
-  it('does not read a peer close with UNAUTHORIZED after server SETUP as a credentials refusal', async () => {
-    const fake = await connectFake();
+  // moq-relay 0.17.0 ends a live session this way when its grant expires or is revoked (#261, #227).
+  it('reports a peer close with UNAUTHORIZED after server SETUP as UNAUTHORIZED in phase connection', async () => {
+    const fake = await connectFake({ getToken: () => 'secret-token' });
 
     fake.peerClose({ closeCode: 0x2, reason: 'unauthorized' });
     const { error } = await fake.connection.closed;
-    expect(error).not.toMatchObject({ code: 'UNAUTHORIZED' });
+    expect(error).toMatchObject({ name: 'RelayError', code: 'UNAUTHORIZED', phase: 'connection' });
+    expect((error as Error).message).toMatch(/expired or its grant was revoked/);
+    expect((error as Error).message).not.toMatch(/secret-token/);
+  });
+
+  it('reports a session error carrying UNAUTHORIZED after server SETUP as UNAUTHORIZED in phase connection', async () => {
+    const sessionError = Object.assign(new Error('the peer closed the session (code 2, unauthorized)'), {
+      source: 'session',
+      closeCode: 0x2,
+      reason: 'unauthorized',
+    });
+    let report: ((info: { error?: unknown }) => void) | undefined;
+    const fake = createFakeTransport();
+    const lifetime = await openRelaySession(
+      { url: endpoint, createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }) },
+      (_transport, callbacks) => {
+        report = (info) => callbacks.onClosed?.(info);
+        return { ready: Promise.resolve(), destroy: () => {} };
+      },
+    );
+    report?.({ error: sessionError });
+    const { error } = await lifetime.closed;
+    expect(error).toMatchObject({ code: 'UNAUTHORIZED', phase: 'connection', cause: sessionError });
+  });
+
+  it('keeps a peer close with any other code after server SETUP a clean close', async () => {
+    const fake = await connectFake();
+
+    fake.peerClose({ closeCode: 0x0, reason: '' });
+    expect((await fake.connection.closed).error).toBeUndefined();
   });
 
   it('closes a transport whose handshake rejects', async () => {

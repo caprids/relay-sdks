@@ -71,6 +71,7 @@ function recordingPublisher(
   };
   const publisher: RelayPublisher = {
     announced: Promise.resolve(),
+    expiresAt: undefined,
     closed: new Promise(() => {}),
     close: async () => {},
     registerTrack({ track }) {

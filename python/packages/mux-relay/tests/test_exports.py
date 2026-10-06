@@ -56,6 +56,7 @@ PUBLIC_NAMES = [
     "SubscribedEvent",
     "Subscription",
     "RelayAwaitable",
+    "RelayCredential",
     "SubscriptionConnectionClosedError",
     "SubscriptionEnd",
     "SubscriptionEndKind",

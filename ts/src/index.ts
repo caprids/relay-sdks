@@ -15,6 +15,7 @@ export type {
 export type {
   ConnectRelayOptions,
   ConnectRelaySubscriberOptions,
+  RelayCredential,
   RelaySubscriber,
   RelaySubscriptionHandlers,
   RelayTrackOptions,

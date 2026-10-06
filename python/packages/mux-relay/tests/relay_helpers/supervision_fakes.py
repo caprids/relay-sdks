@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from moq_core import Closed, KeyValuePair, MoqtObject, PublishDone, RequestError, SubscribeOk
 from mux_relay import (
@@ -43,7 +44,13 @@ class FakeTrack:
         self.closed = False
         self._demand = False
         self._queues: set[asyncio.Queue[bool | None]] = set()
+        self.groups: list[FakeGroup] = []
         self.writer = _FakeWriter(self)
+
+    def reset_groups(self) -> None:
+        """Close every open group the way the primitive does when the relay resets demand: no wrapper method runs."""
+        for group in self.groups:
+            group.closed = True
 
     def set_demand(self, value: bool) -> None:
         self._demand = value
@@ -110,6 +117,7 @@ class FakeGroup:
         self.group_id = len(track.writes)
         self.objects: list[bytes] = []
         self.closed = False
+        track.groups.append(self)
 
     @property
     def object_count(self) -> int:
@@ -123,6 +131,9 @@ class FakeGroup:
     async def close(self) -> None:
         if self._track.closed:
             raise RelayError("Published track is closed", code="CLOSED", phase="closing")
+        if self._track.fail_next is not None:
+            error, self._track.fail_next = self._track.fail_next, None
+            raise error
         self.closed = True
 
     def abort(self, reason: BaseException | None = None) -> None:
@@ -132,8 +143,9 @@ class FakeGroup:
 class FakePublisher:
     """A publisher connection the test ends at will."""
 
-    def __init__(self, namespace: Sequence[str]) -> None:
+    def __init__(self, namespace: Sequence[str], expires_at: datetime | None = None) -> None:
         self.namespace = tuple(namespace)
+        self.expires_at = expires_at
         self.tracks: dict[str, FakeTrack] = {}
         self.close_calls = 0
         self._ended = False
@@ -268,7 +280,8 @@ class FakeDiscovery:
 class FakeSubscriber:
     """A subscriber connection the test ends at will."""
 
-    def __init__(self) -> None:
+    def __init__(self, expires_at: datetime | None = None) -> None:
+        self.expires_at = expires_at
         self.subscriptions: list[FakeSubscription] = []
         self.discoveries: list[FakeDiscovery] = []
         self._ended = False

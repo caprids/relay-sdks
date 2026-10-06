@@ -248,6 +248,28 @@ a string holding an absolute URL is a `TypeError`. Every deadline (`connectTimeo
 milliseconds, the largest delay a JavaScript timer holds. A larger value is a `RangeError` rather
 than a deadline that fires immediately; a value that is not a number is a `TypeError`.
 
+### Token expiry
+
+The relay ends a session when its token expires, and a live session cannot take a new token. Every
+connection exposes `expiresAt`, the time that will happen: from the JWT's `exp` claim, or from a
+`RelayCredential` your token provider returns when the token is not a JWT or your server knows
+better.
+
+```js
+const subscriber = await connectRelaySubscriber({
+  url,
+  getToken: async () => {
+    const { token, expiresAt } = await fetchRelayToken(); // your server
+    return { token, expiresAt: new Date(expiresAt) };
+  },
+});
+console.log('ends at', subscriber.expiresAt);
+```
+
+At that time the connection closes with `UNAUTHORIZED` in phase `connection`. The primitives do not
+prevent it: open a replacement before then. The [supervised connections](#stay-connected-supervised-connections)
+do it for you, make-before-break, a minute before expiry by default (`rotateBeforeMs`).
+
 Both roles take the same connection options, `ConnectRelayOptions`: `url`, `getToken`, `signal`,
 `connectTimeoutMs`, and `createTransport`. `ConnectRelaySubscriberOptions` adds `requestTimeoutMs`,
 the deadline for a subscription's initial response. `ConnectRelayPublisherOptions` adds `namespace`
@@ -472,6 +494,16 @@ its own groups. Wanting the key again with only `until`, `drainMs`, `staleAfterM
 handlers changed swaps them without resubscribing. Another namespace, or turning `generations` on or
 off, replaces the want.
 
+Both supervisors **rotate** before the token expires ([token expiry](#token-expiry)), so a long
+session never hits the relay's deadline. `rotateBeforeMs` (default 60 s) before `expiresAt`, they
+call `getToken` again and open the replacement while the old connection still serves. The
+publisher's next generation is announced, each track moves to it once viewers subscribe there, and
+the old generation closes. Each want moves its subscription to the new connection as a move does;
+when its target is unchanged, the cutover is invisible: no callback runs and nothing is lost or
+repeated. Call `rotate()` to do it now, for example after revoking a token. In a local test with
+12 s tokens, 989 objects written every 40 ms over 9 rotations all arrived, with no gap longer than
+42 ms. See [rotation](../spec/behavior.md#rotation).
+
 ## Publishing lifecycle
 
 A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate
@@ -667,7 +699,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. Reported in browsers and over native QUIC (`@mux/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the refusal, so there it arrives as `TRANSPORT_ERROR` (#14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the credential of a live session expired or its grant was revoked ([token expiry](#token-expiry)). Reported in browsers and over native QUIC (`@mux/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the refusal, so there it arrives as `TRANSPORT_ERROR` (#14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
@@ -689,8 +721,8 @@ application's deduplication policy. Successful writes mean transport acceptance,
 acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
-TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-22 §12.2 defines
-it as refusing to establish a session; Python maps it in any phase (#227). TypeScript reports it in
+In phase `connecting` the relay refused to connect; in phase `connection` it ended a live session
+whose credential expired or whose grant was revoked ([token expiry](#token-expiry)). TypeScript reports it in
 browsers and over native QUIC; against relays older than moq-relay 0.17.0 a browser does not see the
 relay's close, so a refusal there arrives as `TRANSPORT_ERROR` (#14). Neither another connection failure nor an uncovered
 namespace proves authentication was denied. A subscription outside the token's grant is refused

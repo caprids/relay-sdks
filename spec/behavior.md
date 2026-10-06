@@ -40,8 +40,36 @@ against that file.
   Subscriptions still awaiting their first response end as terminated by the closure (see
   "Subscription lifecycle"); accepted or cancelled requests do not receive a second initial
   response. The core's own track source still fails pending requests through their error callback.
-  Opt-in [supervised connections](#supervised-connections) reconnect; the primitives never do, and
-  token refresh on a live session is not yet part of this contract.
+  Opt-in [supervised connections](#supervised-connections) reconnect; the primitives never do.
+
+### Credential lifetime
+
+- A session lasts until its credential expires, and no longer. moq-relay ends a session at its
+  grant's deadline: the JWT's `exp` with the reference auth server (`moq auth serve`), and no
+  later with Mux's. A live session cannot take a new token: the relay ignores
+  AUTHORIZATION_TOKEN on later requests, and revalidation re-checks the credential the session
+  connected with ([token expiry](relay-interop.md#token-expiry)). Plan to replace a connection
+  before its credential expires.
+- The token provider runs once per connection, while connecting. It returns a token, or a
+  `RelayCredential`: the token together with `expiresAt` / `expires_at`, the time the relay stops
+  honoring it. An empty token sends none, as before. A credential of the wrong shape is a
+  `TypeError`; an invalid `Date` (TypeScript) or a naive `datetime` (Python) is a `RangeError` /
+  `ValueError`.
+- Every connection exposes `expiresAt` / `expires_at`: the credential's expiry when the provider
+  gave one, otherwise the `exp` claim of the JWT it connected with (a bare token from the provider,
+  or a `jwt` already on the URL), read without verifying it. A token that is not a JWT with a
+  numeric `exp` leaves it unknown (`undefined` / `None`). The primitives only report it; they never
+  replace a connection.
+- At that time the relay closes the session with MOQT session termination code `UNAUTHORIZED`
+  (0x2), reason `unauthorized`. Both SDKs report it as `UNAUTHORIZED` in phase `connection` on the
+  connection's closure, and operations still pending fail with it. On moq-relay 0.17.0 the close
+  arrives about 80 ms after `exp`. One exception: a TypeScript publisher in Chromium sees the relay
+  abort its control stream before WebTransport reports the close code, and reports
+  `TRANSPORT_ERROR` in phase `connection` instead
+  ([issue #279](https://github.com/muxinc/relay-sdks/issues/279)); a Chromium subscriber reports
+  `UNAUTHORIZED`.
+- [Supervised connections](#supervised-connections) replace their connection make-before-break
+  before the credential expires; see [rotation](#rotation).
 
 ## Error identities and operation phases
 
@@ -64,7 +92,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. In TypeScript, a `connecting`-phase `TRANSPORT_ERROR` usually means the browser abandoned the handshake, so a retry policy should treat it like `CONNECTION_TIMEOUT` (see [browser transport limits](../ts/GUIDE.md#browser-transport-limits)). |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it in browsers and over native QUIC (`@mux/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the refusal, so there it arrives as `TRANSPORT_ERROR` (#14). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the relay ended a live session because its credential expired or its grant was revoked ([credential lifetime](#credential-lifetime)); connect again with a fresh token. TypeScript reports it in browsers and over native QUIC (`@mux/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the close, so there it arrives as `TRANSPORT_ERROR` (#14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
@@ -87,8 +115,10 @@ acknowledgment. The SDK does not automatically retry or reconnect, outside the o
 [supervised connections](#supervised-connections). `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
-TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-22 §12.2 defines
-it as refusing to establish a session; Python maps it in any phase (#227). From moq-relay 0.17.0 a
+Draft-22 §12.2 defines it as refusing to establish a session, but moq-relay also closes a live
+session with it when the session's grant expires or is revoked, so both SDKs map it in any phase:
+`connecting` before the relay's SETUP, `connection` after it (#227, #261). A close in the turn SETUP
+arrives stays `TRANSPORT_ERROR`. From moq-relay 0.17.0 a
 browser sees the relay's close (CLOSE_WEBTRANSPORT_SESSION with code 2 and reason `unauthorized`), so
 TypeScript reports it in browsers as well as over native QUIC; against older relays the browser lost
 the close, and a refusal arrived as `TRANSPORT_ERROR` (#14). Neither another connection failure nor
@@ -555,7 +585,59 @@ Both supervisors:
 - Report `connecting`, `live`, `reconnecting` and `closed` through a status callback, with the
   error that ended the previous connection or failed the last attempt. `closed` settles once the
   supervisor stops: `close()` (no error), the cancellation primitive (its reason), or a first
-  attempt that is not retried (that failure). It never rejects.
+  attempt that is not retried (that failure). It never rejects. A [rotation](#rotation) reports
+  nothing: the status stays `live`.
+- Replace their connection before its credential expires, make-before-break ([rotation](#rotation)).
+
+### Rotation
+
+A rotation replaces a supervisor's live connection make-before-break, so that no connection reaches
+its credential's expiry ([credential lifetime](#credential-lifetime)) and viewers see a switch
+instead of a drop. It is not a reconnect: the old connection keeps serving until the new one has
+taken over.
+
+- **When.** `rotateBeforeMs` / `rotate_before` (default 60 s) before the live connection's
+  `expiresAt` / `expires_at`, but never earlier than halfway through the time left when it
+  connected, so a credential shorter than the margin still serves half its life. A connection whose
+  expiry is unknown never rotates on its own. `rotate()` rotates now, for an application that
+  revokes credentials or wants a fresh token. It is a no-op while no connection is up.
+- **The replacement** connects with the same options, so the token provider runs again. A failed
+  attempt is retried with the reconnection backoff while the old connection lives; if the old one
+  ends first, the supervisor reconnects as after any other ending. When a rotation the supervisor
+  started on its own gets a credential that expires no later than the live one, it discards the
+  replacement and lets the live connection run to its end: two connections the relay ends together
+  replace nothing. `rotate()` always takes the replacement.
+- **Overlap.** The old connection closes once everything has moved to the new one, after 10 s at
+  most, or sooner if it ends on its own.
+- **Publisher.** The replacement is the next generation. Every registered track is registered on it,
+  and `onGeneration` / `on_generation` runs for it once it is up; `generation` names it from then on.
+  Each track's writer keeps writing to the old generation until the track has demand on the new one
+  or has none on the old one, and then moves at the start of its next write or group, never under
+  one: a group opened on the old generation finishes there. Subscribers following generations move
+  to the new one when it is announced, which creates its demand. `hasDemand` and `demandChanges()`
+  follow the generation the writer is on, and report no `false` when demand carries over. They report
+  `true` again on the move, as they do when the relay replaces its upstream subscription, so state an
+  application writes on demand (a catalog) reaches the new generation. When the
+  overlap runs out, every track moves regardless of demand, and the old generation closes as
+  `close()` closes it.
+- **Subscriber.** The replacement is a new connection, and every want **moves** its subscription to
+  it make-before-break, as a [move](#supervised-subscriber) does: the replacement opens pending on
+  the new connection while the old subscription keeps delivering. A want following generations
+  discovers the root on the new connection first. Then:
+  - **Same target** (namespace, track and parameters): the same publisher's stream continues. The
+    replacement starts at the latest group, so its objects at or before the last location the old
+    subscription delivered are dropped, and the first one after it cuts over without `until`. No
+    callback marks it, no `onSwitched`, `onRestarted` or `onSubscribed`, and nothing is lost or
+    repeated, so decoders keep their state. The old subscription is cancelled, not drained. Once
+    any of the want's subscriptions has heard `PUBLISH_DONE`, nothing is dropped: a restarted
+    publisher numbers its groups from 0 again.
+  - **Another target**, a newer generation announced on the new connection or a re-want: an
+    ordinary move, with `until`, the drain and `onSwitched`.
+  - The old connection closing under the old subscription leaves the replacement to carry on, and
+    a replacement refused or ended before its cutover is retried after the retry backoff, as a
+    move's is. The new connection ending restarts the want with `connection`. A want with no
+    accepted subscription starts over on the new connection at once. A rotation to a connection
+    that is itself rotated away before the cutover moves on to the newest one.
 
 ### Supervised publisher
 
@@ -1123,8 +1205,7 @@ See [relay interoperability](relay-interop.md#reproduce-against-a-local-relay) f
 
 ## Not yet specified
 
-Token refresh on a live session, make-before-break rotation of a supervised publisher, datagram
-reception, discovery of tracks within a namespace (namespace discovery is [specified](#discovery)),
+Datagram reception, discovery of tracks within a namespace (namespace discovery is [specified](#discovery)),
 and player adapters are not implemented in any SDK and have no contract yet. Add them here when the first SDK gains them.
 
 ## Draft-22 protocol boundaries

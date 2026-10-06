@@ -37,6 +37,7 @@ import { namespaceFields, trackName } from './validation.js';
 export type {
   ConnectRelayOptions,
   ConnectRelaySubscriberOptions,
+  RelayCredential,
   RelayTransportFactory,
 } from './connect-session.js';
 
@@ -159,6 +160,12 @@ export interface RelaySubscriber {
     /** The failure that ended the connection; absent after a clean shutdown. */
     error?: unknown;
   }>;
+  /**
+   * When the relay will end this connection for its credential's expiry: the `RelayCredential`'s `expiresAt`, or the
+   * JWT's `exp` claim, read without verifying it. `undefined` when neither is known. The relay closes the session then
+   * with `UNAUTHORIZED` in phase `connection`; open a replacement before it. Supervised connections do.
+   */
+  readonly expiresAt: Date | undefined;
   /** Close this connection and all requests on it. Idempotent. */
   close(): void;
 }
@@ -175,6 +182,7 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
     assertOpen,
     close,
     protocol,
+    expiresAt,
   } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
       implementationName: '@mux/relay',
@@ -227,6 +235,7 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
 
   return {
     closed,
+    expiresAt: expiresAt === undefined ? undefined : new Date(expiresAt.getTime()),
     trackSource,
     subscribe: (options, handlers) => {
       // Every argument (the handlers' shape included) before connection state.

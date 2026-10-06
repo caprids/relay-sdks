@@ -1,10 +1,13 @@
 """``connect_relay_subscriber`` behavior over a scripted fake transport, ported from the TypeScript SDK tests."""
 
 import asyncio
+import base64
+import json
 import math
 import sys
 from collections.abc import AsyncIterator, Sequence
-from typing import Any
+from datetime import UTC, datetime
+from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -32,6 +35,7 @@ from moq_core.control_messages import (
 from mux_relay import (
     CancellationToken,
     ConnectingTransport,
+    RelayCredential,
     RelayError,
     RelaySubscriber,
     RelaySubscriptionHandlers,
@@ -599,6 +603,19 @@ class TestConnectRelay:
         )
         assert failure.value.__cause__ is cause
 
+    async def test_reports_a_live_session_the_relay_closed_for_its_credentials_as_unauthorized(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        # moq-relay 0.17.0 ends a live session this way when its grant expires or is revoked (#261, #227).
+        fake, connection, _ = await connect_fake(connections, get_token=lambda: "secret-token")
+        cause = QuicTransportError("peer closed the session", source="session", close_code=0x2, reason="unauthorized")
+        fake._closed.set_exception(cause)
+        closed = await asyncio.wait_for(connection.closed, 1)
+        assert isinstance(closed.error, RelayError)
+        assert (closed.error.code, closed.error.phase) == ("UNAUTHORIZED", "connection")
+        assert closed.error.__cause__ is cause
+        assert "secret-token" not in str(closed.error)
+
     @pytest.mark.parametrize(
         "cause",
         [
@@ -705,3 +722,65 @@ class TestConnectRelay:
             pass
 
         assert await connection.closed == Closed()
+
+
+def _b64url(value: str) -> str:
+    return base64.urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+
+def _jwt(claims: object) -> str:
+    header = _b64url(json.dumps({"alg": "HS256"}))
+    return f"{header}.{_b64url(json.dumps(claims))}.sig"
+
+
+class TestCredentialExpiry:
+    async def test_takes_the_expiry_a_relay_credential_gives_and_sends_its_token(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        expires_at = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+
+        async def get_token() -> RelayCredential:
+            return RelayCredential("opaque", expires_at)
+
+        _, connection, factory = await connect_fake(connections, get_token=get_token)
+        assert factory.calls[0][0] == f"{ENDPOINT}?jwt=opaque"
+        assert connection.expires_at == expires_at
+
+    async def test_reads_a_bare_jwts_exp_claim_without_verifying_it(self, connections: list[RelaySubscriber]) -> None:
+        _, connection, _ = await connect_fake(connections, get_token=lambda: _jwt({"exp": 1_900_000_000}))
+        assert connection.expires_at == datetime.fromtimestamp(1_900_000_000, UTC)
+
+    async def test_reads_the_exp_claim_of_a_jwt_already_on_the_endpoint(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        _, connection, _ = await connect_fake(connections, url=f"{ENDPOINT}?jwt={_jwt({'exp': 1_900_000_001})}")
+        assert connection.expires_at == datetime.fromtimestamp(1_900_000_001, UTC)
+
+    @pytest.mark.parametrize(
+        "token",
+        [
+            "opaque",
+            _jwt({"root": "room"}),
+            _jwt({"exp": "1900000000"}),
+            _jwt({"exp": True}),
+            _jwt({"exp": 10**400}),
+            "a.!!!.c",
+        ],
+    )
+    async def test_knows_no_expiry_otherwise(self, connections: list[RelaySubscriber], token: str) -> None:
+        _, connection, _ = await connect_fake(connections, get_token=lambda: token)
+        assert connection.expires_at is None
+
+    async def test_rejects_a_provider_result_of_the_wrong_shape(self) -> None:
+        with pytest.raises(TypeError):
+            await connect_relay_subscriber(
+                ENDPOINT, get_token=lambda: cast(Any, 42), create_transport=Factory(create_fake_transport())
+            )
+
+    def test_checks_the_credential_when_made(self) -> None:
+        with pytest.raises(TypeError):
+            RelayCredential(cast(Any, 1), datetime.now(UTC))
+        with pytest.raises(TypeError):
+            RelayCredential("t", cast(Any, 1_900_000_000))
+        with pytest.raises(ValueError, match="timezone-aware"):
+            RelayCredential("t", datetime(2030, 1, 1))

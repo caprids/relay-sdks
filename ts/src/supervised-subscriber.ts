@@ -6,7 +6,9 @@
  * Objects are never fetched to fill a gap: a replacement subscription starts live, and `onRestarted` tells the
  * application to drop state that assumed continuity. A move to a newer generation, or to another track or parameters
  * on a re-want, is made before the break instead, as `switchTo` makes one (issue #282): the replacement opens while the
- * current subscription keeps delivering, and `onSwitched` marks the cutover. See spec/behavior.md, "Supervised
+ * current subscription keeps delivering, and `onSwitched` marks the cutover. Before the connection's credential
+ * expires, the supervisor rotates to a new connection the same way (issue #261): every want's subscription moves to it
+ * make-before-break, and a want that keeps its target sees no break and no repeat. See spec/behavior.md, "Supervised
  * connections".
  */
 import {
@@ -30,6 +32,10 @@ import {
   isSetupFailure,
   RECONNECT_BACKOFF,
   RESUBSCRIBE_BACKOFF,
+  ROTATION_OVERLAP_MS,
+  rotateBeforeOption,
+  rotationDeadline,
+  rotationDue,
   type SupervisedStatus,
   type SupervisionBackoff,
   sleep,
@@ -49,6 +55,11 @@ import { namespaceFields, trackName } from './validation.js';
 export interface ConnectSupervisedSubscriberOptions extends ConnectRelaySubscriberOptions {
   /** Backoff between connection attempts. Default from 500 ms, doubling up to 10 s, with jitter. */
   reconnect?: SupervisionBackoff;
+  /**
+   * How long before the connection's credential expires (`RelaySubscriber.expiresAt`) a replacement connection is
+   * opened, make-before-break. Default 60 seconds; never earlier than halfway through the time left.
+   */
+  rotateBeforeMs?: number;
   /**
    * Called on every status change; `error` is what ended the previous connection or failed the last attempt. A throw
    * stops the supervisor with that error: a pending `connectSupervisedSubscriber` rejects with it and `closed` resolves
@@ -181,6 +192,14 @@ export interface SupervisedSubscriber {
     /** The failure that stopped the supervisor, or the signal's reason; absent after `close()`. */
     error?: unknown;
   }>;
+  /**
+   * Replace the connection make-before-break, as happens on its own `rotateBeforeMs` before the credential expires: a
+   * new connection opens, with a fresh token, and every want moves its subscription to it as a move would, keeping the
+   * old one delivering until the cutover. A want whose target is unchanged cuts over on the first object the old one did
+   * not deliver, with no callback: nothing is lost or repeated. The old connection closes once every want has moved,
+   * after 10 seconds at most. A no-op while no connection is up.
+   */
+  rotate(): void;
   /** Stop reconnecting, cancel every want and close the connection. Idempotent. */
   close(): void;
 }
@@ -204,8 +223,28 @@ interface Connection {
   subscriber: RelaySubscriber;
   /** Aborts when this connection ends. */
   signal: AbortSignal;
+  /** Aborts when a rotation replaced this connection: its wants move to the new one. */
+  retiring: AbortSignal;
   /** One discovery per followed root, shared by every want on it. */
   roots: Map<string, RootWatch>;
+  /** Wants with a subscription still on this connection; a rotation closes it once none are left. */
+  holds: number;
+  /** Called whenever `holds` drops to zero. */
+  onIdle?: (() => void) | undefined;
+  /** When it is due to rotate, on the `performance.now()` clock; `undefined` for an unknown expiry. */
+  rotateAt: number | undefined;
+}
+
+/** Count a use of `connection` until the returned release runs. */
+function hold(connection: Connection): () => void {
+  connection.holds += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    connection.holds -= 1;
+    if (connection.holds === 0) connection.onIdle?.();
+  };
 }
 
 /** One want as the supervisor holds it. */
@@ -234,6 +273,8 @@ interface Want {
   namespace?: string[];
   /** The generation the latest subscription was made on, when following one. */
   generation?: string | undefined;
+  /** The connection the latest subscription was made on: a rotation moves it to the new one. */
+  connection?: Connection | undefined;
   /** A discovery failure no wait fixes, seen while backing off, for the loop to surface. */
   deferred?: { error: unknown };
 }
@@ -250,8 +291,9 @@ export async function superviseRelaySubscriber(
   if (typeof options !== 'object' || options === null) {
     throw new TypeError('connectSupervisedSubscriber takes an options object');
   }
-  const { reconnect, onStatus, signal, ...connection } = options;
+  const { reconnect, rotateBeforeMs: rotateBefore, onStatus, signal, ...connection } = options;
   const backoff = backoffOptions('reconnect', reconnect, RECONNECT_BACKOFF);
+  const rotateBeforeMs = rotateBeforeOption(rotateBefore);
   signal?.throwIfAborted();
 
   const wants = new Map<string, Want>();
@@ -266,6 +308,20 @@ export async function superviseRelaySubscriber(
   const lifetime = new AbortController();
   /** Aborts the connection attempt in progress only: a live connection is closed cleanly on `close()`. */
   let attemptInProgress: AbortController | undefined;
+  /** The connection a rotation is replacing, while its wants move off it. */
+  let retiring: Connection | undefined;
+  /**
+   * Set by `rotate()` while a connection is up, and consumed by the rotation that answers it: the next one to start, or
+   * one whose replacement is still connecting or being discarded.
+   */
+  let rotateRequested = false;
+  /** Wakes a serve loop waiting for its rotation; replaced for each wait. */
+  let wakeRotation: () => void = () => {};
+  const requestRotation = () => {
+    if (stopped || !current) return;
+    rotateRequested = true;
+    wakeRotation();
+  };
 
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
@@ -290,6 +346,8 @@ export async function superviseRelaySubscriber(
     wants.clear();
     current?.subscriber.close();
     current = undefined;
+    retiring?.subscriber.close();
+    retiring = undefined;
     for (const wake of connectionWaiters.splice(0)) wake();
     try {
       setStatus('closed');
@@ -316,49 +374,216 @@ export async function superviseRelaySubscriber(
     return undefined;
   };
 
+  /** Open one connection, or `undefined` if the supervisor stopped first. Throws the attempt's failure. */
+  const connectOnce = async (): Promise<
+    { live: Connection; ended: AbortController; retire: AbortController } | undefined
+  > => {
+    let subscriber: RelaySubscriber;
+    try {
+      attemptInProgress = new AbortController();
+      subscriber = await connect({
+        ...connection,
+        signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
+      });
+    } finally {
+      attemptInProgress = undefined;
+    }
+    if (stopped) {
+      subscriber.close();
+      return undefined;
+    }
+    const ended = new AbortController();
+    // Aborted the moment the connection ends, so a rotation in progress sees it and falls back to reconnecting.
+    void subscriber.closed.then(() => ended.abort());
+    const retire = new AbortController();
+    const live: Connection = {
+      subscriber,
+      signal: ended.signal,
+      retiring: retire.signal,
+      roots: new Map(),
+      holds: 0,
+      rotateAt: rotationDeadline(subscriber.expiresAt, rotateBeforeMs),
+    };
+    return { live, ended, retire };
+  };
+
+  type Opened = NonNullable<Awaited<ReturnType<typeof connectOnce>>>;
+
+  /** The connection ended: release what it ran and stop anything still waiting on it. */
+  const settleEnded = (opened: Opened) => {
+    opened.ended.abort();
+    for (const watch of opened.live.roots.values()) watch.close();
+  };
+
+  /**
+   * Open the connection that replaces `opened`, move every want to it, and close the old one once they have moved.
+   * Returns the new connection, or `undefined` when the old one ended or the supervisor stopped before a replacement
+   * was up, or when an automatic rotation found no fresher credential.
+   */
+  const rotateFrom = async (opened: Opened, manual: () => boolean): Promise<Opened | undefined> => {
+    const old = opened.live;
+    let failures = 0;
+    let next: Opened | undefined;
+    // The live connection ending while its replacement is still connecting is a reconnect: report it at once.
+    void old.subscriber.closed.then(({ error }) => {
+      if (stopped || current !== old) return;
+      current = undefined;
+      try {
+        setStatus('reconnecting', error);
+      } catch (thrown) {
+        try {
+          stop({ error: thrown });
+        } catch {
+          // A throwing onStatus while reporting `closed`: `closed` is settled either way.
+        }
+      }
+    });
+    while (!stopped && !old.signal.aborted) {
+      try {
+        next = await connectOnce();
+        break;
+      } catch {
+        if (stopped) return undefined;
+        // The live connection keeps serving; try again after the backoff unless it ends first.
+        await Promise.race([
+          sleep(backoffDelay(failures++, backoff), lifetime.signal).catch(() => {}),
+          whenAborted(old.signal),
+        ]);
+      }
+    }
+    if (!next) return undefined;
+    // `close()` may have run while the helper's result was on its way here: it could not see this connection.
+    if (stopped) {
+      next.live.subscriber.close();
+      return undefined;
+    }
+    // Consulted whatever happened to the old connection: a queued `rotate()` is answered by this replacement.
+    const asked = manual();
+    if (!old.signal.aborted && !asked) {
+      // A credential that expires no later than the live one replaces nothing: the relay would end both together.
+      const was = old.subscriber.expiresAt?.getTime();
+      const now = next.live.subscriber.expiresAt?.getTime();
+      if (was !== undefined && (now === undefined || now <= was)) {
+        next.live.subscriber.close();
+        return undefined;
+      }
+    }
+    current = next.live;
+    retiring = old;
+    setStatus('live');
+    for (const wake of connectionWaiters.splice(0)) wake();
+    const idle = new Promise<void>((resolve) => {
+      old.onIdle = resolve;
+    });
+    // Every want on the old connection ends its attempt there and subscribes on the new one.
+    opened.retire.abort();
+    if (old.holds === 0) old.onIdle?.();
+    // The replacement ending cuts the overlap short too: the wants on it need the next connection now. So does its own
+    // rotation falling due, for a credential shorter than the overlap.
+    const overlap = new AbortController();
+    await Promise.race([
+      idle,
+      sleep(ROTATION_OVERLAP_MS, lifetime.signal).catch(() => {}),
+      whenAborted(old.signal),
+      whenAborted(next.live.signal),
+      rotationDue(next.live.rotateAt, new Promise<void>(() => {}), AbortSignal.any([lifetime.signal, overlap.signal])),
+    ]);
+    overlap.abort();
+    old.onIdle = undefined;
+    if (retiring === old) retiring = undefined;
+    old.subscriber.close();
+    settleEnded(opened);
+    return next;
+  };
+
+  /** Serve `opened` until it ends, or until a rotation replaced it with the connection returned. */
+  const serve = async (opened: Opened): Promise<{ error?: unknown } | { next: Opened }> => {
+    const { subscriber } = opened.live;
+    const scope = new AbortController();
+    /** Cleared once an automatic rotation found no fresher credential: only `rotate()` tries again. */
+    let automatic = true;
+    try {
+      for (;;) {
+        const asked = new Promise<void>((resolve) => {
+          wakeRotation = resolve;
+        });
+        if (rotateRequested) wakeRotation();
+        const due = rotationDue(
+          automatic ? opened.live.rotateAt : undefined,
+          asked,
+          AbortSignal.any([lifetime.signal, scope.signal]),
+        ).then(() => undefined);
+        const outcome = await Promise.race([subscriber.closed, due]);
+        if (outcome !== undefined || stopped) return outcome ?? {};
+        // A `rotate()` before the replacement is current makes this rotation a manual one: it takes the replacement.
+        let manual = false;
+        const isManual = () => {
+          if (rotateRequested) {
+            rotateRequested = false;
+            manual = true;
+          }
+          return manual;
+        };
+        isManual();
+        const next = await rotateFrom(opened, isManual);
+        if (next) return { next };
+        if (opened.live.signal.aborted || stopped) return await subscriber.closed;
+        if (!manual) automatic = false;
+      }
+    } finally {
+      scope.abort();
+      wakeRotation = () => {};
+    }
+  };
+
   const run = async () => {
     let attempt = 0;
+    /** A connection a rotation already opened and moved the wants to. */
+    let next: Opened | undefined;
     while (!stopped) {
-      let subscriber: RelaySubscriber;
-      try {
-        attemptInProgress = new AbortController();
-        subscriber = await connect({
-          ...connection,
-          signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
-        });
-      } catch (error) {
-        attemptInProgress = undefined;
-        if (stopped) return;
-        if (first && isSetupFailure(error)) {
-          first.reject(error);
-          first = undefined;
-          stop({ error });
+      let opened = next;
+      next = undefined;
+      if (!opened) {
+        try {
+          opened = await connectOnce();
+        } catch (error) {
+          if (stopped) return;
+          if (first && isSetupFailure(error)) {
+            first.reject(error);
+            first = undefined;
+            stop({ error });
+            return;
+          }
+          setStatus('reconnecting', error);
+          await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
+          continue;
+        }
+        if (!opened) return;
+        // `close()` may have run while the helper's result was on its way here: it could not see this connection.
+        if (stopped) {
+          opened.live.subscriber.close();
           return;
         }
-        setStatus('reconnecting', error);
-        await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
+        current = opened.live;
+        setStatus('live');
+        first?.resolve();
+        first = undefined;
+        for (const wake of connectionWaiters.splice(0)) wake();
+      }
+      const upAt = performance.now();
+
+      const outcome = await serve(opened);
+      if ('next' in outcome) {
+        if (stopped) return;
+        next = outcome.next;
+        attempt = 0;
         continue;
       }
-      attemptInProgress = undefined;
-      if (stopped) {
-        subscriber.close();
-        return;
-      }
-      const ended = new AbortController();
-      const live: Connection = { subscriber, signal: ended.signal, roots: new Map() };
-      current = live;
-      const upAt = performance.now();
-      setStatus('live');
-      first?.resolve();
-      first = undefined;
-      for (const wake of connectionWaiters.splice(0)) wake();
-
-      const { error } = await subscriber.closed;
-      ended.abort();
-      for (const watch of live.roots.values()) watch.close();
+      settleEnded(opened);
       if (stopped) return;
       current = undefined;
-      setStatus('reconnecting', error);
+      // Already reported if the connection ended while a rotation's replacement was connecting.
+      if (status !== 'reconnecting') setStatus('reconnecting', outcome.error);
       if (performance.now() - upAt > backoff.maxDelayMs) attempt = 0;
       await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
     }
@@ -444,11 +669,19 @@ export async function superviseRelaySubscriber(
         controller: new AbortController(),
       };
       wants.set(key, want);
-      void runWant(want, liveConnection, () => forget(key, want));
+      void runWant(
+        want,
+        liveConnection,
+        () => current,
+        () => forget(key, want),
+      );
     },
     unwant(key) {
       const want = wants.get(key);
       if (want) forget(key, want);
+    },
+    rotate() {
+      requestRotation();
     },
     close() {
       signal?.removeEventListener('abort', onAbort);
@@ -488,10 +721,11 @@ type AttemptOutcome =
 async function runWant(
   want: Want,
   liveConnection: (scope: AbortSignal) => Promise<Connection | undefined>,
+  nextConnection: () => Connection | undefined,
   forget: () => void,
 ): Promise<void> {
   try {
-    await superviseWant(want, liveConnection, forget);
+    await superviseWant(want, liveConnection, nextConnection, forget);
   } catch (error) {
     forget();
     // biome-ignore lint/suspicious/noConsole: the want has no caller left to report its failure to
@@ -503,6 +737,7 @@ async function runWant(
 async function superviseWant(
   want: Want,
   liveConnection: (scope: AbortSignal) => Promise<Connection | undefined>,
+  nextConnection: () => Connection | undefined,
   forget: () => void,
 ): Promise<void> {
   const scope = want.controller.signal;
@@ -525,11 +760,14 @@ async function superviseWant(
         want.handlers.onError?.(want.deferred.error);
         return;
       }
-      const connection = await liveConnection(scope);
+      const started = await liveConnection(scope);
       // A want replaced while waiting must not open anything: its replacement may already hold an overlapping root.
-      if (!connection || scope.aborted) return;
+      if (!started || scope.aborted) return;
       want.settledTarget = undefined;
-      let outcome = await attempt(want, connection);
+      want.connection = started;
+      let outcome = await attempt(want, started, nextConnection);
+      // A rotation may have moved the attempt to another connection: what follows waits on the one it ended on.
+      const connection = want.connection ?? started;
       const asked = want.settledTarget ?? want.target;
       if (scope.aborted) return;
       if (outcome.kind === 'cancelled') return;
@@ -577,7 +815,8 @@ async function superviseWant(
  */
 async function backoff(want: Want, connection: Connection, delayMs: number): Promise<void> {
   const wake = new AbortController();
-  const scope = AbortSignal.any([want.controller.signal, connection.signal, wake.signal]);
+  // A rotation replacing the connection wakes it too: the want's next attempt belongs on the new one.
+  const scope = AbortSignal.any([want.controller.signal, connection.signal, connection.retiring, wake.signal]);
   let held: { watch: RootWatch; release(): void } | undefined;
   if (want.options.generations && !connection.signal.aborted) {
     try {
@@ -627,7 +866,11 @@ async function backoff(want: Want, connection: Connection, delayMs: number): Pro
 }
 
 /** One attempt for `want` on `connection`: its discovery, if it follows generations, and its subscriptions. */
-async function attempt(want: Want, connection: Connection): Promise<AttemptOutcome> {
+async function attempt(
+  want: Want,
+  connection: Connection,
+  nextConnection: () => Connection | undefined,
+): Promise<AttemptOutcome> {
   const { options } = want;
   const scope = AbortSignal.any([want.controller.signal, connection.signal]);
   const cancelledOrConnection = (accepted: boolean): AttemptOutcome =>
@@ -650,15 +893,28 @@ async function attempt(want: Want, connection: Connection): Promise<AttemptOutco
   try {
     let generation: string | undefined;
     if (watch) {
-      const found = await watch.newest(scope);
+      const found = await watch.newest(AbortSignal.any([scope, connection.retiring]));
       if (found.kind === 'failed') return discoveryFailed(found.error, scope, cancelledOrConnection, false);
+      // Rotated away before a generation was found: start over on the new connection at once.
+      if (found.kind !== 'found' && connection.retiring.aborted && !scope.aborted)
+        return { kind: 'moved', accepted: false };
       if (found.kind !== 'found') return cancelledOrConnection(false);
       generation = found.generation;
       namespace = [...options.namespace, generation];
     }
     want.namespace = namespace;
     want.generation = generation;
-    return await follow(want, connection, namespace, generation, scope, watch, cancelledOrConnection);
+    // The want's own signal, not the connection's: a rotation moves the attempt to the next connection.
+    return await follow(
+      want,
+      connection,
+      namespace,
+      generation,
+      want.controller.signal,
+      watch,
+      cancelledOrConnection,
+      nextConnection,
+    );
   } finally {
     release();
   }
@@ -672,10 +928,19 @@ interface Slot {
   track: string;
   /** Its namespace, track and parameters, compared with what the want asks for now. */
   key: string;
+  /** The connection it was made on: a rotation's replacement is on the next one. */
+  connection: Connection;
   subscription: RelaySubscription;
   accepted?: SubscribeOk;
   firstGroup?: number;
   largestGroup?: number;
+  /** The latest object it delivered, by location: a rotation's replacement skips what is at or before it. */
+  latest?: { groupId: number; objectId: number };
+  /**
+   * After a rotation's silent cutover, the latest object its predecessor delivered: an earlier object arriving late on
+   * another stream was delivered already, and is skipped.
+   */
+  skipThrough?: { groupId: number; objectId: number } | undefined;
   /** Whether it delivered an object from a later group than its first. */
   progressed: boolean;
   /** While draining after a cutover: the largest group it had delivered, through which its events still reach the handlers. */
@@ -686,6 +951,26 @@ interface Slot {
   held: HeldEvent[];
 }
 
+/** Whether `object` is at or before `latest`, by group and then object ID. */
+function atOrBefore(object: MoqtObject, latest: { groupId: number; objectId: number } | undefined): boolean {
+  if (latest === undefined) return false;
+  return object.groupId < latest.groupId || (object.groupId === latest.groupId && object.objectId <= latest.objectId);
+}
+
+type Location = { groupId: number; objectId: number };
+
+/** The later of two locations, either of which may be unknown. */
+function later(a: Location | undefined, b: Location | undefined): Location | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return a.groupId > b.groupId || (a.groupId === b.groupId && a.objectId >= b.objectId) ? a : b;
+}
+
+/** Record `object` as the latest `slot` delivered, if it is later than what it had. */
+function delivered(slot: Slot, object: MoqtObject): void {
+  if (!atOrBefore(object, slot.latest)) slot.latest = { groupId: object.groupId, objectId: object.objectId };
+}
+
 /** What a subscription is made with, as a comparable key. */
 function targetKey(namespace: readonly string[], track: string, parameters: MessageParameters | undefined): string {
   return JSON.stringify([namespace, track, parameters ?? null], (_, value) =>
@@ -694,9 +979,11 @@ function targetKey(namespace: readonly string[], track: string, parameters: Mess
 }
 
 /**
- * The want's subscriptions on `connection` from the first SUBSCRIBE to whatever ends the attempt. A move (a newer
+ * The want's subscriptions from the first SUBSCRIBE on `connection` to whatever ends the attempt. A move (a newer
  * generation, or a re-want with another track or parameters) is made before the break: the replacement opens pending
- * while the active subscription keeps delivering, and takes over once one of its objects passes `until`.
+ * while the active subscription keeps delivering, and takes over once one of its objects passes `until`. A rotation is
+ * a move to the next connection: with the target unchanged, the replacement takes over at the first object the active
+ * one had not delivered, and no callback marks it.
  */
 async function follow(
   want: Want,
@@ -704,9 +991,12 @@ async function follow(
   namespace: string[],
   generation: string | undefined,
   scope: AbortSignal,
-  watch: RootWatch | undefined,
+  initialWatch: RootWatch | undefined,
   cancelledOrConnection: (accepted: boolean) => AttemptOutcome,
+  nextConnection: () => Connection | undefined,
 ): Promise<AttemptOutcome> {
+  /** The followed root's discovery on the active subscription's connection. */
+  let watch = initialWatch;
   const handlers = () => want.handlers;
   const settled = new AbortController();
   let outcome: AttemptOutcome | undefined;
@@ -723,21 +1013,79 @@ async function follow(
   /** Old subscriptions draining after a cutover, each with the timer that cancels it. */
   const draining = new Map<Slot, ReturnType<typeof setTimeout>>();
   /** A move whose replacement failed, retried after the backoff unless the want asks for something else first. */
-  let retryMove: { key: string; timer: ReturnType<typeof setTimeout> } | undefined;
+  let retryMove:
+    | { key: string; connection: Connection; timer: ReturnType<typeof setTimeout>; unobserve(): void }
+    | undefined;
   let moveFailures = 0;
   /** The target of the latest move, whose failures `moveFailures` counts. */
   let moveTarget: string | undefined;
   let lastObjectAt = 0;
   const accepted = () => active.accepted !== undefined;
+  /** A rotation under way: the connection the subscriptions move to, and its discovery of the root. */
+  let rotationTo: { connection: Connection; watch: RootWatch | undefined; release(): void } | undefined;
+  /** The discovery a rotation swapped in, released when the attempt ends; the first is the attempt's to release. */
+  let releaseWatch = () => {};
+  /** The connections a subscription of this attempt is on, each held so a rotation closes it only once none are. */
+  const holds = new Map<Connection, () => void>();
+  /** How to stop observing each connection the attempt observes; dropped with its hold. */
+  const observed = new Map<Connection, () => void>();
+  const observe = (on: Connection) => {
+    if (observed.has(on)) return;
+    // Runs inside the supervisor's abort of the retiring signal: an unexpected failure restarts this want alone.
+    const onRetiring = () => {
+      try {
+        rotate(on);
+      } catch (error) {
+        // biome-ignore lint/suspicious/noConsole: the want's own failure, with no caller to report it to
+        console.error(
+          new Error('A want failed to start its rotation; it restarts on the new connection', { cause: error }),
+        );
+        settle(cancelledOrConnection(accepted()));
+      }
+    };
+    on.retiring.addEventListener('abort', onRetiring, { once: true });
+    observed.set(on, () => on.retiring.removeEventListener('abort', onRetiring));
+    if (on.retiring.aborted) queueMicrotask(onRetiring);
+  };
+
+  const holdOn = (on: Connection) => {
+    if (holds.has(on)) return;
+    holds.set(on, hold(on));
+    observe(on);
+  };
+  const releaseUnused = () => {
+    for (const [on, release] of [...holds]) {
+      const used =
+        active.connection === on ||
+        pending?.connection === on ||
+        rotationTo?.connection === on ||
+        [...draining.keys()].some((slot) => slot.connection === on);
+      if (used) continue;
+      holds.delete(on);
+      release();
+      observed.get(on)?.();
+      observed.delete(on);
+    }
+  };
+  /**
+   * The targets a pending replacement heard PUBLISH_DONE on, until the next cutover: a restarted publisher numbers its
+   * groups from 0, so a rotation's replacement for that target no longer skips what the active subscription delivered.
+   * Another target's publisher ending says nothing about the active one's.
+   */
+  const endedTargets = new Set<string>();
+  /** Whether `slot` replaces the active subscription on the next connection, with the same target. */
+  const rotating = (slot: Slot) => slot.connection !== active.connection && slot.key === active.key;
 
   const clearRetry = () => {
     clearTimeout(retryMove?.timer);
+    retryMove?.unobserve();
     retryMove = undefined;
   };
   const stopDrain = (slot: Slot) => {
     clearTimeout(draining.get(slot));
     draining.delete(slot);
     slot.subscription.cancel();
+    releaseUnused();
   };
   /** Whether a subgroup event of `slot` reaches the handlers. */
   const reaches = (slot: Slot | undefined, groupId: number) =>
@@ -775,48 +1123,80 @@ async function follow(
     }
     // The active subscription keeps delivering; the move is retried after the backoff.
     const key = slot.key;
+    const on = slot.connection;
+    // The connection the move is to be retried on closing leaves nothing to retry on: restart now, not after the delay.
+    const closed = () => {
+      if (retryMove?.connection !== on || over()) return;
+      clearRetry();
+      settle(cancelledOrConnection(accepted()));
+    };
+    on.signal.addEventListener('abort', closed, { once: true });
     retryMove = {
       key,
+      connection: on,
       timer: setTimeout(
         () => {
           if (retryMove?.key !== key) return;
-          retryMove = undefined;
+          clearRetry();
           reconcile();
         },
         backoffDelay(moveFailures++, want.retry),
       ),
+      unobserve: () => on.signal.removeEventListener('abort', closed),
     };
+    if (on.signal.aborted) closed();
   };
 
   const cutover = (slot: Slot, object: MoqtObject) => {
     const from = active;
+    // A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
+    const silent = rotating(slot);
+    // Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
+    if (silent && !endedTargets.has(slot.key) && from.ended !== 'publisher-done') {
+      slot.skipThrough = later(from.latest, from.skipThrough);
+    }
+    endedTargets.clear();
     pending = undefined;
     clearRetry();
     moveFailures = 0;
     active = slot;
     want.namespace = slot.namespace;
     want.generation = slot.generation;
-    if (!from.ended && want.drainMs > 0 && from.largestGroup !== undefined) {
+    want.connection = slot.connection;
+    if (rotationTo && rotationTo.connection === slot.connection) {
+      // The followed root's discovery moves to the new connection with the subscription.
+      unwatch?.();
+      unwatchNext?.();
+      unwatchNext = undefined;
+      watch = rotationTo.watch;
+      releaseWatch = rotationTo.release;
+      rotationTo = undefined;
+      unwatch = watch?.onChange(reconcile);
+    }
+    if (!silent && !from.ended && want.drainMs > 0 && from.largestGroup !== undefined) {
       from.drainThrough = from.largestGroup;
       draining.set(
         from,
         setTimeout(() => stopDrain(from), want.drainMs),
       );
     } else from.subscription.cancel();
+    releaseUnused();
     slot.firstGroup = object.groupId;
     slot.largestGroup = object.groupId;
     lastObjectAt = performance.now();
-    try {
-      handlers().onSwitched?.({
-        from: { namespace: [...from.namespace], track: from.track },
-        to: { namespace: [...slot.namespace], track: slot.track },
-        // A subscription that delivered an object was accepted.
-        subscribed: slot.accepted as SubscribeOk,
-      });
-    } catch (error) {
-      // A delivery callback's failure is the application's; the want keeps delivering.
-      // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
-      console.error(new Error('onSwitched threw; the want delivers regardless', { cause: error }));
+    if (!silent) {
+      try {
+        handlers().onSwitched?.({
+          from: { namespace: [...from.namespace], track: from.track },
+          to: { namespace: [...slot.namespace], track: slot.track },
+          // A subscription that delivered an object was accepted.
+          subscribed: slot.accepted as SubscribeOk,
+        });
+      } catch (error) {
+        // A delivery callback's failure is the application's; the want keeps delivering.
+        // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+        console.error(new Error('onSwitched threw; the want delivers regardless', { cause: error }));
+      }
     }
     // Later groups that reached the replacement early, out of order, follow the object that cut over. Each delivery
     // is isolated, so one throwing callback loses neither the rest nor the held events.
@@ -831,10 +1211,12 @@ async function follow(
       }
     };
     // A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
+    delivered(slot, object);
     if (!over() && active === slot) deliver(() => handlers().onObject?.(object));
     for (const event of replay) {
       if (over() || active !== slot) break;
       if (event.type === 'object') {
+        delivered(slot, event.value);
         if (event.value.groupId > (slot.firstGroup as number)) slot.progressed = true;
         if (event.value.groupId > (slot.largestGroup as number)) slot.largestGroup = event.value.groupId;
         deliver(() => handlers().onObject?.(event.value));
@@ -847,10 +1229,12 @@ async function follow(
     if (!slot || over()) return;
     if (slot === active) {
       if (slot.ended) return;
+      if (atOrBefore(object, slot.skipThrough)) return;
       lastObjectAt = performance.now();
       if (slot.firstGroup === undefined) slot.firstGroup = object.groupId;
       else if (object.groupId > slot.firstGroup) slot.progressed = true;
       if (slot.largestGroup === undefined || object.groupId > slot.largestGroup) slot.largestGroup = object.groupId;
+      delivered(slot, object);
       handlers().onObject?.(object);
       return;
     }
@@ -866,9 +1250,17 @@ async function follow(
       onEnded(active, activeEnd);
       if (over() || pending !== slot) return;
     }
-    // With the active subscription gone there is nothing left to compare with: the next object cuts over.
+    // A rotation's replacement starts at the latest group, which the active subscription may have delivered: skip it.
+    // Not once the publisher ended or the subscription was ended by it: a restarted publisher numbers from 0 again.
+    const rotation = rotating(slot);
+    // Only PUBLISH_DONE says the publisher may number from 0 again; a stale, terminated or disconnected subscription
+    // does not.
+    const continues = !endedTargets.has(slot.key) && active.ended !== 'publisher-done';
+    if (rotation && continues && atOrBefore(object, active.latest)) return;
+    // With the active subscription gone there is nothing left to compare with: the next object cuts over. A rotation's
+    // replacement continues the same stream, so its first new object does too.
     let passed = true;
-    if (!active.ended) {
+    if (!active.ended && !rotation) {
       try {
         passed = want.until(object);
       } catch (error) {
@@ -887,16 +1279,30 @@ async function follow(
     if (draining.has(slot)) stopDrain(slot);
     else if (slot === pending) pendingFailed(slot, end);
     else if (slot === active && !slot.ended) {
+      // The retiring connection closed under the active subscription: the rotation's replacement carries on, or is
+      // tried again on the next connection after its backoff.
+      if (end.cause === 'connection-closed' && pending && pending.connection !== slot.connection) {
+        activeEnded('connection');
+        return;
+      }
+      const elsewhere =
+        (retryMove && retryMove.connection !== slot.connection) ||
+        (rotationTo && rotationTo.connection !== slot.connection);
+      if (end.cause === 'connection-closed' && !pending && elsewhere) {
+        slot.ended = 'connection';
+        slot.subscription.cancel();
+        return;
+      }
       const next = classify(end, accepted(), slot.progressed, cancelledOrConnection);
       if (next.kind === 'retry' && next.reason) activeEnded(next.reason);
       else settle(next);
     }
   };
 
-  const open = (target: string[], targetGeneration: string | undefined): Slot => {
+  const open = (target: string[], targetGeneration: string | undefined, on: Connection): Slot => {
     const { track, parameters } = want.options;
     let slot: Slot | undefined;
-    const subscription = connection.subscriber.subscribe(
+    const subscription = on.subscriber.subscribe(
       { namespace: target, track, ...(parameters ? { parameters } : {}) },
       {
         onSubscribed: (info) => {
@@ -917,6 +1323,9 @@ async function follow(
         },
         onPublisherDone: (info) => {
           if (!slot || over()) return;
+          // Heard on the replacement: the publisher behind both ended. An old subscription a move left behind hearing
+          // its own publisher end says nothing about the current one.
+          if (slot === pending) endedTargets.add(slot.key);
           if (slot === pending) pendingFailed(slot, undefined);
           else if (slot === active && !slot.ended) {
             activeEnded('publisher-done');
@@ -930,11 +1339,13 @@ async function follow(
       generation: targetGeneration,
       track,
       key: targetKey(target, track, parameters),
+      connection: on,
       subscription,
       progressed: false,
       held: [],
     };
     slot = opened;
+    holdOn(on);
     void subscription.subscribed.catch(() => {});
     void subscription.ended.then((end) => onEnded(opened, end));
     return opened;
@@ -943,15 +1354,20 @@ async function follow(
   /** Bring the subscriptions in line with what the want asks for now: its options and the newest generation. */
   const reconcile = () => {
     if (over()) return;
+    // During a rotation the subscription belongs on the next connection, following that connection's discovery.
+    const on = rotationTo?.connection ?? active.connection;
+    const discovery = rotationTo ? rotationTo.watch : watch;
     let target = want.options.namespace;
     let targetGeneration: string | undefined;
-    if (watch) {
-      const failure = watch.failure();
+    if (discovery) {
+      const failure = discovery.failure();
       if (failure) {
         settle(discoveryFailed(failure.error, scope, cancelledOrConnection, accepted()));
         return;
       }
-      targetGeneration = watch.current();
+      targetGeneration = discovery.current();
+      // A rotation's discovery on the next connection has found nothing yet: wait for it, the old one still delivers.
+      if (targetGeneration === undefined && rotationTo) return;
       // None announced: nothing to move to, so the want waits for one, as after a withdrawal.
       if (targetGeneration === undefined) {
         settle({ kind: 'moved', accepted: accepted() });
@@ -960,7 +1376,7 @@ async function follow(
       target = [...target, targetGeneration];
     }
     const key = targetKey(target, want.options.track, want.options.parameters);
-    if (key === active.key) {
+    if (key === active.key && on === active.connection) {
       // Asked for what is active again: a pending move is no longer wanted.
       clearRetry();
       moveTarget = undefined;
@@ -971,7 +1387,8 @@ async function follow(
       if (active.ended) settle({ kind: 'retry', accepted: true, progressed: active.progressed, reason: active.ended });
       return;
     }
-    if (pending?.key === key || retryMove?.key === key) return;
+    if ((pending?.key === key && pending.connection === on) || (retryMove?.key === key && retryMove.connection === on))
+      return;
     clearRetry();
     // An unanswered subscription delivers nothing to overlap: replace it at once.
     if (!accepted()) {
@@ -986,14 +1403,14 @@ async function follow(
     if (moveTarget !== key) moveFailures = 0;
     moveTarget = key;
     try {
-      pending = open(target, targetGeneration);
+      pending = open(target, targetGeneration, on);
     } catch (error) {
       settle(scope.aborted || !refusedForGood(error) ? cancelledOrConnection(true) : { kind: 'fatal', error });
     }
   };
 
   try {
-    active = open(namespace, generation);
+    active = open(namespace, generation, connection);
   } catch (error) {
     want.settledTarget = want.target;
     // An argument the relay can never take is the want's fault; anything else is the connection ending under the call.
@@ -1001,6 +1418,45 @@ async function follow(
     return { kind: 'fatal', error };
   }
 
+  /** A rotation replaced the active subscription's connection: move the subscription to the next one. */
+  const rotate = (from: Connection) => {
+    if (over()) return;
+    // The active subscription's connection, or the one a rotation is already moving to, if that one retires in turn.
+    if (rotationTo ? rotationTo.connection !== from : active.connection !== from) return;
+    const next = nextConnection();
+    if (!next || next === from || next.signal.aborted) return;
+    // Nothing accepted yet to overlap: start over on the new connection at once.
+    if (!accepted()) {
+      settle({ kind: 'moved', accepted: false });
+      return;
+    }
+    holdOn(next);
+    let nextWatch: RootWatch | undefined;
+    let release = () => {};
+    if (watch) {
+      try {
+        ({ watch: nextWatch, release } = rootWatch(next, want.options.namespace));
+      } catch {
+        // Discovery the new connection refuses cannot follow there: restart on it as after a connection's end.
+        releaseUnused();
+        settle(cancelledOrConnection(accepted()));
+        return;
+      }
+    }
+    // Recorded at once, before the new connection's discovery has found the generation: reconcile waits for it, and
+    // the rotation is in flight meanwhile, so the old connection closing or this one retiring in turn keeps continuity.
+    // A rotation to a connection that retired in turn gives way to this one.
+    unwatchNext?.();
+    rotationTo?.release();
+    rotationTo = { connection: next, watch: nextWatch, release };
+    // A move waiting to be retried on a connection being rotated away is the rotation's to make now, on the next one:
+    // left in place, its connection closing would restart the want.
+    if (retryMove && retryMove.connection !== next) clearRetry();
+    unwatchNext = nextWatch?.onChange(reconcile);
+    reconcile();
+    releaseUnused();
+  };
+  let unwatchNext: (() => void) | undefined;
   let stale: ReturnType<typeof setInterval> | undefined;
   const watchStale = () => {
     clearInterval(stale);
@@ -1024,7 +1480,7 @@ async function follow(
   };
   watchStale();
   want.changes.add(changed);
-  const unwatch = watch?.onChange(reconcile);
+  let unwatch = watch?.onChange(reconcile);
   // A change that landed between choosing the subscription and attaching the listeners is not lost.
   reconcile();
   try {
@@ -1036,10 +1492,18 @@ async function follow(
     clearInterval(stale);
     clearRetry();
     unwatch?.();
+    unwatchNext?.();
+    for (const stop of observed.values()) stop();
+    observed.clear();
     want.changes.delete(changed);
     for (const slot of [...draining.keys()]) stopDrain(slot);
     pending?.subscription.cancel();
     active.subscription.cancel();
+    rotationTo?.release();
+    rotationTo = undefined;
+    releaseWatch();
+    for (const release of holds.values()) release();
+    holds.clear();
   }
 }
 

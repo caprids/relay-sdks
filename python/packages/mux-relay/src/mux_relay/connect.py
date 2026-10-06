@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, fields, replace
+from datetime import datetime
 from types import TracebackType
 from typing import Self
 
@@ -236,6 +237,16 @@ class RelaySubscriber:
         result intact for every other waiter.
         """
         return self._closed
+
+    @property
+    def expires_at(self) -> datetime | None:
+        """When the relay will end this connection for its credential's expiry, as an aware UTC datetime.
+
+        The :class:`RelayCredential`'s ``expires_at``, or the JWT's ``exp`` claim, read without
+        verifying it; ``None`` when neither is known. The relay closes the session then with
+        ``UNAUTHORIZED`` in phase ``connection``; open a replacement before it. Supervised connections do.
+        """
+        return self._lifetime.expires_at
 
     @property
     def track_source(self) -> MoqTrackSource:

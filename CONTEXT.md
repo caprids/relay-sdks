@@ -79,6 +79,12 @@ One supervised publisher connection, and the namespace it serves: the root plus 
 by start time. Each reconnect is a new generation, which the relay treats as a new publisher.
 _Avoid_: session, epoch, incarnation, reconnect count
 
+**Rotation**:
+Replacing a supervisor's connection before its credential expires, make-before-break: the new
+connection takes over while the old one still serves, so viewers see a switch, not a drop. The relay
+ends a session at its credential's expiry and cannot take a new token on a live one.
+_Avoid_: token refresh (no token is refreshed in place), reconnect (nothing was lost)
+
 **Want**:
 A supervised subscriber's standing request for one track, keyed by the application, held across
 subscriptions until it is withdrawn. Each subscription it makes is an ordinary subscription.

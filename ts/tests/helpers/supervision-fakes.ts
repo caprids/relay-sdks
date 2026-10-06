@@ -23,9 +23,9 @@ export function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
-/** Poll until `predicate` holds, failing after a second. */
-export async function until(predicate: () => boolean, label = 'condition'): Promise<void> {
-  const deadline = Date.now() + 1_000;
+/** Poll until `predicate` holds, failing after `timeoutMs` (a second by default). */
+export async function until(predicate: () => boolean, label = 'condition', timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
     await new Promise((resolve) => setTimeout(resolve, 1));
@@ -40,9 +40,12 @@ export interface FakeTrack {
   failNext?: unknown;
   setDemand(value: boolean): void;
   closed: boolean;
+  /** Close every open group the way the primitive does when the relay resets demand: no wrapper method runs. */
+  resetGroups(): void;
 }
 
 export interface FakePublisher extends RelayPublisher {
+  expiresAt: Date | undefined;
   namespace: string[];
   tracks: Map<string, FakeTrack>;
   /** The connection ends, with `error` or cleanly. */
@@ -50,12 +53,13 @@ export interface FakePublisher extends RelayPublisher {
   closeCalls: number;
 }
 
-export function fakePublisher(namespace: string[]): FakePublisher {
+export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublisher {
   const ended = deferred<{ error?: unknown }>();
   let isEnded = false;
   const tracks = new Map<string, FakeTrack>();
   const publisher: FakePublisher = {
     namespace,
+    expiresAt,
     tracks,
     closeCalls: 0,
     announced: Promise.resolve(),
@@ -74,11 +78,15 @@ export function fakePublisher(namespace: string[]): FakePublisher {
       if (isEnded) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');
       if (tracks.has(options.track)) throw new RangeError('Track name is already registered');
       const listeners = new Set<(value: boolean | undefined) => void>();
+      const resets = new Set<() => void>();
       let demand = false;
       const track: FakeTrack = {
         options,
         writes: [],
         closed: false,
+        resetGroups() {
+          for (const reset of resets) reset();
+        },
         setDemand(value) {
           demand = value;
           for (const listener of listeners) listener(value);
@@ -132,8 +140,45 @@ export function fakePublisher(namespace: string[]): FakePublisher {
           async writeJSON(value) {
             await track.writer.writeText(JSON.stringify(value));
           },
-          async openGroup() {
-            throw new Error('not used');
+          async openGroup(groupOptions?: { signal?: AbortSignal }) {
+            if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
+            let closed = false;
+            groupOptions?.signal?.addEventListener('abort', () => {
+              closed = true;
+            });
+            resets.add(() => {
+              closed = true;
+            });
+            const group = {
+              groupId: track.writes.length,
+              objectCount: 0,
+              get closed() {
+                return closed || track.closed;
+              },
+              async write(payload: Uint8Array) {
+                if (group.closed) throw new RelayError('CLOSED', 'Group is closed', 'writing');
+                track.writes.push(new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength).slice());
+              },
+              async writeText(text: string) {
+                await group.write(new TextEncoder().encode(text));
+              },
+              async writeJSON(value: unknown) {
+                await group.writeText(JSON.stringify(value));
+              },
+              async close() {
+                if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'closing');
+                if (track.failNext !== undefined) {
+                  const error = track.failNext;
+                  track.failNext = undefined;
+                  throw error;
+                }
+                closed = true;
+              },
+              abort() {
+                closed = true;
+              },
+            };
+            return group as never;
           },
           close() {
             track.closed = true;
@@ -161,18 +206,20 @@ export interface FakeSubscription {
 }
 
 export interface FakeSubscriber extends RelaySubscriber {
+  expiresAt: Date | undefined;
   subscriptions: FakeSubscription[];
   discoveries: { prefix: string[]; push(event: NamespaceEvent): void; fail(error: unknown): void; closed: boolean }[];
   end(error?: unknown): void;
 }
 
-export function fakeSubscriber(): FakeSubscriber {
+export function fakeSubscriber(expiresAt?: Date): FakeSubscriber {
   const ended = deferred<{ error?: unknown }>();
   let isEnded = false;
   const closers = new Set<(error?: unknown) => void>();
   const fake: FakeSubscriber = {
     subscriptions: [],
     discoveries: [],
+    expiresAt,
     closed: ended.promise,
     trackSource: undefined as never,
     end(error) {

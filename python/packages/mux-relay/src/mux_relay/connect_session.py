@@ -8,11 +8,16 @@ exposes a ``closed`` future carrying the error that ended it, if any.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import inspect
+import json
+import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from moq_core import MOQT_PROTOCOL_IDS, Closed, Goaway, KeyValuePair, MoqtProtocolId, MoqtTransport
 from moq_core._tasks import call_later, observe, spawn
@@ -22,8 +27,71 @@ from moq_core.transport import transport_ended
 from .cancellation import CancellationToken
 from .errors import RelayError, RelayErrorPhase, _peer_close, _refusal, _transport_error, _unauthorized
 
-TokenProvider = Callable[[], str | Awaitable[str | None] | None]
-"""Resolve a connection token, synchronously or asynchronously. ``None`` or ``""`` sends no token."""
+
+@dataclass(frozen=True, slots=True)
+class RelayCredential:
+    """A token together with when the relay stops honoring it.
+
+    moq-relay ends a session at its grant's deadline, which is the token's expiry, and a live session
+    cannot take a new token; supervised connections replace theirs before then.
+    """
+
+    token: str
+    """The token, carried in the endpoint's ``jwt`` query parameter. An empty one sends no token."""
+    expires_at: datetime
+    """When the relay ends a session the token admitted: the JWT's ``exp``, or the grant's deadline if earlier.
+
+    Must be timezone-aware.
+    """
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.token, str):
+            raise TypeError("RelayCredential.token must be a string")
+
+        if not isinstance(self.expires_at, datetime):
+            raise TypeError("RelayCredential.expires_at must be a datetime")
+
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+            raise ValueError("RelayCredential.expires_at must be timezone-aware")
+
+
+TokenProvider = Callable[[], str | RelayCredential | Awaitable[str | RelayCredential | None] | None]
+"""Resolve a connection token, synchronously or asynchronously. ``None`` or ``""`` sends no token.
+
+Return a :class:`RelayCredential` to say when the token expires; for a bare token the connection
+reads the JWT's ``exp`` claim, without verifying it. The provider runs once per connection.
+"""
+
+
+def jwt_expiry(token: str) -> datetime | None:
+    """The ``exp`` claim of a JWT as an aware UTC datetime, read without verifying the token.
+
+    The relay verifies the token; the SDK only needs to know when the session will end. Anything
+    that is not a JWT with a numeric ``exp`` has no known expiry.
+    """
+    parts = token.split(".")
+
+    if len(parts) != 3 or not parts[1]:
+        return None
+
+    try:
+        payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
+        claims = json.loads(payload.decode("utf-8"))
+    except (ValueError, binascii.Error, UnicodeDecodeError):
+        return None
+
+    exp = claims.get("exp") if isinstance(claims, dict) else None
+
+    if not isinstance(exp, int | float) or isinstance(exp, bool):
+        return None
+
+    # A huge integer `exp` overflows float conversion, in isfinite as in fromtimestamp: no known expiry either.
+    try:
+        if not math.isfinite(exp):
+            return None
+        return datetime.fromtimestamp(exp, UTC)
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 Framing: TypeAlias = Literal["webtransport", "native-quic"]
@@ -102,7 +170,7 @@ class LifetimeCallbacks:
 class RelaySessionLifetime(Generic[T]):
     """An established session plus the shutdown plumbing both connection kinds share."""
 
-    __slots__ = ("_assert_open", "_close", "_observe_closed", "_transport", "closed", "session")
+    __slots__ = ("_assert_open", "_close", "_observe_closed", "_transport", "closed", "expires_at", "session")
 
     def __init__(
         self,
@@ -112,8 +180,11 @@ class RelaySessionLifetime(Generic[T]):
         transport: MoqtTransport,
         assert_open: Callable[[], None],
         close: Callable[[], None],
+        expires_at: datetime | None = None,
     ) -> None:
         self.session = session
+        self.expires_at = expires_at
+        """When the relay ends the session for the credential's expiry, if known."""
         self.closed = closed
         self._observe_closed = observe_closed
         self._transport = transport
@@ -281,6 +352,7 @@ async def open_relay_session(
     stopped = False
     established = False
     using_transport = False
+    expires_at: datetime | None = None
     stop_error: BaseException | None = None
     interrupted: asyncio.Future[None] = loop.create_future()
     observe(interrupted)
@@ -370,22 +442,31 @@ async def open_relay_session(
         return remove
 
     async def establish() -> T:
-        nonlocal using_transport
+        nonlocal using_transport, expires_at
         connect_url = url
 
         if not has_jwt and options.get_token is not None:
-            token = options.get_token()
+            resolved = options.get_token()
 
-            if inspect.isawaitable(token):
-                token = await token
+            if inspect.isawaitable(resolved):
+                resolved = await resolved
 
             assert_open()
 
-            if token is not None and not isinstance(token, str):
-                raise TypeError("get_token must return a string or None")
+            if isinstance(resolved, RelayCredential):
+                token, given = resolved.token, resolved.expires_at.astimezone(UTC)
+            elif resolved is None or isinstance(resolved, str):
+                token, given = resolved or "", None
+            else:
+                raise TypeError("get_token must return a string, a RelayCredential or None")
 
             if token:
                 connect_url = _with_token(connect_url, token)
+
+            expires_at = given if given is not None else jwt_expiry(token)
+        else:
+            explicit = parse_qs(urlsplit(url).query).get("jwt", [""])[0]
+            expires_at = jwt_expiry(explicit)
 
         assert_open()
         using_transport = True
@@ -457,7 +538,9 @@ async def open_relay_session(
     established = True
     assert state.transport is not None
 
-    return RelaySessionLifetime(connected, closed, observe_closed, state.transport, assert_open, lambda: finish())
+    return RelaySessionLifetime(
+        connected, closed, observe_closed, state.transport, assert_open, lambda: finish(), expires_at
+    )
 
 
 __all__ = [
@@ -468,9 +551,11 @@ __all__ = [
     "ConnectingTransport",
     "Framing",
     "LifetimeCallbacks",
+    "RelayCredential",
     "RelaySessionLifetime",
     "RelayTransportFactory",
     "TokenProvider",
+    "jwt_expiry",
     "open_relay_session",
     "validate_timeout",
 ]

@@ -256,6 +256,32 @@ separately from SDK errors (compare the exception to your application's `Cancell
 See [Errors and recovery](#errors-and-recovery) for stable SDK error codes, phases, and preserved
 transport causes.
 
+### Token expiry
+
+The relay ends a session when its token expires, and a live session cannot take a new token. Every
+connection exposes `expires_at`, the time that will happen: from the JWT's `exp` claim, or from a
+`RelayCredential` your token provider returns when the token is not a JWT or your server knows
+better.
+
+```python
+from datetime import UTC, datetime
+
+from mux_relay import RelayCredential, connect_relay_subscriber
+
+
+async def get_token() -> RelayCredential:
+    token, expires = await fetch_relay_token()  # your server
+    return RelayCredential(token, datetime.fromtimestamp(expires, UTC))
+
+
+subscriber = await connect_relay_subscriber(url, get_token=get_token)
+print("ends at", subscriber.expires_at)
+```
+
+At that time the connection closes with `UNAUTHORIZED` in phase `connection`. The primitives do not
+prevent it: open a replacement before then. The [supervised connections](#stay-connected-supervised-connections)
+do it for you, make-before-break, a minute before expiry by default (`rotate_before`).
+
 Namespaces are lists or tuples of 1–32 non-empty string fields, sent verbatim without splitting on
 `/`; a single `str` is a `TypeError`, not a one-field namespace. The 32-field protocol limit is pinned
 in [protocol.json](../spec/protocol.json) and exceeding it is a `ValueError`. Track names must be
@@ -430,6 +456,15 @@ of the want. Compare your own timeline, never group IDs, since each generation a
 its own groups. Wanting the key again with only `until`, `drain`, `stale_after`, `retry` or the
 handlers changed swaps them without resubscribing. Another namespace, or turning `generations` on or
 off, replaces the want.
+
+Both supervisors **rotate** before the token expires ([token expiry](#token-expiry)), so a long
+session never hits the relay's deadline. `rotate_before` seconds (default 60) before `expires_at`,
+they call `get_token` again and open the replacement while the old connection still serves. The
+publisher's next generation is announced, each track moves to it once viewers subscribe there, and
+the old generation closes. Each want moves its subscription to the new connection as a move does;
+when its target is unchanged, the cutover is invisible: no callback runs and nothing is lost or
+repeated. Call `rotate()` to do it now, for example after revoking a token. See
+[rotation](../spec/behavior.md#rotation).
 
 ## Publishing lifecycle
 
@@ -677,7 +712,8 @@ acknowledgment. The primitives do not retry or reconnect; the
 [supervisors](#stay-connected-supervised-connections) do. `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too), in
-any phase. TypeScript reports it too, in phase `connecting`; in a browser only against moq-relay
+any phase: in phase `connection` it means the credential of a live session expired or its grant was
+revoked ([token expiry](#token-expiry)). TypeScript reports it too; in a browser only against moq-relay
 0.17.0 or later, since older relays' close never reached the page and a refusal arrived as
 `TRANSPORT_ERROR` (#14). Neither another connection failure nor an uncovered
 namespace proves authentication was denied. A subscription outside the token's grant is refused

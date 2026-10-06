@@ -180,6 +180,12 @@ export interface RelayPublisher {
     error?: unknown;
   }>;
   /**
+   * When the relay will end this connection for its credential's expiry: the `RelayCredential`'s `expiresAt`, or the
+   * JWT's `exp` claim, read without verifying it. `undefined` when neither is known. The relay closes the session then
+   * with `UNAUTHORIZED` in phase `connection`; open a replacement before it. Supervised connections do.
+   */
+  readonly expiresAt: Date | undefined;
+  /**
    * End all tracks, retract the namespace, and wait for transport shutdown. First waits, for up to
    * the largest writeTimeoutMs among the tracks, for completed groups the relay has not yet
    * acknowledged; any still unacknowledged after that may be lost. Idempotent.
@@ -260,6 +266,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   return {
     announced,
     closed,
+    expiresAt: lifetime.expiresAt === undefined ? undefined : new Date(lifetime.expiresAt.getTime()),
     registerTrack({ track, trackProperties, writeTimeoutMs = 10_000 }) {
       // Arguments first, then connection state, then the registry.
       const name = trackName(track);
