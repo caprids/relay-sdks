@@ -956,16 +956,15 @@ async function subscribeOnce(
         if (reported && !want.handoff) {
           // A subscription that delivered nothing new itself inherits what its predecessor delivered.
           const inherited = want.cutoff;
+          // Its predecessor finished delivering before this one took over: keep its location, not the cutoff itself.
+          const before =
+            inherited && inherited.namespace.join('/') === namespace.join('/') ? inherited.latest() : undefined;
           want.cutoff =
             reason === 'rotation'
               ? {
                   owner: subscription,
                   namespace: [...namespace],
-                  latest: () =>
-                    latest ??
-                    (inherited && inherited.namespace.join('/') === namespace.join('/')
-                      ? inherited.latest()
-                      : undefined),
+                  latest: () => latest ?? before,
                 }
               : undefined;
           handedOff = handOff(want, connection, subscription, reason, namespace, () => {

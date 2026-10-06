@@ -1474,4 +1474,19 @@ describe('rotation before the credential expires (#261)', () => {
       await changes.return?.();
     });
   });
+  describe('Codex pass 4 fixes', () => {
+    it('closes the old generation at once when a track with a group open on it closes', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'video' });
+      connections[0]!.tracks.get('video')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      await writer.openGroup();
+      publisher.rotate();
+      await until(() => connections[1]?.tracks.has('video') === true, 'next generation');
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await writer.write(new Uint8Array([7]));
+      writer.close();
+      await until(() => connections[0]!.closeCalls === 1, 'old generation closed well before the overlap ends', 500);
+    });
+  });
 });

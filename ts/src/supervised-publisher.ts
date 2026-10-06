@@ -535,6 +535,8 @@ class SupervisedTrack {
         heard?: boolean;
       }
     | undefined;
+  /** The holds of groups open on any generation, released when the track closes and ends them. */
+  #groupHolds = new Set<() => void>();
   /** Writers on generations a rotation moved this track off, kept until they close: their open groups end with it. */
   #retired = new Map<Generation, RelayTrackWriter>();
   #closed = false;
@@ -580,7 +582,13 @@ class SupervisedTrack {
           const group = await writer.openGroup(options);
           // The generation the group was opened on, read before the await: a disconnect meanwhile clears the binding.
           // The group holds the generation open until it is closed or aborted.
-          return supervisedGroup(group, () => track.#closed, generation, use(generation));
+          const hold = use(generation);
+          const release = () => {
+            track.#groupHolds.delete(release);
+            hold();
+          };
+          track.#groupHolds.add(release);
+          return supervisedGroup(group, () => track.#closed, generation, release);
         }),
       write: (payload, options?: WriteOptions) => onLive((writer) => writer.write(payload, options)),
       writeText: (text, options?: WriteOptions) => onLive((writer) => writer.writeText(text, options)),
@@ -593,6 +601,8 @@ class SupervisedTrack {
         track.#binding = undefined;
         for (const retired of track.#retired.values()) retired.close();
         track.#retired.clear();
+        // Closing the writers ended their groups: none holds a rotating generation open any more.
+        for (const release of [...track.#groupHolds]) release();
         track.#dropPending(true);
         track.#endDemand();
       },
