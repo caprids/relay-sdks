@@ -633,7 +633,7 @@ async def _supervise_want(
             # move cancelled was a restart.
             superseded = (want.options.track, want.options.parameters) != asked
             if outcome.kind == "fatal" and superseded:
-                outcome = _Outcome("retry", accepted=outcome.accepted, reason="terminated")
+                outcome = _Outcome("retry", accepted=outcome.accepted, reason=outcome.reason or "terminated")
             if outcome.kind == "fatal":
                 forget()
                 assert outcome.error is not None
@@ -828,7 +828,9 @@ async def _follow(
         if outcome is None:
             # A failure no wait fixes still ends an accepted subscription, which a superseding re-want
             # reports as a restart.
-            outcome = replace(next_outcome, accepted=accepted()) if next_outcome.kind == "fatal" else next_outcome
+            if next_outcome.kind == "fatal":
+                next_outcome = replace(next_outcome, accepted=accepted(), reason=active.ended)
+            outcome = next_outcome
             want.settled_target = (want.options.track, want.options.parameters)
             settled.cancel()
 

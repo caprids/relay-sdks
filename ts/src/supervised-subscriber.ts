@@ -480,7 +480,7 @@ type AttemptOutcome =
    */
   | { kind: 'moved'; accepted: boolean }
   /** A failure no wait fixes; surface it and stop. */
-  | { kind: 'fatal'; error: unknown; accepted?: boolean }
+  | { kind: 'fatal'; error: unknown; accepted?: boolean; reason?: RestartReason | undefined }
   /** Anything else; resubscribe after the backoff. */
   | { kind: 'retry'; accepted: boolean; progressed: boolean; reason?: RestartReason | undefined };
 
@@ -536,7 +536,12 @@ async function superviseWant(
       // A re-want that came after the attempt settled asks for another track or parameters: the old target's failure
       // is not the new one's, so try the new one at once. A subscription the failed move cancelled was a restart.
       if (outcome.kind === 'fatal' && want.target !== asked)
-        outcome = { kind: 'retry', accepted: outcome.accepted ?? false, progressed: false, reason: 'terminated' };
+        outcome = {
+          kind: 'retry',
+          accepted: outcome.accepted ?? false,
+          progressed: false,
+          reason: outcome.reason ?? 'terminated',
+        };
       if (outcome.kind === 'fatal') {
         forget();
         want.handlers.onError?.(outcome.error);
@@ -708,7 +713,7 @@ async function follow(
   const settle = (next: AttemptOutcome) => {
     if (outcome) return;
     // A failure no wait fixes still ends an accepted subscription, which a superseding re-want reports as a restart.
-    outcome = next.kind === 'fatal' ? { ...next, accepted: accepted() } : next;
+    outcome = next.kind === 'fatal' ? { ...next, accepted: accepted(), reason: active.ended } : next;
     want.settledTarget = want.target;
     settled.abort();
   };
