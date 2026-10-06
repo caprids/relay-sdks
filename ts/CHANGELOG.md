@@ -22,7 +22,8 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `RECONNECTING` code and is never replayed. `connectSupervisedSubscriber` keeps tracks subscribed through
   `want(key, options, handlers)`: it retries the announce race, resubscribes after a done, a rejection or a stale
   track, moves to replacement connections, follows a supervised publisher's newest generation through discovery, and
-  reports `onRestarted`. Both are in `@mux/relay/node` too. The primitives are unchanged. The examples' shared
+  reports `onRestarted`. An `onStatus` or `onGeneration` that throws stops the supervisor with that error
+  ([#272](https://github.com/muxinc/relay-sdks/issues/272)). Both are in `@mux/relay/node` too. The primitives are unchanged. The examples' shared
   `announce-race.js` is retired: the demo and the live smoke test subscribe through `want`.
 - `@mux/relay-quic`: the native QUIC transport adapter for Node, with prebuilt binaries for Linux (x64 and arm64,
   glibc and musl), macOS (arm64 and x64) and Windows (x64).

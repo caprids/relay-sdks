@@ -38,7 +38,11 @@ import { namespaceFields, trackName } from './validation.js';
 export interface ConnectSupervisedSubscriberOptions extends ConnectRelaySubscriberOptions {
   /** Backoff between connection attempts. Default from 500 ms, doubling up to 10 s, with jitter. */
   reconnect?: SupervisionBackoff;
-  /** Called on every status change; `error` is what ended the previous connection or failed the last attempt. */
+  /**
+   * Called on every status change; `error` is what ended the previous connection or failed the last attempt. A throw
+   * stops the supervisor with that error: a pending `connectSupervisedSubscriber` rejects with it and `closed` resolves
+   * with it. A throw reporting `closed` is rethrown from the `close()` that caused it; `closed` resolves either way.
+   */
   onStatus?(status: SupervisedStatus, error?: unknown): void;
 }
 
@@ -228,10 +232,19 @@ export async function superviseRelaySubscriber(
     current?.subscriber.close();
     current = undefined;
     for (const wake of connectionWaiters.splice(0)) wake();
-    setStatus('closed');
-    resolveClosed(result);
+    try {
+      setStatus('closed');
+    } finally {
+      resolveClosed(result);
+    }
   };
-  const onAbort = () => stop({ error: signal?.reason });
+  const onAbort = () => {
+    try {
+      stop({ error: signal?.reason });
+    } catch {
+      // A throwing onStatus while reporting `closed`: `closed` is settled, and an abort listener has no caller to tell.
+    }
+  };
   signal?.addEventListener('abort', onAbort, { once: true });
 
   /** The live connection, waiting for one while reconnecting; `undefined` once `scope` aborts. */
@@ -291,7 +304,17 @@ export async function superviseRelaySubscriber(
       await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
     }
   };
-  void run();
+  const supervise = async () => {
+    try {
+      await run();
+    } catch (error) {
+      // An application callback (onStatus) threw: stop rather than leave the supervisor neither reconnecting nor
+      // closed, and fail a caller still waiting to connect.
+      stop({ error });
+    }
+  };
+  // A second throw, from onStatus reporting `closed`, has nowhere to go: `closed` is settled either way.
+  void supervise().catch(() => {});
   try {
     await started;
   } catch (error) {
