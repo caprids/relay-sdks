@@ -124,6 +124,8 @@ assert.deepEqual(Object.keys(sdkExports).sort(), [
   'SubscriptionRequestError',
   'connectRelayPublisher',
   'connectRelaySubscriber',
+  'connectSupervisedPublisher',
+  'connectSupervisedSubscriber',
   'readJSON',
   'readText',
 ]);
@@ -131,7 +133,7 @@ assert.deepEqual(Object.keys(sdkExports).sort(), [
 const nodeExports = await import('../dist/node.js');
 assert.deepEqual(Object.keys(nodeExports).sort(), Object.keys(sdkExports).sort(), '@mux/relay/node mirrors the root');
 for (const name of Object.keys(sdkExports)) {
-  const own = name === 'connectRelayPublisher' || name === 'connectRelaySubscriber';
+  const own = name.startsWith('connect');
   assert.equal(nodeExports[name] === sdkExports[name], !own, `${name} ${own ? 'defaults the transport' : 'is shared'}`);
 }
 // Its declarations stand without the optional adapter installed.

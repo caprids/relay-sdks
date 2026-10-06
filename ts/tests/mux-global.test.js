@@ -1,11 +1,18 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { runDemo } from '../examples/mux-global/demo.js';
 import { connectRelayPublisher, connectRelaySubscriber, RelayError, SubscriptionRequestError } from '../src/index.js';
+import { superviseRelaySubscriber } from '../src/supervised-subscriber.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
 const connectors = vi.hoisted(() => ({ connectRelaySubscriber: vi.fn(), connectRelayPublisher: vi.fn() }));
-// The demo imports the SDK by its package name; the connectors are replaced, everything else is real.
-vi.mock('@mux/relay', async () => ({ ...(await vi.importActual('../src/index.js')), ...connectors }));
+// The demo imports the SDK by its package name; the connectors are replaced, everything else is real. The supervised
+// subscriber the demo opens connects through the replaced subscriber connector.
+vi.mock('@mux/relay', async () => ({
+  ...(await vi.importActual('../src/index.js')),
+  ...connectors,
+  connectSupervisedSubscriber: (options) =>
+    superviseRelaySubscriber((connection) => connectors.connectRelaySubscriber(connection), options),
+}));
 
 const config = {
   url: 'https://relay.example.com',
@@ -132,7 +139,8 @@ it('does not replay a write that times out after partial progress', async () => 
 });
 
 it('closes the publisher when subscriber connection setup fails', async () => {
-  connectors.connectRelaySubscriber.mockRejectedValue(new Error('handshake failed'));
+  // A refusal on the first attempt is not retried: the supervised subscriber rejects with it.
+  connectors.connectRelaySubscriber.mockRejectedValue(new RelayError('UNAUTHORIZED', 'refused', 'connecting'));
   await expect(runDemo(config, vi.fn())).rejects.toThrow('subscriber failed to connect');
   expect(connections).toHaveLength(1);
   await expectClosed();
@@ -177,21 +185,27 @@ it('ends the wait for demand promptly with a subscribe rejection recorded meanwh
     const subscriber = await connectRelaySubscriber({ ...options, createTransport: hub.connectSubscriber });
     connections.push(subscriber);
     vi.spyOn(subscriber, 'subscribe').mockImplementation((_, handlers) => {
-      const rejection = { errorCode: 403, retryInterval: 0, reason: 'forbidden' };
+      // UNAUTHORIZED: a rejection the want does not retry.
+      const rejection = { errorCode: 0x1, retryInterval: 0, reason: 'forbidden' };
+      let end;
+      const ended = new Promise((resolve) => {
+        end = resolve;
+      });
       const subscribed = new Promise((_, reject) =>
         setTimeout(() => {
-          handlers.onError(rejection);
+          handlers.onError?.(rejection);
           reject(new SubscriptionRequestError(rejection));
+          end({ kind: 'rejected', cause: 'request-error', accepted: false, error: rejection });
         }, 10),
       );
       subscribed.catch(() => {});
-      return { subscribed, cancel() {} };
+      return { subscribed, ended, cancel() {} };
     });
     return subscriber;
   });
   const started = Date.now();
   // The write deadline is 15 s and the run's 2 s: the recorded rejection must end the wait first.
-  await expect(runDemo(config, vi.fn())).rejects.toThrow('subscribe rejected: code 403 forbidden');
+  await expect(runDemo(config, vi.fn())).rejects.toThrow('subscribe rejected: code 1 forbidden');
   expect(Date.now() - started).toBeLessThan(1000);
   await expectClosed();
 });

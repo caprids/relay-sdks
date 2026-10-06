@@ -50,10 +50,14 @@ await publisher.close();
 The [guide's first round trip](GUIDE.md#first-round-trip) runs the complete version of this in a
 browser, with credential handling, the subscribe retry, a deadline, and cleanup on failure.
 
+These connections never reconnect. For a live application, `connectSupervisedPublisher` and
+`connectSupervisedSubscriber` reconnect with backoff, and keep tracks registered and subscribed
+across connections and publisher restarts ([stay connected](GUIDE.md#stay-connected-supervised-connections)).
+
 ## Node
 
-`@mux/relay/node` exports everything `@mux/relay` does. Its `connectRelayPublisher` and
-`connectRelaySubscriber` connect over native QUIC (MOQT on QUIC, ALPN `moqt-20`) through
+`@mux/relay/node` exports everything `@mux/relay` does. Its `connectRelayPublisher`,
+`connectRelaySubscriber` and both `connectSupervised*` functions connect over native QUIC (MOQT on QUIC, ALPN `moqt-20`) through
 [`@mux/relay-quic`](packages/relay-quic/README.md), Mux's transport adapter for Node. Pass the same
 `https://` endpoint you pass in a browser.
 

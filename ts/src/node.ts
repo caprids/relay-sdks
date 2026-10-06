@@ -27,6 +27,17 @@ import {
   type RelayPublisher,
 } from './publish.js';
 
+import {
+  type ConnectSupervisedPublisherOptions,
+  type SupervisedPublisher,
+  superviseRelayPublisher,
+} from './supervised-publisher.js';
+import {
+  type ConnectSupervisedSubscriberOptions,
+  type SupervisedSubscriber,
+  superviseRelaySubscriber,
+} from './supervised-subscriber.js';
+
 export * from './index.js';
 
 /** A certificate hash the server's end-entity certificate must match, in the W3C WebTransport shape. */
@@ -168,4 +179,24 @@ export async function connectRelayPublisher(
   options: RelayNodeOptions<ConnectRelayPublisherOptions>,
 ): Promise<RelayPublisher> {
   return connectPublisher(withTransport(options));
+}
+
+/**
+ * Open a subscriber that reconnects, as `@mux/relay`'s `connectSupervisedSubscriber` does, with every connection over
+ * native QUIC through `@mux/relay-quic` unless `createTransport` is given.
+ */
+export async function connectSupervisedSubscriber(
+  options: RelayNodeOptions<ConnectSupervisedSubscriberOptions>,
+): Promise<SupervisedSubscriber> {
+  return superviseRelaySubscriber(connectSubscriber, withTransport(options));
+}
+
+/**
+ * Open a publisher that reconnects, as `@mux/relay`'s `connectSupervisedPublisher` does, with every generation over
+ * native QUIC through `@mux/relay-quic` unless `createTransport` is given.
+ */
+export async function connectSupervisedPublisher(
+  options: RelayNodeOptions<ConnectSupervisedPublisherOptions>,
+): Promise<SupervisedPublisher> {
+  return superviseRelayPublisher(connectPublisher, withTransport(options));
 }

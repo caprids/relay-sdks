@@ -34,10 +34,24 @@ export type {
 } from './publish.js';
 export { connectRelayPublisher } from './publish.js';
 export type { RelaySubscription, SubscriptionEnd, SubscriptionEndKind } from './subscription.js';
-
 export type { SubscriptionEvent, SubscriptionEventOptions, SubscriptionEvents } from './subscription-events.js';
 export {
   SubscriptionConnectionClosedError,
   SubscriptionOverflowError,
   SubscriptionRequestError,
 } from './subscription-events.js';
+export type {
+  ConnectSupervisedPublisherOptions,
+  PublisherGeneration,
+  SupervisedPublisher,
+} from './supervised-publisher.js';
+export { connectSupervisedPublisher } from './supervised-publisher.js';
+export type {
+  ConnectSupervisedSubscriberOptions,
+  RestartReason,
+  SupervisedSubscriber,
+  WantHandlers,
+  WantOptions,
+} from './supervised-subscriber.js';
+export { connectSupervisedSubscriber } from './supervised-subscriber.js';
+export type { SupervisedStatus, SupervisionBackoff } from './supervision.js';

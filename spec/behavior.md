@@ -35,7 +35,8 @@ against that file.
   Subscriptions still awaiting their first response end as terminated by the closure (see
   "Subscription lifecycle"); accepted or cancelled requests do not receive a second initial
   response. The core's own track source still fails pending requests through their error callback.
-  Automatic reconnection and token refresh on a live session are not yet part of this contract.
+  Opt-in [supervised connections](#supervised-connections) reconnect; the primitives never do, and
+  token refresh on a live session is not yet part of this contract.
 
 ## Error identities and operation phases
 
@@ -77,7 +78,8 @@ operation's phase, so the code alone does not rule out partial delivery.
 
 No code or phase promises safe replay. Account for previous attempts, data freshness, and your
 application's deduplication policy. Successful writes mean transport acceptance, not viewer
-acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED` is the one code that
+acknowledgment. The SDK does not automatically retry or reconnect, outside the opt-in
+[supervised connections](#supervised-connections). `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
 TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-20 §3.5 defines
@@ -192,9 +194,11 @@ Messages are not a compatibility contract; the class and the point of rejection 
   publisher's `announced` settles ([announce propagation](relay-interop.md#announce-propagation)),
   so a subscribe that races the announce is rejected the same way. The SDK reports that rejection
   like any other, through `subscribed` and `on_error`, and does not retry a subscribe; the
-  application retries it within its own budget rather than treating it as fatal. The examples share
-  one helper per language for this; it retries 16 `unroutable` and the older 404 only, never
-  16 `not found` ([issue #136](https://github.com/muxinc/relay-sdks/issues/136)).
+  application retries it within its own budget rather than treating it as fatal. A
+  [supervised subscriber](#supervised-subscriber)'s want retries it, and the Python examples still
+  share a helper for it until that SDK gains one; both retry 16 `unroutable` and the older 404
+  without reporting them, never treating 16 `not found` as the race
+  ([issue #136](https://github.com/muxinc/relay-sdks/issues/136)).
 - The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It surfaces
   a reset when the relay forwards it, which may be well after the publisher's abort: moq-relay 0.15.8
   forwarded each one only when the publisher's next group began, about 0.5 s later, or 3 s after a
@@ -427,6 +431,101 @@ The iterator owns the request, never the connection.
   of the response stream as a withdrawal of each), and after any events still queued, which a
   clean end does not discard. After an error ending, treat every namespace as withdrawn. A GOAWAY
   on the request stream is not surfaced; the connection's GOAWAY ends the connection.
+
+## Supervised connections
+
+The primitives above never reconnect or retry. Applications can opt into a supervision layer
+built only on them: `connectSupervisedPublisher` / `connect_supervised_publisher` and
+`connectSupervisedSubscriber` / `connect_supervised_subscriber`. It owns the recovery policy in
+[publisher recovery](publisher-recovery.md), so live applications don't each write it again
+([issue #260](https://github.com/muxinc/relay-sdks/issues/260)). Neither supervisor changes what
+the primitives do. The Python SDK gains them in its own change.
+
+Both supervisors:
+
+- Resolve once their first connection is up. A first attempt that fails on its arguments, or
+  because the relay refused the credentials (`UNAUTHORIZED`), rejects with that failure. Any other
+  failure is retried with backoff, bounded only by the cancellation primitive, whose abort rejects
+  with its reason. After the first connection, every ending is retried, `UNAUTHORIZED` included,
+  since the token provider runs again on each attempt.
+- Reconnect whenever the connection ends without the application closing it: error, GOAWAY, or a
+  clean close by the relay. The delay starts at 500 ms and doubles up to 10 s. Each delay is drawn
+  from the upper half of its ceiling (jitter), and the backoff starts over after a connection that
+  stayed up longer than the longest delay. Both bounds are options.
+- Report `connecting`, `live`, `reconnecting` and `closed` through a status callback, with the
+  error that ended the previous connection or failed the last attempt. `closed` settles once the
+  supervisor stops: `close()` (no error), the cancellation primitive (its reason), or a first
+  attempt that is not retried (that failure). It never rejects.
+
+### Supervised publisher
+
+- Each connection is a **generation**. It serves the application's root namespace followed by one
+  generation field the SDK chooses: the start time in fixed-width base 36, then four random
+  characters. Generations therefore sort by age as strings. The token must grant the root. The
+  root plus one field must satisfy the namespace rules, checked when the supervisor starts.
+  `generation` exposes the live generation's field and namespace, and a callback runs once each
+  generation is up and every track is bound to it.
+- A fresh namespace per connection is what `publisher-recovery.md` recommends for predictable
+  handoff on moq-relay 0.17.0: a reconnect on the same namespace is a new publisher to the relay,
+  and duplicate announces are ranked arbitrarily ([duplicate announce](relay-interop.md#duplicate-announce)).
+  If the relay later supports taking over a route, the same API can keep one namespace across
+  reconnects without applications changing.
+- `registerTrack` checks its options at once, under the same rules as the primitive's, and returns
+  a writer that outlives the generations. The supervisor registers the track again on every
+  generation. Track names are unique per supervised publisher, including after their writer
+  closes. A track closed by the application is never registered again.
+- **Writes are never replayed.** While no generation is up, `write`, `writeText`, `writeJSON` and
+  `openGroup` fail at once with `RECONNECTING` in phase `connection`, and `hasDemand` is false. An
+  operation that the connection's end interrupts also fails with `RECONNECTING`, never `CLOSED`.
+  A frame writer therefore treats it as an [interruption](../CONTEXT.md), not a retirement, and
+  resumes at the next keyframe on the next generation. The writer's `closed` is true only once the
+  application closed the track or the supervisor stopped.
+- `demandChanges()` spans generations. It reports the current state first, `false` when a
+  generation that had demand is lost, and the next generation's changes after it. It ends when
+  the track closes.
+- `close()` stops reconnecting and closes the live generation, as the primitive's `close()` does.
+
+### Supervised subscriber
+
+- `want(key, options, handlers)` keeps a subscription to one track open until `unwant(key)`.
+  Wanting a key again with the same namespace, track, parameters and generation-following only
+  swaps the handlers. Anything else replaces the want. Arguments are checked at once.
+- Each want runs one subscription at a time on the live connection:
+  - **Retried at once**, without backoff: the connection ended (the want moves to the replacement
+    connection), or the followed generation changed.
+  - **Retried after backoff** (from 250 ms, doubling up to 8 s, with jitter): the announce race
+    (16 `unroutable`, or the older 404), every other rejection not listed below, `PUBLISH_DONE`,
+    a REQUEST_ERROR after acceptance, and a subscription that went stale. Only an object from a
+    later group than the subscription's first resets the backoff. Cached objects followed by a
+    done are not progress, so a finished track still announced is replayed no faster than the
+    backoff allows ([issue #21](https://github.com/muxinc/relay-sdks/issues/21)).
+  - **Surfaced, after which the want stops and is forgotten:** a rejection that no wait fixes.
+    These are REQUEST_ERROR 0x1 `UNAUTHORIZED`, 0x3 `NOT_SUPPORTED`, 0x4 `MALFORMED_AUTH_TOKEN`,
+    0x5 `EXPIRED_AUTH_TOKEN`, 0x11 `INVALID_RANGE` and 0x12 `MALFORMED_TRACK`, reported as
+    `SubscriptionRequestError`. Discovery refusing the root is surfaced the same way, and so is
+    `PREFIX_OVERLAP` between two followed roots on one connection.
+- `staleAfterMs` / `stale_after` resubscribes when no object arrived for that long, measured from
+  acceptance or the last object. It is for tracks that are never silent while live: after a
+  publisher crash, moq-relay 0.17.0 can hold an accepted subscription on the dead publisher's
+  cached object for about 11 s. Without it, silence is not a failure.
+- **Following generations.** With `generations: true`, the want's namespace is a supervised
+  publisher's root. The supervisor discovers the root ([discovery](#discovery)) and subscribes on
+  the newest generation announced one field below it. Deeper namespaces are ignored. One discovery
+  per root per connection is shared by every want on it. The want moves at once when a newer
+  generation is announced, even while the old one is still announced, as a crashed publisher's is
+  until the relay's idle timeout. It also moves when the current generation is withdrawn. With
+  none announced, it waits. No application channel is needed.
+- Handlers receive the current subscription's objects, subgroup endings and resets, and its
+  `PUBLISH_DONE`. `onSubscribed` receives the namespace the subscription was made on: the
+  generation's, when following one. `onRestarted({ reason, namespace })` runs when an accepted
+  subscription ends and will be replaced, before any object of the replacement. Its reason is
+  `publisher-done`, `stale`, `generation`, `connection` or `terminated`. Decoders drop state that
+  assumed continuity there. Rejections before acceptance, the announce race included, never reach
+  a handler unless they are surfaced.
+- **Nothing is fetched to fill a gap.** A replacement subscription starts live with the want's
+  parameters, so objects published between two subscriptions are not delivered. Trailing objects
+  after a `PUBLISH_DONE` are discarded when the subscription is cancelled for its replacement.
+- `close()` cancels every want and closes the connection.
 
 ## Publishing
 
@@ -853,8 +952,9 @@ and subscribes on the same random namespace, then asserts:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
 2. Once the publisher's `announced` settles, subscriptions to two tracks on the namespace are
-   accepted, retrying the fresh-namespace rejection while the announce propagates; the report
-   records the retries.
+   accepted, retrying the fresh-namespace rejection while the announce propagates. In TypeScript
+   a [supervised subscriber](#supervised-subscriber)'s wants make them and never resubscribe
+   during the run. In Python the examples' helper makes them and the report records the retries.
 3. Binary payloads, an empty payload, and a text payload all arrive intact. Each is written once,
    after a warm-up marker the subscriber drops has arrived on that track: a `SUBSCRIBE_OK` does not
    mean the path to the publisher is ready ([a viewer on another relay](relay-interop.md#a-viewer-on-another-relay)).
@@ -864,16 +964,21 @@ and subscribes on the same random namespace, then asserts:
 6. The subscriber's [discovery](#discovery) on the namespace's parent prefix reports the namespace
    `announced` once the publisher's `announced` settles, then `unannounced` after the publisher's
    clean `close()`, and nothing else for that namespace. The report records how long the withdrawal took.
-7. All connections close cleanly once the test closes them.
+7. A want following a [supervised publisher](#supervised-publisher)'s root receives the first
+   generation's objects. When a second supervised publisher starts on the same root while the
+   first is still up, the want moves to the newer generation, reports `onRestarted` with reason
+   `generation`, and receives its objects. The report records how long the move took. (TypeScript
+   only until the Python SDK gains the supervisors.)
+8. All connections close cleanly once the test closes them.
 
 Adding an assertion here means adding it to every SDK's smoke test.
 See [relay interoperability](relay-interop.md#reproduce-against-a-local-relay) for a local moq-relay 0.17.0 test.
 
 ## Not yet specified
 
-Automatic reconnection, token refresh on a live session, datagram reception, discovery of tracks
-within a namespace (namespace discovery is [specified](#discovery)), and player adapters are not
-implemented in any SDK and have no contract yet. Add them here when the first SDK gains them.
+Token refresh on a live session, make-before-break rotation of a supervised publisher, datagram
+reception, discovery of tracks within a namespace (namespace discovery is [specified](#discovery)),
+and player adapters are not implemented in any SDK and have no contract yet. Add them here when the first SDK gains them.
 
 ## Draft-20 protocol boundaries
 

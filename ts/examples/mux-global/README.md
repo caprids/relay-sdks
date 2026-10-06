@@ -22,12 +22,11 @@ A publisher registers a track and calls `write()`, which **waits for a matching 
 create relay demand before it sends anything. In combined mode (`both`, the default), the demo
 starts both sides. In separate processes, the namespace fields and track must match exactly. A
 subscriber started before the namespace announcement is visible can receive request error 16
-`unroutable` (`404 Broadcast not found` on relays before 0.15.8); the demo retries that rejection
-with backoff starting at 500 ms and capped at 2 seconds, through `subscribeWithRetry` in
-`examples/shared/announce-race.js`, the one copy of that policy the demo and the live smoke test
-share. In combined mode it first awaits `publisher.announced`, the announce reaching the wire, which
-removes most of the race; the relay still needs about a round trip after it. Other rejections fail
-the run. The overall `--timeout` bounds waiting, retries, and reception.
+`unroutable` (`404 Broadcast not found` on relays before 0.15.8). The demo subscribes through a
+[supervised subscriber](../../GUIDE.md#stay-connected-supervised-connections)'s `want`, which retries
+that rejection with backoff (from 250 ms, capped at 8 seconds), resubscribes after a publisher
+restart, and reconnects a lost subscriber connection; the live smoke test does the same. Only a
+rejection no wait fixes, such as an unauthorized track, reaches `onError` and fails the run. The overall `--timeout` bounds waiting, retries, and reception.
 
 The write deadline (15 seconds in the demo) covers that wait and the transport steps after it.
 The demo writes through `writeWithRetry` in `examples/shared/demand-timeout.js`, which branches on
