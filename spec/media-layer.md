@@ -314,7 +314,8 @@ default, because Firefox has none and Safari's handles video only, in workers (M
   delay back:
   `calibrate((contextTime + baseLatency + outputLatency) × 1e6, performanceTime × 1000)`, reading
   both latencies fresh each time (`baseLatency`: Chrome 58, Firefox 70, Safari 14.1). Calibrated
-  on `contextTime` alone, audio would be stamped early by the publisher's own output delay. A
+  on `contextTime` alone, audio would be stamped that much in the future, so players would play it
+late against video by the publisher's own output delay. A
   change of output device would also move audio against video, even with the same microphone.
 - **Why the AudioContext.** The context runs at one fixed sample rate whatever the microphone is,
   because the browser resamples. When the user switches devices, say from a laptop microphone at
