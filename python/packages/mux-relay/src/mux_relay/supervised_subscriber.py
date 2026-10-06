@@ -1018,6 +1018,10 @@ async def _subscribe_once(
         if reported:
             want.call("on_publisher_done", info)
         finish.cancel()
+        # The publisher ended: one restarting on the namespace may number its groups from 0, so nothing it sends
+        # was delivered before.
+        if want.cutoff is not None and want.cutoff.owner is subscription:
+            want.cutoff = None
         if handed_off is not None:
             handed_off.complete()
 

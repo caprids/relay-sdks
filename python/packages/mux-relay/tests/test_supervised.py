@@ -1711,3 +1711,28 @@ async def test_answers_a_rotate_called_from_on_generation_after_a_reconnect(
     rotate_from_callback[0] = True
     connections[0].end(RuntimeError("lost"))
     await until(lambda: len(connections) == 3, "the rotation asked for from on_generation")
+
+
+# ------------------------------------------------------------------ Codex pass 11 fixes (#261)
+
+
+async def test_drops_the_cutoff_when_the_outgoing_publisher_ends_so_a_restarted_one_is_delivered_from_group_0(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[int] = []
+    subscriber.want("v", ["room"], "v", WantHandlers(on_object=lambda o: seen.append(o.group_id)), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    old = s.first.subscriptions[0]
+    old.accept()
+    old.send_object(9)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].reject(0x10, "unroutable")  # the replacement is not up yet
+    old.done()  # the publisher ended
+    await until(lambda: len(s.connections[1].subscriptions) == 2, "retry")
+    restarted = s.connections[1].subscriptions[1]
+    restarted.accept()
+    restarted.send_object(0)
+    restarted.send_object(1)
+    assert seen == [9, 0, 1]
