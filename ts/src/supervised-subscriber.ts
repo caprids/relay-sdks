@@ -162,6 +162,8 @@ interface Want {
   controller: AbortController;
   /** The namespace the latest subscription was made on: the generation's when following one. */
   namespace?: string[];
+  /** The generation the latest subscription was made on, when following one. */
+  generation?: string | undefined;
 }
 
 /**
@@ -396,7 +398,36 @@ async function superviseWant(
     if (outcome.kind !== 'retry') continue;
     // Cached objects followed by a done are not progress: only a later group resets the backoff.
     if (outcome.progressed) failures = 0;
-    await sleep(backoffDelay(failures++, want.retry), scope).catch(() => {});
+    await backoff(want, connection, backoffDelay(failures++, want.retry));
+  }
+}
+
+/**
+ * Wait out a retry delay, cut short when a fresh attempt can do better at once: the connection ended, or (following
+ * generations) a generation other than the last one tried became the newest.
+ */
+async function backoff(want: Want, connection: Connection, delayMs: number): Promise<void> {
+  const wake = new AbortController();
+  const scope = AbortSignal.any([want.controller.signal, connection.signal, wake.signal]);
+  let held: { watch: RootWatch; release(): void } | undefined;
+  if (want.options.generations && !connection.signal.aborted) {
+    try {
+      held = rootWatch(connection, want.options.namespace);
+    } catch {
+      // The attempt itself reports a discovery it cannot open.
+    }
+  }
+  const changed = () => {
+    if (!held) return;
+    if (held.watch.failure() || held.watch.current() !== want.generation) wake.abort();
+  };
+  const unwatch = held?.watch.onChange(changed);
+  try {
+    changed();
+    await sleep(delayMs, scope).catch(() => {});
+  } finally {
+    unwatch?.();
+    held?.release();
   }
 }
 
@@ -413,6 +444,8 @@ async function attempt(want: Want, connection: Connection): Promise<AttemptOutco
   if (options.generations) {
     try {
       ({ watch, release } = rootWatch(connection, options.namespace));
+      // Released in the turn the want is cancelled, so a replacement want can claim an overlapping root at once.
+      scope.addEventListener('abort', release, { once: true });
     } catch (error) {
       // As for a subscribe: a connection that already ended refuses the request with CLOSED.
       if (scope.aborted || (error instanceof RelayError && error.code === 'CLOSED'))
@@ -424,12 +457,13 @@ async function attempt(want: Want, connection: Connection): Promise<AttemptOutco
     let generation: string | undefined;
     if (watch) {
       const found = await watch.newest(scope);
-      if (found.kind === 'failed') return discoveryFailed(found.error, scope, cancelledOrConnection);
+      if (found.kind === 'failed') return discoveryFailed(found.error, scope, cancelledOrConnection, false);
       if (found.kind !== 'found') return cancelledOrConnection(false);
       generation = found.generation;
       namespace = [...options.namespace, generation];
     }
     want.namespace = namespace;
+    want.generation = generation;
     return await subscribeOnce(want, connection, namespace, scope, watch, generation, cancelledOrConnection);
   } finally {
     release();
@@ -501,12 +535,19 @@ async function subscribeOnce(
     );
   }
   let moved = false;
-  const unwatch = watch?.onChange(() => {
-    if (watch.current() !== generation) {
+  let discoveryEnded: { error: unknown } | undefined;
+  const checkWatch = () => {
+    if (!watch) return;
+    discoveryEnded = watch.failure();
+    if (discoveryEnded) finish.abort();
+    else if (watch.current() !== generation) {
       moved = true;
       finish.abort();
     }
-  });
+  };
+  const unwatch = watch?.onChange(checkWatch);
+  // A change that landed between choosing the generation and attaching the listener is not lost.
+  checkWatch();
   try {
     const end = await Promise.race([
       subscription.ended,
@@ -514,6 +555,7 @@ async function subscribeOnce(
     ]);
     if (end === undefined) {
       if (scope.aborted) return cancelledOrConnection(accepted);
+      if (discoveryEnded) return discoveryFailed(discoveryEnded.error, scope, cancelledOrConnection, accepted);
       if (moved) return { kind: 'generation', accepted };
       return {
         kind: 'retry',
@@ -538,12 +580,12 @@ function discoveryFailed(
   error: unknown,
   scope: AbortSignal,
   cancelledOrConnection: (accepted: boolean) => AttemptOutcome,
+  accepted: boolean,
 ): AttemptOutcome {
-  if (scope.aborted || error instanceof SubscriptionConnectionClosedError) return cancelledOrConnection(false);
-  if (error === undefined) return { kind: 'retry', accepted: false, progressed: false };
-  if (error instanceof SubscriptionRequestError && !isPermanentRequestError(error.requestError)) {
-    return { kind: 'retry', accepted: false, progressed: false };
-  }
+  if (scope.aborted || error instanceof SubscriptionConnectionClosedError) return cancelledOrConnection(accepted);
+  const retry: AttemptOutcome = { kind: 'retry', accepted, progressed: false, reason: 'generation' };
+  if (error === undefined) return retry;
+  if (error instanceof SubscriptionRequestError && !isPermanentRequestError(error.requestError)) return retry;
   return { kind: 'fatal', error };
 }
 
@@ -578,9 +620,17 @@ interface RootWatch {
   newest(
     scope: AbortSignal,
   ): Promise<{ kind: 'found'; generation: string } | { kind: 'failed'; error: unknown } | { kind: 'aborted' }>;
-  /** Observe every change; returns the removal. */
+  /** How discovery ended, once it has: `error` is undefined when the relay ended it cleanly. */
+  failure(): { error: unknown } | undefined;
+  /** Observe every change, discovery's end included; returns the removal. */
   onChange(listener: () => void): () => void;
   close(): void;
+}
+
+/** Whether two namespace prefixes overlap field by field: equal, or one contains the other. */
+function overlaps(a: readonly string[], b: readonly string[]): boolean {
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  return shorter.every((field, i) => field === longer[i]);
 }
 
 /** The connection's watch for `root`, opened on first use and closed when its last user releases it. */
@@ -588,6 +638,13 @@ function rootWatch(connection: Connection, root: string[]): { watch: RootWatch; 
   const key = JSON.stringify(root);
   let entry = connection.roots.get(key) as (RootWatch & { users: number }) | undefined;
   if (!entry) {
+    // A watch kept for reuse but unused would hold its prefix and refuse an overlapping root: close it first.
+    for (const [heldKey, held] of connection.roots) {
+      if ((held as RootWatch & { users: number }).users === 0 && overlaps(JSON.parse(heldKey), root)) {
+        connection.roots.delete(heldKey);
+        held.close();
+      }
+    }
     // An ended discovery leaves the map at once, so the next attempt asks the relay again.
     const forgetEnded = () => {
       if (connection.roots.get(key) === entry) connection.roots.delete(key);
@@ -651,6 +708,7 @@ function openRootWatch(subscriber: RelaySubscriber, root: string[], onEnd: () =>
   };
   return {
     current,
+    failure: () => failure,
     async newest(scope) {
       for (;;) {
         if (failure) return { kind: 'failed', error: failure.error };

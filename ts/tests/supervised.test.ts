@@ -497,3 +497,84 @@ describe('connectSupervisedSubscriber at a connection end', () => {
     expect(errors).toEqual([]);
   });
 });
+
+describe('connectSupervisedSubscriber following generations (review fixes)', () => {
+  async function start() {
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: fast },
+    );
+    cleanup.push(() => subscriber.close());
+    return { subscriber, connections };
+  }
+
+  it('moves to a newer generation announced together with the older one', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', generations: true, retry: fast });
+    await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+    const older = newGeneration(1_000);
+    const newer = newGeneration(2_000);
+    const discovery = connections[0]!.discoveries[0]!;
+    discovery.push({ type: 'announced', namespace: ['room', older] });
+    discovery.push({ type: 'announced', namespace: ['room', newer] });
+    await until(
+      () => connections[0]!.subscriptions.at(-1)?.options.namespace[1] === newer,
+      'subscription on the newer generation',
+    );
+  });
+
+  it('surfaces a discovery that fails for good while subscribed', async () => {
+    const { subscriber, connections } = await start();
+    const errors: unknown[] = [];
+    subscriber.want('v', { namespace: ['room'], track: 'v', generations: true }, { onError: (e) => errors.push(e) });
+    await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+    connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', newGeneration()] });
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    connections[0]!.subscriptions[0]!.accept();
+    const { SubscriptionRequestError } = await import('../src/subscription.js');
+    connections[0]!.discoveries[0]!.fail(
+      new SubscriptionRequestError({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' }),
+    );
+    await until(() => errors.length === 1, 'onError');
+    expect(connections[0]!.subscriptions[0]!.cancelled).toBe(true);
+  });
+
+  it('lets an overlapping root replace one whose last want just went away', async () => {
+    const { subscriber, connections } = await start();
+    const errors: unknown[] = [];
+    subscriber.want('a', { namespace: ['room'], track: 'v', generations: true }, { onError: (e) => errors.push(e) });
+    await until(() => connections[0]!.discoveries.length === 1, 'first discovery');
+    subscriber.want(
+      'a',
+      { namespace: ['room', 'alice'], track: 'v', generations: true },
+      { onError: (e) => errors.push(e) },
+    );
+    await until(() => connections[0]!.discoveries.length === 2, 'second discovery');
+    expect(connections[0]!.discoveries[0]!.closed).toBe(true);
+    expect(errors).toEqual([]);
+  });
+
+  it('cuts a retry delay short when a newer generation is announced', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', {
+      namespace: ['room'],
+      track: 'v',
+      generations: true,
+      retry: { initialDelayMs: 60_000, maxDelayMs: 60_000 },
+    });
+    await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+    const discovery = connections[0]!.discoveries[0]!;
+    discovery.push({ type: 'announced', namespace: ['room', newGeneration(1_000)] });
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    connections[0]!.subscriptions[0]!.reject({ errorCode: 0x10, retryInterval: 0, reason: 'not found' });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(connections[0]!.subscriptions).toHaveLength(1); // waiting out a minute-long delay
+    discovery.push({ type: 'announced', namespace: ['room', newGeneration(2_000)] });
+    await until(() => connections[0]!.subscriptions.length === 2, 'resubscribe at once');
+  });
+});
