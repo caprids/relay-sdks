@@ -25,6 +25,8 @@ without a row here is a bug.
 | A subgroup stream ended cleanly or was reset | `onSubgroupEnd(info)`, `onSubgroupReset(info)` | `on_subgroup_end(info)`, `on_subgroup_reset(info)` |
 | The publisher said it is finished with the track | `onPublisherDone(info)` | `on_publisher_done(info)` |
 | Protocol notifications on the request stream | `onUpdateOk()`, `onStateNotify(parameters)`, `onGoaway(goaway)` | `on_update_ok()`, `on_state_notify(parameters)`, `on_goaway(goaway)` |
+| Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
+| A namespace was announced, or its announce withdrawn | `{ type: 'announced' \| 'unannounced', namespace }` | `NamespaceEvent(type='announced' \| 'unannounced', namespace=...)` |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
 | Await the namespace announce reaching the wire | `publisher.announced` resolves `void` | `await publisher.announced` returns `None` |
 | Send one object as its own group | `writer.write(bytes, options)` | `await writer.write(payload, properties=...)` |
@@ -250,6 +252,26 @@ same vocabulary as the product callbacks. It owns its subscription, never the co
 [async consumption contract](behavior.md#async-subscription-consumption) for capacity, cancellation,
 and termination semantics. Product and core callback objects are validated and snapshotted when
 subscribing; callbacks remain synchronous, and async consumers use this iterator.
+
+## Namespace discovery: `namespaceEvents`, `announced`, `unannounced`
+
+`subscriber.namespaceEvents({ prefix })` / `subscriber.namespace_events(prefix)` is the subscriber's
+discovery entry point ([behavior.md](behavior.md#discovery)). It is named after `subscribeEvents`,
+because it is the same bounded iterator over one owned request, and after what it yields. The
+events reuse the publisher's word: `announced` means a namespace's announce reached the relay's
+routing table, as `publisher.announced` means it left the publisher. `unannounced` is its
+withdrawal, by a clean close or by the relay noticing a crash.
+
+The iterator ends with the subscription error classes (`SubscriptionRequestError`,
+`SubscriptionConnectionClosedError`, `SubscriptionOverflowError`): SUBSCRIBE_NAMESPACE is a
+subscription in the draft's terms, and a second set of classes with the same meanings would only
+add names. The prefix is a namespace prefix, matched field by field, never a string prefix.
+
+Not adopted: `announcements()` (CONTEXT.md keeps "announcement" out because it names the act and
+the relay's state interchangeably); `watchNamespaces()` (a verb, where every other iterator is named
+for what it yields); `subscribeNamespace()` (the core's protocol name, which `trackSource` already
+keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
+message).
 
 ## Subscription readiness and termination: `RelaySubscription`, `subscribed`, `ended`
 

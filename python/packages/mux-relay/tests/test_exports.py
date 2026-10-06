@@ -33,6 +33,8 @@ PUBLIC_NAMES = [
     "MoqTrackSource",
     "MoqtObject",
     "MoqtTransport",
+    "NamespaceEvent",
+    "NamespaceEvents",
     "ObjectEvent",
     "PublishDone",
     "PublisherDoneEvent",
@@ -170,6 +172,7 @@ def test_spells_subscription_events_after_what_happened_not_after_the_protocol_m
 def test_names_the_subscriber_the_publisher_and_the_track_writer_by_role_and_by_demand() -> None:
     assert isinstance(RelaySubscriber.track_source, property)
     assert callable(RelaySubscriber.subscribe_events)
+    assert callable(RelaySubscriber.namespace_events)
     assert callable(RelayPublisher.register_track)
     assert isinstance(RelayTrackWriter.has_demand, property)
     assert isinstance(RelayTrackWriter.closed, property)

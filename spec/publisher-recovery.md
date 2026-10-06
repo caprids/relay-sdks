@@ -93,12 +93,16 @@ supervisors.
 
 ## When predictable handoff matters
 
-If you control discovery, assign each publisher generation a fresh namespace under the authorized
-root and publish that namespace through your application's discovery channel. Viewers can then
+Assign each publisher generation a fresh namespace under the authorized root, and let viewers find
+it with [discovery](behavior.md#discovery): `namespaceEvents` / `namespace_events` on the root
+reports each generation `announced` when it announces, and `unannounced` when it closes (within
+about 400 ms) or crashes (about 12 s later, at the relay's QUIC idle timeout). Viewers can then
 explicitly switch to the new generation and cancel the old subscriptions. This avoids relying on
-reuse of the ended namespace's cached state, but initial announcement can still race subscription;
-startup retry, freshness checks, and a bounded switch deadline remain necessary. The SDK does not
-provide this discovery channel.
+reuse of the ended namespace's cached state. A crashed generation stays `announced` until the
+timeout, and `announced` has not been measured as a guarantee that the next subscribe routes
+([namespace discovery](relay-interop.md#namespace-discovery)). Startup retry, freshness checks, and a bounded switch deadline remain necessary.
+An application channel is still needed for anything beyond which namespaces are announced, such as
+which generation is newest. Discovery reports namespaces in arrival order, not by generation.
 
 For a fixed namespace, keep the recovery policy above and budget for relay convergence. SDK-side
 retry can mitigate a stall, but cannot rebind an existing subscription at the relay or guarantee a

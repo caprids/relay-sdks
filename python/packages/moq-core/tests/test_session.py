@@ -24,8 +24,11 @@ from moq_core.control_messages import (
     RequestUpdate,
     Setup,
     Subscribe,
+    SubscribeNamespace,
     SubscribeOk,
     decode_control_message,
+    encode_namespace,
+    encode_namespace_done,
     encode_publish,
     encode_publish_done,
     encode_publish_namespace,
@@ -43,7 +46,9 @@ from moq_core.session import (
     MoqtSession,
     MoqtSessionCallbacks,
     MoqtSessionConfig,
+    MoqtSubscribeNamespaceOptions,
     MoqtSubscribeOptions,
+    NamespaceSubscriptionHandlers,
     SubgroupEnd,
     SubscriptionHandlers,
     TrackStatusHandlers,
@@ -976,3 +981,174 @@ class TestCreateMoqtSession:
         await wait_for(lambda: on_ok.called)
         assert on_ok.last == SubscribeOk(track_alias=3, parameters=MessageParameters(expires=5), track_properties=[])
         harness.session.destroy()
+
+
+def _room() -> MoqtSubscribeNamespaceOptions:
+    return MoqtSubscribeNamespaceOptions(track_namespace_prefix=["room"])
+
+
+class TestSubscribeNamespace:
+    async def test_sends_subscribe_namespace_and_reports_request_ok_then_namespace_and_namespace_done(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        events: list[object] = []
+
+        harness.session.subscribe_namespace(
+            _room(),
+            NamespaceSubscriptionHandlers(
+                on_ok=lambda: events.append("ok"),
+                on_namespace=lambda suffix: events.append(("namespace", suffix)),
+                on_namespace_done=lambda suffix: events.append(("done", suffix)),
+            ),
+        )
+        request = await harness.fake.next_request_stream()
+
+        assert await request.first_message == SubscribeNamespace(request_id=0, track_namespace_prefix=["room"])
+        await request.send(encode_request_ok())
+        await request.send(encode_namespace(["alice"]))
+        await request.send(encode_namespace([]))
+        await request.send(encode_namespace_done(["alice"]))
+
+        await wait_for(lambda: len(events) == 4)
+        assert events == ["ok", ("namespace", ["alice"]), ("namespace", []), ("done", ["alice"])]
+        harness.session.destroy()
+
+    async def test_surfaces_request_error_and_does_not_report_an_end_after_it(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_error = Recorder()
+        on_end = Recorder()
+
+        harness.session.subscribe_namespace(_room(), NamespaceSubscriptionHandlers(on_error=on_error, on_end=on_end))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_error(REQUEST_ERROR_CODE.UNAUTHORIZED, "no"))
+        await request.fin()
+
+        await wait_for(lambda: on_error.called)
+        assert (on_error.last.error_code, on_error.last.reason) == (REQUEST_ERROR_CODE.UNAUTHORIZED, "no")
+        assert await asyncio.wait_for(request.client_end, 1) == "fin"
+        await settle()
+        assert not on_end.called
+        harness.session.destroy()
+
+    async def test_fails_the_request_when_the_peer_fins_before_request_ok(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_error = Recorder()
+
+        harness.session.subscribe_namespace(_room(), NamespaceSubscriptionHandlers(on_error=on_error))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.fin()
+
+        await wait_for(lambda: on_error.called)
+        assert on_error.last == RequestError(
+            error_code=REQUEST_ERROR_CODE.INTERNAL_ERROR,
+            retry_interval=0,
+            reason="request stream closed before a response",
+        )
+        harness.session.destroy()
+
+    async def test_reports_a_fin_after_request_ok_as_a_clean_end_and_fins_back(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_end = Recorder()
+
+        harness.session.subscribe_namespace(_room(), NamespaceSubscriptionHandlers(on_end=on_end))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_ok())
+        await request.fin()
+
+        await wait_for(lambda: on_end.calls == [(None,)])
+        assert await asyncio.wait_for(request.client_end, 1) == "fin"
+        harness.session.destroy()
+
+    async def test_reports_a_reset_after_request_ok_as_an_end_with_the_error(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_end = Recorder()
+        on_error = Recorder()
+
+        harness.session.subscribe_namespace(_room(), NamespaceSubscriptionHandlers(on_end=on_end, on_error=on_error))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_ok())
+        request.reset(RuntimeError("gone"))
+
+        await wait_for(lambda: on_end.called)
+        assert isinstance(on_end.last, BaseException)
+        assert not on_error.called
+        harness.session.destroy()
+
+    async def test_closes_the_session_on_namespace_before_request_ok(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        harness.session.subscribe_namespace(_room())
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_namespace(["alice"]))
+
+        await wait_for(lambda: harness.fake.close_info is not None)
+        assert harness.fake.close_info is not None
+        assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+
+    @pytest.mark.parametrize(
+        "second", [encode_request_ok(), encode_request_error(REQUEST_ERROR_CODE.INTERNAL_ERROR, "late")]
+    )
+    async def test_closes_the_session_on_a_second_response(self, second: bytes) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        harness.session.subscribe_namespace(_room())
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_ok())
+        await request.send(second)
+
+        await wait_for(lambda: harness.fake.close_info is not None)
+        assert harness.fake.close_info is not None
+        assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+
+    async def test_cancels_without_reporting_anything_further(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_namespace = Recorder()
+        on_end = Recorder()
+        handle = harness.session.subscribe_namespace(
+            _room(), NamespaceSubscriptionHandlers(on_namespace=on_namespace, on_end=on_end)
+        )
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_ok())
+        handle.cancel()
+        assert await asyncio.wait_for(request.client_end, 1) == "reset"
+        try:
+            await request.send(encode_namespace(["alice"]))
+        except Exception:
+            pass
+
+        await settle()
+        assert not on_namespace.called
+        assert not on_end.called
+        harness.session.destroy()
+
+    async def test_fails_a_pending_request_when_the_transport_drops(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_error = Recorder()
+
+        harness.session.subscribe_namespace(_room(), NamespaceSubscriptionHandlers(on_error=on_error))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        harness.fake.drop_transport()
+
+        await wait_for(lambda: on_error.called)

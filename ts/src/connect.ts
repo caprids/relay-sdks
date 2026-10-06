@@ -8,10 +8,12 @@ import {
   type MoqtSubscribeOptions,
   type PublishDone,
   type RequestError,
+  SETUP_OPTION,
   type SubscribeOk,
   type SubscriptionHandlers,
 } from '@mux/moq-core';
 import { assertTimeoutMs, type ConnectRelaySubscriberOptions, openRelaySession } from './connect-session.js';
+import { createNamespaceEvents, type NamespaceEventOptions, type NamespaceEvents } from './namespace-events.js';
 import {
   createSubscription,
   type RelaySubscription,
@@ -122,6 +124,16 @@ export interface RelaySubscriber {
   /** Bounded async events. Owns its subscription; break/return cancels it. */
   subscribeEvents(options: RelayTrackOptions, buffer?: SubscriptionEventOptions): SubscriptionEvents;
   /**
+   * Discover which namespaces under a prefix are announced, as bounded async events with the same
+   * ownership rules as `subscribeEvents`: the iterator owns one SUBSCRIBE_NAMESPACE request, and
+   * break/return, `close()` or the signal cancels it. It first yields `announced` for each namespace
+   * already announced, then one event per announce and withdrawal. The relay sends no marker between
+   * the two. A relay rejection ends it with `SubscriptionRequestError`, the connection ending with
+   * `SubscriptionConnectionClosedError`, a full queue with `SubscriptionOverflowError`; a relay that
+   * finishes the request ends it cleanly. See spec/behavior.md, "Discovery", for the timing.
+   */
+  namespaceEvents(options: NamespaceEventOptions): NamespaceEvents;
+  /**
    * This connection seen through the generic `MoqTrackSource` contract, for integrations such as
    * players: `subscribe`, `fetch`, and `trackStatus` in protocol terms, plus `closed`. It lists no
    * tracks and cannot close the connection; the application that opened the connection owns
@@ -151,7 +163,8 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
   } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
       implementationName: '@mux/relay',
-      setupOptions,
+      // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
+      setupOptions: [...setupOptions, { type: SETUP_OPTION.SOLICIT, value: 1 }],
       requestTimeoutMs: options.requestTimeoutMs,
       callbacks,
     }),
@@ -203,6 +216,19 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
       // Admit before building the iterator: an already-aborted signal never runs its callback.
       const admitted = admit(options);
       return createSubscriptionEvents((consumer) => subscription(admitted, [consumer]), buffer);
+    },
+    namespaceEvents: (options) => {
+      // Options are read once and checked before connection state, as on the other entry points.
+      if (typeof options !== 'object' || options === null)
+        throw new TypeError('namespaceEvents takes an options object');
+      const { prefix: given, capacity, signal } = options;
+      const prefix = namespaceFields(given);
+      assertOpen();
+      return createNamespaceEvents(
+        { subscribeNamespace: (...args) => connected.subscribeNamespace(...args), observeClosed },
+        prefix,
+        { ...(capacity === undefined ? {} : { capacity }), ...(signal === undefined ? {} : { signal }) },
+      );
     },
     close,
   };

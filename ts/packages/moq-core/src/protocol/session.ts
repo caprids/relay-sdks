@@ -27,6 +27,7 @@ import {
   encodeRequestUpdate,
   encodeSetup,
   encodeSubscribe,
+  encodeSubscribeNamespace,
   encodeTrackStatus,
   type FetchRequest,
   type KeyValuePair,
@@ -251,6 +252,44 @@ export interface TrackStatusHandlers {
   onError?(error: RequestError): void;
 }
 
+/** The prefix and parameters for a SUBSCRIBE_NAMESPACE. */
+export interface MoqtSubscribeNamespaceOptions {
+  /** Namespace prefix to discover; NAMESPACE entries name namespaces relative to it. */
+  trackNamespacePrefix: TrackNamespace;
+  /** Message parameters to send with the request. */
+  parameters?: MessageParameters | undefined;
+}
+
+/**
+ * Callbacks for {@link MoqtSession.subscribeNamespace}. NAMESPACE and NAMESPACE_DONE entries name a namespace by its
+ * suffix relative to the requested prefix; an empty suffix is the prefix itself.
+ */
+export interface NamespaceSubscriptionHandlers {
+  /** REQUEST_OK arrived: the peer accepted the request, and entries follow on the same stream. */
+  onOk?(): void;
+  /** The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure. */
+  onError?(error: RequestError): void;
+  /** NAMESPACE (§10.19): a namespace under the prefix is available. */
+  onNamespace?(trackNamespaceSuffix: TrackNamespace): void;
+  /** NAMESPACE_DONE (§10.20): a namespace the peer named is no longer available. */
+  onNamespaceDone?(trackNamespaceSuffix: TrackNamespace): void;
+  /**
+   * The accepted request ended: the peer finished its side of the stream (no `error`), or the stream failed (`error`
+   * is the transport's). No entry follows. Not called for a local cancel or the session ending.
+   */
+  onEnd?(info: { error?: unknown }): void;
+  /** GOAWAY on this request stream: re-issue the request (possibly elsewhere). */
+  onGoaway?(goaway: Goaway): void;
+}
+
+/** A namespace subscription returned by {@link MoqtSession.subscribeNamespace}. */
+export interface NamespaceSubscription {
+  /** Request ID of the SUBSCRIBE_NAMESPACE. */
+  readonly requestId: number;
+  /** Tear the request down; the peer withdraws nothing it already sent. */
+  cancel(reason?: unknown): void;
+}
+
 /** GOAWAY: the peer asks the client to stop making requests on this session and move to a new one. */
 export interface Goaway {
   /** New Session URI; empty when the peer names none. */
@@ -342,6 +381,15 @@ export interface MoqtSession {
   fetch(options: MoqtFetchOptions, handlers?: FetchHandlers): FetchHandle;
   /** Send TRACK_STATUS (§10.15) on a new request stream and report its one response through `handlers`. */
   trackStatus(options: MoqtSubscribeOptions, handlers?: TrackStatusHandlers): void;
+  /**
+   * Send SUBSCRIBE_NAMESPACE (§10.18) on a new request stream: the peer answers REQUEST_OK, then names the namespaces
+   * under the prefix with NAMESPACE / NAMESPACE_DONE on the same stream. A relay that pushes unsolicited
+   * PUBLISH_NAMESPACE instead only stops doing so when SETUP carried `SETUP_OPTION.SOLICIT`.
+   */
+  subscribeNamespace(
+    options: MoqtSubscribeNamespaceOptions,
+    handlers?: NamespaceSubscriptionHandlers
+  ): NamespaceSubscription;
   /** Close the transport session. Sends no GOAWAY (spec/behavior.md, "Relay interop deviations"). */
   close(closeCode?: number, reason?: string): void;
   /** End locally; an error also fails requests still awaiting their first response. */
@@ -413,6 +461,11 @@ interface TrackStatusRecord extends RequestRecordBase {
   handlers: TrackStatusHandlers;
 }
 
+interface NamespaceSubscriptionRecord extends RequestRecordBase {
+  requestId: number;
+  handlers: NamespaceSubscriptionHandlers;
+}
+
 interface AliasWaiter {
   resolve(record: SubscriptionRecord | undefined): void;
   timer: ReturnType<typeof setTimeout>;
@@ -435,6 +488,7 @@ class MoqtSessionImpl implements MoqtSession {
   #subscriptions = new Map<number, SubscriptionRecord>();
   #fetches = new Map<number, FetchRecord>();
   #trackStatuses = new Map<number, TrackStatusRecord>();
+  #namespaceSubscriptions = new Map<number, NamespaceSubscriptionRecord>();
   #aliasRoutes = new Map<number, SubscriptionRecord>();
   #aliasWaiters = new Map<number, AliasWaiter[]>();
 
@@ -530,7 +584,12 @@ class MoqtSessionImpl implements MoqtSession {
     // hear about — otherwise a dropped transport leaves subscribers pending
     // forever. A deliberate `close()` is ordinary teardown, and cancelled
     // requests already have their answer.
-    const records = [...this.#subscriptions.values(), ...this.#fetches.values(), ...this.#trackStatuses.values()];
+    const records = [
+      ...this.#subscriptions.values(),
+      ...this.#fetches.values(),
+      ...this.#trackStatuses.values(),
+      ...this.#namespaceSubscriptions.values(),
+    ];
     const pending = expected ? [] : records.filter((r) => !r.settled && !r.cancelled);
 
     for (const record of records) {
@@ -542,6 +601,7 @@ class MoqtSessionImpl implements MoqtSession {
     this.#subscriptions.clear();
     this.#fetches.clear();
     this.#trackStatuses.clear();
+    this.#namespaceSubscriptions.clear();
     this.#aliasRoutes.clear();
     this.#controlWriter = undefined;
 
@@ -721,6 +781,56 @@ class MoqtSessionImpl implements MoqtSession {
     );
   }
 
+  subscribeNamespace(
+    options: MoqtSubscribeNamespaceOptions,
+    handlers: NamespaceSubscriptionHandlers = {}
+  ): NamespaceSubscription {
+    const requestId = this.#allocateRequestId();
+    const record: NamespaceSubscriptionRecord = { requestId, handlers, cancelled: false, settled: false };
+    const message = encodeSubscribeNamespace({
+      requestId,
+      trackNamespacePrefix: options.trackNamespacePrefix,
+      parameters: options.parameters,
+    });
+
+    this.#namespaceSubscriptions.set(requestId, record);
+
+    // Once only, and never after REQUEST_ERROR answered the request: that removes the record first.
+    const end = (error?: unknown) => {
+      if (!this.#namespaceSubscriptions.delete(requestId)) return;
+      handlers.onEnd?.(error === undefined ? {} : { error });
+    };
+
+    void this.#openRequest(
+      message,
+      record,
+      (msg) => this.#handleNamespaceMessage(record, msg),
+      (error) => {
+        this.#namespaceSubscriptions.delete(requestId);
+        handlers.onError?.(error);
+      },
+      () => {
+        // §3.3.2: the requester SHOULD FIN once the peer's FIN completes the request.
+        record.stream?.finWrite().catch(() => {});
+        end();
+      },
+      end
+    );
+
+    return {
+      requestId,
+      cancel: (reason) => {
+        if (record.cancelled) return;
+
+        record.cancelled = true;
+        record.pendingCancelReason = reason;
+        this.#settleRequest(record);
+        record.stream?.cancel(reason);
+        this.#namespaceSubscriptions.delete(requestId);
+      },
+    };
+  }
+
   /**
    * Open a request stream and bind its lifecycle to `record`.
    *
@@ -728,14 +838,15 @@ class MoqtSessionImpl implements MoqtSession {
    * that judgement here, since only the session knows which messages a given request kind requires. It fires for a FIN
    * before any response, a non-protocol stream error (transport reset), and the response timeout; a protocol error
    * still kills the whole session. Once `record.settled` is set the same events are ordinary end-of-request signals and
-   * are ignored, except that a FIN calls `onEnd`.
+   * are ignored, except that a FIN calls `onEnd` and a stream error calls `onSettledError` when given.
    */
   async #openRequest(
     message: Uint8Array,
     record: RequestRecordBase,
     onMessage: (message: ControlMessage) => void,
     onFailure: (error: RequestError) => void,
-    onEnd?: () => void
+    onEnd?: () => void,
+    onSettledError?: (error: unknown) => void
   ): Promise<void> {
     const fail = (error: RequestError): void => {
       if (record.settled || record.cancelled || this.#destroyed) return;
@@ -784,6 +895,11 @@ class MoqtSessionImpl implements MoqtSession {
       onError: (error) => {
         if (isMoqtProtocolError(error)) {
           this.#fatal(error);
+          return;
+        }
+
+        if (record.settled) {
+          if (!record.cancelled && !this.#destroyed) onSettledError?.(error);
           return;
         }
 
@@ -902,6 +1018,51 @@ class MoqtSessionImpl implements MoqtSession {
         break;
       default:
         this.#fatal(new MoqtProtocolError(`unexpected ${message.kind} on a fetch request stream`));
+    }
+  }
+
+  #handleNamespaceMessage(record: NamespaceSubscriptionRecord, message: ControlMessage): void {
+    if (record.cancelled) return;
+    switch (message.kind) {
+      case 'request-ok':
+        if (record.settled) {
+          this.#fatal(new MoqtProtocolError('second REQUEST_OK on a subscribe-namespace request stream'));
+          return;
+        }
+
+        this.#settleRequest(record);
+        record.handlers.onOk?.();
+        break;
+      case 'request-error':
+        // After REQUEST_OK the response is spent: an error then is outside the stream's grammar.
+        if (record.settled) {
+          this.#fatal(new MoqtProtocolError('REQUEST_ERROR after REQUEST_OK on a subscribe-namespace request stream'));
+          return;
+        }
+
+        this.#settleRequest(record);
+        this.#namespaceSubscriptions.delete(record.requestId);
+        record.handlers.onError?.(message);
+        record.stream?.finWrite().catch(() => {});
+        break;
+      case 'namespace':
+      case 'namespace-done':
+        // Entries follow the response (§10.18); one before it is outside the stream's grammar.
+        if (!record.settled) {
+          this.#fatal(
+            new MoqtProtocolError(`${message.kind} before REQUEST_OK on a subscribe-namespace request stream`)
+          );
+          return;
+        }
+
+        if (message.kind === 'namespace') record.handlers.onNamespace?.(message.trackNamespaceSuffix);
+        else record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix);
+        break;
+      case 'goaway':
+        record.handlers.onGoaway?.(message);
+        break;
+      default:
+        this.#fatal(new MoqtProtocolError(`unexpected ${message.kind} on a subscribe-namespace request stream`));
     }
   }
 

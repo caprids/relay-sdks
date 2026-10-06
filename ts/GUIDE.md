@@ -322,6 +322,30 @@ rejection is observed but its work cannot be cancelled. Callbacks are never awai
 `subscribeEvents` for async consumers. Handlers are snapshotted at subscription creation; later
 assignments do not change that subscription.
 
+## Discover namespaces
+
+`namespaceEvents` tells a subscriber which namespaces under a prefix are announced, so a call room,
+a set of cameras or a channel list can keep its roster without a server of its own. It is the same
+bounded iterator as `subscribeEvents`, with the same capacity, signal, overflow and error classes,
+and it owns one request, never the connection.
+
+```ts
+const roster = new Map<string, readonly string[]>();
+for await (const event of subscriber.namespaceEvents({ prefix: ['rooms', 'lobby'], signal })) {
+  const key = JSON.stringify(event.namespace); // e.g. ['rooms', 'lobby', 'alice']
+  if (event.type === 'announced') roster.set(key, event.namespace);
+  else roster.delete(key);
+}
+```
+
+Namespaces already announced arrive first, about one round trip after the call, with no marker
+between them and later changes. A publisher's clean `close()` is reported `unannounced` within a few
+hundred milliseconds. A crashed publisher is reported only at the relay's QUIC idle timeout, about
+12 s later. An announce on another relay of the cluster looks the same as a local one. A prefix
+matches whole fields, and a prefix the token does not cover is silent rather than rejected.
+`announced` means the relay routes the namespace, not that its tracks have content: keep the
+announce-race retry when subscribing. See the [discovery contract](../spec/behavior.md#discovery).
+
 ## Publishing lifecycle
 
 A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate
@@ -589,8 +613,8 @@ This slice supports one connection, arbitrary reliable-stream track subscription
 updates and cancellation, plus data-only publication on a dedicated connection. The borrowed generic interface also exposes FETCH and TRACK_STATUS.
 The protocol is pinned to `moqt-20`, matching the extracted implementation.
 
-Automatic reconnection, token refresh on a live session, datagram reception, product
-resource discovery, and a Video.js adapter are not implemented yet. A GOAWAY ends the connection with an error; subscriptions still awaiting their first response end with it (`subscribed` rejects with `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `onError`;
+Automatic reconnection, token refresh on a live session, datagram reception, discovery of
+tracks within a namespace, and a Video.js adapter are not implemented yet. A GOAWAY ends the connection with an error; subscriptions still awaiting their first response end with it (`subscribed` rejects with `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `onError`;
 callers can open a replacement. A custom `createTransport`
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
 A factory whose transport carries MOQT directly on QUIC, not a WebTransport session, returns

@@ -82,6 +82,12 @@ class SETUP_OPTION(IntEnum):
     MAX_FILTER_RANGES = 0x06
     MOQT_IMPLEMENTATION = 0x07
     MAX_REQUEST_UPDATES = 0x08
+    SOLICIT = 0x40B5A
+    """The MoQ Solicit extension (draft-lcurley-moq-solicit-00), not a draft-20 option.
+
+    ``1`` asks the peer to advertise namespaces only on a SUBSCRIBE_NAMESPACE, never as unsolicited
+    PUBLISH_NAMESPACE. moq-relay honors it from 0.17.0. Even, so the value is a bare varint.
+    """
 
 
 class PARAMETER_TYPE(IntEnum):

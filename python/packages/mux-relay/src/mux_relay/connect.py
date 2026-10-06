@@ -32,6 +32,7 @@ from moq_core import (
     TrackStatusHandlers,
     create_moqt_session,
 )
+from moq_core.control_messages import SETUP_OPTION
 
 from ._awaitable import RelayAwaitable
 from ._subscription import (
@@ -56,6 +57,7 @@ from .connect_session import (
     open_relay_session,
     validate_timeout,
 )
+from .namespace_events import NamespaceEvents, NamespaceRequestDependencies
 from .subscription_events import SubscriptionEvents
 
 IMPLEMENTATION_NAME = "mux-relay (Python)"
@@ -306,6 +308,39 @@ class RelaySubscriber:
             lambda consumer: self._subscription(options, [consumer]), capacity=capacity, cancellation=cancellation
         )
 
+    def namespace_events(
+        self,
+        prefix: Sequence[str],
+        *,
+        capacity: int = 64,
+        cancellation: CancellationToken | None = None,
+    ) -> NamespaceEvents:
+        """Discover which namespaces under ``prefix`` are announced, as a bounded event iterator.
+
+        Same ownership rules as :meth:`subscribe_events`: the iterator owns one SUBSCRIBE_NAMESPACE
+        request, and ``close()``, leaving ``async with`` or ``cancellation`` cancels it. It first yields
+        ``announced`` for each namespace already announced, then one event per announce and
+        withdrawal; the relay sends no marker between the two. A relay rejection ends it with
+        :class:`SubscriptionRequestError`, the connection ending with
+        :class:`SubscriptionConnectionClosedError`, a full queue with
+        :class:`SubscriptionOverflowError`; a relay that finishes the request ends it cleanly. See
+        spec/behavior.md, "Discovery", for the timing. ``prefix`` follows the namespace rules.
+        """
+        # Arguments before connection state, as on the other entry points.
+        fields = namespace_fields(prefix)
+        self._lifetime.assert_open()
+        session = self._lifetime.session
+        return NamespaceEvents(
+            NamespaceRequestDependencies(
+                subscribe_namespace=session.subscribe_namespace,
+                observe_closed=self._lifetime.observe_closed,
+                transport_ended=self._lifetime.transport_ended,
+            ),
+            fields,
+            capacity=capacity,
+            cancellation=cancellation,
+        )
+
     def close(self) -> None:
         """Close this connection and all requests on it. Idempotent."""
         self._lifetime.close()
@@ -353,7 +388,9 @@ async def connect_relay_subscriber(
             transport,
             MoqtSessionConfig(
                 implementation_name=IMPLEMENTATION_NAME,
-                setup_options=setup_options,
+                # Namespaces arrive only on a namespace_events request, never pushed unasked
+                # (spec/behavior.md, "Discovery").
+                setup_options=[*setup_options, KeyValuePair(SETUP_OPTION.SOLICIT, 1)],
                 request_timeout=request_timeout,
                 callbacks=MoqtSessionCallbacks(on_closed=callbacks.on_closed, on_goaway=callbacks.on_goaway),
             ),
