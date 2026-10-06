@@ -18,7 +18,7 @@ import { assertTimeoutMs } from './connect-session.js';
 import { RelayError } from './errors.js';
 import type { NamespaceEvents } from './namespace-events.js';
 import type { RelaySubscription, SubscriptionEnd } from './subscription.js';
-import { SubscriptionConnectionClosedError, SubscriptionRequestError } from './subscription.js';
+import { SubscriptionConnectionClosedError, SubscriptionRequestError, synchronousCallback } from './subscription.js';
 import {
   backoffDelay,
   backoffOptions,
@@ -171,6 +171,8 @@ interface Want {
   namespace?: string[];
   /** The generation the latest subscription was made on, when following one. */
   generation?: string | undefined;
+  /** A discovery failure no wait fixes, seen while backing off, for the loop to surface. */
+  deferred?: { error: unknown };
 }
 
 /**
@@ -314,14 +316,14 @@ export async function superviseRelaySubscriber(
         throw new TypeError('want takes an options object');
       }
       if (typeof handlers !== 'object' || handlers === null) throw new TypeError('want handlers must be an object');
+      // The primitive's guard: a declared-async callback is refused, a returned promise is observed, never left unhandled.
+      const guarded: Record<string, (...args: unknown[]) => void> = {};
       for (const [name, callback] of Object.entries(handlers)) {
-        if (callback !== undefined && typeof callback !== 'function') {
-          throw new TypeError(`${name} must be a function`);
-        }
-        if (Object.prototype.toString.call(callback) === '[object AsyncFunction]') {
-          throw new TypeError(`${name} must be synchronous`);
-        }
+        if (callback === undefined) continue;
+        if (typeof callback !== 'function') throw new TypeError(`${name} must be a function`);
+        guarded[name] = synchronousCallback(name, callback, handlers);
       }
+      const safeHandlers = guarded as WantHandlers;
       const { parameters, generations = false, staleAfterMs, retry } = wantOptions;
       const namespace = namespaceFields(wantOptions.namespace);
       if (generations) namespaceFields([...namespace, 'x']);
@@ -336,7 +338,7 @@ export async function superviseRelaySubscriber(
       );
       const existing = wants.get(key);
       if (existing && existing.identity === identity) {
-        existing.handlers = handlers;
+        existing.handlers = safeHandlers;
         existing.retry = retryBackoff;
         return;
       }
@@ -344,7 +346,7 @@ export async function superviseRelaySubscriber(
       const want: Want = {
         options: { namespace, track, parameters, generations, staleAfterMs },
         identity,
-        handlers,
+        handlers: safeHandlers,
         retry: retryBackoff,
         controller: new AbortController(),
       };
@@ -395,8 +397,15 @@ async function superviseWant(
   const scope = want.controller.signal;
   let failures = 0;
   while (!scope.aborted) {
+    if (want.deferred) {
+      // A discovery refusal seen while backing off is reported as one seen during an attempt would be.
+      forget();
+      want.handlers.onError?.(want.deferred.error);
+      return;
+    }
     const connection = await liveConnection(scope);
-    if (!connection) return;
+    // A want replaced while waiting must not open anything: its replacement may already hold an overlapping root.
+    if (!connection || scope.aborted) return;
     const outcome = await attempt(want, connection);
     if (scope.aborted) return;
     if (outcome.kind === 'cancelled') return;
@@ -440,7 +449,22 @@ async function backoff(want: Want, connection: Connection, delayMs: number): Pro
   // Only a newer generation wakes the wait. A discovery that fails again does not: the next attempt reports it after
   // the delay, so failing discovery is retried no faster than the backoff.
   const changed = () => {
-    if (!held || held.watch.failure()) return;
+    if (!held) return;
+    const failure = held.watch.failure();
+    if (failure) {
+      // A failure no wait fixes is kept for the next turn of the loop, which surfaces it; any other waits out the delay.
+      const outcome = discoveryFailed(
+        failure.error,
+        new AbortController().signal,
+        () => ({ kind: 'cancelled' }),
+        false,
+      );
+      if (outcome.kind === 'fatal') {
+        want.deferred = { error: failure.error };
+        wake.abort();
+      }
+      return;
+    }
     // A fresh discovery starts empty; no generation yet is not a newer one.
     const newest = held.watch.current();
     if (newest !== undefined && newest !== want.generation) wake.abort();
@@ -592,6 +616,8 @@ async function subscribeOnce(
   } finally {
     clearInterval(stale);
     unwatch?.();
+    // Settles the losing waiter, so a subscription that ended on its own leaves no listener behind.
+    finish.abort();
     subscription.cancel();
   }
 }

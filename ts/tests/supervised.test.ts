@@ -712,3 +712,72 @@ describe('PR review fixes: Bugbot and Codex pass 3', () => {
     expect(errors[0]).toBeInstanceOf(MoqtProtocolError);
   });
 });
+
+describe('PR review fixes: Codex pass 4', () => {
+  async function subscriberWith() {
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: fast },
+    );
+    cleanup.push(() => subscriber.close());
+    return { subscriber, connections };
+  }
+
+  it('lets a synchronous replacement with an overlapping root win', async () => {
+    const { subscriber, connections } = await subscriberWith();
+    const errors: unknown[] = [];
+    subscriber.want('a', { namespace: ['room'], track: 'v', generations: true }, { onError: (e) => errors.push(e) });
+    subscriber.want(
+      'a',
+      { namespace: ['room', 'alice'], track: 'v', generations: true },
+      { onError: (e) => errors.push(e) },
+    );
+    await until(() => connections[0]!.discoveries.length >= 1, 'discovery');
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(connections[0]!.discoveries.map((d) => d.prefix)).toEqual([['room', 'alice']]);
+    expect(errors).toEqual([]);
+  });
+
+  it('observes a promise a handler returns instead of leaving it unhandled', async () => {
+    const { subscriber, connections } = await subscriberWith();
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (error: unknown) => logged.push(error);
+    try {
+      subscriber.want('v', { namespace: ['room'], track: 'v' }, { onObject: () => Promise.reject(new Error('boom')) });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(0);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      console.error = original;
+    }
+    expect(String(logged[0])).toContain('onObject returned a promise');
+  });
+
+  it('surfaces a permanent discovery failure seen while backing off', async () => {
+    const { subscriber, connections } = await subscriberWith();
+    const { SubscriptionRequestError } = await import('../src/subscription.js');
+    const errors: unknown[] = [];
+    subscriber.want(
+      'v',
+      { namespace: ['room'], track: 'v', generations: true, retry: { initialDelayMs: 60_000, maxDelayMs: 60_000 } },
+      { onError: (e) => errors.push(e) },
+    );
+    await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+    connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', newGeneration()] });
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    connections[0]!.subscriptions[0]!.reject({ errorCode: 0x10, retryInterval: 0, reason: 'not found' });
+    // The backoff holds the discovery; the relay now refuses it for good.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    connections[0]!.discoveries[0]!.fail(
+      new SubscriptionRequestError({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' }),
+    );
+    await until(() => errors.length === 1, 'onError');
+  });
+});
