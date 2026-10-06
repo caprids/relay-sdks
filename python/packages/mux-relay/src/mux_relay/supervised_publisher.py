@@ -842,7 +842,9 @@ async def _supervise_relay_publisher(
             with contextlib.suppress(Exception):
                 await nxt.publisher.close()
             return None
-        if not live.ended and not manual():
+        # Consulted whatever happened to the old generation: a queued rotate() is answered by this replacement.
+        asked = manual()
+        if not live.ended and not asked:
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = live.publisher.expires_at, nxt.publisher.expires_at
             if was is not None and (now is None or now <= was):

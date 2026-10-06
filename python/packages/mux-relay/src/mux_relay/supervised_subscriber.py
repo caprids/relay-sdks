@@ -570,7 +570,9 @@ async def _supervise_relay_subscriber(
         if state.stopped:
             nxt.subscriber.close()
             return None
-        if not old.ended.cancelled and not manual():
+        # Consulted whatever happened to the old connection: a queued rotate() is answered by this replacement.
+        asked = manual()
+        if not old.ended.cancelled and not asked:
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = old.subscriber.expires_at, nxt.subscriber.expires_at
             if was is not None and (now is None or now <= was):
@@ -1018,10 +1020,9 @@ async def _subscribe_once(
         if reported:
             want.call("on_publisher_done", info)
         finish.cancel()
-        # The publisher ended: one restarting on the namespace may number its groups from 0, so nothing it sends
-        # was delivered before.
-        if want.cutoff is not None and want.cutoff.owner is subscription:
-            want.cutoff = None
+        # The publisher ended, whichever subscription heard it: one restarting on the namespace may number its
+        # groups from 0, so nothing it sends was delivered before.
+        want.cutoff = None
         if handed_off is not None:
             handed_off.complete()
 

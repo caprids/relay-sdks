@@ -1287,7 +1287,7 @@ async def test_keeps_the_cutoff_when_a_replacement_ends_before_taking_over(
     subscriber.rotate()
     await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
     s.connections[1].subscriptions[0].accept()
-    s.connections[1].subscriptions[0].done()
+    s.connections[1].subscriptions[0].terminate(0x0, "internal error")
     old.send_object(3)
     await until(lambda: len(s.connections[1].subscriptions) == 2, "retry on the new connection")
     retry = s.connections[1].subscriptions[1]
@@ -1736,3 +1736,52 @@ async def test_drops_the_cutoff_when_the_outgoing_publisher_ends_so_a_restarted_
     restarted.send_object(0)
     restarted.send_object(1)
     assert seen == [9, 0, 1]
+
+
+# ------------------------------------------------------------------ Codex pass 12 fixes (#261)
+
+
+async def test_drops_the_cutoff_when_the_replacement_hears_the_publisher_end_before_taking_over(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[int] = []
+    subscriber.want("v", ["room"], "v", WantHandlers(on_object=lambda o: seen.append(o.group_id)), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(10)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].accept()
+    s.connections[1].subscriptions[0].done()  # the publisher ended, heard on the replacement
+    await until(lambda: len(s.connections[1].subscriptions) == 2, "retry")
+    restarted = s.connections[1].subscriptions[1]
+    restarted.accept()
+    restarted.send_object(0)  # the restarted publisher, while the old subscription is still open
+    s.first.end()  # the old connection closes without a done
+    restarted.send_object(1)
+    assert seen == [10, 0, 1]
+
+
+async def test_answers_a_queued_rotate_with_the_replacement_even_when_the_old_connection_ended_first(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    gate = asyncio.Event()
+    connections: list[FakeSubscriber] = []
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        if len(connections) == 1:
+            await gate.wait()
+        fake = FakeSubscriber(_in(0.2) if not connections else None)
+        connections.append(fake)
+        return fake
+
+    subscriber = await _supervise_relay_subscriber(connect, reconnect=FAST, rotate_before=0.15)
+    cleanup.append(subscriber.close)
+    await asyncio.sleep(0.15)  # the automatic rotation is connecting
+    subscriber.rotate()
+    connections[0].end(RuntimeError("lost"))
+    gate.set()
+    await until(lambda: len(connections) == 2 and subscriber.status == "live", "replacement adopted")
+    await asyncio.sleep(0.05)
+    assert len(connections) == 2
