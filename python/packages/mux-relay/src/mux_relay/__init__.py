@@ -31,7 +31,7 @@ from ._subscription import RelaySubscription, SubscriptionEnd, SubscriptionEndKi
 from ._supervision import SupervisedStatus, SupervisionBackoff
 from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
-from .connect_session import ConnectingTransport, RelayTransportFactory
+from .connect_session import ConnectingTransport, RelayCredential, RelayTransportFactory
 from .errors import RelayError, RelayErrorCode, RelayErrorPhase
 from .namespace_events import NamespaceEvent, NamespaceEvents
 from .payload import read_json, read_text
@@ -78,6 +78,7 @@ __all__ = [
     "PublisherDoneEvent",
     "PublisherGeneration",
     "RelayAwaitable",
+    "RelayCredential",
     "RelayError",
     "RelayErrorCode",
     "RelayErrorPhase",

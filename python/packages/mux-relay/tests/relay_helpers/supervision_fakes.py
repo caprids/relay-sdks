@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from moq_core import Closed, KeyValuePair, MoqtObject, PublishDone, RequestError, SubscribeOk
 from mux_relay import (
@@ -132,8 +133,9 @@ class FakeGroup:
 class FakePublisher:
     """A publisher connection the test ends at will."""
 
-    def __init__(self, namespace: Sequence[str]) -> None:
+    def __init__(self, namespace: Sequence[str], expires_at: datetime | None = None) -> None:
         self.namespace = tuple(namespace)
+        self.expires_at = expires_at
         self.tracks: dict[str, FakeTrack] = {}
         self.close_calls = 0
         self._ended = False
@@ -268,7 +270,8 @@ class FakeDiscovery:
 class FakeSubscriber:
     """A subscriber connection the test ends at will."""
 
-    def __init__(self) -> None:
+    def __init__(self, expires_at: datetime | None = None) -> None:
+        self.expires_at = expires_at
         self.subscriptions: list[FakeSubscription] = []
         self.discoveries: list[FakeDiscovery] = []
         self._ended = False

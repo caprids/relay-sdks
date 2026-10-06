@@ -22,12 +22,15 @@ from ._awaitable import RelayAwaitable
 from ._supervision import (
     CLOSURE_GRACE,
     RECONNECT_BACKOFF,
+    ROTATION_OVERLAP,
     SupervisedStatus,
     SupervisionBackoff,
     backoff_delay,
     backoff_options,
     is_setup_failure,
     new_generation,
+    rotate_before_option,
+    rotation_due,
     supervisor_closed,
     wait_any,
 )
@@ -64,6 +67,8 @@ class _Generation:
     publisher: RelayPublisher
     ended: bool = False
     """Set once the connection ended or the supervisor stopped using it."""
+    up_at: float = 0.0
+    """When it went live, on the loop's clock, for resetting the backoff."""
 
 
 def _reconnecting(cause: BaseException | None = None) -> RelayError:
@@ -103,6 +108,15 @@ class _Binding:
     writer: RelayTrackWriter
 
 
+@dataclass(slots=True, eq=False)
+class _Pending:
+    """The generation a rotation is moving a track to, until it moves."""
+
+    generation: _Generation
+    writer: RelayTrackWriter
+    moved: asyncio.Future[None]
+
+
 class _SupervisedTrackWriter(RelayTrackWriter):
     """One registered track across generations: the writer, the binding to the live generation, and demand.
 
@@ -110,7 +124,16 @@ class _SupervisedTrackWriter(RelayTrackWriter):
     own slots are never set, as ``RelaySubscription`` does over the core handle.
     """
 
-    __slots__ = ("_binding", "_demand_queues", "_last_demand", "_release", "_retired", "_track_properties", "_wt")
+    __slots__ = (
+        "_binding",
+        "_demand_queues",
+        "_last_demand",
+        "_pending",
+        "_release",
+        "_retired",
+        "_track_properties",
+        "_wt",
+    )
 
     def __init__(
         self, name: str, track_properties: list[KeyValuePair], write_timeout: float, release: Callable[[], None]
@@ -121,6 +144,7 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         self._wt = write_timeout
         self._release = release
         self._binding: _Binding | None = None
+        self._pending: _Pending | None = None
         self._retired = False
         # The demand the iterators last reported, so a lost generation reports False only after True.
         self._last_demand = False
@@ -194,6 +218,7 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         binding, self._binding = self._binding, None
         if binding is not None:
             binding.writer.close()
+        self._drop_pending(close=True)
         self._end_demand()
 
     # ------------------------------------------------------------------ the supervisor's side
@@ -202,6 +227,8 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         """Run ``operation`` on the live generation's writer, mapping an interruption by the connection's end."""
         if self._retired:
             raise RelayError("Published track is closed", code="CLOSED", phase="waiting-for-demand")
+        # A rotation moves the track at an operation's start, never under one.
+        self._maybe_move()
         binding = self._binding
         if binding is None:
             raise _reconnecting()
@@ -227,8 +254,73 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         follower = asyncio.ensure_future(self._follow(generation, writer))
         _observe(follower)
 
+    def _hand_over(self, generation: _Generation) -> asyncio.Future[None]:
+        """A rotation brought up ``generation``: register this track on it and move there once it has
+        demand there or none on the current generation. Settles once moved, or once the track closed or
+        could not be registered."""
+        moved: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        if self._retired:
+            moved.set_result(None)
+            return moved
+        if self._binding is None or self._binding.generation.ended:
+            self._bind_generation(generation)
+            moved.set_result(None)
+            return moved
+        try:
+            writer = generation.publisher.register_track(
+                self.name, track_properties=self._track_properties, write_timeout=self._wt
+            )
+        except Exception:
+            # As in `_bind_generation`: only the new connection's end lands here.
+            moved.set_result(None)
+            return moved
+        self._pending = _Pending(generation, writer, moved)
+        follower = asyncio.ensure_future(self._follow(generation, writer))
+        _observe(follower)
+        self._maybe_move()
+        return moved
+
+    def _settle(self) -> None:
+        """The rotation's overlap is over: move to the next generation now, wherever demand is."""
+        self._maybe_move(force=True)
+
+    def _maybe_move(self, *, force: bool = False) -> None:
+        """Move to the pending generation once it has demand or the current one has none, or at once when forced."""
+        pending = self._pending
+        if pending is None:
+            return
+        if pending.generation.ended:
+            self._drop_pending(close=False)
+            return
+        binding = self._binding
+        stay = (
+            binding is not None
+            and not binding.generation.ended
+            and binding.writer.has_demand
+            and not pending.writer.has_demand
+        )
+        if stay and not force:
+            return
+        self._pending = None
+        self._binding = _Binding(pending.generation, pending.writer)
+        self._emit_demand(pending.writer.has_demand)
+        if not pending.moved.done():
+            pending.moved.set_result(None)
+
+    def _drop_pending(self, *, close: bool) -> None:
+        """Give up the pending generation, closing its writer when the track itself closed."""
+        pending, self._pending = self._pending, None
+        if pending is None:
+            return
+        if close:
+            pending.writer.close()
+        if not pending.moved.done():
+            pending.moved.set_result(None)
+
     def _unbind_generation(self, generation: _Generation) -> None:
         """The generation ended: writes fail with RECONNECTING until the next one binds."""
+        if self._pending is not None and self._pending.generation is generation:
+            self._drop_pending(close=False)
         if self._binding is None or self._binding.generation is not generation:
             return
         self._binding = None
@@ -240,6 +332,7 @@ class _SupervisedTrackWriter(RelayTrackWriter):
             return
         self._retired = True
         self._binding = None
+        self._drop_pending(close=False)
         self._end_demand()
 
     async def _follow(self, generation: _Generation, writer: RelayTrackWriter) -> None:
@@ -247,19 +340,22 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         changes = writer.demand_changes()
         try:
             async for value in changes:
-                if self._binding is None or self._binding.generation is not generation:
+                bound = self._binding is not None and self._binding.generation is generation
+                if not bound and (self._pending is None or self._pending.generation is not generation):
                     break
                 # The first value is the new connection's current state; False repeats the lost generation's.
-                if not (first and not value):
+                if bound and not (first and not value):
                     self._emit_demand(value)
                 first = False
+                # Demand arriving on the next generation, or leaving the current one, moves a rotating track.
+                self._maybe_move()
         finally:
             close = getattr(changes, "aclose", None)
             if close is not None:
                 await close()
 
     def _emit_demand(self, value: bool) -> None:
-        if not value and not self._last_demand:
+        if value == self._last_demand:
             return
         self._last_demand = value
         for queue in list(self._demand_queues):
@@ -346,8 +442,12 @@ class _State:
     names: set[str] = field(default_factory=set)
     """Every name ever registered: a closed track's name stays taken, as on a single connection."""
     current: _Generation | None = None
+    retiring: _Generation | None = None
+    """The generation a rotation is replacing, while its tracks move off it."""
     status: SupervisedStatus = "connecting"
     stopped: bool = False
+    rotation: asyncio.Future[None] | None = None
+    """Resolved by ``rotate()`` to rotate the live generation; replaced for each generation served."""
 
 
 class SupervisedPublisher:
@@ -415,6 +515,19 @@ class SupervisedPublisher:
             writer._bind_generation(state.current)
         return writer
 
+    def rotate(self) -> None:
+        """Replace the live generation make-before-break, as happens on its own ``rotate_before`` before the
+        credential expires.
+
+        The next generation connects, with a fresh token, and every track is registered on it. Each
+        track's writer then moves to it at its next write or group, once the track has demand there or
+        has none on the old one. The old generation closes once every track has moved, after 10 seconds
+        at most. A no-op while no generation is up.
+        """
+        rotation = self._state.rotation
+        if rotation is not None and not rotation.done():
+            rotation.set_result(None)
+
     async def close(self) -> None:
         """Stop reconnecting and close the live generation as :meth:`RelayPublisher.close` does. Idempotent."""
         await self._close()
@@ -437,6 +550,7 @@ async def connect_supervised_publisher(
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT,
     create_transport: RelayTransportFactory | None = None,
     reconnect: SupervisionBackoff | None = None,
+    rotate_before: float | None = None,
     on_generation: Callable[[PublisherGeneration], None] | None = None,
     on_status: Callable[[SupervisedStatus, BaseException | None], None] | None = None,
 ) -> SupervisedPublisher:
@@ -449,8 +563,10 @@ async def connect_supervised_publisher(
     ``cancellation``, whose reason is raised. The token must grant ``namespace``, the root, since every
     generation publishes one field below it. ``on_generation`` runs once each generation is up and
     every track is bound to it; ``on_status`` on every status change, with what ended the previous
-    connection or failed the last attempt. See ``spec/behavior.md``, "Supervised connections";
-    :func:`connect_relay_publisher` never reconnects.
+    connection or failed the last attempt. ``rotate_before`` (seconds, default 60) is how long before
+    the connection's credential expires (:attr:`RelayPublisher.expires_at`) the next generation is
+    brought up to replace it, make-before-break; never earlier than halfway through the time left.
+    See ``spec/behavior.md``, "Supervised connections"; :func:`connect_relay_publisher` never reconnects.
     """
 
     def connect(fields: tuple[str, ...], attempt: CancellationToken) -> Awaitable[RelayPublisher]:
@@ -468,6 +584,7 @@ async def connect_supervised_publisher(
         namespace,
         cancellation=cancellation,
         reconnect=reconnect,
+        rotate_before=rotate_before,
         on_generation=on_generation,
         on_status=on_status,
     )
@@ -479,6 +596,7 @@ async def _supervise_relay_publisher(
     *,
     cancellation: CancellationToken | None = None,
     reconnect: SupervisionBackoff | None = None,
+    rotate_before: float | None = None,
     on_generation: Callable[[PublisherGeneration], None] | None = None,
     on_status: Callable[[SupervisedStatus, BaseException | None], None] | None = None,
 ) -> SupervisedPublisher:
@@ -487,6 +605,7 @@ async def _supervise_relay_publisher(
     # A generation field is always valid; check the whole namespace once so a root at the size limit fails here.
     namespace_fields((*root, new_generation()))
     backoff = backoff_options("reconnect", reconnect, RECONNECT_BACKOFF)
+    rotate_margin = rotate_before_option(rotate_before)
     if cancellation is not None:
         cancellation.throw_if_cancelled()
 
@@ -522,11 +641,13 @@ async def _supervise_relay_publisher(
         first = None
 
         async def finish() -> None:
-            live, state.current = state.current, None
+            open_generations = [g for g in (state.current, state.retiring) if g is not None]
+            state.current = state.retiring = None
             for track in list(state.tracks.values()):
                 track._retire()
-            if live is not None:
+            for live in open_generations:
                 live.ended = True
+            for live in open_generations:
                 with contextlib.suppress(Exception):
                     await live.publisher.close()
             try:
@@ -545,61 +666,145 @@ async def _supervise_relay_publisher(
     if cancellation is not None:
         cancellation.add_callback(on_cancelled)
 
-    async def run() -> None:
-        nonlocal attempt_in_progress, first
-        attempt = 0
-        while not state.stopped:
-            generation = new_generation()
-            fields = (*root, generation)
-            attempt_in_progress = CancellationToken()
-            try:
-                publisher = await connect(fields, attempt_in_progress)
-            except Exception as error:
-                attempt_in_progress = None
-                if state.stopped:
-                    return
-                if first is not None and is_setup_failure(error):
-                    first.set_exception(error)
-                    first = None
-                    await stop(error)
-                    return
-                set_status("reconnecting", error)
-                await wait_any([stopping], limit=backoff_delay(attempt, backoff))
-                attempt += 1
-                continue
+    async def connect_generation() -> _Generation | None:
+        """Connect one generation, or ``None`` if the supervisor stopped first. Raises the attempt's failure."""
+        nonlocal attempt_in_progress
+        generation = new_generation()
+        fields = (*root, generation)
+        attempt_in_progress = CancellationToken()
+        try:
+            publisher = await connect(fields, attempt_in_progress)
+        finally:
             attempt_in_progress = None
-            if state.stopped:
-                with contextlib.suppress(Exception):
-                    await publisher.close()
-                return
-            live = _Generation(PublisherGeneration(generation, fields), publisher)
+        if state.stopped:
+            with contextlib.suppress(Exception):
+                await publisher.close()
+            return None
+        live = _Generation(PublisherGeneration(generation, fields), publisher, up_at=loop.time())
 
-            # Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
-            def mark_ended(_: object, live: _Generation = live) -> None:
-                live.ended = True
-
-            publisher.closed.add_done_callback(mark_ended)
-            state.current = live
-            up_at = loop.time()
-            for track in list(state.tracks.values()):
-                track._bind_generation(live)
-            set_status("live")
-            if first is not None:
-                first.set_result(None)
-                first = None
-            if on_generation is not None:
-                on_generation(live.info)
-
-            ended = await publisher.closed
+        # Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
+        def mark_ended(_: object, live: _Generation = live) -> None:
             live.ended = True
+
+        publisher.closed.add_done_callback(mark_ended)
+        return live
+
+    def report(live: _Generation) -> None:
+        if on_generation is not None:
+            on_generation(live.info)
+
+    async def rotate_from(live: _Generation, manual: bool) -> _Generation | None:
+        """Bring up the generation that replaces ``live`` and move the tracks to it, make-before-break.
+
+        ``None`` when ``live`` ended or the supervisor stopped before a replacement was up, or when an
+        automatic rotation found no fresher credential.
+        """
+        failures = 0
+        nxt: _Generation | None = None
+        while not state.stopped and not live.ended:
+            try:
+                nxt = await connect_generation()
+                break
+            except Exception:
+                if state.stopped:
+                    return None
+                # The live generation keeps serving; try again after the backoff unless it ends first.
+                await wait_any([stopping], settles=[live.publisher.closed], limit=backoff_delay(failures, backoff))
+                failures += 1
+        if nxt is None:
+            return None
+        if not live.ended and not manual:
+            # A credential that expires no later than the live one replaces nothing: the relay would end both together.
+            was, now = live.publisher.expires_at, nxt.publisher.expires_at
+            if was is not None and (now is None or now <= was):
+                nxt.ended = True
+                with contextlib.suppress(Exception):
+                    await nxt.publisher.close()
+                return None
+        state.current = nxt
+        state.retiring = live
+        moved = [track._hand_over(nxt) for track in list(state.tracks.values())]
+        report(nxt)
+        all_moved = asyncio.gather(*moved)
+        _observe(all_moved)
+        await wait_any([stopping], settles=[all_moved, live.publisher.closed], limit=ROTATION_OVERLAP)
+        for track in list(state.tracks.values()):
+            track._settle()
+        live.ended = True
+        if state.retiring is live:
+            state.retiring = None
+        with contextlib.suppress(Exception):
+            await live.publisher.close()
+        return nxt
+
+    async def serve(live: _Generation) -> Closed | _Generation:
+        """Serve ``live`` until it ends (its ``Closed``), or until a rotation replaced it (the new generation)."""
+        asked: asyncio.Future[None] = loop.create_future()
+        state.rotation = asked
+        due = asyncio.ensure_future(rotation_due(live.publisher.expires_at, rotate_margin, asked))
+        _observe(due)
+        try:
+            await wait_any([stopping], settles=[live.publisher.closed, due])
+            if live.publisher.closed.done() or state.stopped:
+                return await live.publisher.closed
+            manual = asked.done()
+            state.rotation = None
+            nxt = await rotate_from(live, manual)
+            if nxt is not None:
+                return nxt
+            return await live.publisher.closed
+        finally:
+            due.cancel()
+            if state.rotation is asked:
+                state.rotation = None
+
+    async def run() -> None:
+        nonlocal first
+        attempt = 0
+        # A generation a rotation already brought up, reported and moved the tracks to.
+        nxt: _Generation | None = None
+        while not state.stopped:
+            live, nxt = nxt, None
+            if live is None:
+                try:
+                    live = await connect_generation()
+                except Exception as error:
+                    if state.stopped:
+                        return
+                    if first is not None and is_setup_failure(error):
+                        first.set_exception(error)
+                        first = None
+                        await stop(error)
+                        return
+                    set_status("reconnecting", error)
+                    await wait_any([stopping], limit=backoff_delay(attempt, backoff))
+                    attempt += 1
+                    continue
+                if live is None:
+                    return
+                state.current = live
+                for track in list(state.tracks.values()):
+                    track._bind_generation(live)
+                set_status("live")
+                if first is not None:
+                    first.set_result(None)
+                    first = None
+                report(live)
+
+            outcome = await serve(live)
             if state.stopped:
                 return
+            if isinstance(outcome, _Generation):
+                nxt = outcome
+                attempt = 0
+                continue
+            live.ended = True
             state.current = None
             for track in list(state.tracks.values()):
                 track._unbind_generation(live)
-            set_status("reconnecting", ended.error)
+            set_status("reconnecting", outcome.error)
             # A generation that stayed up longer than the longest delay was a success: start the backoff over.
-            if loop.time() - up_at > backoff.max_delay:
+            if loop.time() - live.up_at > backoff.max_delay:
                 attempt = 0
             await wait_any([stopping], limit=backoff_delay(attempt, backoff))
             attempt += 1

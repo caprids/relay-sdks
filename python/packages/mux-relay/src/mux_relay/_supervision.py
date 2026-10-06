@@ -14,6 +14,7 @@ import secrets
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal, Protocol, TypeAlias
 
 from moq_core import RequestError
@@ -78,6 +79,42 @@ def _check_delay(name: str, value: object) -> None:
         raise TypeError(f"{name} must be a number of seconds")
     if not (math.isfinite(value) and 0 <= value <= _MAX_DELAY):
         raise ValueError(f"{name} must be between 0 and {_MAX_DELAY} seconds")
+
+
+ROTATE_BEFORE = 60.0
+"""How long before the credential's expiry a supervisor replaces its connection by default, in seconds."""
+ROTATION_OVERLAP = 10.0
+"""The longest a supervisor keeps the replaced connection open while its tracks or wants move over, in seconds."""
+
+
+def rotate_before_option(value: object) -> float:
+    """Check ``rotate_before``: a number of seconds a timer can hold, ``0`` included."""
+    if value is None:
+        return ROTATE_BEFORE
+    _check_delay("rotate_before", value)
+    assert isinstance(value, int | float)
+    return float(value)
+
+
+def rotation_delay(expires_at: datetime | None, rotate_before: float, now: float | None = None) -> float | None:
+    """Seconds until a connection whose credential expires at ``expires_at`` is replaced.
+
+    ``rotate_before`` before it, but no earlier than halfway through what is left, so a token
+    shorter than the margin still gets a connection's worth of use. ``None`` when the expiry is unknown.
+    """
+    if expires_at is None:
+        return None
+    left = expires_at.timestamp() - (time.time() if now is None else now)
+    return max(0.0, left - rotate_before, left / 2)
+
+
+async def rotation_due(expires_at: datetime | None, rotate_before: float, manual: asyncio.Future[None]) -> None:
+    """Return once a connection should be replaced: its rotation delay passed, or ``manual`` resolved.
+
+    With no known expiry only ``manual`` ends the wait. Cancel the task to stop waiting.
+    """
+    delay = rotation_delay(expires_at, rotate_before)
+    await wait_any(settles=(manual,), limit=delay)
 
 
 def backoff_delay(attempt: int, backoff: _Backoff) -> float:
@@ -235,6 +272,8 @@ __all__ = [
     "CLOSURE_GRACE",
     "RECONNECT_BACKOFF",
     "RESUBSCRIBE_BACKOFF",
+    "ROTATE_BEFORE",
+    "ROTATION_OVERLAP",
     "SupervisedStatus",
     "SupervisionBackoff",
     "backoff_delay",
@@ -244,6 +283,9 @@ __all__ = [
     "is_setup_failure",
     "new_generation",
     "on_cancel",
+    "rotate_before_option",
+    "rotation_delay",
+    "rotation_due",
     "supervisor_closed",
     "wait_any",
 ]

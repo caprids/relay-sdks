@@ -62,8 +62,12 @@ against that file.
   replace a connection.
 - At that time the relay closes the session with MOQT session termination code `UNAUTHORIZED`
   (0x2), reason `unauthorized`. Both SDKs report it as `UNAUTHORIZED` in phase `connection` on the
-  connection's closure, and operations still pending fail with it. On moq-relay 0.17.0 over native
-  QUIC the close arrives about 80 ms after `exp`.
+  connection's closure, and operations still pending fail with it. On moq-relay 0.17.0 the close
+  arrives about 80 ms after `exp`. One exception: a TypeScript publisher in Chromium sees the relay
+  abort its control stream before WebTransport reports the close code, and reports
+  `TRANSPORT_ERROR` in phase `connection` instead
+  ([issue #279](https://github.com/muxinc/relay-sdks/issues/279)); a Chromium subscriber reports
+  `UNAUTHORIZED`.
 - [Supervised connections](#supervised-connections) replace their connection make-before-break
   before the credential expires; see [rotation](#rotation).
 

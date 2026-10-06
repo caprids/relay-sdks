@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
 import pytest
@@ -493,16 +494,25 @@ async def test_follows_the_newest_generation(cleanup: list[Callable[[], object]]
     s.first.latest.accept()
     s.first.latest.send_object(1)
 
-    # The crashed generation is still announced when the replacement arrives: the newer one wins at once.
+    # The old generation is still announced when the replacement arrives: the newer one is subscribed at once,
+    # and the old subscription keeps delivering until the replacement's first object.
+    previous = s.first.latest
     discovery.push("announced", ["room", "alice", replacement])
     await until(lambda: len(s.first.subscriptions) == 2, "subscribe to the replacement")
     assert s.first.latest.namespace == ("room", "alice", replacement)
     s.first.latest.accept()
+    previous.send_object(2)
+    assert not previous.cancelled
+    s.first.latest.send_object(0)
+    assert previous.cancelled
+    previous.send_object(3)
     assert r.seen == [
         f"subscribed room/alice/{old}",
         "object 1",
+        "object 2",
         "restarted generation",
         f"subscribed room/alice/{replacement}",
+        "object 0",
     ]
 
     # Its withdrawal does not move the want back: the old one is gone too.
@@ -877,3 +887,212 @@ async def test_cached_groups_replayed_newest_first_are_not_progress(cleanup: lis
         s.first.latest.done()
     # The delays keep doubling (0.02-0.04, 0.04-0.08, 0.08-0.16 s): nothing reset the backoff.
     assert started[3] - started[2] >= 0.08
+
+
+# ------------------------------------------------------------------ rotation before the credential expires (#261)
+
+
+def _in(seconds: float) -> datetime:
+    return datetime.now(UTC) + timedelta(seconds=seconds)
+
+
+class ExpiringPublishers(Publishers):
+    def __init__(self, expiries: list[datetime | None]) -> None:
+        super().__init__()
+        self.expiries = expiries
+
+    async def connect(self, namespace: tuple[str, ...], _attempt: CancellationToken) -> Any:
+        index = len(self.connections)
+        fake = FakePublisher(namespace, self.expiries[index] if index < len(self.expiries) else None)
+        self.connections.append(fake)
+        return fake
+
+
+async def start_rotating_publisher(
+    cleanup: list[Callable[[], object]], expiries: list[datetime | None], rotate_before: float | None = None
+) -> tuple[SupervisedPublisher, ExpiringPublishers]:
+    p = ExpiringPublishers(expiries)
+    publisher = await _supervise_relay_publisher(
+        p.connect,
+        ["room"],
+        reconnect=FAST,
+        rotate_before=rotate_before,
+        on_generation=lambda info: p.generations.append(info.namespace),
+    )
+    cleanup.append(publisher.close)
+    return publisher, p
+
+
+async def test_rotation_moves_a_track_once_it_has_demand_on_the_next_generation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("video")
+    old = p.connections[0]
+    old.tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand on the first generation")
+    # Let the supervisor hear the change before the iterator snapshots the current state.
+    await asyncio.sleep(0.005)
+    changes = writer.demand_changes()
+    assert await anext(changes) is True
+
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    assert len(p.generations) == 2
+    assert publisher.generation is not None and publisher.generation.namespace == p.generations[1]
+    assert publisher.status == "live"
+    # The viewers are still on the old generation: writes stay there.
+    await writer.write(b"\x01")
+    assert old.tracks["video"].writes == [b"\x01"]
+    assert old.close_calls == 0
+
+    p.connections[1].tracks["video"].set_demand(True)
+    await writer.write(b"\x02")
+    assert p.connections[1].tracks["video"].writes == [b"\x02"]
+    await until(lambda: old.close_calls == 1, "old generation closed once the track moved")
+    assert writer.has_demand
+    assert not writer.closed
+    # Demand stayed continuous across the move: no False in between.
+    p.connections[1].tracks["video"].set_demand(False)
+    assert await asyncio.wait_for(anext(changes), 1) is False
+    await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+async def test_rotation_moves_a_track_without_demand_at_once(cleanup: list[Callable[[], object]]) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("audio")
+    publisher.rotate()
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed")
+    await writer.write(b"\x09")
+    assert p.connections[1].tracks["audio"].writes == [b"\x09"]
+    assert p.connections[0].tracks["audio"].writes == []
+
+
+async def test_publisher_rotates_on_its_own_before_the_credential_expires(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    _, p = await start_rotating_publisher(cleanup, [_in(0.2), _in(3600)], rotate_before=0.15)
+    assert len(p.connections) == 1
+    await until(lambda: p.connections[0].close_calls == 1, "rotated before the expiry")
+    assert len(p.connections) == 2
+    assert len(p.generations) == 2
+
+
+async def test_publisher_keeps_the_live_generation_when_the_next_expires_no_later(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    soon = _in(0.1)
+    publisher, p = await start_rotating_publisher(cleanup, [soon, soon], rotate_before=60)
+    await until(lambda: len(p.connections) == 2, "replacement attempted")
+    await until(lambda: p.connections[1].close_calls == 1, "replacement discarded")
+    assert p.connections[0].close_calls == 0
+    assert publisher.generation is not None and publisher.generation.namespace == p.connections[0].namespace
+
+
+@pytest.mark.parametrize(("value", "kind"), [("60", TypeError), (True, TypeError), (-1, ValueError)])
+async def test_rotate_before_is_checked_at_once(value: object, kind: type[Exception]) -> None:
+    p = Publishers()
+    with pytest.raises(kind):
+        await _supervise_relay_publisher(p.connect, ["room"], rotate_before=cast(float, value))
+    s = Subscribers()
+    with pytest.raises(kind):
+        await _supervise_relay_subscriber(s.connect, rotate_before=cast(float, value))
+
+
+class ExpiringSubscribers(Subscribers):
+    def __init__(self, expiries: list[datetime | None]) -> None:
+        super().__init__()
+        self.expiries = expiries
+
+    async def connect(self, _attempt: CancellationToken) -> Any:
+        index = len(self.connections)
+        fake = FakeSubscriber(self.expiries[index] if index < len(self.expiries) else None)
+        self.connections.append(fake)
+        return fake
+
+
+async def start_rotating_subscriber(
+    cleanup: list[Callable[[], object]], expiries: list[datetime | None] | None = None
+) -> tuple[SupervisedSubscriber, ExpiringSubscribers]:
+    s = ExpiringSubscribers(expiries or [])
+    subscriber = await _supervise_relay_subscriber(
+        s.connect, reconnect=FAST, rotate_before=0.15, on_status=lambda status, _error: s.statuses.append(status)
+    )
+    cleanup.append(subscriber.close)
+    return subscriber, s
+
+
+async def test_rotation_moves_a_want_make_before_break(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[str] = []
+    subscriber.want(
+        "video",
+        ["room"],
+        "video",
+        WantHandlers(
+            on_subscribed=lambda _info, _namespace: seen.append("subscribed"),
+            on_object=lambda obj: seen.append(f"object {obj.group_id}"),
+            on_restarted=lambda reason, _namespace: seen.append(f"restarted {reason}"),
+        ),
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    old = s.first.subscriptions[0]
+    old.accept()
+    old.send_object(1)
+
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    replacement = s.connections[1].subscriptions[0]
+    replacement.accept()
+    old.send_object(2)
+    assert not old.cancelled
+    assert len(s.first.subscriptions) == 1
+    # The replacement starts at the latest group, which the old subscription already delivered: not repeated.
+    replacement.send_object(2)
+    assert not old.cancelled
+    replacement.send_object(3)
+    old.send_object(4)
+    await until(lambda: old.cancelled, "old subscription cancelled")
+    assert seen == ["subscribed", "object 1", "object 2", "restarted rotation", "subscribed", "object 3"]
+    assert s.statuses == ["live"]
+    # The old connection closes once every want moved; nothing reconnects after it.
+    await until(lambda: s.first.closed.done(), "old connection closed")
+    await asyncio.sleep(0.02)
+    assert len(s.connections) == 2
+    assert subscriber.status == "live"
+
+
+async def test_rotation_reports_the_restart_when_the_old_subscription_ends_first(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[str] = []
+    subscriber.want(
+        "video",
+        ["room"],
+        "video",
+        WantHandlers(
+            on_subscribed=lambda _info, _namespace: seen.append("subscribed"),
+            on_restarted=lambda reason, _namespace: seen.append(f"restarted {reason}"),
+        ),
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].accept()
+    assert seen == ["subscribed"]
+    s.first.end()
+    await until(lambda: len(seen) == 3, "restart reported")
+    assert seen == ["subscribed", "restarted rotation", "subscribed"]
+
+
+async def test_subscriber_rotates_on_its_own_before_the_credential_expires(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    _, s = await start_rotating_subscriber(cleanup, [_in(0.2), _in(3600)])
+    # No wants: the old connection closes as soon as the new one is up.
+    await until(lambda: len(s.connections) == 2 and s.first.closed.done(), "rotated")
+    assert s.statuses == ["live"]

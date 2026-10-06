@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Sequence
+from datetime import datetime
 from types import TracebackType
 from typing import Self
 
@@ -133,6 +134,16 @@ class RelayPublisher:
 
         if track is not None:
             track._bind(binding.track_alias, binding.object_delivery_timeout, binding.subgroup_delivery_timeout)
+
+    @property
+    def expires_at(self) -> datetime | None:
+        """When the relay will end this connection for its credential's expiry, as an aware UTC datetime.
+
+        The :class:`RelayCredential`'s ``expires_at``, or the JWT's ``exp`` claim, read without
+        verifying it; ``None`` when neither is known. The relay closes the session then with
+        ``UNAUTHORIZED`` in phase ``connection``; open a replacement before it. Supervised connections do.
+        """
+        return self._lifetime.expires_at
 
     @property
     def namespace(self) -> list[str]:

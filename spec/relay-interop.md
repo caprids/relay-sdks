@@ -323,14 +323,21 @@ server that granted until the token's `exp`), with the TypeScript SDK over nativ
   closed 81 to 83 ms after it, with session termination code 0x2 and reason `unauthorized`, which
   the SDK reports as `UNAUTHORIZED` in phase `connection`. The subscriber's transport reported the
   close through `closed`, the publisher's as a session error on a stream. The auth server received
-  `end` with reason `expired`.
+  `end` with reason `expired`. The Python SDK measured the same, 82 ms after `exp`. In headless
+  Chromium the subscriber reported `UNAUTHORIZED` too, within a few milliseconds of `exp`, but the
+  publisher's control stream failed (`NetworkError: The stream was aborted by the remote server`)
+  before WebTransport's `closed` carried code 0x2, so it reported `TRANSPORT_ERROR`
+  ([issue #279](https://github.com/muxinc/relay-sdks/issues/279)).
 - **Rotation.** A supervised publisher wrote one object per group every 40 ms for 40 s, and a
   supervised subscriber followed its root. Both took 12 s tokens (the subscriber's 15 s) and rotated
   5 s before expiry. The publisher rotated 5 times and the subscriber 4 times. All 989 objects
   arrived once each, in order, with no gap longer than the 42 ms between writes, no failed write,
   and the status `live` throughout. Each publisher rotation restarted the want with reason
   `generation`, each subscriber rotation with `rotation`. Before the replacement subscription
-  skipped what the old one had delivered, each subscriber rotation repeated one object.
+  skipped what the old one had delivered, each subscriber rotation repeated one object. The Python
+  SDK, run the same way, delivered 964 of 964 objects with no gap longer than 43 ms. So did headless
+  Chromium over WebTransport for 30 s: 4 publisher and 3 subscriber rotations, 737 of 737 objects,
+  no gap longer than 43 ms.
 
 To reproduce, run moq-relay with `--auth-url` pointing at `moq auth serve --key ...`, and sign
 short-lived tokens with `moq auth sign --expires`.
