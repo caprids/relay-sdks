@@ -297,7 +297,7 @@ export async function superviseRelayPublisher(
    * `undefined` when `live` ended or the supervisor stopped before a replacement was up, or when an automatic rotation
    * found no fresher credential.
    */
-  const rotateFrom = async (live: Generation, manual: boolean): Promise<Generation | undefined> => {
+  const rotateFrom = async (live: Generation, manual: () => boolean): Promise<Generation | undefined> => {
     let failures = 0;
     let next: Generation | undefined;
     // The live generation ending while its replacement is still connecting is a reconnect: report it at once.
@@ -325,7 +325,7 @@ export async function superviseRelayPublisher(
       }
     }
     if (!next) return undefined;
-    if (!live.ended && !manual) {
+    if (!live.ended && !manual()) {
       // A credential that expires no later than the live one replaces nothing: the relay would end both together.
       const was = live.publisher.expiresAt?.getTime();
       const now = next.publisher.expiresAt?.getTime();
@@ -401,8 +401,11 @@ export async function superviseRelayPublisher(
         ).then(() => undefined);
         const outcome = await Promise.race([live.publisher.closed, due]);
         if (outcome !== undefined || stopped) return outcome ?? {};
-        requestRotation = () => {};
-        const next = await rotateFrom(live, manual);
+        // A `rotate()` while the replacement connects makes this rotation a manual one: it takes the replacement.
+        requestRotation = () => {
+          manual = true;
+        };
+        const next = await rotateFrom(live, () => manual);
         if (next) {
           handedOver = true;
           return { next };

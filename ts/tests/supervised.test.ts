@@ -1584,4 +1584,27 @@ describe('rotation before the credential expires (#261)', () => {
       await until(() => connections.length === 3, 'the rotation asked for during the overlap');
     });
   });
+  describe('Codex pass 8 fixes', () => {
+    it('takes the replacement when rotate() is called while an automatic rotation connects it', async () => {
+      const gate = deferred();
+      const soon = new Date(Date.now() + 200);
+      const connections: FakePublisher[] = [];
+      const publisher = await superviseRelayPublisher(
+        async (options) => {
+          if (connections.length === 1) await gate.promise;
+          const fake = fakePublisher([...options.namespace], soon); // no fresher credential
+          connections.push(fake);
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', namespace: ['room'], reconnect: fast, rotateBeforeMs: 150 },
+      );
+      cleanup.push(() => publisher.close());
+      await new Promise((resolve) => setTimeout(resolve, 150)); // the automatic rotation is connecting
+      publisher.rotate();
+      gate.resolve();
+      await until(() => connections.length === 2 && connections[0]!.closeCalls === 1, 'replacement taken');
+      expect(connections[1]!.closeCalls).toBe(0);
+      expect(publisher.generation?.namespace).toEqual(connections[1]!.namespace);
+    });
+  });
 });

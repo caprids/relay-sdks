@@ -391,7 +391,7 @@ export async function superviseRelaySubscriber(
    * Returns the new connection, or `undefined` when the old one ended or the supervisor stopped before a replacement
    * was up, or when an automatic rotation found no fresher credential.
    */
-  const rotateFrom = async (opened: Opened, manual: boolean): Promise<Opened | undefined> => {
+  const rotateFrom = async (opened: Opened, manual: () => boolean): Promise<Opened | undefined> => {
     const old = opened.live;
     let failures = 0;
     let next: Opened | undefined;
@@ -423,7 +423,7 @@ export async function superviseRelaySubscriber(
       }
     }
     if (!next) return undefined;
-    if (!old.signal.aborted && !manual) {
+    if (!old.signal.aborted && !manual()) {
       // A credential that expires no later than the live one replaces nothing: the relay would end both together.
       const was = old.subscriber.expiresAt?.getTime();
       const now = next.live.subscriber.expiresAt?.getTime();
@@ -491,8 +491,11 @@ export async function superviseRelaySubscriber(
         ).then(() => undefined);
         const outcome = await Promise.race([subscriber.closed, due]);
         if (outcome !== undefined || stopped) return outcome ?? {};
-        requestRotation = () => {};
-        const next = await rotateFrom(opened, manual);
+        // A `rotate()` while the replacement connects makes this rotation a manual one: it takes the replacement.
+        requestRotation = () => {
+          manual = true;
+        };
+        const next = await rotateFrom(opened, () => manual);
         if (next) {
           handedOver = true;
           return { next };
