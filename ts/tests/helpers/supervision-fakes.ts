@@ -135,7 +135,33 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
             await track.writer.writeText(JSON.stringify(value));
           },
           async openGroup() {
-            throw new Error('not used');
+            if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
+            let closed = false;
+            const group = {
+              groupId: track.writes.length,
+              objectCount: 0,
+              get closed() {
+                return closed || track.closed;
+              },
+              async write(payload: Uint8Array) {
+                if (group.closed) throw new RelayError('CLOSED', 'Group is closed', 'writing');
+                track.writes.push(new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength).slice());
+              },
+              async writeText(text: string) {
+                await group.write(new TextEncoder().encode(text));
+              },
+              async writeJSON(value: unknown) {
+                await group.writeText(JSON.stringify(value));
+              },
+              async close() {
+                if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'closing');
+                closed = true;
+              },
+              abort() {
+                closed = true;
+              },
+            };
+            return group as never;
           },
           close() {
             track.closed = true;

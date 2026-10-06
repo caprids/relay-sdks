@@ -122,6 +122,30 @@ interface Generation {
   ended: boolean;
   /** When it went live, for resetting the backoff. */
   upAt: number;
+  /** Operations and open groups running on it; a rotation closes it only once none are left. */
+  busy: number;
+  /** Called whenever `busy` drops to zero. */
+  onIdle?: (() => void) | undefined;
+}
+
+/** Count an operation or open group on `generation` until the returned release runs. */
+function use(generation: Generation): () => void {
+  generation.busy += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    generation.busy -= 1;
+    if (generation.busy === 0) generation.onIdle?.();
+  };
+}
+
+/** Resolve once nothing runs on `generation`. */
+function idle(generation: Generation): Promise<void> {
+  if (generation.busy === 0) return Promise.resolve();
+  return new Promise((resolve) => {
+    generation.onIdle = resolve;
+  });
 }
 
 /**
@@ -236,7 +260,13 @@ export async function superviseRelayPublisher(
       await publisher.close().catch(() => {});
       return undefined;
     }
-    const live: Generation = { info: { generation, namespace }, publisher, ended: false, upAt: performance.now() };
+    const live: Generation = {
+      info: { generation, namespace },
+      publisher,
+      ended: false,
+      upAt: performance.now(),
+      busy: 0,
+    };
     // Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
     void publisher.closed.then(() => {
       live.ended = true;
@@ -284,11 +314,13 @@ export async function superviseRelayPublisher(
     retiring = live;
     const moved = [...tracks.values()].map((track) => track.handOver(next));
     report(next);
+    // Every track moved and every write or group still on the old generation finished, or the overlap ran out.
     await Promise.race([
-      Promise.all(moved),
+      Promise.all(moved).then(() => idle(live)),
       sleep(ROTATION_OVERLAP_MS, stopping.signal).catch(() => {}),
       live.publisher.closed,
     ]);
+    live.onIdle = undefined;
     for (const track of tracks.values()) track.settle();
     live.ended = true;
     if (retiring === live) retiring = undefined;
@@ -298,27 +330,32 @@ export async function superviseRelayPublisher(
 
   /** Serve `live` until it ends, or until a rotation replaced it with the generation returned. */
   const serve = async (live: Generation): Promise<{ error?: unknown } | { next: Generation }> => {
-    let manual = false;
-    const asked = new Promise<void>((resolve) => {
-      requestRotation = () => {
-        manual = true;
-        resolve();
-      };
-    });
     const scope = new AbortController();
+    /** Cleared once an automatic rotation found no fresher credential: only `rotate()` tries again. */
+    let automatic = true;
     try {
-      const due = rotationDue(
-        live.publisher.expiresAt,
-        rotateBeforeMs,
-        asked,
-        AbortSignal.any([stopping.signal, scope.signal]),
-      ).then(() => undefined);
-      const outcome = await Promise.race([live.publisher.closed, due]);
-      if (outcome !== undefined || stopped) return outcome ?? {};
-      requestRotation = () => {};
-      const next = await rotateFrom(live, manual);
-      if (next) return { next };
-      return await live.publisher.closed;
+      for (;;) {
+        let manual = false;
+        const asked = new Promise<void>((resolve) => {
+          requestRotation = () => {
+            manual = true;
+            resolve();
+          };
+        });
+        const due = rotationDue(
+          automatic ? live.publisher.expiresAt : undefined,
+          rotateBeforeMs,
+          asked,
+          AbortSignal.any([stopping.signal, scope.signal]),
+        ).then(() => undefined);
+        const outcome = await Promise.race([live.publisher.closed, due]);
+        if (outcome !== undefined || stopped) return outcome ?? {};
+        requestRotation = () => {};
+        const next = await rotateFrom(live, manual);
+        if (next) return { next };
+        if (live.ended || stopped) return await live.publisher.closed;
+        if (!manual) automatic = false;
+      }
     } finally {
       scope.abort();
       requestRotation = () => {};
@@ -482,18 +519,22 @@ class SupervisedTrack {
     const track = this;
     /** Run `operation` on the live generation's writer, mapping an interruption by the connection's end. */
     const onLive = async <T>(
-      operation: (writer: RelayTrackWriter, generation: Generation) => Promise<T>,
+      operation: (writer: RelayTrackWriter, generation: Generation, release: () => void) => Promise<T>,
     ): Promise<T> => {
       if (track.#closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
       // A rotation moves the track at an operation's start, never under one.
       track.#maybeMove();
       const binding = track.#binding;
       if (!binding) throw reconnecting();
+      // A rotation keeps the generation open until the operation (and a group it opens) is done.
+      const release = use(binding.generation);
       try {
-        return await operation(binding.writer, binding.generation);
+        return await operation(binding.writer, binding.generation, release);
       } catch (error) {
         if (!track.#closed && (await endedUnder(error, binding.generation))) throw reconnecting(error);
         throw error;
+      } finally {
+        release();
       }
     };
     this.writer = {
@@ -508,7 +549,8 @@ class SupervisedTrack {
         onLive(async (writer, generation) => {
           const group = await writer.openGroup(options);
           // The generation the group was opened on, read before the await: a disconnect meanwhile clears the binding.
-          return supervisedGroup(group, () => track.#closed, generation);
+          // The group holds the generation open until it is closed or aborted.
+          return supervisedGroup(group, () => track.#closed, generation, use(generation));
         }),
       write: (payload, options?: WriteOptions) => onLive((writer) => writer.write(payload, options)),
       writeText: (text, options?: WriteOptions) => onLive((writer) => writer.writeText(text, options)),
@@ -681,6 +723,7 @@ function supervisedGroup(
   group: RelayGroupWriter,
   trackClosed: () => boolean,
   generation: Generation,
+  release: () => void,
 ): RelayGroupWriter {
   let aborted = false;
   const mapped = async <T>(operation: () => Promise<T>): Promise<T> => {
@@ -689,6 +732,9 @@ function supervisedGroup(
     } catch (error) {
       if (!aborted && !trackClosed() && (await endedUnder(error, generation))) throw reconnecting(error);
       throw error;
+    } finally {
+      // A finished or failed group no longer holds a rotating generation open.
+      if (group.closed) release();
     }
   };
   return {
@@ -704,10 +750,14 @@ function supervisedGroup(
     write: (payload, options) => mapped(() => group.write(payload, options)),
     writeText: (text, options) => mapped(() => group.writeText(text, options)),
     writeJSON: (value, options) => mapped(() => group.writeJSON(value, options)),
-    close: () => mapped(() => group.close()),
+    close: () => mapped(() => group.close()).finally(release),
     abort: (reason) => {
       aborted = true;
-      group.abort(reason);
+      try {
+        group.abort(reason);
+      } finally {
+        release();
+      }
     },
   };
 }

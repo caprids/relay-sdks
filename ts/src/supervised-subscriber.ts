@@ -205,11 +205,26 @@ interface Handoff {
   drop(): void;
   /** The replacement's accepted `onSubscribed`, held back until the handoff completes. */
   held?: (() => void) | undefined;
-  /**
-   * Whether the previous subscription already delivered `object`. Only on a rotation, where both subscriptions serve
-   * the same namespace: the replacement starts at the latest group, which the previous one may have delivered.
-   */
-  delivered(object: MoqtObject, namespace: readonly string[]): boolean;
+}
+
+/**
+ * What a rotated-away subscription delivered, so its replacement on the same namespace does not deliver it again: the
+ * replacement starts at the latest group, which the previous one may have delivered.
+ */
+interface Cutoff {
+  /** The subscription that delivered it; its own objects are never cut. */
+  owner: RelaySubscription;
+  namespace: readonly string[];
+  /** The latest location it delivered, read live while it still delivers. */
+  latest(): { groupId: number; objectId: number } | undefined;
+}
+
+/** Whether `object` on `namespace` is at or before what `cutoff` already delivered. */
+function alreadyDelivered(cutoff: Cutoff, object: MoqtObject, namespace: readonly string[]): boolean {
+  const last = cutoff.latest();
+  if (last === undefined || namespace.length !== cutoff.namespace.length) return false;
+  if (namespace.some((field, i) => field !== cutoff.namespace[i])) return false;
+  return object.groupId < last.groupId || (object.groupId === last.groupId && object.objectId <= last.objectId);
 }
 
 /** One want as the supervisor holds it. */
@@ -233,6 +248,8 @@ interface Want {
   deferred?: { error: unknown };
   /** The previous subscription, while it still delivers during a move. */
   handoff?: Handoff | undefined;
+  /** What a rotation's previous subscription delivered, kept until a replacement that was accepted ends. */
+  cutoff?: Cutoff | undefined;
 }
 
 /**
@@ -288,7 +305,10 @@ export async function superviseRelaySubscriber(
     // An abort while the first connection is still being made rejects the call that is waiting for it.
     first?.reject(reason);
     first = undefined;
-    for (const want of wants.values()) want.controller.abort();
+    for (const want of wants.values()) {
+      want.controller.abort();
+      want.handoff?.drop();
+    }
     wants.clear();
     current?.subscriber.close();
     current = undefined;
@@ -339,6 +359,8 @@ export async function superviseRelaySubscriber(
       return undefined;
     }
     const ended = new AbortController();
+    // Aborted the moment the connection ends, so a rotation in progress sees it and falls back to reconnecting.
+    void subscriber.closed.then(() => ended.abort());
     const retire = new AbortController();
     const live: Connection = {
       subscriber,
@@ -410,27 +432,32 @@ export async function superviseRelaySubscriber(
   /** Serve `opened` until it ends, or until a rotation replaced it with the connection returned. */
   const serve = async (opened: Opened): Promise<{ error?: unknown } | { next: Opened }> => {
     const { subscriber } = opened.live;
-    let manual = false;
-    const asked = new Promise<void>((resolve) => {
-      requestRotation = () => {
-        manual = true;
-        resolve();
-      };
-    });
     const scope = new AbortController();
+    /** Cleared once an automatic rotation found no fresher credential: only `rotate()` tries again. */
+    let automatic = true;
     try {
-      const due = rotationDue(
-        subscriber.expiresAt,
-        rotateBeforeMs,
-        asked,
-        AbortSignal.any([lifetime.signal, scope.signal]),
-      ).then(() => undefined);
-      const outcome = await Promise.race([subscriber.closed, due]);
-      if (outcome !== undefined || stopped) return outcome ?? {};
-      requestRotation = () => {};
-      const next = await rotateFrom(opened, manual);
-      if (next) return { next };
-      return await subscriber.closed;
+      for (;;) {
+        let manual = false;
+        const asked = new Promise<void>((resolve) => {
+          requestRotation = () => {
+            manual = true;
+            resolve();
+          };
+        });
+        const due = rotationDue(
+          automatic ? subscriber.expiresAt : undefined,
+          rotateBeforeMs,
+          asked,
+          AbortSignal.any([lifetime.signal, scope.signal]),
+        ).then(() => undefined);
+        const outcome = await Promise.race([subscriber.closed, due]);
+        if (outcome !== undefined || stopped) return outcome ?? {};
+        requestRotation = () => {};
+        const next = await rotateFrom(opened, manual);
+        if (next) return { next };
+        if (opened.live.signal.aborted || stopped) return await subscriber.closed;
+        if (!manual) automatic = false;
+      }
     } finally {
       scope.abort();
       requestRotation = () => {};
@@ -820,10 +847,9 @@ async function subscribeOnce(
           lastObjectAt = performance.now();
           if (firstGroup === undefined) firstGroup = object.groupId;
           else if (object.groupId > firstGroup) progressed = true;
-          if (!reported) {
-            if (want.handoff?.delivered(object, namespace)) return;
-            takeOver();
-          }
+          const cutoff = want.cutoff;
+          if (cutoff && cutoff.owner !== subscription && alreadyDelivered(cutoff, object, namespace)) return;
+          if (!reported) takeOver();
           if (
             latest === undefined ||
             object.groupId > latest.groupId ||
@@ -902,17 +928,13 @@ async function subscribeOnce(
         const reason = moved ? 'generation' : 'rotation';
         // Only a subscription the application is hearing from is worth keeping; one move at a time.
         if (reported && !want.handoff) {
-          handedOff = handOff(
-            want,
-            connection,
-            subscription,
-            reason,
-            namespace,
-            () => latest,
-            () => {
-              delivering = false;
-            },
-          );
+          want.cutoff =
+            reason === 'rotation'
+              ? { owner: subscription, namespace: [...namespace], latest: () => latest }
+              : undefined;
+          handedOff = handOff(want, connection, subscription, reason, namespace, () => {
+            delivering = false;
+          });
           return { kind: reason, accepted: true, handedOff: true };
         }
         return { kind: reason, accepted: reported };
@@ -933,6 +955,8 @@ async function subscribeOnce(
     finish.abort();
     // A replacement that ends before it took over never reports its held-back onSubscribed.
     if (!reported && want.handoff) want.handoff.held = undefined;
+    // An accepted replacement that ended has had its turn: the next subscription may restart group numbers.
+    if (accepted && !handedOff && want.cutoff && want.cutoff.owner !== subscription) want.cutoff = undefined;
     if (!handedOff) {
       delivering = false;
       subscription.cancel();
@@ -950,7 +974,6 @@ function handOff(
   subscription: RelaySubscription,
   reason: RestartReason,
   namespace: string[],
-  latest: () => { groupId: number; objectId: number } | undefined,
   stopDelivering: () => void,
 ): Handoff {
   const release = hold(connection);
@@ -968,27 +991,27 @@ function handOff(
     complete() {
       const held = handoff.held;
       if (!end()) return;
+      // A want cancelled meanwhile, or a supervisor that stopped, reports nothing more.
+      if (want.controller.signal.aborted) return;
       try {
         want.handlers.onRestarted?.({ reason, namespace: [...namespace] });
       } catch (error) {
         // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
         console.error(new Error('onRestarted threw; the want resubscribes regardless', { cause: error }));
       }
-      held?.();
+      try {
+        held?.();
+      } catch (error) {
+        // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+        console.error(new Error('onSubscribed threw; the want stays subscribed', { cause: error }));
+      }
     },
     drop() {
       end();
     },
-    delivered(object, replacement) {
-      if (reason !== 'rotation' || over) return false;
-      const last = latest();
-      if (last === undefined || replacement.length !== namespace.length) return false;
-      if (replacement.some((field, i) => field !== namespace[i])) return false;
-      return object.groupId < last.groupId || (object.groupId === last.groupId && object.objectId <= last.objectId);
-    },
   };
   want.handoff = handoff;
-  void subscription.ended.then(() => handoff.complete());
+  void subscription.ended.then(() => handoff.complete()).catch(() => {});
   return handoff;
 }
 

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
 import type { ConnectRelayPublisherOptions } from '../src/publish.js';
 import { SubscriptionConnectionClosedError } from '../src/subscription.js';
@@ -1196,5 +1196,127 @@ describe('rotation before the credential expires (#261)', () => {
     // No wants: the old connection closes as soon as the new one is up.
     await until(() => connections.length === 2 && ended, 'rotated');
     expect(statuses).toEqual(['live']);
+  });
+
+  describe('Codex pass 1 fixes', () => {
+    it('keeps the old generation open until a group opened on it is closed', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'video' });
+      connections[0]!.tracks.get('video')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      const group = await writer.openGroup();
+      publisher.rotate();
+      await until(() => connections[1]?.tracks.has('video') === true, 'next generation');
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await writer.write(new Uint8Array([7])); // moves the track
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(connections[0]!.closeCalls).toBe(0);
+      await group.write(new Uint8Array([1]));
+      await group.close();
+      await until(() => connections[0]!.closeCalls === 1, 'old generation closed after the group');
+      expect(connections[0]!.tracks.get('video')!.writes).toEqual([new Uint8Array([1])]);
+    });
+
+    it('still rotates on rotate() after an automatic rotation was discarded', async () => {
+      const soon = new Date(Date.now() + 100);
+      const { publisher, connections } = await publishers([soon, soon, new Date(Date.now() + 3_600_000)]);
+      await until(() => connections[1]?.closeCalls === 1, 'automatic replacement discarded');
+      publisher.rotate();
+      await until(() => connections[0]!.closeCalls === 1, 'manual rotation replaced the generation');
+      expect(publisher.generation?.namespace).toEqual(connections[2]!.namespace);
+    });
+
+    it('keeps cutting repeats after the old subscription ended before the replacement delivered', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: number[] = [];
+      subscriber.want('v', { namespace: ['room'], track: 'v', retry: fast }, { onObject: (o) => seen.push(o.groupId) });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      const old = connections[0]!.subscriptions[0]!;
+      old.accept();
+      old.object(2);
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      const replacement = connections[1]!.subscriptions[0]!;
+      replacement.accept();
+      connections[0]!.end();
+      await until(() => old.cancelled || connections[0]!.subscriptions.length === 1, 'old ended');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      replacement.object(2);
+      replacement.object(1);
+      replacement.object(3);
+      expect(seen).toEqual([2, 3]);
+    });
+
+    it('reconnects when the old connection ends while replacements keep failing', async () => {
+      const connections: FakeSubscriber[] = [];
+      const statuses: [string, unknown][] = [];
+      let failing = false;
+      const subscriber = await superviseRelaySubscriber(
+        async () => {
+          if (failing) throw new RelayError('TRANSPORT_ERROR', 'down', 'connecting');
+          const fake = fakeSubscriber();
+          connections.push(fake);
+          return fake;
+        },
+        {
+          url: 'https://relay.example.com/moq',
+          reconnect: { initialDelayMs: 20, maxDelayMs: 20 },
+          onStatus: (status, error) => statuses.push([status, error]),
+        },
+      );
+      cleanup.push(() => subscriber.close());
+      failing = true;
+      subscriber.rotate();
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      const lost = new RelayError('UNAUTHORIZED', 'expired', 'connection');
+      connections[0]!.end(lost);
+      await until(() => statuses.some(([status]) => status === 'reconnecting'), 'reconnecting reported');
+      expect(statuses).toContainEqual(['reconnecting', lost]);
+      failing = false;
+      await until(() => subscriber.status === 'live' && connections.length === 2, 'reconnected');
+    });
+
+    it('reports a throwing held-back onSubscribed instead of rejecting unhandled', async () => {
+      const { subscriber, connections } = await subscribers();
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+      let calls = 0;
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v', retry: fast },
+        {
+          onSubscribed: () => {
+            calls += 1;
+            if (calls === 2) throw new Error('app bug');
+          },
+        },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.accept();
+      connections[0]!.end();
+      await until(() => errors.mock.calls.length > 0, 'logged');
+      expect(calls).toBe(2);
+      errors.mockRestore();
+    });
+
+    it('reports nothing for a pending handoff after close()', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: string[] = [];
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v', retry: fast },
+        { onSubscribed: () => seen.push('subscribed'), onRestarted: () => seen.push('restarted') },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.accept();
+      subscriber.close();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(seen).toEqual(['subscribed']);
+    });
   });
 });
