@@ -40,6 +40,8 @@ export interface FakeTrack {
   failNext?: unknown;
   setDemand(value: boolean): void;
   closed: boolean;
+  /** Close every open group the way the primitive does when the relay resets demand: no wrapper method runs. */
+  resetGroups(): void;
 }
 
 export interface FakePublisher extends RelayPublisher {
@@ -76,11 +78,15 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
       if (isEnded) throw new RelayError('CLOSED', 'Relay publisher is closed', 'connection');
       if (tracks.has(options.track)) throw new RangeError('Track name is already registered');
       const listeners = new Set<(value: boolean | undefined) => void>();
+      const resets = new Set<() => void>();
       let demand = false;
       const track: FakeTrack = {
         options,
         writes: [],
         closed: false,
+        resetGroups() {
+          for (const reset of resets) reset();
+        },
         setDemand(value) {
           demand = value;
           for (const listener of listeners) listener(value);
@@ -138,6 +144,9 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
             if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
             let closed = false;
             groupOptions?.signal?.addEventListener('abort', () => {
+              closed = true;
+            });
+            resets.add(() => {
               closed = true;
             });
             const group = {

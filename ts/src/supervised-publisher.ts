@@ -127,8 +127,8 @@ interface Generation {
   rotateAt: number | undefined;
   /** Operations and open groups running on it; a rotation closes it only once none are left. */
   busy: number;
-  /** The holds of groups open on it, released when it ends: the connection closed them. */
-  groupHolds: Set<() => void>;
+  /** The holds of groups open on it, with their groups, released when it ends: the connection closed them. */
+  groupHolds: Map<() => void, RelayGroupWriter>;
   /** Called whenever `busy` drops to zero. */
   onIdle?: (() => void) | undefined;
 }
@@ -286,13 +286,13 @@ export async function superviseRelayPublisher(
       upAt: performance.now(),
       rotateAt: rotationDeadline(publisher.expiresAt, rotateBeforeMs),
       busy: 0,
-      groupHolds: new Set(),
+      groupHolds: new Map(),
     };
     // Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
     void publisher.closed.then(() => {
       live.ended = true;
       // The connection's end closed its groups under the application, which may never close them itself.
-      for (const release of [...live.groupHolds]) release();
+      for (const release of [...live.groupHolds.keys()]) release();
     });
     return live;
   };
@@ -361,14 +361,24 @@ export async function superviseRelayPublisher(
     // The next generation ending cuts the overlap short too: its tracks need the generation after it now. So does its
     // own rotation falling due, for a credential shorter than the overlap.
     const overlap = new AbortController();
+    // A group can close without the wrapper hearing of it (its signal, the relay resetting demand): release its hold
+    // once it is closed, whatever closed it.
+    const sweep = () => {
+      for (const [release, group] of [...live.groupHolds]) if (group.closed) release();
+    };
+    const sweeper = setInterval(sweep, 50);
     await Promise.race([
-      Promise.all(moved).then(() => idle(live)),
+      Promise.all(moved).then(() => {
+        sweep();
+        return idle(live);
+      }),
       sleep(ROTATION_OVERLAP_MS, stopping.signal).catch(() => {}),
       live.publisher.closed,
       next.publisher.closed,
       rotationDue(next.rotateAt, new Promise<void>(() => {}), AbortSignal.any([stopping.signal, overlap.signal])),
     ]);
     overlap.abort();
+    clearInterval(sweeper);
     live.onIdle = undefined;
     for (const track of tracks.values()) track.settle();
     live.ended = true;
@@ -646,7 +656,7 @@ class SupervisedTrack {
             hold();
           };
           track.#groupHolds.add(release);
-          generation.groupHolds.add(release);
+          generation.groupHolds.set(release, group);
           // Opened under a connection that has ended meanwhile: nothing will release it on the end.
           if (generation.ended) release();
           // A group its signal aborted is closed without the wrapper hearing of it: release then, or now if already so.

@@ -897,7 +897,8 @@ async function subscribeOnce(
           lastObjectAt = performance.now();
           const handoff = want.handoff;
           // The previous subscription keeps delivering until this one's first object: report this one then.
-          if (handoff) handoff.held = () => report(info);
+          // Not if it ended meanwhile: a replacement that never took over is not the one the application hears of.
+          if (handoff) handoff.held = () => subscriptionOver || report(info);
           else report(info);
         },
         onObject: (object) => {
@@ -945,6 +946,10 @@ async function subscribeOnce(
     return { kind: 'fatal', error };
   }
   void subscription.subscribed.catch(() => {});
+  let subscriptionOver = false;
+  void subscription.ended.then(() => {
+    subscriptionOver = true;
+  });
 
   let stale: ReturnType<typeof setInterval> | undefined;
   const staleAfterMs = options.staleAfterMs;

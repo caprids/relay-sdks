@@ -1827,4 +1827,41 @@ describe('rotation before the credential expires (#261)', () => {
       expect(connections).toHaveLength(2);
     });
   });
+  describe('Codex pass 13 fixes', () => {
+    it('does not promote a replacement that ended in the turn the old connection did', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: number[] = [];
+      subscriber.want('v', { namespace: ['room'], track: 'v', retry: fast }, { onObject: (o) => seen.push(o.groupId) });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(7);
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.accept();
+      connections[1]!.subscriptions[0]!.terminate({ errorCode: 0x0, retryInterval: 0, reason: 'internal error' });
+      connections[0]!.end(); // the same turn
+      await until(() => connections[1]!.subscriptions.length === 2, 'retry');
+      const retry = connections[1]!.subscriptions[1]!;
+      retry.accept();
+      retry.object(7);
+      retry.object(8);
+      expect(seen).toEqual([7, 8]);
+    });
+
+    it('releases the old generation when the relay resets demand under an open group there', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'video' });
+      connections[0]!.tracks.get('video')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      await writer.openGroup();
+      publisher.rotate();
+      await until(() => connections[1]?.tracks.has('video') === true, 'next generation');
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await writer.write(new Uint8Array([7]));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(connections[0]!.closeCalls).toBe(0);
+      connections[0]!.tracks.get('video')!.resetGroups();
+      await until(() => connections[0]!.closeCalls === 1, 'old generation closed once the group was reset', 500);
+    });
+  });
 });
