@@ -1128,7 +1128,7 @@ async function follow(
     // A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
     const silent = rotating(slot);
     // Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
-    if (silent && !endedTargets.has(slot.key) && (!from.ended || from.ended === 'connection')) {
+    if (silent && !endedTargets.has(slot.key) && from.ended !== 'publisher-done') {
       slot.skipThrough = later(from.latest, from.skipThrough);
     }
     endedTargets.clear();
@@ -1229,7 +1229,9 @@ async function follow(
     // A rotation's replacement starts at the latest group, which the active subscription may have delivered: skip it.
     // Not once the publisher ended or the subscription was ended by it: a restarted publisher numbers from 0 again.
     const rotation = rotating(slot);
-    const continues = !endedTargets.has(slot.key) && (!active.ended || active.ended === 'connection');
+    // Only PUBLISH_DONE says the publisher may number from 0 again; a stale, terminated or disconnected subscription
+    // does not.
+    const continues = !endedTargets.has(slot.key) && active.ended !== 'publisher-done';
     if (rotation && continues && atOrBefore(object, active.latest)) return;
     // With the active subscription gone there is nothing left to compare with: the next object cuts over. A rotation's
     // replacement continues the same stream, so its first new object does too.

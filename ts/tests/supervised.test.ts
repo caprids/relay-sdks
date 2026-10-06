@@ -2407,4 +2407,27 @@ describe('rotation before the credential expires (#261)', () => {
       expect(seen).toEqual(['4', '5']);
     });
   });
+  describe('Codex review of the merge, pass 2', () => {
+    it('keeps skipping repeats when the old subscription went stale during a rotation', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: number[] = [];
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v', staleAfterMs: 40, retry: fast },
+        { onObject: (o) => seen.push(o.groupId) },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(10);
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      const replacement = connections[1]!.subscriptions[0]!;
+      replacement.accept();
+      await until(() => connections[0]!.subscriptions[0]!.cancelled, 'old subscription went stale');
+      replacement.object(10); // already delivered
+      replacement.object(9); // late, already behind what was delivered
+      replacement.object(11);
+      expect(seen).toEqual([10, 11]);
+    });
+  });
 });
