@@ -69,6 +69,33 @@ class _Generation:
     """Set once the connection ended or the supervisor stopped using it."""
     up_at: float = 0.0
     """When it went live, on the loop's clock, for resetting the backoff."""
+    busy: int = 0
+    """Operations and open groups running on it; a rotation closes it only once none are left."""
+    idle: asyncio.Future[None] | None = None
+    """Set by a rotation waiting for it; resolved whenever ``busy`` drops to zero."""
+
+    def use(self) -> Callable[[], None]:
+        """Count an operation or open group on this generation until the returned release runs."""
+        self.busy += 1
+        released = False
+
+        def release() -> None:
+            nonlocal released
+            if released:
+                return
+            released = True
+            self.busy -= 1
+            if self.busy == 0 and self.idle is not None and not self.idle.done():
+                self.idle.set_result(None)
+
+        return release
+
+    async def wait_idle(self) -> None:
+        """Return once nothing runs on this generation."""
+        if self.busy == 0:
+            return
+        self.idle = asyncio.get_running_loop().create_future()
+        await self.idle
 
 
 def _reconnecting(cause: BaseException | None = None) -> RelayError:
@@ -205,7 +232,8 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         async def open_on(writer: RelayTrackWriter, generation: _Generation) -> RelayGroupWriter:
             group = await writer.open_group()
             # The generation the group was opened on, read before the await: a disconnect clears the binding.
-            return _SupervisedGroupWriter(group, self, generation, writer)
+            # The group holds the generation open until it is closed or aborted.
+            return _SupervisedGroupWriter(group, self, generation, writer, generation.use())
 
         return await self._on_live(open_on)
 
@@ -232,12 +260,16 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         binding = self._binding
         if binding is None:
             raise _reconnecting()
+        # A rotation keeps the generation open until the operation (and a group it opens) is done.
+        release = binding.generation.use()
         try:
             return await operation(binding.writer, binding.generation)
         except Exception as error:
             if not self._retired and await _ended_under(error, binding.generation, binding.writer):
                 raise _reconnecting(error) from error
             raise
+        finally:
+            release()
 
     def _bind_generation(self, generation: _Generation) -> None:
         """Register this track on a new generation. A registration the new connection refuses leaves it unbound."""
@@ -374,7 +406,7 @@ def _discard(tracks: dict[str, _SupervisedTrackWriter], name: str) -> None:
 class _SupervisedGroupWriter(RelayGroupWriter):
     """A generation's group writer whose failures map the connection's end to RECONNECTING, as the track's do."""
 
-    __slots__ = ("_aborted", "_generation", "_group", "_track", "_track_writer")
+    __slots__ = ("_aborted", "_generation", "_group", "_release", "_track", "_track_writer")
 
     def __init__(
         self,
@@ -382,9 +414,11 @@ class _SupervisedGroupWriter(RelayGroupWriter):
         track: _SupervisedTrackWriter,
         generation: _Generation,
         track_writer: RelayTrackWriter,
+        release: Callable[[], None],
     ) -> None:
         # Deliberately no super().__init__(): every member forwards to the generation's group.
         self._group = group
+        self._release = release
         self._track = track
         self._generation = generation
         self._track_writer = track_writer
@@ -410,6 +444,10 @@ class _SupervisedGroupWriter(RelayGroupWriter):
             ):
                 raise _reconnecting(error) from error
             raise
+        finally:
+            # A finished or failed group no longer holds a rotating generation open.
+            if self._group.closed:
+                self._release()
 
     async def write(
         self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None, status: ObjectStatus = "normal"
@@ -427,11 +465,17 @@ class _SupervisedGroupWriter(RelayGroupWriter):
         await self.write(_encode_json(value), properties=properties, status=status)
 
     async def close(self) -> None:
-        await self._mapped(self._group.close)
+        try:
+            await self._mapped(self._group.close)
+        finally:
+            self._release()
 
     def abort(self, reason: BaseException | None = None) -> None:
         self._aborted = True
-        self._group.abort(reason)
+        try:
+            self._group.abort(reason)
+        finally:
+            self._release()
 
 
 @dataclass(slots=True, eq=False)
@@ -725,9 +769,19 @@ async def _supervise_relay_publisher(
         state.retiring = live
         moved = [track._hand_over(nxt) for track in list(state.tracks.values())]
         report(nxt)
-        all_moved = asyncio.gather(*moved)
-        _observe(all_moved)
-        await wait_any([stopping], settles=[all_moved, live.publisher.closed], limit=ROTATION_OVERLAP)
+
+        async def moved_and_idle() -> None:
+            await asyncio.gather(*moved)
+            await live.wait_idle()
+
+        # Every track moved and every write or group still on the old generation finished, or the overlap ran out.
+        settled = asyncio.ensure_future(moved_and_idle())
+        _observe(settled)
+        try:
+            await wait_any([stopping], settles=[settled, live.publisher.closed], limit=ROTATION_OVERLAP)
+        finally:
+            settled.cancel()
+            live.idle = None
         for track in list(state.tracks.values()):
             track._settle()
         live.ended = True
@@ -739,24 +793,32 @@ async def _supervise_relay_publisher(
 
     async def serve(live: _Generation) -> Closed | _Generation:
         """Serve ``live`` until it ends (its ``Closed``), or until a rotation replaced it (the new generation)."""
-        asked: asyncio.Future[None] = loop.create_future()
-        state.rotation = asked
-        due = asyncio.ensure_future(rotation_due(live.publisher.expires_at, rotate_margin, asked))
-        _observe(due)
-        try:
-            await wait_any([stopping], settles=[live.publisher.closed, due])
-            if live.publisher.closed.done() or state.stopped:
-                return await live.publisher.closed
-            manual = asked.done()
-            state.rotation = None
-            nxt = await rotate_from(live, manual)
-            if nxt is not None:
-                return nxt
-            return await live.publisher.closed
-        finally:
-            due.cancel()
-            if state.rotation is asked:
+        # Cleared once an automatic rotation found no fresher credential: only rotate() tries again.
+        automatic = True
+        while True:
+            asked: asyncio.Future[None] = loop.create_future()
+            state.rotation = asked
+            due = asyncio.ensure_future(
+                rotation_due(live.publisher.expires_at if automatic else None, rotate_margin, asked)
+            )
+            _observe(due)
+            try:
+                await wait_any([stopping], settles=[live.publisher.closed, due])
+                if live.publisher.closed.done() or state.stopped:
+                    return await live.publisher.closed
+                manual = asked.done()
                 state.rotation = None
+                nxt = await rotate_from(live, manual)
+                if nxt is not None:
+                    return nxt
+                if live.ended or state.stopped:
+                    return await live.publisher.closed
+                if not manual:
+                    automatic = False
+            finally:
+                due.cancel()
+                if state.rotation is asked:
+                    state.rotation = None
 
     async def run() -> None:
         nonlocal first

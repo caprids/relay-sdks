@@ -1096,3 +1096,137 @@ async def test_subscriber_rotates_on_its_own_before_the_credential_expires(
     # No wants: the old connection closes as soon as the new one is up.
     await until(lambda: len(s.connections) == 2 and s.first.closed.done(), "rotated")
     assert s.statuses == ["live"]
+
+
+# ------------------------------------------------------------------ Codex pass 1 fixes (#261)
+
+
+async def test_keeps_the_old_generation_open_until_a_group_opened_on_it_is_closed(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("video")
+    p.connections[0].tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    group = await writer.open_group()
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "next generation")
+    p.connections[1].tracks["video"].set_demand(True)
+    await writer.write(b"\x07")  # moves the track
+    await asyncio.sleep(0.02)
+    assert p.connections[0].close_calls == 0
+    await group.write(b"\x01")
+    await group.close()
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed after the group")
+    assert p.connections[1].tracks["video"].writes == [b"\x07"]
+
+
+async def test_still_rotates_on_rotate_after_an_automatic_rotation_was_discarded(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    soon = _in(0.1)
+    publisher, p = await start_rotating_publisher(cleanup, [soon, soon, _in(3600)])
+    await until(lambda: len(p.connections) == 2 and p.connections[1].close_calls == 1, "automatic one discarded")
+    publisher.rotate()
+    await until(lambda: p.connections[0].close_calls == 1, "manual rotation replaced the generation")
+    assert publisher.generation is not None and publisher.generation.namespace == p.connections[2].namespace
+
+
+async def test_keeps_cutting_repeats_after_the_old_subscription_ended_before_the_replacement_delivered(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[int] = []
+    subscriber.want("v", ["room"], "v", WantHandlers(on_object=lambda o: seen.append(o.group_id)), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    old = s.first.subscriptions[0]
+    old.accept()
+    old.send_object(2)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    replacement = s.connections[1].subscriptions[0]
+    replacement.accept()
+    s.first.end()
+    await asyncio.sleep(0.005)
+    replacement.send_object(2)
+    replacement.send_object(1)
+    replacement.send_object(3)
+    assert seen == [2, 3]
+
+
+async def test_reconnects_when_the_old_connection_ends_while_replacements_keep_failing(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    connections: list[FakeSubscriber] = []
+    statuses: list[tuple[str, BaseException | None]] = []
+    failing = False
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        if failing:
+            raise RelayError("down", code="TRANSPORT_ERROR", phase="connecting")
+        fake = FakeSubscriber()
+        connections.append(fake)
+        return fake
+
+    subscriber = await _supervise_relay_subscriber(
+        connect,
+        reconnect=SupervisionBackoff(initial_delay=0.02, max_delay=0.02),
+        on_status=lambda status, error: statuses.append((status, error)),
+    )
+    cleanup.append(subscriber.close)
+    failing = True
+    subscriber.rotate()
+    await asyncio.sleep(0.03)
+    lost = RelayError("expired", code="UNAUTHORIZED", phase="connection")
+    connections[0].end(lost)
+    await until(lambda: any(status == "reconnecting" for status, _ in statuses), "reconnecting reported")
+    assert ("reconnecting", lost) in statuses
+    failing = False
+    await until(lambda: subscriber.status == "live" and len(connections) == 2, "reconnected")
+
+
+async def test_reports_a_raising_held_back_on_subscribed_instead_of_leaking_it(
+    cleanup: list[Callable[[], object]], caplog: pytest.LogCaptureFixture
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    calls = 0
+
+    def on_subscribed(_info: object, _namespace: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("app bug")
+
+    subscriber.want("v", ["room"], "v", WantHandlers(on_subscribed=on_subscribed), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].accept()
+    with caplog.at_level("ERROR", logger="mux_relay"):
+        s.first.end()
+        await until(lambda: any("on_subscribed raised" in r.message for r in caplog.records), "logged")
+    assert calls == 2
+
+
+async def test_reports_nothing_for_a_pending_handoff_after_close(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[str] = []
+    subscriber.want(
+        "v",
+        ["room"],
+        "v",
+        WantHandlers(
+            on_subscribed=lambda _info, _ns: seen.append("subscribed"),
+            on_restarted=lambda _reason, _ns: seen.append("restarted"),
+        ),
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].accept()
+    subscriber.close()
+    await asyncio.sleep(0.02)
+    assert seen == ["subscribed"]
