@@ -1489,4 +1489,20 @@ describe('rotation before the credential expires (#261)', () => {
       await until(() => connections[0]!.closeCalls === 1, 'old generation closed well before the overlap ends', 500);
     });
   });
+  describe('Codex pass 5 fixes', () => {
+    it('rotates a short-lived replacement during the overlap instead of letting it expire', async () => {
+      const { subscriber, connections } = await subscribers([
+        undefined,
+        new Date(Date.now() + 300),
+        new Date(Date.now() + 3_600_000),
+      ]);
+      subscriber.want('silent', { namespace: ['room'], track: 'silent', retry: fast });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept(); // silent: no object will take the handoff over
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.accept();
+      await until(() => connections.length === 3, 'the replacement rotated well within the 10 s overlap', 2_000);
+    });
+  });
 });

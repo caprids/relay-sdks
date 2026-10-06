@@ -327,13 +327,22 @@ export async function superviseRelayPublisher(
     setStatus('live');
     report(next);
     // Every track moved and every write or group still on the old generation finished, or the overlap ran out.
-    // The next generation ending cuts the overlap short too: its tracks need the generation after it now.
+    // The next generation ending cuts the overlap short too: its tracks need the generation after it now. So does its
+    // own rotation falling due, for a credential shorter than the overlap.
+    const overlap = new AbortController();
     await Promise.race([
       Promise.all(moved).then(() => idle(live)),
       sleep(ROTATION_OVERLAP_MS, stopping.signal).catch(() => {}),
       live.publisher.closed,
       next.publisher.closed,
+      rotationDue(
+        next.publisher.expiresAt,
+        rotateBeforeMs,
+        new Promise<void>(() => {}),
+        AbortSignal.any([stopping.signal, overlap.signal]),
+      ),
     ]);
+    overlap.abort();
     live.onIdle = undefined;
     for (const track of tracks.values()) track.settle();
     live.ended = true;
@@ -588,6 +597,8 @@ class SupervisedTrack {
             hold();
           };
           track.#groupHolds.add(release);
+          // The connection's end closes the group under the application, which may never close it itself.
+          void generation.publisher.closed.then(release);
           return supervisedGroup(group, () => track.#closed, generation, release);
         }),
       write: (payload, options?: WriteOptions) => onLive((writer) => writer.write(payload, options)),
@@ -695,6 +706,7 @@ class SupervisedTrack {
 
   /** The supervisor stopped: the track is closed for good. */
   retire(): void {
+    for (const release of [...this.#groupHolds]) release();
     if (this.#closed) return;
     this.#closed = true;
     this.#binding = undefined;

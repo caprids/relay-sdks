@@ -436,13 +436,22 @@ export async function superviseRelaySubscriber(
     // Every want on the old connection ends its attempt there and subscribes on the new one.
     opened.retire.abort();
     if (old.holds === 0) old.onIdle?.();
-    // The replacement ending cuts the overlap short too: the wants on it need the next connection now.
+    // The replacement ending cuts the overlap short too: the wants on it need the next connection now. So does its own
+    // rotation falling due, for a credential shorter than the overlap.
+    const overlap = new AbortController();
     await Promise.race([
       idle,
       sleep(ROTATION_OVERLAP_MS, lifetime.signal).catch(() => {}),
       whenAborted(old.signal),
       whenAborted(next.live.signal),
+      rotationDue(
+        next.live.subscriber.expiresAt,
+        rotateBeforeMs,
+        new Promise<void>(() => {}),
+        AbortSignal.any([lifetime.signal, overlap.signal]),
+      ),
     ]);
+    overlap.abort();
     old.onIdle = undefined;
     if (retiring === old) retiring = undefined;
     old.subscriber.close();
