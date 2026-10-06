@@ -52,6 +52,8 @@ export type {
   SupervisedSubscriber,
   WantHandlers,
   WantOptions,
+  WantSwitchedInfo,
+  WantTarget,
 } from './supervised-subscriber.js';
 export { connectSupervisedSubscriber } from './supervised-subscriber.js';
 export type { SupervisedStatus, SupervisionBackoff } from './supervision.js';

@@ -152,6 +152,50 @@ def _until_predicate(until: Until) -> Callable[[MoqtObject], bool]:
     return predicate
 
 
+_HeldEvent = ObjectEvent | SubgroupEndEvent | SubgroupResetEvent
+"""A group-scoped event of a pending subscription that did not cut over: an object ``until``
+refused, or a subgroup's end."""
+
+_HELD_EVENTS = 256
+"""How many of a pending subscription's events are held for its cutover; the oldest are dropped first."""
+
+
+def _hold(held: list[_HeldEvent], event: _HeldEvent) -> None:
+    """Hold one more of a pending subscription's events, dropping the oldest beyond the bound."""
+    held.append(event)
+    if len(held) > _HELD_EVENTS:
+        del held[0]
+
+
+def _held_after(held: list[_HeldEvent], cutover: MoqtObject) -> list[_HeldEvent]:
+    """The held events that come after the cutover object in its own subscription, in arrival order.
+
+    Those of later groups, and later objects of its group. Groups arrive out of order across streams,
+    so a later group can reach a pending subscription before the object that cuts over; discarding it
+    would leave a gap, while the earlier groups are the old subscription's to deliver. Group IDs are
+    compared only within the one subscription.
+    """
+    return [
+        event
+        for event in held
+        if event.value.group_id > cutover.group_id
+        or (
+            isinstance(event, ObjectEvent)
+            and event.value.group_id == cutover.group_id
+            and event.value.object_id > cutover.object_id
+        )
+    ]
+
+
+def _check_drain(drain: object) -> None:
+    """Check a drain duration in seconds; shared with the supervised want."""
+    if isinstance(drain, bool) or not isinstance(drain, (int, float)):
+        raise TypeError("drain must be a number of seconds")
+    # The same bound as every SDK deadline, which the TypeScript SDK's timers impose.
+    if not math.isfinite(drain) or not 0 <= drain <= MAX_TIMEOUT:
+        raise ValueError(f"drain must be between 0 and {MAX_TIMEOUT} seconds")
+
+
 class _Slot:
     """One subscription the switchable holds: active, pending or draining."""
 
@@ -169,10 +213,12 @@ class _Slot:
 class _PendingSwitch(_Slot):
     """A pending switch: its slot plus the future ``switch_to`` returned."""
 
-    __slots__ = ("drain", "future", "remove_cancellation", "until")
+    __slots__ = ("drain", "future", "held", "remove_cancellation", "until")
 
     def __init__(self, track: str, until: Callable[[MoqtObject], bool], drain: float) -> None:
         super().__init__(track)
+        self.held: list[_HeldEvent] = []
+        """Its events held until the cutover."""
         self.until = until
         self.drain = drain
         self.future: asyncio.Future[SwitchedInfo] = asyncio.get_running_loop().create_future()
@@ -294,7 +340,8 @@ class SwitchableSubscription:
 
         ``until`` is ``"first-object"`` (the default), which promotes on the new subscription's first
         object, or a synchronous predicate that promotes on the first object it accepts. Objects
-        before the cutover are discarded. Compare the object's own timeline (a timestamp property,
+        before the cutover are discarded, except those of groups later than the one that cuts over
+        (arrived early, out of order), which follow it. Compare the object's own timeline (a timestamp property,
         say) with what the active subscription delivered, so the cutover repeats media rather than
         skipping it: group IDs are no such timeline, since each track numbers its own groups. A new
         subscription can also start with a stale cached group, or lose its first object through
@@ -317,11 +364,7 @@ class SwitchableSubscription:
         # Arguments before the switchable's or the connection's state (spec/behavior.md, Arguments).
         track_name(track)
         predicate = _until_predicate(until)
-        if isinstance(drain, bool) or not isinstance(drain, (int, float)):
-            raise TypeError("drain must be a number of seconds")
-        # The same bound as every SDK deadline, which the TypeScript SDK's timers impose.
-        if not math.isfinite(drain) or not 0 <= drain <= MAX_TIMEOUT:
-            raise ValueError(f"drain must be between 0 and {MAX_TIMEOUT} seconds")
+        _check_drain(drain)
         if cancellation is not None and not isinstance(cancellation, CancellationToken):
             raise TypeError("cancellation must be a CancellationToken")
         if self._end is not None:
@@ -404,7 +447,11 @@ class SwitchableSubscription:
                 self._call(_EVENT_HANDLERS[event.type] or "", event.value, slot.track)
             return
         pending = self._pending
-        if slot is not pending or not isinstance(event, ObjectEvent):
+        if slot is not pending:
+            return
+        if isinstance(event, (SubgroupEndEvent, SubgroupResetEvent)):
+            _hold(pending.held, event)
+        if not isinstance(event, ObjectEvent):
             return
         try:
             passed = pending.until(event.value)
@@ -414,7 +461,9 @@ class SwitchableSubscription:
                 self._abandon(pending, error)
             return
         # The predicate is application code: it may have switched again or cancelled.
-        if passed and self._end is None and self._pending is pending:
+        if not passed:
+            _hold(pending.held, event)
+        elif self._end is None and self._pending is pending:
             self._cutover(pending, event.value)
 
     def _slot_ended(self, slot: _Slot, end: SubscriptionEnd) -> None:
@@ -450,6 +499,13 @@ class SwitchableSubscription:
         # A handler may have switched again or cancelled; the object still belongs to this cutover.
         if self._end is None and self._active is switching:
             self._call("on_object", obj, switching.track)
+        for held in _held_after(switching.held, obj):
+            if self._end is not None or self._active is not switching:
+                break
+            if isinstance(held, ObjectEvent) and held.value.group_id > self._active_largest_group:
+                self._active_largest_group = held.value.group_id
+            self._call(_EVENT_HANDLERS[held.type] or "", held.value, switching.track)
+        switching.held = []
 
     # ------------------------------------------------------------------ the lifecycle
 

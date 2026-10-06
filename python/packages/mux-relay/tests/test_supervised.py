@@ -15,6 +15,7 @@ from typing import Any, cast
 import pytest
 from relay_helpers.supervision_fakes import FakePublisher, FakeSubscriber, until
 
+from moq_core import MessageParameters, MoqtObject, SubgroupEnd
 from moq_core.errors import MoqtProtocolError
 from mux_relay import (
     CancellationToken,
@@ -26,6 +27,7 @@ from mux_relay import (
     SupervisedSubscriber,
     SupervisionBackoff,
     WantHandlers,
+    WantSwitchedInfo,
 )
 from mux_relay._supervision import RESUBSCRIBE_BACKOFF, _Backoff, backoff_delay, new_generation, wait_any
 from mux_relay.supervised_publisher import _supervise_relay_publisher
@@ -493,17 +495,15 @@ async def test_follows_the_newest_generation(cleanup: list[Callable[[], object]]
     s.first.latest.accept()
     s.first.latest.send_object(1)
 
-    # The crashed generation is still announced when the replacement arrives: the newer one wins at once.
+    # The crashed generation is still announced when the replacement arrives: the newer one wins at
+    # once, made before the break.
     discovery.push("announced", ["room", "alice", replacement])
     await until(lambda: len(s.first.subscriptions) == 2, "subscribe to the replacement")
     assert s.first.latest.namespace == ("room", "alice", replacement)
     s.first.latest.accept()
-    assert r.seen == [
-        f"subscribed room/alice/{old}",
-        "object 1",
-        "restarted generation",
-        f"subscribed room/alice/{replacement}",
-    ]
+    s.first.latest.send_object(0)
+    assert s.first.subscriptions[0].cancelled
+    assert r.seen == [f"subscribed room/alice/{old}", "object 1", "object 0"]
 
     # Its withdrawal does not move the want back: the old one is gone too.
     discovery.push("unannounced", ["room", "alice", old])
@@ -545,10 +545,10 @@ async def test_swaps_handlers_for_the_same_want_and_replaces_a_different_one(
     assert second.seen == ["object 1"]
     assert len(s.first.subscriptions) == 1
 
-    subscriber.want("video", ["room"], "screen", second.handlers)
+    subscriber.want("video", ["lobby"], "video", second.handlers)
     await until(lambda: len(s.first.subscriptions) == 2, "replacement want")
     assert s.first.subscriptions[0].cancelled
-    assert s.first.latest.track == "screen"
+    assert s.first.latest.namespace == ("lobby",)
 
 
 async def test_unwant_cancels_and_close_stops_everything(cleanup: list[Callable[[], object]]) -> None:
@@ -700,15 +700,15 @@ async def test_a_discovery_that_keeps_failing_is_retried_no_faster_than_the_back
     assert len(s.first.discoveries) <= 8
 
 
-async def test_replaces_the_want_when_only_stale_after_changes(cleanup: list[Callable[[], object]]) -> None:
+async def test_applies_a_new_stale_after_in_place(cleanup: list[Callable[[], object]]) -> None:
     subscriber, s = await start_subscriber(cleanup)
     subscriber.want("v", ["room"], "v")
     await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
     s.first.subscriptions[0].accept()
     subscriber.want("v", ["room"], "v", stale_after=0.02, retry=FAST)
-    await until(lambda: len(s.first.subscriptions) == 2, "replacement")
-    s.first.subscriptions[1].accept()
-    await until(lambda: len(s.first.subscriptions) == 3, "stale resubscribe under the new threshold")
+    assert not s.first.subscriptions[0].cancelled
+    await until(lambda: len(s.first.subscriptions) == 2, "stale resubscribe under the new threshold")
+    assert s.first.subscriptions[0].cancelled
 
 
 async def test_an_empty_fresh_discovery_does_not_cut_a_backoff_short(cleanup: list[Callable[[], object]]) -> None:
@@ -877,3 +877,290 @@ async def test_cached_groups_replayed_newest_first_are_not_progress(cleanup: lis
         s.first.latest.done()
     # The delays keep doubling (0.02-0.04, 0.04-0.08, 0.08-0.16 s): nothing reset the backoff.
     assert started[3] - started[2] >= 0.08
+
+
+# Make-before-break moves (#282)
+
+
+class MoveRecorder(Recorder):
+    def __init__(self) -> None:
+        super().__init__()
+        self.switched: list[WantSwitchedInfo] = []
+        self.handlers.on_subgroup_end = lambda info: self.seen.append(f"end {info.group_id}")
+        self.handlers.on_switched = self._switched
+
+    def _switched(self, info: WantSwitchedInfo) -> None:
+        self.switched.append(info)
+        source = f"{'/'.join(info.from_namespace)}:{info.from_track}"
+        self.seen.append(f"switched {source} > {'/'.join(info.to_namespace)}:{info.to_track}")
+
+
+class OldGeneration:
+    """A want following generations under ``room``, subscribed and delivering on the older one."""
+
+    def __init__(self, subscriber: SupervisedSubscriber, s: Subscribers, r: MoveRecorder) -> None:
+        self.subscriber, self.s, self.r = subscriber, s, r
+        self.old = new_generation(1_000)
+        self.replacement = new_generation(2_000)
+
+    @property
+    def subs(self) -> list[Any]:
+        return self.s.first.subscriptions
+
+    async def announce_replacement(self) -> Any:
+        self.s.first.discoveries[0].push("announced", ["room", self.replacement])
+        await until(lambda: len(self.subs) == 2, "replacement opened")
+        return self.subs[1]
+
+
+async def on_old_generation(cleanup: list[Callable[[], object]], **options: Any) -> tuple[OldGeneration, Any]:
+    subscriber, s = await start_subscriber(cleanup)
+    r = MoveRecorder()
+    subscriber.want("v", ["room"], "v", r.handlers, generations=True, retry=FAST, **options)
+    await until(lambda: len(s.first.discoveries) == 1, "discovery")
+    g = OldGeneration(subscriber, s, r)
+    s.first.discoveries[0].push("announced", ["room", g.old])
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe to the old generation")
+    first = s.first.subscriptions[0]
+    first.accept()
+    first.send_object(10)
+    return g, first
+
+
+SWITCHED = "switched"
+
+
+def switched_at(seen: list[str]) -> list[str]:
+    """``seen`` with each switch shortened to its marker."""
+    return [SWITCHED if entry.startswith(SWITCHED) else entry for entry in seen]
+
+
+async def test_a_generation_move_keeps_the_old_one_delivering_and_reports_a_switch(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    g, first = await on_old_generation(cleanup)
+    second = await g.announce_replacement()
+    assert second.namespace == ("room", g.replacement)
+    first.send_object(11)
+    second.accept()
+    first.send_object(12)
+    assert not first.cancelled
+    second.send_object(0)
+    assert first.cancelled
+    first.send_object(13)
+    second.send_object(1)
+    assert g.r.seen == [
+        f"subscribed room/{g.old}",
+        "object 10",
+        "object 11",
+        "object 12",
+        f"switched room/{g.old}:v > room/{g.replacement}:v",
+        "object 0",
+        "object 1",
+    ]
+    assert g.r.switched[0].subscribed.track_alias == 1
+
+
+async def test_a_move_cuts_over_on_the_first_object_until_accepts(cleanup: list[Callable[[], object]]) -> None:
+    g, first = await on_old_generation(cleanup, until=lambda obj: obj.group_id >= 5)
+    second = await g.announce_replacement()
+    second.accept()
+    second.send_object(3)
+    first.send_object(11)
+    second.send_object(5)
+    assert switched_at(g.r.seen[1:]) == ["object 10", "object 11", SWITCHED, "object 5"]
+
+
+async def test_a_move_follows_the_cutover_object_with_later_groups_that_arrived_early(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    g, _first = await on_old_generation(cleanup, until=lambda obj: obj.group_id == 5)
+    second = await g.announce_replacement()
+    second.accept()
+    second.send_object(6)  # ahead: refused, held
+    second.handlers.on_subgroup_end(SubgroupEnd(group_id=6, subgroup_id=0, end_of_group=True))
+    second.send_object(3)  # earlier than the cutover: the old subscription's to deliver
+    second.send_object(5)
+    assert switched_at(g.r.seen[1:]) == ["object 10", SWITCHED, "object 5", "object 6", "end 6"]
+
+
+async def test_a_move_drains_the_old_subscription(cleanup: list[Callable[[], object]]) -> None:
+    g, first = await on_old_generation(cleanup, drain=0.03)
+    second = await g.announce_replacement()
+    first.send_object(12)
+    second.accept()
+    second.send_object(0)
+    assert not first.cancelled
+    first.send_object(11)  # in flight, older than the largest it delivered
+    first.handlers.on_subgroup_end(SubgroupEnd(group_id=11, subgroup_id=0, end_of_group=True))
+    first.send_object(13)  # later than the cutover: discarded
+    await until(lambda: first.cancelled, "drain over")
+    assert switched_at(g.r.seen[1:]) == ["object 10", "object 12", SWITCHED, "object 0", "object 11", "end 11"]
+
+
+async def test_a_rewant_with_another_track_moves_make_before_break(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    before, after = MoveRecorder(), MoveRecorder()
+    subscriber.want("v", ["room"], "video-lo", before.handlers)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    lo = s.first.subscriptions[0]
+    lo.accept()
+    lo.send_object(1)
+    subscriber.want("v", ["room"], "video-hi", after.handlers)
+    await until(lambda: len(s.first.subscriptions) == 2, "pending move")
+    hi = s.first.subscriptions[1]
+    assert hi.track == "video-hi"
+    lo.send_object(2)
+    hi.accept()
+    hi.send_object(7)
+    assert lo.cancelled
+    assert before.seen == ["subscribed room", "object 1"]
+    assert after.seen == ["object 2", "switched room:video-lo > room:video-hi", "object 7"]
+    assert (after.switched[0].from_track, after.switched[0].to_track) == ("video-lo", "video-hi")
+
+
+async def test_a_rewant_moves_on_new_parameters_alone(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = MoveRecorder()
+    subscriber.want("v", ["room"], "v", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.want("v", ["room"], "v", r.handlers, parameters=MessageParameters(subscriber_priority=1))
+    await until(lambda: len(s.first.subscriptions) == 2, "pending move")
+    assert s.first.subscriptions[1].parameters == MessageParameters(subscriber_priority=1)
+    s.first.subscriptions[1].accept()
+    s.first.subscriptions[1].send_object(0)
+    assert r.seen == ["subscribed room", "switched room:v > room:v", "object 0"]
+
+
+async def test_a_rewant_replaces_an_unanswered_subscription_at_once(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = MoveRecorder()
+    subscriber.want("v", ["room"], "a", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    subscriber.want("v", ["room"], "b", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 2, "replacement")
+    assert s.first.subscriptions[0].cancelled
+    s.first.subscriptions[1].accept()
+    assert r.seen == ["subscribed room"]
+
+
+async def test_a_rewant_back_to_the_active_track_cancels_the_pending_move(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = MoveRecorder()
+    subscriber.want("v", ["room"], "a", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    a = s.first.subscriptions[0]
+    a.accept()
+    subscriber.want("v", ["room"], "b", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 2, "pending b")
+    subscriber.want("v", ["room"], "c", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 3, "pending c")
+    assert s.first.subscriptions[1].cancelled
+    subscriber.want("v", ["room"], "a", r.handlers)
+    assert s.first.subscriptions[2].cancelled
+    a.send_object(4)
+    assert not a.cancelled
+    assert r.seen == ["subscribed room", "object 4"]
+
+
+async def test_a_refused_replacement_keeps_the_old_one_delivering_and_is_retried(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    g, first = await on_old_generation(cleanup)
+    second = await g.announce_replacement()
+    second.reject(0x10, "unroutable")
+    await until(lambda: len(g.subs) == 3, "move retried")
+    assert not first.cancelled
+    first.send_object(11)
+    g.subs[2].accept()
+    g.subs[2].send_object(0)
+    assert switched_at(g.r.seen[1:]) == ["object 10", "object 11", SWITCHED, "object 0"]
+
+
+async def test_a_replacement_refused_for_good_is_surfaced(cleanup: list[Callable[[], object]]) -> None:
+    g, first = await on_old_generation(cleanup)
+    second = await g.announce_replacement()
+    second.reject(0x1, "unauthorized")
+    await until(lambda: "error SUBSCRIPTION_REQUEST_FAILED" in g.r.seen, "error")
+    assert first.cancelled
+    assert "restarted generation" not in g.r.seen
+
+
+async def test_a_move_cuts_over_once_the_old_subscription_ended_whatever_until_says(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    g, first = await on_old_generation(cleanup, until=lambda _obj: False)
+    second = await g.announce_replacement()
+    second.accept()
+    second.send_object(0)  # refused while the old one still delivers
+    first.done()  # the old publisher finished: a supervised publisher's rotation
+    assert first.cancelled
+    second.send_object(1)
+    assert switched_at(g.r.seen[1:]) == ["object 10", "done", SWITCHED, "object 1"]
+
+
+async def test_a_failed_replacement_after_the_old_one_ended_reports_its_restart(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    g, first = await on_old_generation(cleanup)
+    second = await g.announce_replacement()
+    first.done()
+    second.reject(0x10, "unroutable")
+    await until(lambda: "restarted publisher-done" in g.r.seen, "restart")
+    await until(lambda: len(g.subs) == 3, "resubscribe")
+    assert g.subs[2].namespace == ("room", g.replacement)
+
+
+async def test_a_raising_until_cuts_over_and_is_logged(
+    cleanup: list[Callable[[], object]], caplog: pytest.LogCaptureFixture
+) -> None:
+    def bad(_obj: MoqtObject) -> bool:
+        raise RuntimeError("bad predicate")
+
+    g, _first = await on_old_generation(cleanup, until=bad)
+    second = await g.announce_replacement()
+    second.accept()
+    second.send_object(0)
+    assert switched_at(g.r.seen[-2:]) == [SWITCHED, "object 0"]
+    assert "until raised" in caplog.text
+
+
+async def test_a_withdrawn_generation_with_none_newer_still_restarts(cleanup: list[Callable[[], object]]) -> None:
+    g, first = await on_old_generation(cleanup)
+    g.s.first.discoveries[0].push("unannounced", ["room", g.old])
+    await until(lambda: "restarted generation" in g.r.seen, "restart")
+    assert first.cancelled
+
+
+async def test_until_and_drain_swap_in_place_and_are_checked_at_once(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v")
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    subscriber.want("v", ["room"], "v", until=lambda _obj: True, drain=0.1)
+    assert len(s.first.subscriptions) == 1
+    assert not s.first.subscriptions[0].cancelled
+    with pytest.raises(TypeError):
+        subscriber.want("v", ["room"], "v", until=cast(Any, "first"))
+
+    async def asynchronous(_obj: MoqtObject) -> bool:
+        return True
+
+    with pytest.raises(TypeError):
+        subscriber.want("v", ["room"], "v", until=cast(Any, asynchronous))
+    with pytest.raises(ValueError):
+        subscriber.want("v", ["room"], "v", drain=-1)
+    with pytest.raises(ValueError):
+        subscriber.want("v", ["room"], "v", drain=2**31)
+
+
+async def test_a_connection_end_during_a_pending_move_moves_to_the_next_connection(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    g, _first = await on_old_generation(cleanup)
+    await g.announce_replacement()
+    g.s.first.end(RelayError("idle", code="TRANSPORT_ERROR"))
+    await until(lambda: "restarted connection" in g.r.seen, "restart")
+    assert not [entry for entry in g.r.seen if entry.startswith(SWITCHED)]

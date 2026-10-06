@@ -60,6 +60,7 @@ without a row here is a bug.
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
+| A want moved make-before-break (a newer generation, or another track or parameters) | `until` and `drainMs` on `WantOptions`; `onSwitched(info)` with `WantSwitchedInfo` (`from`, `to`, each a `WantTarget` of `namespace` and `track`; `subscribed`) | `until=` and `drain=` (seconds) on `want`; `on_switched(info)` with `WantSwitchedInfo` (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`) |
 | Backoff bounds between attempts | `SupervisionBackoff` (`initialDelayMs`, `maxDelayMs`), given as `reconnect` or `retry` | `SupervisionBackoff` (`initial_delay`, `max_delay`, seconds), as `reconnect=` or `retry=` |
 | The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
 
@@ -322,7 +323,14 @@ receive the namespace as a second argument (`on_subscribed(info, namespace)`,
 type of their own.
 
 `onRestarted` tells a decoder that the next object starts a new subscription. It is named for that
-fact rather than for the cause, which `reason` carries. `RECONNECTING` names the publisher's state
+fact rather than for the cause, which `reason` carries.
+
+A want's make-before-break move reuses the switchable's words: `until`, `drainMs` / `drain` and
+`onSwitched` mean what they mean on `switchTo`, so the two cutovers read the same. A move is not a
+restart, because nothing was lost in between, so it gets `onSwitched` and not an `onRestarted`
+flag. A want's record is `WantSwitchedInfo` rather than `SwitchedInfo`, because a generation move
+changes the namespace as well as the track. Not adopted: a `want(key).switchTo(...)` verb. `want`
+is declarative, and wanting the key again with another track already states the change. `RECONNECTING` names the publisher's state
 when a write fails between generations, and keeps it apart from `CLOSED`, which retires a frame
 writer.
 

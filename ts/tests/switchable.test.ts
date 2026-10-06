@@ -168,6 +168,31 @@ describe('subscribeSwitchable', () => {
     ]);
   });
 
+  it('delivers refused objects of later groups after the cutover object: they arrived early, out of order', async () => {
+    const { calls, handlers } = recording();
+    const { switchable, track } = harness(handlers);
+    track('video-mid').core.onOk?.(OK);
+    const switched = switchable.switchTo('video-lo', {
+      until: (value) => value.groupId === 7 && value.objectId === 0,
+    });
+    const lo = track('video-lo');
+    lo.core.onOk?.(OK);
+    lo.core.onObject?.(object(8)); // ahead of the timeline: refused, held
+    lo.core.onSubgroupEnd?.({ groupId: 8, subgroupId: 0, endOfGroup: true });
+    lo.core.onObject?.(object(4)); // stale: refused, and earlier than the cutover
+    lo.core.onObject?.(object(7, 1)); // the cutover group's later object, arrived on another subgroup
+    lo.core.onObject?.(object(7));
+    await switched;
+    expect(calls).toEqual([
+      ['subscribed', 'video-mid'],
+      ['switched', 'video-mid', 'video-lo'],
+      ['object', 7, 0, 'video-lo'],
+      ['object', 8, 0, 'video-lo'],
+      ['subgroupEnd', 8, 'video-lo'],
+      ['object', 7, 1, 'video-lo'],
+    ]);
+  });
+
   it('drains the old track through its largest group after the cutover, then cancels it', async () => {
     const { calls, handlers } = recording();
     const { switchable, track } = harness(handlers);
