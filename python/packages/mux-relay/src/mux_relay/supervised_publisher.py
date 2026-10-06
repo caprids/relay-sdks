@@ -806,7 +806,7 @@ async def _supervise_relay_publisher(
         if on_generation is not None:
             on_generation(live.info)
 
-    async def rotate_from(live: _Generation, manual: bool) -> _Generation | None:
+    async def rotate_from(live: _Generation, manual: Callable[[], bool]) -> _Generation | None:
         """Bring up the generation that replaces ``live`` and move the tracks to it, make-before-break.
 
         ``None`` when ``live`` ended or the supervisor stopped before a replacement was up, or when an
@@ -840,7 +840,7 @@ async def _supervise_relay_publisher(
                 failures += 1
         if nxt is None:
             return None
-        if not live.ended and not manual:
+        if not live.ended and not manual():
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = live.publisher.expires_at, nxt.publisher.expires_at
             if was is not None and (now is None or now <= was):
@@ -850,6 +850,8 @@ async def _supervise_relay_publisher(
                 return None
         state.current = nxt
         state.retiring = live
+        # The replacement is current: a rotate() from now on is for it, not this rotation.
+        state.rotation = None
         state.queue_next = True
         moved = [track._hand_over(nxt) for track in list(state.tracks.values())]
         set_status("live")
@@ -917,13 +919,17 @@ async def _supervise_relay_publisher(
                 if live.publisher.closed.done() or state.stopped:
                     return await live.publisher.closed
                 manual = asked.done()
-                state.rotation = None
-                nxt = await rotate_from(live, manual)
+                # A rotate() while the replacement connects makes this rotation a manual one: it takes the replacement.
+                promote: asyncio.Future[None] = loop.create_future()
+                state.rotation = promote
+                nxt = await rotate_from(live, lambda manual=manual, promote=promote: manual or promote.done())
+                if state.rotation is promote:
+                    state.rotation = None
                 if nxt is not None:
                     return nxt
                 if live.ended or state.stopped:
                     return await live.publisher.closed
-                if not manual:
+                if not manual and not promote.done():
                     automatic = False
             finally:
                 due.cancel()

@@ -1531,3 +1531,30 @@ async def test_takes_up_a_rotate_made_during_the_overlap_once_the_overlap_ends(
     assert len(s.connections) == 2
     s.first.end()
     await until(lambda: len(s.connections) == 3, "the rotation asked for during the overlap")
+
+
+# ------------------------------------------------------------------ Codex pass 8 fixes (#261)
+
+
+async def test_takes_the_replacement_when_rotate_is_called_while_an_automatic_rotation_connects_it(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    gate = asyncio.Event()
+    soon = _in(0.2)
+    connections: list[FakePublisher] = []
+
+    async def connect(namespace: tuple[str, ...], _attempt: CancellationToken) -> Any:
+        if len(connections) == 1:
+            await gate.wait()
+        fake = FakePublisher(namespace, soon)  # no fresher credential
+        connections.append(fake)
+        return fake
+
+    publisher = await _supervise_relay_publisher(connect, ["room"], reconnect=FAST, rotate_before=0.15)
+    cleanup.append(publisher.close)
+    await asyncio.sleep(0.15)  # the automatic rotation is connecting
+    publisher.rotate()
+    gate.set()
+    await until(lambda: len(connections) == 2 and connections[0].close_calls == 1, "replacement taken")
+    assert connections[1].close_calls == 0
+    assert publisher.generation is not None and publisher.generation.namespace == connections[1].namespace

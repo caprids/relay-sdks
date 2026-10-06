@@ -534,7 +534,7 @@ async def _supervise_relay_subscriber(
         for watch in list(live.roots.values()):
             watch.close()
 
-    async def rotate_from(old: _Connection, manual: bool) -> _Connection | None:
+    async def rotate_from(old: _Connection, manual: Callable[[], bool]) -> _Connection | None:
         """Open the connection that replaces ``old``, move every want to it, and close ``old`` once they moved.
 
         ``None`` when ``old`` ended or the supervisor stopped before a replacement was up, or when an
@@ -568,7 +568,7 @@ async def _supervise_relay_subscriber(
                 failures += 1
         if nxt is None:
             return None
-        if not old.ended.cancelled and not manual:
+        if not old.ended.cancelled and not manual():
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = old.subscriber.expires_at, nxt.subscriber.expires_at
             if was is not None and (now is None or now <= was):
@@ -576,6 +576,8 @@ async def _supervise_relay_subscriber(
                 return None
         state.current = nxt
         state.retiring = old
+        # The replacement is current: a rotate() from now on is for it, not this rotation.
+        state.rotation = None
         state.queue_next = True
         set_status("live")
         state.wake_waiters()
@@ -620,13 +622,17 @@ async def _supervise_relay_subscriber(
                 if live.subscriber.closed.done() or state.stopped:
                     return await live.subscriber.closed
                 manual = asked.done()
-                state.rotation = None
-                nxt = await rotate_from(live, manual)
+                # A rotate() while the replacement connects makes this rotation a manual one: it takes the replacement.
+                promote: asyncio.Future[None] = loop.create_future()
+                state.rotation = promote
+                nxt = await rotate_from(live, lambda manual=manual, promote=promote: manual or promote.done())
+                if state.rotation is promote:
+                    state.rotation = None
                 if nxt is not None:
                     return nxt
                 if live.ended.cancelled or state.stopped:
                     return await live.subscriber.closed
-                if not manual:
+                if not manual and not promote.done():
                     automatic = False
             finally:
                 due.cancel()
