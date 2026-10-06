@@ -29,6 +29,7 @@ import {
   RESUBSCRIBE_BACKOFF,
   ROTATION_OVERLAP_MS,
   rotateBeforeOption,
+  rotationDeadline,
   rotationDue,
   type SupervisedStatus,
   type SupervisionBackoff,
@@ -180,6 +181,8 @@ interface Connection {
   holds: number;
   /** Called whenever `holds` drops to zero. */
   onIdle?: (() => void) | undefined;
+  /** When it is due to rotate, on the `performance.now()` clock; `undefined` for an unknown expiry. */
+  rotateAt: number | undefined;
 }
 
 /** Count a use of `connection` until the returned release runs. */
@@ -368,6 +371,7 @@ export async function superviseRelaySubscriber(
       retiring: retire.signal,
       roots: new Map(),
       holds: 0,
+      rotateAt: rotationDeadline(subscriber.expiresAt, rotateBeforeMs),
     };
     return { live, ended, retire };
   };
@@ -444,12 +448,7 @@ export async function superviseRelaySubscriber(
       sleep(ROTATION_OVERLAP_MS, lifetime.signal).catch(() => {}),
       whenAborted(old.signal),
       whenAborted(next.live.signal),
-      rotationDue(
-        next.live.subscriber.expiresAt,
-        rotateBeforeMs,
-        new Promise<void>(() => {}),
-        AbortSignal.any([lifetime.signal, overlap.signal]),
-      ),
+      rotationDue(next.live.rotateAt, new Promise<void>(() => {}), AbortSignal.any([lifetime.signal, overlap.signal])),
     ]);
     overlap.abort();
     old.onIdle = undefined;
@@ -475,8 +474,7 @@ export async function superviseRelaySubscriber(
           };
         });
         const due = rotationDue(
-          automatic ? subscriber.expiresAt : undefined,
-          rotateBeforeMs,
+          automatic ? opened.live.rotateAt : undefined,
           asked,
           AbortSignal.any([lifetime.signal, scope.signal]),
         ).then(() => undefined);

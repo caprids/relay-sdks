@@ -86,21 +86,23 @@ export function rotationDelay(
 }
 
 /**
- * Resolve once a connection should be replaced: its rotation delay passed (see {@link rotationDelay}), or `manual`
- * resolved. Never resolves after `signal` aborts. A delay past what one timer holds is waited out in steps.
+ * When, on the `performance.now()` clock, a connection whose credential expires at `expiresAt` is replaced (see
+ * {@link rotationDelay}). Computed once, when it connects, so time spent in a rotation's overlap does not push it back.
  */
-export function rotationDue(
-  expiresAt: Date | undefined,
-  rotateBeforeMs: number,
-  manual: Promise<void>,
-  signal: AbortSignal,
-): Promise<void> {
+export function rotationDeadline(expiresAt: Date | undefined, rotateBeforeMs: number): number | undefined {
   const delay = rotationDelay(expiresAt, rotateBeforeMs);
-  if (delay === undefined) return manual;
-  const due = performance.now() + delay;
+  return delay === undefined ? undefined : performance.now() + delay;
+}
+
+/**
+ * Resolve once `deadline` (from {@link rotationDeadline}) passed, or `manual` resolved. Never resolves after `signal`
+ * aborts. A wait past what one timer holds is waited out in steps.
+ */
+export function rotationDue(deadline: number | undefined, manual: Promise<void>, signal: AbortSignal): Promise<void> {
+  if (deadline === undefined) return manual;
   const timed = (async () => {
     for (;;) {
-      const left = due - performance.now();
+      const left = deadline - performance.now();
       if (left <= 0) return;
       await sleep(Math.min(left, 2_147_483_647), signal);
     }

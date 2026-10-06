@@ -26,6 +26,7 @@ import {
   RECONNECT_BACKOFF,
   ROTATION_OVERLAP_MS,
   rotateBeforeOption,
+  rotationDeadline,
   rotationDue,
   type SupervisedStatus,
   type SupervisionBackoff,
@@ -122,8 +123,12 @@ interface Generation {
   ended: boolean;
   /** When it went live, for resetting the backoff. */
   upAt: number;
+  /** When it is due to rotate, on the `performance.now()` clock; `undefined` for an unknown expiry. */
+  rotateAt: number | undefined;
   /** Operations and open groups running on it; a rotation closes it only once none are left. */
   busy: number;
+  /** The holds of groups open on it, released when it ends: the connection closed them. */
+  groupHolds: Set<() => void>;
   /** Called whenever `busy` drops to zero. */
   onIdle?: (() => void) | undefined;
 }
@@ -265,11 +270,15 @@ export async function superviseRelayPublisher(
       publisher,
       ended: false,
       upAt: performance.now(),
+      rotateAt: rotationDeadline(publisher.expiresAt, rotateBeforeMs),
       busy: 0,
+      groupHolds: new Set(),
     };
     // Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
     void publisher.closed.then(() => {
       live.ended = true;
+      // The connection's end closed its groups under the application, which may never close them itself.
+      for (const release of [...live.groupHolds]) release();
     });
     return live;
   };
@@ -335,12 +344,7 @@ export async function superviseRelayPublisher(
       sleep(ROTATION_OVERLAP_MS, stopping.signal).catch(() => {}),
       live.publisher.closed,
       next.publisher.closed,
-      rotationDue(
-        next.publisher.expiresAt,
-        rotateBeforeMs,
-        new Promise<void>(() => {}),
-        AbortSignal.any([stopping.signal, overlap.signal]),
-      ),
+      rotationDue(next.rotateAt, new Promise<void>(() => {}), AbortSignal.any([stopping.signal, overlap.signal])),
     ]);
     overlap.abort();
     live.onIdle = undefined;
@@ -371,8 +375,7 @@ export async function superviseRelayPublisher(
           };
         });
         const due = rotationDue(
-          automatic ? live.publisher.expiresAt : undefined,
-          rotateBeforeMs,
+          automatic ? live.rotateAt : undefined,
           asked,
           AbortSignal.any([stopping.signal, scope.signal]),
         ).then(() => undefined);
@@ -594,11 +597,13 @@ class SupervisedTrack {
           const hold = use(generation);
           const release = () => {
             track.#groupHolds.delete(release);
+            generation.groupHolds.delete(release);
             hold();
           };
           track.#groupHolds.add(release);
-          // The connection's end closes the group under the application, which may never close it itself.
-          void generation.publisher.closed.then(release);
+          generation.groupHolds.add(release);
+          // Opened under a connection that has ended meanwhile: nothing will release it on the end.
+          if (generation.ended) release();
           return supervisedGroup(group, () => track.#closed, generation, release);
         }),
       write: (payload, options?: WriteOptions) => onLive((writer) => writer.write(payload, options)),

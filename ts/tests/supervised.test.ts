@@ -1505,4 +1505,31 @@ describe('rotation before the credential expires (#261)', () => {
       await until(() => connections.length === 3, 'the replacement rotated well within the 10 s overlap', 2_000);
     });
   });
+  describe('Codex pass 6 fixes', () => {
+    it("keeps a replacement's rotation deadline from when it connected, overlap or not", async () => {
+      const connections: FakeSubscriber[] = [];
+      const connectedAt: number[] = [];
+      const expiries = [undefined, 600, 3_600_000];
+      const subscriber = await superviseRelaySubscriber(
+        async () => {
+          const lifetime = expiries[connections.length];
+          const fake = fakeSubscriber(lifetime === undefined ? undefined : new Date(Date.now() + lifetime));
+          connections.push(fake);
+          connectedAt.push(performance.now());
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', reconnect: fast },
+      );
+      cleanup.push(() => subscriber.close());
+      subscriber.want('silent', { namespace: ['room'], track: 'silent', retry: fast });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept(); // silent: the overlap lasts until the replacement's own rotation
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.accept();
+      await until(() => connections.length === 3, 'second rotation', 2_000);
+      // Half of the 600 ms credential: 300 ms after the replacement connected, not 300 ms plus half what was left.
+      expect(connectedAt[2]! - connectedAt[1]!).toBeLessThan(400);
+    });
+  });
 });
