@@ -529,6 +529,20 @@ async def _supervise_relay_subscriber(
         """
         failures = 0
         nxt: _Connection | None = None
+
+        # The live connection ending while its replacement is still connecting is a reconnect: report it at once.
+        def on_old_closed(done: asyncio.Future[Closed]) -> None:
+            if state.stopped or state.current is not old:
+                return
+            state.current = None
+            try:
+                set_status("reconnecting", done.result().error)
+            except Exception as thrown:
+                with contextlib.suppress(Exception):
+                    # A raising on_status while reporting `closed`: `closed` is settled either way.
+                    stop(thrown)
+
+        old.subscriber.closed.add_done_callback(on_old_closed)
         while not state.stopped and not old.ended.cancelled:
             try:
                 nxt = await connect_once()
@@ -549,6 +563,7 @@ async def _supervise_relay_subscriber(
                 return None
         state.current = nxt
         state.retiring = old
+        set_status("live")
         state.wake_waiters()
         old.idle = loop.create_future()
         # Every want on the old connection ends its attempt there and subscribes on the new one.
@@ -637,7 +652,9 @@ async def _supervise_relay_subscriber(
             if state.stopped:
                 return
             state.current = None
-            set_status("reconnecting", outcome.error)
+            # Already reported if the connection ended while a rotation's replacement was connecting.
+            if state.status != "reconnecting":
+                set_status("reconnecting", outcome.error)
             if loop.time() - up_at > backoff.max_delay:
                 attempt = 0
             await wait_any([lifetime], limit=backoff_delay(attempt, backoff))
@@ -1039,7 +1056,17 @@ async def _subscribe_once(
                 kind: Literal["generation", "rotation"] = "generation" if moved else "rotation"
                 # Only a subscription the application is hearing from is worth keeping; one move at a time.
                 if reported and want.handoff is None:
-                    want.cutoff = _Cutoff(subscription, namespace, lambda: latest) if kind == "rotation" else None
+                    # A subscription that delivered nothing new itself inherits what its predecessor delivered.
+                    inherited = want.cutoff
+
+                    def cutoff_latest() -> tuple[int, int] | None:
+                        if latest is not None:
+                            return latest
+                        if inherited is not None and inherited.namespace == namespace:
+                            return inherited.latest()
+                        return None
+
+                    want.cutoff = _Cutoff(subscription, namespace, cutoff_latest) if kind == "rotation" else None
                     handed_off = _hand_off(want, connection, subscription, kind, namespace, stop_delivering)
                     return _Outcome(kind, accepted=True, handed_off=True)
                 return _Outcome(kind, accepted=reported)

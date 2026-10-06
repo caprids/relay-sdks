@@ -952,7 +952,9 @@ async def test_rotation_moves_a_track_once_it_has_demand_on_the_next_generation(
     await until(lambda: old.close_calls == 1, "old generation closed once the track moved")
     assert writer.has_demand
     assert not writer.closed
-    # Demand stayed continuous across the move: no False in between.
+    # Demand carried over: the move repeats True (so demand-driven state is written to the new generation), and
+    # no False comes in between.
+    assert await asyncio.wait_for(anext(changes), 1) is True
     p.connections[1].tracks["video"].set_demand(False)
     assert await asyncio.wait_for(anext(changes), 1) is False
     await changes.aclose()  # ty: ignore[unresolved-attribute]
@@ -1321,3 +1323,91 @@ async def test_delivers_nothing_more_when_on_restarted_cancels_the_want(cleanup:
     s.connections[1].subscriptions[0].accept()
     s.connections[1].subscriptions[0].send_object(5)
     assert seen == ["subscribed", "restarted"]
+
+
+# ------------------------------------------------------------------ Codex pass 3 fixes (#261)
+
+
+async def test_passes_a_repeated_true_through_as_demand_driven_state_needs(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("catalog")
+    changes = writer.demand_changes()
+    assert await asyncio.wait_for(anext(changes), 1) is False
+    p.connections[0].tracks["catalog"].set_demand(True)
+    assert await asyncio.wait_for(anext(changes), 1) is True
+    p.connections[0].tracks["catalog"].set_demand(True)  # the relay replaced its upstream subscription
+    assert await asyncio.wait_for(anext(changes), 1) is True
+    await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+async def test_keeps_cutting_what_was_delivered_across_two_rotations_with_nothing_new_in_between(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[int] = []
+    subscriber.want("v", ["room"], "v", WantHandlers(on_object=lambda o: seen.append(o.group_id)), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(2)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "first rotation")
+    s.connections[1].subscriptions[0].accept()
+    s.connections[1].subscriptions[0].send_object(2)  # cached: cut
+    s.first.end()
+    await asyncio.sleep(0.01)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 3 and len(s.connections[2].subscriptions) == 1, "second rotation")
+    s.connections[2].subscriptions[0].accept()
+    s.connections[2].subscriptions[0].send_object(2)
+    s.connections[2].subscriptions[0].send_object(3)
+    assert seen == [2, 3]
+
+
+async def test_reports_reconnecting_when_the_connection_ends_while_its_replacement_is_still_connecting(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    gate = asyncio.Event()
+    connections: list[FakeSubscriber] = []
+    statuses: list[tuple[str, BaseException | None]] = []
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        if len(connections) == 1:
+            await gate.wait()
+        fake = FakeSubscriber()
+        connections.append(fake)
+        return fake
+
+    subscriber = await _supervise_relay_subscriber(
+        connect, reconnect=FAST, on_status=lambda status, error: statuses.append((status, error))
+    )
+    cleanup.append(subscriber.close)
+    subscriber.rotate()
+    await asyncio.sleep(0.01)
+    lost = RelayError("lost", code="TRANSPORT_ERROR", phase="connection")
+    connections[0].end(lost)
+    await until(lambda: subscriber.status == "reconnecting", "reconnecting while the replacement connects")
+    assert ("reconnecting", lost) in statuses
+    gate.set()
+    await until(lambda: subscriber.status == "live", "live on the replacement")
+    assert len(connections) == 2
+
+
+async def test_unbinds_a_track_left_on_the_old_generation_when_the_next_one_ends_before_it_moved(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("video")
+    p.connections[0].tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    await asyncio.sleep(0.005)
+    changes = writer.demand_changes()
+    assert await asyncio.wait_for(anext(changes), 1) is True
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "next generation")
+    p.connections[1].end(RuntimeError("lost"))
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed")
+    assert not writer.has_demand
+    assert await asyncio.wait_for(anext(changes), 1) is False
+    await changes.aclose()  # ty: ignore[unresolved-attribute]
