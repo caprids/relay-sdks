@@ -1186,6 +1186,19 @@ async def test_a_new_move_target_starts_its_own_backoff(cleanup: list[Callable[[
     assert time.monotonic() - rejected_at < 0.2
 
 
+async def test_a_rewant_after_the_old_target_failed_for_good_is_kept(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = MoveRecorder()
+    subscriber.want("v", ["room"], "a", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].reject(0x1, "unauthorized")
+    await asyncio.sleep(0)
+    subscriber.want("v", ["room"], "b", r.handlers)
+    await until(lambda: len(s.first.subscriptions) == 2, "subscribe to b")
+    assert s.first.subscriptions[1].track == "b"
+    assert r.seen == []
+
+
 async def test_a_withdrawn_generation_with_none_newer_still_restarts(cleanup: list[Callable[[], object]]) -> None:
     g, first = await on_old_generation(cleanup)
     g.s.first.discoveries[0].push("unannounced", ["room", g.old])

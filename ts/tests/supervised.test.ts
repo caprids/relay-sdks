@@ -1341,6 +1341,19 @@ describe('make-before-break moves (#282)', () => {
     expect(Date.now() - rejectedAt).toBeLessThan(200);
   });
 
+  it('keeps a re-want made after the old target failed for good, and subscribes to the new one', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+    await Promise.resolve();
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'subscribe to b');
+    expect(subs(connections[0]!)[1]!.options.track).toBe('b');
+    expect(seen).toEqual([]);
+  });
+
   it('still restarts when the generation is withdrawn with none newer', async () => {
     const { connections, seen, discovery, old } = await onOldGeneration();
     discovery.push({ type: 'unannounced', namespace: ['room', old] });

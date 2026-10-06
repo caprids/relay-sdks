@@ -621,9 +621,15 @@ async def _supervise_want(
             # overlapping root.
             if connection is None or scope.cancelled:
                 return
+            asked = (want.options.track, want.options.parameters)
             outcome = await _attempt(want, connection)
             if scope.cancelled or outcome.kind == "cancelled":
                 return
+            # A re-want that came after the attempt settled asks for another track or parameters: the old
+            # target's failure is not the new one's, so try the new one at once.
+            superseded = (want.options.track, want.options.parameters) != asked
+            if outcome.kind == "fatal" and superseded:
+                continue
             if outcome.kind == "fatal":
                 forget()
                 assert outcome.error is not None
@@ -644,7 +650,7 @@ async def _supervise_want(
                 # The request can see the end before the connection reports it; wait for that rather than spin on it.
                 await wait_any([connection.ended, scope], limit=1.0)
                 continue
-            if outcome.kind != "retry":
+            if outcome.kind != "retry" or superseded:
                 continue
             # Cached objects followed by a done are not progress: only a later group resets the backoff.
             if outcome.progressed:

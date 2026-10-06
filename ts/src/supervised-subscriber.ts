@@ -526,9 +526,13 @@ async function superviseWant(
       const connection = await liveConnection(scope);
       // A want replaced while waiting must not open anything: its replacement may already hold an overlapping root.
       if (!connection || scope.aborted) return;
+      const asked = want.target;
       const outcome = await attempt(want, connection);
       if (scope.aborted) return;
       if (outcome.kind === 'cancelled') return;
+      // A re-want that came after the attempt settled asks for another track or parameters: the old target's failure
+      // is not the new one's, so try the new one at once.
+      if (outcome.kind === 'fatal' && want.target !== asked) continue;
       if (outcome.kind === 'fatal') {
         forget();
         want.handlers.onError?.(outcome.error);
@@ -550,7 +554,7 @@ async function superviseWant(
         await Promise.race([whenAborted(connection.signal), sleep(1_000, scope).catch(() => {})]);
         continue;
       }
-      if (outcome.kind !== 'retry') continue;
+      if (outcome.kind !== 'retry' || want.target !== asked) continue;
       // Cached objects followed by a done are not progress: only a later group resets the backoff.
       if (outcome.progressed) failures = 0;
       await backoff(want, connection, backoffDelay(failures++, want.retry));
