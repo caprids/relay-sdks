@@ -170,7 +170,8 @@ def _hold(held: list[_HeldEvent], event: _HeldEvent) -> None:
 def _held_after(held: list[_HeldEvent], cutover: MoqtObject) -> list[_HeldEvent]:
     """The held events that come after the cutover object in its own subscription, in arrival order.
 
-    Those of later groups, and later objects of its group. Groups arrive out of order across streams,
+    Those of later groups, and later objects, subgroup ends and resets of its group (the ends and
+    resets complete objects that follow it, and never arrive again). Groups arrive out of order across streams,
     so a later group can reach a pending subscription before the object that cuts over; discarding it
     would leave a gap, while the earlier groups are the old subscription's to deliver. Group IDs are
     compared only within the one subscription.
@@ -180,9 +181,8 @@ def _held_after(held: list[_HeldEvent], cutover: MoqtObject) -> list[_HeldEvent]
         for event in held
         if event.value.group_id > cutover.group_id
         or (
-            isinstance(event, ObjectEvent)
-            and event.value.group_id == cutover.group_id
-            and event.value.object_id > cutover.object_id
+            event.value.group_id == cutover.group_id
+            and (not isinstance(event, ObjectEvent) or event.value.object_id > cutover.object_id)
         )
     ]
 

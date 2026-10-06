@@ -416,7 +416,7 @@ is wanted again with another track or parameters ([moves](#supervised-subscriber
   true for. Objects it refuses, and the pending subscription's other events, are discarded, with
   one exception. Its objects, subgroup ends and resets are held (the latest 256), and those that come
   after the accepted object in its own subscription follow it. Those are its later groups, and
-  later objects of its group. Across relays a later group can arrive before the object that cuts
+  its group's later objects, subgroup ends and resets. Across relays a later group can arrive before the object that cuts
   over, and the predicate refuses it as too far ahead ([issue #282](https://github.com/muxinc/relay-sdks/issues/282)).
   On the first accepted object:
   1. the old subscription is cancelled;
@@ -639,7 +639,8 @@ Both supervisors:
     its connection, a REQUEST_ERROR, or the stale threshold). The pending subscription carries on
     and cuts over on its next object, whatever `until` says, since there is nothing left to
     compare. `onPublisherDone` still runs for the old one. The stale threshold counts objects from
-    either subscription.
+    either subscription. When it passes during a move, only the old subscription ends, and the
+    replacement gets a full threshold of its own before the want restarts with `stale`.
   - **The pending subscription fails before its cutover.** A rejection no wait fixes is surfaced,
     and the want stops. Any other failure leaves the current subscription delivering, and the move
     is retried after the retry backoff, sooner if the want asks for something else. If the old

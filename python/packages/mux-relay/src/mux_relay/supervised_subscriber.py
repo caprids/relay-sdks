@@ -1087,9 +1087,16 @@ async def _follow(
         interval = max(0.01, min(1.0, stale_after / 4))
 
         async def check() -> None:
+            nonlocal last_object_at
             while True:
                 await asyncio.sleep(interval)
-                if not over() and accepted() and loop.time() - last_object_at >= stale_after:
+                if over() or not accepted() or loop.time() - last_object_at < stale_after:
+                    continue
+                # During a move only the old subscription went stale: the replacement gets a window of its own.
+                if pending is not None and active.ended is None:
+                    active_ended("stale")
+                    last_object_at = loop.time()
+                else:
                     settle(_Outcome("retry", accepted=True, progressed=active.progressed, reason="stale"))
                     return
 

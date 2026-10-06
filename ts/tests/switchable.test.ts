@@ -181,6 +181,7 @@ describe('subscribeSwitchable', () => {
     lo.core.onSubgroupEnd?.({ groupId: 8, subgroupId: 0, endOfGroup: true });
     lo.core.onObject?.(object(4)); // stale: refused, and earlier than the cutover
     lo.core.onObject?.(object(7, 1)); // the cutover group's later object, arrived on another subgroup
+    lo.core.onSubgroupEnd?.({ groupId: 7, subgroupId: 1, endOfGroup: true }); // and that subgroup's end
     lo.core.onObject?.(object(7));
     await switched;
     expect(calls).toEqual([
@@ -190,6 +191,7 @@ describe('subscribeSwitchable', () => {
       ['object', 8, 0, 'video-lo'],
       ['subgroupEnd', 8, 'video-lo'],
       ['object', 7, 1, 'video-lo'],
+      ['subgroupEnd', 7, 'video-lo'],
     ]);
   });
 

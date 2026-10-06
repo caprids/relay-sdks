@@ -1128,6 +1128,17 @@ async def test_a_raising_until_cuts_over_and_is_logged(
     assert "until raised" in caplog.text
 
 
+async def test_a_pending_move_survives_the_old_subscription_going_stale(cleanup: list[Callable[[], object]]) -> None:
+    g, first = await on_old_generation(cleanup, stale_after=0.04, until=lambda _obj: False)
+    second = await g.announce_replacement()
+    second.accept()
+    await until(lambda: first.cancelled, "old subscription stale")
+    assert not second.cancelled
+    second.send_object(0)  # the old one is gone: cuts over whatever until says
+    assert switched_at(g.r.seen[1:]) == ["object 10", SWITCHED, "object 0"]
+    await until(lambda: "restarted stale" in g.r.seen, "the replacement went stale too")
+
+
 async def test_a_withdrawn_generation_with_none_newer_still_restarts(cleanup: list[Callable[[], object]]) -> None:
     g, first = await on_old_generation(cleanup)
     g.s.first.discoveries[0].push("unannounced", ["room", g.old])

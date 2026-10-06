@@ -197,7 +197,8 @@ export function holdEvent(held: HeldEvent[], event: HeldEvent): void {
 
 /**
  * The held events that come after the cutover object in its own subscription, in arrival order: those of later
- * groups, and later objects of its group. Groups arrive out of order across streams, so a later group can reach a
+ * groups, and later objects, subgroup ends and resets of its group (the ends and resets complete objects that follow
+ * it, and never arrive again). Groups arrive out of order across streams, so a later group can reach a
  * pending subscription before the object that cuts over; discarding it would leave a gap, while the earlier groups
  * are the old subscription's to deliver. Group IDs are compared only within the one subscription.
  */
@@ -205,7 +206,7 @@ export function heldAfter(held: readonly HeldEvent[], cutover: MoqtObject): Held
   return held.filter(
     (event) =>
       event.value.groupId > cutover.groupId ||
-      (event.type === 'object' && event.value.groupId === cutover.groupId && event.value.objectId > cutover.objectId),
+      (event.value.groupId === cutover.groupId && (event.type !== 'object' || event.value.objectId > cutover.objectId)),
   );
 }
 

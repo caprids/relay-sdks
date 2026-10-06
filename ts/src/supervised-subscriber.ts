@@ -967,8 +967,12 @@ async function follow(
     if (staleAfterMs === undefined) return;
     stale = setInterval(
       () => {
-        if (!over() && accepted() && performance.now() - lastObjectAt >= staleAfterMs)
-          settle({ kind: 'retry', accepted: true, progressed: active.progressed, reason: 'stale' });
+        if (over() || !accepted() || performance.now() - lastObjectAt < staleAfterMs) return;
+        // During a move only the old subscription went stale: the replacement gets a window of its own.
+        if (pending && !active.ended) {
+          activeEnded('stale');
+          lastObjectAt = performance.now();
+        } else settle({ kind: 'retry', accepted: true, progressed: active.progressed, reason: 'stale' });
       },
       Math.max(10, Math.min(1_000, Math.floor(staleAfterMs / 4))),
     );

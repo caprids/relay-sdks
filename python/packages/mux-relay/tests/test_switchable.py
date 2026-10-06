@@ -201,6 +201,7 @@ class TestSwitchable:
         lo.subgroup_end(8)
         lo.object(obj(4))  # stale: refused, and earlier than the cutover
         lo.object(obj(7, 1))  # the cutover group's later object, arrived on another subgroup
+        lo.subgroup_end(7)  # and that subgroup's end
         lo.object(obj(7))
         await switched
         assert calls == [
@@ -210,6 +211,7 @@ class TestSwitchable:
             ("object", 8, 0, "video-lo"),
             ("subgroup_end", 8, "video-lo"),
             ("object", 7, 1, "video-lo"),
+            ("subgroup_end", 7, "video-lo"),
         ]
 
     async def test_switches_to_the_same_track_with_new_parameters_which_are_not_inherited(self) -> None:

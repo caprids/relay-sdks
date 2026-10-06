@@ -1263,6 +1263,22 @@ describe('make-before-break moves (#282)', () => {
     expect(String((logged[0] as Error).message)).toMatch(/until threw/);
   });
 
+  it('keeps a pending move when the old subscription goes stale, restarting only if the replacement stays silent', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration({
+      staleAfterMs: 40,
+      until: () => false,
+    });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    second.accept();
+    await until(() => first.cancelled, 'old subscription stale');
+    expect(second.cancelled).toBe(false);
+    second.object(0); // the old one is gone: cuts over whatever until says
+    expect(seen.slice(1)).toEqual(['object 10', expect.stringMatching(/^switched/), 'object 0']);
+    await until(() => seen.includes('restarted stale'), 'the replacement went stale too');
+  });
+
   it('still restarts when the generation is withdrawn with none newer', async () => {
     const { connections, seen, discovery, old } = await onOldGeneration();
     discovery.push({ type: 'unannounced', namespace: ['room', old] });
