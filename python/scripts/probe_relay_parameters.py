@@ -222,13 +222,14 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         )
 
         # Groups the relay caches, each large enough that the order they are served in can show.
-        burst_start = live[-1] + 1
+        burst_start = max(live) + 1
         burst_end = burst_start + BURST_GROUPS - 1
 
         for _ in range(BURST_GROUPS):
             await track.write(bytes(BURST_PAYLOAD))
 
-        await wait_for(lambda: live[-1] >= burst_end, "the burst on the first subscriber")
+        burst = set(range(burst_start, burst_end + 1))
+        await wait_for(lambda: burst <= set(live), "the burst on the first subscriber")
         updates_before = len(updates)
         late_oks: list[SubscribeOk] = []
         arrivals: list[int] = []
