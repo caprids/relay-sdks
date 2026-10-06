@@ -555,7 +555,10 @@ async def _supervise_relay_subscriber(
         old.retiring.cancel()
         if old.holds == 0:
             old.idle.set_result(None)
-        await wait_any([lifetime], settles=[old.idle, old.subscriber.closed], limit=ROTATION_OVERLAP)
+        # The replacement ending cuts the overlap short too: the wants on it need the next connection now.
+        await wait_any(
+            [lifetime, old.ended, nxt.ended], settles=[old.idle, old.subscriber.closed], limit=ROTATION_OVERLAP
+        )
         if state.retiring is old:
             state.retiring = None
         old.subscriber.close()
@@ -937,6 +940,9 @@ async def _subscribe_once(
             return
         if not reported and want.handoff is not None:
             want.handoff.complete()
+            # The restart callback may have cancelled the want or stopped the supervisor.
+            if not delivering or want.controller.cancelled:
+                return
         location = (obj.group_id, obj.object_id)
         if latest is None or location > latest:
             latest = location
@@ -1052,8 +1058,8 @@ async def _subscribe_once(
         # A replacement that ends before it took over never reports its held-back on_subscribed.
         if not reported and want.handoff is not None:
             want.handoff.held = None
-        # An accepted replacement that ended has had its turn: the next subscription may restart group numbers.
-        if accepted and handed_off is None and want.cutoff is not None and want.cutoff.owner is not subscription:
+        # A replacement that took over and ended has had its turn: the next subscription may restart group numbers.
+        if reported and handed_off is None and want.cutoff is not None and want.cutoff.owner is not subscription:
             want.cutoff = None
         if handed_off is None:
             delivering = False
@@ -1099,6 +1105,8 @@ def _hand_off(
             want.call("on_restarted", reason, namespace)
         except Exception:
             _log.exception("on_restarted raised; the want resubscribes regardless")
+        if want.controller.cancelled:
+            return
         if held is not None:
             try:
                 held()

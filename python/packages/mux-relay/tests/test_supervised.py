@@ -1230,3 +1230,94 @@ async def test_reports_nothing_for_a_pending_handoff_after_close(cleanup: list[C
     subscriber.close()
     await asyncio.sleep(0.02)
     assert seen == ["subscribed"]
+
+
+# ------------------------------------------------------------------ Codex pass 2 fixes (#261)
+
+
+async def test_reconnects_at_once_when_the_replacement_connection_ends_during_the_overlap(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    subscriber.want("a", ["room"], "a", retry=FAST)
+    subscriber.want("b", ["room"], "b", retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 2, "subscribe both")
+    for sub in s.first.subscriptions:
+        sub.accept()
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 2, "resubscribe both")
+    s.connections[1].subscriptions[0].accept()
+    s.connections[1].subscriptions[0].send_object(1)  # 'a' moved, 'b' still on the old connection
+    s.connections[1].end(RelayError("lost", code="TRANSPORT_ERROR", phase="connection"))
+    await until(lambda: len(s.connections) == 3, "a third connection well within the overlap", 0.5)
+    assert "reconnecting" in s.statuses
+
+
+async def test_closes_a_group_still_open_on_the_old_generation_when_the_track_closes(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("video")
+    p.connections[0].tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    group = await writer.open_group()
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "next generation")
+    p.connections[1].tracks["video"].set_demand(True)
+    await writer.write(b"\x07")
+    writer.close()
+    assert p.connections[0].tracks["video"].closed
+    with pytest.raises(RelayError) as failure:
+        await group.write(b"\x01")
+    assert failure.value.code == "CLOSED"
+
+
+async def test_keeps_the_cutoff_when_a_replacement_ends_before_taking_over(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[int] = []
+    subscriber.want("v", ["room"], "v", WantHandlers(on_object=lambda o: seen.append(o.group_id)), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    old = s.first.subscriptions[0]
+    old.accept()
+    old.send_object(2)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].accept()
+    s.connections[1].subscriptions[0].done()
+    old.send_object(3)
+    await until(lambda: len(s.connections[1].subscriptions) == 2, "retry on the new connection")
+    retry = s.connections[1].subscriptions[1]
+    retry.accept()
+    retry.send_object(3)
+    retry.send_object(4)
+    assert seen == [2, 3, 4]
+
+
+async def test_delivers_nothing_more_when_on_restarted_cancels_the_want(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[str] = []
+
+    def on_restarted(_reason: object, _namespace: object) -> None:
+        seen.append("restarted")
+        subscriber.unwant("v")
+
+    subscriber.want(
+        "v",
+        ["room"],
+        "v",
+        WantHandlers(
+            on_subscribed=lambda _info, _ns: seen.append("subscribed"),
+            on_object=lambda o: seen.append(f"object {o.group_id}"),
+            on_restarted=on_restarted,
+        ),
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    s.connections[1].subscriptions[0].accept()
+    s.connections[1].subscriptions[0].send_object(5)
+    assert seen == ["subscribed", "restarted"]

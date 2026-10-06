@@ -158,6 +158,7 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         "_pending",
         "_release",
         "_retired",
+        "_retired_writers",
         "_track_properties",
         "_wt",
     )
@@ -172,6 +173,8 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         self._release = release
         self._binding: _Binding | None = None
         self._pending: _Pending | None = None
+        # Writers on generations a rotation moved this track off, kept until they close: their open groups end with it.
+        self._retired_writers: dict[_Generation, RelayTrackWriter] = {}
         self._retired = False
         # The demand the iterators last reported, so a lost generation reports False only after True.
         self._last_demand = False
@@ -246,6 +249,9 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         binding, self._binding = self._binding, None
         if binding is not None:
             binding.writer.close()
+        retired, self._retired_writers = list(self._retired_writers.values()), {}
+        for writer in retired:
+            writer.close()
         self._drop_pending(close=True)
         self._end_demand()
 
@@ -312,6 +318,10 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         self._maybe_move()
         return moved
 
+    def _forget(self, generation: _Generation) -> None:
+        """The rotation closed ``generation``: nothing on it is left to close with the track."""
+        self._retired_writers.pop(generation, None)
+
     def _settle(self) -> None:
         """The rotation's overlap is over: move to the next generation now, wherever demand is."""
         self._maybe_move(force=True)
@@ -334,6 +344,8 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         if stay and not force:
             return
         self._pending = None
+        if binding is not None and not binding.generation.ended:
+            self._retired_writers[binding.generation] = binding.writer
         self._binding = _Binding(pending.generation, pending.writer)
         self._emit_demand(pending.writer.has_demand)
         if not pending.moved.done():
@@ -778,7 +790,10 @@ async def _supervise_relay_publisher(
         settled = asyncio.ensure_future(moved_and_idle())
         _observe(settled)
         try:
-            await wait_any([stopping], settles=[settled, live.publisher.closed], limit=ROTATION_OVERLAP)
+            # The next generation ending cuts the overlap short too: its tracks need the generation after it now.
+            await wait_any(
+                [stopping], settles=[settled, live.publisher.closed, nxt.publisher.closed], limit=ROTATION_OVERLAP
+            )
         finally:
             settled.cancel()
             live.idle = None
@@ -789,6 +804,8 @@ async def _supervise_relay_publisher(
             state.retiring = None
         with contextlib.suppress(Exception):
             await live.publisher.close()
+        for track in list(state.tracks.values()):
+            track._forget(live)
         return nxt
 
     async def serve(live: _Generation) -> Closed | _Generation:
