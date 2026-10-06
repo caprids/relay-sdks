@@ -6,15 +6,19 @@ on aioquic), then asserts the list in ``spec/behavior.md``:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
 2. Once the publisher's ``announced`` settles, subscriptions to two tracks on the namespace are
-   accepted, retrying the fresh-namespace rejection while the announce propagates; the report
-   records the retries.
+   accepted, retrying the fresh-namespace rejection while the announce propagates: a supervised
+   subscriber's wants make them and never resubscribe during the run.
 3. Binary payloads, an empty payload, and a text payload all arrive intact, each written once after
    a warm-up marker has arrived on its track; the report records the warm-up writes.
 4. Closing one track writer does not affect delivery on another track.
 5. A late subscriber decodes LARGEST_OBJECT and receives the next live object.
 6. The subscriber's discovery on the namespace's parent prefix reports the namespace ``announced``,
    then ``unannounced`` after the publisher's clean ``close()``; the report records how long that took.
-7. All connections close cleanly once the test closes them.
+7. A want following a supervised publisher's root receives the first generation's objects; when a
+   second supervised publisher starts on the same root while the first is still up, the want moves to
+   the newer generation, reports ``on_restarted`` with reason ``generation``, and receives its
+   objects. The report records how long the move took.
+8. All connections close cleanly once the test closes them.
 
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
 (https, without the token), ``RELAY_SUB_URL`` (the subscribers' relay for a cross-relay run, defaulting
@@ -36,7 +40,6 @@ import sys
 import time
 import uuid
 from getpass import getpass
-from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -52,17 +55,14 @@ from mux_relay import (
     RelayPublisher,
     RelaySubscriber,
     RelaySubscriptionHandlers,
+    SupervisedPublisher,
+    SupervisedSubscriber,
+    WantHandlers,
     connect_relay_publisher,
     connect_relay_subscriber,
+    connect_supervised_publisher,
+    connect_supervised_subscriber,
 )
-
-# The announce-race retry is the examples' policy, shared with this test; see spec/behavior.md.
-EXAMPLES = str(Path(__file__).resolve().parents[1] / "examples")
-
-if EXAMPLES not in sys.path:
-    sys.path.insert(0, EXAMPLES)
-
-from shared.announce_race import subscribe_with_retry  # noqa: E402
 
 RUN_DEADLINE = 45.0
 RECEIVE_DEADLINE = 10.0
@@ -129,6 +129,8 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
     publisher: RelayPublisher | None = None
     subscriber: RelaySubscriber | None = None
     late_subscriber: RelaySubscriber | None = None
+    watcher: SupervisedSubscriber | None = None
+    supervised_publishers: list[SupervisedPublisher] = []
     late_largest_object = None
     discovered: list[str] = []
     discovery_task: asyncio.Task[None] | None = None
@@ -227,12 +229,26 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
         discovery_task = asyncio.create_task(discover())
 
         # Assertion 2. The announce left with the first registered track; the relay routes subscribes to
-        # the namespace about a round trip later, so the subscribe retries the rejection it may still answer.
+        # the namespace about a round trip later. The supervised subscriber's wants retry the rejection it
+        # may still answer, and report only what they do not retry.
         await publisher.announced
         report({"phase": "announced"})
         await wait_for(lambda: "announced" in discovered, "discovery: announced")
         report({"phase": "discovered"})
-        retries = {"events": 0, "status": 0}
+
+        def on_status(state: str, error: BaseException | None) -> None:
+            if state == "reconnecting" and not closing:
+                errors.append(f"supervised subscriber reconnecting: {error!r}")
+
+        watcher = await connect_supervised_subscriber(
+            sub_endpoint,
+            get_token=lambda: token,
+            cancellation=lifetime,
+            create_transport=create_transport,
+            on_status=on_status,
+        )
+        report({"phase": "supervised subscriber connected"})
+        subscribed: set[str] = set()
 
         for track in ("events", "status"):
 
@@ -244,25 +260,28 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
                 else:
                     received[track].append(obj.payload)
 
-            def on_retry(attempt: int, delay: float, track: str = track) -> None:
-                retries[track] += 1
-                report({"phase": "subscribe retried", "track": track, "attempt": attempt, "delay": delay})
+            def on_subscribed(_ok: Any, _namespace: tuple[str, ...], track: str = track) -> None:
+                subscribed.add(track)
+                report({"phase": "subscribed", "track": track})
 
-            await subscribe_with_retry(
-                subscriber,
+            def on_restarted(reason: str, _namespace: tuple[str, ...], track: str = track) -> None:
+                if not closing:
+                    errors.append(f"{track} resubscribed unexpectedly: {reason}")
+
+            watcher.want(
+                track,
                 namespace,
                 track,
-                RelaySubscriptionHandlers(
-                    on_subscribed=lambda ok, track=track: report({"phase": "subscribed", "track": track}),
+                WantHandlers(
+                    on_subscribed=on_subscribed,
                     on_object=on_object,
-                    on_error=lambda error, track=track: errors.append(f"{track}: {error.error_code} {error.reason}"),
+                    on_error=lambda error, track=track: errors.append(f"{track}: {error!r}"),
                     on_subgroup_reset=lambda reset, track=track: errors.append(f"{track} reset: {reset.error}"),
+                    on_restarted=on_restarted,
                 ),
-                on_retry=on_retry,
             )
 
-        if errors:
-            raise RuntimeError("; ".join(errors))
+        await wait_for(lambda: len(subscribed) == 2, "both wants subscribed")
 
         warm_up_writes = {"events": await warm_up("events", events), "status": await warm_up("status", status)}
         report({"phase": "warmed up", "writes": warm_up_writes})
@@ -303,6 +322,8 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             parameters=MessageParameters(location_filter=NextObjectFilter()),
         )
         await wait_for(lambda: late_largest_object is not None, "late SUBSCRIBE_OK with LARGEST_OBJECT")
+        # The track's end would make its want resubscribe and replay the cached group (spec/publisher-recovery.md).
+        watcher.unwant("events")
         events.close()
         await status.write(bytes([43]))
         await wait_for_count("status", 2)
@@ -316,7 +337,9 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
         if errors:
             raise RuntimeError("; ".join(errors))
 
-        # A clean publisher close withdraws the announce; the subscriber's discovery hears it.
+        # A clean publisher close withdraws the announce; the subscriber's discovery hears it. The want on
+        # its last track goes first, so the publisher's done does not start a resubscription.
+        watcher.unwant("status")
         closed_at = time.monotonic()
         closed_on_purpose.add("publisher")
         await publisher.close()
@@ -326,13 +349,86 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
         if discovered != ["announced", "unannounced"]:
             raise RuntimeError(f"Discovery mismatch: {discovered!r}")
 
+        # Assertion 7. A want following a supervised publisher's root moves to a newer generation that
+        # announces while the old one is still up, the way a restarted publisher replaces a crashed one
+        # whose announce the relay still holds.
+        root = [*namespace, "supervised"]
+        beats: list[str] = []
+        restarts: list[str] = []
+        current_namespace: list[tuple[str, ...]] = []
+
+        def on_beat_subscribed(_ok: Any, subscribed_on: tuple[str, ...]) -> None:
+            current_namespace[:] = [subscribed_on]
+
+        def on_beat(obj: MoqtObject) -> None:
+            if obj.status == "normal":
+                beats.append(obj.payload.decode())
+
+        watcher.want(
+            "beat",
+            root,
+            "beat",
+            WantHandlers(
+                on_subscribed=on_beat_subscribed,
+                on_object=on_beat,
+                on_restarted=lambda reason, _namespace: restarts.append(reason),
+                on_error=lambda error: errors.append(f"beat: {error!r}"),
+            ),
+            generations=True,
+        )
+
+        async def start_generation(label: str) -> tuple[SupervisedPublisher, Any]:
+            supervised = await connect_supervised_publisher(
+                endpoint,
+                namespace=root,
+                get_token=lambda: token,
+                cancellation=lifetime,
+                create_transport=create_transport,
+            )
+            supervised_publishers.append(supervised)
+            return supervised, supervised.register_track("beat", write_timeout=2)
+
+        # Write until this generation's beats arrive: a SUBSCRIBE_OK does not prove the path is ready.
+        async def beat_until_received(writer: Any, label: str) -> None:
+            until = time.monotonic() + 15
+            n = 0
+            while not any(beat.startswith(f"{label}:") for beat in beats):
+                if errors:
+                    raise RuntimeError("; ".join(errors))
+                if time.monotonic() >= until:
+                    raise TimeoutError(f"Timed out waiting for generation {label}'s beats")
+                try:
+                    await writer.write(f"{label}:{n}".encode())
+                except RelayError as error:
+                    if error.code not in ("SUBSCRIPTION_CHANGED", "WRITE_TIMEOUT"):
+                        raise
+                n += 1
+                await asyncio.sleep(0.1)
+
+        first, first_writer = await start_generation("first")
+        assert first.generation is not None
+        report({"phase": "first generation", "namespace": list(first.generation.namespace)})
+        await beat_until_received(first_writer, "first")
+        second, second_writer = await start_generation("second")
+        switch_started = time.monotonic()
+        await beat_until_received(second_writer, "second")
+        switched_after_ms = round((time.monotonic() - switch_started) * 1000)
+        assert second.generation is not None
+        if current_namespace != [second.generation.namespace]:
+            raise RuntimeError(f"Want stayed on {current_namespace!r}")
+        if "generation" not in restarts:
+            raise RuntimeError(f"No generation restart: {restarts!r}")
+        report({"phase": "followed newer generation", "afterMs": switched_after_ms, "restarts": restarts})
+        watcher.unwant("beat")
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
         return {
             "endpoint": endpoint,
             "subscriberEndpoint": sub_endpoint,
             "namespace": namespace,
             "events": len(received["events"]),
             "status": len(received["status"]),
-            "announceRaceRetries": retries,
             "warmUpWrites": warm_up_writes,
             "binaryAndEmptyPayloads": "passed",
             "independentTrackClose": "passed",
@@ -343,6 +439,7 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             if late_largest_object is not None
             else None,
             "discovery": {"announced": "passed", "withdrawnAfterMs": withdrawn_after_ms},
+            "generationSwitch": {"afterMs": switched_after_ms, "restarts": restarts},
         }
     finally:
         closing = True
@@ -350,9 +447,14 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
         if discovery_task is not None:
             discovery_task.cancel()
 
+        if watcher is not None:
+            watcher.close()
+
         try:
+            closing_publishers = [supervised.close() for supervised in supervised_publishers]
             if publisher is not None:
-                await publisher.close()
+                closing_publishers.append(publisher.close())
+            await asyncio.gather(*closing_publishers)
         finally:
             if subscriber is not None:
                 subscriber.close()

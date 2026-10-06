@@ -9,7 +9,15 @@ import pytest
 from mux_global import demo
 from relay_helpers.relay_hub import create_relay_hub
 
-from mux_relay import RelayError, RelayTrackWriter, connect_relay_publisher, connect_relay_subscriber
+from moq_core import RequestError
+from mux_relay import (
+    RelayError,
+    RelaySubscriber,
+    RelayTrackWriter,
+    SubscriptionEnd,
+    connect_relay_publisher,
+    connect_supervised_subscriber,
+)
 
 CONFIG = demo.Config(
     url="https://relay.example.com",
@@ -33,13 +41,14 @@ async def connected(monkeypatch: pytest.MonkeyPatch):
         connections.append(result)
         return result
 
+    # The demo's supervised subscriber connects through the hub, attempt after attempt.
     async def subscriber(url: str, **kwargs: Any):
-        result = await connect_relay_subscriber(url, **kwargs, create_transport=hub.connect_subscriber)
+        result = await connect_supervised_subscriber(url, **kwargs, create_transport=hub.connect_subscriber)
         connections.append(result)
         return result
 
     monkeypatch.setattr(demo, "connect_relay_publisher", publisher)
-    monkeypatch.setattr(demo, "connect_relay_subscriber", subscriber)
+    monkeypatch.setattr(demo, "connect_supervised_subscriber", subscriber)
     try:
         yield connections
     finally:
@@ -49,7 +58,7 @@ async def connected(monkeypatch: pytest.MonkeyPatch):
 async def test_one_object_round_trip_closes_connections(connected):
     entries = []
     assert await demo.run_demo(CONFIG, entries.append) == {"published": 1, "received": 1}
-    # The combined run waits for the announce to reach the wire before it subscribes, and says so.
+    # The combined run logs the announce reaching the wire, before the relay accepts the subscription.
     assert entries.index({"event": "announced", "namespace": "quickstart/test"}) < next(
         index for index, entry in enumerate(entries) if entry["event"] == "subscribed"
     )
@@ -117,7 +126,9 @@ async def test_partial_delivery_timeout_is_not_replayed(connected, monkeypatch: 
 
 
 async def test_second_connection_failure_closes_publisher(connected, monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(demo, "connect_relay_subscriber", AsyncMock(side_effect=RuntimeError("handshake failed")))
+    # A refusal on the first attempt is not retried: the supervised subscriber raises it.
+    refused = RelayError("refused", code="UNAUTHORIZED", phase="connecting")
+    monkeypatch.setattr(demo, "connect_supervised_subscriber", AsyncMock(side_effect=refused))
     with pytest.raises(RuntimeError, match="subscriber failed to connect"):
         await demo.run_demo(CONFIG, lambda _: None)
     assert len(connected) == 1
@@ -155,10 +166,10 @@ async def test_demo_over_native_quic(monkeypatch: pytest.MonkeyPatch):
 
     async def subscriber(_url, **kwargs):
         transport = servers.subscribers.factory()
-        return await connect_relay_subscriber(servers.subscribers.url(), **kwargs, create_transport=transport)
+        return await connect_supervised_subscriber(servers.subscribers.url(), **kwargs, create_transport=transport)
 
     monkeypatch.setattr(demo, "connect_relay_publisher", publisher)
-    monkeypatch.setattr(demo, "connect_relay_subscriber", subscriber)
+    monkeypatch.setattr(demo, "connect_supervised_subscriber", subscriber)
     try:
         assert await demo.run_demo(CONFIG, lambda _: None) == {"published": 1, "received": 1}
     finally:
@@ -186,16 +197,26 @@ async def test_track_closed_while_waiting_for_demand(connected, monkeypatch: pyt
     assert all(connection.closed.done() for connection in connected)
 
 
-async def test_background_subscribe_failure_interrupts_the_wait_for_demand(connected, monkeypatch: pytest.MonkeyPatch):
-    async def failing_subscribe(*args: Any, **kwargs: Any):
-        await asyncio.sleep(0.01)
-        raise RuntimeError("subscribe exploded")
+async def test_a_rejection_no_wait_fixes_interrupts_the_wait_for_demand(connected, monkeypatch: pytest.MonkeyPatch):
+    class Rejected:
+        """A subscription the relay refuses with UNAUTHORIZED, a rejection the want does not retry."""
 
-    monkeypatch.setattr(demo, "subscribe_with_retry", failing_subscribe)
+        def __init__(self) -> None:
+            loop = asyncio.get_running_loop()
+            self._ended: asyncio.Future[SubscriptionEnd] = loop.create_future()
+            rejection = RequestError(error_code=0x1, retry_interval=0, reason="forbidden")
+            end = SubscriptionEnd(kind="rejected", cause="request-error", accepted=False, error=rejection)
+            loop.call_later(0.01, self._ended.set_result, end)
+            self.ended = self._ended
+
+        def cancel(self, reason: object = None) -> None:
+            pass
+
+    monkeypatch.setattr(RelaySubscriber, "subscribe", lambda self, *args, **kwargs: Rejected())
     loop = asyncio.get_running_loop()
     started = loop.time()
-    # The write deadline is 15 s and the run's 2 s: the recorded failure must end the wait first.
-    with pytest.raises(RuntimeError, match="subscribe failed: RuntimeError: subscribe exploded"):
+    # The write deadline is 15 s and the run's 2 s: the surfaced rejection must end the wait first.
+    with pytest.raises(RuntimeError, match="subscribe rejected: code 1 forbidden"):
         await demo.run_demo(CONFIG, lambda _: None)
     assert loop.time() - started < 1
     assert all(connection.closed.done() for connection in connected)

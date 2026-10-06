@@ -63,19 +63,12 @@ from mux_relay import (
     RelayAwaitable,
     RelayError,
     RelayPublisher,
-    RelaySubscriptionHandlers,
+    SubscriptionRequestError,
+    WantHandlers,
     connect_relay_publisher,
-    connect_relay_subscriber,
+    connect_supervised_subscriber,
 )
 from mux_relay.media import CatalogService, FrameOutcome, FrameWriter
-
-# The policies the examples share live one directory up; a script run by path cannot see them otherwise.
-EXAMPLES = str(Path(__file__).resolve().parents[1])
-
-if EXAMPLES not in sys.path:
-    sys.path.insert(0, EXAMPLES)
-
-from shared.announce_race import subscribe_with_retry  # noqa: E402
 
 Log = Callable[[str, dict[str, Any]], None]
 
@@ -952,12 +945,13 @@ async def verify(
 ) -> tuple[Any, Verified]:
     """Subscribe like a player would and record what arrives, so the wire can be checked without a browser.
 
-    The viewer shares this process with the publisher, so it waits for the announce to reach the wire
-    and then subscribes with the examples' announce-race retry (``shared.announce_race``): the relay
-    still needs about a round trip after the announce before it routes subscribes to the namespace.
+    The viewer is a supervised subscriber whose wants keep each track subscribed: they retry the
+    announce race (a subscribe that reaches the relay before it routes the namespace, about a round
+    trip after the announce reached the wire) and resubscribe after a publisher's done, as a player's
+    would.
     """
     result = Verified(video_groups=set(), problems=[])
-    subscriber = await connect_relay_subscriber(config.url, get_token=lambda: config.token, cancellation=lifetime)
+    subscriber = await connect_supervised_subscriber(config.url, get_token=lambda: config.token, cancellation=lifetime)
     assert result.problems is not None
     assert result.video_groups is not None
     problems = result.problems
@@ -1018,19 +1012,51 @@ async def verify(
         if obj.status == "normal":
             result.audio_objects += 1
 
-    def on_error(track: str) -> Callable[[Any], None]:
-        return lambda error: problems.append(f"{track}: subscribe error {error.error_code} {error.reason}")
+    subscribed: set[str] = set()
+    all_subscribed = asyncio.Event()
 
-    def on_retry(track: str) -> Callable[[int, float], None]:
-        def retried(attempt: int, delay: float) -> None:
-            log("verify: subscribe retried", {"track": track, "attempt": attempt, "delay": delay})
+    def on_error(track: str) -> Callable[[BaseException], None]:
+        def failed(error: BaseException) -> None:
+            detail = (
+                f"{error.request_error.error_code} {error.request_error.reason}"
+                if isinstance(error, SubscriptionRequestError)
+                else describe(error)
+            )
+            problems.append(f"{track}: subscribe error {detail}")
 
-        return retried
+        return failed
+
+    def on_subscribed(track: str) -> Callable[[Any, tuple[str, ...]], None]:
+        def accepted(_info: Any, _namespace: tuple[str, ...]) -> None:
+            subscribed.add(track)
+            if len(subscribed) == len(tracks):
+                all_subscribed.set()
+
+        return accepted
+
+    def on_restarted(track: str) -> Callable[[str, tuple[str, ...]], None]:
+        def restarted(reason: str, _namespace: tuple[str, ...]) -> None:
+            log("verify: resubscribing", {"track": track, "reason": reason})
+
+        return restarted
 
     tracks = [(CATALOG_TRACK, on_catalog), (VIDEO_TRACK, on_video)]
 
     if config.audio != "off":
         tracks.append((AUDIO_TRACK, on_audio))
+
+    for track, on_object in tracks:
+        subscriber.want(
+            track,
+            config.namespace,
+            track,
+            WantHandlers(
+                on_subscribed=on_subscribed(track),
+                on_object=on_object,
+                on_error=on_error(track),
+                on_restarted=on_restarted(track),
+            ),
+        )
 
     # Bounded: the run's own duration timer starts only after this returns, and an announce that no
     # solicitation covers (or a relay that keeps refusing the namespace) would otherwise hold the
@@ -1039,15 +1065,7 @@ async def verify(
         async with asyncio.timeout(VERIFY_STARTUP_TIMEOUT):
             await publisher.announced
             log("verify: namespace announced", {"namespace": "/".join(config.namespace)})
-
-            for track, on_object in tracks:
-                await subscribe_with_retry(
-                    subscriber,
-                    config.namespace,
-                    track,
-                    RelaySubscriptionHandlers(on_object=on_object, on_error=on_error(track)),
-                    on_retry=on_retry(track),
-                )
+            await all_subscribed.wait()
     except TimeoutError:
         # Verification is diagnostic: record it and let the media start.
         problems.append(

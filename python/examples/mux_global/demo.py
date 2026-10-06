@@ -2,10 +2,10 @@
 """Publish JSON ticks to a Relay namespace and subscribe to them again.
 
 The SDK usage lives in :func:`run_demo`. It connects a publisher with ``connect_relay_publisher``,
-registers a track, connects a subscriber with ``connect_relay_subscriber`` to the same track, publishes JSON
-objects one second apart, and prints each object as it comes back through the relay. It decodes the
-JSON itself; the SDK only delivers bytes. Unlike the TypeScript example, no browser is involved: the
-SDK's native QUIC transport runs on aioquic.
+registers a track, connects a supervised subscriber with ``connect_supervised_subscriber`` and wants
+the same track, publishes JSON objects one second apart, and prints each object as it comes back
+through the relay. It decodes the JSON itself; the SDK only delivers bytes. Unlike the TypeScript
+example, no browser is involved: the SDK's native QUIC transport runs on aioquic.
 
     # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
     mise run python:example:mux-global -- --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE"
@@ -35,10 +35,11 @@ from mux_relay import (
     RelayAwaitable,
     RelayError,
     RelayPublisher,
-    RelaySubscriptionHandlers,
     RelayTrackWriter,
+    SubscriptionRequestError,
+    WantHandlers,
     connect_relay_publisher,
-    connect_relay_subscriber,
+    connect_supervised_subscriber,
 )
 
 # The policies the examples share live one directory up; a script run by path cannot see them otherwise.
@@ -47,7 +48,6 @@ EXAMPLES = str(Path(__file__).resolve().parents[1])
 if EXAMPLES not in sys.path:
     sys.path.insert(0, EXAMPLES)
 
-from shared.announce_race import subscribe_with_retry  # noqa: E402
 from shared.demand_timeout import write_with_retry  # noqa: E402
 
 Log = Callable[[dict[str, Any]], None]
@@ -66,7 +66,6 @@ class Config:
 
 
 async def run_demo(config: Config, log: Log) -> dict[str, int]:
-    background_tasks: list[asyncio.Task[Any]] = []
     problems: list[str] = []
     broken = asyncio.Event()
     received = 0
@@ -84,21 +83,6 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                 report(f"{label} connection closed: {describe(future.result().error)}")
 
         closed.add_done_callback(done)
-
-    # subscribe_with_retry runs in the background; it can itself raise synchronously (e.g. a namespace
-    # too long to encode). Without this the exception went unobserved and the run just idled until its
-    # deadline. A task cancelled by our own shutdown (below) is not a failure.
-    def watch_background(task: asyncio.Task[Any]) -> None:
-        def done(finished: asyncio.Task[Any]) -> None:
-            if finished.cancelled():
-                return
-
-            error = finished.exception()
-
-            if error is not None:
-                report(f"subscribe failed: {describe(error)}")
-
-        task.add_done_callback(done)
 
     def fail_if_broken() -> None:
         if problems:
@@ -156,8 +140,15 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                     publisher.announced.add_done_callback(on_announced)
 
                 if config.mode != "publish":
+                    # The supervised subscriber reconnects on its own, so a lost connection is logged, not a failure.
+                    def on_status(status: str, error: BaseException | None) -> None:
+                        if status == "reconnecting":
+                            log({"event": "subscriber reconnecting", "detail": describe(error)})
+
                     try:
-                        subscriber = await connect_relay_subscriber(config.url, get_token=lambda: config.token)
+                        subscriber = await connect_supervised_subscriber(
+                            config.url, get_token=lambda: config.token, on_status=on_status
+                        )
                     except Exception as error:
                         raise RuntimeError(
                             f"subscriber failed to connect (check the token and endpoint): {describe(error)}"
@@ -184,43 +175,34 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                             }
                         )
 
-                    if publisher is not None:
-                        # Same process as the publisher: subscribing before its announce reached the wire
-                        # would be rejected for certain; after it, the retry below covers the round trip.
-                        await publisher.announced
-
-                    subscribe_task = asyncio.ensure_future(
-                        subscribe_with_retry(
-                            subscriber,
-                            config.namespace,
-                            config.track,
-                            RelaySubscriptionHandlers(
-                                on_subscribed=lambda ok: log(
-                                    {
-                                        "event": "subscribed",
-                                        "namespace": "/".join(config.namespace),
-                                        "track": config.track,
-                                        "alias": ok.track_alias,
-                                    }
-                                ),
-                                on_object=on_object,
-                                on_error=lambda error: report(
-                                    f"subscribe rejected: code {error.error_code} {error.reason}"
-                                ),
-                                on_subgroup_reset=lambda reset: report(
-                                    f"group {reset.group_id} reset: {describe(reset.error)}"
-                                ),
-                                on_publisher_done=lambda done: log(
-                                    {"event": "publisher done", "status": done.status_code, "reason": done.reason}
-                                ),
+                    # The want keeps the track subscribed until the run ends: it retries the announce race (a
+                    # subscribe that reaches the relay before the publisher's announce), resubscribes after a
+                    # publisher restart, and moves to a new connection. Only a rejection no wait fixes reaches
+                    # on_error, and ends the run.
+                    subscriber.want(
+                        "ticks",
+                        config.namespace,
+                        config.track,
+                        WantHandlers(
+                            on_subscribed=lambda ok, namespace: log(
+                                {
+                                    "event": "subscribed",
+                                    "namespace": "/".join(namespace),
+                                    "track": config.track,
+                                    "alias": ok.track_alias,
+                                }
                             ),
-                            on_retry=lambda attempt, delay: log(
-                                {"event": "waiting", "detail": "namespace not announced yet; retrying the subscribe"}
+                            on_object=on_object,
+                            on_error=lambda error: report(f"subscribe rejected: {rejection(error)}"),
+                            on_subgroup_reset=lambda reset: report(
+                                f"group {reset.group_id} reset: {describe(reset.error)}"
                             ),
-                        )
+                            on_publisher_done=lambda done: log(
+                                {"event": "publisher done", "status": done.status_code, "reason": done.reason}
+                            ),
+                            on_restarted=lambda reason, _namespace: log({"event": "resubscribing", "reason": reason}),
+                        ),
                     )
-                    background_tasks.append(subscribe_task)
-                    watch_background(subscribe_task)
 
                 if writer is not None:
                     # The SDK waits for demand inside write(), up to the track's write deadline. Only a
@@ -275,9 +257,6 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                 return {"published": config.count if writer is not None else 0, "received": received}
             finally:
                 closing = True
-                for task in background_tasks:
-                    task.cancel()
-                await asyncio.gather(*background_tasks, return_exceptions=True)
     except TimeoutError as error:
         if deadline.expired():
             raise TimeoutError(f"Run exceeded {config.timeout:g} s") from error
@@ -301,6 +280,14 @@ def inspect(payload: bytes) -> dict[str, Any]:
         return {"seq": parsed.get("seq"), "ageMs": age_ms}
     except (ValueError, AttributeError):
         return {"text": text[:60]}
+
+
+def rejection(error: BaseException) -> str:
+    """A want's surfaced failure: the relay's code and reason for a rejection, the SDK's code otherwise."""
+    if isinstance(error, SubscriptionRequestError):
+        return f"code {error.request_error.error_code} {error.request_error.reason}"
+
+    return f"{getattr(error, 'code', type(error).__name__)} {error}"
 
 
 def describe(error: BaseException | None) -> str:

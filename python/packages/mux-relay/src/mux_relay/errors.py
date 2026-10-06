@@ -35,6 +35,10 @@ RelayErrorCode = Literal[
     # filter, or use a second connection.
     "PREFIX_OVERLAP",
     "GOAWAY",
+    # A supervised publisher's write made while no generation is up, or interrupted by the
+    # connection's end, in phase ``connection``; nothing was replayed. An interruption, not a
+    # retirement: write the next object (at the next keyframe) once the next generation is live.
+    "RECONNECTING",
     "TRANSPORT_ERROR",
     "TRANSPORT_UNAVAILABLE",
     "UNAUTHORIZED",
