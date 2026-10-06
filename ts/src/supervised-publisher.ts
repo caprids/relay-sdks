@@ -786,6 +786,15 @@ class SupervisedTrack {
         const pending = this.#pending?.generation === generation ? this.#pending : undefined;
         if (!bound && !pending) break;
         if (pending) pending.heard = value;
+        // Demand leaving a generation a rotation is moving off: move first if the next one has demand, so the track
+        // reports no `false` it did not have.
+        if (bound && !value && this.#pending) {
+          this.#maybeMove();
+          if (this.#binding?.generation !== generation) {
+            firstValue = false;
+            continue;
+          }
+        }
         // The first value is the new connection's current state; `false` repeats what the lost generation reported.
         if (bound && !(firstValue && !value)) this.#emitDemand(value);
         firstValue = false;

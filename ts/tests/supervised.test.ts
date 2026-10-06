@@ -2430,4 +2430,33 @@ describe('rotation before the credential expires (#261)', () => {
       expect(seen).toEqual([10, 11]);
     });
   });
+  describe('Codex review of the merge, pass 3', () => {
+    it('reports no false when the old generation loses demand as the next one gains it', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'video' });
+      connections[0]!.tracks.get('video')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const changes = writer.demandChanges();
+      expect((await changes.next()).value).toBe(true);
+      publisher.rotate();
+      await until(() => connections[1]?.tracks.has('video') === true, 'next generation');
+      // In one turn: the viewer leaves the old generation and arrives on the next one.
+      connections[0]!.tracks.get('video')!.setDemand(false);
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await until(() => connections[0]!.closeCalls === 1, 'moved and closed');
+      // Everything the track reported through the handoff, before any real loss of demand.
+      const values: boolean[] = [];
+      for (;;) {
+        const next = await Promise.race([
+          changes.next(),
+          new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 20)),
+        ]);
+        if (next === undefined) break;
+        values.push(next.value as boolean);
+      }
+      expect(values).not.toContain(false);
+      await changes.return?.();
+    });
+  });
 });
