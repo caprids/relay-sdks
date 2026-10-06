@@ -2422,3 +2422,38 @@ async def test_reports_no_false_when_the_old_generation_loses_demand_as_the_next
             break
     assert False not in values
     await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+# ------------------------------------------------------------------ Codex review of the merge, pass 4 (#261)
+
+
+async def test_reports_the_loss_of_demand_when_the_old_generation_loses_it_as_the_track_moves(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    gate = asyncio.Event()
+    connections: list[FakePublisher] = []
+
+    async def connect(namespace: tuple[str, ...], _attempt: CancellationToken) -> Any:
+        if len(connections) == 1:
+            await gate.wait()
+        fake = FakePublisher(namespace)
+        connections.append(fake)
+        return fake
+
+    publisher = await _supervise_relay_publisher(connect, ["room"], reconnect=FAST)
+    cleanup.append(publisher.close)
+    writer = publisher.register_track("video")
+    connections[0].tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    await asyncio.sleep(0.005)
+    changes = writer.demand_changes()
+    assert await asyncio.wait_for(anext(changes), 1) is True
+    publisher.rotate()
+    await asyncio.sleep(0.005)
+    # The viewer leaves in the turn the next generation connects: the track moves before any iterator runs.
+    gate.set()
+    connections[0].tracks["video"].set_demand(False)
+    await until(lambda: connections[0].close_calls == 1, "moved and closed")
+    assert not writer.has_demand
+    assert await asyncio.wait_for(anext(changes), 0.05) is False
+    await changes.aclose()  # ty: ignore[unresolved-attribute]

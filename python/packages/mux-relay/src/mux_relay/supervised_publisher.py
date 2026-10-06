@@ -147,8 +147,6 @@ class _Pending:
     generation: _Generation
     writer: RelayTrackWriter
     moved: asyncio.Future[None]
-    heard: bool | None = None
-    """The demand its iterator last reported while pending, reported on the move; later values follow it."""
 
 
 class _SupervisedTrackWriter(RelayTrackWriter):
@@ -372,10 +370,10 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         if binding is not None and not binding.generation.ended:
             self._retired_writers[binding.generation] = binding.writer
         self._binding = _Binding(pending.generation, pending.writer)
-        # Reported here only once its iterator caught up; otherwise the iterator reports the values still
-        # queued, in order.
-        if pending.heard is not None and pending.heard == pending.writer.has_demand:
-            self._emit_demand(pending.heard)
+        # The move reports the next generation's demand as it is now: True again if it has demand, so
+        # demand-driven state reaches it, or the loss of demand. Values its iterator had queued before the move
+        # are stale and not reported.
+        self._emit_demand(pending.writer.has_demand)
         if not pending.moved.done():
             pending.moved.set_result(None)
 
@@ -410,29 +408,27 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         self._end_demand()
 
     async def _follow(self, generation: _Generation, writer: RelayTrackWriter) -> None:
-        first = True
+        # The value this iterator yielded last: a True after True is the relay replacing its upstream subscription.
+        previous: bool | None = None
         changes = writer.demand_changes()
         try:
             async for value in changes:
                 bound = self._binding is not None and self._binding.generation is generation
-                pending = (
-                    self._pending if self._pending is not None and self._pending.generation is generation else None
-                )
-                if not bound and pending is None:
+                if not bound and (self._pending is None or self._pending.generation is not generation):
                     break
-                if pending is not None:
-                    pending.heard = value
+                repeated = value and previous is True
+                previous = value
                 # Demand leaving a generation a rotation is moving off: move first if the next one has demand, so
-                # the track reports no False it did not have.
+                # the track reports no False it did not have. The move reports the next generation's own demand.
                 if bound and not value and self._pending is not None:
                     self._maybe_move()
                     if self._binding is None or self._binding.generation is not generation:
-                        first = False
                         continue
-                # The first value is the new connection's current state; False repeats the lost generation's.
-                if bound and not (first and not value):
+                # Report only what is true of the writer now: a value queued before a move or a newer change is
+                # stale. A change is reported, and so is a repeated True, which demand-driven state is written
+                # again on.
+                if bound and value == writer.has_demand and (value != self._last_demand or repeated):
                     self._emit_demand(value)
-                first = False
                 # Demand arriving on the next generation, or leaving the current one, moves a rotating track.
                 self._maybe_move()
         finally:
