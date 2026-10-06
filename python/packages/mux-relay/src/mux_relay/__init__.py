@@ -52,7 +52,13 @@ from .subscription_events import (
     UpdateOkEvent,
 )
 from .supervised_publisher import PublisherGeneration, SupervisedPublisher, connect_supervised_publisher
-from .supervised_subscriber import RestartReason, SupervisedSubscriber, WantHandlers, connect_supervised_subscriber
+from .supervised_subscriber import (
+    RestartReason,
+    SupervisedSubscriber,
+    WantHandlers,
+    WantSwitchedInfo,
+    connect_supervised_subscriber,
+)
 from .switchable import SwitchableHandlers, SwitchableSubscription, SwitchedInfo
 
 DEFAULT_ENDPOINT = "https://sjc.relay.mux.global"
@@ -114,6 +120,7 @@ __all__ = [
     "SwitchedInfo",
     "UpdateOkEvent",
     "WantHandlers",
+    "WantSwitchedInfo",
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_supervised_publisher",

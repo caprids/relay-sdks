@@ -75,6 +75,7 @@ PUBLIC_NAMES = [
     "SwitchableSubscription",
     "SwitchedInfo",
     "WantHandlers",
+    "WantSwitchedInfo",
     "connect_relay_publisher",
     "connect_relay_subscriber",
     "connect_supervised_publisher",

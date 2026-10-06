@@ -236,25 +236,61 @@ export async function runRelayScenario({
 
     // Assertion 8. A want following a supervised publisher's root moves to a newer generation that
     // announces while the old one is still up, the way a restarted publisher replaces a crashed one
-    // whose announce the relay still holds.
+    // whose announce the relay still holds, or a publisher rotates its connection. The move is made
+    // before the break (issue #282): both generations beat one shared counter every 50 ms, the want
+    // cuts over once the new generation's beat is within a few of the latest delivered (each
+    // generation numbers its own groups, so the counter is the timeline), the old one drains for a
+    // second, and no beat number is missing across the move.
     const root = [...namespace, 'supervised'];
     const beats = [];
     const restarts = [];
-    let currentNamespace;
+    const generationSwitches = [];
+    const beatOf = (object) => {
+      const [label, n] = new TextDecoder().decode(object.payload).split(':');
+      return { label, n: Number(n) };
+    };
+    const latestBeat = () => Math.max(...beats.map(({ n }) => n));
     watcher.want(
       'beat',
-      { namespace: root, track: 'beat', generations: true },
       {
-        onSubscribed: (_, context) => {
-          currentNamespace = context.namespace;
+        namespace: root,
+        track: 'beat',
+        generations: true,
+        until: (object) => {
+          const { n } = beatOf(object);
+          return beats.length === 0 || (n <= latestBeat() + 1 && n >= latestBeat() - 5);
         },
+        drainMs: 1_000,
+      },
+      {
         onObject: (object) => {
-          if (object.status === 'normal') beats.push(new TextDecoder().decode(object.payload));
+          if (object.status === 'normal') beats.push(beatOf(object));
         },
+        onSwitched: (info) => generationSwitches.push(info),
         onRestarted: ({ reason }) => restarts.push(reason),
         onError: (error) => errors.push(`beat: ${String(error)}`),
       },
     );
+    const generations = [];
+    let beat = 0;
+    let beating = true;
+    // One counter for every generation, written only where the relay wants it, so a generation nobody
+    // watches yet never holds up the one being watched.
+    const beatLoop = (async () => {
+      while (beating) {
+        const n = beat++;
+        await Promise.all(
+          generations
+            .filter(({ writer }) => writer.hasDemand)
+            .map(({ writer, label }) =>
+              writer.write(new TextEncoder().encode(`${label}:${n}`)).catch((error) => {
+                if (!['SUBSCRIPTION_CHANGED', 'WRITE_TIMEOUT', 'RECONNECTING'].includes(error?.code)) throw error;
+              }),
+            ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    })().catch((error) => errors.push(`beat write: ${String(error)}`));
     const startGeneration = async (label) => {
       const supervised = await connectSupervisedPublisher({
         url: endpoint,
@@ -264,35 +300,58 @@ export async function runRelayScenario({
         signal: lifetime.signal,
       });
       supervisedPublishers.push(supervised);
-      return { supervised, label, writer: supervised.registerTrack({ track: 'beat', writeTimeoutMs: 2_000 }) };
+      const generation = {
+        supervised,
+        label,
+        writer: supervised.registerTrack({ track: 'beat', writeTimeoutMs: 2_000 }),
+      };
+      generations.push(generation);
+      return generation;
     };
-    // Write until this generation's beats arrive: a SUBSCRIBE_OK does not prove the path is ready.
-    const beatUntilReceived = async ({ writer, label }) => {
-      const until = performance.now() + 15_000;
-      for (let n = 0; !beats.some((beat) => beat.startsWith(`${label}:`)); n += 1) {
-        if (errors.length > 0) throw new Error(errors.join('; '));
-        if (performance.now() >= until) throw new Error(`Timed out waiting for generation ${label}'s beats`);
-        try {
-          await writer.write(new TextEncoder().encode(`${label}:${n}`));
-        } catch (error) {
-          if (!['SUBSCRIPTION_CHANGED', 'WRITE_TIMEOUT'].includes(error?.code)) throw error;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
+    let generationSwitch;
+    try {
+      const first = await startGeneration('first');
+      await report({ phase: 'first generation', namespace: first.supervised.generation.namespace });
+      await waitFor(() => beats.filter(({ label }) => label === 'first').length >= 10, "first generation's beats");
+      const second = await startGeneration('second');
+      const switchStarted = performance.now();
+      await waitFor(() => generationSwitches.length > 0, 'move to the second generation');
+      const switchedAfterMs = Math.round(performance.now() - switchStarted);
+      const atCutover = beats.length;
+      await waitFor(() => beats.length >= atCutover + 10, "second generation's beats");
+      beating = false;
+      await beatLoop;
+      if (errors.length > 0) throw new Error(errors.join('; '));
+      const [move] = generationSwitches;
+      if (JSON.stringify(move.to.namespace) !== JSON.stringify(second.supervised.generation.namespace)) {
+        throw new Error(`Want moved to ${JSON.stringify(move.to.namespace)}`);
       }
-    };
-    const first = await startGeneration('first');
-    await report({ phase: 'first generation', namespace: first.supervised.generation.namespace });
-    await beatUntilReceived(first);
-    const second = await startGeneration('second');
-    const switchStarted = performance.now();
-    await beatUntilReceived(second);
-    const switchedAfterMs = Math.round(performance.now() - switchStarted);
-    if (JSON.stringify(currentNamespace) !== JSON.stringify(second.supervised.generation.namespace)) {
-      throw new Error(`Want stayed on ${JSON.stringify(currentNamespace)}`);
+      const numbers = [...new Set(beats.map(({ n }) => n))].sort((a, b) => a - b);
+      const missing = [];
+      for (let n = numbers[0]; n <= numbers.at(-1); n += 1) if (!numbers.includes(n)) missing.push(n);
+      const labels = [...new Set(beats.map(({ label }) => label))];
+      if (
+        missing.length > 0 ||
+        generationSwitches.length !== 1 ||
+        restarts.length > 0 ||
+        JSON.stringify(labels) !== '["first","second"]'
+      ) {
+        throw new Error(
+          `Generation move left a gap: missing ${JSON.stringify(missing)}, ${generationSwitches.length} switches, restarts ${JSON.stringify(restarts)}, ${JSON.stringify(beats)}`,
+        );
+      }
+      const firstNew = beats.findIndex(({ label }) => label === 'second');
+      generationSwitch = {
+        afterMs: switchedAfterMs,
+        lastOld: beats[firstNew - 1].n,
+        firstNew: beats[firstNew].n,
+        beats: beats.length,
+      };
+      await report({ phase: 'followed newer generation', ...generationSwitch });
+    } finally {
+      beating = false;
+      watcher.unwant('beat');
     }
-    if (!restarts.includes('generation')) throw new Error(`No generation restart: ${JSON.stringify(restarts)}`);
-    await report({ phase: 'followed newer generation', afterMs: switchedAfterMs, restarts });
-    watcher.unwant('beat');
     if (errors.length > 0) throw new Error(errors.join('; '));
 
     // Assertion 9. A switchable subscription moves from one layer to another make-before-break: the
@@ -414,7 +473,7 @@ export async function runRelayScenario({
       independentTrackClose: 'passed',
       lateSubscriberLargestObject: lateLargestObject,
       discovery: { announced: 'passed', withdrawnAfterMs },
-      generationSwitch: { afterMs: switchedAfterMs, restarts },
+      generationSwitch,
       layerSwitch,
     };
   } finally {

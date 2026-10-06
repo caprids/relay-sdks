@@ -31,6 +31,13 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   drainMs, signal })` subscribes to the new track while the old one keeps delivering, cuts over on the first object
   `until` accepts, reports `onSwitched`, and can keep the old subscription open briefly for groups still in flight.
   It is how to change a track, filter or priority, which `update()` cannot do against moq-relay.
+- `@mux/relay`: a supervised want moves make-before-break ([#282](https://github.com/muxinc/relay-sdks/issues/282)).
+  A newer generation, or wanting the key again with another track or parameters, opens the replacement while the
+  current subscription keeps delivering, and cuts over on the first object `until` accepts. The new `WantOptions`
+  fields `until` and `drainMs` work as they do on `switchTo`, and the new `onSwitched` handler receives a
+  `WantSwitchedInfo` (`from`, `to`, `subscribed`). A generation move no longer reports `onRestarted({ reason:
+  'generation' })`; handle `onSwitched` instead, where decoders reset. Wanting a key again with only `staleAfterMs`
+  changed now swaps it without resubscribing. Another namespace or `generations` still replaces the want.
 - `@mux/relay-quic`: the native QUIC transport adapter for Node, with prebuilt binaries for Linux (x64 and arm64,
   glibc and musl), macOS (arm64 and x64) and Windows (x64).
 - `@mux/moq-core`: the transport-independent MOQT sessions the SDK is built on.
