@@ -464,6 +464,8 @@ interface TrackStatusRecord extends RequestRecordBase {
 interface NamespaceSubscriptionRecord extends RequestRecordBase {
   requestId: number;
   handlers: NamespaceSubscriptionHandlers;
+  /** REQUEST_OK arrived. Settlement alone is not acceptance: REQUEST_ERROR settles the request too. */
+  accepted?: boolean;
 }
 
 interface AliasWaiter {
@@ -1031,6 +1033,7 @@ class MoqtSessionImpl implements MoqtSession {
         }
 
         this.#settleRequest(record);
+        record.accepted = true;
         record.handlers.onOk?.();
         break;
       case 'request-error':
@@ -1047,8 +1050,9 @@ class MoqtSessionImpl implements MoqtSession {
         break;
       case 'namespace':
       case 'namespace-done':
-        // Entries follow the response (§10.18); one before it is outside the stream's grammar.
-        if (!record.settled) {
+        // Entries follow REQUEST_OK (§10.18); one before it, or after REQUEST_ERROR, is outside the
+        // stream's grammar.
+        if (!record.accepted) {
           this.#fatal(
             new MoqtProtocolError(`${message.kind} before REQUEST_OK on a subscribe-namespace request stream`)
           );

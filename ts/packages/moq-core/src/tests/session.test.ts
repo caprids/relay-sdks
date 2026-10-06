@@ -1163,6 +1163,28 @@ describe('createMoqtSession', () => {
       await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
     });
 
+    it('closes the session on NAMESPACE after REQUEST_ERROR, without reporting it', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onNamespace = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onNamespace });
+      const request = await harness.nextRequestStream();
+      const error = encodeRequestError(REQUEST_ERROR_CODE.UNAUTHORIZED, 'no');
+      const entry = encodeNamespace(['alice']);
+      const both = new Uint8Array(error.length + entry.length);
+
+      both.set(error);
+      both.set(entry, error.length);
+      await request.firstMessage;
+      await request.send(both);
+
+      await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+      expect(onNamespace).not.toHaveBeenCalled();
+    });
+
     it('cancels without reporting anything further', async () => {
       const harness = createSessionHarness();
 

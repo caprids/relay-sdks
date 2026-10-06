@@ -421,6 +421,8 @@ class _TrackStatusRecord(_RequestRecord):
 @dataclass(slots=True, kw_only=True)
 class _NamespaceSubscriptionRecord(_RequestRecord):
     handlers: NamespaceSubscriptionHandlers
+    accepted: bool = False
+    """REQUEST_OK arrived. Settlement alone is not acceptance: REQUEST_ERROR settles the request too."""
 
 
 @dataclass(slots=True)
@@ -826,6 +828,9 @@ class MoqtSession:
             _call(handlers.on_end, error)
 
         def on_failure(error: RequestError) -> None:
+            # Removing the record puts the stream out of a later cancel's reach, so drop it now.
+            if record.stream is not None:
+                record.stream.cancel(error)
             self._namespace_subscriptions.pop(request_id, None)
             _call(handlers.on_error, error)
 
@@ -1023,6 +1028,7 @@ class MoqtSession:
                     return
 
                 self._settle_request(record)
+                record.accepted = True
                 _call(record.handlers.on_ok)
             case RequestError():
                 # After REQUEST_OK the response is spent: an error then is outside the stream's grammar.
@@ -1038,8 +1044,9 @@ class MoqtSession:
                 if record.stream is not None:
                     spawn(record.stream.fin_write())
             case Namespace() | NamespaceDone():
-                # Entries follow the response (§10.18); one before it is outside the stream's grammar.
-                if not record.settled:
+                # Entries follow REQUEST_OK (§10.18); one before it, or after REQUEST_ERROR, is outside
+                # the stream's grammar.
+                if not record.accepted:
                     self._fatal(
                         MoqtProtocolError(f"{message.kind} before REQUEST_OK on a subscribe-namespace request stream")
                     )

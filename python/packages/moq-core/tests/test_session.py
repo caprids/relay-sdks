@@ -1050,6 +1050,8 @@ class TestSubscribeNamespace:
             retry_interval=0,
             reason="request stream closed before a response",
         )
+        # The failed request's own direction ends too; nothing can reach it once its record is gone.
+        assert await asyncio.wait_for(request.client_end, 1) == "reset"
         harness.session.destroy()
 
     async def test_reports_a_fin_after_request_ok_as_a_clean_end_and_fins_back(self) -> None:
@@ -1098,6 +1100,21 @@ class TestSubscribeNamespace:
         await wait_for(lambda: harness.fake.close_info is not None)
         assert harness.fake.close_info is not None
         assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+
+    async def test_closes_the_session_on_namespace_after_request_error(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_namespace = Recorder()
+        harness.session.subscribe_namespace(_room(), NamespaceSubscriptionHandlers(on_namespace=on_namespace))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_error(REQUEST_ERROR_CODE.UNAUTHORIZED, "no") + encode_namespace(["alice"]))
+
+        await wait_for(lambda: harness.fake.close_info is not None)
+        assert harness.fake.close_info is not None
+        assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+        assert not on_namespace.called
 
     @pytest.mark.parametrize(
         "second", [encode_request_ok(), encode_request_error(REQUEST_ERROR_CODE.INTERNAL_ERROR, "late")]
