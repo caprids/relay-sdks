@@ -23,9 +23,9 @@ export function deferred<T = void>() {
   return { promise, resolve, reject };
 }
 
-/** Poll until `predicate` holds, failing after a second. */
-export async function until(predicate: () => boolean, label = 'condition'): Promise<void> {
-  const deadline = Date.now() + 1_000;
+/** Poll until `predicate` holds, failing after `timeoutMs` (a second by default). */
+export async function until(predicate: () => boolean, label = 'condition', timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
   while (!predicate()) {
     if (Date.now() > deadline) throw new Error(`Timed out waiting for ${label}`);
     await new Promise((resolve) => setTimeout(resolve, 1));

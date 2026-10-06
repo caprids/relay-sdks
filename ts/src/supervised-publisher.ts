@@ -315,16 +315,19 @@ export async function superviseRelayPublisher(
     const moved = [...tracks.values()].map((track) => track.handOver(next));
     report(next);
     // Every track moved and every write or group still on the old generation finished, or the overlap ran out.
+    // The next generation ending cuts the overlap short too: its tracks need the generation after it now.
     await Promise.race([
       Promise.all(moved).then(() => idle(live)),
       sleep(ROTATION_OVERLAP_MS, stopping.signal).catch(() => {}),
       live.publisher.closed,
+      next.publisher.closed,
     ]);
     live.onIdle = undefined;
     for (const track of tracks.values()) track.settle();
     live.ended = true;
     if (retiring === live) retiring = undefined;
     await live.publisher.close().catch(() => {});
+    for (const track of tracks.values()) track.forget(live);
     return next;
   };
 
@@ -507,6 +510,8 @@ class SupervisedTrack {
   #binding: { generation: Generation; writer: RelayTrackWriter } | undefined;
   /** The generation a rotation is moving this track to, until it moves. */
   #pending: { generation: Generation; writer: RelayTrackWriter; moved(): void } | undefined;
+  /** Writers on generations a rotation moved this track off, kept until they close: their open groups end with it. */
+  #retired = new Map<Generation, RelayTrackWriter>();
   #closed = false;
   /** The demand the iterators last reported, so a lost generation reports `false` only after `true`. */
   #lastDemand = false;
@@ -561,6 +566,8 @@ class SupervisedTrack {
         release();
         track.#binding?.writer.close();
         track.#binding = undefined;
+        for (const retired of track.#retired.values()) retired.close();
+        track.#retired.clear();
         track.#dropPending(true);
         track.#endDemand();
       },
@@ -605,6 +612,11 @@ class SupervisedTrack {
     });
   }
 
+  /** The rotation closed `generation`: nothing on it is left to close with the track. */
+  forget(generation: Generation): void {
+    this.#retired.delete(generation);
+  }
+
   /** The rotation's overlap is over: move to the next generation now, wherever demand is. */
   settle(): void {
     this.#maybeMove(true);
@@ -622,6 +634,7 @@ class SupervisedTrack {
     const stay = binding && !binding.generation.ended && binding.writer.hasDemand && !pending.writer.hasDemand;
     if (stay && !force) return;
     this.#pending = undefined;
+    if (binding && !binding.generation.ended) this.#retired.set(binding.generation, binding.writer);
     this.#binding = { generation: pending.generation, writer: pending.writer };
     this.#emitDemand(pending.writer.hasDemand);
     pending.moved();

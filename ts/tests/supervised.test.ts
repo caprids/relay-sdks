@@ -1319,4 +1319,80 @@ describe('rotation before the credential expires (#261)', () => {
       expect(seen).toEqual(['subscribed']);
     });
   });
+  describe('Codex pass 2 fixes', () => {
+    it('reconnects at once when the replacement connection ends during the overlap', async () => {
+      const { subscriber, connections, statuses } = await subscribers();
+      subscriber.want('a', { namespace: ['room'], track: 'a', retry: fast });
+      subscriber.want('b', { namespace: ['room'], track: 'b', retry: fast });
+      await until(() => connections[0]!.subscriptions.length === 2, 'subscribe both');
+      for (const sub of connections[0]!.subscriptions) sub.accept();
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 2, 'resubscribe both');
+      connections[1]!.subscriptions[0]!.accept();
+      connections[1]!.subscriptions[0]!.object(1); // 'a' moved, 'b' still on the old connection
+      connections[1]!.end(new RelayError('TRANSPORT_ERROR', 'lost', 'connection'));
+      await until(() => connections.length === 3, 'a third connection well within the overlap', 500);
+      expect(statuses).toContain('reconnecting');
+    });
+
+    it('closes a group still open on the old generation when the track closes', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'video' });
+      connections[0]!.tracks.get('video')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      const group = await writer.openGroup();
+      publisher.rotate();
+      await until(() => connections[1]?.tracks.has('video') === true, 'next generation');
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await writer.write(new Uint8Array([7]));
+      writer.close();
+      expect(connections[0]!.tracks.get('video')!.closed).toBe(true);
+      await expect(group.write(new Uint8Array([1]))).rejects.toMatchObject({ code: 'CLOSED' });
+    });
+
+    it('keeps the cutoff when a replacement ends before taking over', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: number[] = [];
+      subscriber.want('v', { namespace: ['room'], track: 'v', retry: fast }, { onObject: (o) => seen.push(o.groupId) });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      const old = connections[0]!.subscriptions[0]!;
+      old.accept();
+      old.object(2);
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.accept();
+      connections[1]!.subscriptions[0]!.done();
+      old.object(3);
+      await until(() => connections[1]!.subscriptions.length === 2, 'retry on the new connection');
+      const retry = connections[1]!.subscriptions[1]!;
+      retry.accept();
+      retry.object(3);
+      retry.object(4);
+      expect(seen).toEqual([2, 3, 4]);
+    });
+
+    it('delivers nothing more when onRestarted cancels the want', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: string[] = [];
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v', retry: fast },
+        {
+          onSubscribed: () => seen.push('subscribed'),
+          onObject: (o) => seen.push(`object ${o.groupId}`),
+          onRestarted: () => {
+            seen.push('restarted');
+            subscriber.unwant('v');
+          },
+        },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.accept();
+      connections[1]!.subscriptions[0]!.object(5);
+      expect(seen).toEqual(['subscribed', 'restarted']);
+    });
+  });
 });

@@ -421,7 +421,13 @@ export async function superviseRelaySubscriber(
     // Every want on the old connection ends its attempt there and subscribes on the new one.
     opened.retire.abort();
     if (old.holds === 0) old.onIdle?.();
-    await Promise.race([idle, sleep(ROTATION_OVERLAP_MS, lifetime.signal).catch(() => {}), whenAborted(old.signal)]);
+    // The replacement ending cuts the overlap short too: the wants on it need the next connection now.
+    await Promise.race([
+      idle,
+      sleep(ROTATION_OVERLAP_MS, lifetime.signal).catch(() => {}),
+      whenAborted(old.signal),
+      whenAborted(next.live.signal),
+    ]);
     old.onIdle = undefined;
     if (retiring === old) retiring = undefined;
     old.subscriber.close();
@@ -849,7 +855,11 @@ async function subscribeOnce(
           else if (object.groupId > firstGroup) progressed = true;
           const cutoff = want.cutoff;
           if (cutoff && cutoff.owner !== subscription && alreadyDelivered(cutoff, object, namespace)) return;
-          if (!reported) takeOver();
+          if (!reported) {
+            takeOver();
+            // The restart callback may have cancelled the want or stopped the supervisor.
+            if (!delivering || want.controller.signal.aborted) return;
+          }
           if (
             latest === undefined ||
             object.groupId > latest.groupId ||
@@ -955,8 +965,8 @@ async function subscribeOnce(
     finish.abort();
     // A replacement that ends before it took over never reports its held-back onSubscribed.
     if (!reported && want.handoff) want.handoff.held = undefined;
-    // An accepted replacement that ended has had its turn: the next subscription may restart group numbers.
-    if (accepted && !handedOff && want.cutoff && want.cutoff.owner !== subscription) want.cutoff = undefined;
+    // A replacement that took over and ended has had its turn: the next subscription may restart group numbers.
+    if (reported && !handedOff && want.cutoff && want.cutoff.owner !== subscription) want.cutoff = undefined;
     if (!handedOff) {
       delivering = false;
       subscription.cancel();
@@ -999,6 +1009,7 @@ function handOff(
         // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
         console.error(new Error('onRestarted threw; the want resubscribes regardless', { cause: error }));
       }
+      if (want.controller.signal.aborted) return;
       try {
         held?.();
       } catch (error) {
