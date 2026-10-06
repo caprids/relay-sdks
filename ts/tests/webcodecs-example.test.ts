@@ -93,6 +93,7 @@ function recordingPublisher(
   const settlingGroups = createSettlingGroups();
   const publisher: RelayPublisher = {
     announced: Promise.resolve(),
+    expiresAt: undefined,
     closed,
     close: vi.fn(async () => {}),
     registerTrack({ track }) {

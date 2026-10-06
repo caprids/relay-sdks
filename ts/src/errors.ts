@@ -34,10 +34,11 @@ export type RelayErrorCode =
   | 'TRANSPORT_ERROR'
   | 'TRANSPORT_UNAVAILABLE'
   /**
-   * The relay refused the connection's credentials, in phase `connecting`. Over native QUIC (`@mux/relay/node`) a
-   * refusal always reports this, and so does a browser against moq-relay 0.17.0 or later, which delivers its
-   * CLOSE_WEBTRANSPORT_SESSION (code 2, `unauthorized`). Against older relays a browser loses that close, and a
-   * refusal arrives as `TRANSPORT_ERROR` (muxinc/relay-sdks#14).
+   * The relay refused the connection's credentials: in phase `connecting`, a refusal to connect; in phase
+   * `connection`, the end of a live session whose token expired or whose grant was revoked. Over native QUIC
+   * (`@mux/relay/node`) this is always reported, and so it is in a browser against moq-relay 0.17.0 or later, which
+   * delivers its CLOSE_WEBTRANSPORT_SESSION (code 2, `unauthorized`). Against older relays a browser loses that close,
+   * and it arrives as `TRANSPORT_ERROR` (muxinc/relay-sdks#14).
    */
   | 'UNAUTHORIZED';
 
@@ -115,7 +116,8 @@ function credentialRefusal(value: unknown): { closeCode: number; reason: string 
 /**
  * Wrap a failure while connecting: a credentials refusal is `UNAUTHORIZED`, anything else a transport error.
  * `peerClose` is what the transport's `closed` resolved with, if it has; the session reports a clean close before
- * server SETUP without its code. Code 2 after SETUP is not a refusal, so the connected phase never comes here.
+ * server SETUP without its code. A failure in the turn server SETUP arrives is a transport error (see
+ * {@link connectedError} for a close after that).
  */
 export function connectingError(error: unknown, peerClose?: unknown): RelayError {
   if (error instanceof RelayError) return error;
@@ -125,6 +127,28 @@ export function connectingError(error: unknown, peerClose?: unknown): RelayError
     'UNAUTHORIZED',
     `Relay refused the connection's credentials: ${refusal.reason || 'no reason given'} (session closed with code 0x${refusal.closeCode.toString(16)}); check the token and that it grants this endpoint's path`,
     'connecting',
+    { cause: error },
+  );
+}
+
+/** Whether the peer closed the session over its credentials: a `closed` resolution or session error with 0x2, 0x16 or 0x18. */
+export function isCredentialRefusal(value: unknown): boolean {
+  return credentialRefusal(value) !== undefined;
+}
+
+/**
+ * Wrap the failure that ended an established connection. A session closed with a credentials code is `UNAUTHORIZED`
+ * in phase `connection`: moq-relay ends a session that way when its grant expires or is revoked (muxinc/relay-sdks#261,
+ * #227). Anything else is a transport error.
+ */
+export function connectedError(error: unknown, peerClose?: unknown): RelayError {
+  if (error instanceof RelayError) return error;
+  const refusal = credentialRefusal(error) ?? credentialRefusal(peerClose);
+  if (refusal === undefined) return transportError(error, 'connection');
+  return new RelayError(
+    'UNAUTHORIZED',
+    `Relay ended the session over its credentials: ${refusal.reason || 'no reason given'} (session closed with code 0x${refusal.closeCode.toString(16)}); the token expired or its grant was revoked. Connect again with a fresh token`,
+    'connection',
     { cause: error },
   );
 }

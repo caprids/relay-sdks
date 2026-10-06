@@ -54,12 +54,14 @@ describe('public vocabulary', () => {
       subscribe: true,
       trackSource: true,
       closed: true,
+      expiresAt: true,
       close: true,
     } satisfies Record<keyof RelaySubscriber, true>;
     const publisher = {
       registerTrack: true,
       announced: true,
       closed: true,
+      expiresAt: true,
       close: true,
     } satisfies Record<keyof RelayPublisher, true>;
     const writer = {

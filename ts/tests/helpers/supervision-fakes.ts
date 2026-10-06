@@ -43,6 +43,7 @@ export interface FakeTrack {
 }
 
 export interface FakePublisher extends RelayPublisher {
+  expiresAt: Date | undefined;
   namespace: string[];
   tracks: Map<string, FakeTrack>;
   /** The connection ends, with `error` or cleanly. */
@@ -50,12 +51,13 @@ export interface FakePublisher extends RelayPublisher {
   closeCalls: number;
 }
 
-export function fakePublisher(namespace: string[]): FakePublisher {
+export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublisher {
   const ended = deferred<{ error?: unknown }>();
   let isEnded = false;
   const tracks = new Map<string, FakeTrack>();
   const publisher: FakePublisher = {
     namespace,
+    expiresAt,
     tracks,
     closeCalls: 0,
     announced: Promise.resolve(),
@@ -161,18 +163,20 @@ export interface FakeSubscription {
 }
 
 export interface FakeSubscriber extends RelaySubscriber {
+  expiresAt: Date | undefined;
   subscriptions: FakeSubscription[];
   discoveries: { prefix: string[]; push(event: NamespaceEvent): void; fail(error: unknown): void; closed: boolean }[];
   end(error?: unknown): void;
 }
 
-export function fakeSubscriber(): FakeSubscriber {
+export function fakeSubscriber(expiresAt?: Date): FakeSubscriber {
   const ended = deferred<{ error?: unknown }>();
   let isEnded = false;
   const closers = new Set<(error?: unknown) => void>();
   const fake: FakeSubscriber = {
     subscriptions: [],
     discoveries: [],
+    expiresAt,
     closed: ended.promise,
     trackSource: undefined as never,
     end(error) {

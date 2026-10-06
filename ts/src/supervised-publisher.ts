@@ -24,6 +24,9 @@ import {
   isSetupFailure,
   newGeneration,
   RECONNECT_BACKOFF,
+  ROTATION_OVERLAP_MS,
+  rotateBeforeOption,
+  rotationDue,
   type SupervisedStatus,
   type SupervisionBackoff,
   sleep,
@@ -40,7 +43,13 @@ export interface ConnectSupervisedPublisherOptions extends ConnectRelayOptions {
   /** Backoff between connection attempts. Default from 500 ms, doubling up to 10 s, with jitter. */
   reconnect?: SupervisionBackoff;
   /**
-   * Called once each generation's connection is up and every registered track is bound to it. A throw stops the
+   * How long before the connection's credential expires (`RelayPublisher.expiresAt`) the next generation is brought
+   * up to replace it, make-before-break. Default 60 seconds; never earlier than halfway through the time left.
+   */
+  rotateBeforeMs?: number;
+  /**
+   * Called once each generation's connection is up and every registered track is bound to it. On a rotation, once
+   * the next generation is up and every track is registered on it; each track moves to it as described in `rotate()`. A throw stops the
    * supervisor with that error, as `onStatus` does.
    */
   onGeneration?(info: PublisherGeneration): void;
@@ -82,6 +91,13 @@ export interface SupervisedPublisher {
     /** The failure that stopped the supervisor, or the signal's reason; absent after `close()`. */
     error?: unknown;
   }>;
+  /**
+   * Replace the live generation make-before-break, as happens on its own `rotateBeforeMs` before the credential
+   * expires: the next generation connects, with a fresh token, and every track is registered on it. Each track's
+   * writer then moves to it at its next write or group, once the track has demand there or has none on the old one.
+   * The old generation closes once every track has moved, after 10 seconds at most. A no-op while no generation is up.
+   */
+  rotate(): void;
   /** Stop reconnecting and close the live generation as `RelayPublisher.close()` does. Idempotent. */
   close(): Promise<void>;
 }
@@ -104,6 +120,8 @@ interface Generation {
   publisher: RelayPublisher;
   /** Set once the connection ended or the supervisor stopped using it. */
   ended: boolean;
+  /** When it went live, for resetting the backoff. */
+  upAt: number;
 }
 
 /**
@@ -119,17 +137,28 @@ export async function superviseRelayPublisher(
   if (typeof options !== 'object' || options === null) {
     throw new TypeError('connectSupervisedPublisher takes an options object');
   }
-  const { namespace: given, reconnect, onGeneration, onStatus, signal, ...connection } = options;
+  const {
+    namespace: given,
+    reconnect,
+    rotateBeforeMs: rotateBefore,
+    onGeneration,
+    onStatus,
+    signal,
+    ...connection
+  } = options;
   const root = namespaceFields(given);
   // A generation field is always valid; check the whole namespace once so a root at the size limit fails here.
   namespaceFields([...root, newGeneration()]);
   const backoff = backoffOptions('reconnect', reconnect, RECONNECT_BACKOFF);
+  const rotateBeforeMs = rotateBeforeOption(rotateBefore);
   signal?.throwIfAborted();
 
   const tracks = new Map<string, SupervisedTrack>();
   /** Every name ever registered: a closed track's name stays taken, as on a single connection. */
   const names = new Set<string>();
   let current: Generation | undefined;
+  /** The generation a rotation is replacing, while its tracks move off it. */
+  let retiring: Generation | undefined;
   let status: SupervisedStatus = 'connecting';
   let stopped = false;
   let shutdown: Promise<void> | undefined;
@@ -141,6 +170,8 @@ export async function superviseRelayPublisher(
   const stopping = new AbortController();
   /** Aborts the connection attempt in progress only: once connected, a generation is closed, not aborted. */
   let attemptInProgress: AbortController | undefined;
+  /** Asks the live generation to rotate; replaced for each generation served. */
+  let requestRotation: () => void = () => {};
 
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
@@ -163,13 +194,16 @@ export async function superviseRelayPublisher(
     first?.reject(reason);
     first = undefined;
     shutdown = (async () => {
-      const live = current;
+      const open = [current, retiring].filter((generation) => generation !== undefined);
       current = undefined;
+      retiring = undefined;
       for (const track of tracks.values()) track.retire();
-      if (live) {
-        live.ended = true;
-        await live.publisher.close().catch(() => {});
-      }
+      await Promise.all(
+        open.map((generation) => {
+          generation.ended = true;
+          return generation.publisher.close().catch(() => {});
+        }),
+      );
       try {
         setStatus('closed');
       } finally {
@@ -183,58 +217,158 @@ export async function superviseRelayPublisher(
   const onAbort = () => void stop({ error: signal?.reason });
   signal?.addEventListener('abort', onAbort, { once: true });
 
+  /** Connect one generation, or `undefined` if the supervisor stopped first. Throws the attempt's failure. */
+  const connectGeneration = async (): Promise<Generation | undefined> => {
+    const generation = newGeneration();
+    const namespace = [...root, generation];
+    let publisher: RelayPublisher;
+    try {
+      attemptInProgress = new AbortController();
+      publisher = await connect({
+        ...connection,
+        namespace,
+        signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
+      });
+    } finally {
+      attemptInProgress = undefined;
+    }
+    if (stopped) {
+      await publisher.close().catch(() => {});
+      return undefined;
+    }
+    const live: Generation = { info: { generation, namespace }, publisher, ended: false, upAt: performance.now() };
+    // Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
+    void publisher.closed.then(() => {
+      live.ended = true;
+    });
+    return live;
+  };
+
+  const report = (live: Generation) => {
+    onGeneration?.({ generation: live.info.generation, namespace: [...live.info.namespace] });
+  };
+
+  /**
+   * Bring up the generation that replaces `live` and move the tracks to it, make-before-break. Returns it, or
+   * `undefined` when `live` ended or the supervisor stopped before a replacement was up, or when an automatic rotation
+   * found no fresher credential.
+   */
+  const rotateFrom = async (live: Generation, manual: boolean): Promise<Generation | undefined> => {
+    let failures = 0;
+    let next: Generation | undefined;
+    while (!stopped && !live.ended) {
+      try {
+        next = await connectGeneration();
+        break;
+      } catch {
+        if (stopped) return undefined;
+        // The live generation keeps serving; try again after the backoff unless it ends first.
+        await Promise.race([
+          sleep(backoffDelay(failures++, backoff), stopping.signal).catch(() => {}),
+          live.publisher.closed,
+        ]);
+      }
+    }
+    if (!next) return undefined;
+    if (!live.ended && !manual) {
+      // A credential that expires no later than the live one replaces nothing: the relay would end both together.
+      const was = live.publisher.expiresAt?.getTime();
+      const now = next.publisher.expiresAt?.getTime();
+      if (was !== undefined && (now === undefined || now <= was)) {
+        next.ended = true;
+        await next.publisher.close().catch(() => {});
+        return undefined;
+      }
+    }
+    current = next;
+    retiring = live;
+    const moved = [...tracks.values()].map((track) => track.handOver(next));
+    report(next);
+    await Promise.race([
+      Promise.all(moved),
+      sleep(ROTATION_OVERLAP_MS, stopping.signal).catch(() => {}),
+      live.publisher.closed,
+    ]);
+    for (const track of tracks.values()) track.settle();
+    live.ended = true;
+    if (retiring === live) retiring = undefined;
+    await live.publisher.close().catch(() => {});
+    return next;
+  };
+
+  /** Serve `live` until it ends, or until a rotation replaced it with the generation returned. */
+  const serve = async (live: Generation): Promise<{ error?: unknown } | { next: Generation }> => {
+    let manual = false;
+    const asked = new Promise<void>((resolve) => {
+      requestRotation = () => {
+        manual = true;
+        resolve();
+      };
+    });
+    const scope = new AbortController();
+    try {
+      const due = rotationDue(
+        live.publisher.expiresAt,
+        rotateBeforeMs,
+        asked,
+        AbortSignal.any([stopping.signal, scope.signal]),
+      ).then(() => undefined);
+      const outcome = await Promise.race([live.publisher.closed, due]);
+      if (outcome !== undefined || stopped) return outcome ?? {};
+      requestRotation = () => {};
+      const next = await rotateFrom(live, manual);
+      if (next) return { next };
+      return await live.publisher.closed;
+    } finally {
+      scope.abort();
+      requestRotation = () => {};
+    }
+  };
+
   const run = async () => {
     let attempt = 0;
+    /** A generation a rotation already brought up, reported and moved the tracks to. */
+    let next: Generation | undefined;
     while (!stopped) {
-      const generation = newGeneration();
-      const namespace = [...root, generation];
-      let publisher: RelayPublisher;
-      try {
-        attemptInProgress = new AbortController();
-        publisher = await connect({
-          ...connection,
-          namespace,
-          signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
-        });
-      } catch (error) {
-        attemptInProgress = undefined;
-        if (stopped) return;
-        if (first && isSetupFailure(error)) {
-          first.reject(error);
-          first = undefined;
-          await stop({ error });
-          return;
+      let live = next;
+      next = undefined;
+      if (!live) {
+        try {
+          live = await connectGeneration();
+        } catch (error) {
+          if (stopped) return;
+          if (first && isSetupFailure(error)) {
+            first.reject(error);
+            first = undefined;
+            await stop({ error });
+            return;
+          }
+          setStatus('reconnecting', error);
+          await sleep(backoffDelay(attempt++, backoff), stopping.signal).catch(() => {});
+          continue;
         }
-        setStatus('reconnecting', error);
-        await sleep(backoffDelay(attempt++, backoff), stopping.signal).catch(() => {});
+        if (!live) return;
+        current = live;
+        for (const track of tracks.values()) track.bind(live);
+        setStatus('live');
+        report(live);
+        first?.resolve();
+        first = undefined;
+      }
+
+      const outcome = await serve(live);
+      if (stopped) return;
+      if ('next' in outcome) {
+        next = outcome.next;
+        attempt = 0;
         continue;
       }
-      attemptInProgress = undefined;
-      if (stopped) {
-        await publisher.close().catch(() => {});
-        return;
-      }
-      const live: Generation = { info: { generation, namespace }, publisher, ended: false };
-      // Marked in the turn the connection reports its end, before anything awaiting `closed` resumes.
-      void publisher.closed.then(() => {
-        live.ended = true;
-      });
-      current = live;
-      const upAt = performance.now();
-      for (const track of tracks.values()) track.bind(live);
-      setStatus('live');
-      onGeneration?.({ generation, namespace: [...namespace] });
-      first?.resolve();
-      first = undefined;
-
-      const { error } = await publisher.closed;
       live.ended = true;
-      if (stopped) return;
       current = undefined;
       for (const track of tracks.values()) track.unbind(live);
-      setStatus('reconnecting', error);
+      setStatus('reconnecting', outcome.error);
       // A generation that stayed up longer than the longest delay was a success: start the backoff over.
-      if (performance.now() - upAt > backoff.maxDelayMs) attempt = 0;
+      if (performance.now() - live.upAt > backoff.maxDelayMs) attempt = 0;
       await sleep(backoffDelay(attempt++, backoff), stopping.signal).catch(() => {});
     }
   };
@@ -289,6 +423,7 @@ export async function superviseRelayPublisher(
       if (current) supervised.bind(current);
       return supervised.writer;
     },
+    rotate: () => requestRotation(),
     close: () => {
       signal?.removeEventListener('abort', onAbort);
       return stop({});
@@ -333,6 +468,8 @@ type WriteOptions = { properties?: readonly PublishProperty[]; signal?: AbortSig
 class SupervisedTrack {
   readonly writer: RelayTrackWriter;
   #binding: { generation: Generation; writer: RelayTrackWriter } | undefined;
+  /** The generation a rotation is moving this track to, until it moves. */
+  #pending: { generation: Generation; writer: RelayTrackWriter; moved(): void } | undefined;
   #closed = false;
   /** The demand the iterators last reported, so a lost generation reports `false` only after `true`. */
   #lastDemand = false;
@@ -348,6 +485,8 @@ class SupervisedTrack {
       operation: (writer: RelayTrackWriter, generation: Generation) => Promise<T>,
     ): Promise<T> => {
       if (track.#closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
+      // A rotation moves the track at an operation's start, never under one.
+      track.#maybeMove();
       const binding = track.#binding;
       if (!binding) throw reconnecting();
       try {
@@ -380,6 +519,7 @@ class SupervisedTrack {
         release();
         track.#binding?.writer.close();
         track.#binding = undefined;
+        track.#dropPending(true);
         track.#endDemand();
       },
     };
@@ -399,8 +539,64 @@ class SupervisedTrack {
     void this.#follow(generation, writer);
   }
 
+  /**
+   * A rotation brought up `generation`: register this track on it and move there once it has demand there or none on
+   * the current generation. Resolves once moved, or once the track closed or could not be registered.
+   */
+  handOver(generation: Generation): Promise<void> {
+    if (this.#closed) return Promise.resolve();
+    if (!this.#binding || this.#binding.generation.ended) {
+      this.bind(generation);
+      return Promise.resolve();
+    }
+    let writer: RelayTrackWriter;
+    try {
+      writer = generation.publisher.registerTrack(this.options);
+    } catch {
+      // As in `bind`: only the new connection's end lands here.
+      return Promise.resolve();
+    }
+    return new Promise((moved) => {
+      this.#pending = { generation, writer, moved };
+      void this.#follow(generation, writer);
+      this.#maybeMove();
+    });
+  }
+
+  /** The rotation's overlap is over: move to the next generation now, wherever demand is. */
+  settle(): void {
+    this.#maybeMove(true);
+  }
+
+  /** Move to the pending generation once it has demand or the current one has none, or at once when `force`d. */
+  #maybeMove(force = false): void {
+    const pending = this.#pending;
+    if (!pending) return;
+    if (pending.generation.ended) {
+      this.#dropPending(false);
+      return;
+    }
+    const binding = this.#binding;
+    const stay = binding && !binding.generation.ended && binding.writer.hasDemand && !pending.writer.hasDemand;
+    if (stay && !force) return;
+    this.#pending = undefined;
+    this.#binding = { generation: pending.generation, writer: pending.writer };
+    this.#emitDemand(pending.writer.hasDemand);
+    pending.moved();
+  }
+
+  /** Give up the pending generation, closing its writer when the track itself closed. */
+  #dropPending(close: boolean): void {
+    const pending = this.#pending;
+    if (!pending) return;
+    this.#pending = undefined;
+    if (close) pending.writer.close();
+    pending.moved();
+  }
+
   /** The generation ended: writes fail with RECONNECTING until the next one binds. */
   unbind(generation: Generation): void {
+    if (this.#pending?.generation === generation) this.#dropPending(false);
     if (this.#binding?.generation !== generation) return;
     this.#binding = undefined;
     this.#emitDemand(false);
@@ -411,6 +607,7 @@ class SupervisedTrack {
     if (this.#closed) return;
     this.#closed = true;
     this.#binding = undefined;
+    this.#dropPending(false);
     this.#endDemand();
   }
 
@@ -419,10 +616,13 @@ class SupervisedTrack {
     let firstValue = true;
     try {
       for await (const value of changes) {
-        if (this.#binding?.generation !== generation) break;
+        const bound = this.#binding?.generation === generation;
+        if (!bound && this.#pending?.generation !== generation) break;
         // The first value is the new connection's current state; `false` repeats what the lost generation reported.
-        if (!(firstValue && !value)) this.#emitDemand(value);
+        if (bound && !(firstValue && !value)) this.#emitDemand(value);
         firstValue = false;
+        // Demand arriving on the next generation, or leaving the current one, is what moves a rotating track.
+        this.#maybeMove();
       }
     } finally {
       await changes.return?.();
@@ -430,7 +630,7 @@ class SupervisedTrack {
   }
 
   #emitDemand(value: boolean): void {
-    if (!value && !this.#lastDemand) return;
+    if (value === this.#lastDemand) return;
     this.#lastDemand = value;
     for (const listener of this.#demandListeners) listener(value);
   }

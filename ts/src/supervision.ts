@@ -55,6 +55,60 @@ export function backoffDelay(attempt: number, { initialDelayMs, maxDelayMs }: Re
   return Math.round(ceiling / 2 + (Math.random() * ceiling) / 2);
 }
 
+/** How long before the credential's expiry a supervisor replaces its connection, by default. */
+export const ROTATE_BEFORE_MS = 60_000;
+/** The longest a supervisor keeps the replaced connection open while its tracks or wants move over. */
+export const ROTATION_OVERLAP_MS = 10_000;
+
+/** Check `rotateBeforeMs`: a whole number of milliseconds a timer can hold. */
+export function rotateBeforeOption(value: unknown): number {
+  if (value === undefined) return ROTATE_BEFORE_MS;
+  if (typeof value !== 'number') throw new TypeError('rotateBeforeMs must be a number of milliseconds');
+  if (!Number.isSafeInteger(value) || value < 0 || value > 2_147_483_647) {
+    throw new RangeError('rotateBeforeMs must be an integer between 0 and 2147483647');
+  }
+  return value;
+}
+
+/**
+ * When a connection whose credential expires at `expiresAt` is replaced: `rotateBeforeMs` before it, but no earlier
+ * than halfway through what is left, so a token shorter than the margin still gets a connection's worth of use.
+ * `undefined` when the expiry is unknown.
+ */
+export function rotationDelay(
+  expiresAt: Date | undefined,
+  rotateBeforeMs: number,
+  now = Date.now(),
+): number | undefined {
+  if (expiresAt === undefined) return undefined;
+  const left = expiresAt.getTime() - now;
+  return Math.max(0, left - rotateBeforeMs, left / 2);
+}
+
+/**
+ * Resolve once a connection should be replaced: its rotation delay passed (see {@link rotationDelay}), or `manual`
+ * resolved. Never resolves after `signal` aborts. A delay past what one timer holds is waited out in steps.
+ */
+export function rotationDue(
+  expiresAt: Date | undefined,
+  rotateBeforeMs: number,
+  manual: Promise<void>,
+  signal: AbortSignal,
+): Promise<void> {
+  const delay = rotationDelay(expiresAt, rotateBeforeMs);
+  if (delay === undefined) return manual;
+  const due = performance.now() + delay;
+  const timed = (async () => {
+    for (;;) {
+      const left = due - performance.now();
+      if (left <= 0) return;
+      await sleep(Math.min(left, 2_147_483_647), signal);
+    }
+  })();
+  // An abort ends the wait without resolving it; nobody is left to hear the rejection.
+  return Promise.race([timed.catch(() => new Promise<void>(() => {})), manual]);
+}
+
 /** Resolve after `ms`, or reject with the abort reason once `signal` aborts. */
 export function sleep(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {

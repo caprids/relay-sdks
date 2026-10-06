@@ -27,6 +27,9 @@ import {
   isSetupFailure,
   RECONNECT_BACKOFF,
   RESUBSCRIBE_BACKOFF,
+  ROTATION_OVERLAP_MS,
+  rotateBeforeOption,
+  rotationDue,
   type SupervisedStatus,
   type SupervisionBackoff,
   sleep,
@@ -38,6 +41,11 @@ import { namespaceFields, trackName } from './validation.js';
 export interface ConnectSupervisedSubscriberOptions extends ConnectRelaySubscriberOptions {
   /** Backoff between connection attempts. Default from 500 ms, doubling up to 10 s, with jitter. */
   reconnect?: SupervisionBackoff;
+  /**
+   * How long before the connection's credential expires (`RelaySubscriber.expiresAt`) a replacement connection is
+   * opened, make-before-break. Default 60 seconds; never earlier than halfway through the time left.
+   */
+  rotateBeforeMs?: number;
   /**
    * Called on every status change; `error` is what ended the previous connection or failed the last attempt. A throw
    * stops the supervisor with that error: a pending `connectSupervisedSubscriber` rejects with it and `closed` resolves
@@ -83,6 +91,8 @@ export type RestartReason =
   | 'generation'
   /** The subscriber connection ended and was replaced. */
   | 'connection'
+  /** The subscriber connection was replaced before its credential expired, and the want moved to the new one. */
+  | 'rotation'
   /** The relay ended the subscription with REQUEST_ERROR after accepting it. */
   | 'terminated';
 
@@ -100,7 +110,8 @@ export interface WantHandlers {
   onPublisherDone?(info: PublishDone): void;
   /**
    * An accepted subscription ended and the want will replace it: drop decoder state that assumed continuity. Called
-   * before any object of the replacement; the gap is never filled.
+   * before any object of the replacement; the gap is never filled. On a move to a newer generation or a rotated
+   * connection, the old subscription keeps delivering until the replacement's first object, so this is called then.
    */
   onRestarted?(info: { reason: RestartReason; namespace: string[] }): void;
   /**
@@ -131,6 +142,13 @@ export interface SupervisedSubscriber {
     /** The failure that stopped the supervisor, or the signal's reason; absent after `close()`. */
     error?: unknown;
   }>;
+  /**
+   * Replace the connection make-before-break, as happens on its own `rotateBeforeMs` before the credential expires: a
+   * new connection opens, with a fresh token, and every want subscribes on it. Each want's old subscription keeps
+   * delivering until the replacement's first object arrives. The old connection closes once every want has moved,
+   * after 10 seconds at most. A no-op while no connection is up.
+   */
+  rotate(): void;
   /** Stop reconnecting, cancel every want and close the connection. Idempotent. */
   close(): void;
 }
@@ -154,8 +172,44 @@ interface Connection {
   subscriber: RelaySubscriber;
   /** Aborts when this connection ends. */
   signal: AbortSignal;
+  /** Aborts when a rotation replaced this connection: its wants move to the new one. */
+  retiring: AbortSignal;
   /** One discovery per followed root, shared by every want on it. */
   roots: Map<string, RootWatch>;
+  /** Attempts and handoffs still using this connection; a rotation closes it once none are left. */
+  holds: number;
+  /** Called whenever `holds` drops to zero. */
+  onIdle?: (() => void) | undefined;
+}
+
+/** Count a use of `connection` until the returned release runs. */
+function hold(connection: Connection): () => void {
+  connection.holds += 1;
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    connection.holds -= 1;
+    if (connection.holds === 0) connection.onIdle?.();
+  };
+}
+
+/**
+ * A want's previous subscription, still delivering while its replacement starts: on a move to a newer generation or a
+ * rotated connection. It ends at the replacement's first object, or when it ends on its own.
+ */
+interface Handoff {
+  /** Stop delivering the previous subscription, cancel it and report `onRestarted`, then run `held`. Idempotent. */
+  complete(): void;
+  /** Stop delivering and cancel it without reporting anything: the want itself was cancelled. */
+  drop(): void;
+  /** The replacement's accepted `onSubscribed`, held back until the handoff completes. */
+  held?: (() => void) | undefined;
+  /**
+   * Whether the previous subscription already delivered `object`. Only on a rotation, where both subscriptions serve
+   * the same namespace: the replacement starts at the latest group, which the previous one may have delivered.
+   */
+  delivered(object: MoqtObject, namespace: readonly string[]): boolean;
 }
 
 /** One want as the supervisor holds it. */
@@ -177,6 +231,8 @@ interface Want {
   generation?: string | undefined;
   /** A discovery failure no wait fixes, seen while backing off, for the loop to surface. */
   deferred?: { error: unknown };
+  /** The previous subscription, while it still delivers during a move. */
+  handoff?: Handoff | undefined;
 }
 
 /**
@@ -191,8 +247,9 @@ export async function superviseRelaySubscriber(
   if (typeof options !== 'object' || options === null) {
     throw new TypeError('connectSupervisedSubscriber takes an options object');
   }
-  const { reconnect, onStatus, signal, ...connection } = options;
+  const { reconnect, rotateBeforeMs: rotateBefore, onStatus, signal, ...connection } = options;
   const backoff = backoffOptions('reconnect', reconnect, RECONNECT_BACKOFF);
+  const rotateBeforeMs = rotateBeforeOption(rotateBefore);
   signal?.throwIfAborted();
 
   const wants = new Map<string, Want>();
@@ -207,6 +264,10 @@ export async function superviseRelaySubscriber(
   const lifetime = new AbortController();
   /** Aborts the connection attempt in progress only: a live connection is closed cleanly on `close()`. */
   let attemptInProgress: AbortController | undefined;
+  /** The connection a rotation is replacing, while its wants move off it. */
+  let retiring: Connection | undefined;
+  /** Asks the live connection to rotate; replaced for each connection served. */
+  let requestRotation: () => void = () => {};
 
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
@@ -231,6 +292,8 @@ export async function superviseRelaySubscriber(
     wants.clear();
     current?.subscriber.close();
     current = undefined;
+    retiring?.subscriber.close();
+    retiring = undefined;
     for (const wake of connectionWaiters.splice(0)) wake();
     try {
       setStatus('closed');
@@ -257,49 +320,165 @@ export async function superviseRelaySubscriber(
     return undefined;
   };
 
+  /** Open one connection, or `undefined` if the supervisor stopped first. Throws the attempt's failure. */
+  const connectOnce = async (): Promise<
+    { live: Connection; ended: AbortController; retire: AbortController } | undefined
+  > => {
+    let subscriber: RelaySubscriber;
+    try {
+      attemptInProgress = new AbortController();
+      subscriber = await connect({
+        ...connection,
+        signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
+      });
+    } finally {
+      attemptInProgress = undefined;
+    }
+    if (stopped) {
+      subscriber.close();
+      return undefined;
+    }
+    const ended = new AbortController();
+    const retire = new AbortController();
+    const live: Connection = {
+      subscriber,
+      signal: ended.signal,
+      retiring: retire.signal,
+      roots: new Map(),
+      holds: 0,
+    };
+    return { live, ended, retire };
+  };
+
+  type Opened = NonNullable<Awaited<ReturnType<typeof connectOnce>>>;
+
+  /** The connection ended: release what it ran and stop anything still waiting on it. */
+  const settleEnded = (opened: Opened) => {
+    opened.ended.abort();
+    for (const watch of opened.live.roots.values()) watch.close();
+  };
+
+  /**
+   * Open the connection that replaces `opened`, move every want to it, and close the old one once they have moved.
+   * Returns the new connection, or `undefined` when the old one ended or the supervisor stopped before a replacement
+   * was up, or when an automatic rotation found no fresher credential.
+   */
+  const rotateFrom = async (opened: Opened, manual: boolean): Promise<Opened | undefined> => {
+    const old = opened.live;
+    let failures = 0;
+    let next: Opened | undefined;
+    while (!stopped && !old.signal.aborted) {
+      try {
+        next = await connectOnce();
+        break;
+      } catch {
+        if (stopped) return undefined;
+        // The live connection keeps serving; try again after the backoff unless it ends first.
+        await Promise.race([
+          sleep(backoffDelay(failures++, backoff), lifetime.signal).catch(() => {}),
+          whenAborted(old.signal),
+        ]);
+      }
+    }
+    if (!next) return undefined;
+    if (!old.signal.aborted && !manual) {
+      // A credential that expires no later than the live one replaces nothing: the relay would end both together.
+      const was = old.subscriber.expiresAt?.getTime();
+      const now = next.live.subscriber.expiresAt?.getTime();
+      if (was !== undefined && (now === undefined || now <= was)) {
+        next.live.subscriber.close();
+        return undefined;
+      }
+    }
+    current = next.live;
+    retiring = old;
+    for (const wake of connectionWaiters.splice(0)) wake();
+    const idle = new Promise<void>((resolve) => {
+      old.onIdle = resolve;
+    });
+    // Every want on the old connection ends its attempt there and subscribes on the new one.
+    opened.retire.abort();
+    if (old.holds === 0) old.onIdle?.();
+    await Promise.race([idle, sleep(ROTATION_OVERLAP_MS, lifetime.signal).catch(() => {}), whenAborted(old.signal)]);
+    old.onIdle = undefined;
+    if (retiring === old) retiring = undefined;
+    old.subscriber.close();
+    settleEnded(opened);
+    return next;
+  };
+
+  /** Serve `opened` until it ends, or until a rotation replaced it with the connection returned. */
+  const serve = async (opened: Opened): Promise<{ error?: unknown } | { next: Opened }> => {
+    const { subscriber } = opened.live;
+    let manual = false;
+    const asked = new Promise<void>((resolve) => {
+      requestRotation = () => {
+        manual = true;
+        resolve();
+      };
+    });
+    const scope = new AbortController();
+    try {
+      const due = rotationDue(
+        subscriber.expiresAt,
+        rotateBeforeMs,
+        asked,
+        AbortSignal.any([lifetime.signal, scope.signal]),
+      ).then(() => undefined);
+      const outcome = await Promise.race([subscriber.closed, due]);
+      if (outcome !== undefined || stopped) return outcome ?? {};
+      requestRotation = () => {};
+      const next = await rotateFrom(opened, manual);
+      if (next) return { next };
+      return await subscriber.closed;
+    } finally {
+      scope.abort();
+      requestRotation = () => {};
+    }
+  };
+
   const run = async () => {
     let attempt = 0;
+    /** A connection a rotation already opened and moved the wants to. */
+    let next: Opened | undefined;
     while (!stopped) {
-      let subscriber: RelaySubscriber;
-      try {
-        attemptInProgress = new AbortController();
-        subscriber = await connect({
-          ...connection,
-          signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
-        });
-      } catch (error) {
-        attemptInProgress = undefined;
-        if (stopped) return;
-        if (first && isSetupFailure(error)) {
-          first.reject(error);
-          first = undefined;
-          stop({ error });
-          return;
+      let opened = next;
+      next = undefined;
+      if (!opened) {
+        try {
+          opened = await connectOnce();
+        } catch (error) {
+          if (stopped) return;
+          if (first && isSetupFailure(error)) {
+            first.reject(error);
+            first = undefined;
+            stop({ error });
+            return;
+          }
+          setStatus('reconnecting', error);
+          await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
+          continue;
         }
-        setStatus('reconnecting', error);
-        await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
+        if (!opened) return;
+        current = opened.live;
+        setStatus('live');
+        first?.resolve();
+        first = undefined;
+        for (const wake of connectionWaiters.splice(0)) wake();
+      }
+      const upAt = performance.now();
+
+      const outcome = await serve(opened);
+      if ('next' in outcome) {
+        if (stopped) return;
+        next = outcome.next;
+        attempt = 0;
         continue;
       }
-      attemptInProgress = undefined;
-      if (stopped) {
-        subscriber.close();
-        return;
-      }
-      const ended = new AbortController();
-      const live: Connection = { subscriber, signal: ended.signal, roots: new Map() };
-      current = live;
-      const upAt = performance.now();
-      setStatus('live');
-      first?.resolve();
-      first = undefined;
-      for (const wake of connectionWaiters.splice(0)) wake();
-
-      const { error } = await subscriber.closed;
-      ended.abort();
-      for (const watch of live.roots.values()) watch.close();
+      settleEnded(opened);
       if (stopped) return;
       current = undefined;
-      setStatus('reconnecting', error);
+      setStatus('reconnecting', outcome.error);
       if (performance.now() - upAt > backoff.maxDelayMs) attempt = 0;
       await sleep(backoffDelay(attempt++, backoff), lifetime.signal).catch(() => {});
     }
@@ -325,6 +504,7 @@ export async function superviseRelaySubscriber(
 
   const forget = (key: string, want: Want) => {
     want.controller.abort();
+    want.handoff?.drop();
     if (wants.get(key) === want) wants.delete(key);
   };
 
@@ -380,6 +560,9 @@ export async function superviseRelaySubscriber(
       const want = wants.get(key);
       if (want) forget(key, want);
     },
+    rotate() {
+      requestRotation();
+    },
     close() {
       signal?.removeEventListener('abort', onAbort);
       stop({});
@@ -404,8 +587,10 @@ type AttemptOutcome =
   | { kind: 'cancelled' }
   /** The connection ended; move to the next one without delay. */
   | { kind: 'connection'; accepted: boolean }
-  /** A newer generation, or none; resubscribe without delay. */
-  | { kind: 'generation'; accepted: boolean }
+  /** A newer generation, or none; resubscribe without delay. `handedOff`: the old subscription still delivers. */
+  | { kind: 'generation'; accepted: boolean; handedOff?: boolean }
+  /** A rotation replaced the connection; resubscribe on the new one without delay. */
+  | { kind: 'rotation'; accepted: boolean; handedOff?: boolean }
   /** A failure no wait fixes; surface it and stop. */
   | { kind: 'fatal'; error: unknown }
   /** Anything else; resubscribe after the backoff. */
@@ -444,7 +629,18 @@ async function superviseWant(
     const connection = await liveConnection(scope);
     // A want replaced while waiting must not open anything: its replacement may already hold an overlapping root.
     if (!connection || scope.aborted) return;
-    const outcome = await attempt(want, connection);
+    // A connection a rotation is replacing takes nothing new; the replacement is already live.
+    if (connection.retiring.aborted) {
+      await Promise.resolve();
+      continue;
+    }
+    const release = hold(connection);
+    let outcome: AttemptOutcome;
+    try {
+      outcome = await attempt(want, connection);
+    } finally {
+      release();
+    }
     if (scope.aborted) return;
     if (outcome.kind === 'cancelled') return;
     if (outcome.kind === 'fatal') {
@@ -453,8 +649,12 @@ async function superviseWant(
       return;
     }
     const reason: RestartReason | undefined =
-      outcome.kind === 'connection' ? 'connection' : outcome.kind === 'generation' ? 'generation' : outcome.reason;
-    if (outcome.accepted && reason) {
+      outcome.kind === 'connection' || outcome.kind === 'generation' || outcome.kind === 'rotation'
+        ? outcome.kind
+        : outcome.reason;
+    // A handed-off subscription reports its restart when the handoff completes.
+    const handedOff = (outcome.kind === 'generation' || outcome.kind === 'rotation') && outcome.handedOff;
+    if (outcome.accepted && reason && !handedOff) {
       try {
         want.handlers.onRestarted?.({ reason, namespace: [...(want.namespace ?? [])] });
       } catch (error) {
@@ -481,7 +681,7 @@ async function superviseWant(
  */
 async function backoff(want: Want, connection: Connection, delayMs: number): Promise<void> {
   const wake = new AbortController();
-  const scope = AbortSignal.any([want.controller.signal, connection.signal, wake.signal]);
+  const scope = AbortSignal.any([want.controller.signal, connection.signal, connection.retiring, wake.signal]);
   let held: { watch: RootWatch; release(): void } | undefined;
   if (want.options.generations && !connection.signal.aborted) {
     try {
@@ -531,7 +731,11 @@ async function attempt(want: Want, connection: Connection): Promise<AttemptOutco
   const { options } = want;
   const scope = AbortSignal.any([want.controller.signal, connection.signal]);
   const cancelledOrConnection = (accepted: boolean): AttemptOutcome =>
-    want.controller.signal.aborted ? { kind: 'cancelled' } : { kind: 'connection', accepted };
+    want.controller.signal.aborted
+      ? { kind: 'cancelled' }
+      : connection.retiring.aborted && !connection.signal.aborted
+        ? { kind: 'rotation', accepted }
+        : { kind: 'connection', accepted };
 
   let namespace = options.namespace;
   let watch: RootWatch | undefined;
@@ -550,13 +754,14 @@ async function attempt(want: Want, connection: Connection): Promise<AttemptOutco
   try {
     let generation: string | undefined;
     if (watch) {
-      const found = await watch.newest(scope);
+      const found = await watch.newest(AbortSignal.any([scope, connection.retiring]));
       if (found.kind === 'failed') return discoveryFailed(found.error, scope, cancelledOrConnection, false);
       if (found.kind !== 'found') return cancelledOrConnection(false);
+      if (connection.retiring.aborted) return cancelledOrConnection(false);
       generation = found.generation;
       namespace = [...options.namespace, generation];
     }
-    want.namespace = namespace;
+    if (connection.retiring.aborted) return cancelledOrConnection(false);
     want.generation = generation;
     return await subscribeOnce(want, connection, namespace, scope, watch, generation, cancelledOrConnection);
   } finally {
@@ -575,12 +780,27 @@ async function subscribeOnce(
 ): Promise<AttemptOutcome> {
   const { options } = want;
   let accepted = false;
+  /** Whether the application heard of this subscription: its `onSubscribed` ran. A handoff can hold that back. */
+  let reported = false;
+  /** Whether this subscription's events reach the handlers; a completed handoff turns it off. */
+  let delivering = true;
   let firstGroup: number | undefined;
+  /** The latest object delivered, by location, for a rotation's replacement to skip what was already delivered. */
+  let latest: { groupId: number; objectId: number } | undefined;
   let progressed = false;
   let lastObjectAt = 0;
   let publisherDone = false;
+  /** Set when this subscription stays open, delivering, while its replacement starts. */
+  let handedOff: Handoff | undefined;
   const finish = new AbortController();
   const handlers = () => want.handlers;
+  /** Run the pending handoff's restart, which also reports this subscription's held-back `onSubscribed`. */
+  const takeOver = () => want.handoff?.complete();
+  const report = (info: SubscribeOk) => {
+    reported = true;
+    want.namespace = namespace;
+    handlers().onSubscribed?.(info, { namespace: [...namespace] });
+  };
 
   let subscription: RelaySubscription;
   try {
@@ -590,20 +810,41 @@ async function subscribeOnce(
         onSubscribed: (info) => {
           accepted = true;
           lastObjectAt = performance.now();
-          handlers().onSubscribed?.(info, { namespace: [...namespace] });
+          const handoff = want.handoff;
+          // The previous subscription keeps delivering until this one's first object: report this one then.
+          if (handoff) handoff.held = () => report(info);
+          else report(info);
         },
         onObject: (object) => {
+          if (!delivering) return;
           lastObjectAt = performance.now();
           if (firstGroup === undefined) firstGroup = object.groupId;
           else if (object.groupId > firstGroup) progressed = true;
+          if (!reported) {
+            if (want.handoff?.delivered(object, namespace)) return;
+            takeOver();
+          }
+          if (
+            latest === undefined ||
+            object.groupId > latest.groupId ||
+            (object.groupId === latest.groupId && object.objectId > latest.objectId)
+          ) {
+            latest = { groupId: object.groupId, objectId: object.objectId };
+          }
           handlers().onObject?.(object);
         },
-        onSubgroupEnd: (info) => handlers().onSubgroupEnd?.(info),
-        onSubgroupReset: (info) => handlers().onSubgroupReset?.(info),
+        onSubgroupEnd: (info) => {
+          if (delivering && reported) handlers().onSubgroupEnd?.(info);
+        },
+        onSubgroupReset: (info) => {
+          if (delivering && reported) handlers().onSubgroupReset?.(info);
+        },
         onPublisherDone: (info) => {
+          if (!delivering) return;
           publisherDone = true;
-          handlers().onPublisherDone?.(info);
+          if (reported) handlers().onPublisherDone?.(info);
           finish.abort();
+          handedOff?.complete();
         },
       },
     );
@@ -629,6 +870,7 @@ async function subscribeOnce(
     );
   }
   let moved = false;
+  let rotating = false;
   let discoveryEnded: { error: unknown } | undefined;
   const checkWatch = () => {
     if (!watch) return;
@@ -642,30 +884,112 @@ async function subscribeOnce(
   const unwatch = watch?.onChange(checkWatch);
   // A change that landed between choosing the generation and attaching the listener is not lost.
   checkWatch();
+  const onRetiring = () => {
+    rotating = true;
+    finish.abort();
+  };
+  if (connection.retiring.aborted) onRetiring();
+  else connection.retiring.addEventListener('abort', onRetiring, { once: true });
   try {
     const end = await Promise.race([
       subscription.ended,
       whenAborted(AbortSignal.any([scope, finish.signal])).then(() => undefined),
     ]);
     if (end === undefined) {
-      if (scope.aborted) return cancelledOrConnection(accepted);
-      if (discoveryEnded) return discoveryFailed(discoveryEnded.error, scope, cancelledOrConnection, accepted);
-      if (moved) return { kind: 'generation', accepted };
+      if (scope.aborted) return cancelledOrConnection(reported);
+      if (discoveryEnded) return discoveryFailed(discoveryEnded.error, scope, cancelledOrConnection, reported);
+      if ((moved || rotating) && !publisherDone && !wentStale) {
+        const reason = moved ? 'generation' : 'rotation';
+        // Only a subscription the application is hearing from is worth keeping; one move at a time.
+        if (reported && !want.handoff) {
+          handedOff = handOff(
+            want,
+            connection,
+            subscription,
+            reason,
+            namespace,
+            () => latest,
+            () => {
+              delivering = false;
+            },
+          );
+          return { kind: reason, accepted: true, handedOff: true };
+        }
+        return { kind: reason, accepted: reported };
+      }
       return {
         kind: 'retry',
-        accepted,
+        accepted: reported,
         progressed,
         reason: publisherDone ? 'publisher-done' : wentStale ? 'stale' : undefined,
       };
     }
-    return classify(end, accepted, progressed, cancelledOrConnection);
+    return classify(end, reported, progressed, cancelledOrConnection);
   } finally {
     clearInterval(stale);
     unwatch?.();
+    connection.retiring.removeEventListener('abort', onRetiring);
     // Settles the losing waiter, so a subscription that ended on its own leaves no listener behind.
     finish.abort();
-    subscription.cancel();
+    // A replacement that ends before it took over never reports its held-back onSubscribed.
+    if (!reported && want.handoff) want.handoff.held = undefined;
+    if (!handedOff) {
+      delivering = false;
+      subscription.cancel();
+    }
   }
+}
+
+/**
+ * Keep `subscription` delivering while the want's replacement starts. It ends at the replacement's first object, when
+ * it ends on its own, or when the want is cancelled; the first two report `onRestarted` with `reason`.
+ */
+function handOff(
+  want: Want,
+  connection: Connection,
+  subscription: RelaySubscription,
+  reason: RestartReason,
+  namespace: string[],
+  latest: () => { groupId: number; objectId: number } | undefined,
+  stopDelivering: () => void,
+): Handoff {
+  const release = hold(connection);
+  let over = false;
+  const end = (): boolean => {
+    if (over) return false;
+    over = true;
+    stopDelivering();
+    subscription.cancel();
+    if (want.handoff === handoff) want.handoff = undefined;
+    release();
+    return true;
+  };
+  const handoff: Handoff = {
+    complete() {
+      const held = handoff.held;
+      if (!end()) return;
+      try {
+        want.handlers.onRestarted?.({ reason, namespace: [...namespace] });
+      } catch (error) {
+        // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+        console.error(new Error('onRestarted threw; the want resubscribes regardless', { cause: error }));
+      }
+      held?.();
+    },
+    drop() {
+      end();
+    },
+    delivered(object, replacement) {
+      if (reason !== 'rotation' || over) return false;
+      const last = latest();
+      if (last === undefined || replacement.length !== namespace.length) return false;
+      if (replacement.some((field, i) => field !== namespace[i])) return false;
+      return object.groupId < last.groupId || (object.groupId === last.groupId && object.objectId <= last.objectId);
+    },
+  };
+  want.handoff = handoff;
+  void subscription.ended.then(() => handoff.complete());
+  return handoff;
 }
 
 /**

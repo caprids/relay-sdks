@@ -7,7 +7,7 @@ import {
   SETUP_OPTION,
 } from '@mux/moq-core';
 
-import { connectingError, RelayError, transportError } from './errors.js';
+import { connectedError, connectingError, isCredentialRefusal, RelayError, transportError } from './errors.js';
 
 /** setTimeout stores its delay in a signed 32-bit integer; a larger one wraps and fires at once. */
 export const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -46,6 +46,17 @@ export type RelayTransportFactory = (
 };
 
 /**
+ * A token together with when the relay stops honoring it. moq-relay ends a session at its grant's deadline, which is
+ * the token's expiry, and a live session cannot take a new token; supervised connections replace theirs before then.
+ */
+export interface RelayCredential {
+  /** The token, carried in the endpoint's jwt query parameter. An empty one sends no token. */
+  token: string;
+  /** When the relay ends a session the token admitted: the JWT's `exp`, or the grant's deadline if it is earlier. */
+  expiresAt: Date;
+}
+
+/**
  * Connection options shared by connectRelaySubscriber and connectRelayPublisher: endpoint, token,
  * lifetime signal, connection deadline, and transport injection. Each role's options extend this
  * with what only that role uses: {@link ConnectRelaySubscriberOptions} and
@@ -57,9 +68,12 @@ export interface ConnectRelayOptions {
   /**
    * Resolve a connection token. Relay carries it in the endpoint's jwt query parameter.
    * An explicit jwt in the URL wins, and the provider is not called in that case. An empty jwt
-   * in the URL is a RangeError, raised before the provider or the transport is used.
+   * in the URL is a RangeError, raised before the provider or the transport is used. Return a
+   * {@link RelayCredential} to say when the token expires; for a bare token the connection reads
+   * the JWT's `exp` claim, without verifying it. The provider runs once per connection: a live
+   * session keeps the token it connected with until the relay ends it at that expiry.
    */
-  getToken?: () => string | undefined | Promise<string | undefined>;
+  getToken?: () => string | RelayCredential | undefined | Promise<string | RelayCredential | undefined>;
   /** Aborting closes the connection, including after the connect call has resolved. */
   signal?: AbortSignal;
   /** Deadline for token resolution, transport connection, and protocol SETUP. Default 10 seconds, maximum 2147483647. */
@@ -96,6 +110,8 @@ interface RelaySessionLifetime<T extends Session> {
   transportClosed: MoqtTransport['closed'];
   /** The MOQT version the transport negotiated, which selects the core's parameter codec. */
   protocol: MoqtProtocolId;
+  /** When the relay ends the session for the credential's expiry, if known. */
+  expiresAt: Date | undefined;
   /** Throws the closing error once the connection has ended. */
   assertOpen(): void;
   /** Close the connection. Idempotent. */
@@ -273,6 +289,7 @@ export async function openRelaySession<T extends Session>(
 
   let established = false;
   let usingTransport = false;
+  let expiresAt: Date | undefined;
   let peerClose: unknown;
   // Set in the turn server SETUP arrives, ahead of `established`: a failure in between is no credentials refusal.
   let setupReceived = false;
@@ -280,12 +297,14 @@ export async function openRelaySession<T extends Session>(
     setupReceived ? transportError(error, 'connecting') : connectingError(error, peerClose);
   const establish = async (): Promise<{ session: T; transport: MoqtTransport }> => {
     if (!url.searchParams.has('jwt') && options.getToken) {
-      const token = await options.getToken();
+      const resolved = await options.getToken();
 
       assertOpen();
-      if (token !== undefined && typeof token !== 'string')
-        throw new TypeError('getToken must return a string or undefined');
-      if (token !== undefined && token.length > 0) url.searchParams.set('jwt', token);
+      const { token, expiresAt: given } = credential(resolved);
+      if (token.length > 0) url.searchParams.set('jwt', token);
+      expiresAt = given ?? jwtExpiry(token);
+    } else {
+      expiresAt = jwtExpiry(url.searchParams.get('jwt') ?? '');
     }
 
     let createTransport = options.createTransport ?? createBrowserTransport;
@@ -330,14 +349,16 @@ export async function openRelaySession<T extends Session>(
         onReady: () => {
           setupReceived = true;
         },
-        onClosed: (info) =>
-          finish(
-            info.error === undefined
-              ? info
-              : {
-                  error: established ? transportError(info.error, 'connection') : connectFailure(info.error),
-                },
-          ),
+        onClosed: (info) => {
+          if (info.error !== undefined) {
+            finish({ error: established ? connectedError(info.error, peerClose) : connectFailure(info.error) });
+          } else if (established && isCredentialRefusal(peerClose)) {
+            // The session reports the peer's close without its code; a credentials code ends a live session too.
+            finish({ error: connectedError(peerClose) });
+          } else {
+            finish(info);
+          }
+        },
         onGoaway: () =>
           finish({
             error: new RelayError(
@@ -385,7 +406,46 @@ export async function openRelaySession<T extends Session>(
     transportClosed: connected.transport.closed,
     // assertNegotiatedProtocol admitted it before the session started.
     protocol: connected.transport.protocol as MoqtProtocolId,
+    expiresAt,
     assertOpen,
     close: () => finish(),
   };
+}
+
+/** Check what `getToken` returned and split it into the token and its expiry, if given. */
+function credential(resolved: unknown): { token: string; expiresAt?: Date } {
+  if (resolved === undefined) return { token: '' };
+  if (typeof resolved === 'string') return { token: resolved };
+  if (typeof resolved !== 'object' || resolved === null)
+    throw new TypeError('getToken must return a string, a RelayCredential or undefined');
+  const { token, expiresAt } = resolved as { token?: unknown; expiresAt?: unknown };
+  if (typeof token !== 'string') throw new TypeError('RelayCredential.token must be a string');
+  if (!(expiresAt instanceof Date)) throw new TypeError('RelayCredential.expiresAt must be a Date');
+  if (Number.isNaN(expiresAt.getTime())) throw new RangeError('RelayCredential.expiresAt is an invalid Date');
+  return { token, expiresAt: new Date(expiresAt.getTime()) };
+}
+
+/**
+ * The `exp` claim of a JWT, read without verifying the token: the relay verifies it, and the SDK only needs to know
+ * when the session will end. Anything that is not a JWT with a numeric `exp` has no known expiry.
+ */
+export function jwtExpiry(token: string): Date | undefined {
+  const parts = token.split('.');
+  if (parts.length !== 3 || !parts[1]) return undefined;
+  try {
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = new TextDecoder('utf-8', { fatal: true }).decode(
+      Uint8Array.from(atob(base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=')), (c) =>
+        c.charCodeAt(0),
+      ),
+    );
+    const claims: unknown = JSON.parse(json);
+    if (typeof claims !== 'object' || claims === null) return undefined;
+    const { exp } = claims as { exp?: unknown };
+    if (typeof exp !== 'number' || !Number.isFinite(exp)) return undefined;
+    const expiresAt = new Date(exp * 1000);
+    return Number.isNaN(expiresAt.getTime()) ? undefined : expiresAt;
+  } catch {
+    return undefined;
+  }
 }
