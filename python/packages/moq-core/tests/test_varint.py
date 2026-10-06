@@ -11,7 +11,7 @@ from moq_core.varint import (
     varint_length_from_first_byte,
 )
 
-# Golden vectors from moq-transport draft-20 §1.4.1, Table 2.
+# Golden vectors from moq-transport draft-22 §8.1, Table 4.
 SPEC_VECTORS: list[tuple[bytes, int]] = [
     (bytes([0x25]), 37),
     (bytes([0x80, 0x25]), 37),

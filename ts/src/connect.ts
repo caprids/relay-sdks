@@ -160,6 +160,7 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
     observeClosed,
     assertOpen,
     close,
+    protocol,
   } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
       implementationName: '@mux/relay',
@@ -205,7 +206,10 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
 
   /** One product subscription per public call; both entry points bind the core the same way. */
   const subscription = (admitted: MoqtSubscribeOptions, consumers: SubscriptionConsumer[]) =>
-    createSubscription({ subscribe: (handlers) => connected.subscribe(admitted, handlers), observeClosed }, consumers);
+    createSubscription(
+      { subscribe: (handlers) => connected.subscribe(admitted, handlers), protocol, observeClosed },
+      consumers,
+    );
 
   return {
     closed,

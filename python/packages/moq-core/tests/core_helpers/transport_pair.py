@@ -11,7 +11,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
-from moq_core.control_messages import MESSAGE_TYPE
+from moq_core.control_messages import MESSAGE_TYPE, MOQT_PROTOCOL_ID
 from moq_core.transport import BidirectionalStream, MoqtTransport, ReceiveStream, SendStream, transport_ended
 from moq_core.varint import decode_varint, encode_varint
 
@@ -34,10 +34,12 @@ class _Side:
 class PairTransport:
     """One end of a :func:`create_transport_pair`."""
 
-    def __init__(self, local: _Side, remote: _Side, shared: _Shared) -> None:
+    def __init__(self, local: _Side, remote: _Side, shared: _Shared, protocol_id: str) -> None:
         self._local = local
         self._remote = remote
         self._shared = shared
+        self.protocol_id = protocol_id
+        """The protocol both ends report as negotiated (TA-8)."""
         self.release_after_turns = 0
         """Extra loop turns ``wait_closed`` takes after the end, like the native transport's socket release."""
 
@@ -143,15 +145,17 @@ class TransportPair:
         return self.client._shared.events
 
 
-def create_transport_pair() -> TransportPair:
+def create_transport_pair(protocol_id: str = MOQT_PROTOCOL_ID) -> TransportPair:
     """Create two transports wired back-to-back. Requires a running event loop."""
     a = _Side()
     b = _Side()
     shared = _Shared(a, b)
-    return TransportPair(client=PairTransport(a, b, shared), server=PairTransport(b, a, shared))
+    return TransportPair(
+        client=PairTransport(a, b, shared, protocol_id), server=PairTransport(b, a, shared, protocol_id)
+    )
 
 
-# Request-initiating messages whose body opens with the sender's Request ID (§10.1).
+# Request-initiating messages whose body opens with the sender's Request ID (§6.4.2.1).
 _REQUEST_ID_MESSAGE_TYPES = frozenset(
     {
         MESSAGE_TYPE.SUBSCRIBE,
@@ -244,7 +248,7 @@ def with_server_request_ids(transport: MoqtTransport) -> ServerRequestIdTranspor
     """Give the subscribe driver a server's request ids.
 
     The driver always allocates client (even) ids, and a publish session is always the client too,
-    so it requires the peer's ids to be odd (§10.1). A test that stands the driver in for the relay
+    so it requires the peer's ids to be odd (§6.4.2.1). A test that stands the driver in for the relay
     wraps the driver's transport with this: every request stream the driver opens has each Request
     ID's least significant bit set on the wire (0 becomes 1, 2 becomes 3). Assumes each write
     carries whole frames, which is how the driver writes them.

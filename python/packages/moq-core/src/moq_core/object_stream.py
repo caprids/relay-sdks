@@ -1,11 +1,11 @@
-"""MOQT unidirectional data-stream parsing (moq-transport draft-20 §3.4, §11).
+"""MOQT unidirectional data-stream parsing (moq-transport draft-22 §6.4.1, §11).
 
 Every unidirectional stream begins with a varint stream type:
 
-- ``SUBGROUP_HEADER`` (a Type Flags bitfield with bit 4 set, §11.4.2): objects for one subgroup of
+- ``SUBGROUP_HEADER`` (a Type Flags bitfield with bit 4 set, §11.3.1): objects for one subgroup of
   one group of a subscribed track, identified by Track Alias.
 - ``FETCH_HEADER`` (0x05): objects for a FETCH response, identified by Request ID. A fill fetch stream
-  (§5.1.3) has the same shape and names the SUBSCRIBE or REQUEST_UPDATE that asked for it.
+  (§3.4) has the same shape and names the SUBSCRIBE or REQUEST_UPDATE that asked for it.
 - ``SETUP`` (0x2F00): the peer's control stream (handled by the session).
 - ``PADDING`` (0x132B3E28): bandwidth probing; drained and ignored.
 
@@ -38,7 +38,7 @@ class STREAM_TYPE(IntEnum):
 def is_subgroup_header_type(stream_type: int) -> bool:
     """Whether a stream-type varint is a SUBGROUP_HEADER.
 
-    §11.4.2 describes the type as Type Flags: bit 4 is always set, SUBGROUP_ID_MODE 0b11 is reserved,
+    §11.3.1 describes the type as Type Flags: bit 4 is always set, SUBGROUP_ID_MODE 0b11 is reserved,
     and a value of 128 or more, or any set bit without a specified meaning, is a PROTOCOL_VIOLATION.
     Every bit below 0x80 is assigned, so "bit 7 clear" is that last rule in full.
     """
@@ -96,7 +96,7 @@ class MoqtObject:
 
 
 # ============================================================================
-# Subgroup streams (§11.4.2)
+# Subgroup streams (§11.3.1)
 # ============================================================================
 
 _SUBGROUP_FLAG_PROPERTIES = 0x01
@@ -155,7 +155,7 @@ async def read_subgroup_header(reader: StreamReader, stream_type: int) -> Subgro
 
 
 async def _read_object_properties(reader: StreamReader) -> list[KeyValuePair]:
-    """Object Properties structure (§11.2.1.2): varint length + Key-Value-Pairs."""
+    """Object Properties structure (§11.1.2): varint length + Key-Value-Pairs."""
     length = await reader.read_varint()
     if length == 0:
         return []
@@ -216,7 +216,7 @@ async def read_subgroup_objects(reader: StreamReader, header: SubgroupHeader) ->
 
 
 # ============================================================================
-# Fetch streams (§11.4.4)
+# Fetch streams (§11.4.1)
 # ============================================================================
 
 _FETCH_FLAG_SUBGROUP_MODE_MASK = 0x03
@@ -228,9 +228,9 @@ _FETCH_FLAG_DATAGRAM = 0x40
 
 FetchEndOfRangeStatus: TypeAlias = Literal["non-existent", "unknown", "timed-out"]
 """Why a run of Locations was not serialized: they do not exist, their status is unknown to the relay,
-or the relay's Fill Timeout expired before upstream supplied them (§10.2.5)."""
+or the relay's Fill Timeout expired before upstream supplied them (§9.20.5)."""
 
-# End of Range serialization flags (§11.4.4, Table 7).
+# End of Range serialization flags (§11.4.1, Table 8).
 _FETCH_END_OF_RANGE_STATUS: dict[int, FetchEndOfRangeStatus] = {
     0x8C: "non-existent",
     0x10C: "unknown",
@@ -254,7 +254,7 @@ class FetchObject:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class FetchEndOfRange:
-    """An End of Range marker on a fetch data stream (§11.4.4): a run of Locations was not serialized.
+    """An End of Range marker on a fetch data stream (§11.4.1): a run of Locations was not serialized.
 
     ``status`` says why; ``group_id`` and ``object_id`` are the Location the marker carries.
     """
@@ -286,7 +286,7 @@ async def read_fetch_entries(
 ) -> AsyncGenerator[FetchStreamEntry, None]:
     """Yield the entries of one FETCH response stream until FIN.
 
-    Group/object IDs are delta-decoded against the prior entry per §11.4.4.1; the first object must
+    Group/object IDs are delta-decoded against the prior entry per §11.4.1.1; the first object must
     carry both deltas (as absolute values).
     """
     prior: _PriorLocation | None = None
@@ -300,7 +300,7 @@ async def read_fetch_entries(
             object_id = await reader.read_varint()
 
             # The indicator becomes the prior Location; subgroup/priority carry over from the last
-            # actual object (§11.4.4.2).
+            # actual object (§11.4.1.2).
             prior = _PriorLocation(
                 group_id,
                 object_id,

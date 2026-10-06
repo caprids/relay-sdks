@@ -29,7 +29,7 @@ it('the pair fails a write released by a read in the same turn the session ends'
 
 it('the pair rejects ready when the session ends while the dial is held', async () => {
   const factory = createTransportPairFactory({ handshake: 'hold' });
-  const { ready } = factory.createTransport('https://pair.invalid/', ['moqt-20']);
+  const { ready } = factory.createTransport('https://pair.invalid/', ['moqt-22']);
   (await factory.dialled).pair.fail('lost');
   await expect(ready).rejects.toMatchObject({ source: 'session' });
   factory.releaseHandshake();
@@ -38,7 +38,7 @@ it('the pair rejects ready when the session ends while the dial is held', async 
 
 it('the pair rejects ready when the session ends in the same turn the held handshake is released', async () => {
   const factory = createTransportPairFactory({ handshake: 'hold' });
-  const { ready } = factory.createTransport('https://pair.invalid/', ['moqt-20']);
+  const { ready } = factory.createTransport('https://pair.invalid/', ['moqt-22']);
   (await factory.dialled).pair.fail('lost');
   factory.releaseHandshake();
   await expect(ready).rejects.toMatchObject({ source: 'session' });

@@ -45,7 +45,7 @@ function receive(subscriber: RelaySubscriber, track: string) {
 }
 
 describe('connectRelayPublisher', () => {
-  // draft-20 §3.5 UNAUTHORIZED, sent by moq-relay after reading SETUP (#14, TA-9).
+  // draft-22 §12.2 UNAUTHORIZED, sent by moq-relay after reading SETUP (#14, TA-9).
   it('reports a peer close with UNAUTHORIZED before server SETUP as a credentials refusal', async () => {
     const fake = createFakeTransport();
     const connecting = connectRelayPublisher({
@@ -360,7 +360,7 @@ describe('connectRelayPublisher', () => {
     const publisher = await connectRelayPublisher({ url, namespace, getToken: () => 'publish-token', createTransport });
     cleanup.push(() => publisher.close());
 
-    expect(createTransport).toHaveBeenCalledWith(`${url}?jwt=publish-token`, ['moqt-20']);
+    expect(createTransport).toHaveBeenCalledWith(`${url}?jwt=publish-token`, ['moqt-22', 'moqt-20']);
   });
 
   it('preserves explicit track properties and defaults other tracks to no timescale', async () => {
@@ -535,7 +535,7 @@ describe('connectRelayPublisher', () => {
     await group.close();
     expect(group.closed).toBe(true);
 
-    // draft-ietf-moq-transport-20 section 11.4.3: a reset after all data and the FIN is ignorable.
+    // draft-ietf-moq-transport-22 section 11.3.2: a reset after all data and the FIN is ignorable.
     // write-slot.test.ts proves no reset is sent; this pins the end-to-end shape through a relay.
     group.abort(new Error('late abort'));
     expect(group.closed).toBe(true);
@@ -807,7 +807,7 @@ describe('settling groups', () => {
   });
 });
 
-describe('delivery timeouts (draft-20 §8)', () => {
+describe('delivery timeouts (draft-22 §5.2)', () => {
   it("resets a settling group with code 2 when the track's 0x06 runs out, so closing does not wait for it", async () => {
     const hub = createRelayHub();
     cleanup.push(() => hub.destroy());

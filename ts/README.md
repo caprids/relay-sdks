@@ -57,7 +57,7 @@ across connections and publisher restarts ([stay connected](GUIDE.md#stay-connec
 ## Node
 
 `@mux/relay/node` exports everything `@mux/relay` does. Its `connectRelayPublisher`,
-`connectRelaySubscriber` and both `connectSupervised*` functions connect over native QUIC (MOQT on QUIC, ALPN `moqt-20`) through
+`connectRelaySubscriber` and both `connectSupervised*` functions connect over native QUIC (MOQT on QUIC, ALPN `moqt-22`, falling back to `moqt-20`) through
 [`@mux/relay-quic`](packages/relay-quic/README.md), Mux's transport adapter for Node. Pass the same
 `https://` endpoint you pass in a browser.
 
@@ -141,7 +141,8 @@ release together at the same version, so install matching versions. A release su
 
 - browsers with WebTransport, and Node 24 or later on the platforms `@mux/relay-quic` ships
   binaries for (Linux x64 and arm64 with glibc or musl, macOS arm64 and x64, Windows x64);
-- MOQT draft 20 (`moqt-20`) only, against moq-relay 0.15.4 or later.
+- MOQT draft 22 (`moqt-22`), with draft 20 (`moqt-20`) as an offered fallback, against moq-relay
+  0.15.4 or later.
 
 ## Documentation
 

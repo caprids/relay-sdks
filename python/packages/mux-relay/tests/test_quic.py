@@ -51,7 +51,7 @@ from mux_relay.quic import connect_quic
 from mux_relay.quic._client import QuicSession
 from mux_relay.quic._errors import QuicTransportError, _from_h3_error_code, _from_native_wire_code, _to_h3_error_code
 
-MOQT = "moqt-20"
+MOQT = "moqt-22"
 NAMESPACE = ["loopback", "quic"]
 
 
@@ -564,7 +564,7 @@ class TestRelayConnection:
 
         assert dials == [f"{url}?jwt=a+token"]
         assert peer.peer.observed is not None
-        assert peer.peer.observed["protocols"] == [MOQT]
+        assert peer.peer.observed["protocols"] == [MOQT, "moqt-20"]
         assert option_value(options, SETUP_OPTION.PATH) == "/moq?jwt=a+token"
         assert option_value(options, SETUP_OPTION.AUTHORITY) == f"{SERVER_NAME}:{peer.port}"
         connecting.cancel()

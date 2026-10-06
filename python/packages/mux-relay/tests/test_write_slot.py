@@ -948,7 +948,7 @@ def delivery_reset(subgroup: FakeSubgroup) -> bool:
 
 
 class TestSubgroupDeliveryTimeout:
-    """§8 SUBGROUP_DELIVERY_TIMEOUT: a settling group whose FIN is not acknowledged in time is reset (#167)."""
+    """§5.2 SUBGROUP_DELIVERY_TIMEOUT: a settling group whose FIN is not acknowledged in time is reset (#167)."""
 
     def harness(self, track: Sequence[KeyValuePair] = (), **options: Any) -> tuple[Harness, RecordingSettlingGroups]:
         recorder = RecordingSettlingGroups()
@@ -1093,7 +1093,7 @@ class TestSubgroupDeliveryTimeout:
 
 
 class TestObjectDeliveryTimeout:
-    """§8 OBJECT_DELIVERY_TIMEOUT: an object too old when it would reach the transport is not sent (#167)."""
+    """§5.2 OBJECT_DELIVERY_TIMEOUT: an object too old when it would reach the transport is not sent (#167)."""
 
     async def test_a_write_waiting_too_long_for_demand_fails_with_delivery_timeout_and_sends_nothing(self) -> None:
         h = Harness(track_properties=[object_timeout(50)])
@@ -1224,7 +1224,7 @@ class TestObjectDeliveryTimeout:
         with pytest.raises(RelayError) as later:
             await group.write(b"\x03")
         assert later.value.code == "DELIVERY_TIMEOUT"
-        assert len(h.opened) == 1  # no new stream for that group (§8 SHOULD NOT)
+        assert len(h.opened) == 1  # no new stream for that group (§5.2 SHOULD NOT)
         assert not h.writer.closed
         await h.writer.write(b"\x04")
         assert h.opened[1].group_id == 1

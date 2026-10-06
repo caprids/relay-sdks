@@ -177,12 +177,12 @@ class RelayPublisher:
         connection, including after their writer closes.
         ``track_properties`` is encoded as supplied; the SDK adds no default timescale. It rides in
         every SUBSCRIBE_OK, so it must encode to at most 65525 bytes, hold at most 64 pairs (the
-        relay's limit) and keep 0x0E at most 255 and 0x22 at 1 or 2 (draft-20); otherwise the relay
+        relay's limit) and keep 0x0E at most 255 and 0x22 at 1 or 2 (draft-22); otherwise the relay
         would refuse every subscriber, so ``register_track`` raises ``ValueError`` instead.
         The relay may add, drop, or rewrite properties before delivery to subscribers; see README.
         Properties 0x02 (OBJECT_DELIVERY_TIMEOUT) and 0x06 (SUBGROUP_DELIVERY_TIMEOUT), in
-        milliseconds, are also the publisher's delivery timeouts (draft-ietf-moq-transport-20
-        section 8), which the writer enforces; 0 means none, and values above 2147483647 are clamped.
+        milliseconds, are also the publisher's delivery timeouts (draft-ietf-moq-transport-22
+        section 5.2), which the writer enforces; 0 means none, and values above 2147483647 are clamped.
         ``write_timeout`` (seconds) bounds relay demand and the transport write together.
         """
         # Arguments first, then connection state, then the registry.

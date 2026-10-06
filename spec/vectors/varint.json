@@ -1,8 +1,8 @@
 {
-  "description": "MOQT variable-length integers as specified in draft-ietf-moq-transport-20 §1.4.1. The number of leading 1 bits in the first byte is the encoded length minus one (1 to 9 bytes); the remaining bits of the first byte and every following byte carry the value in network byte order. This is MOQT's own scheme, not the RFC 9000 QUIC varint.",
+  "description": "MOQT variable-length integers as specified in draft-ietf-moq-transport-22 §8.1. The number of leading 1 bits in the first byte is the encoded length minus one (1 to 9 bytes); the remaining bits of the first byte and every following byte carry the value in network byte order. This is MOQT's own scheme, not the RFC 9000 QUIC varint.",
   "sources": [
-    "minimal: the examples in draft-ietf-moq-transport-20 §1.4.1 Table 2, plus the smallest and largest value of each encoded length derived from the encoding rules",
-    "nonMinimal: the two-byte encoding of 37 from draft-ietf-moq-transport-20 §1.4.1 Table 2, plus zero at longer lengths",
+    "minimal: the examples in draft-ietf-moq-transport-22 §8.1 Table 4, plus the smallest and largest value of each encoded length derived from the encoding rules",
+    "nonMinimal: the two-byte encoding of 37 from draft-ietf-moq-transport-22 §8.1 Table 4, plus zero at longer lengths",
     "beyond53Bits: derived; values above 2^53-1 exercise implementations without exact 64-bit integers"
   ],
   "minimal": [

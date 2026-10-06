@@ -32,7 +32,7 @@ from moq_core import (
     Subscription,
     SubscriptionHandlers,
 )
-from moq_core.control_messages import encode_request_update
+from moq_core.control_messages import MOQT_PROTOCOL_ID, MoqtProtocolId, encode_request_update
 
 from ._awaitable import RelayAwaitable
 from .errors import RelayError
@@ -42,7 +42,7 @@ _log = logging.getLogger("mux_relay")
 UPDATE_QUEUE_BOUND = 8
 """How many ``update()`` calls may wait for SUBSCRIBE_OK.
 
-REQUEST_UPDATE is legal only on an accepted subscription (draft-ietf-moq-transport-20 §5.1), so
+REQUEST_UPDATE is legal only on an accepted subscription (draft-ietf-moq-transport-22 §3.1), so
 earlier updates queue in order.
 """
 
@@ -176,6 +176,8 @@ class SubscriptionDependencies:
     transport_ended: Callable[[], bool]
     """Whether the transport has already ended, before the session has reported the closure. A
     transport that cannot say answers ``False``."""
+    protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+    """The connection's negotiated MOQT version, which ``update()`` encodes for."""
 
 
 class SubscriptionOverflowError(RelayError):
@@ -277,6 +279,7 @@ class RelaySubscription(Subscription):
         "_end",
         "_ended",
         "_ended_awaitable",
+        "_protocol",
         "_queued_updates",
         "_remove_closed",
         "_subscribed",
@@ -294,6 +297,7 @@ class RelaySubscription(Subscription):
         self._core: Subscription | None = None
         self._remove_closed: Callable[[], None] = lambda: None
         self._transport_ended = dependencies.transport_ended
+        self._protocol: MoqtProtocolId = dependencies.protocol
         self._subscribed: asyncio.Future[SubscribeOk] = loop.create_future()
         # Nobody may await readiness; a failure must not be reported as an unretrieved exception.
         _observe(self._subscribed)
@@ -379,7 +383,7 @@ class RelaySubscription(Subscription):
         # flush on SUBSCRIBE_OK, so it is encoded exactly as the flush will encode it. The queue
         # holds a snapshot, so later mutation of the caller's object cannot change what is sent, as
         # an immediate send would have serialized it at once.
-        encode_request_update(self._handle().request_id, parameters)
+        encode_request_update(self._handle().request_id, parameters, self._protocol)
         self._queued_updates.append(deepcopy(parameters))
 
     def cancel(self, reason: object = None) -> None:

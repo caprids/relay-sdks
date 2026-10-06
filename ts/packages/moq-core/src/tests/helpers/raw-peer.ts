@@ -11,6 +11,8 @@ import {
   decodeControlMessage,
   encodeSubscribe,
   encodeSubscribeNamespace,
+  MOQT_PROTOCOL_ID,
+  type MoqtProtocolId,
   type TrackNamespace,
 } from '../../protocol/control-messages.js';
 import type { MoqtTransport } from '../../protocol/session.js';
@@ -34,7 +36,7 @@ export interface RawRequest {
    * response-side write failure test needs.
    */
   abandonReads: () => Promise<void>;
-  /** FIN the peer's side — half-closure, NOT a withdrawal (§3.3.2). */
+  /** FIN the peer's side — half-closure, NOT a withdrawal (§6.4.2.2). */
   fin: () => Promise<void>;
   /** Reset the peer's side — the actual withdrawal signal. The reader sees `reason` as its stream error. */
   reset: (reason?: unknown) => Promise<void>;
@@ -102,21 +104,25 @@ export function rawSubscribe(
   server: MoqtTransport,
   trackNamespace: TrackNamespace,
   trackName: string,
-  requestId: number
+  requestId: number,
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
 ): Promise<RawRequest> {
   return openRawRequest(
     server,
-    encodeSubscribe({
-      requestId,
-      trackNamespace,
-      trackName,
-      parameters: {
-        forward: 1,
-        subscriberPriority: 0,
-        locationFilter: { type: 'next-object' },
-        fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
-        groupOrder: 'descending',
+    encodeSubscribe(
+      {
+        requestId,
+        trackNamespace,
+        trackName,
+        parameters: {
+          forward: 1,
+          subscriberPriority: 0,
+          locationFilter: { type: 'next-object' },
+          fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
+          groupOrder: 'descending',
+        },
       },
-    })
+      protocol
+    )
   );
 }

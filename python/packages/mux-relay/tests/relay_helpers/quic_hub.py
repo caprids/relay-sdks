@@ -19,7 +19,7 @@ from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import QuicConnection
 from cryptography.hazmat.primitives import serialization
 
-from moq_core import MOQT_PROTOCOL_ID
+from moq_core import MOQT_PROTOCOL_IDS
 from mux_relay import ConnectingTransport
 from mux_relay.quic import connect_quic
 
@@ -86,7 +86,9 @@ class HubServer:
 
 async def start_hub_server(hub: RelayHub, role: Role) -> HubServer:
     certificate, key, _ = generate_leaf_certificate()
-    configuration = QuicConfiguration(is_client=False, alpn_protocols=[MOQT_PROTOCOL_ID], idle_timeout=IDLE_TIMEOUT)
+    configuration = QuicConfiguration(
+        is_client=False, alpn_protocols=list(MOQT_PROTOCOL_IDS), idle_timeout=IDLE_TIMEOUT
+    )
     configuration.certificate = certificate
     configuration.private_key = key
     sessions: list[NativeQuicSession] = []

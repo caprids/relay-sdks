@@ -11,16 +11,17 @@ for the SDK core to behave as `behavior.md` says. Until now that was only the Ty
 The protocols underneath are the authority. This contract adds no wire behaviour and overrides
 nothing in them. It only narrows what an adapter exposes at the seam the core depends on:
 
-- [draft-ietf-moq-transport-20] (MOQT, wire identifier `moqt-20`, pinned in `protocol.json`)
+- [draft-ietf-moq-transport-22] (MOQT, wire identifier `moqt-22`, pinned in `protocol.json`, with
+  `moqt-20` offered as a fallback)
 - [RFC 9000] (QUIC streams, RESET_STREAM, STOP_SENDING, MAX_STREAMS, acknowledgement)
 - [RFC 7301] (ALPN)
 - [draft-ietf-webtrans-http3] and the [W3C WebTransport] API, for a WebTransport session
 
 Every rule cites the upstream section it narrows. If a rule seems to conflict with one of these
 specifications, the specification wins and the rule is a bug in this document. TA-27 is the one
-exception: on native QUIC it follows moq-relay's stream error codes, which differ from draft-20.
+exception: on native QUIC it follows moq-relay's stream error codes, which differ from draft-22.
 
-[draft-ietf-moq-transport-20]: https://datatracker.ietf.org/doc/draft-ietf-moq-transport/20/
+[draft-ietf-moq-transport-22]: https://datatracker.ietf.org/doc/draft-ietf-moq-transport/22/
 [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000
 [RFC 7301]: https://www.rfc-editor.org/rfc/rfc7301
 [draft-ietf-webtrans-http3]: https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/
@@ -54,7 +55,7 @@ acknowledgement) and are normative for the TypeScript SDK, whose binding is the 
 and where its aioquic adapter differs today. It is informative.
 
 Datagrams are outside the contract. MOQT requires the QUIC DATAGRAM extension
-(draft-20 §3.1), and the QUIC stack negotiates it, but the core never sends or reads datagrams.
+(draft-22 §6.2), and the QUIC stack negotiates it, but the core never sends or reads datagrams.
 
 ## TypeScript binding
 
@@ -89,16 +90,16 @@ connection. An adapter that declares nothing is a WebTransport session.
 
 **TA-2.** On a WebTransport session the adapter MUST send the extended CONNECT to the URL exactly
 as it was given, path and query included, so the token reaches the relay in the `jwt` query
-parameter (draft-20 §3.1.4; draft-ietf-webtrans-http3 §3).
+parameter (draft-22 §6.2.1; draft-ietf-webtrans-http3 §3).
 
 **TA-3.** On native QUIC the adapter MUST connect to the URL's host and port (443 when the URL gives
-none), with the host as the TLS server name (draft-20 §3.1.3, §3.1.5). It MUST NOT send the URL's
+none), with the host as the TLS server name (draft-22 §6.1.2, §6.2.2). It MUST NOT send the URL's
 path or query anywhere, and MUST NOT read, validate or log them: the path and the token travel only
 in the core's SETUP (TA-6).
 
 **TA-4.** The adapter MUST accept the `https:` URL the core hands it, in every framing. It MUST NOT
 require a `moqt:` URL.
-**Why:** callers pass the same URL in every runtime (#186). draft-20 §3.1.4 derives the `https` URI
+**Why:** callers pass the same URL in every runtime (#186). draft-22 §6.2.1 derives the `https` URI
 from a `moqt` one by changing the scheme, so they name the same server.
 
 ### Version negotiation
@@ -106,14 +107,14 @@ from a `moqt` one by changing the scheme, so they name the same server.
 **TA-5.** The adapter MUST offer exactly the factory's `protocols`, in the order given: as
 `WT-Available-Protocols` on a WebTransport session (draft-ietf-webtrans-http3 §3.3), as the ALPN
 list on native QUIC (RFC 7301 §3.1). On native QUIC it MUST NOT add `h3` or any other ALPN, even
-though draft-20 §3.1.3 lets a client offer `h3` beside its MOQT ALPNs.
+though draft-22 §6.1.2 lets a client offer `h3` beside its MOQT ALPNs.
 **Why:** the SDK speaks one MOQT version. A fallback to `h3` would turn a native QUIC adapter into
 a WebTransport session it cannot run.
 
 **TA-6.** On native QUIC the core, not the adapter, sends the AUTHORITY setup option (the URL's
 authority) and the PATH setup option (the URL's path-abempty, then `?` and the query when present,
 the resolved `jwt` included) in CLIENT_SETUP. On a WebTransport session it MUST NOT send either
-(draft-20 §10.3.1.1, §10.3.1.2).
+(draft-22 §9.1.1, §9.1.2).
 The cases, from the URL and token to the exact option values, are in
 `vectors/setup-options.json`.
 
@@ -147,7 +148,7 @@ unhandled. Resolving for any application close code matches W3C WebTransport, wh
 CLOSE_WEBTRANSPORT_SESSION capsule resolves `closed` with its code.
 
 **TA-10.** `close({ closeCode, reason })` MUST end the session with that code and reason, using the
-framing's own close (draft-20 §3.5). It MUST be idempotent, and MUST NOT throw, including after the
+framing's own close (draft-22 §6.6). It MUST be idempotent, and MUST NOT throw, including after the
 session has ended. A missing `closeCode` means 0 and a missing `reason` means empty.
 **Why:** the core closes from teardown paths that cannot tell whether the session already ended.
 
@@ -198,7 +199,7 @@ NOT depend on the reason's class or name. A runtime's native `WebTransport` read
 a native `WebTransportError` reason and resets with 0 for any other (see
 [Known deviations](#known-deviations)), so where that global exists the core MUST hand over a
 `WebTransportError` (`streamResetReason` in `stream-reset.ts` does).
-**Why:** the core sends MOQT stream reset codes (draft-20 §3.3.4) as `streamErrorCode` on the
+**Why:** the core sends MOQT stream reset codes (draft-22 §12.5) as `streamErrorCode` on the
 reason it hands over (`stream-reset.ts`, `write-slot.ts`): a native `WebTransportError` in a browser,
 the SDK's own `MoqtStreamError`, which has the TA-22 shape, elsewhere. 2³²−1 is the largest code a
 WebTransport session can carry, so the range is the same in both framings. A conformance test for this rule against a browser hands
@@ -215,8 +216,8 @@ be discarded (RFC 9000 §3.2).
 peer's code. `writer.closed` MUST reject with it **even when no write or close is in flight**, and
 the next write or close MUST reject with it. The adapter's QUIC stack answers the stop with a
 RESET_STREAM as RFC 9000 §3.5 requires.
-**Why:** the relay stops a subgroup stream when its group is no longer of interest (draft-20
-§11.4). The write slot hears of it through `writer.closed` between writes (`isStreamStop`,
+**Why:** the relay stops a subgroup stream when its group is no longer of interest (draft-22
+§11.3.2). The write slot hears of it through `writer.closed` between writes (`isStreamStop`,
 `write-slot.ts`) and reports `SUBSCRIPTION_CHANGED`. A stop that surfaced only on the next write
 would be reported late, or never on an idle track.
 
@@ -244,8 +245,8 @@ be mapped. This rule does not apply to a WebTransport session, whose runtime map
 read the codes the core sends. moq-relay reaches raw QUIC through web-transport-moq, whose stream
 wrappers map every reset and stop code through `error_to_http3` and `error_from_http3` (moq-relay
 0.17.0 uses web-transport-moq 1.3.3, `send.rs` and `recv.rs`), while its session close stays raw.
-draft-20 puts stream codes on native QUIC unmapped (§3.3.4, RFC 9000 §19.4, §19.5), so this follows
-the relay rather than the draft (#248). Decoding is lenient: a peer that sends draft-20's raw codes
+draft-22 puts stream codes on native QUIC unmapped (§12.5, RFC 9000 §19.4, §19.5), so this follows
+the relay rather than the draft (#248). Decoding is lenient: a peer that sends the draft's raw codes
 is still read correctly, since none of them reaches the range. The encoding on the way out is what
 would have to change if web-transport-moq stopped mapping on raw QUIC.
 **Evidence:** on 2026-10-05, production 0.17.0 reset forwarded subgroups with `0x52E4A40FA8DC`
@@ -280,7 +281,7 @@ rejection is exempt only because it is a create rejection, which the core never 
 
 **TA-24.** A session error that reports the peer's close SHOULD carry the peer's `closeCode` and
 `reason`. A session error for a lost connection carries neither.
-**Why:** a refusal for credentials is a peer close with MOQT's UNAUTHORIZED code (draft-20 §3.5),
+**Why:** a refusal for credentials is a peer close with MOQT's UNAUTHORIZED code (draft-22 §12.2),
 which the SDK reports as `UNAUTHORIZED` while connecting. Browsers did not expose it against relays
 before moq-relay 0.17.0 (#14), so it is not a MUST.
 
@@ -307,7 +308,7 @@ The contract has two sides. Against an adapter that follows the rules above, the
   `ready` is never unhandled;
 - sends PATH and AUTHORITY only on native QUIC (TA-6), and fails the connection with
   `TRANSPORT_ERROR`, closing the transport, when `framing` is neither value TA-1 allows;
-- checks `protocol` after `ready` and, unless it is `moqt-20`, fails the connection with
+- checks `protocol` after `ready` and, unless it is one it offered (`moqt-22` or `moqt-20`), fails the connection with
   `TRANSPORT_ERROR` in phase `connecting`, naming the protocol received (or "none"), closes the
   transport and never sends CLIENT_SETUP (TA-7, TA-8);
 - classifies errors by `source`, not by class or name, and hands over `streamErrorCode` on the
@@ -359,7 +360,7 @@ adapters MUST NOT copy them.
 - **Chromium 8-bit send codes (TA-17, TA-18).** Chromium's `WebTransportError` constructor clamps
   `streamErrorCode` to 255, so a reset or a stop it sends carries at most 255. Codes it receives are
   not limited: a peer reset with 2³²−1 arrives intact (TA-19). This is harmless today, since every
-  stream reset code the core sends is 0x12 or below (draft-20 §3.3.4).
+  stream reset code the core sends is 0x12 or below (draft-22 §12.5).
   **Evidence:** in Chromium 147.0.7727.15,
   `new WebTransportError({ message, streamErrorCode: 256 }).streamErrorCode` is 255, and the
   conformance suite's peer sees 255 for a reset or stop sent with 256, 65536 or 2³²−1.

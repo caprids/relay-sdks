@@ -25,7 +25,7 @@ from relay_helpers.quic_hub import HubServer, start_quic_hub
 from relay_helpers.quic_server import LoopbackQuicServer, start_quic_server
 from relay_helpers.relay_hub import RelayHub, create_relay_hub
 
-from moq_core import MoqtObject
+from moq_core import MOQT_PROTOCOL_ID, MoqtObject
 from moq_core.transport import ReceiveStream, SendStream
 from mux_relay import (
     RelayError,
@@ -84,7 +84,7 @@ class TestSendBackpressure:
     """
 
     async def _connect(self, server: LoopbackQuicServer) -> Any:
-        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
+        created = connect_quic(server.url_for("/sink"), [MOQT_PROTOCOL_ID], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         return created.transport
 
@@ -543,7 +543,7 @@ class TestKeepalive:
         monkeypatch.setattr(_protocol, "_KEEPALIVE_INTERVAL", self.INTERVAL)
 
     async def _connect(self, server: LoopbackQuicServer) -> tuple[Any, list[float]]:
-        created = connect_quic(server.url_for("/idle"), ["moqt-20"], configuration=server.client_configuration())
+        created = connect_quic(server.url_for("/idle"), [MOQT_PROTOCOL_ID], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         transport: Any = created.transport
         protocol = transport._protocol
@@ -704,7 +704,7 @@ class TestClosedPort:
     async def test_the_socket_stays_unconnected_and_stops_reporting_after_the_handshake(self) -> None:
         sessions: list[Any] = []
         server = await start_quic_server(sessions.append)
-        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
+        created = connect_quic(server.url_for("/sink"), [MOQT_PROTOCOL_ID], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         transport: Any = created.transport
         sock = transport._protocol._transport.get_extra_info("socket")
@@ -722,7 +722,7 @@ class TestClosedPort:
 
     @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="only Linux reports ICMP to an unconnected socket")
     async def test_a_refused_connect_leaves_no_error_report_to_spin_on(self) -> None:
-        created = connect_quic(f"https://127.0.0.1:{_closed_udp_port()}", ["moqt-20"])
+        created = connect_quic(f"https://127.0.0.1:{_closed_udp_port()}", [MOQT_PROTOCOL_ID])
 
         with pytest.raises(QuicTransportError):
             await asyncio.wait_for(created.ready, 2)
@@ -744,7 +744,7 @@ class TestClosedPort:
     async def test_an_error_ignored_during_the_handshake_is_drained(self) -> None:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as blackhole:
             blackhole.bind(("127.0.0.1", 0))
-            created = connect_quic(f"https://127.0.0.1:{blackhole.getsockname()[1]}", ["moqt-20"])
+            created = connect_quic(f"https://127.0.0.1:{blackhole.getsockname()[1]}", [MOQT_PROTOCOL_ID])
             transport: Any = created.transport
             await wait_for(lambda: transport._transport_protocol() is not None, timeout=2)
             protocol = transport._transport_protocol()
@@ -778,7 +778,7 @@ class TestClosedPort:
     async def test_a_refusal_after_the_handshake_changes_nothing(self) -> None:
         sessions: list[Any] = []
         server = await start_quic_server(sessions.append)
-        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
+        created = connect_quic(server.url_for("/sink"), [MOQT_PROTOCOL_ID], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         transport: Any = created.transport
         protocol = transport._protocol
@@ -802,7 +802,7 @@ class TestReceivePruning:
     """Per-stream state for peer-initiated streams is dropped once aioquic discards the stream."""
 
     async def _connect(self, server: LoopbackQuicServer) -> Any:
-        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
+        created = connect_quic(server.url_for("/sink"), [MOQT_PROTOCOL_ID], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         return created.transport
 
@@ -903,7 +903,7 @@ class TestReceiveBatching:
     async def test_waiting_datagrams_share_one_transmit_and_are_still_acknowledged(self) -> None:
         sessions: list[Any] = []
         server = await start_quic_server(sessions.append)
-        created = connect_quic(server.url_for("/sink"), ["moqt-20"], configuration=server.client_configuration())
+        created = connect_quic(server.url_for("/sink"), [MOQT_PROTOCOL_ID], configuration=server.client_configuration())
         await asyncio.wait_for(created.ready, 5)
         transport: Any = created.transport
         await wait_for(lambda: len(sessions) == 1, timeout=5)

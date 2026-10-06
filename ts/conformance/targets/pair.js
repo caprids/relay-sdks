@@ -132,7 +132,7 @@ export function createPairTarget() {
       let dialled;
       return {
         peer: createPairPeer(factory),
-        dial({ path = '/conformance', protocols = ['moqt-20'] } = {}) {
+        dial({ path = '/conformance', protocols = ['moqt-22'] } = {}) {
           const url = ORIGIN + path;
           dialled = factory.createTransport(url, protocols);
           return { ...dialled, url };

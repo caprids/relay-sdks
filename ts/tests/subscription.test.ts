@@ -6,6 +6,7 @@
 import {
   encodeRequestUpdate,
   type MessageParameters,
+  MOQT_PROTOCOL_ID,
   type RequestError,
   type SubscriptionHandlers,
 } from '@mux/moq-core';
@@ -68,7 +69,7 @@ function harness(options: { closedAlready?: unknown; subscribeThrows?: unknown; 
     return remove;
   });
   return {
-    deps: { subscribe, observeClosed },
+    deps: { subscribe, protocol: MOQT_PROTOCOL_ID, observeClosed },
     /** The transport's closed settles; the session reacts and reports the connection ended. */
     endTransport: (error: unknown) => {
       void Promise.reject(error).catch((reason: unknown) => observer?.(reason));
@@ -345,6 +346,7 @@ describe('subscription: endings', () => {
         handlers.onError?.(requestError);
         return { requestId: 1, cancel, update() {} };
       },
+      protocol: MOQT_PROTOCOL_ID,
       observeClosed: () => () => {},
     };
     const r = recorder();

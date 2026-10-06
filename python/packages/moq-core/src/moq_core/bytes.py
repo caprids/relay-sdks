@@ -47,7 +47,7 @@ class ByteReader:
         return value
 
     def read_count_varint(self) -> int | None:
-        """Read a count whose "unknown" sentinel is the maximal varint 2^64-1 (PUBLISH_DONE's Stream Count, §10.12).
+        """Read a count whose "unknown" sentinel is the maximal varint 2^64-1 (PUBLISH_DONE's Stream Count, §9.9).
 
         Exactly that sentinel reads as ``None``; every other value is returned as is.
         """

@@ -1,11 +1,11 @@
 /**
- * Publish-capable MOQT session (moq-transport draft-20), the publish-side sibling of `network/moqt/session.ts`'s
+ * Publish-capable MOQT session (moq-transport draft-22), the publish-side sibling of `network/moqt/session.ts`'s
  * subscribe-only driver.
  *
  * Owns the protocol mechanics over an established transport: the SETUP exchange on paired unidirectional control
- * streams (§3.3), and the announce-and-serve ingest flow — answering the peer's SUBSCRIBE_NAMESPACE solicitation with
- * REQUEST_OK and a NAMESPACE entry for the announced namespace (§10.19, §10.17), then serving the per-track SUBSCRIBEs the
- * peer routes back (answered with SUBSCRIBE_OK carrying a publisher-assigned track alias, §10.8) for as long as each
+ * streams (§6.3), and the announce-and-serve ingest flow — answering the peer's SUBSCRIBE_NAMESPACE solicitation with
+ * REQUEST_OK and a NAMESPACE entry for the announced namespace (§9.15, §9.16), then serving the per-track SUBSCRIBEs the
+ * peer routes back (answered with SUBSCRIBE_OK carrying a publisher-assigned track alias, §9.7) for as long as each
  * subscription's request stream stays open.
  *
  * Flow choice: the publisher initiates no request streams at all. moq-relay 0.14.7 removed PUBLISH-based ingest
@@ -14,9 +14,9 @@
  * NAMESPACE entries (suffix-relative, parameterless — the relay treats even an empty parameter count as malformed);
  * data flows only on aliases bound by our own SUBSCRIBE_OKs, per subscription.
  *
- * Teardown follows draft-20: every end of an Established subscription the publisher chooses resets the subscription's
+ * Teardown follows draft-22: every end of an Established subscription the publisher chooses resets the subscription's
  * still-open data streams, then writes PUBLISH_DONE (status, the number of data streams opened for it, reason) and FINs
- * the request stream (§3.3.2, §10.12). moq-relay 0.15.4 and later require that PUBLISH_DONE, and treat a bare FIN as a
+ * the request stream (§6.4.2.2, §9.9). moq-relay 0.15.4 and later require that PUBLISH_DONE, and treat a bare FIN as a
  * failed request; 0.15.1 to 0.15.3 abort the track on any byte after SUBSCRIBE_OK, PUBLISH_DONE included, so this core
  * needs a relay at 0.15.4 or later for a clean end. An orderly `close()` holds the transport open, bounded, until the
  * peer closes its side of each ended request stream, which moq-relay does only after it has read the PUBLISH_DONE and
@@ -44,8 +44,10 @@ import {
   MAX_CONTROL_MESSAGE_LENGTH,
   MESSAGE_TYPE,
   type MessageParameters,
+  type MoqtProtocolId,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
+  resolveMoqtProtocol,
   SETUP_OPTION,
   STREAM_RESET_CODE,
   type TrackNamespace,
@@ -110,8 +112,8 @@ export interface MoqtPublishSessionCallbacks {
   onTrackBinding?(info: { trackName: string; trackAlias: number | undefined }): void;
   /**
    * REQUEST_UPDATE on an inbound request stream. `requestId` is the request being updated (the stream's SUBSCRIBE or
-   * SUBSCRIBE_NAMESPACE); `updateRequestId` is the update's own, freshly consumed Request ID (§10.1). A subscription
-   * update may carry Forward State, a subscriber priority and the two delivery timeouts (§8), which the session leaves
+   * SUBSCRIBE_NAMESPACE); `updateRequestId` is the update's own, freshly consumed Request ID (§6.4.2.1). A subscription
+   * update may carry Forward State, a subscriber priority and the two delivery timeouts (§5.2), which the session leaves
    * to its caller; one carrying anything else is answered with REQUEST_ERROR and ends the subscription.
    */
   onRequestUpdate?(info: { requestId: number; updateRequestId: number; parameters: MessageParameters }): void;
@@ -123,7 +125,7 @@ export interface MoqtPublishSessionCallbacks {
 export interface MoqtPublishSessionConfig {
   /** Extra Setup Options to send (an implementation identifier is added automatically). */
   setupOptions?: KeyValuePair[];
-  /** Identifies this implementation in SETUP (§10.3.1.5). */
+  /** Identifies this implementation in SETUP (§9.1.5). */
   implementationName?: string;
   /** Session event callbacks. */
   callbacks?: MoqtPublishSessionCallbacks;
@@ -131,7 +133,7 @@ export interface MoqtPublishSessionConfig {
 
 /**
  * The largest encoded track property block every SUBSCRIBE_OK this session sends can carry. The
- * properties ride in SUBSCRIBE_OK, a control message whose length field is 16 bits (§10). The rest
+ * properties ride in SUBSCRIBE_OK, a control message whose length field is 16 bits (§9). The rest
  * of its body is the track alias, a varint of up to 9 bytes on the wire (it is the peer's request
  * ID, so it is unknown until a subscription arrives), and the count of message parameters, of which
  * this session sends none (1 byte). A longer block registers but can never answer a subscription.
@@ -176,7 +178,7 @@ export interface MoqtPublishSession {
   /**
    * Open a unidirectional data stream for the live subscription bound to `trackAlias`. The stream counts toward that
    * subscription's PUBLISH_DONE Stream Count, and a stream still open when the subscription ends is reset before
-   * PUBLISH_DONE is written (§10.12). Rejects once the session is closing, when no live subscription holds the alias,
+   * PUBLISH_DONE is written (§9.9). Rejects once the session is closing, when no live subscription holds the alias,
    * and when the subscription ends while the stream is opening (the stream is reset first).
    */
   openUniStream(trackAlias: number): Promise<WritableStream<Uint8Array>>;
@@ -228,11 +230,11 @@ interface SubscriberStream {
   forwarding: boolean;
   /** The subscription is ending or over; no new data stream may open on its alias. */
   finished: boolean;
-  /** Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§10.12). */
+  /** Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§9.9). */
   streamCount: number;
   /** Data streams opened for this subscription that the caller has not closed yet; each entry resets its stream. */
   dataStreams: Set<() => void>;
-  /** Data-stream opens in flight; PUBLISH_DONE waits for them to settle (§10.12). */
+  /** Data-stream opens in flight; PUBLISH_DONE waits for them to settle (§9.9). */
   opening: Set<Promise<void>>;
   /**
    * Settles once the peer's direction of the request stream ends (FIN or reset) or the session tears it down.
@@ -243,7 +245,7 @@ interface SubscriberStream {
 }
 
 /**
- * The reason handed to a data stream the session resets when its subscription ends (§3.3.4 CANCELLED): a
+ * The reason handed to a data stream the session resets when its subscription ends (§12.5 CANCELLED): a
  * WebTransportError in a browser, which is the only form WebTransport reads the code from.
  */
 function dataStreamReset(): unknown {
@@ -357,6 +359,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   readonly ready: Promise<void>;
 
   #transport: MoqtTransport;
+  /** The negotiated draft, which selects the parameter codec. */
+  #protocol: MoqtProtocolId;
   #config: MoqtPublishSessionConfig;
   #callbacks: MoqtPublishSessionCallbacks;
 
@@ -369,7 +373,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
    */
   #pendingNamespacePrefixes = new Set<TrackNamespace>();
   /**
-   * Every inbound request ID ever seen. Reuse closes the session with INVALID_REQUEST_ID (§10.1), and because aliases ARE the peer's
+   * Every inbound request ID ever seen. Reuse closes the session with INVALID_REQUEST_ID (§6.4.2.1), and because aliases ARE the peer's
    * request IDs, a reused ID would hand two subscriptions the same alias and make their subgroup streams
    * indistinguishable — session-fatal, per the draft.
    */
@@ -391,6 +395,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
   constructor(transport: MoqtTransport, config: MoqtPublishSessionConfig = {}) {
     this.#transport = transport;
+    this.#protocol = resolveMoqtProtocol(transport.protocol);
     this.#config = config;
     this.#callbacks = config.callbacks ?? {};
     this.ready = new Promise((resolve, reject) => {
@@ -425,7 +430,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
       this.#controlWriter = control.getWriter();
       // A control stream MUST stay open for the session's lifetime
-      // (§3.3) — a peer stopping it has ended the session, so fail now
+      // (§6.3) — a peer stopping it has ended the session, so fail now
       // rather than on the next control write or the transport's own
       // `closed` (~an RTT later); the gap is long enough for a busy
       // publisher to keep churning streams against a dying transport.
@@ -736,7 +741,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   /**
-   * End an Established subscription from the publisher side (§3.3.2, §10.12). Marks it finished at once, so no new
+   * End an Established subscription from the publisher side (§6.4.2.2, §9.9). Marks it finished at once, so no new
    * data stream opens on its alias. Then, in order: wait for data-stream opens in flight, reset every data stream the
    * caller has not closed (a caller that follows the binding has closed them already), write `preceding` (a
    * REQUEST_ERROR answering a failed update) and PUBLISH_DONE with the subscription's Stream Count, and FIN. Settles
@@ -871,7 +876,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     const low = await reader.readUint8();
     const body = await reader.readBytes(high * 256 + low);
 
-    return decodeControlMessage({ type, body });
+    return decodeControlMessage({ type, body }, this.#protocol);
   }
 
   async #runControlStream(reader: StreamReader): Promise<void> {
@@ -901,7 +906,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       this.#callbacks.onGoaway?.(message);
     }
 
-    // A closed control stream ends the session (§3.3).
+    // A closed control stream ends the session (§6.3).
     if (!this.#destroyed) {
       this.#fatal(new MoqtProtocolError('peer closed its control stream'));
     }
@@ -981,7 +986,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   /**
-   * Request IDs are consumed once per session (§10.1) — by every request-initiating message and, since draft-20 gave it
+   * Request IDs are consumed once per session (§6.4.2.1) — by every request-initiating message and, since draft-20 gave it
    * an id of its own, by REQUEST_UPDATE. This endpoint is always the client, so the peer's ids are odd; a reused id or
    * an even one closes the session with INVALID_REQUEST_ID.
    */
@@ -1000,7 +1005,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   /**
    * A peer's namespace solicitation — the announce carrier. Accepted with REQUEST_OK, then held open for the session's
    * lifetime: NAMESPACE / NAMESPACE_DONE entries for every announced namespace under the prefix ride this stream. A
-   * clean requester-side FIN is half-closure, not withdrawal (§3.3.2); only a reset (or a rejected update, §10.9.1)
+   * clean requester-side FIN is half-closure, not withdrawal (§6.4.2.2); only a reset (or a rejected update, §9.5.1)
    * ends the carrier, and its loss while the announce is live means the peer refused or withdrew the ingest path.
    */
   async #handleSubscribeNamespace(
@@ -1011,7 +1016,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     const writer = stream.writable.getWriter();
     const prefix = subscribeNamespace.trackNamespacePrefix;
 
-    // §10.18: a solicitation overlapping an established one (either
+    // §9.17: a solicitation overlapping an established one (either
     // prefix containing the other) is refused with PREFIX_OVERLAP —
     // announcing on both would hand the peer duplicate namespace state
     // with inconsistent withdrawals.
@@ -1042,7 +1047,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     let accepted = false;
 
     try {
-      await writer.write(encodeRequestOk());
+      await writer.write(encodeRequestOk({}, this.#protocol));
       accepted = true;
     } catch {
       // Peer cancelled before the acceptance landed.
@@ -1079,9 +1084,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
           this.#callbacks.onGoaway?.(message);
         } else if (message.kind === 'request-update') {
           this.#claimPeerRequestId(message.requestId);
-          // Namespace subscriptions may legally be updated (§10.9). v1
+          // Namespace subscriptions may legally be updated (§9.5). v1
           // applies none of it (a prefix change would re-base every
-          // entry), so per §10.9.1 the update is answered with an error
+          // entry), so per §9.5.1 the update is answered with an error
           // and the request stream closes below — never session-fatal
           // (only the reused Request ID above is).
           this.#callbacks.onRequestUpdate?.({
@@ -1100,7 +1105,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       }
 
       if (!failedUpdate) {
-        // A clean requester-side FIN is NOT a cancellation (§3.3.2 — the
+        // A clean requester-side FIN is NOT a cancellation (§6.4.2.2 — the
         // peer merely commits to sending no updates): the response side
         // keeps carrying NAMESPACE entries until a reset or the
         // transport ends, so the carrier stays registered and open.
@@ -1145,7 +1150,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // left waiting on a request that never gets an answer.
     let subscribeOk: Uint8Array;
     try {
-      subscribeOk = encodeSubscribeOk(trackAlias, {}, track.trackProperties);
+      subscribeOk = encodeSubscribeOk(trackAlias, {}, track.trackProperties, this.#protocol);
     } catch (error) {
       // The encoder refused the response; the peer did nothing wrong.
       await refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, 'could not encode SUBSCRIBE_OK');
@@ -1242,7 +1247,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
         if (message.kind === 'request-update') {
           this.#claimPeerRequestId(message.requestId);
-          // The delivery timeouts (§8) are applied by the caller, through `onRequestUpdate`, to the groups it opens
+          // The delivery timeouts (§5.2) are applied by the caller, through `onRequestUpdate`, to the groups it opens
           // afterwards.
           const {
             forward,
@@ -1282,7 +1287,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
               // too), and the caller applies the delivery timeouts;
               // anything else ends this request honestly: the
               // update's REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED
-              // (§10.9.1).
+              // (§9.5.1).
               this.#endSubscription(
                 track,
                 subscriber,
@@ -1303,7 +1308,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
               // completion (`onUpdateOk`). Strictly reactive: a peer that
               // never sends REQUEST_UPDATE (moq-relay 0.15.8 writes nothing
               // after SUBSCRIBE until it cancels) never sees a trailing byte.
-              void writer.write(encodeRequestOk()).catch(() => {});
+              void writer.write(encodeRequestOk({}, this.#protocol)).catch(() => {});
             }
           }
         } else if (message.kind === 'goaway') {
@@ -1317,7 +1322,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       // The peer FINed its direction while the subscription was still ours
       // to end. moq-relay (0.15.8 `cancel_subscribe`) pairs that FIN with
       // STOP_SENDING (a cancellation, so the write fails harmlessly); a
-      // peer that only half-closes still gets the PUBLISH_DONE §3.3.2
+      // peer that only half-closes still gets the PUBLISH_DONE §6.4.2.2
       // requires before our FIN. No status names this, so it reports the
       // publisher's own limitation.
       if (!subscriber.finished) {
@@ -1330,9 +1335,9 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       }
     } catch (error) {
       if (isMoqtProtocolError(error)) throw error;
-      // Reset — the subscriber cancelled (§3.3.3); ordinary end-of-request.
+      // Reset — the subscriber cancelled (§6.4.2.3); ordinary end-of-request.
       // A cancelled subscription gets no PUBLISH_DONE, and its open data
-      // streams are reset (§5.1.1).
+      // streams are reset (§3.1.2).
       resetDataStreams(subscriber);
     } finally {
       const alreadyEnding = subscriber.finished;

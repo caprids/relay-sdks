@@ -1,6 +1,6 @@
 /**
  * Delivery timeouts (see CONTEXT.md): the draft's SUBGROUP_DELIVERY_TIMEOUT and OBJECT_DELIVERY_TIMEOUT, as the write
- * slot applies them to one group (draft-ietf-moq-transport-20 §8).
+ * slot applies them to one group (draft-ietf-moq-transport-22 §5.2).
  *
  * Each side has a value for each timeout. The publisher's is the property (0x02 or 0x06) on the group's first object
  * when present, and the track property otherwise; the subscriber's is the parameter on the relay subscription, as
@@ -19,9 +19,9 @@ export interface DeliveryTimeouts {
   subgroupMs: number;
 }
 
-/** Property and parameter type of OBJECT_DELIVERY_TIMEOUT (§10.2.4, §12.2). */
+/** Property and parameter type of OBJECT_DELIVERY_TIMEOUT (§9.20.4, §10.2). */
 export const OBJECT_DELIVERY_TIMEOUT = 0x02;
-/** Property and parameter type of SUBGROUP_DELIVERY_TIMEOUT (§10.2.3, §12.1). */
+/** Property and parameter type of SUBGROUP_DELIVERY_TIMEOUT (§9.20.3, §10.1). */
 export const SUBGROUP_DELIVERY_TIMEOUT = 0x06;
 
 /** No timeout of either kind. */
@@ -37,7 +37,7 @@ function propertyValue(properties: readonly KeyValuePair[], type: number): numbe
 
 /**
  * The publisher's values for a group: each timeout from the group's first object's properties when present there,
- * and from the track's otherwise (§8). Pass the track's own values as `fallback`.
+ * and from the track's otherwise (§5.2). Pass the track's own values as `fallback`.
  */
 export function publisherTimeouts(
   properties: readonly KeyValuePair[],
@@ -51,7 +51,7 @@ export function publisherTimeouts(
 
 /**
  * A subscription's values after `parameters`: each timeout the message carries replaces the previous one, and an
- * absent one keeps it (§10.9: a parameter not present in REQUEST_UPDATE keeps its value).
+ * absent one keeps it (§9.5: a parameter not present in REQUEST_UPDATE keeps its value).
  */
 export function subscriberTimeouts(
   parameters: MessageParameters,
@@ -69,7 +69,7 @@ function smallerNonZero(a: number, b: number): number {
   return set.length === 0 ? 0 : Math.min(MAX_TIMEOUT_MS, ...set);
 }
 
-/** A group's effective timeouts from the publisher's and the subscriber's values (§8). */
+/** A group's effective timeouts from the publisher's and the subscriber's values (§5.2). */
 export function effectiveTimeouts(publisher: DeliveryTimeouts, subscriber: DeliveryTimeouts): DeliveryTimeouts {
   return {
     objectMs: smallerNonZero(publisher.objectMs, subscriber.objectMs),

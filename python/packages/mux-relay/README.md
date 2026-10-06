@@ -62,7 +62,8 @@ with credential handling, the subscribe retry, a deadline, and cleanup on failur
 Before 1.0, a minor version can break the API, and [CHANGELOG.md](../../CHANGELOG.md) says what
 changed. `mux-relay`, `mux-moq-core` and `mux-moq-media` always release together at the same
 version, and `mux-relay` pins `mux-moq-core` exactly. A release supports Python 3.11 or later, and
-MOQT draft 20 (`moqt-20`) only, against moq-relay 0.15.4 or later.
+MOQT draft 22 (`moqt-22`), with draft 20 (`moqt-20`) as an offered fallback, against moq-relay
+0.15.4 or later.
 
 ## Documentation
 

@@ -6,6 +6,7 @@ export type {
   Location,
   LocationFilter,
   MessageParameters,
+  MoqtProtocolId,
   Redirect,
   TrackNamespace,
 } from './protocol/control-messages.js';
@@ -14,6 +15,7 @@ export {
   encodeRequestUpdate,
   MAX_NAMESPACE_FIELDS,
   MOQT_PROTOCOL_ID,
+  MOQT_PROTOCOL_IDS,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
   SETUP_OPTION,

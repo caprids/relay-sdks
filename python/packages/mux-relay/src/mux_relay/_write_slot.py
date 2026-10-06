@@ -12,7 +12,7 @@ acknowledged it: the slot frees itself and passes the group on to the connection
 (see ``CONTEXT.md`` and ``_settling_groups.py``). Only the group's own delivery timeout resets a
 settling group, and nothing reports how it ends.
 
-The slot enforces both delivery timeouts of draft-ietf-moq-transport-20 section 8 (see
+The slot enforces both delivery timeouts of draft-ietf-moq-transport-22 section 5.2 (see
 ``CONTEXT.md``). Each group's values are the smaller non-zero of the publisher's (the 0x02 or 0x06
 property on the group's first object, else the track property) and the subscriber's (the relay
 subscription's parameters, as updated by REQUEST_UPDATE). The subscriber's are fixed when the group's
@@ -61,10 +61,10 @@ MAX_DELIVERY_TIMEOUT_MS = 2_147_483_647
 The SDKs' common timer bound (see Deadline in ``spec/behavior.md``)."""
 
 OBJECT_DELIVERY_TIMEOUT = 0x02
-"""The OBJECT_DELIVERY_TIMEOUT property type (draft-ietf-moq-transport-20 section 12.2)."""
+"""The OBJECT_DELIVERY_TIMEOUT property type (draft-ietf-moq-transport-22 section 10.2)."""
 
 SUBGROUP_DELIVERY_TIMEOUT = 0x06
-"""The SUBGROUP_DELIVERY_TIMEOUT property type (draft-ietf-moq-transport-20 section 12.1)."""
+"""The SUBGROUP_DELIVERY_TIMEOUT property type (draft-ietf-moq-transport-22 section 10.1)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,7 +99,7 @@ def _publisher_timeouts(properties: Sequence[KeyValuePair], fallback: _Timeouts)
 
 
 def _effective_seconds(publisher: int | None, subscriber: int | None) -> float:
-    """§8: the smaller of the non-zero values, clamped, in seconds; 0 when neither sets a timeout."""
+    """§5.2: the smaller of the non-zero values, clamped, in seconds; 0 when neither sets a timeout."""
     values = [value for value in (publisher, subscriber) if value]
     return min(*values, MAX_DELIVERY_TIMEOUT_MS) / 1000 if values else 0.0
 
@@ -117,8 +117,8 @@ def _observe(future: asyncio.Future[Any]) -> None:
 class StreamReset(Exception):
     """The reason handed to a stream reset.
 
-    ``stream_error_code`` is the MOQT reset code the transport sends (draft-ietf-moq-transport-20
-    §3.3.4, registry §15.11.4); the aioquic transport reads it, and in-memory test transports hand the
+    ``stream_error_code`` is the MOQT reset code the transport sends (draft-ietf-moq-transport-22
+    §12.5, registry §16.11.4); the aioquic transport reads it, and in-memory test transports hand the
     reason to the receiver as the reset error. ``__cause__`` is the failure the caller saw.
     """
 
@@ -260,7 +260,7 @@ class _Operation:
     def complete(self, writer: SubgroupStream) -> None:
         """The FIN was handed over: the group settles on the connection's account and the slot is free.
 
-        Its SUBGROUP_DELIVERY_TIMEOUT starts now (§8). If the relay has not acknowledged the FIN when
+        Its SUBGROUP_DELIVERY_TIMEOUT starts now (§5.2). If the relay has not acknowledged the FIN when
         it expires, the stream is reset with DELIVERY_TIMEOUT, and nothing is reported: the group
         leaves the settling set as a late failure.
         """
@@ -276,7 +276,7 @@ class _Operation:
         )
         self.release()
 
-    # ------------------------------------------------------------------ OBJECT_DELIVERY_TIMEOUT (§8)
+    # ------------------------------------------------------------------ OBJECT_DELIVERY_TIMEOUT (§5.2)
 
     def start_object(self, started: float, properties: Sequence[KeyValuePair]) -> None:
         """The application handed over an object at ``started``: its age counts from then, every wait included."""
@@ -306,7 +306,7 @@ class _Operation:
         self.check()
 
     def check_object_age(self) -> None:
-        """The object is about to go to the transport: the §8 check, in case its timer is late.
+        """The object is about to go to the transport: the §5.2 check, in case its timer is late.
 
         The group's first object fixes the publisher's values. An object older than the effective
         OBJECT_DELIVERY_TIMEOUT fails the operation with ``DELIVERY_TIMEOUT`` and resets its stream.
@@ -429,7 +429,7 @@ class _Operation:
             return interrupted, code
         if self.writer is not None and _stream_stopped(error):
             # The relay stopped this operation's own stream: the group is no longer of interest
-            # (§11.4), whether or not its subscription is ending too. The binding alone decides
+            # (§11.3.2), whether or not its subscription is ending too. The binding alone decides
             # whether the next write waits for demand; a later binding change finds no operation.
             stopped = RelayError(
                 "Relay stopped the stream during a write or group; objects may be incomplete",
@@ -570,7 +570,7 @@ class RelayGroupWriter:
         """Reset the group's stream; objects already sent may be incomplete at the peer.
 
         After a clean ``close()`` this has no effect: the FIN already ended the stream, and a reset
-        after complete delivery is ignorable (draft-ietf-moq-transport-20 section 11.4.3).
+        after complete delivery is ignorable (draft-ietf-moq-transport-22 section 11.3.2).
         """
         if self._complete:
             return
@@ -848,13 +848,13 @@ class RelayTrackWriter:
             await settling_groups.wait_for_room(operation.interrupted)
             operation.check()
 
-        # The group's subscriber values are those of the subscription its stream opens on (§8). An
+        # The group's subscriber values are those of the subscription its stream opens on (§5.2). An
         # object already older than the fixed value fails here, before any stream opens.
         operation.fix_subscriber(self._subscriber_timeouts)
         writer = await self._deps.open_subgroup(alias, group_id)
 
         if operation.cancelled:
-            # The stream opened after the failure: reset it before any object is written (§11.4.3).
+            # The stream opened after the failure: reset it before any object is written (§11.3.2).
             writer.abort(StreamReset(operation.code, operation.failure))
             operation.check()
 

@@ -19,8 +19,8 @@ import {
 import type { PublishProperty } from './publish.js';
 
 /**
- * A key-value pair's byte value carries a 16-bit length on the wire (draft-ietf-moq-transport-20
- * §1.4.2), pinned in spec/protocol.json. The core enforces the same bound while encoding.
+ * A key-value pair's byte value carries a 16-bit length on the wire (draft-ietf-moq-transport-22
+ * §8.3), pinned in spec/protocol.json. The core enforces the same bound while encoding.
  */
 export const MAX_PROPERTY_VALUE_LENGTH = 0xffff;
 
@@ -39,7 +39,7 @@ export const MAX_RELAY_OBJECT_PROPERTIES_LENGTH = 64 * 1024;
 export const MAX_RELAY_TRACK_PROPERTIES = 64;
 
 /**
- * Track property values draft-ietf-moq-transport-20 restricts (sections 12.4 and 12.5), pinned in
+ * Track property values draft-ietf-moq-transport-22 restricts (sections 10.4 and 10.5), pinned in
  * spec/protocol.json under `trackProperties`. moq-relay refuses every subscriber to a track that
  * breaks them, so registration checks them.
  */
@@ -88,7 +88,7 @@ export function payloadBytes(payload: unknown): Uint8Array {
  * language is `Number.MAX_SAFE_INTEGER`, and byte values by their 16-bit wire length. The list
  * rides in every SUBSCRIBE_OK, so its encoding, measured here with the core's own encoder, must fit
  * the room that control message leaves; the relay also caps how many pairs it reads and refuses
- * the values draft-20 rules out. A track that breaks any of these would register and then never
+ * the values draft-22 rules out. A track that breaks any of these would register and then never
  * answer a subscription, with the publisher's writes timing out, so each is an argument error here
  * instead.
  */

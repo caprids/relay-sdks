@@ -1,10 +1,10 @@
-"""Per-request bidirectional-stream lifecycle (moq-transport draft-20 §3.3).
+"""Per-request bidirectional-stream lifecycle (moq-transport draft-22 §6.4.2).
 
 The control model is request-stream based: each request (SUBSCRIBE, FETCH, TRACK_STATUS, ...) opens
 its own bidirectional stream, the first message on it is the request, and responses (SUBSCRIBE_OK /
 REQUEST_OK / REQUEST_ERROR / PUBLISH_DONE / GOAWAY) arrive as control messages on the same stream.
 There is no UNSUBSCRIBE message: cancellation IS the stream lifecycle. Abort our sending direction
-(RESET_STREAM) and cancel the receiving direction (STOP_SENDING), per §3.3.3.
+(RESET_STREAM) and cancel the receiving direction (STOP_SENDING), per §6.4.2.3.
 
 Callback-shaped: the session driver binds this to its own bookkeeping.
 """
@@ -16,7 +16,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from ._tasks import spawn
-from .control_messages import ControlMessage, ControlMessageDeframer, decode_control_message
+from .control_messages import (
+    MOQT_PROTOCOL_ID,
+    ControlMessage,
+    ControlMessageDeframer,
+    MoqtProtocolId,
+    decode_control_message,
+)
 from .errors import MoqtProtocolError
 from .transport import BidirectionalStream
 
@@ -27,7 +33,7 @@ class RequestStreamHandlers:
     on_fin: Callable[[], None] | None = None
     """The peer FINed its direction.
 
-    Per §3.3.2 this signals the request is complete; an endpoint that receives a FIN before all
+    Per §6.4.2.2 this signals the request is complete; an endpoint that receives a FIN before all
     required messages treats the request as failed. That judgement is the caller's (it knows which
     messages arrived).
     """
@@ -42,11 +48,18 @@ class RequestStream:
     cancellation.
     """
 
-    __slots__ = ("_cancelled", "_finished", "_first_write", "_handlers", "_stream")
+    __slots__ = ("_cancelled", "_finished", "_first_write", "_handlers", "_protocol", "_stream")
 
-    def __init__(self, stream: BidirectionalStream, request_message: bytes, handlers: RequestStreamHandlers) -> None:
+    def __init__(
+        self,
+        stream: BidirectionalStream,
+        request_message: bytes,
+        handlers: RequestStreamHandlers,
+        protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
+    ) -> None:
         self._stream = stream
         self._handlers = handlers
+        self._protocol: MoqtProtocolId = protocol
         self._cancelled = False
         self._finished = False
         self._first_write: asyncio.Task[None] = spawn(self._write_first(request_message))
@@ -70,7 +83,7 @@ class RequestStream:
                     break
 
                 for frame in deframer.push(chunk):
-                    self._handlers.on_message(decode_control_message(frame))
+                    self._handlers.on_message(decode_control_message(frame, self._protocol))
 
             if not self._cancelled:
                 # A FIN that lands mid-frame is a truncated response, not a clean completion:
@@ -106,7 +119,7 @@ class RequestStream:
         await self._stream.writable.close()
 
     def cancel(self, reason: object = None) -> None:
-        """Cancel the request (§3.3.3): abort the sending direction and stop reading the receiving direction."""
+        """Cancel the request (§6.4.2.3): abort the sending direction and stop reading the receiving direction."""
         if self._cancelled:
             return
 
@@ -126,14 +139,18 @@ class RequestStream:
 
 
 def open_request_stream(
-    stream: BidirectionalStream, request_message: bytes, handlers: RequestStreamHandlers
+    stream: BidirectionalStream,
+    request_message: bytes,
+    handlers: RequestStreamHandlers,
+    protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
 ) -> RequestStream:
     """Open a request over an established bidirectional stream.
 
     Writes the encoded request message, then pumps incoming control messages to
-    ``handlers.on_message`` until FIN, reset, or cancellation.
+    ``handlers.on_message`` until FIN, reset, or cancellation. ``protocol`` is the session's
+    negotiated identifier, which selects the parameter codec.
     """
-    return RequestStream(stream, request_message, handlers)
+    return RequestStream(stream, request_message, handlers, protocol)
 
 
 __all__ = ["RequestStream", "RequestStreamHandlers", "open_request_stream"]

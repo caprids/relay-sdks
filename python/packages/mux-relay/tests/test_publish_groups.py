@@ -175,7 +175,7 @@ class TestOpenGroup:
         await group.close()
         assert group.closed
 
-        # draft-ietf-moq-transport-20 section 11.4.3: a reset after all data and the FIN is ignorable,
+        # draft-ietf-moq-transport-22 section 11.3.2: a reset after all data and the FIN is ignorable,
         # so the SDK sends none and a repeated close stays a no-op.
         group.abort()
         assert group.closed

@@ -58,7 +58,7 @@ class NamespaceRequestDependencies:
 def _claim_prefix(prefixes: set[tuple[str, ...]], prefix: tuple[str, ...]) -> Callable[[], None]:
     """Hold ``prefix`` for one request, or refuse it when it overlaps one already held.
 
-    Draft-20 §10.19 has a relay answer an overlapping SUBSCRIBE_NAMESPACE on the same session with
+    Draft-22 §9.15 has a relay answer an overlapping SUBSCRIBE_NAMESPACE on the same session with
     PREFIX_OVERLAP. moq-relay 0.17.0 does not, so the SDK refuses it itself, before anything is sent,
     and behaves the same against every relay. Returns the release.
     """

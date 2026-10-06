@@ -1,8 +1,10 @@
 {
   "moqt": {
-    "document": "draft-ietf-moq-transport-20",
-    "protocolId": "moqt-20",
-    "note": "Every SDK implements draft-ietf-moq-transport-20 and no other version. protocolId is that draft's wire identifier (draft §1.4 rule: \"moqt-\" plus the draft number), offered as the WebTransport protocol identifier (WT-Available-Protocols / ALPN)."
+    "document": "draft-ietf-moq-transport-22",
+    "protocolId": "moqt-22",
+    "protocolIds": ["moqt-22", "moqt-20"],
+    "fallbackDocument": "draft-ietf-moq-transport-20",
+    "note": "Every SDK implements draft-ietf-moq-transport-22, and draft-ietf-moq-transport-20 as a fallback, and no other version. protocolId is draft-22's wire identifier (draft-22 Section 6.2 rule: \"moqt-\" plus the draft number) and the default. protocolIds is the list a client offers as the WebTransport protocol identifiers (WT-Available-Protocols) or ALPN, in preference order; the connection proceeds on either. The two drafts differ on the wire only in the LOCATION_FILTER parameter (draft-22 Section 9.20.9), which the core encodes for the negotiated one. See docs/research/moqt-22-delta.md."
   },
   "relay": {
     "defaultEndpoint": "https://sjc.relay.mux.global",
@@ -14,7 +16,7 @@
     "limits": {
       "maxObjectPropertiesBytes": 65536,
       "maxTrackProperties": 64,
-      "note": "moq-relay implementation limits, not draft-20 ones. maxObjectPropertiesBytes is the limit on an object's encoded property block (MAX_OBJECT_EXTENSIONS since 0.17.0): the relay stops the subgroup stream on a larger block and the object is lost with no error to the subscriber, so both SDKs refuse such a write as an argument error. limits.maxObjectPropertiesBytes stays the core's draft-20 bound for what a subscriber decodes. maxTrackProperties is the number of track properties the relay parses from SUBSCRIBE_OK (MAX_PROPERTIES in 0.17.0): past it, the relay refuses every subscriber with REQUEST_ERROR 18 'too many' and the publisher hears nothing, so both SDKs refuse such a track at registration."
+      "note": "moq-relay implementation limits, not draft-22 ones. maxObjectPropertiesBytes is the limit on an object's encoded property block (MAX_OBJECT_EXTENSIONS since 0.17.0): the relay stops the subgroup stream on a larger block and the object is lost with no error to the subscriber, so both SDKs refuse such a write as an argument error. limits.maxObjectPropertiesBytes stays the core's draft-22 bound for what a subscriber decodes. maxTrackProperties is the number of track properties the relay parses from SUBSCRIBE_OK (MAX_PROPERTIES in 0.17.0): past it, the relay refuses every subscriber with REQUEST_ERROR 18 'too many' and the publisher hears nothing, so both SDKs refuse such a track at registration."
     }
   },
   "limits": {
@@ -28,7 +30,7 @@
   "trackProperties": {
     "defaultPublisherPriority": { "type": 14, "max": 255 },
     "defaultPublisherGroupOrder": { "type": 34, "values": [1, 2] },
-    "note": "Track property values draft-20 restricts (sections 12.4 and 12.5): a Default Publisher Priority above 255 is invalid and a Default Publisher Group Order other than 1 (ascending) or 2 (descending) is a PROTOCOL_VIOLATION. moq-relay refuses every subscriber to such a track with REQUEST_ERROR 18 'invalid value', so both SDKs refuse it at registration."
+    "note": "Track property values draft-22 restricts (sections 10.4 and 10.5): a Default Publisher Priority above 255 is invalid and a Default Publisher Group Order other than 1 (ascending) or 2 (descending) is a PROTOCOL_VIOLATION. moq-relay refuses every subscriber to such a track with REQUEST_ERROR 18 'invalid value', so both SDKs refuse it at registration."
   },
   "media": {
     "locDocument": "draft-ietf-moq-loc-04",

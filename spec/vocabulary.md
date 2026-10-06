@@ -46,7 +46,7 @@ without a row here is a bug.
 | Options only a publisher connection takes | `ConnectRelayPublisherOptions`: the shared options plus `namespace`; no request deadline | `connect_relay_publisher`'s shared keyword arguments plus `namespace`; no request deadline |
 | Connect from Node over native QUIC, and the trust options that takes | `@mux/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
 | Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing? }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `mux_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
-| A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@mux/relay-quic` | `mux_relay.quic.connect_quic(url, protocols, configuration=...)`, given as `create_transport`; not the default until #231, and the name stays open to #222 |
+| A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@mux/relay-quic` | `mux_relay.quic.connect_quic(url, protocols, configuration=...)`, given as `create_transport`; not the default until #231, and the name stays open to #222 |
 | Consume one subscription as an async iterator | `subscriber.subscribeEvents(options)` returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
 | One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
@@ -244,7 +244,7 @@ which only TypeScript raises. Both raise `UNAUTHORIZED`; TypeScript in a browser
 expired or out-of-scope token, so one name covers them, and it is the protocol's. A subscription
 refused for its grant stays a MOQT `RequestError` on `onError` / `on_error`.
 
-`DELIVERY_TIMEOUT` names a write whose object outlived the draft's delivery timeout (draft-20 §8)
+`DELIVERY_TIMEOUT` names a write whose object outlived the draft's delivery timeout (draft-22 §5.2)
 before it reached the transport, after the stream reset code the publisher sends with it (0x2). The
 term is in `CONTEXT.md`. Not adopted: reusing `WRITE_TIMEOUT`, because the write deadline is the
 SDK's own bound on one operation and calls for a different response (data that missed a write

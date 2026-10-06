@@ -1,5 +1,5 @@
 /**
- * MOQT subgroup data-stream writing (moq-transport draft-19 §11.4.2) — the publish-direction complement to
+ * MOQT subgroup data-stream writing (moq-transport draft-22 §11.3.1) — the publish-direction complement to
  * `object-stream.ts`'s reader.
  *
  * One writer owns one unidirectional stream carrying one subgroup of one group: the SUBGROUP_HEADER goes out first,
@@ -63,7 +63,7 @@ export interface SubgroupObjectInput {
   properties?: readonly KeyValuePair[];
   /** Object payload, at most `MAX_OBJECT_PAYLOAD_LENGTH` bytes. */
   payload: Uint8Array;
-  /** Only meaningful for zero-length payloads (§11.2.1.1). Default 'normal'. */
+  /** Only meaningful for zero-length payloads (§11.1.1). Default 'normal'. */
   status?: ObjectStatus;
 }
 
@@ -73,7 +73,7 @@ export interface SubgroupWriteOptions {
    * Called just before the object's bytes are handed to the stream, after the header write settled. Throwing refuses
    * the object: nothing of it is written and the write rejects with the thrown value. The stream then has a gap, so
    * every later write and FIN rejects too, and only `abort()` is left. This is where a publisher checks an object's
-   * delivery timeout (draft-ietf-moq-transport-20 §8).
+   * delivery timeout (draft-ietf-moq-transport-22 §5.2).
    */
   beforeWrite?(): void;
 }
@@ -136,7 +136,7 @@ function encodeObject(
 
   const writer = new ByteWriter(object.payload.length + 64);
 
-  // First object carries its absolute ID; the rest are `delta + 1` (§11.4.2).
+  // First object carries its absolute ID; the rest are `delta + 1` (§11.3.1).
   writer.writeVarint(previousObjectId === undefined ? object.objectId : object.objectId - previousObjectId - 1);
 
   if (hasProperties) {

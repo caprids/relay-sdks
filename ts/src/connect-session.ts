@@ -1,6 +1,7 @@
 import {
   type KeyValuePair,
-  MOQT_PROTOCOL_ID,
+  MOQT_PROTOCOL_IDS,
+  type MoqtProtocolId,
   type MoqtSessionCallbacks,
   type MoqtTransport,
   SETUP_OPTION,
@@ -25,7 +26,7 @@ export function assertTimeoutMs(name: string, value: unknown): void {
 /**
  * Supply a browser transport or a compatible implementation in another runtime. Called once per
  * connection with the endpoint URL (the token already in its `jwt` query parameter) and the MOQT
- * protocol IDs to offer, today only `moqt-20`.
+ * protocol IDs to offer, in preference order: `moqt-22`, then `moqt-20` as a fallback.
  */
 export type RelayTransportFactory = (
   url: string,
@@ -93,6 +94,8 @@ interface RelaySessionLifetime<T extends Session> {
    */
   observeClosed(observer: (error?: unknown) => void): () => void;
   transportClosed: MoqtTransport['closed'];
+  /** The MOQT version the transport negotiated, which selects the core's parameter codec. */
+  protocol: MoqtProtocolId;
   /** Throws the closing error once the connection has ended. */
   assertOpen(): void;
   /** Close the connection. Idempotent. */
@@ -108,7 +111,7 @@ const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
     );
   }
   // Deno 2.x has a global that ignores protocols and has no protocol getter, so it could never
-  // agree on moqt-20; refuse it here rather than hang waiting for a SETUP that cannot come.
+  // agree on a MOQT version; refuse it here rather than hang waiting for a SETUP that cannot come.
   if (!('protocol' in WebTransport.prototype)) {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
@@ -129,7 +132,7 @@ const utf8 = new TextEncoder();
  * The setup options the endpoint URL needs in CLIENT_SETUP for a framing (TA-6). On native QUIC,
  * PATH (the path-abempty and `?query`, the resolved jwt included) and AUTHORITY take the place of
  * the CONNECT request a WebTransport session sends; on a WebTransport session neither may be sent
- * (draft-20 §10.3.1.2, §10.3.1.1).
+ * (draft-22 §9.1.2, §9.1.1).
  */
 function endpointSetupOptions(framing: unknown, url: URL): KeyValuePair[] {
   if (framing === undefined || framing === 'webtransport') return [];
@@ -151,15 +154,17 @@ function endpointSetupOptions(framing: unknown, url: URL): KeyValuePair[] {
 }
 
 /**
- * Fail the connection unless the transport negotiated `moqt-20` (TA-8). It backs up TA-7, which makes `ready` reject
- * on no selection or an unoffered one; Chromium resolves `ready` anyway, with an empty `protocol`.
+ * Fail the connection unless the transport negotiated one of the offered protocols, `moqt-22` or `moqt-20` (TA-8). It
+ * backs up TA-7, which makes `ready` reject on no selection or an unoffered one; Chromium resolves `ready` anyway, with
+ * an empty `protocol`.
  */
 function assertNegotiatedProtocol(protocol: unknown): void {
-  if (protocol === MOQT_PROTOCOL_ID) return;
+  if ((MOQT_PROTOCOL_IDS as readonly unknown[]).includes(protocol)) return;
   const received = typeof protocol === 'string' && protocol.length > 0 ? JSON.stringify(protocol) : 'none';
+  const offered = MOQT_PROTOCOL_IDS.map((id) => `"${id}"`).join(', ');
   throw new RelayError(
     'TRANSPORT_ERROR',
-    `Relay transport negotiated ${received}, not the offered protocol "${MOQT_PROTOCOL_ID}"`,
+    `Relay transport negotiated ${received}, not one of the offered protocols ${offered}`,
     'connecting',
   );
 }
@@ -292,7 +297,7 @@ export async function openRelaySession<T extends Session>(
 
     assertOpen();
     usingTransport = true;
-    const created = createTransport(url.href, [MOQT_PROTOCOL_ID]);
+    const created = createTransport(url.href, [...MOQT_PROTOCOL_IDS]);
 
     transport = created.transport;
     // WebTransport.closed may reject alongside ready, before a session can observe it. Registered before the
@@ -378,6 +383,8 @@ export async function openRelaySession<T extends Session>(
       };
     },
     transportClosed: connected.transport.closed,
+    // assertNegotiatedProtocol admitted it before the session started.
+    protocol: connected.transport.protocol as MoqtProtocolId,
     assertOpen,
     close: () => finish(),
   };

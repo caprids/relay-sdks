@@ -9,6 +9,7 @@ import {
   MAX_OBJECT_PROPERTIES_LENGTH,
   MAX_TRACK_PROPERTIES_LENGTH,
   MOQT_PROTOCOL_ID,
+  MOQT_PROTOCOL_IDS,
 } from '../packages/moq-core/src/index.js';
 import {
   DEFAULT_PUBLISHER_GROUP_ORDER,
@@ -21,7 +22,7 @@ import {
 } from '../src/validation.js';
 
 interface ProtocolSpec {
-  moqt: { document: string; protocolId: string };
+  moqt: { document: string; protocolId: string; protocolIds: string[]; fallbackDocument: string };
   relay: { limits: { maxObjectPropertiesBytes: number; maxTrackProperties: number } };
   limits: {
     maxObjectPayloadBytes: number;
@@ -43,8 +44,14 @@ describe('spec/protocol.json', () => {
     expect(MOQT_PROTOCOL_ID).toBe(spec.moqt.protocolId);
   });
 
+  it('pins the protocols a client offers, the default first', () => {
+    expect([...MOQT_PROTOCOL_IDS]).toEqual(spec.moqt.protocolIds);
+    expect(MOQT_PROTOCOL_IDS[0]).toBe(MOQT_PROTOCOL_ID);
+    expect(spec.moqt.fallbackDocument).toBe(`draft-ietf-moq-transport-${MOQT_PROTOCOL_IDS[1].slice('moqt-'.length)}`);
+  });
+
   it('names the draft whose number the wire identifier carries', () => {
-    // draft-ietf-moq-transport-20 §1.4: the identifier is "moqt-" followed by the draft number.
+    // draft-ietf-moq-transport-22 §6.2: the identifier is "moqt-" followed by the draft number.
     expect(spec.moqt.document).toBe(`draft-ietf-moq-transport-${MOQT_PROTOCOL_ID.slice('moqt-'.length)}`);
   });
 

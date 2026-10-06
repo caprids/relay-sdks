@@ -30,7 +30,7 @@ RelayErrorCode = Literal[
     "SUBSCRIPTION_OVERFLOW",
     "UPDATE_QUEUE_FULL",
     # ``namespace_events`` refused a prefix that overlaps (equals, contains or falls under) one this
-    # connection is already discovering, in phase ``subscription``; nothing was sent. Draft-20 §10.19
+    # connection is already discovering, in phase ``subscription``; nothing was sent. Draft-22 §9.15
     # allows one SUBSCRIBE_NAMESPACE per prefix tree on a session. Widen one iterator's prefix and
     # filter, or use a second connection.
     "PREFIX_OVERLAP",
@@ -69,7 +69,7 @@ class RelayError(Exception):
 _CREDENTIAL_REFUSALS = frozenset(
     {SESSION_ERROR.UNAUTHORIZED, SESSION_ERROR.MALFORMED_AUTH_TOKEN, SESSION_ERROR.EXPIRED_AUTH_TOKEN}
 )
-"""MOQT session termination codes (draft-20 §3.5) that mean the relay refused the connection's credentials.
+"""MOQT session termination codes (draft-22 §12.2) that mean the relay refused the connection's credentials.
 
 moq-relay sends ``UNAUTHORIZED`` (0x2) for every refusal: no token, a bad signature, a malformed or
 expired token, a path outside the token's root.

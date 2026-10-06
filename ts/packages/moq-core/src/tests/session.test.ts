@@ -14,8 +14,13 @@ import {
   encodeRequestError,
   encodeRequestOk,
   encodeSetup,
+  encodeSubscribe,
   encodeSubscribeOk,
   type LocationFilter,
+  type MessageParameters,
+  MOQT_PROTOCOL_ID,
+  MOQT_PROTOCOL_IDS,
+  type MoqtProtocolId,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
 } from '../protocol/control-messages.js';
@@ -58,6 +63,8 @@ function pushChannel<T>(): PushChannel<T> {
 interface ServerRequestStream {
   /** Decoded control messages received from the client, in order. */
   messages: ControlMessage[];
+  /** The client's bytes as they arrived. */
+  raw: Uint8Array[];
   /** Resolves when the first client message has been decoded. */
   firstMessage: Promise<ControlMessage>;
   /** Resolves when the client's direction ends: `fin` for a clean FIN, `reset` for a reset. */
@@ -67,7 +74,7 @@ interface ServerRequestStream {
   reset(reason?: unknown): void;
 }
 
-function createFakeTransport() {
+function createFakeTransport(protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) {
   const incomingUni = pushChannel<ReadableStream<Uint8Array>>();
   const incomingBidi = pushChannel<BidirectionalStreamLike>();
   const clientUniStreams: ReadableStream<Uint8Array>[] = [];
@@ -80,7 +87,7 @@ function createFakeTransport() {
   });
 
   const transport: MoqtTransport = {
-    protocol: 'moqt-20',
+    protocol,
     incomingUnidirectionalStreams: incomingUni.stream,
     incomingBidirectionalStreams: incomingBidi.stream,
     async createUnidirectionalStream() {
@@ -95,6 +102,7 @@ function createFakeTransport() {
       const writer = serverToClient.writable.getWriter();
 
       const messages: ControlMessage[] = [];
+      const raw: Uint8Array[] = [];
       let resolveFirst!: (message: ControlMessage) => void;
       const firstMessage = new Promise<ControlMessage>((resolve) => {
         resolveFirst = resolve;
@@ -117,8 +125,10 @@ function createFakeTransport() {
               break;
             }
 
+            raw.push(value);
+
             for (const frame of deframer.push(value)) {
-              const message = decodeControlMessage(frame);
+              const message = decodeControlMessage(frame, protocol);
 
               messages.push(message);
 
@@ -133,6 +143,7 @@ function createFakeTransport() {
 
       const serverStream: ServerRequestStream = {
         messages,
+        raw,
         firstMessage,
         clientEnd,
         send: (bytes) => writer.write(bytes),
@@ -243,17 +254,74 @@ function encodeSubgroup(trackAlias: number, groupId: number, payload: Uint8Array
   return writer.toBytes();
 }
 
+function concat(chunks: readonly Uint8Array[]): Uint8Array {
+  const merged = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0));
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.length;
+  }
+
+  return merged;
+}
+
+function containsBytes(haystack: Uint8Array, needle: readonly number[]): boolean {
+  return haystack.some((_, start) => needle.every((byte, i) => haystack[start + i] === byte));
+}
+
 /** The fetch range playback would ask for if it fetched: the current group from its start. */
 const CURRENT_GROUP: LocationFilter = { type: 'relative-group', groupsBeforeNext: 1 };
 
-function createSessionHarness(callbacks?: MoqtSessionCallbacks) {
-  const fake = createFakeTransport();
+function createSessionHarness(callbacks?: MoqtSessionCallbacks, protocol?: MoqtProtocolId) {
+  const fake = createFakeTransport(protocol);
   const session = createMoqtSession(fake.transport, { callbacks, unknownAliasTimeoutMs: 200 });
 
   return { ...fake, session };
 }
 
 describe('createMoqtSession', () => {
+  describe('negotiated protocol', () => {
+    it.each(MOQT_PROTOCOL_IDS)('encodes and decodes LOCATION_FILTER for %s', async (protocol) => {
+      const harness = createSessionHarness(undefined, protocol);
+      const parameters: MessageParameters = {
+        locationFilter: { type: 'next-object' },
+        fillParameters: { locationFilter: CURRENT_GROUP },
+      };
+
+      harness.sendServerSetup();
+      await harness.session.ready;
+      harness.session.subscribe({ trackNamespace: ['live'], trackName: 'video', parameters }, {});
+
+      const stream = await harness.nextRequestStream();
+
+      expect(await stream.firstMessage).toMatchObject({ kind: 'subscribe', parameters });
+      expect(concat(stream.raw)).toEqual(
+        encodeSubscribe({ requestId: 0, trackNamespace: ['live'], trackName: 'video', parameters }, protocol)
+      );
+      // Draft-22 spells Next Object as its type alone; draft-20 as a length-prefixed {0,0}.
+      expect(containsBytes(concat(stream.raw), protocol === 'moqt-22' ? [0x21, 0x05] : [0x21, 0x02, 0x00, 0x00])).toBe(
+        true
+      );
+
+      // A filter the publisher reports in PUBLISH_STATE_NOTIFY decodes for the same draft.
+      const update = { locationFilter: { type: 'absolute', start: { group: 4, object: 0 } } } as const;
+      const notified = new Promise<MessageParameters>((resolve) => {
+        harness.session.subscribe(
+          { trackNamespace: ['live'], trackName: 'audio' },
+          { onStateNotify: (notifiedParameters) => resolve(notifiedParameters) }
+        );
+      });
+      const audio = await harness.nextRequestStream();
+
+      await audio.firstMessage;
+      await audio.send(encodeSubscribeOk(2, {}, [], protocol));
+      await audio.send(encodePublishStateNotify(update, protocol));
+      expect(await notified).toEqual(update);
+      harness.session.destroy();
+    });
+  });
+
   it('sends SETUP on a fresh unidirectional control stream', async () => {
     const harness = createSessionHarness();
     const control = await harness.clientControlStream();
@@ -422,7 +490,7 @@ describe('createMoqtSession', () => {
     harness.session.destroy();
   });
 
-  // §3.3.2 leaves "was this FIN premature?" to the caller; the session is the
+  // §6.4.2.2 leaves "was this FIN premature?" to the caller; the session is the
   // only layer that knows a SUBSCRIBE needs a SUBSCRIBE_OK. Without these the
   // subscription sits pending forever with neither response nor error.
   it('fails a subscription when the peer FINs before SUBSCRIBE_OK', async () => {
@@ -620,7 +688,7 @@ describe('createMoqtSession', () => {
     await request.send(encodePublishDone(PUBLISH_DONE_STATUS.TRACK_ENDED, 0, 'ended'));
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    // PUBLISH_DONE alone does not complete the request (§3.3.2): the publisher's FIN does.
+    // PUBLISH_DONE alone does not complete the request (§6.4.2.2): the publisher's FIN does.
     expect(clientEnd).toBeUndefined();
 
     await request.fin();
@@ -1011,7 +1079,7 @@ describe('createMoqtSession', () => {
     const { responses } = harness.openIncomingBidi(publishFrame.toBytes());
     const chunks = await responses;
     const deframer = new ControlMessageDeframer();
-    const messages = chunks.flatMap((chunk) => deframer.push(chunk)).map(decodeControlMessage);
+    const messages = chunks.flatMap((chunk) => deframer.push(chunk)).map((frame) => decodeControlMessage(frame));
 
     expect(messages[0]).toMatchObject({ kind: 'request-error', errorCode: REQUEST_ERROR_CODE.UNINTERESTED });
 
@@ -1028,7 +1096,7 @@ describe('createMoqtSession', () => {
     const { responses } = harness.openIncomingBidi(encodePublishNamespace({ requestId: 1, trackNamespace: ['anon'] }));
     const chunks = await responses;
     const deframer = new ControlMessageDeframer();
-    const messages = chunks.flatMap((chunk) => deframer.push(chunk)).map(decodeControlMessage);
+    const messages = chunks.flatMap((chunk) => deframer.push(chunk)).map((frame) => decodeControlMessage(frame));
 
     expect(messages[0]).toMatchObject({ kind: 'request-error', errorCode: REQUEST_ERROR_CODE.NOT_SUPPORTED });
 
@@ -1113,7 +1181,7 @@ describe('createMoqtSession', () => {
       harness.session.destroy();
     });
 
-    it('closes the session on NAMESPACE_DONE for a namespace never named (§10.19)', async () => {
+    it('closes the session on NAMESPACE_DONE for a namespace never named (§9.15)', async () => {
       const harness = createSessionHarness();
 
       harness.sendServerSetup();
@@ -1132,7 +1200,7 @@ describe('createMoqtSession', () => {
       expect(onNamespaceDone).not.toHaveBeenCalled();
     });
 
-    it('withdraws each active namespace when the accepted request ends (§10.19)', async () => {
+    it('withdraws each active namespace when the accepted request ends (§9.15)', async () => {
       for (const ending of ['fin', 'reset'] as const) {
         const harness = createSessionHarness();
 
@@ -1306,7 +1374,7 @@ describe('createMoqtSession', () => {
     });
   });
 
-  describe('inbound request IDs (§10.1)', () => {
+  describe('inbound request IDs (§6.4.2.1)', () => {
     const publish = (requestId: number) =>
       encodePublish({ requestId, trackNamespace: ['live'], trackName: 'offered', trackAlias: 9 });
     const publishNamespace = (requestId: number) => encodePublishNamespace({ requestId, trackNamespace: ['anon'] });
@@ -1365,7 +1433,7 @@ describe('createMoqtSession', () => {
       await harness.openIncomingBidi(publish(1)).responses;
       const chunks = await harness.openIncomingBidi(publishNamespace(3)).responses;
       const deframer = new ControlMessageDeframer();
-      const messages = chunks.flatMap((chunk) => deframer.push(chunk)).map(decodeControlMessage);
+      const messages = chunks.flatMap((chunk) => deframer.push(chunk)).map((frame) => decodeControlMessage(frame));
 
       expect(messages[0]).toMatchObject({ kind: 'request-error', errorCode: REQUEST_ERROR_CODE.NOT_SUPPORTED });
       expect(harness.getCloseInfo()).toBeUndefined();
@@ -1426,7 +1494,7 @@ describe('createMoqtSession', () => {
     await vi.waitFor(() => expect(onStateNotify).toHaveBeenCalled());
     expect(onStateNotify).toHaveBeenCalledWith({ largestObject: { group: 12, object: 3 } });
 
-    // §10.10: unilateral — no REQUEST_OK or REQUEST_ERROR goes back.
+    // §9.10: unilateral — no REQUEST_OK or REQUEST_ERROR goes back.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(request.messages).toHaveLength(1);
     harness.session.destroy();
@@ -1447,7 +1515,7 @@ describe('createMoqtSession', () => {
     expect(harness.getCloseInfo()).toMatchObject({ closeCode: 0x3 });
   });
 
-  // §10.1 counts REQUEST_UPDATE among the messages that consume a Request
+  // §6.4.2.1 counts REQUEST_UPDATE among the messages that consume a Request
   // ID; reusing the subscription's would be a duplicate the peer closes on.
   it('gives each REQUEST_UPDATE a fresh request id', async () => {
     const harness = createSessionHarness();
@@ -1481,7 +1549,7 @@ describe('createMoqtSession', () => {
     await request.firstMessage;
     await request.send(encodeSubscribeOk(7));
 
-    // Status, the 9-byte varint 2^64-1 (§10.12's sentinel), empty reason.
+    // Status, the 9-byte varint 2^64-1 (§9.9's sentinel), empty reason.
     const body = Uint8Array.of(PUBLISH_DONE_STATUS.TRACK_ENDED, ...new Array<number>(9).fill(0xff), 0x00);
     const frame = new ByteWriter();
 

@@ -1,16 +1,22 @@
 /**
- * Per-request bidirectional-stream lifecycle (moq-transport draft-20 §3.3).
+ * Per-request bidirectional-stream lifecycle (moq-transport draft-22 §6.4.2).
  *
  * The control model is request-stream based: each request (SUBSCRIBE, FETCH, TRACK_STATUS, …) opens its own
  * bidirectional stream, the first message on it is the request, and responses (SUBSCRIBE_OK / REQUEST_OK /
  * REQUEST_ERROR / PUBLISH_DONE / GOAWAY) arrive as control messages on the same stream. There is no UNSUBSCRIBE message
  * — cancellation IS the stream lifecycle: abort our sending direction (RESET_STREAM) and cancel the receiving direction
- * (STOP_SENDING), per §3.3.3.
+ * (STOP_SENDING), per §6.4.2.3.
  *
  * Callback-shaped, no signals — the session driver binds this to its own bookkeeping; SPF actors bind signals at the
  * `playback/` layer.
  */
-import { type ControlMessage, ControlMessageDeframer, decodeControlMessage } from './control-messages.js';
+import {
+  type ControlMessage,
+  ControlMessageDeframer,
+  decodeControlMessage,
+  MOQT_PROTOCOL_ID,
+  type MoqtProtocolId,
+} from './control-messages.js';
 import { MoqtProtocolError } from './errors.js';
 
 /** Structural subset of `WebTransportBidirectionalStream`. */
@@ -24,7 +30,7 @@ export interface BidirectionalStreamLike {
 export interface RequestStreamHandlers {
   onMessage(message: ControlMessage): void;
   /**
-   * The peer FINed its direction. Per §3.3.2 this signals the request is complete; an endpoint that receives a FIN
+   * The peer FINed its direction. Per §6.4.2.2 this signals the request is complete; an endpoint that receives a FIN
    * before all required messages treats the request as failed — that judgement is the caller's (it knows which messages
    * arrived).
    */
@@ -39,7 +45,7 @@ export interface RequestStream {
   /** Gracefully close our sending direction (FIN). Not a cancellation. */
   finWrite(): Promise<void>;
   /**
-   * Cancel the request (§3.3.3): abort the sending direction and stop reading the receiving direction. `reason` is
+   * Cancel the request (§6.4.2.3): abort the sending direction and stop reading the receiving direction. `reason` is
    * surfaced to the transport — a caller passes the reason `streamResetReason` builds, which carries the stream error
    * code (TA-17); tests pass anything.
    */
@@ -49,12 +55,14 @@ export interface RequestStream {
 
 /**
  * Open a request over an established bidirectional stream: write the encoded request message, then pump incoming
- * control messages to `handlers.onMessage` until FIN, reset, or cancellation.
+ * control messages to `handlers.onMessage` until FIN, reset, or cancellation. `protocol` is the session's negotiated
+ * identifier, which selects the parameter codec.
  */
 export function openRequestStream(
   stream: BidirectionalStreamLike,
   requestMessage: Uint8Array,
-  handlers: RequestStreamHandlers
+  handlers: RequestStreamHandlers,
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
 ): RequestStream {
   const writer = stream.writable.getWriter();
   // Acquired here (not inside the loop) so `cancel()` can cancel through
@@ -72,7 +80,7 @@ export function openRequestStream(
         if (done) break;
 
         for (const frame of deframer.push(value)) {
-          handlers.onMessage(decodeControlMessage(frame));
+          handlers.onMessage(decodeControlMessage(frame, protocol));
         }
       }
 

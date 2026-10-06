@@ -1,7 +1,7 @@
 # @mux/relay-quic
 
-The Relay SDK's transport adapter for Node. It carries MOQT straight on a QUIC connection (native QUIC, ALPN
-`moqt-20`), through a napi-rs addon over [quinn](https://github.com/quinn-rs/quinn), so a plain Node script can publish
+The Relay SDK's transport adapter for Node. It carries MOQT straight on a QUIC connection (native QUIC, with
+the MOQT ALPNs the SDK offers: `moqt-22`, then `moqt-20`), through a napi-rs addon over [quinn](https://github.com/quinn-rs/quinn), so a plain Node script can publish
 and subscribe without a browser. It follows the transport adapter contract in
 [`spec/transport-adapter.md`](../../../spec/transport-adapter.md) and passes its conformance suite. The design is
 [ADR 0002](../../../docs/adr/0002-node-adapter-speaks-native-quic.md).

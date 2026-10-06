@@ -10,8 +10,13 @@ against that file.
 
 ## Connection
 
-- The MOQT version is the draft pinned in `protocol.json`, currently draft-ietf-moq-transport-20
-  with wire identifier `moqt-20`. An SDK offers that protocol identifier and no other.
+- The MOQT version is the draft pinned in `protocol.json`, currently draft-ietf-moq-transport-22
+  with wire identifier `moqt-22`, and draft-ietf-moq-transport-20 (`moqt-20`) as a fallback. An SDK
+  offers `moqt-22`, then `moqt-20`, and no other protocol identifier, and speaks whichever the relay
+  selects. The two drafts differ on the wire only in the LOCATION_FILTER parameter, which the core
+  encodes for the negotiated one. moq-relay selects `moqt-22` from 0.15.0, so every relay version
+  the SDKs support speaks it, but it frames LOCATION_FILTER the draft-20 way on `moqt-22` too
+  ([draft-22 LOCATION_FILTER framing](relay-interop.md#draft-22-location_filter-framing)).
 - Authentication is a JWT supplied by the application. The SDK sends it as the `jwt` query
   parameter on the endpoint URL. An explicit `jwt` parameter already present on the URL takes
   precedence over a token callback, and the callback is not called. An empty `jwt` parameter
@@ -53,7 +58,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
 | `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
 | `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
-| `PREFIX_OVERLAP` | `namespaceEvents` / `namespace_events` was given a prefix that equals, contains or falls under one this connection is already discovering (draft-20 §10.19). Nothing was sent. Widen one iterator's prefix and filter, end the other iterator first, or use another connection. |
+| `PREFIX_OVERLAP` | `namespaceEvents` / `namespace_events` was given a prefix that equals, contains or falls under one this connection is already discovering (draft-22 §9.15). Nothing was sent. Widen one iterator's prefix and filter, end the other iterator first, or use another connection. |
 | `UPDATE_QUEUE_FULL` | More than eight updates were issued before the subscription was accepted; await acceptance (`onSubscribed` / `on_subscribed`) before updating again. Nothing was sent for the refused update. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. It can be group-level: the relay may stop one group's stream while its subscription continues, so check `hasDemand` / `has_demand` rather than assume demand ended. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
@@ -82,7 +87,7 @@ acknowledgment. The SDK does not automatically retry or reconnect, outside the o
 [supervised connections](#supervised-connections). `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
-TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-20 §3.5 defines
+TypeScript maps it only in phase `connecting`, before the relay's SETUP, since draft-22 §12.2 defines
 it as refusing to establish a session; Python maps it in any phase (#227). From moq-relay 0.17.0 a
 browser sees the relay's close (CLOSE_WEBTRANSPORT_SESSION with code 2 and reason `unauthorized`), so
 TypeScript reports it in browsers as well as over native QUIC; against older relays the browser lost
@@ -129,7 +134,7 @@ connection state, because it depends on the connection's registry.
 | --- | --- | --- | --- | --- |
 | Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. A discovery prefix follows the same rule. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe`; the prefix of `namespaceEvents` / `namespace_events` |
 | Track name | A non-empty string, in both roles. | anything else | | `registerTrack` / `register_track`; the three subscriber entry points |
-| Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length). A track's properties encode to at most `limits.maxTrackPropertiesBytes` (65,525 bytes, the room SUBSCRIBE_OK leaves them), hold at most `relay.limits.maxTrackProperties` (64) pairs, and keep Default Publisher Priority (`0x0E`) at most 255 and Default Publisher Group Order (`0x22`) at 1 or 2 (`trackProperties`, draft-20 §12.4 and §12.5), because otherwise the track registers but every subscribe to it fails while the publisher's writes time out. An object's properties on `write` encode to at most `relay.limits.maxObjectPropertiesBytes` (64 KiB), because the relay drops a larger object without an error to either side. The SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds its bound; track properties with more than 64 pairs, or a `0x0E` or `0x22` value draft-20 rules out | `registerTrack` / `register_track`; `write` on a track or group writer |
+| Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length). A track's properties encode to at most `limits.maxTrackPropertiesBytes` (65,525 bytes, the room SUBSCRIBE_OK leaves them), hold at most `relay.limits.maxTrackProperties` (64) pairs, and keep Default Publisher Priority (`0x0E`) at most 255 and Default Publisher Group Order (`0x22`) at 1 or 2 (`trackProperties`, draft-22 §10.4 and §10.5), because otherwise the track registers but every subscribe to it fails while the publisher's writes time out. An object's properties on `write` encode to at most `relay.limits.maxObjectPropertiesBytes` (64 KiB), because the relay drops a larger object without an error to either side. The SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds its bound; track properties with more than 64 pairs, or a `0x0E` or `0x22` value draft-22 rules out | `registerTrack` / `register_track`; `write` on a track or group writer |
 | Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. | not a string; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
 | Deadline | A number in (0, 2147483647] milliseconds in TypeScript, (0, 2147483.647] seconds in Python: the largest delay a JavaScript timer holds, and the same bound in both SDKs. The connection, request and write deadlines share one check. | not a number, including a boolean | zero, negative, NaN, infinite, or above the bound | `connectTimeoutMs` / `connect_timeout` on both connect calls; `requestTimeoutMs` / `request_timeout`; `writeTimeoutMs` / `write_timeout` on `registerTrack` / `register_track` |
 | Track registration | A track name not yet registered on this publisher connection, including after its writer closed. Checked after the track name, properties and deadline, and after connection state. | | a name already registered | `registerTrack` / `register_track` |
@@ -157,7 +162,7 @@ Messages are not a compatibility contract; the class and the point of rejection 
 - A subscription without a location filter, whether it sends no LOCATION_FILTER or an explicit
   zero-field one, carries the draft's meaning: it passes all Objects published or received via
   upstream subscriptions
-  ([draft-20 Section 5.1.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1.2)).
+  ([draft-22 Section 3.3.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.3.1)).
   Whether that reaches back into what a relay cached before the subscription is the relay's
   choice. The Mux relay (moq-relay 0.17.0) starts it at the beginning of its latest group, and
   starts a Next Object filter after its largest object, skipping the rest of that group
@@ -168,14 +173,14 @@ Messages are not a compatibility contract; the class and the point of rejection 
 - The request timeout bounds only the subscription's initial response. An accepted subscription
   has no application inactivity deadline. The SDK schedules no application-level keepalive: keeping
   the transport connected is left to peer traffic and the transport's own keepalive, which
-  [draft-20 Section 13.6.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-13.6.1)
+  [draft-22 Section 15.6.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-15.6.1)
   names as one way to keep an idle session open. In TypeScript that is Chromium's own QUIC PING. In
   Python the aioquic adapter sends a QUIC PING once it has sent nothing for 5 seconds, which also
   lets a receive-only connection survive a NAT rebinding: the relay learns the new address from
   that packet. The Python transport uses aioquic's default 60-second local idle timeout, subject to
   peer negotiation.
 - `update()` sends REQUEST_UPDATE, which the draft allows only on an accepted subscription
-  ([draft-20 Section 5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1)).
+  ([draft-22 Section 3.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.1)).
   An update issued before acceptance is queued in order and sent when SUBSCRIBE_OK arrives; at most
   eight wait, and a further one raises `UPDATE_QUEUE_FULL` without sending anything. A subscription
   that ends before acceptance discards its queue, and its ending is what the application observes.
@@ -390,14 +395,14 @@ The iterator owns the request, never the connection.
 - Each event is `announced` or `unannounced`, with the full namespace: the prefix's fields followed
   by the rest, sent verbatim. The relay names each namespace relative to the prefix, and the SDK
   joins the two. A namespace equal to the prefix is reported as the prefix itself.
-- The events are edge-triggered per namespace. Draft-20 lets a relay name a namespace again, and
+- The events are edge-triggered per namespace. Draft-22 lets a relay name a namespace again, and
   moq-relay does when its route changes. Those repeats are dropped, so an application that tracks
   the `announced` set holds the relay's current view. A NAMESPACE_DONE for a namespace the relay
-  never named closes the connection with `PROTOCOL_VIOLATION`, as draft-20 §10.19 requires.
+  never named closes the connection with `PROTOCOL_VIOLATION`, as draft-22 §9.15 requires.
 - The prefix follows the namespace argument rules (1 to 32 non-empty fields), checked before
-  connection state. Draft-20 also allows an empty prefix, meaning every namespace; the SDK does
+  connection state. Draft-22 also allows an empty prefix, meaning every namespace; the SDK does
   not. The prefix matches whole fields: `['room', 'a']` does not cover `['room', 'ab']`.
-- One connection discovers each prefix tree once. Draft-20 §10.19 has a relay answer a
+- One connection discovers each prefix tree once. Draft-22 §9.15 has a relay answer a
   SUBSCRIBE_NAMESPACE whose prefix overlaps one already open on the session (equal, shorter or
   longer, field by field) with PREFIX_OVERLAP. moq-relay 0.17.0 does not enforce this, so the SDK
   refuses such a prefix itself, with `PREFIX_OVERLAP` in phase `subscription`, before anything is
@@ -438,7 +443,7 @@ The iterator owns the request, never the connection.
   same closure grace as a subscription. The connection ending raises
   `SubscriptionConnectionClosedError`, a full queue `SubscriptionOverflowError`, and the signal or
   cancellation its reason. A relay that finishes the request cleanly ends the iterator without an
-  error, after `unannounced` for every namespace still announced (draft-20 §10.19 treats the end
+  error, after `unannounced` for every namespace still announced (draft-22 §9.15 treats the end
   of the response stream as a withdrawal of each), and after any events still queued, which a
   clean end does not discard. After an error ending, treat every namespace as withdrawn. A GOAWAY
   on the request stream is not surfaced; the connection's GOAWAY ends the connection.
@@ -623,7 +628,7 @@ Both supervisors:
   each object write, and closing the group. Idle time between operations is unrestricted. Aborting a
   group after it closed cleanly has no effect: the FIN already ended the stream, and a reset after
   complete delivery is ignorable
-  ([draft-20 Section 11.4.3](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.4.3)).
+  ([draft-22 Section 11.3.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-11.3.2)).
   Implemented in both SDKs.
 - A track writer exposes whether the relay currently demands the track and lets the application
   observe every change, so a state-shaped track such as a catalog can re-send its document on each
@@ -646,7 +651,7 @@ Both supervisors:
 
 ### Delivery timeouts
 
-[Draft-20 Section 8](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-8) gives each group two delivery timeouts, in milliseconds:
+[Draft-22 Section 5.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-5.2) gives each group two delivery timeouts, in milliseconds:
 SUBGROUP_DELIVERY_TIMEOUT (`0x06`) bounds how long a group's FIN may wait for acknowledgment, and
 OBJECT_DELIVERY_TIMEOUT (`0x02`) bounds how old an object may be when it reaches the transport.
 There are no options for them: an application sets the publisher's values with the track and object
@@ -664,7 +669,7 @@ properties it already passes.
   or settling keep theirs.
 - **The subgroup timeout** starts when the group's FIN is handed to the transport, the moment its
   operation completes and it becomes a settling group. If the relay has not acknowledged the FIN
-  when it expires, the stream is reset with `DELIVERY_TIMEOUT` (0x2), as Section 8 requires before
+  when it expires, the stream is reset with `DELIVERY_TIMEOUT` (0x2), as Section 5.2 requires before
   the stream reaches "all data committed". Nothing is reported to the track: the group leaves the
   settling set like any other late failure and frees its place under the 64-group limit. The timer
   belongs to the group, so it keeps running through a relay subscription change or end and through
@@ -672,12 +677,12 @@ properties it already passes.
 - **The object timeout** counts from the application's write call (`write()`, or the group's
   `write()`) to the moment the transport takes the object, so waiting for demand, for settling
   room, for the stream and behind the group's earlier bytes all count. The age is checked again
-  just before the object is handed over, as Section 8 requires. Until the group's value is fixed
+  just before the object is handed over, as Section 5.2 requires. Until the group's value is fixed
   only the publisher's value times the wait; an object already older than the fixed value fails
   then, before any stream opens. When it expires the operation fails with `DELIVERY_TIMEOUT`
   in its current phase, and a stream already open is reset with code 0x2. In a group the whole
   group is reset and its later writes fail with the same error; no stream is opened again for it
-  (Section 8: SHOULD NOT). The track stays open and the next write uses a new group ID, as after
+  (Section 5.2: SHOULD NOT). The track stays open and the next write uses a new group ID, as after
   any interruption. The object timeout runs alongside the write deadline: whichever expires first
   fails the write, with `DELIVERY_TIMEOUT` or `WRITE_TIMEOUT`. Once the transport has taken an
   object, its bytes cannot be timed out. In TypeScript the transport has taken an object when its
@@ -687,7 +692,7 @@ properties it already passes.
   never sends either parameter upstream: its SUBSCRIBE carries only `0x10`, `0x20`, `0x21`, `0x22`
   and `0x23`, plus `0x35` only to opt out of properties, which the relay never does
   ([subscribe.rs](https://github.com/moq-dev/moq/blob/cd59d15b07c2c2c8a5bfa8a2e82b3bbc24e82a76/rs/moq-net/src/ietf/subscribe.rs#L187-L199)), its REQUEST_UPDATE only `0x10`, `0x20` and `0x21`,
-  and it states that it never negotiates the Section 8 parameter ([error.rs](https://github.com/moq-dev/moq/blob/cd59d15b07c2c2c8a5bfa8a2e82b3bbc24e82a76/rs/moq-net/src/ietf/error.rs#L85)).
+  and it states that it never negotiates the Section 5.2 parameter ([error.rs](https://github.com/moq-dev/moq/blob/cd59d15b07c2c2c8a5bfa8a2e82b3bbc24e82a76/rs/moq-net/src/ietf/error.rs#L85)).
   It drops both track properties and the `0x02` object property, and reads an object's `0x06` as a
   Timestamp ([Relay property handling](#relay-property-handling)), so a first-object `0x06` reaches
   viewers as a Timestamp. In production the publisher's own values are therefore the only ones that
@@ -705,34 +710,34 @@ Every write and every open group is one operation occupying the track's write sl
 `CONTEXT.md`). The operation records its phase before each step, and this table is the shared test
 list both SDKs implement: what the caller sees, what reaches the wire, and what state the track is
 left in. The Source column separates what the protocol rules from SDK policy. Section numbers refer
-to [draft-ietf-moq-transport-20](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html)
+to [draft-ietf-moq-transport-22](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html)
 unless stated otherwise.
 
 | Phase | Interruption | Reported to the caller | Wire effect | Track afterwards | Source |
 | --- | --- | --- | --- | --- | --- |
-| waiting-for-demand | write deadline expires | `WRITE_TIMEOUT`, or `NAMESPACE_NOT_SOLICITED` when solicitations arrived but none covers the namespace; phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | SDK policy: the protocol has no timer for awaiting a subscription (§13.6 only warns of idle timeout) |
-| waiting-for-demand | object timeout expires: the publisher's value, the only one that applies before the group's value is fixed | `DELIVERY_TIMEOUT`, phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | §8: an object's age counts from when the application provided it, and is checked before it reaches the transport |
+| waiting-for-demand | write deadline expires | `WRITE_TIMEOUT`, or `NAMESPACE_NOT_SOLICITED` when solicitations arrived but none covers the namespace; phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | SDK policy: the protocol has no timer for awaiting a subscription (§15.6 only warns of idle timeout) |
+| waiting-for-demand | object timeout expires: the publisher's value, the only one that applies before the group's value is fixed | `DELIVERY_TIMEOUT`, phase `waiting-for-demand` | nothing sent | open; the next write waits for demand again | §5.2: an object's age counts from when the application provided it, and is checked before it reaches the transport |
 | waiting-for-demand | relay subscription ends while waiting | the wait continues until the deadline | nothing sent | open | SDK policy |
 | waiting-for-demand | caller cancels | the caller's reason, unwrapped; phase `waiting-for-demand` | nothing sent | open | SDK policy |
 | waiting-for-demand | track closed | `CLOSED`, phase `waiting-for-demand` | nothing sent | ended | SDK policy |
-| waiting-for-demand | connection ends | the connection's own error (phase `connection`), or `CLOSED` after a clean shutdown | nothing sent | ended | §3.5: streams and subscriptions end with the session |
-| opening-stream | write deadline expires or caller cancels | `WRITE_TIMEOUT` or the caller's reason; phase `opening-stream` | a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) or `CANCELLED` (0x1); its header may precede the reset (RESET_STREAM_AT) | open; the next write uses a new group ID | §11.4.3: a stream closed before all objects are delivered MUST be reset, and the reset SHOULD include the header; the deadline itself is SDK policy |
-| opening-stream | object timeout expires, while waiting for settling room or for the stream, or the object is already older than the value fixed just before the stream opens | `DELIVERY_TIMEOUT`, phase `opening-stream` | no stream opens, or a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §8 MUST reset with `DELIVERY_TIMEOUT`; §11.4.3 |
-| writing | object timeout expires before the transport takes the object | `DELIVERY_TIMEOUT`, phase `writing`; a group's earlier objects may have been delivered. Never `closing`: the object is with the transport by then | stream reset, code `DELIVERY_TIMEOUT` (0x2); the group's later writes and `close()` fail with the same error, and no stream is opened again for it | open; the next write uses a new group ID | §8: MUST reset with `DELIVERY_TIMEOUT`, SHOULD NOT open a new stream for the subgroup |
-| writing, closing | write deadline expires | `WRITE_TIMEOUT`, phase `writing` or `closing`; object bytes may have been delivered, and `closing` can fail after all of them were. In TypeScript `closing` can only fail before the FIN is handed to the transport; Python's `closing` can still wait on transport backpressure | stream reset, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §11.4.3 MUST reset; §8 and §15.11.4 for the code; the deadline is SDK policy |
-| opening-stream, writing, closing | caller cancels (AbortSignal, task cancellation, or `group.abort()`) | the caller's reason unwrapped, or `CLOSED` when `abort()` gave none; the current phase | stream reset, code `CANCELLED` (0x1) | open | §11.4.3 MUST reset; code choice is SDK policy (§3.3.4 SHOULD be relevant) |
+| waiting-for-demand | connection ends | the connection's own error (phase `connection`), or `CLOSED` after a clean shutdown | nothing sent | ended | §6.6: streams and subscriptions end with the session |
+| opening-stream | write deadline expires or caller cancels | `WRITE_TIMEOUT` or the caller's reason; phase `opening-stream` | a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) or `CANCELLED` (0x1); its header may precede the reset (RESET_STREAM_AT) | open; the next write uses a new group ID | §11.3.2: a stream closed before all objects are delivered MUST be reset, and the reset SHOULD include the header; the deadline itself is SDK policy |
+| opening-stream | object timeout expires, while waiting for settling room or for the stream, or the object is already older than the value fixed just before the stream opens | `DELIVERY_TIMEOUT`, phase `opening-stream` | no stream opens, or a stream that opens after the failure is reset before any object is written, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §5.2 MUST reset with `DELIVERY_TIMEOUT`; §11.3.2 |
+| writing | object timeout expires before the transport takes the object | `DELIVERY_TIMEOUT`, phase `writing`; a group's earlier objects may have been delivered. Never `closing`: the object is with the transport by then | stream reset, code `DELIVERY_TIMEOUT` (0x2); the group's later writes and `close()` fail with the same error, and no stream is opened again for it | open; the next write uses a new group ID | §5.2: MUST reset with `DELIVERY_TIMEOUT`, SHOULD NOT open a new stream for the subgroup |
+| writing, closing | write deadline expires | `WRITE_TIMEOUT`, phase `writing` or `closing`; object bytes may have been delivered, and `closing` can fail after all of them were. In TypeScript `closing` can only fail before the FIN is handed to the transport; Python's `closing` can still wait on transport backpressure | stream reset, code `DELIVERY_TIMEOUT` (0x2) | open; the next write uses a new group ID | §11.3.2 MUST reset; §5.2 and §16.11.4 for the code; the deadline is SDK policy |
+| opening-stream, writing, closing | caller cancels (AbortSignal, task cancellation, or `group.abort()`) | the caller's reason unwrapped, or `CLOSED` when `abort()` gave none; the current phase | stream reset, code `CANCELLED` (0x1) | open | §11.3.2 MUST reset; code choice is SDK policy (§12.5 SHOULD be relevant) |
 | opening-stream, writing, closing | the transport refuses the stream or fails a write, other than the relay stopping the operation's own stream | `TRANSPORT_ERROR` with the cause preserved; the current phase | stream reset, code `INTERNAL_ERROR` (0x0), when a stream exists | open | SDK policy |
-| opening-stream, writing, closing | relay subscription replaced or ended, or the relay stopped the operation's stream (STOP_SENDING, §11.4) | `SUBSCRIPTION_CHANGED`; the current phase; after a stop the transport error is kept as the cause. The same code whichever of the stop and the subscription change arrives first, and nothing further is reported for the operation | stream reset, code `CANCELLED` (0x1); after a stop the QUIC stack has already answered with its own RESET_STREAM (RFC 9000 §3.5) | open; the next write waits for new demand only if the relay subscription ended, and proceeds at once while it is still live | §5.1.1: the publisher MUST reset open streams of a cancelled subscription; §11.4: a subscriber MAY stop a subgroup stream whose group is no longer of interest, which does not by itself end the subscription; treating a new SUBSCRIBE as a replacement rather than a concurrent subscription is SDK policy (§5.1, ADR-0001) |
-| opening-stream, writing, closing | track closed | `CLOSED`; the current phase | stream reset, code `CANCELLED` (0x1) | ended | §10.12: every stream is closed or reset before the track ends |
-| opening-stream, writing, closing | connection ends | the connection's own error (phase `connection`), or `CLOSED` | streams end with the session; a reset that is still sent carries `SESSION_CLOSED` (0x3), or `GOING_AWAY` (0x4) after GOAWAY | ended | §3.5; §15.11.4 for the codes |
+| opening-stream, writing, closing | relay subscription replaced or ended, or the relay stopped the operation's stream (STOP_SENDING, §11.3.2) | `SUBSCRIPTION_CHANGED`; the current phase; after a stop the transport error is kept as the cause. The same code whichever of the stop and the subscription change arrives first, and nothing further is reported for the operation | stream reset, code `CANCELLED` (0x1); after a stop the QUIC stack has already answered with its own RESET_STREAM (RFC 9000 §3.5) | open; the next write waits for new demand only if the relay subscription ended, and proceeds at once while it is still live | §3.1.2: the publisher MUST reset open streams of a cancelled subscription; §11.3.2: a subscriber MAY stop a subgroup stream whose group is no longer of interest, which does not by itself end the subscription; treating a new SUBSCRIBE as a replacement rather than a concurrent subscription is SDK policy (§3.1, ADR-0001) |
+| opening-stream, writing, closing | track closed | `CLOSED`; the current phase | stream reset, code `CANCELLED` (0x1) | ended | §9.9: every stream is closed or reset before the track ends |
+| opening-stream, writing, closing | connection ends | the connection's own error (phase `connection`), or `CLOSED` | streams end with the session; a reset that is still sent carries `SESSION_CLOSED` (0x3), or `GOING_AWAY` (0x4) after GOAWAY | ended | §12.2; §16.11.4 for the codes |
 | none: refused before an operation starts | a write or group on a track that already ended, or a write on a group already closed with its FIN | `CLOSED`, phase `waiting-for-demand` | nothing sent | unchanged | SDK policy: the phase that means nothing was sent |
 | any | a second write or group is started | `WRITE_PENDING`, phase `writing`; the active operation is unaffected | nothing sent | unchanged | SDK policy: one pending operation per track |
-| after the FIN is handed over (settling group) | subgroup timeout expires before the relay acknowledges the FIN | nothing; the operation had completed | stream reset, code `DELIVERY_TIMEOUT` (0x2); the group leaves the settling set | open, whether or not the subscription or the track has ended since | §8: MUST reset the stream when the timer expires before all data is acknowledged |
-| after a clean group close | `abort()` | nothing; `closed` stays true and a repeated `close()` returns | nothing sent | open | §11.4.3: a reset after all data and the FIN is ignorable |
+| after the FIN is handed over (settling group) | subgroup timeout expires before the relay acknowledges the FIN | nothing; the operation had completed | stream reset, code `DELIVERY_TIMEOUT` (0x2); the group leaves the settling set | open, whether or not the subscription or the track has ended since | §5.2: MUST reset the stream when the timer expires before all data is acknowledged |
+| after a clean group close | `abort()` | nothing; `closed` stays true and a repeated `close()` returns | nothing sent | open | §11.3.2: a reset after all data and the FIN is ignorable |
 
 A failed group's ID is never reused, which is stricter than §2.2 (a subgroup may resume on a new
 stream after a premature reset); group IDs increase monotonically and object IDs start at 0 within a
-group (draft-ietf-moq-msf-01 §6). A group may end without an `END_OF_GROUP` marker (§2.4.2). There
+group (draft-ietf-moq-msf-01 §6). A group may end without an `END_OF_GROUP` marker (§12.1). There
 is no automatic retry, and the application chooses the next random-access point after a failure;
 MSF and LOC say nothing about an abandoned group. Implemented in both SDKs.
 
@@ -760,7 +765,7 @@ size and a timestamp only, so no other object property can survive it.
 - A track registered with a Default Publisher Priority (`0x0E`) above 255 or a Default Publisher
   Group Order (`0x22`) other than 1 or 2 makes the relay refuse **every** subscribe to it with
   REQUEST_ERROR 18 `invalid value`. The publisher gets no error; its writes time out waiting for
-  demand. Draft-20 rules both values out (§12.4, §12.5), so the SDKs refuse them at registration
+  demand. Draft-22 rules both values out (§10.4, §10.5), so the SDKs refuse them at registration
   ([issue #252](https://github.com/muxinc/relay-sdks/issues/252)).
 - **On 0.17.0**, a track registered with more than 64 track properties makes the relay refuse
   **every** subscribe to it with REQUEST_ERROR 18 `too many` (`MAX_PROPERTIES`, an implementation
@@ -991,33 +996,33 @@ Token refresh on a live session, make-before-break rotation of a supervised publ
 reception, discovery of tracks within a namespace (namespace discovery is [specified](#discovery)),
 and player adapters are not implemented in any SDK and have no contract yet. Add them here when the first SDK gains them.
 
-## Draft-20 protocol boundaries
+## Draft-22 protocol boundaries
 
 - `MAX_REQUEST_ID` and `REQUESTS_BLOCKED` were removed after draft-16
-  ([draft-20 Appendix A.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#appendix-A.4)).
-  They are not draft-20 request-budget messages. Unknown control messages terminate the session,
-  as required by [Section 10](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10).
+  ([draft-22 Appendix A.6](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#appendix-A.6)).
+  They are not draft-22 request-budget messages. Unknown control messages terminate the session,
+  as required by [Section 9](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9).
 - An unrecognized wire Object Status terminates the session with `PROTOCOL_VIOLATION`, following
-  [Section 11.2.1.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.2.1.1).
+  [Section 11.1.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-11.1.1).
   The `UNKNOWN_OBJECT_STATUS` stream-reset code has a different meaning: a FETCH publisher cannot
-  determine whether an object exists ([Section 3.3.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-3.3.4)).
+  determine whether an object exists ([Section 12.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-12.5)).
   Ordinary subgroup transport resets remain per-stream delivery events.
 
 ### Relay interop deviations
 
 Four choices in the generic cores depend on how moq-relay treats the draft's teardown messages,
-track aliases and request updates. All four conform to draft-20; each is recorded because the
+track aliases and request updates. All four conform to draft-22 (and draft-20); each is recorded because the
 relay's behavior, and for the first one its version, decides whether it works. The relay behavior,
 the evidence and how to re-test are in [relay
-interoperability](relay-interop.md#draft-20-deviations). Re-test against the relay before changing
+interoperability](relay-interop.md#draft-22-deviations). Re-test against the relay before changing
 one: on a relay older than 0.15.4 the first one aborts every viewer's track. Both SDKs agree on all
 four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-session.ts`,
 `python/packages/moq-core/src/moq_core/publish_session.py`) state the same constraints.
 
 1. **A subscription ends with PUBLISH_DONE, then FIN, which needs moq-relay 0.15.4 or later.**
-   Draft-20 [Section 3.3.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-3.3.2):
+   Draft-22 [Section 6.4.2.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-6.4.2.2):
    "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN"; and
-   [Section 10.12](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.12):
+   [Section 9.9](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.9):
    "A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will ever open". This
    conforms. Every end the publisher chooses resets the subscription's data streams that are still
    open, writes PUBLISH_DONE with Stream Count set to the data streams opened for that
@@ -1027,19 +1032,19 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    | --- | --- | --- |
    | closing a track writer, or the publisher | `TRACK_ENDED` (0x2) | `track ended` |
    | a replacement subscription supersedes an older one | `TRACK_ENDED` (0x2) | `superseded by a newer subscription` |
-   | an unsupported REQUEST_UPDATE, after its REQUEST_ERROR ([Section 10.9.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.9.1)) | `UPDATE_FAILED` (0x8) | `unsupported subscription update` |
+   | an unsupported REQUEST_UPDATE, after its REQUEST_ERROR ([Section 9.5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.5.1)) | `UPDATE_FAILED` (0x8) | `unsupported subscription update` |
    | the subscriber FINs its direction while the subscription is live | `INTERNAL_ERROR` (0x0) | `subscriber closed its request stream` |
 
    No status names a replacement, and the relay finishes a track only on `TRACK_ENDED`. A
    subscription the subscriber cancels (a reset) gets no PUBLISH_DONE, and its open data streams
-   are reset ([Section 5.1.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1.1)).
+   are reset ([Section 3.1.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.1.2)).
    Once a subscription is ending no data stream opens on its alias, and one that finishes opening
    afterwards is reset and not counted. moq-relay 0.15.4 and later read the PUBLISH_DONE, wait for
    Stream Count data streams or a grace period (1 s), finish the track, and only then FIN their side
    of the request stream: a viewer receives an end-of-track object and PUBLISH_DONE status 2
    `track ended`. A session that closes before the relay has done so aborts the track, which a
    viewer sees as status 0 `internal error`, so closing the publisher waits for that FIN (the one
-   Section 3.3.2 says a requester SHOULD send once the responder's FIN completes the request) on
+   Section 6.4.2.2 says a requester SHOULD send once the responder's FIN completes the request) on
    every subscription it ended before closing the transport (bounded, see deviation 2). The SDK
    subscriber sends that FIN too, once the publisher's FIN follows PUBLISH_DONE, so an SDK publisher
    facing an SDK subscriber directly closes without waiting out the bound. moq-relay 0.15.4 and later
@@ -1048,8 +1053,8 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    status 0 `internal error`, where a bare FIN finished the track. No behavior ends cleanly on both,
    and the SDKs cannot tell the versions apart (the relay's SETUP names only `moq-lite-rs`), so they
    require 0.15.4 or later.
-2. **Neither connection sends GOAWAY.** Draft-20
-   [Section 10.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.4):
+2. **Neither connection sends GOAWAY.** Draft-22
+   [Section 9.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.2):
    "An endpoint sends a GOAWAY message on its control stream to inform the peer it intends to close
    the session soon", and "A client MUST send a zero-length New Session URI in any GOAWAY". GOAWAY
    is optional, so omitting it conforms. The SDK sends none because it has no drain behavior: a
@@ -1069,17 +1074,17 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    is still received and handled on both connections. Sending GOAWAY becomes useful once the SDK
    can drain on it, which means giving it time to arrive before the transport closes; on relays
    older than 0.15.1 it would still close the session.
-3. **A track alias is the peer's own request ID.** Draft-20
-   [Section 5.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-5.1): "A
+3. **A track alias is the peer's own request ID.** Draft-22
+   [Section 3.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.1): "A
    publisher MAY assign the same or different Track Aliases to these subscriptions"; and
-   [Section 11.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-11.1):
+   [Section 3.1.3](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.1.3):
    "The same Track Alias MUST NOT be used by a publisher to refer to two different Tracks
    simultaneously in the same session." This conforms, and narrows a MAY: every SUBSCRIBE_OK
    carries the SUBSCRIBE's request ID as the alias, which is unique for the session by
    construction, so an alias is never shared between subscriptions, of one track or of two. A
    request ID the peer reuses, or one with a client's (even) parity, closes the session with
    `INVALID_REQUEST_ID` before it can become an alias, as
-   [Section 10.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.1)
+   [Section 6.4.2.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-6.4.2.1)
    requires. The subscriber connection applies the same check to every request the relay opens,
    including the ones it rejects, before answering. moq-relay allocates server request IDs odd,
    from 1, so the parity check never fires against it. moq-relay 0.15.1 and 0.15.8 close the session with PROTOCOL_VIOLATION when one
@@ -1088,10 +1093,11 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    the Relay surface. Nothing needs to change unless the SDK serves concurrent subscriptions to one
    track, which
    [ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md) rules out today.
-4. **`update()` sends REQUEST_UPDATE, which moq-relay does not implement.** Draft-20
-   [Section 10.9](https://www.ietf.org/archive/id/draft-ietf-moq-transport-20.html#section-10.9):
-   "The receiver of a REQUEST_UPDATE MUST respond with exactly one REQUEST_OK or REQUEST_ERROR
-   message indicating if the update was successful". This conforms: each `update()` on an accepted
+4. **`update()` sends REQUEST_UPDATE, which moq-relay does not implement.** Draft-22
+   [Section 9.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.5):
+   "The receiver of a REQUEST_UPDATE MUST respond with exactly one REQUEST_UPDATE_OK or
+   REQUEST_UPDATE_ERROR message indicating if the update was successful", per-request names for
+   REQUEST_OK and REQUEST_ERROR ([Section 1.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-1.5)). This conforms: each `update()` on an accepted
    subscription writes one REQUEST_UPDATE, with its own Request ID, on that subscription's request
    stream; a REQUEST_OK reaches `onUpdateOk` / `on_update_ok`, and a REQUEST_ERROR reaches
    `onError` / `on_error` and ends the subscription. moq-relay answers neither, from 0.14.17 through

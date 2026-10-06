@@ -1,7 +1,7 @@
 """In-memory MoQ relay hub for cross-driver tests. Derived from Video.js (Apache-2.0); see packages/moq-core/NOTICE.
 
-A real publish driver on one side, real subscribe driver(s) on the other, draft-20 bytes in the
-middle. The hub is transport-agnostic: :meth:`RelayHub.serve_publisher` and
+A real publish driver on one side, real subscribe driver(s) on the other, the negotiated draft's
+bytes in the middle. The hub is transport-agnostic: :meth:`RelayHub.serve_publisher` and
 :meth:`RelayHub.serve_subscriber` run the relay's half over any ``MoqtTransport``, and
 :meth:`RelayHub.connect_publisher` / :meth:`RelayHub.connect_subscriber` wrap them in in-memory pairs
 shaped like a ``RelayTransportFactory``.
@@ -17,7 +17,7 @@ retracts a namespace with NAMESPACE_DONE; both land in ``track_ends``.
 
 Subscriber side answers SUBSCRIBE with SUBSCRIBE_OK (carrying LARGEST_OBJECT once the track has
 content) and forwards objects one-per-subgroup-stream, resolving the request's Location Filter
-using the draft-20 §5.1.2 rules. FETCH is answered with REQUEST_ERROR. An upstream
+using the draft-22 §3.3.1 rules. FETCH is answered with REQUEST_ERROR. An upstream
 FIN ends the track's downstream subscriptions with PUBLISH_DONE, the way a real relay ends the track
 for every viewer.
 
@@ -36,6 +36,8 @@ from core_helpers.transport_pair import create_transport_pair
 
 from moq_core.bytes import StreamReader
 from moq_core.control_messages import (
+    MOQT_PROTOCOL_ID,
+    MOQT_PROTOCOL_IDS,
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
     AbsoluteLocationFilter,
@@ -46,6 +48,7 @@ from moq_core.control_messages import (
     Location,
     LocationFilter,
     MessageParameters,
+    MoqtProtocolId,
     Namespace,
     NamespaceDone,
     NextObjectFilter,
@@ -65,6 +68,7 @@ from moq_core.control_messages import (
     encode_subscribe,
     encode_subscribe_namespace,
     encode_subscribe_ok,
+    resolve_moqt_protocol,
 )
 from moq_core.object_stream import STREAM_TYPE, is_subgroup_header_type, read_subgroup_header, read_subgroup_objects
 from moq_core.subgroup_writer import create_subgroup_writer
@@ -138,12 +142,14 @@ SUBSCRIBE_RETRY_DELAY = 0.025
 # =============================================================================
 
 
-async def read_control_frame(reader: StreamReader, message_type: int) -> ControlMessage:
+async def read_control_frame(
+    reader: StreamReader, message_type: int, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+) -> ControlMessage:
     """Read one length-framed control message (type varint already consumed)."""
     high = await reader.read_uint8()
     low = await reader.read_uint8()
     body = await reader.read_bytes((high << 8) | low)
-    return decode_control_message(ControlMessageFrame(message_type, body))
+    return decode_control_message(ControlMessageFrame(message_type, body), protocol)
 
 
 def location_of(obj: BufferedObject) -> Location:
@@ -155,7 +161,7 @@ def is_at_or_after(a: Location, b: Location) -> bool:
 
 
 def resolve_start(location_filter: LocationFilter | None, largest: Location | None) -> Location:
-    """Where a new subscription starts, resolved using the draft-20 Location Filter rules."""
+    """Where a new subscription starts, resolved using the draft-22 Location Filter rules."""
     if isinstance(location_filter, NextObjectFilter):
         return Location(largest.group, largest.object + 1) if largest else Location(0, 0)
 
@@ -182,9 +188,15 @@ def _spawn(coroutine: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
 
 
 class RelayHub:
-    def __init__(self) -> None:
+    def __init__(self, protocols: Sequence[MoqtProtocolId] = MOQT_PROTOCOL_IDS) -> None:
+        self.protocols = tuple(protocols)
+        """The drafts the hub speaks, in its preference order; a connection gets the first one the client offers."""
         self.subscribes: list[str] = []
         """Upstream track SUBSCRIBEs sent to the publisher, in order (a retry appends again)."""
+        self.negotiated: list[MoqtProtocolId] = []
+        """The draft each connection negotiated, in connection order."""
+        self.downstream_subscribes: list[Subscribe] = []
+        """SUBSCRIBEs received from subscribers, as decoded for each connection's draft."""
         self.track_ends: list[ObservedTrackEnd] = []
         """Every upstream end observed: subscribe-stream FINs and NAMESPACE_DONE retractions."""
         self._destroyed = False
@@ -271,14 +283,23 @@ class RelayHub:
 
     # ------------------------------------------------------------------ transport factories
 
+    def _select(self, offered: Sequence[str]) -> MoqtProtocolId:
+        """The draft a connection speaks: the first one offered that the hub speaks (TA-7), or the hub's first."""
+        for protocol in self.protocols:
+            if not offered or protocol in offered:
+                self.negotiated.append(protocol)
+                return protocol
+
+        raise AssertionError(f"the hub speaks none of the offered protocols {list(offered)}")
+
     def connect_publisher(self, url: str = "", protocols: Sequence[str] = ()) -> ConnectingTransport:
-        pair = create_transport_pair()
+        pair = create_transport_pair(self._select(protocols))
         self.serve_publisher(pair.server)
         self._closers.append(pair.client.close)
         return ConnectingTransport(transport=pair.client, ready=_completed())
 
     def connect_subscriber(self, url: str = "", protocols: Sequence[str] = ()) -> ConnectingTransport:
-        pair = create_transport_pair()
+        pair = create_transport_pair(self._select(protocols))
         closer = self.serve_subscriber(pair.server)
         self._closers.append(closer)
         self._closers.append(pair.client.close)
@@ -288,6 +309,7 @@ class RelayHub:
 
     def serve_publisher(self, server: MoqtTransport) -> None:
         """Run the relay's announce-and-serve half against a connected publisher."""
+        protocol = resolve_moqt_protocol(getattr(server, "protocol_id", None))
         self._publisher_connections += 1
         alias_to_track: dict[int, _TrackRecord] = {}
         next_request_id = [3]
@@ -300,7 +322,7 @@ class RelayHub:
         async def update_upstream(track_name: str, parameters: MessageParameters) -> None:
             request_id = next_request_id[0]
             next_request_id[0] += 2
-            await upstream_writers[track_name].write(encode_request_update(request_id, parameters))
+            await upstream_writers[track_name].write(encode_request_update(request_id, parameters, protocol))
 
         self._update_upstream = update_upstream
 
@@ -318,12 +340,12 @@ class RelayHub:
 
             try:
                 await stream.writable.write(
-                    encode_subscribe_namespace(SubscribeNamespace(request_id=1, track_namespace_prefix=[]))
+                    encode_subscribe_namespace(SubscribeNamespace(request_id=1, track_namespace_prefix=[]), protocol)
                 )
 
                 while not await reader.at_end():
                     message_type = await reader.read_varint()
-                    message = await read_control_frame(reader, message_type)
+                    message = await read_control_frame(reader, message_type, protocol)
 
                     if isinstance(message, Namespace):
                         # Empty solicited prefix: the suffix IS the full namespace.
@@ -374,7 +396,8 @@ class RelayHub:
                                     object_delivery_timeout=self.upstream_object_delivery_timeout,
                                     subgroup_delivery_timeout=self.upstream_subgroup_delivery_timeout,
                                 ),
-                            )
+                            ),
+                            protocol,
                         )
                     )
                     self.subscribes.append(track_name)
@@ -382,7 +405,7 @@ class RelayHub:
 
                     while not await reader.at_end():
                         message_type = await reader.read_varint()
-                        message = await read_control_frame(reader, message_type)
+                        message = await read_control_frame(reader, message_type, protocol)
 
                         if isinstance(message, SubscribeOk):
                             accepted = True
@@ -475,7 +498,7 @@ class RelayHub:
 
             try:
                 message_type = await reader.read_varint()
-                message = await read_control_frame(reader, message_type)
+                message = await read_control_frame(reader, message_type, protocol)
 
                 if isinstance(message, Publish):
                     await stream.writable.write(
@@ -537,6 +560,7 @@ class RelayHub:
 
     def serve_subscriber(self, server: MoqtTransport) -> Callable[[], None]:
         """Run the relay's downstream half against a connected subscriber. Returns a function that stops forwarding."""
+        protocol = resolve_moqt_protocol(getattr(server, "protocol_id", None))
         open_flag = [True]
 
         def forward_object(track_alias: int, obj: BufferedObject) -> None:
@@ -564,9 +588,10 @@ class RelayHub:
             try:
                 while not await reader.at_end():
                     message_type = await reader.read_varint()
-                    message = await read_control_frame(reader, message_type)
+                    message = await read_control_frame(reader, message_type, protocol)
 
                     if isinstance(message, Subscribe):
+                        self.downstream_subscribes.append(message)
                         # Downstream demand is what makes the hub pull the track from the publisher.
                         self.subscribe_upstream(message.track_name)
                         track = self._track_for(message.track_name)
@@ -574,13 +599,15 @@ class RelayHub:
                         self._next_subscriber_alias += 1
 
                         # Like the relay on draft-20, SUBSCRIBE_OK reports the Largest Object once the
-                        # track has content (two bare varints, §10.2.17).
+                        # track has content (two bare varints, §9.20.17).
                         await stream.writable.write(
                             encode_subscribe_ok(
                                 track_alias,
                                 MessageParameters(largest_object=track.largest)
                                 if track.largest
                                 else MessageParameters(),
+                                (),
+                                protocol,
                             )
                         )
 

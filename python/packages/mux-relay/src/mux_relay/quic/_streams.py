@@ -224,7 +224,7 @@ class _SendHalf:
 
         That includes a FIN that was transmitted but not yet acknowledged: the peer may never have
         received it, and a settling group's delivery timeout resets exactly that stream
-        (draft-ietf-moq-transport-20 section 8). :meth:`wait_acknowledged` then raises ``reason``.
+        (draft-ietf-moq-transport-22 section 5.2). :meth:`wait_acknowledged` then raises ``reason``.
         Once the FIN is acknowledged there is nothing left to reset, and this does nothing.
         """
         if self._aborted or self._error is not None or self._acknowledged:

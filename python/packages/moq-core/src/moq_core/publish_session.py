@@ -1,12 +1,12 @@
-"""Publish-capable MOQT session (moq-transport draft-20).
+"""Publish-capable MOQT session (moq-transport draft-22).
 
 The publish-side sibling of the subscribe-only driver in ``session``.
 
 Owns the protocol mechanics over an established transport: the SETUP exchange on paired
-unidirectional control streams (§3.3), and the announce-and-serve ingest flow. The peer's
+unidirectional control streams (§6.3), and the announce-and-serve ingest flow. The peer's
 SUBSCRIBE_NAMESPACE solicitation is answered with REQUEST_OK and a NAMESPACE entry for the announced
-namespace (§10.19, §10.17), then the per-track SUBSCRIBEs the peer routes back are served (answered with
-SUBSCRIBE_OK carrying a publisher-assigned track alias, §10.8) for as long as each subscription's
+namespace (§9.15, §9.16), then the per-track SUBSCRIBEs the peer routes back are served (answered with
+SUBSCRIBE_OK carrying a publisher-assigned track alias, §9.7) for as long as each subscription's
 request stream stays open.
 
 Flow choice: the publisher initiates no request streams at all. moq-relay 0.14.7 removed
@@ -16,9 +16,9 @@ the solicitation stream as NAMESPACE entries (suffix-relative, parameterless; th
 an empty parameter count as malformed); data flows only on aliases bound by our own SUBSCRIBE_OKs,
 per subscription.
 
-Teardown follows draft-20: every end of an Established subscription the publisher chooses resets
+Teardown follows draft-22: every end of an Established subscription the publisher chooses resets
 the subscription's still-open data streams, then writes PUBLISH_DONE (status, the number of data
-streams opened for it, reason) and FINs the request stream (§3.3.2, §10.12). moq-relay 0.15.4 and
+streams opened for it, reason) and FINs the request stream (§6.4.2.2, §9.9). moq-relay 0.15.4 and
 later require that PUBLISH_DONE, and treat a bare FIN as a failed request; 0.15.1 to 0.15.3 abort
 the track on any byte after SUBSCRIBE_OK, PUBLISH_DONE included, so this core needs a relay at
 0.15.4 or later for a clean end. An orderly ``close()`` holds the transport open, bounded, until
@@ -54,6 +54,7 @@ from .control_messages import (
     Goaway,
     KeyValuePair,
     MessageParameters,
+    MoqtProtocolId,
     Publish,
     PublishNamespace,
     RequestUpdate,
@@ -70,6 +71,7 @@ from .control_messages import (
     encode_request_ok,
     encode_setup,
     encode_subscribe_ok,
+    resolve_moqt_protocol,
 )
 from .errors import SESSION_ERROR, MoqtProtocolError, is_moqt_protocol_error
 from .object_stream import STREAM_TYPE, is_subgroup_header_type
@@ -110,8 +112,8 @@ class TrackBinding:
     REQUEST_UPDATE toggles it). ``None`` means no live forwarding subscription, so no data streams
     may be opened for the track.
 
-    The two delivery timeouts are that subscription's values in milliseconds (draft-20 §8, §10.2.3,
-    §10.2.4): SUBSCRIBE's parameters as updated by every REQUEST_UPDATE since, ``None`` where the
+    The two delivery timeouts are that subscription's values in milliseconds (draft-22 §5.2, §9.20.3,
+    §9.20.4): SUBSCRIBE's parameters as updated by every REQUEST_UPDATE since, ``None`` where the
     subscriber never sent one, and always ``None`` without a binding. A REQUEST_UPDATE that changes
     either is reported as a binding with the same alias.
     """
@@ -127,7 +129,7 @@ class IncomingRequestUpdate:
     """REQUEST_UPDATE on an inbound request stream.
 
     ``request_id`` is the request being updated (the stream's SUBSCRIBE or SUBSCRIBE_NAMESPACE);
-    ``update_request_id`` is the update's own, freshly consumed Request ID (§10.1).
+    ``update_request_id`` is the update's own, freshly consumed Request ID (§6.4.2.1).
     """
 
     request_id: int
@@ -205,7 +207,7 @@ a peer that never closes its side costs at most this much.
 MAX_TRACK_PROPERTIES_LENGTH = MAX_CONTROL_MESSAGE_LENGTH - 9 - 1
 """The largest encoded track property block every SUBSCRIBE_OK this session sends can carry.
 
-The properties ride in SUBSCRIBE_OK, a control message whose length field is 16 bits (§10). The
+The properties ride in SUBSCRIBE_OK, a control message whose length field is 16 bits (§9). The
 rest of its body is the track alias, a varint of up to 9 bytes (it is the peer's request ID, so
 it is unknown until a subscription arrives), and the count of message parameters, of which this
 session sends none (1 byte). A longer block registers but can never answer a subscription.
@@ -219,7 +221,7 @@ class MoqtPublishSessionConfig:
     setup_options: Sequence[KeyValuePair] = ()
     """Extra Setup Options to send (an implementation identifier is added automatically)."""
     implementation_name: str = DEFAULT_IMPLEMENTATION_NAME
-    """Identifies this implementation in SETUP (§10.3.1.5)."""
+    """Identifies this implementation in SETUP (§9.1.5)."""
     callbacks: MoqtPublishSessionCallbacks = field(default_factory=MoqtPublishSessionCallbacks)
 
 
@@ -272,19 +274,19 @@ class _SubscriberStream:
     forwarding: bool = True
     """Forward State (SUBSCRIBE ``forward``, togglable via REQUEST_UPDATE); data flows only while true."""
     object_delivery_timeout: int | None = None
-    """OBJECT_DELIVERY_TIMEOUT (§10.2.4) from SUBSCRIBE, as updated by REQUEST_UPDATE; ``None`` if never sent."""
+    """OBJECT_DELIVERY_TIMEOUT (§9.20.4) from SUBSCRIBE, as updated by REQUEST_UPDATE; ``None`` if never sent."""
     subgroup_delivery_timeout: int | None = None
-    """SUBGROUP_DELIVERY_TIMEOUT (§10.2.3) from SUBSCRIBE, as updated by REQUEST_UPDATE; ``None`` if never sent."""
+    """SUBGROUP_DELIVERY_TIMEOUT (§9.20.3) from SUBSCRIBE, as updated by REQUEST_UPDATE; ``None`` if never sent."""
     finished: bool = False
     """The subscription is ending or over; no new data stream may open on its alias."""
     writer_closed: bool = False
     """Our direction of the request stream was FINed (after PUBLISH_DONE); it is never reset afterwards."""
     stream_count: int = 0
-    """Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§10.12)."""
+    """Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§9.9)."""
     data_streams: set[_DataStream] = field(default_factory=set)
     """Data streams opened for this subscription that the caller has not closed yet."""
     opening: set[asyncio.Future[None]] = field(default_factory=set)
-    """Data-stream opens in flight; PUBLISH_DONE waits for them to settle (§10.12)."""
+    """Data-stream opens in flight; PUBLISH_DONE waits for them to settle (§9.9)."""
     request_ended: asyncio.Future[None] = field(default_factory=lambda: asyncio.get_running_loop().create_future())
     """Settles once the peer's direction of the request stream ends (FIN or reset) or the session tears it down.
 
@@ -315,7 +317,7 @@ class _SubscriberStream:
 class _DataStreamReset(Exception):
     """The reason handed to a data stream the session resets when its subscription ends.
 
-    Transports read ``stream_error_code`` from it (§3.3.4 CANCELLED).
+    Transports read ``stream_error_code`` from it (§12.5 CANCELLED).
     """
 
     stream_error_code = STREAM_RESET_CODE.CANCELLED
@@ -419,6 +421,9 @@ class MoqtPublishSession:
 
     def __init__(self, transport: MoqtTransport, config: MoqtPublishSessionConfig | None = None) -> None:
         self._transport = transport
+        # The negotiated draft, which selects the parameter codec: the adapter's ``protocol_id``
+        # (spec/transport-adapter.md TA-8), or the default for a transport that reports none.
+        self._protocol: MoqtProtocolId = resolve_moqt_protocol(getattr(transport, "protocol_id", None))
         self._config = config or MoqtPublishSessionConfig()
         self._callbacks = self._config.callbacks
 
@@ -428,7 +433,7 @@ class MoqtPublishSession:
         # registration happens only after the REQUEST_OK write settles, so an overlapping solicitation
         # racing that await must be refused off this reservation, not just off the registered set.
         self._pending_namespace_prefixes: list[TrackNamespace] = []
-        # Every inbound request ID ever seen. Reuse closes the session with INVALID_REQUEST_ID (§10.1), and because
+        # Every inbound request ID ever seen. Reuse closes the session with INVALID_REQUEST_ID (§6.4.2.1), and because
         # aliases ARE the peer's request IDs, a reused ID would hand two subscriptions the same alias
         # and make their subgroup streams indistinguishable: session-fatal, per the draft.
         self._peer_request_ids: set[int] = set()
@@ -785,7 +790,7 @@ class MoqtPublishSession:
     def _end_subscription(
         self, track: _TrackRecord, subscriber: _SubscriberStream, status: int, reason: str, *, preceding: bytes = b""
     ) -> None:
-        """End an Established subscription from the publisher side (§3.3.2, §10.12).
+        """End an Established subscription from the publisher side (§6.4.2.2, §9.9).
 
         Marks it finished at once, so no new data stream opens on its alias. Then, in order: wait for
         data-stream opens in flight, reset every data stream the caller has not closed (a caller that
@@ -850,7 +855,7 @@ class MoqtPublishSession:
         """Open a unidirectional data stream for the live subscription bound to ``track_alias``.
 
         The stream counts toward that subscription's PUBLISH_DONE Stream Count, and a stream still
-        open when the subscription ends is reset before PUBLISH_DONE is written (§10.12). Raises
+        open when the subscription ends is reset before PUBLISH_DONE is written (§9.9). Raises
         ``RuntimeError`` once the session is closing, when no live subscription holds the alias, and
         when the subscription ends while the stream is opening (the stream is reset first).
         """
@@ -918,7 +923,7 @@ class MoqtPublishSession:
         high = await reader.read_uint8()
         low = await reader.read_uint8()
         body = await reader.read_bytes((high << 8) | low)
-        return decode_control_message(ControlMessageFrame(message_type, body))
+        return decode_control_message(ControlMessageFrame(message_type, body), self._protocol)
 
     async def _run_control_stream(self, reader: StreamReader) -> None:
         # The stream-type varint (0x2F00) doubles as the first message's type.
@@ -947,7 +952,7 @@ class MoqtPublishSession:
             self._received_goaway = True
             _call(self._callbacks.on_goaway, message)
 
-        # A closed control stream ends the session (§3.3).
+        # A closed control stream ends the session (§6.3).
         if not self._destroyed:
             self._fatal(MoqtProtocolError("peer closed its control stream"))
 
@@ -996,7 +1001,7 @@ class MoqtPublishSession:
         reader.cancel()
 
     def _claim_peer_request_id(self, request_id: int) -> None:
-        """Request IDs are consumed once per session (§10.1); a reused or wrong-parity one is session-fatal.
+        """Request IDs are consumed once per session (§6.4.2.1); a reused or wrong-parity one is session-fatal.
 
         Every request-initiating message consumes one, and since draft-20 gave it an id of its own,
         so does REQUEST_UPDATE. This endpoint is always the client, so the peer's ids are odd; a
@@ -1017,14 +1022,14 @@ class MoqtPublishSession:
 
         Accepted with REQUEST_OK, then held open for the session's lifetime: NAMESPACE /
         NAMESPACE_DONE entries for every announced namespace under the prefix ride this stream. A
-        clean requester-side FIN is half-closure, not withdrawal (§3.3.2); only a reset (or a rejected
-        update, §10.9.1) ends the carrier, and its loss while the announce is live means the peer
+        clean requester-side FIN is half-closure, not withdrawal (§6.4.2.2); only a reset (or a rejected
+        update, §9.5.1) ends the carrier, and its loss while the announce is live means the peer
         refused or withdrew the ingest path.
         """
         writer = stream.writable
         prefix = subscribe_namespace.track_namespace_prefix
 
-        # §10.18: a solicitation overlapping an established one (either prefix containing the other)
+        # §9.17: a solicitation overlapping an established one (either prefix containing the other)
         # is refused with PREFIX_OVERLAP. Announcing on both would hand the peer duplicate namespace
         # state with inconsistent withdrawals.
         overlaps = any(
@@ -1053,7 +1058,7 @@ class MoqtPublishSession:
         accepted = False
 
         try:
-            await writer.write(encode_request_ok())
+            await writer.write(encode_request_ok(None, self._protocol))
             accepted = True
         except Exception:  # peer cancelled before the acceptance landed
             pass
@@ -1083,8 +1088,8 @@ class MoqtPublishSession:
                     _call(self._callbacks.on_goaway, message)
                 elif isinstance(message, RequestUpdate):
                     self._claim_peer_request_id(message.request_id)
-                    # Namespace subscriptions may legally be updated (§10.9). v1 applies none of it (a
-                    # prefix change would re-base every entry), so per §10.9.1 the update is answered
+                    # Namespace subscriptions may legally be updated (§9.5). v1 applies none of it (a
+                    # prefix change would re-base every entry), so per §9.5.1 the update is answered
                     # with an error and the request stream closes below: never session-fatal (only the
                     # reused Request ID above is).
                     _call(
@@ -1108,7 +1113,7 @@ class MoqtPublishSession:
                     raise MoqtProtocolError(f"unexpected {message.kind} on an incoming subscribe-namespace stream")
 
             if not failed_update:
-                # A clean requester-side FIN is NOT a cancellation (§3.3.2: the peer merely commits to
+                # A clean requester-side FIN is NOT a cancellation (§6.4.2.2: the peer merely commits to
                 # sending no updates): the response side keeps carrying NAMESPACE entries until a
                 # reset or the transport ends, so the carrier stays registered and open.
                 return
@@ -1146,7 +1151,7 @@ class MoqtPublishSession:
         # this side cannot build (the properties overflow the message, say) is refused promptly, so
         # the peer is not left waiting on a request that never gets an answer.
         try:
-            subscribe_ok = encode_subscribe_ok(track_alias, MessageParameters(), track.track_properties)
+            subscribe_ok = encode_subscribe_ok(track_alias, MessageParameters(), track.track_properties, self._protocol)
         except Exception as error:  # the encoder refused the response; the peer did nothing wrong
             await _refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, "could not encode SUBSCRIBE_OK")
 
@@ -1221,7 +1226,7 @@ class MoqtPublishSession:
 
                     # Forward State toggles ride REQUEST_UPDATE; the binding must follow so data stops
                     # (or starts) with the subscription's authorization. The delivery timeouts ride it
-                    # too (§8), and the publisher applies the new values to groups it opens afterwards.
+                    # too (§5.2), and the publisher applies the new values to groups it opens afterwards.
                     # Newest-wins keeps this subscriber the track's only live one, so its state IS the
                     # binding.
                     rebind = False
@@ -1260,7 +1265,7 @@ class MoqtPublishSession:
                             # State and the delivery timeouts are applied above and priority is advisory
                             # (the known relays discard ours too); anything else ends this request
                             # honestly: the update's REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED
-                            # (§10.9.1).
+                            # (§9.5.1).
                             self._end_subscription(
                                 track,
                                 subscriber,
@@ -1280,7 +1285,7 @@ class MoqtPublishSession:
                             # (`on_update_ok`). Strictly reactive: a peer that never sends
                             # REQUEST_UPDATE (moq-relay 0.15.8 writes nothing after SUBSCRIBE until
                             # it cancels) never sees a trailing byte.
-                            spawn(_swallow(writer.write(encode_request_ok())))
+                            spawn(_swallow(writer.write(encode_request_ok(None, self._protocol))))
                 elif isinstance(message, Goaway):
                     self._received_goaway = True
                     _call(self._callbacks.on_goaway, message)
@@ -1289,7 +1294,7 @@ class MoqtPublishSession:
             # The peer FINed its direction while the subscription was still ours to end. moq-relay
             # (0.15.8 `cancel_subscribe`) pairs that FIN with STOP_SENDING (a cancellation, so the
             # write below fails harmlessly); a peer that only half-closes still gets the PUBLISH_DONE
-            # §3.3.2 requires before our FIN. No status names this, so it reports the publisher's own
+            # §6.4.2.2 requires before our FIN. No status names this, so it reports the publisher's own
             # limitation.
             if not subscriber.finished:
                 self._end_subscription(
@@ -1297,9 +1302,9 @@ class MoqtPublishSession:
                 )
         except MoqtProtocolError:
             raise
-        except Exception:  # reset: the subscriber cancelled (§3.3.3); ordinary end-of-request
+        except Exception:  # reset: the subscriber cancelled (§6.4.2.3); ordinary end-of-request
             # A cancelled subscription gets no PUBLISH_DONE, and its open data streams are reset
-            # (§5.1.1).
+            # (§3.1.2).
             subscriber.reset_data_streams()
         finally:
             already_ending = subscriber.finished

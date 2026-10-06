@@ -14,11 +14,12 @@ Conventions:
 | File | Covers |
 | --- | --- |
 | `media.json` | Exact MSF catalog UTF-8 JSON, LOC properties, MSF source URLs, H.264 avcC and access units, and rejected inputs |
-| `varint.json` | MOQT variable-length integers, draft-ietf-moq-transport-20 §1.4.1 |
+| `varint.json` | MOQT variable-length integers, draft-ietf-moq-transport-22 §8.1 |
 | `setup-options.json` | The PATH and AUTHORITY setup options the core sends for an endpoint URL and token, by framing, per `../transport-adapter.md` TA-6; TypeScript only until Python speaks native QUIC (#199) |
+| `location-filter.json` | The LOCATION_FILTER parameter in both drafts the SDKs speak: draft-ietf-moq-transport-22 §9.20.9 and its draft-20 §5.1.2 spelling, the draft-20-only normalization, and rejected values |
 | `arguments.json` | Namespace and track-name arguments the SDKs accept or reject locally, per the Arguments table in `../behavior.md`; properties and payloads are not portable through JSON and stay as mirrored tables in each suite |
 
-Planned: control message framing and parameters, subgroup and fetch stream headers, object status
+Planned: the rest of control message framing and parameters, subgroup and fetch stream headers, object status
 markers. The regression tests under `ts/packages/moq-core/src/tests` are the seed for those.
 
 Media vectors use decimal strings for numeric inputs and hex for binary data; `json` is the exact

@@ -52,7 +52,7 @@ A target is a plain object:
 | `host` | Only on native QUIC. The host TA-3 expects as the TLS server name. |
 
 `dial({ path, protocols })` calls the adapter's factory with the target's `https://` origin plus `path` (default
-`/conformance`) and `protocols` (default `['moqt-20']`). It returns the factory result plus the `url` it dialled.
+`/conformance`) and `protocols` (default `['moqt-22']`). It returns the factory result plus the `url` it dialled.
 
 ### Capabilities
 

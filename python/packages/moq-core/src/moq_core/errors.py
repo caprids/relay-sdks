@@ -1,4 +1,4 @@
-"""MOQT session-termination error codes (moq-transport draft-20 §3.5) and the codec error types.
+"""MOQT session-termination error codes (moq-transport draft-22 §12.2) and the codec error types.
 
 ``SESSION_ERROR`` values are used as the close code when terminating the transport session and as
 the ``code`` carried by :class:`MoqtProtocolError`.
@@ -10,7 +10,7 @@ from enum import IntEnum
 
 
 class SESSION_ERROR(IntEnum):
-    """Session-termination codes (§3.5)."""
+    """Session-termination codes (§12.2)."""
 
     NO_ERROR = 0x0
     INTERNAL_ERROR = 0x1
@@ -48,7 +48,7 @@ class IncompleteInputError(ValueError):
 class MoqtProtocolError(Exception):
     """A wire-protocol violation detected while encoding or decoding MOQT data.
 
-    ``code`` is the session-termination code (§3.5) the session driver should close the transport
+    ``code`` is the session-termination code (§12.2) the session driver should close the transport
     with; it defaults to ``PROTOCOL_VIOLATION``.
     """
 

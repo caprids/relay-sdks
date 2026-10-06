@@ -11,8 +11,8 @@ groups open at that moment. The TypeScript SDK keeps the same set (``ts/src/sett
 
 A settling group that fails later (STOP_SENDING, a reset, session teardown) leaves the set like one
 that settles cleanly, and nobody hears of it: the cause surfaces as demand, a rebind, or the
-connection's ``closed``. A group with a SUBGROUP_DELIVERY_TIMEOUT (draft-ietf-moq-transport-20 section
-8) carries its timer here: started when the group joins, it resets the stream if the acknowledgement
+connection's ``closed``. A group with a SUBGROUP_DELIVERY_TIMEOUT (draft-ietf-moq-transport-22 section
+5.2) carries its timer here: started when the group joins, it resets the stream if the acknowledgement
 has not come by then, which fails the acknowledgement wait, so the group leaves the set the same
 silent way and frees its room. The timer belongs to the group: a subscription change or end and the
 track's close leave it running, and only the acknowledgement or the connection's end settles the

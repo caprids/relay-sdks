@@ -8,13 +8,15 @@ from __future__ import annotations
 import asyncio
 from collections import deque
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 from moq_core.bytes import ByteWriter, StreamReader
 from moq_core.control_messages import (
+    MOQT_PROTOCOL_ID,
     ControlMessage,
     ControlMessageDeframer,
+    MoqtProtocolId,
     decode_control_message,
     encode_setup,
 )
@@ -36,6 +38,8 @@ class ServerRequestStream:
     client_end: asyncio.Future[Literal["fin", "reset"]]
     """Resolves when the client's direction ends: ``"fin"`` for a clean FIN, ``"reset"`` for a reset."""
     _writer: Pipe
+    raw: list[bytes] = field(default_factory=list)
+    """The client's bytes as they arrived."""
 
     async def send(self, data: bytes) -> None:
         await self._writer.write(data)
@@ -63,8 +67,10 @@ class ControlledDataStream:
 class FakeTransport:
     """The client's ``MoqtTransport``; the same object exposes the server-side controls."""
 
-    def __init__(self) -> None:
+    def __init__(self, protocol_id: MoqtProtocolId = MOQT_PROTOCOL_ID) -> None:
         loop = asyncio.get_running_loop()
+        self.protocol_id = protocol_id
+        """The protocol the transport reports as negotiated (TA-8); the server side decodes for it too."""
         self._incoming_uni: PushChannel[ReceiveStream] = PushChannel()
         self._incoming_bidi: PushChannel[BidirectionalStream] = PushChannel()
         self.client_uni_streams: list[Pipe] = []
@@ -107,6 +113,7 @@ class FakeTransport:
         messages: list[ControlMessage] = []
         first_message: asyncio.Future[ControlMessage] = asyncio.get_running_loop().create_future()
         client_end: asyncio.Future[Literal["fin", "reset"]] = asyncio.get_running_loop().create_future()
+        server_stream = ServerRequestStream(messages, first_message, client_end, server_to_client)
 
         async def pump() -> None:
             deframer = ControlMessageDeframer()
@@ -118,8 +125,10 @@ class FakeTransport:
                         client_end.set_result("fin")
                         break
 
+                    server_stream.raw.append(chunk)
+
                     for frame in deframer.push(chunk):
-                        message = decode_control_message(frame)
+                        message = decode_control_message(frame, self.protocol_id)
                         messages.append(message)
 
                         if len(messages) == 1 and not first_message.done():
@@ -129,8 +138,6 @@ class FakeTransport:
 
         task = asyncio.get_running_loop().create_task(pump())
         self._pumps.append(task)
-
-        server_stream = ServerRequestStream(messages, first_message, client_end, server_to_client)
 
         if self._request_waiters:
             self._request_waiters.popleft().set_result(server_stream)
@@ -243,8 +250,8 @@ class FakeTransport:
             pass
 
 
-def create_fake_transport() -> FakeTransport:
-    return FakeTransport()
+def create_fake_transport(protocol_id: MoqtProtocolId = MOQT_PROTOCOL_ID) -> FakeTransport:
+    return FakeTransport(protocol_id)
 
 
 def encode_subgroup(track_alias: int, group_id: int, payload: bytes, object_id: int = 0) -> bytes:

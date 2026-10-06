@@ -3,6 +3,8 @@ import pytest
 from moq_core.bytes import ByteReader, ByteWriter, utf8_encode
 from moq_core.control_messages import (
     MESSAGE_TYPE,
+    MOQT_PROTOCOL_ID,
+    MOQT_PROTOCOL_IDS,
     PARAMETER_TYPE,
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
@@ -18,6 +20,7 @@ from moq_core.control_messages import (
     Location,
     LocationFilter,
     MessageParameters,
+    MoqtProtocolId,
     NextObjectFilter,
     NoLocationFilter,
     PublishDone,
@@ -50,16 +53,16 @@ from moq_core.control_messages import (
     is_retryable_publish_done_status,
     is_retryable_request_error_code,
 )
-from moq_core.errors import MoqtProtocolError
+from moq_core.errors import IncompleteInputError, MoqtProtocolError
 
 
 def decode_all(data: bytes) -> list[ControlMessage]:
     return [decode_control_message(frame) for frame in ControlMessageDeframer().push(data)]
 
 
-def encode_parameters(parameters: MessageParameters) -> bytes:
+def encode_parameters(parameters: MessageParameters, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) -> bytes:
     writer = ByteWriter()
-    encode_message_parameters(writer, parameters)
+    encode_message_parameters(writer, parameters, protocol)
     return writer.to_bytes()
 
 
@@ -317,7 +320,7 @@ class TestEncodeMessageParameters:
             decode_control_message(ControlMessageFrame(type=MESSAGE_TYPE.SUBSCRIBE_OK, body=body + b"\x00"))
 
     def test_frames_include_properties_as_a_raw_byte_and_rejects_other_values(self) -> None:
-        # §10.2.21 and moq-relay 0.17.0: a uint8 with no Length.
+        # §9.20.21 and moq-relay 0.17.0: a uint8 with no Length.
         assert list(encode_parameters(MessageParameters(include_properties=0))) == [0x01, 0x35, 0x00]
 
         reader = ByteReader(bytes([0x01, 0x35, 0x00]))
@@ -334,7 +337,8 @@ class TestEncodeMessageParameters:
             )
         )
 
-        # count 1, type 0x23, length 4, then the nested list: count 1, type 0x21, length 1, StartGroup 1.
+        # count 1, type 0x23, length 4, then the nested list: count 1, type 0x21, Location Filter Type 0x01
+        # (Relative Start), StartGroup 1. The draft-20 spelling is the same bytes: length 1, then StartGroup 1.
         assert list(encoded) == [0x01, 0x23, 0x04, 0x01, 0x21, 0x01, 0x01]
 
     def test_rejects_parameters_outside_table_6_inside_fill_parameters_on_both_sides(self) -> None:
@@ -361,57 +365,146 @@ class TestEncodeMessageParameters:
             )
 
 
+FILTERS: list[LocationFilter] = [
+    NoLocationFilter(),
+    NextObjectFilter(),
+    RelativeGroupFilter(groups_before_next=0),
+    RelativeGroupFilter(groups_before_next=1),
+    RelativeGroupFilter(groups_before_next=5),
+    AbsoluteLocationFilter(start=Location(3, 9)),
+    AbsoluteLocationFilter(start=Location(3, 9), end_group_delta=0),
+    AbsoluteLocationFilter(start=Location(3, 9), end_group_delta=2, end_object=7),
+]
+
+
 class TestEncodeLocationFilter:
-    def test_round_trips_every_filter_shape(self) -> None:
-        filters: list[LocationFilter] = [
-            NoLocationFilter(),
-            NextObjectFilter(),
-            RelativeGroupFilter(groups_before_next=0),
-            RelativeGroupFilter(groups_before_next=1),
-            RelativeGroupFilter(groups_before_next=5),
-            AbsoluteLocationFilter(start=Location(3, 9)),
-            AbsoluteLocationFilter(start=Location(3, 9), end_group_delta=0),
-            AbsoluteLocationFilter(start=Location(3, 9), end_group_delta=2, end_object=7),
-        ]
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    def test_round_trips_every_filter_shape(self, protocol: MoqtProtocolId) -> None:
+        for location_filter in FILTERS:
+            assert (
+                decode_location_filter(encode_location_filter(location_filter, protocol), protocol) == location_filter
+            )
 
-        for location_filter in filters:
-            assert decode_location_filter(encode_location_filter(location_filter)) == location_filter
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    def test_round_trips_every_filter_shape_as_a_parameter_nested_in_fill_parameters_too(
+        self, protocol: MoqtProtocolId
+    ) -> None:
+        for location_filter in FILTERS:
+            parameters = MessageParameters(
+                location_filter=location_filter,
+                group_order="ascending",
+                fill_parameters=MessageParameters(location_filter=location_filter, group_order="descending"),
+            )
+            reader = ByteReader(encode_parameters(parameters, protocol))
 
-    def test_selects_the_meaning_by_field_count(self) -> None:
-        assert list(encode_location_filter(NoLocationFilter())) == []
-        assert list(encode_location_filter(RelativeGroupFilter(groups_before_next=1))) == [1]
-        assert list(encode_location_filter(NextObjectFilter())) == [0, 0]
-        assert list(encode_location_filter(AbsoluteLocationFilter(start=Location(3, 9)))) == [3, 9]
-        assert list(
-            encode_location_filter(AbsoluteLocationFilter(start=Location(3, 9), end_group_delta=2, end_object=7))
-        ) == [3, 9, 2, 7]
+            assert decode_message_parameters(reader, protocol) == parameters
+            assert reader.remaining == 0
 
-    def test_normalizes_an_open_ended_absolute_zero_to_no_filter(self) -> None:
-        # Rather than the Next Object spelling.
-        assert list(encode_location_filter(AbsoluteLocationFilter(start=Location(0, 0)))) == []
-        # Bounded, {0,0} is a real absolute start.
-        assert list(encode_location_filter(AbsoluteLocationFilter(start=Location(0, 0), end_group_delta=3))) == [
-            0,
-            0,
+    def test_defaults_to_draft_22(self) -> None:
+        assert MOQT_PROTOCOL_ID == "moqt-22"
+        assert list(encode_location_filter(NextObjectFilter())) == [0x05]
+
+    def test_opens_with_the_location_filter_type_on_draft_22(self) -> None:
+        # §9.20.9, Table 6.
+        def encode(location_filter: LocationFilter) -> list[int]:
+            return list(encode_location_filter(location_filter, "moqt-22"))
+
+        assert encode(NoLocationFilter()) == [0x00]
+        assert encode(RelativeGroupFilter(groups_before_next=1)) == [0x01, 1]
+        assert encode(AbsoluteLocationFilter(start=Location(3, 9))) == [0x02, 3, 9]
+        assert encode(AbsoluteLocationFilter(start=Location(3, 9), end_group_delta=2)) == [0x03, 3, 9, 2]
+        assert encode(AbsoluteLocationFilter(start=Location(3, 9), end_group_delta=2, end_object=7)) == [
+            0x04,
             3,
+            9,
+            2,
+            7,
+        ]
+        assert encode(NextObjectFilter()) == [0x05]
+        # Draft-22 has a spelling for an open-ended absolute {0,0}, so it is not normalized away.
+        assert encode(AbsoluteLocationFilter(start=Location(0, 0))) == [0x02, 0, 0]
+
+    def test_writes_the_draft_22_parameter_without_a_length_prefix(self) -> None:
+        # count 1, type 0x21, Location Filter Type 0x05 (Next Object), and nothing else.
+        assert list(encode_parameters(MessageParameters(location_filter=NextObjectFilter()), "moqt-22")) == [
+            0x01,
+            0x21,
+            0x05,
+        ]
+        # A following parameter's delta comes straight after the filter's last field.
+        parameters = MessageParameters(
+            location_filter=AbsoluteLocationFilter(start=Location(3, 9)), group_order="descending"
+        )
+        assert list(encode_parameters(parameters, "moqt-22")) == [0x02, 0x21, 0x02, 3, 9, 0x01, 0x02]
+
+    def test_selects_the_meaning_by_field_count_on_draft_20(self) -> None:
+        # Draft-20 §5.1.2.
+        def encode(location_filter: LocationFilter) -> list[int]:
+            return list(encode_location_filter(location_filter, "moqt-20"))
+
+        assert encode(NoLocationFilter()) == []
+        assert encode(RelativeGroupFilter(groups_before_next=1)) == [1]
+        assert encode(NextObjectFilter()) == [0, 0]
+        assert encode(AbsoluteLocationFilter(start=Location(3, 9))) == [3, 9]
+        assert encode(AbsoluteLocationFilter(start=Location(3, 9), end_group_delta=2, end_object=7)) == [3, 9, 2, 7]
+        # The draft-20 parameter is length-prefixed.
+        assert list(encode_parameters(MessageParameters(location_filter=NextObjectFilter()), "moqt-20")) == [
+            0x01,
+            0x21,
+            0x02,
+            0,
+            0,
         ]
 
-    def test_rejects_an_end_object_without_an_end_group(self) -> None:
-        with pytest.raises(MoqtProtocolError):
-            encode_location_filter(AbsoluteLocationFilter(start=Location(1, 0), end_object=4))
+    def test_normalizes_an_open_ended_absolute_zero_to_no_filter_on_draft_20(self) -> None:
+        # Rather than the Next Object spelling.
+        assert list(encode_location_filter(AbsoluteLocationFilter(start=Location(0, 0)), "moqt-20")) == []
+        # Bounded, {0,0} is a real absolute start.
+        assert list(
+            encode_location_filter(AbsoluteLocationFilter(start=Location(0, 0), end_group_delta=3), "moqt-20")
+        ) == [0, 0, 3]
 
-    def test_rejects_more_than_four_fields(self) -> None:
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    def test_rejects_an_end_object_without_an_end_group(self, protocol: MoqtProtocolId) -> None:
         with pytest.raises(MoqtProtocolError):
-            decode_location_filter(bytes([1, 2, 3, 4, 5]))
+            encode_location_filter(AbsoluteLocationFilter(start=Location(1, 0), end_object=4), protocol)
 
-    def test_rejects_an_end_group_past_the_supported_range(self) -> None:
+    def test_rejects_an_unknown_location_filter_type_on_draft_22(self) -> None:
+        with pytest.raises(MoqtProtocolError, match="Location Filter Type"):
+            decode_location_filter(bytes([0x06]), "moqt-22")
+
+        with pytest.raises(MoqtProtocolError):
+            decode_message_parameters(ByteReader(bytes([0x01, 0x21, 0x06])), "moqt-22")
+
+    def test_rejects_a_draft_22_filter_missing_the_fields_its_type_selects_or_with_bytes_left_over(self) -> None:
+        with pytest.raises(IncompleteInputError):
+            decode_location_filter(bytes([0x04, 3, 9, 2]), "moqt-22")
+
+        with pytest.raises(MoqtProtocolError):
+            decode_location_filter(bytes([0x05, 0]), "moqt-22")
+
+        with pytest.raises(MoqtProtocolError):
+            decode_control_message(
+                ControlMessageFrame(MESSAGE_TYPE.REQUEST_UPDATE, bytes([2, 1, 0x21, 0x03, 3, 9])), "moqt-22"
+            )
+
+    def test_rejects_more_than_four_fields_on_draft_20(self) -> None:
+        with pytest.raises(MoqtProtocolError):
+            decode_location_filter(bytes([1, 2, 3, 4, 5]), "moqt-20")
+
+    @pytest.mark.parametrize(("protocol", "prefix"), [("moqt-22", [0x03]), ("moqt-20", [])])
+    def test_rejects_an_end_group_past_the_supported_range(self, protocol: MoqtProtocolId, prefix: list[int]) -> None:
         writer = ByteWriter()
+
+        for byte in prefix:
+            writer.write_varint(byte)
+
         writer.write_varint(2**64 - 1)
         writer.write_varint(0)
         writer.write_varint(1)
 
         with pytest.raises(MoqtProtocolError):
-            decode_location_filter(writer.to_bytes())
+            decode_location_filter(writer.to_bytes(), protocol)
 
 
 class TestEncodeFetchOk:

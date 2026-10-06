@@ -3,7 +3,7 @@
  * the peer's incoming stream queues, so a publish session on one side can talk to a subscribe session on the other over
  * real (in-process) WHATWG streams — the same structural seam a `WebTransport` satisfies in production.
  */
-import { MESSAGE_TYPE, MOQT_PROTOCOL_ID } from '../../protocol/control-messages.js';
+import { MESSAGE_TYPE, MOQT_PROTOCOL_ID, type MoqtProtocolId } from '../../protocol/control-messages.js';
 import type { BidirectionalStreamLike } from '../../protocol/request-stream.js';
 import type { MoqtTransport } from '../../protocol/session.js';
 import { decodeVarint, encodeVarintInto, varintByteLength } from '../../protocol/varint.js';
@@ -233,9 +233,12 @@ const DEFAULT_BUFFER_BYTES = 64 * 1024;
 export function createTransportPair({
   events,
   bufferBytes = DEFAULT_BUFFER_BYTES,
+  protocol = MOQT_PROTOCOL_ID,
 }: {
   events?: PipeEvent[];
   bufferBytes?: number;
+  /** The protocol both transports report as negotiated. */
+  protocol?: MoqtProtocolId;
 } = {}): TransportPair {
   const pipes = new Set<Pipe>();
   const newPipe = (): Pipe => {
@@ -285,7 +288,7 @@ export function createTransportPair({
   };
 
   const makeTransport = (local: typeof a, remote: typeof b, closedPromise: Promise<unknown>): MoqtTransport => ({
-    protocol: MOQT_PROTOCOL_ID,
+    protocol,
     incomingUnidirectionalStreams: local.incomingUni.stream,
     incomingBidirectionalStreams: local.incomingBidi.stream,
     async createUnidirectionalStream() {
@@ -443,7 +446,7 @@ export function createTransportPairFactory({
   };
 }
 
-/** Request-initiating messages whose body opens with the sender's Request ID (§10.1). */
+/** Request-initiating messages whose body opens with the sender's Request ID (§6.4.2.1). */
 const REQUEST_ID_MESSAGE_TYPES: ReadonlySet<number> = new Set([
   MESSAGE_TYPE.SUBSCRIBE,
   MESSAGE_TYPE.FETCH,
@@ -488,7 +491,7 @@ export function setRequestIdParity(chunk: Uint8Array): Uint8Array {
 
 /**
  * Give the subscribe driver a server's request ids. The driver always allocates client (even) ids, and a publish
- * session is always the client too, so it requires the peer's ids to be odd (§10.1). A test that stands the driver in
+ * session is always the client too, so it requires the peer's ids to be odd (§6.4.2.1). A test that stands the driver in
  * for the relay wraps the driver's transport with this: every request stream the driver opens has each Request ID's
  * least significant bit set on the wire (0 becomes 1, 2 becomes 3). Assumes each write carries whole frames, which is
  * how the driver writes them.

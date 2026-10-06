@@ -1,7 +1,7 @@
-"""Pure MOQT session protocol driver (moq-transport draft-20), subscribe side only.
+"""Pure MOQT session protocol driver (moq-transport draft-22), subscribe side only.
 
 Owns the protocol mechanics over an established transport: the SETUP exchange on paired
-unidirectional control streams (§3.3), request-stream bookkeeping keyed by Request ID (§10.1: client
+unidirectional control streams (§6.3), request-stream bookkeeping keyed by Request ID (§6.4.2.1: client
 IDs are even, starting at 0), routing of incoming data streams to subscriptions (by Track Alias) and
 fetches (by Request ID), GOAWAY handling, and session termination.
 
@@ -42,6 +42,7 @@ from .control_messages import (
     GroupOrder,
     KeyValuePair,
     MessageParameters,
+    MoqtProtocolId,
     Namespace,
     NamespaceDone,
     Publish,
@@ -64,6 +65,7 @@ from .control_messages import (
     encode_subscribe,
     encode_subscribe_namespace,
     encode_track_status,
+    resolve_moqt_protocol,
 )
 from .errors import SESSION_ERROR, MoqtProtocolError, is_moqt_protocol_error
 from .object_stream import (
@@ -151,7 +153,7 @@ class SubscriptionHandlers:
     on_update_ok: Callable[[], None] | None = None
     """Response to a REQUEST_UPDATE sent on this subscription."""
     on_state_notify: Callable[[MessageParameters], None] | None = None
-    """PUBLISH_STATE_NOTIFY (§10.10): the publisher changed subscription state on its own.
+    """PUBLISH_STATE_NOTIFY (§9.10): the publisher changed subscription state on its own.
 
     The parameters carry only what changed, with LARGEST_OBJECT marking where. Informational; the
     session sends no reply.
@@ -201,15 +203,15 @@ class NamespaceSubscriptionHandlers:
     on_error: Callable[[RequestError], None] | None = None
     """The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure or timeout."""
     on_namespace: Callable[[list[str]], None] | None = None
-    """NAMESPACE (§10.17): a namespace under the prefix is available.
+    """NAMESPACE (§9.16): a namespace under the prefix is available.
 
     A peer may name one again (moq-relay does when its route changes); each call is passed on.
     """
     on_namespace_done: Callable[[list[str]], None] | None = None
-    """NAMESPACE_DONE (§10.18): a namespace the peer named is no longer available.
+    """NAMESPACE_DONE (§9.17): a namespace the peer named is no longer available.
 
-    Also called for each namespace still active when the accepted request ends (§10.19), just before
-    ``on_end``. One for a namespace never named closes the session with PROTOCOL_VIOLATION (§10.19).
+    Also called for each namespace still active when the accepted request ends (§9.15), just before
+    ``on_end``. One for a namespace never named closes the session with PROTOCOL_VIOLATION (§9.15).
     """
     on_end: Callable[[BaseException | None], None] | None = None
     """The accepted request ended; no entry follows.
@@ -235,7 +237,7 @@ class PublishResponder:
 
         Since draft-20 the subscription parameters (FORWARD, LOCATION_FILTER, ...) are legal only on
         PUBLISH and REQUEST_UPDATE, and a parameter in the wrong message is a PROTOCOL_VIOLATION
-        (§10.2.1).
+        (§9.20.1).
         """
         if self._responded:
             return
@@ -281,16 +283,16 @@ class MoqtSessionConfig:
     setup_options: Sequence[KeyValuePair] = ()
     """Extra Setup Options to send (an implementation identifier is added automatically)."""
     implementation_name: str = DEFAULT_IMPLEMENTATION_NAME
-    """Identifies this implementation in SETUP (§10.3.1.5)."""
+    """Identifies this implementation in SETUP (§9.1.5)."""
     unknown_alias_timeout: float = DEFAULT_UNKNOWN_ALIAS_TIMEOUT
     """Seconds to hold an incoming data stream whose Track Alias has no registered subscription yet.
 
-    Objects can outrace SUBSCRIBE_OK; §11.4.2 allows brief buffering, and expired streams are dropped.
+    Objects can outrace SUBSCRIBE_OK; §11.3.1 allows brief buffering, and expired streams are dropped.
     """
     request_timeout: float = DEFAULT_REQUEST_TIMEOUT
     """Seconds to wait for a request's first response before failing it; ``0`` disables the bound.
 
-    The draft expects implementations to bound control exchanges (§3.5's CONTROL_MESSAGE_TIMEOUT);
+    The draft expects implementations to bound control exchanges (§12.2's CONTROL_MESSAGE_TIMEOUT);
     without this a relay that accepts the stream and then goes quiet leaves the request pending
     forever.
     """
@@ -302,7 +304,7 @@ class MoqtSubscribeOptions:
     """The track a SUBSCRIBE, FETCH or TRACK_STATUS names, and the request's parameters.
 
     ``MoqtFetchOptions`` is the same class: for FETCH, ``parameters.location_filter`` is the range,
-    read with fetch rules (§5.1.2).
+    read with fetch rules (§3.3.1).
     """
 
     track_namespace: Sequence[str]
@@ -313,7 +315,7 @@ class MoqtSubscribeOptions:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class MoqtSubscribeNamespaceOptions:
-    """The prefix and parameters for a SUBSCRIBE_NAMESPACE (§10.19)."""
+    """The prefix and parameters for a SUBSCRIBE_NAMESPACE (§9.15)."""
 
     track_namespace_prefix: Sequence[str]
     """Namespace prefix to discover; NAMESPACE entries name namespaces relative to it."""
@@ -322,9 +324,9 @@ class MoqtSubscribeNamespaceOptions:
 
 
 MoqtFetchOptions: TypeAlias = MoqtSubscribeOptions
-"""FETCH (§10.13) takes the SUBSCRIBE shape.
+"""FETCH (§9.11) takes the SUBSCRIBE shape.
 
-The range is ``parameters.location_filter``, read with fetch rules (§5.1.2): a relative start counts
+The range is ``parameters.location_filter``, read with fetch rules (§3.3.1): a relative start counts
 back from Largest Object, an omitted end stops there, no filter means ``{0,0}`` up to Largest Object.
 A subscription reads the same filter with subscription rules; see ``NoLocationFilter``.
 """
@@ -443,7 +445,7 @@ class _AliasWaiter:
 class Subscription:
     """A live subscription request.
 
-    MOQT has no UNSUBSCRIBE message: teardown is the request stream's lifecycle (§3.3.3).
+    MOQT has no UNSUBSCRIBE message: teardown is the request stream's lifecycle (§6.4.2.3).
     """
 
     __slots__ = ("_record", "_session")
@@ -454,17 +456,21 @@ class Subscription:
 
     @property
     def request_id(self) -> int:
-        """The Request ID the SUBSCRIBE carried (§10.1)."""
+        """The Request ID the SUBSCRIBE carried (§6.4.2.1)."""
         return self._record.request_id
 
     def update(self, parameters: MessageParameters) -> None:
-        """Modify the subscription (REQUEST_UPDATE, §10.9)."""
-        # REQUEST_UPDATE consumes a Request ID of its own (§10.1); the stream it travels on is what
+        """Modify the subscription (REQUEST_UPDATE, §9.5)."""
+        # REQUEST_UPDATE consumes a Request ID of its own (§6.4.2.1); the stream it travels on is what
         # names the subscription. Reusing the subscription's id would be a duplicate the peer MUST
         # close on.
         stream = self._record.stream
         if stream is not None:
-            spawn(stream.send(encode_request_update(self._session._allocate_request_id(), parameters)))
+            spawn(
+                stream.send(
+                    encode_request_update(self._session._allocate_request_id(), parameters, self._session._protocol)
+                )
+            )
 
     def cancel(self, reason: object = None) -> None:
         """Tear the subscription down."""
@@ -482,7 +488,7 @@ class FetchHandle:
 
     @property
     def request_id(self) -> int:
-        """The Request ID the FETCH carried (§10.1)."""
+        """The Request ID the FETCH carried (§6.4.2.1)."""
         return self._record.request_id
 
     def cancel(self, reason: object = None) -> None:
@@ -501,7 +507,7 @@ class NamespaceSubscription:
 
     @property
     def request_id(self) -> int:
-        """The Request ID the SUBSCRIBE_NAMESPACE carried (§10.1)."""
+        """The Request ID the SUBSCRIBE_NAMESPACE carried (§6.4.2.1)."""
         return self._record.request_id
 
     def cancel(self, reason: object = None) -> None:
@@ -519,11 +525,14 @@ class MoqtSession:
 
     def __init__(self, transport: MoqtTransport, config: MoqtSessionConfig | None = None) -> None:
         self._transport = transport
+        # The negotiated draft, which selects the parameter codec: the adapter's ``protocol_id``
+        # (spec/transport-adapter.md TA-8), or the default for a transport that reports none.
+        self._protocol: MoqtProtocolId = resolve_moqt_protocol(getattr(transport, "protocol_id", None))
         self._config = config or MoqtSessionConfig()
         self._callbacks = self._config.callbacks
 
-        self._next_request_id = 0  # client request IDs: even, starting at 0 (§10.1)
-        # Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§10.1).
+        self._next_request_id = 0  # client request IDs: even, starting at 0 (§6.4.2.1)
+        # Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§6.4.2.1).
         self._peer_request_ids: set[int] = set()
         self._subscriptions: dict[int, _SubscriptionRecord] = {}
         self._fetches: dict[int, _FetchRecord] = {}
@@ -551,7 +560,7 @@ class MoqtSession:
 
     async def _start(self) -> None:
         # Accept loops start first: the peer's streams must be processed even while our own SETUP
-        # write is still propagating (either peer may send stream data first, §3.3).
+        # write is still propagating (either peer may send stream data first, §6.3).
         spawn(self._accept_unidirectional_streams())
         spawn(self._accept_bidirectional_streams())
         spawn(self._watch_transport())
@@ -687,7 +696,7 @@ class MoqtSession:
         return request_id
 
     def _claim_peer_request_id(self, request_id: int) -> None:
-        """Request IDs are consumed once per session (§10.1); a reused or wrong-parity one is session-fatal.
+        """Request IDs are consumed once per session (§6.4.2.1); a reused or wrong-parity one is session-fatal.
 
         Every request-initiating message consumes one, accepted or not. This endpoint is always the
         client, so the peer's ids are odd; a reused id or an even one closes the session with
@@ -702,7 +711,7 @@ class MoqtSession:
         self._peer_request_ids.add(request_id)
 
     def subscribe(self, options: MoqtSubscribeOptions, handlers: SubscriptionHandlers | None = None) -> Subscription:
-        """Send SUBSCRIBE (§10.7) on a new request stream and return its handle at once.
+        """Send SUBSCRIBE (§9.6) on a new request stream and return its handle at once.
 
         Results arrive through ``handlers``, which must be synchronous (``TypeError`` otherwise).
         """
@@ -714,7 +723,8 @@ class MoqtSession:
                 track_namespace=list(options.track_namespace),
                 track_name=options.track_name,
                 parameters=options.parameters or MessageParameters(),
-            )
+            ),
+            self._protocol,
         )
         record = _SubscriptionRecord(request_id=request_id, handlers=handlers)
         self._subscriptions[request_id] = record
@@ -724,7 +734,7 @@ class MoqtSession:
             _call(handlers.on_error, error)
 
         def on_end() -> None:
-            # §3.3.2: once the publisher's FIN after PUBLISH_DONE completes the request, the
+            # §6.4.2.2: once the publisher's FIN after PUBLISH_DONE completes the request, the
             # requester SHOULD FIN too. A publisher closing waits for it before closing the transport.
             if record.publisher_done and record.stream is not None:
                 spawn(record.stream.fin_write())
@@ -738,7 +748,7 @@ class MoqtSession:
         return Subscription(self, record)
 
     def fetch(self, options: MoqtSubscribeOptions, handlers: FetchHandlers | None = None) -> FetchHandle:
-        """Send FETCH (§10.13) on a new request stream and return its handle at once.
+        """Send FETCH (§9.11) on a new request stream and return its handle at once.
 
         The range is ``options.parameters.location_filter``, read with fetch rules; results and entries
         arrive through ``handlers``.
@@ -752,7 +762,8 @@ class MoqtSession:
                 track_namespace=list(options.track_namespace),
                 track_name=options.track_name,
                 parameters=parameters,
-            )
+            ),
+            self._protocol,
         )
         record = _FetchRecord(
             request_id=request_id, handlers=handlers, group_order=parameters.group_order or "ascending"
@@ -768,7 +779,7 @@ class MoqtSession:
         return FetchHandle(self, record)
 
     def track_status(self, options: MoqtSubscribeOptions, handlers: TrackStatusHandlers | None = None) -> None:
-        """Send TRACK_STATUS (§10.15) on a new request stream; the answer arrives through ``handlers``."""
+        """Send TRACK_STATUS (§9.13) on a new request stream; the answer arrives through ``handlers``."""
         handlers = handlers or TrackStatusHandlers()
         request_id = self._allocate_request_id()
         message = encode_track_status(
@@ -777,7 +788,8 @@ class MoqtSession:
                 track_namespace=list(options.track_namespace),
                 track_name=options.track_name,
                 parameters=options.parameters or MessageParameters(),
-            )
+            ),
+            self._protocol,
         )
         record = _TrackStatusRecord(request_id=request_id, handlers=handlers)
 
@@ -809,7 +821,7 @@ class MoqtSession:
     def subscribe_namespace(
         self, options: MoqtSubscribeNamespaceOptions, handlers: NamespaceSubscriptionHandlers | None = None
     ) -> NamespaceSubscription:
-        """Send SUBSCRIBE_NAMESPACE (§10.19) on a new request stream and return its handle at once.
+        """Send SUBSCRIBE_NAMESPACE (§9.15) on a new request stream and return its handle at once.
 
         The peer answers REQUEST_OK, then names the namespaces under the prefix with NAMESPACE /
         NAMESPACE_DONE on the same stream. A relay that pushes unsolicited PUBLISH_NAMESPACE instead
@@ -822,7 +834,8 @@ class MoqtSession:
                 request_id=request_id,
                 track_namespace_prefix=list(options.track_namespace_prefix),
                 parameters=options.parameters or MessageParameters(),
-            )
+            ),
+            self._protocol,
         )
         record = _NamespaceSubscriptionRecord(request_id=request_id, handlers=handlers)
         self._namespace_subscriptions[request_id] = record
@@ -834,7 +847,7 @@ class MoqtSession:
             # A failed stream is dropped here, since a cancel after the end no longer touches it.
             if error is not None and record.stream is not None:
                 record.stream.cancel(error)
-            # §10.19: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
+            # §9.15: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
             active = list(record.active.values())
             record.active.clear()
             for suffix in active:
@@ -849,7 +862,7 @@ class MoqtSession:
             _call(handlers.on_error, error)
 
         def on_end() -> None:
-            # §3.3.2: the requester SHOULD FIN once the peer's FIN completes the request.
+            # §6.4.2.2: the requester SHOULD FIN once the peer's FIN completes the request.
             if record.stream is not None:
                 spawn(record.stream.fin_write())
             end(None)
@@ -948,6 +961,7 @@ class MoqtSession:
                 on_fin=on_fin,
                 on_error=on_error,
             ),
+            self._protocol,
         )
 
         # A cancel that raced the stream opening lands here.
@@ -997,12 +1011,12 @@ class MoqtSession:
                 _call(record.handlers.on_error, message)
             case PublishDone():
                 # Data streams may still be inbound; the alias route stays until the subscription is
-                # cancelled or the session ends, so late subgroups still deliver (§10.12 leaves the
+                # cancelled or the session ends, so late subgroups still deliver (§9.9 leaves the
                 # timing policy to us).
                 record.publisher_done = True
                 _call(record.handlers.on_done, message)
             case PublishStateNotify(parameters=parameters):
-                # Unilateral (§10.10): no REQUEST_OK back, and it does not count against
+                # Unilateral (§9.10): no REQUEST_OK back, and it does not count against
                 # MAX_REQUEST_UPDATES.
                 _call(record.handlers.on_state_notify, parameters)
             case Goaway():
@@ -1017,7 +1031,7 @@ class MoqtSession:
                 _call(record.handlers.on_ok, message)
             case RequestOk():
                 # Some deployed relays accept a FETCH with the generic REQUEST_OK instead of the
-                # FETCH_OK §10.13 mandates. It carries no End Location/End Of Track, so on_ok can't
+                # FETCH_OK §9.11 mandates. It carries no End Location/End Of Track, so on_ok can't
                 # fire; the fetch's actual completion still surfaces via on_entry/on_end on the data
                 # stream. It is still the response, so it has to settle the request: leaving the timer
                 # armed would fail an answered fetch (and drop its data stream) once the deadline
@@ -1059,7 +1073,7 @@ class MoqtSession:
                 if record.stream is not None:
                     spawn(record.stream.fin_write())
             case Namespace() | NamespaceDone():
-                # Entries follow REQUEST_OK (§10.19); one before it, or after REQUEST_ERROR, is outside
+                # Entries follow REQUEST_OK (§9.15); one before it, or after REQUEST_ERROR, is outside
                 # the stream's grammar.
                 if not record.accepted:
                     self._fatal(
@@ -1074,7 +1088,7 @@ class MoqtSession:
                 elif record.active.pop(tuple(suffix), None) is not None:
                     _call(record.handlers.on_namespace_done, suffix)
                 else:
-                    # §10.19: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
+                    # §9.15: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
                     self._fatal(
                         MoqtProtocolError("NAMESPACE_DONE before its NAMESPACE on a subscribe-namespace request stream")
                     )
@@ -1175,7 +1189,7 @@ class MoqtSession:
         high = await reader.read_uint8()
         low = await reader.read_uint8()
         body = await reader.read_bytes((high << 8) | low)
-        return decode_control_message(ControlMessageFrame(message_type, body))
+        return decode_control_message(ControlMessageFrame(message_type, body), self._protocol)
 
     async def _run_control_stream(self, reader: StreamReader) -> None:
         # The stream-type varint (0x2F00) doubles as the first message's type.
@@ -1204,12 +1218,12 @@ class MoqtSession:
             self._received_control_goaway = True
             _call(self._callbacks.on_goaway, message)
 
-        # A closed control stream ends the session (§3.3).
+        # A closed control stream ends the session (§6.3).
         if not self._destroyed:
             self._fatal(MoqtProtocolError("peer closed its control stream"))
 
     async def _wait_for_alias(self, track_alias: int) -> _SubscriptionRecord | None:
-        """Wait briefly for a subscription to claim ``track_alias`` (§11.4.2 buffering)."""
+        """Wait briefly for a subscription to claim ``track_alias`` (§11.3.1 buffering)."""
         known = self._alias_routes.get(track_alias)
         if known is not None or self._destroyed:
             return known
@@ -1272,7 +1286,7 @@ class MoqtSession:
         record = self._fetches.get(request_id)
 
         # A FETCH_HEADER naming no fetch of ours is dropped, not fatal. That includes a fill fetch
-        # stream (§5.1.3), keyed by a SUBSCRIBE's Request ID: this subscriber never asks for one, so
+        # stream (§3.4), keyed by a SUBSCRIBE's Request ID: this subscriber never asks for one, so
         # none is expected.
         if record is None or record.cancelled:
             reader.cancel()

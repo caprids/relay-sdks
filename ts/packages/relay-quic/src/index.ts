@@ -1,6 +1,6 @@
 /**
  * `@mux/relay-quic`: the Relay SDK's transport adapter for Node. It speaks MOQT directly on a QUIC connection (native
- * QUIC, ALPN `moqt-20`), over quinn through a napi-rs addon, and follows the transport adapter contract
+ * QUIC, with the MOQT ALPNs it is given: `moqt-22`, then `moqt-20`), over quinn through a napi-rs addon, and follows the transport adapter contract
  * (`spec/transport-adapter.md`). Pass {@link nativeQuicTransport}'s factory as `createTransport`.
  *
  * @packageDocumentation

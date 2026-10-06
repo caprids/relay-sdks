@@ -19,8 +19,8 @@ from moq_core.bytes import ByteWriter
 from moq_core.control_messages import encode_key_value_pairs
 from moq_core.varint import MAX_VARINT_VALUE
 
-#: A key-value pair's byte value carries a 16-bit length on the wire (draft-ietf-moq-transport-20
-#: §1.4.2), pinned in ``spec/protocol.json``. The core enforces the same bound while encoding.
+#: A key-value pair's byte value carries a 16-bit length on the wire (draft-ietf-moq-transport-22
+#: §8.3), pinned in ``spec/protocol.json``. The core enforces the same bound while encoding.
 MAX_PROPERTY_VALUE_LENGTH = 0xFFFF
 
 #: moq-relay drops an object whose encoded property block is larger than this (``MAX_OBJECT_EXTENSIONS``
@@ -33,7 +33,7 @@ MAX_RELAY_OBJECT_PROPERTIES_LENGTH = 64 * 1024
 #: Pinned in ``spec/protocol.json`` as ``relay.limits.maxTrackProperties``.
 MAX_RELAY_TRACK_PROPERTIES = 64
 
-#: Track property values draft-ietf-moq-transport-20 restricts (sections 12.4 and 12.5), pinned in
+#: Track property values draft-ietf-moq-transport-22 restricts (sections 10.4 and 10.5), pinned in
 #: ``spec/protocol.json`` under ``trackProperties``. moq-relay refuses every subscriber to a track
 #: that breaks them, so registration checks them.
 DEFAULT_PUBLISHER_PRIORITY = 0x0E
@@ -85,7 +85,7 @@ def track_property_pairs(properties: object) -> list[KeyValuePair]:
     Integer types and values are bounded by what the core's varint carries, ``2**64 - 1``, and byte
     values by their 16-bit wire length. The list rides in every SUBSCRIBE_OK, so its encoding,
     measured here with the core's own encoder, must fit the room that control message leaves; the
-    relay also caps how many pairs it reads and refuses the values draft-20 rules out. A track that
+    relay also caps how many pairs it reads and refuses the values draft-22 rules out. A track that
     breaks any of these would register and then never answer a subscription, with the publisher's
     writes timing out, so each is an argument error here instead.
     """

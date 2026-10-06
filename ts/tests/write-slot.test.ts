@@ -924,7 +924,7 @@ describe('write slot: settling groups', () => {
   });
 });
 
-describe('write slot: delivery timeouts (draft-20 §8)', () => {
+describe('write slot: delivery timeouts (draft-22 §5.2)', () => {
   const MAX_TIMER_MS = 2_147_483_647;
 
   /** One track on its own connection, bound to alias 1, with FINs that wait for `acknowledge()`. */

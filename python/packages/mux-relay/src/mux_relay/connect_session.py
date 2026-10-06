@@ -14,9 +14,9 @@ from dataclasses import dataclass
 from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
-from moq_core import MOQT_PROTOCOL_ID, Closed, Goaway, KeyValuePair, MoqtTransport
+from moq_core import MOQT_PROTOCOL_IDS, Closed, Goaway, KeyValuePair, MoqtProtocolId, MoqtTransport
 from moq_core._tasks import call_later, observe, spawn
-from moq_core.control_messages import SETUP_OPTION
+from moq_core.control_messages import SETUP_OPTION, resolve_moqt_protocol
 from moq_core.transport import transport_ended
 
 from .cancellation import CancellationToken
@@ -42,6 +42,9 @@ class ConnectingTransport:
 
 RelayTransportFactory = Callable[[str, Sequence[str]], ConnectingTransport]
 """Supply a transport for ``(url, protocols)``.
+
+``protocols`` are the MOQT protocol IDs to offer, in preference order: ``moqt-22``, then ``moqt-20``
+as a fallback. A transport reports the one the peer selected as ``protocol_id`` (TA-8).
 
 Native QUIC on aioquic (``mux_relay.quic.connect_quic``) by default; tests supply in-memory pairs.
 """
@@ -136,6 +139,11 @@ class RelaySessionLifetime(Generic[T]):
         """
         return transport_ended(self._transport)
 
+    @property
+    def protocol(self) -> MoqtProtocolId:
+        """The MOQT version the transport negotiated, which selects the core's parameter codec."""
+        return resolve_moqt_protocol(getattr(self._transport, "protocol_id", None))
+
     def close(self) -> None:
         self._close()
 
@@ -219,7 +227,7 @@ def _endpoint_setup_options(framing: object, url: str) -> list[KeyValuePair]:
 
     On native QUIC, PATH (the path, then ``?`` and the query when present, the resolved ``jwt``
     included) and AUTHORITY take the place of the CONNECT request a WebTransport session sends; on a
-    WebTransport session neither may be sent (draft-20 §10.3.1.2, §10.3.1.1). ``url`` is the endpoint
+    WebTransport session neither may be sent (draft-22 §9.1.2, §9.1.1). ``url`` is the endpoint
     as ``_parse_endpoint`` normalized it, so its path is never empty and it has no fragment.
     """
     if framing == "webtransport":
@@ -381,7 +389,7 @@ async def open_relay_session(
 
         assert_open()
         using_transport = True
-        created = (options.create_transport or _default_transport)(connect_url, [MOQT_PROTOCOL_ID])
+        created = (options.create_transport or _default_transport)(connect_url, list(MOQT_PROTOCOL_IDS))
         transport = created.transport
         state.transport = transport
         ready = asyncio.ensure_future(created.ready)

@@ -13,7 +13,7 @@
  * connection as a settling group (see CONTEXT.md). Only the group's own delivery timeout resets a
  * settling group, and nothing reports how it ends.
  *
- * The slot enforces the group's delivery timeouts (draft-ietf-moq-transport-20 §8, see
+ * The slot enforces the group's delivery timeouts (draft-ietf-moq-transport-22 §5.2, see
  * delivery-timeouts.ts), fixed per group: the subscriber's side just before the group's stream opens
  * (until then only the publisher's applies), the publisher's side from the first object or the track. The object timeout
  * runs from the application's call until the transport takes the object, so waiting for demand, for
@@ -42,7 +42,7 @@ import type { SettlingGroups } from './settling-groups.js';
 import { objectPropertyPairs, payloadBytes } from './validation.js';
 
 /**
- * Stream reset codes a publisher sends (draft-ietf-moq-transport-20 §3.3.4, registry §15.11.4).
+ * Stream reset codes a publisher sends (draft-ietf-moq-transport-22 §12.5, registry §16.11.4).
  * The core defines the same values but does not export them.
  */
 export const RESET_CODE = {
@@ -107,7 +107,7 @@ interface Operation {
   publisher: DeliveryTimeouts;
   /** The relay subscription's delivery timeouts, fixed just before the group's stream opens. */
   subscriber: DeliveryTimeouts;
-  /** The group's effective delivery timeouts (§8). Before its stream opens only the publisher's apply. */
+  /** The group's effective delivery timeouts (§5.2). Before its stream opens only the publisher's apply. */
   timeouts: DeliveryTimeouts;
   /** When the application handed over the object now under the object timeout, if one is. */
   objectStartedAt: number | undefined;
@@ -230,7 +230,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     if (operation.cancelled) throw operation.failure;
     assertOpen();
   };
-  // The object timeout expired before the transport took the object (§8): fail the operation in its
+  // The object timeout expired before the transport took the object (§5.2): fail the operation in its
   // current phase and reset its stream, if one is open, with DELIVERY_TIMEOUT. A group is not reopened.
   const expireObject = (operation: Operation) => {
     operation.cancel(
@@ -261,7 +261,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     operation.objectTimer = undefined;
     operation.objectStartedAt = undefined;
   };
-  // The check §8 requires just before an object goes to the transport, in case its timer is late:
+  // The check §5.2 requires just before an object goes to the transport, in case its timer is late:
   // before the stream write starts, and again once the stream's header write has settled.
   const checkObjectAge = (operation: Operation) => {
     const { objectMs } = operation.timeouts;
@@ -303,7 +303,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
         check(operation);
         if (operation.writer && isStreamStop(error)) {
           // The relay stopped this operation's own stream: the group is no longer of interest
-          // (§11.4), whether or not its subscription is ending too. The binding alone decides
+          // (§11.3.2), whether or not its subscription is ending too. The binding alone decides
           // whether the next write waits for demand; a later binding change finds no operation.
           failure = new RelayError(
             'SUBSCRIPTION_CHANGED',
@@ -352,7 +352,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     check(operation);
     const subgroup = await openSubgroup(operation.alias, groupId);
     if (operation.cancelled) {
-      // The stream opened after the failure: reset it without sending payload bytes (§11.4.3).
+      // The stream opened after the failure: reset it without sending payload bytes (§11.3.2).
       subgroup.abort(resetReason(operation.code, operation.failure));
       check(operation);
     }
@@ -364,7 +364,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     operation.cleanup();
   };
   // The operation is complete: its FIN was handed over, so the group settles on the connection's
-  // account and the slot is free. Its subgroup timeout starts now (§8): if the relay has not
+  // account and the slot is free. Its subgroup timeout starts now (§5.2): if the relay has not
   // acknowledged the FIN when it expires, the stream is reset with DELIVERY_TIMEOUT, the failed FIN
   // takes the group out of the settling set, and nobody hears of it.
   const completeOperation = (operation: Operation, subgroup: SubgroupWriter) => {
@@ -447,7 +447,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await writer.write(encodeJSON(value), writeOptions);
     },
     async write(payload, writeOptions = {}) {
-      // The object's age counts from here (§8).
+      // The object's age counts from here (§5.2).
       const startedAt = now();
       // Arguments before slot state: a bad payload is a programming error whatever the slot holds.
       const bytes = payloadBytes(payload);
@@ -518,7 +518,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
           try {
             operation.phase = 'writing';
             // The first object's properties can override the track's timeouts for this group; a later
-            // object's are ignored (§8).
+            // object's are ignored (§5.2).
             if (objectCount === 0) fixTimeouts(operation, publisherTimeouts(properties, trackTimeouts));
             startObject(operation, startedAt);
             await run(operation, () => {
@@ -548,7 +548,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
           }
         },
         abort(reason = new RelayError('CLOSED', 'Group was aborted', operation.phase)) {
-          // After a clean close the FIN already ended the stream; a later reset is ignorable (§11.4.3).
+          // After a clean close the FIN already ended the stream; a later reset is ignorable (§11.3.2).
           if (!complete) operation.cancel(reason, RESET_CODE.CANCELLED);
         },
       };
