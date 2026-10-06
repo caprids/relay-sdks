@@ -16,8 +16,9 @@ on aioquic), then asserts the list in ``spec/behavior.md``:
    then ``unannounced`` after the publisher's clean ``close()``; the report records how long that took.
 7. A want following a supervised publisher's root receives the first generation's objects; when a
    second supervised publisher starts on the same root while the first is still up, the want moves to
-   the newer generation, reports ``on_restarted`` with reason ``generation``, and receives its
-   objects. The report records how long the move took.
+   the newer generation make-before-break (issue #282): both generations beat one shared counter, the
+   want reports one ``on_switched`` and no ``on_restarted``, and no beat number is missing across the
+   move. The report records how long the move took.
 8. All connections close cleanly once the test closes them.
 
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
@@ -59,6 +60,7 @@ from mux_relay import (
     SupervisedSubscriber,
     SwitchableHandlers,
     WantHandlers,
+    WantSwitchedInfo,
     connect_relay_publisher,
     connect_relay_subscriber,
     connect_supervised_publisher,
@@ -361,33 +363,67 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
 
         # Assertion 7. A want following a supervised publisher's root moves to a newer generation that
         # announces while the old one is still up, the way a restarted publisher replaces a crashed one
-        # whose announce the relay still holds.
+        # whose announce the relay still holds, or a publisher rotates its connection. The move is made
+        # before the break (issue #282): both generations beat one shared counter every 50 ms, the want
+        # cuts over once the new generation's beat is within a few of the latest delivered (each
+        # generation numbers its own groups, so the counter is the timeline), the old one drains for a
+        # second, and no beat number is missing across the move.
         root = [*namespace, "supervised"]
-        beats: list[str] = []
+        beats: list[tuple[str, int]] = []
         restarts: list[str] = []
-        current_namespace: list[tuple[str, ...]] = []
+        generation_switches: list[WantSwitchedInfo] = []
 
-        def on_beat_subscribed(_ok: Any, subscribed_on: tuple[str, ...]) -> None:
-            current_namespace[:] = [subscribed_on]
+        def beat_of(obj: MoqtObject) -> tuple[str, int]:
+            label, n = obj.payload.decode().split(":")
+            return label, int(n)
 
         def on_beat(obj: MoqtObject) -> None:
             if obj.status == "normal":
-                beats.append(obj.payload.decode())
+                beats.append(beat_of(obj))
+
+        def caught_up(obj: MoqtObject) -> bool:
+            if not beats:
+                return True
+            latest = max(n for _, n in beats)
+            return latest - 5 <= beat_of(obj)[1] <= latest + 1
 
         watcher.want(
             "beat",
             root,
             "beat",
             WantHandlers(
-                on_subscribed=on_beat_subscribed,
                 on_object=on_beat,
+                on_switched=generation_switches.append,
                 on_restarted=lambda reason, _namespace: restarts.append(reason),
                 on_error=lambda error: errors.append(f"beat: {error!r}"),
             ),
             generations=True,
+            until=caught_up,
+            drain=1.0,
         )
 
-        async def start_generation(label: str) -> tuple[SupervisedPublisher, Any]:
+        generations: list[tuple[str, Any]] = []
+        beating = True
+
+        async def write_beat(label: str, writer: Any, n: int) -> None:
+            try:
+                await writer.write(f"{label}:{n}".encode())
+            except RelayError as error:
+                if error.code not in ("SUBSCRIPTION_CHANGED", "WRITE_TIMEOUT", "RECONNECTING"):
+                    raise
+
+        # One counter for every generation, written only where the relay wants it, so a generation nobody
+        # watches yet never holds up the one being watched.
+        async def beat_loop() -> None:
+            n = 0
+            while beating:
+                await asyncio.gather(
+                    *(write_beat(label, writer, n) for label, writer in list(generations) if writer.has_demand)
+                )
+                n += 1
+                await asyncio.sleep(0.05)
+
+        async def start_generation(label: str) -> SupervisedPublisher:
             supervised = await connect_supervised_publisher(
                 endpoint,
                 namespace=root,
@@ -396,40 +432,51 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
                 create_transport=create_transport,
             )
             supervised_publishers.append(supervised)
-            return supervised, supervised.register_track("beat", write_timeout=2)
+            generations.append((label, supervised.register_track("beat", write_timeout=2)))
+            return supervised
 
-        # Write until this generation's beats arrive: a SUBSCRIBE_OK does not prove the path is ready.
-        async def beat_until_received(writer: Any, label: str) -> None:
-            until = time.monotonic() + 15
-            n = 0
-            while not any(beat.startswith(f"{label}:") for beat in beats):
-                if errors:
-                    raise RuntimeError("; ".join(errors))
-                if time.monotonic() >= until:
-                    raise TimeoutError(f"Timed out waiting for generation {label}'s beats")
-                try:
-                    await writer.write(f"{label}:{n}".encode())
-                except RelayError as error:
-                    if error.code not in ("SUBSCRIPTION_CHANGED", "WRITE_TIMEOUT"):
-                        raise
-                n += 1
-                await asyncio.sleep(0.1)
-
-        first, first_writer = await start_generation("first")
-        assert first.generation is not None
-        report({"phase": "first generation", "namespace": list(first.generation.namespace)})
-        await beat_until_received(first_writer, "first")
-        second, second_writer = await start_generation("second")
-        switch_started = time.monotonic()
-        await beat_until_received(second_writer, "second")
-        switched_after_ms = round((time.monotonic() - switch_started) * 1000)
-        assert second.generation is not None
-        if current_namespace != [second.generation.namespace]:
-            raise RuntimeError(f"Want stayed on {current_namespace!r}")
-        if "generation" not in restarts:
-            raise RuntimeError(f"No generation restart: {restarts!r}")
-        report({"phase": "followed newer generation", "afterMs": switched_after_ms, "restarts": restarts})
-        watcher.unwant("beat")
+        generation_switch: dict[str, Any] = {}
+        beater = asyncio.ensure_future(beat_loop())
+        try:
+            first = await start_generation("first")
+            assert first.generation is not None
+            report({"phase": "first generation", "namespace": list(first.generation.namespace)})
+            await wait_for(lambda: sum(1 for label, _ in beats if label == "first") >= 10, "first generation's beats")
+            second = await start_generation("second")
+            switch_started = time.monotonic()
+            await wait_for(lambda: bool(generation_switches), "move to the second generation")
+            switched_after_ms = round((time.monotonic() - switch_started) * 1000)
+            at_cutover = len(beats)
+            await wait_for(lambda: len(beats) >= at_cutover + 10, "second generation's beats")
+            beating = False
+            await beater
+            if errors:
+                raise RuntimeError("; ".join(errors))
+            assert second.generation is not None
+            move = generation_switches[0]
+            if move.to_namespace != second.generation.namespace:
+                raise RuntimeError(f"Want moved to {move.to_namespace!r}")
+            numbers = sorted({n for _, n in beats})
+            missing = [n for n in range(numbers[0], numbers[-1] + 1) if n not in numbers]
+            labels = list(dict.fromkeys(label for label, _ in beats))
+            if missing or len(generation_switches) != 1 or restarts or labels != ["first", "second"]:
+                raise RuntimeError(
+                    f"Generation move left a gap: missing {missing}, {len(generation_switches)} switches, "
+                    f"restarts {restarts}, {beats}"
+                )
+            first_new = next(i for i, (label, _) in enumerate(beats) if label == "second")
+            generation_switch = {
+                "afterMs": switched_after_ms,
+                "lastOld": beats[first_new - 1][1],
+                "firstNew": beats[first_new][1],
+                "beats": len(beats),
+            }
+            report({"phase": "followed newer generation", **generation_switch})
+        finally:
+            beating = False
+            if not beater.done():
+                beater.cancel()
+            watcher.unwant("beat")
         if errors:
             raise RuntimeError("; ".join(errors))
 
@@ -555,7 +602,7 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             if late_largest_object is not None
             else None,
             "discovery": {"announced": "passed", "withdrawnAfterMs": withdrawn_after_ms},
-            "generationSwitch": {"afterMs": switched_after_ms, "restarts": restarts},
+            "generationSwitch": generation_switch,
             "layerSwitch": layer_switch,
         }
     finally:

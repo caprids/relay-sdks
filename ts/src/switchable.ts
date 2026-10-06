@@ -16,6 +16,7 @@ import {
   type ProductSubscription,
   type SubscriptionConsumer,
   type SubscriptionEnd,
+  type SubscriptionEvent,
   synchronousCallback,
 } from './subscription.js';
 import { trackName } from './validation.js';
@@ -77,7 +78,8 @@ export interface SwitchOptions {
    */
   parameters?: MessageParameters;
   /**
-   * When to cut over; the new subscription's objects before the cutover are discarded.
+   * When to cut over. The new subscription's objects before the cutover are discarded, except those of groups later
+   * than the one that cuts over (arrived early, out of order), which follow it.
    * `'first-object'` (the default) promotes on its first object. A synchronous predicate promotes
    * on the first object it accepts: compare the object's own timeline (a timestamp property, say)
    * with what the active subscription has delivered, and accept once the new track has caught up,
@@ -181,8 +183,37 @@ interface Slot {
   drainThrough?: number;
 }
 
+/** A group-scoped event of a pending subscription that did not cut over: an object `until` refused, or a subgroup's end. */
+export type HeldEvent = Extract<SubscriptionEvent, { type: 'object' | 'subgroupEnd' | 'subgroupReset' }>;
+
+/** How many of a pending subscription's events are held for its cutover; the oldest are dropped first. */
+export const HELD_EVENTS = 256;
+
+/** Hold one more of a pending subscription's events, dropping the oldest beyond {@link HELD_EVENTS}. */
+export function holdEvent(held: HeldEvent[], event: HeldEvent): void {
+  held.push(event);
+  if (held.length > HELD_EVENTS) held.shift();
+}
+
+/**
+ * The held events that come after the cutover object in its own subscription, in arrival order: those of later
+ * groups, and later objects, subgroup ends and resets of its group (the ends and resets complete objects that follow
+ * it, and never arrive again). Groups arrive out of order across streams, so a later group can reach a
+ * pending subscription before the object that cuts over; discarding it would leave a gap, while the earlier groups
+ * are the old subscription's to deliver. Group IDs are compared only within the one subscription.
+ */
+export function heldAfter(held: readonly HeldEvent[], cutover: MoqtObject): HeldEvent[] {
+  return held.filter(
+    (event) =>
+      event.value.groupId > cutover.groupId ||
+      (event.value.groupId === cutover.groupId && (event.type !== 'object' || event.value.objectId > cutover.objectId)),
+  );
+}
+
 /** A pending switch: its slot plus the promise `switchTo` returned. */
 interface PendingSwitch extends Slot {
+  /** Its events held until the cutover. */
+  held: HeldEvent[];
   /** Whether this object may be the cutover. */
   until: (object: MoqtObject) => boolean;
   drainMs: number;
@@ -191,7 +222,8 @@ interface PendingSwitch extends Slot {
   removeAbort(): void;
 }
 
-function untilPredicate(until: SwitchOptions['until']): (object: MoqtObject) => boolean {
+/** Check `until` and return the predicate it stands for; shared with the supervised want (spec/behavior.md). */
+export function untilPredicate(until: SwitchOptions['until']): (object: MoqtObject) => boolean {
   if (until === undefined || until === 'first-object') return () => true;
   if (typeof until !== 'function') throw new TypeError("until must be 'first-object' or a function");
   if (Object.prototype.toString.call(until) === '[object AsyncFunction]')
@@ -211,6 +243,14 @@ function untilPredicate(until: SwitchOptions['until']): (object: MoqtObject) => 
     }
     return passed;
   };
+}
+
+/** Check a drain duration in milliseconds; shared with the supervised want. */
+export function assertDrainMs(drainMs: unknown): asserts drainMs is number {
+  if (typeof drainMs !== 'number') throw new TypeError('drainMs must be a number of milliseconds');
+  // A timer holds at most MAX_TIMEOUT_MS; a larger delay would fire at once and end the drain early.
+  if (!Number.isFinite(drainMs) || drainMs < 0 || drainMs > MAX_TIMEOUT_MS)
+    throw new RangeError(`drainMs must be between 0 and ${MAX_TIMEOUT_MS} milliseconds`);
 }
 
 /** Handlers checked and snapshotted, held to the synchronous callback policy. */
@@ -314,9 +354,27 @@ export function createSwitchable(
     markSubscribed(info);
     const switched = { from: from.track, to: switching.track, subscribed: info };
     switching.resolve(switched);
-    call('onSwitched', switched);
+    // Later groups that reached the new subscription early, out of order, follow the object that cut over. Each
+    // delivery is isolated, so one throwing handler loses neither the rest nor the held events.
+    const replay = heldAfter(switching.held, object);
+    switching.held = [];
+    const deliver = (name: keyof SwitchableHandlers, ...args: unknown[]) => {
+      try {
+        call(name, ...args);
+      } catch (error) {
+        // biome-ignore lint/suspicious/noConsole: the application's handler failed and has no caller to report to
+        console.error(new Error(`${name} threw at a cutover; the switchable delivers regardless`, { cause: error }));
+      }
+    };
+    deliver('onSwitched', switched);
     // A handler may have switched again or cancelled; the object still belongs to this cutover.
-    if (!end && active === switching) call('onObject', object, switching.track);
+    if (!end && active === switching) deliver('onObject', object, switching.track);
+    for (const event of replay) {
+      if (end || active !== switching) break;
+      if (event.type === 'object' && event.value.groupId > (activeLargestGroup as number))
+        activeLargestGroup = event.value.groupId;
+      deliver(EVENT_HANDLERS[event.type], event.value, switching.track);
+    }
   };
 
   /** The consumer for one slot: active events go to the handlers, pending ones to the cutover check. */
@@ -345,8 +403,10 @@ export function createSwitchable(
           call(EVENT_HANDLERS[event.type], event.value, self.track);
         return;
       }
-      if (self !== pending || event.type !== 'object') return;
+      if (self !== pending) return;
       const switching = pending;
+      if (event.type === 'subgroupEnd' || event.type === 'subgroupReset') holdEvent(switching.held, event);
+      if (event.type !== 'object') return;
       let passed: boolean;
       try {
         passed = switching.until(event.value);
@@ -355,7 +415,8 @@ export function createSwitchable(
         return;
       }
       // The predicate is application code: it may have switched again or cancelled.
-      if (passed && !end && pending === switching) cutover(switching, event.value);
+      if (!passed) holdEvent(switching.held, event);
+      else if (!end && pending === switching) cutover(switching, event.value);
     },
     ended(subscriptionEnd) {
       const self = slot();
@@ -394,10 +455,7 @@ export function createSwitchable(
       // Arguments before the switchable's or the connection's state (spec/behavior.md, Arguments).
       trackName(track);
       const predicate = untilPredicate(until);
-      if (typeof drainMs !== 'number') throw new TypeError('drainMs must be a number of milliseconds');
-      // A timer holds at most MAX_TIMEOUT_MS; a larger delay would fire at once and end the drain early.
-      if (!Number.isFinite(drainMs) || drainMs < 0 || drainMs > MAX_TIMEOUT_MS)
-        throw new RangeError(`drainMs must be between 0 and ${MAX_TIMEOUT_MS} milliseconds`);
+      assertDrainMs(drainMs);
       if (signal !== undefined && !(signal instanceof AbortSignal))
         throw new TypeError('signal must be an AbortSignal');
       if (end) {
@@ -415,7 +473,7 @@ export function createSwitchable(
       // Open first: an invalid track or a closed connection throws here and leaves any pending switch alone.
       const subscription = open(track, params, () => switching as Slot);
       const previous = pending;
-      switching = { track, subscription, until: predicate, drainMs, resolve, reject, removeAbort: () => {} };
+      switching = { track, subscription, held: [], until: predicate, drainMs, resolve, reject, removeAbort: () => {} };
       pending = switching;
       if (previous) abandon(previous, new RelayError('CLOSED', `Superseded by a switch to ${track}`, 'subscription'));
       if (subscription.end) {

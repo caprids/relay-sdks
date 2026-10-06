@@ -191,9 +191,11 @@ export function fakeSubscriber(): FakeSubscriber {
       void subscribed.promise.catch(() => {});
       let accepted = false;
       let over = false;
+      let recorded: SubscriptionEnd | undefined;
       const finish = (end: SubscriptionEnd) => {
         if (over) return;
         over = true;
+        recorded = end;
         closers.delete(onClose);
         endedSub.resolve(end);
       };
@@ -237,6 +239,10 @@ export function fakeSubscriber(): FakeSubscriber {
       const subscription = {
         subscribed: subscribed.promise,
         ended: endedSub.promise,
+        // As on a product subscription, the ending is readable at once; `ended` settles a turn later.
+        get end() {
+          return recorded;
+        },
         cancel(reason?: unknown) {
           record.cancelled = true;
           finish({ kind: 'cancelled', cause: 'cancelled', accepted, error: reason });

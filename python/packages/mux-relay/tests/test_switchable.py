@@ -188,6 +188,32 @@ class TestSwitchable:
             ("object", 6, 0, "video-lo"),
         ]
 
+    async def test_delivers_refused_objects_of_later_groups_after_the_cutover_object(self) -> None:
+        calls, handlers = recording()
+        harness = Harness(handlers)
+        harness.track("video-mid").ok()
+        switched = harness.switchable.switch_to(
+            "video-lo", until=lambda value: value.group_id == 7 and value.object_id == 0
+        )
+        lo = harness.track("video-lo")
+        lo.ok()
+        lo.object(obj(8))  # ahead of the timeline: refused, held
+        lo.subgroup_end(8)
+        lo.object(obj(4))  # stale: refused, and earlier than the cutover
+        lo.object(obj(7, 1))  # the cutover group's later object, arrived on another subgroup
+        lo.subgroup_end(7)  # and that subgroup's end
+        lo.object(obj(7))
+        await switched
+        assert calls == [
+            ("subscribed", "video-mid"),
+            ("switched", "video-mid", "video-lo"),
+            ("object", 7, 0, "video-lo"),
+            ("object", 8, 0, "video-lo"),
+            ("subgroup_end", 8, "video-lo"),
+            ("object", 7, 1, "video-lo"),
+            ("subgroup_end", 7, "video-lo"),
+        ]
+
     async def test_switches_to_the_same_track_with_new_parameters_which_are_not_inherited(self) -> None:
         parameters = MessageParameters(subscriber_priority=3)
         harness = Harness(parameters=parameters)

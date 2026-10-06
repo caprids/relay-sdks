@@ -90,6 +90,14 @@ objects, live, with the gap unfilled. A decoder resets there.
 _Avoid_: resume (nothing resumes), reconnect (that is the connection's), retry (a rejected attempt
 was never accepted)
 
+**Move**:
+A want's change of subscription made before the break: a newer generation, or the same key wanted
+with another track or parameters. The replacement opens while the current subscription keeps
+delivering, and takes over at a cutover (`onSwitched`), which is not a restart. A decoder resets
+there too.
+_Avoid_: restart (nothing was lost in between), switch (the switchable's verb, for the primitive),
+migration
+
 ### Media publishing internals
 
 **Frame writer**:

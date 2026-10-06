@@ -23,6 +23,13 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   until=..., drain=..., cancellation=...)` subscribes to the new track while the old one keeps delivering, cuts over on
   the first object `until` accepts, reports `on_switched`, and can keep the old subscription open briefly for groups
   still in flight. It is how to change a track, filter or priority, which `update()` cannot do against moq-relay.
+- `mux-relay`: a supervised want moves make-before-break ([#282](https://github.com/muxinc/relay-sdks/issues/282)).
+  A newer generation, or wanting the key again with another track or parameters, opens the replacement while the
+  current subscription keeps delivering, and cuts over on the first object `until` accepts. `want` gains `until=` and
+  `drain=` (seconds), as on `switch_to`, and `WantHandlers` gains `on_switched`, which receives a `WantSwitchedInfo`
+  (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`). A generation move no longer reports
+  `on_restarted("generation", ...)`; handle `on_switched` instead, where decoders reset. Wanting a key again with only
+  `stale_after` changed now swaps it without resubscribing. Another namespace or `generations` still replaces the want.
 - `mux-moq-media` (imported as `moq_media`): LOC and MSF format helpers. `build_msf_catalog` leaves `isComplete`
   out, since a live broadcast is not complete (msf-01 §5.1.3), and `build_msf_end_catalog` builds the §11.3 catalog
   that ends a broadcast: `isComplete: true` and no tracks ([#284](https://github.com/muxinc/relay-sdks/issues/284)).

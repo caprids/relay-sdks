@@ -379,6 +379,7 @@ subscriber.want(
     WantHandlers(
         on_object=decoder.push,
         on_restarted=lambda reason, namespace: decoder.reset(),  # the gap is not filled
+        on_switched=lambda info: decoder.reset(),  # a newer generation took over with no gap; see below
         on_error=lambda error: print("gave up on alice/video", error),
     ),
     generations=True,
@@ -405,6 +406,30 @@ moving as soon as a newer one is announced, with no application channel. Rejecti
 such as credentials or a malformed request, reach `on_error`, and the want stops. Backoff bounds are
 `SupervisionBackoff(initial_delay=..., max_delay=...)`, given as `reconnect=` to either supervisor
 or `retry=` to a want. See the [supervised contract](../spec/behavior.md#supervised-connections).
+
+A move to a newer generation is made before the break, as `switch_to` makes one. The old
+subscription keeps delivering until the new generation delivers, and `on_switched` runs at the
+cutover (with a `WantSwitchedInfo`) instead of `on_restarted`. Wanting the key again with another
+track or parameters moves the same way, so a supervised viewer changes layers without a gap:
+
+```python
+# Cut over once the new layer reaches what was already shown, and let the old one finish in-flight groups.
+subscriber.want(
+    "alice/video",
+    namespace,
+    "video-hi",
+    handlers,
+    generations=True,
+    until=lambda obj: timestamp_of(obj) >= last_shown_timestamp,
+    drain=1.0,
+)
+```
+
+`until` and `drain` mean what they mean on [`switch_to`](#switching-tracks), and apply to every move
+of the want. Compare your own timeline, never group IDs, since each generation and track numbers
+its own groups. Wanting the key again with only `until`, `drain`, `stale_after`, `retry` or the
+handlers changed swaps them without resubscribing. Another namespace, or turning `generations` on or
+off, replaces the want.
 
 ## Publishing lifecycle
 
@@ -794,8 +819,8 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
 | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
 | Browser `WebTransport`, or `@mux/relay-quic` on Node | aioquic native QUIC client (`mux_relay.quic.connect_quic`) |
-| `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=...)` |
-| `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)` |
+| `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry, until, drainMs }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=..., until=..., drain=seconds)` |
+| `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })`, `onSwitched({ from, to, subscribed })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)`, `on_switched(WantSwitchedInfo)` with `from_namespace`, `from_track`, `to_namespace`, `to_track` |
 | `SupervisionBackoff` in milliseconds (`initialDelayMs`, `maxDelayMs`) | `SupervisionBackoff` in seconds (`initial_delay`, `max_delay`) |
 
 ## Initial scope

@@ -431,6 +431,7 @@ subscriber.want(
   {
     onObject: (object) => decoder.push(object),
     onRestarted: () => decoder.reset(), // the next object starts a new subscription; the gap is not filled
+    onSwitched: () => decoder.reset(), // a newer generation took over with no gap; see below
     onError: (error) => console.error('gave up on alice/video', error),
   },
 );
@@ -453,6 +454,23 @@ the publisher's root and stays on the newest generation, moving as soon as a new
 announced, with no application channel. Rejections no wait fixes, such as credentials or a
 malformed request, reach `onError`, and the want stops. See the
 [supervised contract](../spec/behavior.md#supervised-connections).
+
+A move to a newer generation is made before the break, as `switchTo` makes one. The old
+subscription keeps delivering until the new generation delivers, and `onSwitched` runs at the
+cutover instead of `onRestarted`. Wanting the key again with another track or parameters moves the
+same way, so a supervised viewer changes layers without a gap:
+
+```js
+// Cut over once the new layer reaches what was already shown, and let the old one finish in-flight groups.
+const caughtUp = (object) => timestampOf(object) >= lastShownTimestamp;
+subscriber.want('alice/video', { namespace, track: 'video-hi', generations: true, until: caughtUp, drainMs: 1000 }, handlers);
+```
+
+`until` and `drainMs` mean what they mean on [`switchTo`](#switching-tracks), and apply to every move
+of the want. Compare your own timeline, never group IDs, since each generation and track numbers
+its own groups. Wanting the key again with only `until`, `drainMs`, `staleAfterMs`, `retry` or the
+handlers changed swaps them without resubscribing. Another namespace, or turning `generations` on or
+off, replaces the want.
 
 ## Publishing lifecycle
 
