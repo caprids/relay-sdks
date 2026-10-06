@@ -374,7 +374,7 @@ export async function superviseRelaySubscriber(
         controller: new AbortController(),
       };
       wants.set(key, want);
-      void superviseWant(want, liveConnection, () => forget(key, want));
+      void runWant(want, liveConnection, () => forget(key, want));
     },
     unwant(key) {
       const want = wants.get(key);
@@ -411,6 +411,21 @@ type AttemptOutcome =
   /** Anything else; resubscribe after the backoff. */
   | { kind: 'retry'; accepted: boolean; progressed: boolean; reason?: RestartReason | undefined };
 
+/** Supervise `want`; a failure its loop did not expect forgets it rather than leave it registered but dead. */
+async function runWant(
+  want: Want,
+  liveConnection: (scope: AbortSignal) => Promise<Connection | undefined>,
+  forget: () => void,
+): Promise<void> {
+  try {
+    await superviseWant(want, liveConnection, forget);
+  } catch (error) {
+    forget();
+    // biome-ignore lint/suspicious/noConsole: the want has no caller left to report its failure to
+    console.error(new Error('A want stopped on an unexpected failure and was forgotten', { cause: error }));
+  }
+}
+
 /** Keep `want` subscribed until it is cancelled or fails for good. */
 async function superviseWant(
   want: Want,
@@ -439,7 +454,15 @@ async function superviseWant(
     }
     const reason: RestartReason | undefined =
       outcome.kind === 'connection' ? 'connection' : outcome.kind === 'generation' ? 'generation' : outcome.reason;
-    if (outcome.accepted && reason) want.handlers.onRestarted?.({ reason, namespace: [...(want.namespace ?? [])] });
+    if (outcome.accepted && reason) {
+      try {
+        want.handlers.onRestarted?.({ reason, namespace: [...(want.namespace ?? [])] });
+      } catch (error) {
+        // A delivery callback's failure is the application's; the want keeps its track subscribed.
+        // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+        console.error(new Error('onRestarted threw; the want resubscribes regardless', { cause: error }));
+      }
+    }
     if (outcome.kind === 'connection') {
       // The request can see the end before the connection reports it; wait for that rather than spin on it.
       await Promise.race([whenAborted(connection.signal), sleep(1_000, scope).catch(() => {})]);
@@ -572,7 +595,7 @@ async function subscribeOnce(
         onObject: (object) => {
           lastObjectAt = performance.now();
           if (firstGroup === undefined) firstGroup = object.groupId;
-          else if (object.groupId !== firstGroup) progressed = true;
+          else if (object.groupId > firstGroup) progressed = true;
           handlers().onObject?.(object);
         },
         onSubgroupEnd: (info) => handlers().onSubgroupEnd?.(info),

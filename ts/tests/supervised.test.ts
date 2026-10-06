@@ -782,7 +782,7 @@ describe('PR review fixes: Codex pass 4', () => {
   });
 });
 
-describe('a throwing onStatus or onGeneration (#272)', () => {
+describe('callback failures and progress (#272)', () => {
   const url = 'https://relay.example.com/moq';
   const boom = new Error('callback failed');
 
@@ -910,5 +910,89 @@ describe('a throwing onStatus or onGeneration (#272)', () => {
     });
     owner.abort(reason);
     await expect(aborted.closed).resolves.toEqual({ error: reason });
+  });
+
+  async function silenced(body: (logged: unknown[]) => Promise<void>): Promise<unknown[]> {
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (error: unknown) => logged.push(error);
+    try {
+      await body(logged);
+    } finally {
+      console.error = original;
+    }
+    return logged;
+  }
+
+  it('keeps a want subscribed when onRestarted throws, and logs the failure', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, { url });
+    cleanup.push(() => subscriber.close());
+    const objects: number[] = [];
+    const logged = await silenced(async () => {
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v', retry: fast },
+        {
+          onObject: (object) => objects.push(object.groupId),
+          onRestarted: () => {
+            throw boom;
+          },
+        },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.done();
+      await until(() => connections[0]!.subscriptions.length === 2, 'resubscribed despite the throwing callback');
+    });
+    connections[0]!.subscriptions[1]!.accept();
+    connections[0]!.subscriptions[1]!.object(7);
+    expect(objects).toEqual([7]);
+    expect(logged).toHaveLength(1);
+    expect((logged[0] as Error).cause).toBe(boom);
+  });
+
+  it('forgets a want whose loop fails unexpectedly, here a throwing onError, and logs it', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, { url });
+    cleanup.push(() => subscriber.close());
+    const logged = await silenced(async (logged) => {
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v' },
+        {
+          onError: () => {
+            throw boom;
+          },
+        },
+      );
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+      await until(() => logged.length === 1, 'logged');
+    });
+    expect((logged[0] as Error).cause).toBe(boom);
+    // Forgotten: wanting the same key again subscribes afresh instead of swapping handlers on a dead entry.
+    subscriber.want('v', { namespace: ['room'], track: 'v' });
+    await until(() => connections[0]!.subscriptions.length === 2, 'subscribed again');
+  });
+
+  it('counts only a later group as progress: cached groups replayed newest first do not reset the backoff', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, { url });
+    cleanup.push(() => subscriber.close());
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 40, maxDelayMs: 1_000 } });
+    const started: number[] = [];
+    for (let count = 1; count <= 4; count++) {
+      await until(() => connections[0]!.subscriptions.length === count, `subscription ${count}`);
+      started.push(performance.now());
+      // A finished track still announced: its cached groups, newest first, then a done.
+      const subscription = connections[0]!.subscriptions.at(-1)!;
+      subscription.accept();
+      subscription.object(10);
+      subscription.object(9);
+      subscription.done();
+    }
+    // The delays keep doubling (20-40, 40-80, 80-160 ms): nothing reset the backoff.
+    expect(started[3]! - started[2]!).toBeGreaterThanOrEqual(80);
   });
 });
