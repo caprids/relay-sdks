@@ -200,6 +200,11 @@ Messages are not a compatibility contract; the class and the point of rejection 
   needs earlier groups asks for them with a relative-group or absolute filter; an absolute start is
   served from the requested group while the relay still caches it. The SDK sends the
   filter it is given and adds none.
+- The SDK sends every subscription parameter the application sets. Which ones take effect is the
+  relay's choice: moq-relay 0.17.0 ignores GROUP_ORDER, NEW_GROUP_REQUEST and the delivery
+  timeouts on a SUBSCRIBE, and refuses FORWARD = 0 and range filters
+  ([subscription parameters](relay-interop.md#subscription-parameters)). The SDK does not warn
+  about an ignored parameter.
 - The request timeout bounds only the subscription's initial response. An accepted subscription
   has no application inactivity deadline. The SDK schedules no application-level keepalive: keeping
   the transport connected is left to peer traffic and the transport's own keepalive, which
@@ -221,6 +226,9 @@ Messages are not a compatibility contract; the class and the point of rejection 
   Implemented in both SDKs. moq-relay, however, never answers a REQUEST_UPDATE: any byte on the
   request stream after SUBSCRIBE_OK ends the subscription with PUBLISH_DONE `TRACK_ENDED`, so
   against it an update ends delivery ([relay interop deviation 4](#relay-interop-deviations)).
+  REQUEST_UPDATE carries no track either, so it cannot change tracks against any relay. A
+  [switchable subscription](#switching-tracks) changes the track, the filter or the priority with
+  a new subscription, make-before-break.
 - A subscribe for a namespace the relay has not seen announced is rejected, not parked: moq-relay
   0.15.8 and 0.17.0 answer request error 16 (0x10, `DOES_NOT_EXIST`) with reason `unroutable`, and
   moq-relay through 0.15.1 answered its literal 404. The same code 16 with reason `not found` means the
@@ -412,6 +420,82 @@ Teardown suppresses subsequent end/reset callbacks and protocol errors from thos
 it does not report cancellation as a network gap. An actual reset while the subscription is active
 still invokes the gap callback. Publisher completion leaves readers active for trailing objects.
 
+## Switching tracks
+
+Changing what a viewer receives (a simulcast or ABR layer, a location filter, a priority) takes a
+new SUBSCRIBE: draft-22 REQUEST_UPDATE names no track, and moq-relay ends a subscription on any
+update. The draft recommends subscribing to the alternate track before cancelling the old one
+([draft-22 Section 3.7.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.7.2)).
+`subscriber.subscribeSwitchable(options, handlers)` / `subscriber.subscribe_switchable(namespace,
+track, handlers, parameters=...)` does that for the application
+([issue #264](https://github.com/muxinc/relay-sdks/issues/264)). Implemented in both SDKs, on the
+primitive subscriber. A supervised want moves the same way when it follows a newer generation or
+is wanted again with another track or parameters ([moves](#supervised-subscriber)).
+
+- One subscription at a time is **active**, and only its events reach the handlers. Each handler
+  gets the active track's name as its last argument. Every subscription underneath is an ordinary
+  subscription with the lifecycle above. The handle has no `update()`.
+- `switchTo(track, { parameters, until, drainMs, signal })` / `switch_to(track, parameters=...,
+  until=..., drain=..., cancellation=...)` subscribes to `track` in the same namespace. The track
+  may be the active one, which is how to change parameters. `parameters` are not inherited: omitted
+  means none. The new subscription is **pending**, and the active one keeps delivering. The
+  arguments, the connection and the switchable's own state are checked at once. A failed check
+  leaves any pending switch alone.
+- **Cutover.** Each object of the pending subscription is offered to `until`. `'first-object'`
+  (the default) accepts the first object. A synchronous predicate accepts each object it returns
+  true for. Objects it refuses, and the pending subscription's other events, are discarded, with
+  one exception. Its objects, subgroup ends and resets are held (the latest 256), and those that come
+  after the accepted object in its own subscription follow it. Those are its later groups, and
+  its group's later objects, subgroup ends and resets. Across relays a later group can arrive before the object that cuts
+  over, and the predicate refuses it as too far ahead ([issue #282](https://github.com/muxinc/relay-sdks/issues/282)).
+  On the first accepted object:
+  1. the old subscription is cancelled;
+  2. `onSwitched` / `on_switched` runs with the old track, the new track and the new
+     subscription's SUBSCRIBE_OK;
+  3. the accepted object is delivered, then the held events that come after it, in arrival order.
+
+  `switchTo` resolves with the same record.
+- **Avoiding a gap needs a timeline.** The SDK knows no media time, and group IDs are not one.
+  Each track numbers its own groups, and the SDK's publisher counts them from the track's first
+  sent group, so layers that gained demand at different times disagree. An application that must
+  not skip media supplies a predicate. It compares the object's own timeline (a timestamp property,
+  a frame number) with what the active subscription delivered, and accepts an object within a few
+  frames of it. The same check refuses a stale first object. The relay starts a subscription at its
+  cached latest group, and that group is old if the publisher skipped the track while nobody watched
+  it. A subscriber on another relay can also lose the first object altogether
+  ([issue #243](https://github.com/muxinc/relay-sdks/issues/243)).
+- **Drain.** Groups arrive out of order across streams, especially through another relay, so an
+  older group of the old track can still be in flight at the cutover. `drainMs` / `drain` (default
+  0) keeps the old subscription open for that long. It takes 0 up to the bound every SDK deadline
+  has (2147483647 ms, 2147483.647 s), the longest a JavaScript timer holds; beyond it, or negative,
+  is a `RangeError` / `ValueError`, and a non-number a `TypeError`. While it drains, its objects, subgroup ends
+  and resets still reach the handlers, with the old track's name, if they belong to a group no
+  later than the largest it had delivered. Its later groups and other events are discarded. When
+  the time is up, it is cancelled. An old subscription that had delivered nothing is cancelled at
+  once.
+- **A failed switch leaves the active subscription delivering.** A switch fails, reaching no
+  handler, when:
+  - the pending subscription ends before its cutover: it fails as `subscribed` would;
+  - a newer `switchTo` supersedes it: `CLOSED`;
+  - the signal or token cancels it: the signal's or token's reason;
+  - the predicate throws: that error.
+- **Endings.**
+  - `subscribed` settles with the SUBSCRIBE_OK of the first subscription to become active. If the
+    switchable ends before that, it fails as the first subscription's `subscribed` does.
+  - `ended` settles with that subscription's `SubscriptionEnd` when the active subscription ends
+    other than by a cutover, or on `cancel()`. A REQUEST_ERROR ending also reaches `onError` with
+    the track.
+  - Any pending switch then fails, with `CLOSED` or with the connection error if the connection
+    ended. Any drain stops.
+  - Publisher completion is not an ending, as for any subscription.
+  - `switchTo` on an ended switchable raises `CLOSED`.
+- **Measured** on moq-relay 0.17.0 at `*.relay.mux.global` (2026-10-06). The test switched between
+  two layers written frame for frame every 50 ms, with a frame-window predicate and a 1 s drain. The
+  cutover came about 140 ms after `switchTo` with publisher and subscriber on one relay (sjc), and
+  about 1 to 1.6 s with the subscriber on another (fra). The live smoke test asserts that no frame
+  is missing across the cutover, in both runtimes of each SDK. Without the predicate and drain, a
+  `'first-object'` switch skipped a frame in most cross-relay runs.
+
 ## Discovery
 
 A subscriber can learn which namespaces under a prefix are announced, without an application
@@ -536,14 +620,24 @@ taken over.
   application writes on demand (a catalog) reaches the new generation. When the
   overlap runs out, every track moves regardless of demand, and the old generation closes as
   `close()` closes it.
-- **Subscriber.** The replacement is a new connection. Every want subscribes on it at once, and its
-  subscription on the old connection keeps delivering until the replacement delivers an object the
-  old one has not, or until the old one ends. Then the old subscription is cancelled,
-  `onRestarted` / `on_restarted` runs with reason `rotation`, the replacement's `onSubscribed` /
-  `on_subscribed` runs, and its objects follow. Both subscriptions serve the same namespace, and the
-  replacement starts at the latest group, so its objects at or before the last location the old
-  one delivered are dropped rather than delivered twice. A want with no accepted subscription
-  starts over on the new connection.
+- **Subscriber.** The replacement is a new connection, and every want **moves** its subscription to
+  it make-before-break, as a [move](#supervised-subscriber) does: the replacement opens pending on
+  the new connection while the old subscription keeps delivering. A want following generations
+  discovers the root on the new connection first. Then:
+  - **Same target** (namespace, track and parameters): the same publisher's stream continues. The
+    replacement starts at the latest group, so its objects at or before the last location the old
+    subscription delivered are dropped, and the first one after it cuts over without `until`. No
+    callback marks it, no `onSwitched`, `onRestarted` or `onSubscribed`, and nothing is lost or
+    repeated, so decoders keep their state. The old subscription is cancelled, not drained. Once
+    any of the want's subscriptions has heard `PUBLISH_DONE`, nothing is dropped: a restarted
+    publisher numbers its groups from 0 again.
+  - **Another target**, a newer generation announced on the new connection or a re-want: an
+    ordinary move, with `until`, the drain and `onSwitched`.
+  - The old connection closing under the old subscription leaves the replacement to carry on, and
+    a replacement refused or ended before its cutover is retried after the retry backoff, as a
+    move's is. The new connection ending restarts the want with `connection`. A want with no
+    accepted subscription starts over on the new connection at once. A rotation to a connection
+    that is itself rotated away before the cutover moves on to the newest one.
 
 ### Supervised publisher
 
@@ -576,11 +670,14 @@ taken over.
 ### Supervised subscriber
 
 - `want(key, options, handlers)` keeps a subscription to one track open until `unwant(key)`.
-  Wanting a key again with the same namespace, track, parameters, generation-following and stale
-  threshold only swaps the handlers and the retry backoff. Anything else replaces the want. Arguments are checked at once.
-- Each want runs one subscription at a time on the live connection:
+  Arguments are checked at once. Wanting a key again with the same namespace and
+  generation-following updates the want in place. The handlers, the retry backoff, the stale
+  threshold, `until` and the drain are swapped. Another track or other parameters **move** the
+  subscription (below). Another namespace or generation-following replaces the want.
+- Each want runs one subscription at a time on the live connection, two while a move is pending:
   - **Retried at once**, without backoff: the connection ended (the want moves to the replacement
-    connection), or the followed generation changed.
+    connection), the followed generation was withdrawn with none newer, or a move came before the
+    subscription was accepted.
   - **Retried after backoff** (from 250 ms, doubling up to 8 s, with jitter): the announce race
     (16 `unroutable`, or the older 404), every other rejection not listed below, `PUBLISH_DONE`,
     a REQUEST_ERROR after acceptance, and a subscription that went stale. Only an object from a
@@ -599,22 +696,55 @@ taken over.
 - **Following generations.** With `generations: true`, the want's namespace is a supervised
   publisher's root. The supervisor discovers the root ([discovery](#discovery)) and subscribes on
   the newest generation announced one field below it. Deeper namespaces are ignored. One discovery
-  per root per connection is shared by every want on it. The want subscribes to a newer generation
-  at once when it is announced, even while the old one is still announced, as a crashed publisher's
-  is until the relay's idle timeout. As in a [rotation](#rotation), an accepted subscription on the
-  old generation keeps delivering until the new one's first object, or until it ends, and then
-  `onRestarted` runs with reason `generation`. Group numbers start over on a new generation, so
-  nothing is dropped as already delivered. The want also moves when the current generation is
-  withdrawn. With none announced, it waits. No application channel is needed.
+  per root per connection is shared by every want on it. The want moves as soon as a newer
+  generation is announced, even while the old one is still announced, as a crashed publisher's is
+  until the relay's idle timeout. It also moves when the current generation is withdrawn and an
+  older one is still announced. With none announced, it waits. No application channel is needed.
+- **Moves are made before the break** ([issue #282](https://github.com/muxinc/relay-sdks/issues/282)),
+  as on a [switchable subscription](#switching-tracks). A move is a newer generation, or a re-want
+  with another track or parameters. Once the current subscription has been accepted, the want opens
+  the replacement as **pending** while the current one keeps delivering:
+  - Each object of the pending subscription is offered to `until` (`WantOptions.until` /
+    `until=`). `'first-object'`, the default, accepts the first. A synchronous predicate accepts
+    each object it returns true for. The objects it refuses are discarded, except those that come
+    after the accepted object, which follow it as on a switchable. A new generation's
+    namespace is fresh, so its first group is its publisher's first. The first-object default is
+    never worse than a break, and an application with a timeline passes a predicate that compares
+    it. Group IDs are not a shared timeline: each generation and track numbers its own groups. A
+    predicate that throws is logged and accepts the object, so application code never stalls a
+    move.
+  - **Cutover.** On the first accepted object, the old subscription is cancelled, or drains for
+    `drainMs` / `drain` (default 0) as a switchable's does. Then `onSwitched` / `on_switched` runs
+    with the old and new namespace and track and the new SUBSCRIBE_OK, and then the accepted
+    object is delivered. A move runs neither `onRestarted` nor `onSubscribed`.
+  - **The old subscription ends first** (`PUBLISH_DONE`, as when a supervised publisher replaces
+    its connection, a REQUEST_ERROR, or the stale threshold). The pending subscription carries on
+    and cuts over on its next object, whatever `until` says, since there is nothing left to
+    compare. `onPublisherDone` still runs for the old one. The stale threshold counts objects from
+    either subscription. When it passes during a move, only the old subscription ends, and the
+    replacement gets a full threshold of its own before the want restarts with `stale`.
+  - **The pending subscription fails before its cutover.** A rejection no wait fixes is surfaced,
+    and the want stops, unless the key was wanted again with another target first. Then the want
+    reports `onRestarted` for the subscription it cancelled (its own ending's reason, else
+    `terminated`), and tries the new target at once. Any other failure leaves the current subscription delivering, and the move
+    is retried after the retry backoff, sooner if the want asks for something else. If the old
+    subscription had already ended, `onRestarted` reports its reason instead, and the want
+    resubscribes as after any restart.
+  - A newer move supersedes a pending one. A re-want back to the current track and parameters
+    cancels the pending one. A move before the current subscription is accepted replaces it at
+    once, since there is nothing to overlap. The connection's end takes both subscriptions, and
+    the want restarts with `connection`.
 - Handlers receive the current subscription's objects, subgroup endings and resets, and its
   `PUBLISH_DONE`. `onSubscribed` receives the namespace the subscription was made on: the
   generation's, when following one. `onRestarted({ reason, namespace })` runs when an accepted
   subscription ends and will be replaced, before any object of the replacement. Its reason is
-  `publisher-done`, `stale`, `generation`, `connection`, `rotation` or `terminated`. Decoders drop state that
-  assumed continuity there. Rejections before acceptance, the announce race included, never reach
+  `publisher-done`, `stale`, `generation`, `connection` or `terminated`. `generation` remains for
+  a withdrawal with none newer announced. Decoders drop state that assumed continuity there, and at
+  `onSwitched`. Rejections before acceptance, the announce race included, never reach
   a handler unless they are surfaced.
-- **Nothing is fetched to fill a gap.** A replacement subscription starts live with the want's
-  parameters, so objects published between two subscriptions are not delivered. Trailing objects
+- **Nothing is fetched to fill a gap.** A replacement subscription after a restart starts live with
+  the want's parameters, so objects published between two subscriptions are not delivered. A move
+  leaves no gap only as far as its `until` and drain allow. Trailing objects
   after a `PUBLISH_DONE` are discarded when the subscription is cancelled for its replacement.
 - `close()` cancels every want and closes the connection.
 
@@ -1057,8 +1187,11 @@ and subscribes on the same random namespace, then asserts:
    clean `close()`, and nothing else for that namespace. The report records how long the withdrawal took.
 7. A want following a [supervised publisher](#supervised-publisher)'s root receives the first
    generation's objects. When a second supervised publisher starts on the same root while the
-   first is still up, the want moves to the newer generation, reports `onRestarted` with reason
-   `generation`, and receives its objects. The report records how long the move took.
+   first is still up, the want moves to the newer generation make-before-break. Both generations
+   beat one shared counter every 50 ms, and the want cuts over once a beat of the new one is within
+   a few of the latest delivered, with a 1 s drain. It reports one `onSwitched` and no
+   `onRestarted`, and no beat number is missing across the move, on one relay and across two. The
+   report records how long the move took.
 8. All connections close cleanly once the test closes them.
 
 Adding an assertion here means adding it to every SDK's smoke test.

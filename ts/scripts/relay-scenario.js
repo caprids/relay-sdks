@@ -36,9 +36,12 @@ export async function runRelayScenario({
   let watcher;
   const supervisedPublishers = [];
   let lateSubscriber;
+  let layerPublisher;
+  let layerSwitch;
   let lateLargestObject;
   let discovery;
   const discovered = [];
+  const announcedNamespaces = new Set();
   const lifetime = new AbortController();
   const deadline = setTimeout(() => lifetime.abort(new Error('Live relay test exceeded 45 seconds')), 45_000);
   const received = { events: [], status: [], lateStatus: [] };
@@ -117,6 +120,7 @@ export async function runRelayScenario({
     void (async () => {
       try {
         for await (const event of discovery) {
+          if (event.type === 'announced') announcedNamespaces.add(JSON.stringify(event.namespace));
           if (JSON.stringify(event.namespace) === ours) {
             discovered.push({ type: event.type, ms: Math.round(performance.now() - discoveryStarted) });
           }
@@ -232,25 +236,61 @@ export async function runRelayScenario({
 
     // Assertion 8. A want following a supervised publisher's root moves to a newer generation that
     // announces while the old one is still up, the way a restarted publisher replaces a crashed one
-    // whose announce the relay still holds.
+    // whose announce the relay still holds, or a publisher rotates its connection. The move is made
+    // before the break (issue #282): both generations beat one shared counter every 50 ms, the want
+    // cuts over once the new generation's beat is within a few of the latest delivered (each
+    // generation numbers its own groups, so the counter is the timeline), the old one drains for a
+    // second, and no beat number is missing across the move.
     const root = [...namespace, 'supervised'];
     const beats = [];
     const restarts = [];
-    let currentNamespace;
+    const generationSwitches = [];
+    const beatOf = (object) => {
+      const [label, n] = new TextDecoder().decode(object.payload).split(':');
+      return { label, n: Number(n) };
+    };
+    const latestBeat = () => Math.max(...beats.map(({ n }) => n));
     watcher.want(
       'beat',
-      { namespace: root, track: 'beat', generations: true },
       {
-        onSubscribed: (_, context) => {
-          currentNamespace = context.namespace;
+        namespace: root,
+        track: 'beat',
+        generations: true,
+        until: (object) => {
+          const { n } = beatOf(object);
+          return beats.length === 0 || (n <= latestBeat() + 1 && n >= latestBeat() - 5);
         },
+        drainMs: 1_000,
+      },
+      {
         onObject: (object) => {
-          if (object.status === 'normal') beats.push(new TextDecoder().decode(object.payload));
+          if (object.status === 'normal') beats.push(beatOf(object));
         },
+        onSwitched: (info) => generationSwitches.push(info),
         onRestarted: ({ reason }) => restarts.push(reason),
         onError: (error) => errors.push(`beat: ${String(error)}`),
       },
     );
+    const generations = [];
+    let beat = 0;
+    let beating = true;
+    // One counter for every generation, written only where the relay wants it, so a generation nobody
+    // watches yet never holds up the one being watched.
+    const beatLoop = (async () => {
+      while (beating) {
+        const n = beat++;
+        await Promise.all(
+          generations
+            .filter(({ writer }) => writer.hasDemand)
+            .map(({ writer, label }) =>
+              writer.write(new TextEncoder().encode(`${label}:${n}`)).catch((error) => {
+                if (!['SUBSCRIPTION_CHANGED', 'WRITE_TIMEOUT', 'RECONNECTING'].includes(error?.code)) throw error;
+              }),
+            ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    })().catch((error) => errors.push(`beat write: ${String(error)}`));
     const startGeneration = async (label) => {
       const supervised = await connectSupervisedPublisher({
         url: endpoint,
@@ -260,36 +300,167 @@ export async function runRelayScenario({
         signal: lifetime.signal,
       });
       supervisedPublishers.push(supervised);
-      return { supervised, label, writer: supervised.registerTrack({ track: 'beat', writeTimeoutMs: 2_000 }) };
+      const generation = {
+        supervised,
+        label,
+        writer: supervised.registerTrack({ track: 'beat', writeTimeoutMs: 2_000 }),
+      };
+      generations.push(generation);
+      return generation;
     };
-    // Write until this generation's beats arrive: a SUBSCRIBE_OK does not prove the path is ready.
-    const beatUntilReceived = async ({ writer, label }) => {
-      const until = performance.now() + 15_000;
-      for (let n = 0; !beats.some((beat) => beat.startsWith(`${label}:`)); n += 1) {
-        if (errors.length > 0) throw new Error(errors.join('; '));
-        if (performance.now() >= until) throw new Error(`Timed out waiting for generation ${label}'s beats`);
-        try {
-          await writer.write(new TextEncoder().encode(`${label}:${n}`));
-        } catch (error) {
-          if (!['SUBSCRIPTION_CHANGED', 'WRITE_TIMEOUT'].includes(error?.code)) throw error;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
+    let generationSwitch;
+    try {
+      const first = await startGeneration('first');
+      await report({ phase: 'first generation', namespace: first.supervised.generation.namespace });
+      await waitFor(() => beats.filter(({ label }) => label === 'first').length >= 10, "first generation's beats");
+      const second = await startGeneration('second');
+      const switchStarted = performance.now();
+      await waitFor(() => generationSwitches.length > 0, 'move to the second generation');
+      const switchedAfterMs = Math.round(performance.now() - switchStarted);
+      const atCutover = beats.length;
+      await waitFor(() => beats.length >= atCutover + 10, "second generation's beats");
+      beating = false;
+      await beatLoop;
+      if (errors.length > 0) throw new Error(errors.join('; '));
+      const [move] = generationSwitches;
+      if (JSON.stringify(move.to.namespace) !== JSON.stringify(second.supervised.generation.namespace)) {
+        throw new Error(`Want moved to ${JSON.stringify(move.to.namespace)}`);
       }
-    };
-    const first = await startGeneration('first');
-    await report({ phase: 'first generation', namespace: first.supervised.generation.namespace });
-    await beatUntilReceived(first);
-    const second = await startGeneration('second');
-    const switchStarted = performance.now();
-    await beatUntilReceived(second);
-    const switchedAfterMs = Math.round(performance.now() - switchStarted);
-    if (JSON.stringify(currentNamespace) !== JSON.stringify(second.supervised.generation.namespace)) {
-      throw new Error(`Want stayed on ${JSON.stringify(currentNamespace)}`);
+      const numbers = [...new Set(beats.map(({ n }) => n))].sort((a, b) => a - b);
+      const missing = [];
+      for (let n = numbers[0]; n <= numbers.at(-1); n += 1) if (!numbers.includes(n)) missing.push(n);
+      const labels = [...new Set(beats.map(({ label }) => label))];
+      if (
+        missing.length > 0 ||
+        generationSwitches.length !== 1 ||
+        restarts.length > 0 ||
+        JSON.stringify(labels) !== '["first","second"]'
+      ) {
+        throw new Error(
+          `Generation move left a gap: missing ${JSON.stringify(missing)}, ${generationSwitches.length} switches, restarts ${JSON.stringify(restarts)}, ${JSON.stringify(beats)}`,
+        );
+      }
+      const firstNew = beats.findIndex(({ label }) => label === 'second');
+      generationSwitch = {
+        afterMs: switchedAfterMs,
+        lastOld: beats[firstNew - 1].n,
+        firstNew: beats[firstNew].n,
+        beats: beats.length,
+      };
+      await report({ phase: 'followed newer generation', ...generationSwitch });
+    } finally {
+      beating = false;
+      watcher.unwant('beat');
     }
-    if (!restarts.includes('generation')) throw new Error(`No generation restart: ${JSON.stringify(restarts)}`);
-    await report({ phase: 'followed newer generation', afterMs: switchedAfterMs, restarts });
-    watcher.unwant('beat');
     if (errors.length > 0) throw new Error(errors.join('; '));
+
+    // Assertion 9. A switchable subscription moves from one layer to another make-before-break: the
+    // layers carry the same frame numbers, one group per frame, and the frames the handlers receive
+    // leave no gap across the cutover (issue #264). The frame number stands in for a media timestamp:
+    // the switch waits for a new-layer frame within a few of the latest the old layer delivered, as a
+    // player compares timestamps. The first object can be stale: the relay caches the layer's latest
+    // group, and the publisher skips a layer nobody watches. A subscriber on another relay can also
+    // lose the first object (issue #243). The drain delivers older frames still in flight on the old layer: across relays
+    // groups arrive out of order, and cancelling at the cutover can cut one off.
+    layerPublisher = await connectRelayPublisher({
+      url: endpoint,
+      createTransport,
+      namespace: [...namespace, 'layers'],
+      getToken: () => token,
+      signal: lifetime.signal,
+    });
+    observeClosed('layer publisher', layerPublisher);
+    const layers = ['video-lo', 'video-hi'].map((track) =>
+      layerPublisher.registerTrack({ track, writeTimeoutMs: 2_000 }),
+    );
+    // Subscribe once discovery reports the announce, so the relay cannot refuse it as unroutable.
+    await layerPublisher.announced;
+    await waitFor(
+      () => announcedNamespaces.has(JSON.stringify([...namespace, 'layers'])),
+      'discovery: layers announced',
+    );
+    const layerErrors = [];
+    const lostWrites = [];
+    let frameNumber = 0;
+    let writingLayers = true;
+    const layerWrites = (async () => {
+      while (writingLayers) {
+        const payload = new TextEncoder().encode(String(frameNumber++));
+        await Promise.all(
+          layers
+            .filter((layer) => layer.hasDemand)
+            .map((layer) =>
+              layer.write(payload).catch((error) => {
+                if (!['SUBSCRIPTION_CHANGED', 'WRITE_TIMEOUT'].includes(error?.code)) throw error;
+                lostWrites.push([
+                  layer === layers[0] ? 'video-lo' : 'video-hi',
+                  Number(new TextDecoder().decode(payload)),
+                  error.code,
+                ]);
+              }),
+            ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    })().catch((error) => {
+      layerErrors.push(`layer write: ${String(error)}`);
+    });
+    const frames = [];
+    const frameOf = (object) => Number(new TextDecoder().decode(object.payload));
+    let switches = 0;
+    const switchable = subscriber.subscribeSwitchable(
+      { namespace: [...namespace, 'layers'], track: 'video-lo' },
+      {
+        onObject: (object, track) => {
+          if (object.status === 'normal') frames.push([track, frameOf(object)]);
+        },
+        onSwitched: () => {
+          switches += 1;
+        },
+        onError: (error, track) => layerErrors.push(`${track}: ${error.errorCode} ${error.reason}`),
+        onSubgroupReset: ({ groupId }, track) => layerErrors.push(`${track} reset group ${groupId}`),
+      },
+    );
+    try {
+      await switchable.subscribed;
+      await waitFor(() => frames.length >= 10, 'video-lo: 10 frames');
+      const switchStartedAt = performance.now();
+      const switched = await switchable.switchTo('video-hi', {
+        until: (object) => {
+          const latest = Math.max(...frames.map(([, n]) => n));
+          return frameOf(object) <= latest + 1 && frameOf(object) >= latest - 5;
+        },
+        drainMs: 1_000,
+      });
+      const cutoverMs = Math.round(performance.now() - switchStartedAt);
+      const atCutover = frames.length;
+      await waitFor(() => frames.length >= atCutover + 10, 'video-hi: 10 frames');
+      writingLayers = false;
+      await layerWrites;
+      if (layerErrors.length > 0) throw new Error(layerErrors.join('; '));
+      const numbers = [...new Set(frames.map(([, n]) => n))].sort((a, b) => a - b);
+      const missing = [];
+      for (let n = numbers[0]; n <= numbers.at(-1); n += 1) if (!numbers.includes(n)) missing.push(n);
+      const tracks = [...new Set(frames.map(([track]) => track))];
+      if (missing.length > 0 || switches !== 1 || JSON.stringify(tracks) !== '["video-lo","video-hi"]') {
+        throw new Error(
+          `Layer switch left a gap: missing ${JSON.stringify(missing)}, ${switches} switches, lost writes ${JSON.stringify(lostWrites)}, ${JSON.stringify(frames)}`,
+        );
+      }
+      const firstHi = frames.findIndex(([track]) => track === 'video-hi');
+      layerSwitch = {
+        cutoverMs,
+        from: switched.from,
+        to: switched.to,
+        lastOld: frames[firstHi - 1][1],
+        firstNew: frames[firstHi][1],
+        frames: frames.length,
+      };
+      await report({ phase: 'switched layers', ...layerSwitch });
+    } finally {
+      writingLayers = false;
+      switchable.cancel();
+    }
 
     return {
       endpoint,
@@ -302,7 +473,8 @@ export async function runRelayScenario({
       independentTrackClose: 'passed',
       lateSubscriberLargestObject: lateLargestObject,
       discovery: { announced: 'passed', withdrawnAfterMs },
-      generationSwitch: { afterMs: switchedAfterMs, restarts },
+      generationSwitch,
+      layerSwitch,
     };
   } finally {
     closing = true;
@@ -310,7 +482,11 @@ export async function runRelayScenario({
     discovery?.close();
     watcher?.close();
     try {
-      await Promise.all([publisher?.close(), ...supervisedPublishers.map((supervised) => supervised.close())]);
+      await Promise.all([
+        publisher?.close(),
+        layerPublisher?.close(),
+        ...supervisedPublishers.map((supervised) => supervised.close()),
+      ]);
     } finally {
       subscriber?.close();
       lateSubscriber?.close();

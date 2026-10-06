@@ -205,12 +205,20 @@ begun forwarding, so an aborted group can leave no trace except a gap in group I
 `onPublisherDone` is the publisher's control notification: it may precede trailing objects in
 transit, and it does not end the subscription. Cancel the subscription when you are finished with it.
 
+The SDK sends every subscription parameter you set, but moq-relay acts on only some of them. It
+honors `subscriberPriority` and `locationFilter` on the subscribe, and ignores `groupOrder` (the
+relay always serves Descending), `newGroupRequest`, both delivery timeouts and a per-request
+`authorizationTokens`. With `newGroupRequest` ignored there is no protocol key-frame request through
+the relay: an application that needs one sends it to the publisher on a track of its own. See
+[subscription parameters](../spec/relay-interop.md#subscription-parameters).
+
 `subscription.update(parameters)` sends REQUEST_UPDATE, the protocol's way to change what an
 accepted subscription delivers. **moq-relay does not implement it**: the relay never acknowledges an
 update, and any update, including `{ forward: 0 }` or an empty one, ends the subscription within one
 round trip with `onPublisherDone` (status 2 `track ended`) and stops delivery; `onUpdateOk` never
-fires. To pause, cancel the subscription and subscribe again later; to change priority or filters,
-open a new subscription ([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)).
+fires. To pause, cancel the subscription and subscribe again later. To change the track, the priority
+or the filter, use a [switchable subscription](#switching-tracks), which opens the new subscription
+before it cancels the old one ([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)).
 Subscribing with `parameters: { forward: 0 }` does not work either: moq-relay refuses it with request error 3
 `FORWARD=0 not supported` through `onError`, and the connection stays open.
 The protocol allows updates only after acceptance, so an update issued before `onSubscribed` is
@@ -268,6 +276,48 @@ the deadline for a subscription's initial response. `ConnectRelayPublisherOption
 and has no request deadline: each track's `writeTimeoutMs` bounds its wait for demand and its
 writes. Passing `requestTimeoutMs` to `connectRelayPublisher` is a type error; untyped JavaScript
 that passes it anyway has it ignored, like any other option the call does not take.
+
+### Switching tracks
+
+REQUEST_UPDATE names no track, so moving a viewer between layers (`video-hi`, `video-mid`,
+`video-lo`) takes a new subscription. `subscribeSwitchable` keeps one set of handlers on whichever
+subscription is active and moves them make-before-break: `switchTo` subscribes to the new track while
+the old one keeps delivering, and cuts over once a new object passes `until`.
+
+```ts
+const switchable = subscriber.subscribeSwitchable(
+  { namespace, track: 'video-mid' },
+  {
+    onSwitched: ({ from, to }) => decoder.reset(), // the next object starts the new layer
+    onObject: (object, track) => decoder.decode(object, track),
+  },
+);
+await switchable.subscribed;
+
+// Cut over on a new-layer object no later than the next frame and no more than a few frames behind
+// the media already delivered (your own timestamps, not group IDs). Keep the old layer open for a
+// second to deliver groups still in flight on it.
+await switchable.switchTo('video-hi', {
+  until: (object) => {
+    const t = timestampOf(object);
+    return t <= lastDelivered + frameDuration && t >= lastDelivered - 5 * frameDuration;
+  },
+  drainMs: 1_000,
+  signal: AbortSignal.timeout(5_000),
+});
+```
+
+- Handlers see only the active subscription, and get its track name as their last argument.
+  `onSwitched` runs before the first object of the new track. A switchable has no `update()`; switch to
+  the same track with new `parameters` to change a filter or priority. Parameters are not inherited.
+- `until` defaults to `'first-object'`. That is fine where delivery is in order, but it can skip media:
+  the relay starts a subscription at its cached latest group, which can be stale, and a subscriber on
+  another relay can lose the first object ([#243](https://github.com/muxinc/relay-sdks/issues/243)).
+  Compare your own timeline, not group IDs: each track numbers its own groups.
+- If the new subscription fails, a newer `switchTo` supersedes it, or the signal aborts, `switchTo`
+  rejects and the old track keeps playing. `ended` settles when the active subscription ends;
+  `cancel()` cancels everything. See [switching tracks](../spec/behavior.md#switching-tracks) for the
+  full contract and measured cutover times.
 
 ### Browser transport limits
 
@@ -403,6 +453,7 @@ subscriber.want(
   {
     onObject: (object) => decoder.push(object),
     onRestarted: () => decoder.reset(), // the next object starts a new subscription; the gap is not filled
+    onSwitched: () => decoder.reset(), // a newer generation took over with no gap; see below
     onError: (error) => console.error('gave up on alice/video', error),
   },
 );
@@ -426,15 +477,32 @@ announced, with no application channel. Rejections no wait fixes, such as creden
 malformed request, reach `onError`, and the want stops. See the
 [supervised contract](../spec/behavior.md#supervised-connections).
 
+A move to a newer generation is made before the break, as `switchTo` makes one. The old
+subscription keeps delivering until the new generation delivers, and `onSwitched` runs at the
+cutover instead of `onRestarted`. Wanting the key again with another track or parameters moves the
+same way, so a supervised viewer changes layers without a gap:
+
+```js
+// Cut over once the new layer reaches what was already shown, and let the old one finish in-flight groups.
+const caughtUp = (object) => timestampOf(object) >= lastShownTimestamp;
+subscriber.want('alice/video', { namespace, track: 'video-hi', generations: true, until: caughtUp, drainMs: 1000 }, handlers);
+```
+
+`until` and `drainMs` mean what they mean on [`switchTo`](#switching-tracks), and apply to every move
+of the want. Compare your own timeline, never group IDs, since each generation and track numbers
+its own groups. Wanting the key again with only `until`, `drainMs`, `staleAfterMs`, `retry` or the
+handlers changed swaps them without resubscribing. Another namespace, or turning `generations` on or
+off, replaces the want.
+
 Both supervisors **rotate** before the token expires ([token expiry](#token-expiry)), so a long
 session never hits the relay's deadline. `rotateBeforeMs` (default 60 s) before `expiresAt`, they
 call `getToken` again and open the replacement while the old connection still serves. The
 publisher's next generation is announced, each track moves to it once viewers subscribe there, and
-the old generation closes. The subscriber's wants subscribe on the new connection and keep the old
-subscription delivering until the new one delivers, then report `onRestarted` with reason
-`rotation`; nothing is lost or repeated. Call `rotate()` to do it now, for example after revoking a
-token. In a local test with 12 s tokens, 989 objects written every 40 ms over 9 rotations all
-arrived, with no gap longer than 42 ms. See [rotation](../spec/behavior.md#rotation).
+the old generation closes. Each want moves its subscription to the new connection as a move does;
+when its target is unchanged, the cutover is invisible: no callback runs and nothing is lost or
+repeated. Call `rotate()` to do it now, for example after revoking a token. In a local test with
+12 s tokens, 989 objects written every 40 ms over 9 rotations all arrived, with no gap longer than
+42 ms. See [rotation](../spec/behavior.md#rotation).
 
 ## Publishing lifecycle
 

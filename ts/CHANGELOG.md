@@ -26,15 +26,27 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   ([#272](https://github.com/muxinc/relay-sdks/issues/272)); an `onRestarted` that throws is logged and the want stays
   subscribed. Both are in `@mux/relay/node` too. The primitives are unchanged. The examples' shared
   `announce-race.js` is retired: the demo and the live smoke test subscribe through `want`.
+- `@mux/relay`: `subscriber.subscribeSwitchable(options, handlers)` moves one set of handlers between tracks
+  make-before-break ([#264](https://github.com/muxinc/relay-sdks/issues/264)). `switchTo(track, { parameters, until,
+  drainMs, signal })` subscribes to the new track while the old one keeps delivering, cuts over on the first object
+  `until` accepts, reports `onSwitched`, and can keep the old subscription open briefly for groups still in flight.
+  It is how to change a track, filter or priority, which `update()` cannot do against moq-relay.
+- `@mux/relay`: a supervised want moves make-before-break ([#282](https://github.com/muxinc/relay-sdks/issues/282)).
+  A newer generation, or wanting the key again with another track or parameters, opens the replacement while the
+  current subscription keeps delivering, and cuts over on the first object `until` accepts. The new `WantOptions`
+  fields `until` and `drainMs` work as they do on `switchTo`, and the new `onSwitched` handler receives a
+  `WantSwitchedInfo` (`from`, `to`, `subscribed`). A generation move no longer reports `onRestarted({ reason:
+  'generation' })`; handle `onSwitched` instead, where decoders reset. Wanting a key again with only `staleAfterMs`
+  changed now swaps it without resubscribing. Another namespace or `generations` still replaces the want.
 - `@mux/relay`: sessions end at the token's expiry, and the supervisors now rotate before it
   ([#261](https://github.com/muxinc/relay-sdks/issues/261)). `getToken` may return a `RelayCredential`
   (`{ token, expiresAt }`); every connection exposes `expiresAt`, from that or the JWT's `exp` claim. Both supervisors
   take `rotateBeforeMs` (default 60 s) and `rotate()`, and replace their connection make-before-break: the publisher
-  moves each track to the next generation once it has demand there, and the subscriber keeps a want's old
-  subscription delivering until the replacement does, reporting `onRestarted` with the new reason `rotation`. A move
-  to a newer generation is make-before-break the same way. A session closed with `UNAUTHORIZED` (0x2) after SETUP,
-  which is how moq-relay ends an expired or revoked session, is now `UNAUTHORIZED` in phase `connection` rather than
-  `TRANSPORT_ERROR` or a clean close ([#227](https://github.com/muxinc/relay-sdks/issues/227)).
+  moves each track to the next generation once it has demand there, and every want moves its subscription to the new
+  connection as a move does. A want whose target is unchanged cuts over on the first object the old subscription did
+  not deliver, with no callback, so nothing is lost or repeated. A session closed with `UNAUTHORIZED` (0x2) after
+  SETUP, which is how moq-relay ends an expired or revoked session, is now `UNAUTHORIZED` in phase `connection` rather
+  than `TRANSPORT_ERROR` or a clean close ([#227](https://github.com/muxinc/relay-sdks/issues/227)).
 - `@mux/relay-quic`: the native QUIC transport adapter for Node, with prebuilt binaries for Linux (x64 and arm64,
   glibc and musl), macOS (arm64 and x64) and Windows (x64).
 - `@mux/moq-core`: the transport-independent MOQT sessions the SDK is built on.

@@ -18,6 +18,18 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `MoqtProtocolId`. `MOQT_PROTOCOL_ID` is now `moqt-22`. moq-relay 0.17.0 frames LOCATION_FILTER the draft-20 way on
   `moqt-22`, so a Next Object filter closes the session there; use a relative start of 0
   ([#275](https://github.com/muxinc/relay-sdks/issues/275)).
+- `mux-relay`: `subscriber.subscribe_switchable(namespace, track, handlers)` moves one set of handlers between tracks
+  make-before-break ([#264](https://github.com/muxinc/relay-sdks/issues/264)). `switch_to(track, parameters=...,
+  until=..., drain=..., cancellation=...)` subscribes to the new track while the old one keeps delivering, cuts over on
+  the first object `until` accepts, reports `on_switched`, and can keep the old subscription open briefly for groups
+  still in flight. It is how to change a track, filter or priority, which `update()` cannot do against moq-relay.
+- `mux-relay`: a supervised want moves make-before-break ([#282](https://github.com/muxinc/relay-sdks/issues/282)).
+  A newer generation, or wanting the key again with another track or parameters, opens the replacement while the
+  current subscription keeps delivering, and cuts over on the first object `until` accepts. `want` gains `until=` and
+  `drain=` (seconds), as on `switch_to`, and `WantHandlers` gains `on_switched`, which receives a `WantSwitchedInfo`
+  (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`). A generation move no longer reports
+  `on_restarted("generation", ...)`; handle `on_switched` instead, where decoders reset. Wanting a key again with only
+  `stale_after` changed now swaps it without resubscribing. Another namespace or `generations` still replaces the want.
 - `mux-moq-media` (imported as `moq_media`): LOC and MSF format helpers.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
@@ -37,6 +49,6 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   ([#261](https://github.com/muxinc/relay-sdks/issues/261)). `get_token` may return a `RelayCredential`
   (`token`, an aware `expires_at`); every connection exposes `expires_at`, from that or the JWT's `exp` claim. Both
   supervisors take `rotate_before` (seconds, default 60) and `rotate()`, and replace their connection
-  make-before-break: the publisher moves each track to the next generation once it has demand there, and the
-  subscriber keeps a want's old subscription delivering until the replacement does, reporting `on_restarted` with the
-  new reason `"rotation"`. A move to a newer generation is make-before-break the same way.
+  make-before-break: the publisher moves each track to the next generation once it has demand there, and every want
+  moves its subscription to the new connection as a move does. A want whose target is unchanged cuts over on the first
+  object the old subscription did not deliver, with no callback, so nothing is lost or repeated.

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { RelayError } from '../src/errors.js';
 import type { ConnectRelayPublisherOptions } from '../src/publish.js';
 import { SubscriptionConnectionClosedError } from '../src/subscription.js';
@@ -7,6 +7,8 @@ import {
   type SupervisedSubscriber,
   superviseRelaySubscriber,
   type WantHandlers,
+  type WantOptions,
+  type WantSwitchedInfo,
 } from '../src/supervised-subscriber.js';
 import { backoffDelay, newGeneration } from '../src/supervision.js';
 import {
@@ -388,26 +390,15 @@ describe('connectSupervisedSubscriber', () => {
     latest(connections[0]!).accept();
     latest(connections[0]!).object(1);
 
-    // The old generation is still announced when the replacement arrives: the newer one is subscribed at once, and
-    // the old subscription keeps delivering until the replacement's first object.
-    const previous = latest(connections[0]!);
+    // The crashed generation is still announced when the replacement arrives: the newer one wins at once, made
+    // before the break.
     discovery.push({ type: 'announced', namespace: ['room', 'alice', replacement] });
     await until(() => connections[0]!.subscriptions.length === 2, 'subscribe to the replacement');
     expect(latest(connections[0]!).options.namespace).toEqual(['room', 'alice', replacement]);
     latest(connections[0]!).accept();
-    previous.object(2);
-    expect(previous.cancelled).toBe(false);
     latest(connections[0]!).object(0);
-    expect(previous.cancelled).toBe(true);
-    previous.object(3);
-    expect(seen).toEqual([
-      `subscribed room/alice/${old}`,
-      'object 1',
-      'object 2',
-      'restarted generation',
-      `subscribed room/alice/${replacement}`,
-      'object 0',
-    ]);
+    expect(connections[0]!.subscriptions[0]!.cancelled).toBe(true);
+    expect(seen).toEqual([`subscribed room/alice/${old}`, 'object 1', 'object 0']);
 
     // Its withdrawal does not move the want back: the old one is gone too.
     discovery.push({ type: 'unannounced', namespace: ['room', 'alice', old] });
@@ -448,10 +439,10 @@ describe('connectSupervisedSubscriber', () => {
     expect(second.seen).toEqual(['object 1']);
     expect(connections[0]!.subscriptions).toHaveLength(1);
 
-    subscriber.want('video', { namespace: ['room'], track: 'screen' }, second.handlers);
+    subscriber.want('video', { namespace: ['lobby'], track: 'video' }, second.handlers);
     await until(() => connections[0]!.subscriptions.length === 2, 'replacement want');
     expect(connections[0]!.subscriptions[0]!.cancelled).toBe(true);
-    expect(latest(connections[0]!).options.track).toBe('screen');
+    expect(latest(connections[0]!).options.namespace).toEqual(['lobby']);
   });
 
   it('unwant cancels; close cancels everything and stops reconnecting', async () => {
@@ -675,15 +666,15 @@ describe('PR review fixes: Bugbot and Codex pass 3', () => {
     return { subscriber, connections };
   }
 
-  it('replaces the want when only staleAfterMs changes, so the new threshold applies', async () => {
+  it('applies a new staleAfterMs in place, without resubscribing first', async () => {
     const { subscriber, connections } = await subscriberWith();
     subscriber.want('v', { namespace: ['room'], track: 'v' });
     await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
     connections[0]!.subscriptions[0]!.accept();
     subscriber.want('v', { namespace: ['room'], track: 'v', staleAfterMs: 20, retry: fast });
-    await until(() => connections[0]!.subscriptions.length === 2, 'replacement');
-    connections[0]!.subscriptions[1]!.accept();
-    await until(() => connections[0]!.subscriptions.length === 3, 'stale resubscribe under the new threshold');
+    expect(connections[0]!.subscriptions[0]!.cancelled).toBe(false);
+    await until(() => connections[0]!.subscriptions.length === 2, 'stale resubscribe under the new threshold');
+    expect(connections[0]!.subscriptions[0]!.cancelled).toBe(true);
   });
 
   it('does not cut a backoff short for a fresh, still empty discovery', async () => {
@@ -1006,6 +997,475 @@ describe('callback failures and progress (#272)', () => {
   });
 });
 
+describe('make-before-break moves (#282)', () => {
+  async function start() {
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: fast },
+    );
+    cleanup.push(() => subscriber.close());
+    return { subscriber, connections };
+  }
+
+  function recorder() {
+    const seen: string[] = [];
+    const switched: WantSwitchedInfo[] = [];
+    const handlers: WantHandlers = {
+      onSubscribed: (_, { namespace }) => seen.push(`subscribed ${namespace.join('/')}`),
+      onObject: (object) => seen.push(`object ${object.groupId}`),
+      onSubgroupEnd: ({ groupId }) => seen.push(`end ${groupId}`),
+      onPublisherDone: () => seen.push('done'),
+      onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
+      onSwitched: (info) => {
+        switched.push(info);
+        seen.push(
+          `switched ${info.from.namespace.join('/')}:${info.from.track} > ${info.to.namespace.join('/')}:${info.to.track}`,
+        );
+      },
+      onError: (error) => seen.push(`error ${(error as RelayError).code}`),
+    };
+    return { seen, switched, handlers };
+  }
+
+  const subs = (connection: FakeSubscriber) => connection.subscriptions;
+
+  /** A want following generations under `room`, subscribed and delivering on the older one. */
+  async function onOldGeneration(options: Partial<WantOptions> = {}) {
+    const { subscriber, connections } = await start();
+    const { seen, switched, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'v', generations: true, retry: fast, ...options }, handlers);
+    await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+    const discovery = connections[0]!.discoveries[0]!;
+    const old = newGeneration(1_000);
+    const replacement = newGeneration(2_000);
+    discovery.push({ type: 'announced', namespace: ['room', old] });
+    await until(() => subs(connections[0]!).length === 1, 'subscribe to the old generation');
+    const first = subs(connections[0]!)[0]!;
+    first.accept();
+    first.object(10);
+    return { subscriber, connections, seen, switched, discovery, old, replacement, first };
+  }
+
+  it('keeps the old generation delivering until the new one delivers, then reports a switch, not a restart', async () => {
+    const { connections, seen, switched, discovery, old, replacement, first } = await onOldGeneration();
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    expect(second.options.namespace).toEqual(['room', replacement]);
+    first.object(11);
+    second.accept();
+    first.object(12);
+    expect(first.cancelled).toBe(false);
+    second.object(0);
+    expect(first.cancelled).toBe(true);
+    first.object(13);
+    second.object(1);
+    expect(seen).toEqual([
+      `subscribed room/${old}`,
+      'object 10',
+      'object 11',
+      'object 12',
+      `switched room/${old}:v > room/${replacement}:v`,
+      'object 0',
+      'object 1',
+    ]);
+    expect(switched[0]!.subscribed.trackAlias).toBe(1);
+  });
+
+  it('cuts over on the first object until accepts, discarding the ones it refuses', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration({
+      until: (object) => object.groupId >= 5,
+    });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    second.accept();
+    second.object(3);
+    first.object(11);
+    second.object(5);
+    expect(seen.slice(1)).toEqual(['object 10', 'object 11', expect.stringMatching(/^switched/), 'object 5']);
+  });
+
+  it('follows the cutover object with the later groups that reached the replacement early', async () => {
+    const { connections, seen, discovery, replacement } = await onOldGeneration({
+      until: (object) => object.groupId === 5,
+    });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    second.accept();
+    second.object(6); // ahead: refused, held
+    second.handlers.onSubgroupEnd?.({ groupId: 6, subgroupId: 0, endOfGroup: true });
+    second.object(3); // earlier than the cutover: the old subscription's to deliver
+    second.object(5);
+    expect(seen.slice(1)).toEqual(['object 10', expect.stringMatching(/^switched/), 'object 5', 'object 6', 'end 6']);
+  });
+
+  it('drains the old subscription: its groups up to the largest delivered still arrive, for drainMs', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration({ drainMs: 30 });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    first.object(12);
+    second.accept();
+    second.object(0);
+    expect(first.cancelled).toBe(false);
+    first.object(11); // in flight, older than the largest it delivered
+    first.handlers.onSubgroupEnd?.({ groupId: 11, subgroupId: 0, endOfGroup: true });
+    first.object(13); // later than the cutover: discarded
+    await until(() => first.cancelled, 'drain over');
+    expect(seen.slice(1)).toEqual([
+      'object 10',
+      'object 12',
+      expect.stringMatching(/^switched/),
+      'object 0',
+      'object 11',
+      'end 11',
+    ]);
+  });
+
+  it('moves a re-want with another track make-before-break, delivering to the new handlers', async () => {
+    const { subscriber, connections } = await start();
+    const before = recorder();
+    const after = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'video-lo' }, before.handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    const lo = subs(connections[0]!)[0]!;
+    lo.accept();
+    lo.object(1);
+    subscriber.want('v', { namespace: ['room'], track: 'video-hi' }, after.handlers);
+    await until(() => subs(connections[0]!).length === 2, 'pending move');
+    const hi = subs(connections[0]!)[1]!;
+    expect(hi.options.track).toBe('video-hi');
+    lo.object(2);
+    hi.accept();
+    hi.object(7);
+    expect(lo.cancelled).toBe(true);
+    expect(before.seen).toEqual(['subscribed room', 'object 1']);
+    expect(after.seen).toEqual(['object 2', 'switched room:video-lo > room:video-hi', 'object 7']);
+    expect(after.switched[0]).toMatchObject({ from: { track: 'video-lo' }, to: { track: 'video-hi' } });
+  });
+
+  it('moves on new parameters alone', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'v' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'v', parameters: { subscriberPriority: 1 } }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'pending move');
+    expect(subs(connections[0]!)[1]!.options.parameters).toEqual({ subscriberPriority: 1 });
+    subs(connections[0]!)[1]!.accept();
+    subs(connections[0]!)[1]!.object(0);
+    expect(seen).toEqual(['subscribed room', 'switched room:v > room:v', 'object 0']);
+  });
+
+  it('replaces an unanswered subscription at once, with nothing to report', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'replacement');
+    expect(subs(connections[0]!)[0]!.cancelled).toBe(true);
+    subs(connections[0]!)[1]!.accept();
+    expect(seen).toEqual(['subscribed room']);
+  });
+
+  it('cancels a pending move when the want asks for the active track again, and supersedes one with another', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    const a = subs(connections[0]!)[0]!;
+    a.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'pending b');
+    subscriber.want('v', { namespace: ['room'], track: 'c' }, handlers);
+    await until(() => subs(connections[0]!).length === 3, 'pending c');
+    expect(subs(connections[0]!)[1]!.cancelled).toBe(true);
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    expect(subs(connections[0]!)[2]!.cancelled).toBe(true);
+    a.object(4);
+    expect(a.cancelled).toBe(false);
+    expect(seen).toEqual(['subscribed room', 'object 4']);
+  });
+
+  it('keeps the old subscription delivering when the replacement is refused, and retries the move', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration();
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    subs(connections[0]!)[1]!.reject(UNROUTABLE);
+    await until(() => subs(connections[0]!).length === 3, 'move retried');
+    expect(first.cancelled).toBe(false);
+    first.object(11);
+    subs(connections[0]!)[2]!.accept();
+    subs(connections[0]!)[2]!.object(0);
+    expect(seen.slice(1)).toEqual(['object 10', 'object 11', expect.stringMatching(/^switched/), 'object 0']);
+  });
+
+  it('surfaces a replacement refused for good and stops the want', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration();
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    subs(connections[0]!)[1]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+    await until(() => seen.includes('error SUBSCRIPTION_REQUEST_FAILED'), 'error');
+    expect(first.cancelled).toBe(true);
+    expect(seen).not.toContain('restarted generation');
+  });
+
+  it('cuts over on the next object, whatever until says, once the old subscription has ended', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration({ until: () => false });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    second.accept();
+    second.object(0); // refused while the old one still delivers
+    first.done(); // the old publisher finished: a supervised publisher's rotation
+    expect(first.cancelled).toBe(true);
+    second.object(1);
+    expect(seen.slice(1)).toEqual(['object 10', 'done', expect.stringMatching(/^switched/), 'object 1']);
+  });
+
+  it("reports the old subscription's ending as a restart when the replacement then fails", async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration();
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    first.done();
+    subs(connections[0]!)[1]!.reject(UNROUTABLE);
+    await until(() => seen.includes('restarted publisher-done'), 'restart');
+    await until(() => subs(connections[0]!).length === 3, 'resubscribe');
+    expect(subs(connections[0]!)[2]!.options.namespace).toEqual(['room', replacement]);
+  });
+
+  it('cuts over on the object a throwing until was offered, and logs the throw', async () => {
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (error: unknown) => logged.push(error);
+    cleanup.push(() => {
+      console.error = original;
+    });
+    const { connections, seen, discovery, replacement } = await onOldGeneration({
+      until: () => {
+        throw new Error('bad predicate');
+      },
+    });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    subs(connections[0]!)[1]!.accept();
+    subs(connections[0]!)[1]!.object(0);
+    expect(seen.slice(-2)).toEqual([expect.stringMatching(/^switched/), 'object 0']);
+    expect(String((logged[0] as Error).message)).toMatch(/until threw/);
+  });
+
+  it('keeps a pending move when the old subscription goes stale, restarting only if the replacement stays silent', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration({
+      staleAfterMs: 40,
+      until: () => false,
+    });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    second.accept();
+    await until(() => first.cancelled, 'old subscription stale');
+    expect(second.cancelled).toBe(false);
+    second.object(0); // the old one is gone: cuts over whatever until says
+    expect(seen.slice(1)).toEqual(['object 10', expect.stringMatching(/^switched/), 'object 0']);
+    await until(() => seen.includes('restarted stale'), 'the replacement went stale too');
+  });
+
+  it('replays the held later groups even when a handler throws at the cutover', async () => {
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (error: unknown) => logged.push(error);
+    cleanup.push(() => {
+      console.error = original;
+    });
+    const { subscriber, connections } = await start();
+    const objects: number[] = [];
+    subscriber.want(
+      'v',
+      { namespace: ['room'], track: 'a', until: (object) => object.groupId === 5 },
+      {
+        onObject: (object) => {
+          objects.push(object.groupId);
+          if (object.groupId === 5) throw new Error('decoder failed');
+        },
+      },
+    );
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want(
+      'v',
+      { namespace: ['room'], track: 'b', until: (object) => object.groupId === 5 },
+      {
+        onObject: (object) => {
+          objects.push(object.groupId);
+          if (object.groupId === 5) throw new Error('decoder failed');
+        },
+      },
+    );
+    await until(() => subs(connections[0]!).length === 2, 'pending move');
+    const b = subs(connections[0]!)[1]!;
+    b.accept();
+    b.object(6);
+    b.object(7);
+    b.object(5);
+    expect(objects).toEqual([5, 6, 7]);
+    expect(logged).toHaveLength(1);
+  });
+
+  it("starts a new move target on its own backoff, not the superseded one's", async () => {
+    const { subscriber, connections } = await start();
+    const retry = { initialDelayMs: 60, maxDelayMs: 60_000 };
+    subscriber.want('v', { namespace: ['room'], track: 'a', retry });
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'b', retry });
+    for (let n = 2; n <= 4; n++) {
+      await until(() => subs(connections[0]!).length === n, `move to b, attempt ${n - 1}`);
+      subs(connections[0]!)[n - 1]!.reject(UNROUTABLE);
+    }
+    // b has failed three times: its next retry would wait 240 to 480 ms.
+    subscriber.want('v', { namespace: ['room'], track: 'c', retry });
+    await until(() => subs(connections[0]!).at(-1)!.options.track === 'c', 'move to c');
+    const rejectedAt = Date.now();
+    subs(connections[0]!).at(-1)!.reject(UNROUTABLE);
+    const count = subs(connections[0]!).length;
+    await until(() => subs(connections[0]!).length === count + 1, 'c retried');
+    expect(Date.now() - rejectedAt).toBeLessThan(200);
+  });
+
+  it('keeps a re-want made after the old target failed for good, and subscribes to the new one', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+    await Promise.resolve();
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'subscribe to b');
+    expect(subs(connections[0]!)[1]!.options.track).toBe('b');
+    expect(seen).toEqual([]);
+  });
+
+  it('surfaces a replacement refused for good after a re-want', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'pending b');
+    subs(connections[0]!)[1]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+    await until(() => seen.includes('error SUBSCRIPTION_REQUEST_FAILED'), 'error');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(subs(connections[0]!)).toHaveLength(2);
+  });
+
+  it('tries a target wanted from onRestarted at once, not after the old backoff', async () => {
+    const { subscriber, connections } = await start();
+    const retry = { initialDelayMs: 60_000, maxDelayMs: 60_000 };
+    let rewanted = false;
+    const handlers: WantHandlers = {
+      onRestarted: () => {
+        if (rewanted) return;
+        rewanted = true;
+        subscriber.want('v', { namespace: ['room'], track: 'b', retry }, handlers);
+      },
+    };
+    subscriber.want('v', { namespace: ['room'], track: 'a', retry }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subs(connections[0]!)[0]!.done();
+    await until(() => subs(connections[0]!).length === 2, 'b subscribed at once');
+    expect(subs(connections[0]!)[1]!.options.track).toBe('b');
+  });
+
+  it('cuts over on a replacement object queued in the turn the old subscription ended', async () => {
+    const { connections, seen, discovery, replacement, first } = await onOldGeneration({ until: () => false });
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    const second = subs(connections[0]!)[1]!;
+    second.accept();
+    // The relay ends the old subscription, and the replacement's object arrives before `ended` settles.
+    first.terminate({ errorCode: 0x0, retryInterval: 0, reason: 'internal' });
+    second.object(0);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(seen.slice(1)).toEqual(['object 10', expect.stringMatching(/^switched/), 'object 0']);
+  });
+
+  it('reports a restart when a re-want supersedes a move that failed for good', async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'pending b');
+    subs(connections[0]!)[1]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+    await Promise.resolve();
+    subscriber.want('v', { namespace: ['room'], track: 'c' }, handlers);
+    await until(() => subs(connections[0]!).length === 3, 'subscribe to c');
+    subs(connections[0]!)[2]!.accept();
+    expect(seen).toEqual(['subscribed room', 'restarted terminated', 'subscribed room']);
+  });
+
+  it("keeps the old subscription's reason when a re-want supersedes a move that failed for good", async () => {
+    const { subscriber, connections } = await start();
+    const { seen, handlers } = recorder();
+    subscriber.want('v', { namespace: ['room'], track: 'a' }, handlers);
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'b' }, handlers);
+    await until(() => subs(connections[0]!).length === 2, 'pending b');
+    subs(connections[0]!)[0]!.done();
+    subs(connections[0]!)[1]!.reject({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' });
+    await Promise.resolve();
+    subscriber.want('v', { namespace: ['room'], track: 'c' }, handlers);
+    await until(() => seen.includes('restarted publisher-done'), 'restart');
+    expect(seen).not.toContain('restarted terminated');
+  });
+
+  it('still restarts when the generation is withdrawn with none newer', async () => {
+    const { connections, seen, discovery, old } = await onOldGeneration();
+    discovery.push({ type: 'unannounced', namespace: ['room', old] });
+    await until(() => seen.includes('restarted generation'), 'restart');
+    expect(subs(connections[0]!)[0]!.cancelled).toBe(true);
+  });
+
+  it('swaps until and drainMs in place, and checks them at once', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v' });
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subscriber.want('v', { namespace: ['room'], track: 'v', until: () => true, drainMs: 100 });
+    expect(subs(connections[0]!)).toHaveLength(1);
+    expect(subs(connections[0]!)[0]!.cancelled).toBe(false);
+    expect(() => subscriber.want('v', { namespace: ['room'], track: 'v', until: 'first' as 'first-object' })).toThrow(
+      TypeError,
+    );
+    expect(() => subscriber.want('v', { namespace: ['room'], track: 'v', until: (async () => true) as never })).toThrow(
+      TypeError,
+    );
+    expect(() => subscriber.want('v', { namespace: ['room'], track: 'v', drainMs: -1 })).toThrow(RangeError);
+    expect(() => subscriber.want('v', { namespace: ['room'], track: 'v', drainMs: 2 ** 31 })).toThrow(RangeError);
+  });
+
+  it('moves to the replacement connection when the connection ends during a pending move', async () => {
+    const { connections, seen, discovery, replacement } = await onOldGeneration();
+    discovery.push({ type: 'announced', namespace: ['room', replacement] });
+    await until(() => subs(connections[0]!).length === 2, 'replacement opened');
+    connections[0]!.end(new RelayError('TRANSPORT_ERROR', 'idle', 'connection'));
+    await until(() => seen.includes('restarted connection'), 'restart');
+    expect(seen.filter((entry) => entry.startsWith('switched'))).toEqual([]);
+  });
+});
+
 describe('rotation before the credential expires (#261)', () => {
   async function publishers(expiries: (Date | undefined)[], options: { rotateBeforeMs?: number } = {}) {
     const connections: FakePublisher[] = [];
@@ -1128,7 +1588,7 @@ describe('rotation before the credential expires (#261)', () => {
     return { subscriber, connections, statuses };
   }
 
-  it('moves a want to the new connection make-before-break', async () => {
+  it('moves a want to the new connection make-before-break, with no callback and nothing repeated', async () => {
     const { subscriber, connections, statuses } = await subscribers();
     const seen: string[] = [];
     subscriber.want(
@@ -1138,6 +1598,7 @@ describe('rotation before the credential expires (#261)', () => {
         onSubscribed: () => seen.push('subscribed'),
         onObject: (object) => seen.push(`object ${object.groupId}`),
         onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
+        onSwitched: () => seen.push('switched'),
       },
     );
     await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
@@ -1158,7 +1619,7 @@ describe('rotation before the credential expires (#261)', () => {
     replacement.object(3);
     old.object(4);
     await until(() => old.cancelled, 'old subscription cancelled');
-    expect(seen).toEqual(['subscribed', 'object 1', 'object 2', 'restarted rotation', 'subscribed', 'object 3']);
+    expect(seen).toEqual(['subscribed', 'object 1', 'object 2', 'object 3']);
     expect(statuses).toEqual(['live']);
     // The old connection closes once every want moved; nothing reconnects after it.
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1166,7 +1627,7 @@ describe('rotation before the credential expires (#261)', () => {
     expect(subscriber.status).toBe('live');
   });
 
-  it('reports the restart when the old subscription ends before the replacement delivers', async () => {
+  it('carries on to the replacement when the old connection ends before it delivered', async () => {
     const { subscriber, connections } = await subscribers();
     const seen: string[] = [];
     subscriber.want(
@@ -1174,18 +1635,21 @@ describe('rotation before the credential expires (#261)', () => {
       { namespace: ['room'], track: 'video', retry: fast },
       {
         onSubscribed: () => seen.push('subscribed'),
+        onObject: (object) => seen.push(`object ${object.groupId}`),
         onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
       },
     );
     await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
     connections[0]!.subscriptions[0]!.accept();
+    connections[0]!.subscriptions[0]!.object(4);
     subscriber.rotate();
     await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
     connections[1]!.subscriptions[0]!.accept();
-    expect(seen).toEqual(['subscribed']);
     connections[0]!.end();
-    await until(() => seen.length === 3, 'restart reported');
-    expect(seen).toEqual(['subscribed', 'restarted rotation', 'subscribed']);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    connections[1]!.subscriptions[0]!.object(4); // already delivered
+    connections[1]!.subscriptions[0]!.object(5);
+    expect(seen).toEqual(['subscribed', 'object 4', 'object 5']);
   });
 
   it('rotates the subscriber on its own before the credential expires', async () => {
@@ -1278,31 +1742,6 @@ describe('rotation before the credential expires (#261)', () => {
       await until(() => subscriber.status === 'live' && connections.length === 2, 'reconnected');
     });
 
-    it('reports a throwing held-back onSubscribed instead of rejecting unhandled', async () => {
-      const { subscriber, connections } = await subscribers();
-      const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-      let calls = 0;
-      subscriber.want(
-        'v',
-        { namespace: ['room'], track: 'v', retry: fast },
-        {
-          onSubscribed: () => {
-            calls += 1;
-            if (calls === 2) throw new Error('app bug');
-          },
-        },
-      );
-      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
-      connections[0]!.subscriptions[0]!.accept();
-      subscriber.rotate();
-      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
-      connections[1]!.subscriptions[0]!.accept();
-      connections[0]!.end();
-      await until(() => errors.mock.calls.length > 0, 'logged');
-      expect(calls).toBe(2);
-      errors.mockRestore();
-    });
-
     it('reports nothing for a pending handoff after close()', async () => {
       const { subscriber, connections } = await subscribers();
       const seen: string[] = [];
@@ -1371,30 +1810,6 @@ describe('rotation before the credential expires (#261)', () => {
       retry.object(3);
       retry.object(4);
       expect(seen).toEqual([2, 3, 4]);
-    });
-
-    it('delivers nothing more when onRestarted cancels the want', async () => {
-      const { subscriber, connections } = await subscribers();
-      const seen: string[] = [];
-      subscriber.want(
-        'v',
-        { namespace: ['room'], track: 'v', retry: fast },
-        {
-          onSubscribed: () => seen.push('subscribed'),
-          onObject: (o) => seen.push(`object ${o.groupId}`),
-          onRestarted: () => {
-            seen.push('restarted');
-            subscriber.unwant('v');
-          },
-        },
-      );
-      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
-      connections[0]!.subscriptions[0]!.accept();
-      subscriber.rotate();
-      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
-      connections[1]!.subscriptions[0]!.accept();
-      connections[1]!.subscriptions[0]!.object(5);
-      expect(seen).toEqual(['subscribed', 'restarted']);
     });
   });
   describe('Codex pass 3 fixes', () => {
@@ -1862,6 +2277,65 @@ describe('rotation before the credential expires (#261)', () => {
       expect(connections[0]!.closeCalls).toBe(0);
       connections[0]!.tracks.get('video')!.resetGroups();
       await until(() => connections[0]!.closeCalls === 1, 'old generation closed once the group was reset', 500);
+    });
+  });
+  describe('rotation with generations (merged with #282)', () => {
+    async function following() {
+      const { subscriber, connections } = await subscribers();
+      const seen: string[] = [];
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v', generations: true, retry: fast },
+        {
+          onObject: (object) => seen.push(`object ${object.groupId}`),
+          onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
+          onSwitched: ({ from, to }) => seen.push(`switched ${from.namespace[1]} -> ${to.namespace[1]}`),
+        },
+      );
+      await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+      return { subscriber, connections, seen };
+    }
+
+    it('moves a followed generation to the new connection silently', async () => {
+      const { subscriber, connections, seen } = await following();
+      const generation = newGeneration(1_000);
+      connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', generation] });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(3);
+      subscriber.rotate();
+      await until(() => connections[1]?.discoveries.length === 1, 'discovery on the new connection');
+      connections[1]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', generation] });
+      await until(() => connections[1]!.subscriptions.length === 1, 'replacement');
+      const replacement = connections[1]!.subscriptions[0]!;
+      expect(replacement.options.namespace).toEqual(['room', generation]);
+      replacement.accept();
+      replacement.object(3);
+      replacement.object(4);
+      expect(seen).toEqual(['object 3', 'object 4']);
+      await until(() => connections[0]!.subscriptions[0]!.cancelled, 'old subscription cancelled');
+    });
+
+    it('reports a newer generation found on the new connection as a move', async () => {
+      const { subscriber, connections, seen } = await following();
+      const older = newGeneration(1_000);
+      const newer = newGeneration(2_000);
+      connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', older] });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(3);
+      subscriber.rotate();
+      await until(() => connections[1]?.discoveries.length === 1, 'discovery on the new connection');
+      connections[1]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', older] });
+      connections[1]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', newer] });
+      await until(
+        () => connections[1]!.subscriptions.at(-1)?.options.namespace[1] === newer,
+        'replacement on the newer generation',
+      );
+      const replacement = connections[1]!.subscriptions.at(-1)!;
+      replacement.accept();
+      replacement.object(0);
+      expect(seen).toEqual(['object 3', `switched ${older} -> ${newer}`, 'object 0']);
     });
   });
 });

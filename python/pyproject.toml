@@ -85,6 +85,7 @@ root = [
   "packages/moq-core/tests",
   "packages/mux-relay/tests",
   "examples",
+  "scripts",
 ]
 
 [tool.ty.src]

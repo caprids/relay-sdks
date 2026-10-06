@@ -5,7 +5,12 @@ publisher restarts and generations.
 Each want retries the announce race, backs off after a publisher's done or a rejection, resubscribes
 a subscription that went stale, and follows a supervised publisher's newest generation through
 namespace discovery. Objects are never fetched to fill a gap: a replacement subscription starts
-live, and ``on_restarted`` tells the application to drop state that assumed continuity. See
+live, and ``on_restarted`` tells the application to drop state that assumed continuity. A move to a
+newer generation, or to another track or parameters on a re-want, is made before the break instead,
+as ``switch_to`` makes one (issue #282): the replacement opens while the current subscription keeps
+delivering, and ``on_switched`` marks the cutover. Before the connection's credential expires, the
+supervisor rotates to a new connection the same way (issue #261): every want's subscription moves to
+it make-before-break, and a want that keeps its target sees no break and no repeat. See
 ``spec/behavior.md``, "Supervised connections". The counterpart of ``ts/src/supervised-subscriber.ts``.
 """
 
@@ -16,9 +21,9 @@ import contextlib
 import logging
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from types import TracebackType
-from typing import Literal, Self, TypeAlias, cast
+from typing import Literal, Self, TypeAlias
 
 from moq_core import (
     Closed,
@@ -34,7 +39,10 @@ from moq_core.errors import is_moqt_protocol_error
 
 from ._awaitable import RelayAwaitable
 from ._subscription import (
+    ObjectEvent,
     RelaySubscription,
+    SubgroupEndEvent,
+    SubgroupResetEvent,
     SubscriptionConnectionClosedError,
     SubscriptionEnd,
     SubscriptionRequestError,
@@ -72,17 +80,18 @@ from .connect_session import (
 )
 from .errors import RelayError
 from .namespace_events import NamespaceEvents
+from .switchable import Until, _check_drain, _held_after, _HeldEvent, _hold, _until_predicate
 
 _log = logging.getLogger("mux_relay")
 
-RestartReason: TypeAlias = Literal["publisher-done", "stale", "generation", "connection", "rotation", "terminated"]
+RestartReason: TypeAlias = Literal["publisher-done", "stale", "generation", "connection", "terminated"]
 """Why a want replaced its subscription.
 
 ``publisher-done``: the relay sent PUBLISH_DONE. ``stale``: no object arrived for ``stale_after``.
-``generation``: a newer generation was announced, or the current one was withdrawn. ``connection``:
-the subscriber connection ended and was replaced. ``rotation``: the subscriber connection was
-replaced before its credential expired, and the want moved to the new one. ``terminated``: the
-relay ended the subscription with REQUEST_ERROR after accepting it.
+``generation``: the current generation was withdrawn with none newer, or a move to a newer one
+could not be made before the break. ``connection``:
+the subscriber connection ended and was replaced. ``terminated``: the relay ended the subscription
+with REQUEST_ERROR after accepting it.
 """
 
 _DISCOVERY_CAPACITY = 1024
@@ -92,13 +101,30 @@ _ROOT_LINGER = 5.0
 """How long an unused root's discovery is kept, so a want that resubscribes at once reuses its snapshot."""
 
 
+@dataclass(frozen=True, slots=True)
+class WantSwitchedInfo:
+    """What ``on_switched`` receives at a want's cutover."""
+
+    from_namespace: tuple[str, ...]
+    """The namespace the want delivered from before the cutover: the generation's, when following one."""
+    from_track: str
+    """The track the want delivered from before the cutover."""
+    to_namespace: tuple[str, ...]
+    """The namespace it delivers from now."""
+    to_track: str
+    """The track it delivers from now."""
+    subscribed: SubscribeOk
+    """The new subscription's acceptance info."""
+
+
 @dataclass(slots=True, kw_only=True)
 class WantHandlers:
     """The callbacks a want delivers to. Like :class:`RelaySubscriptionHandlers`, they must be synchronous."""
 
     on_subscribed: Callable[[SubscribeOk, tuple[str, ...]], None] | None = None
     """A subscription was accepted. The second argument is the namespace it was made on: the
-    generation's, when following one."""
+    generation's, when following one. A move's replacement reports its acceptance in
+    ``on_switched`` instead."""
     on_object: Callable[[MoqtObject], None] | None = None
     """One object, from whichever subscription is current."""
     on_subgroup_end: Callable[[SubgroupEnd], None] | None = None
@@ -110,9 +136,12 @@ class WantHandlers:
     on_restarted: Callable[[RestartReason, tuple[str, ...]], None] | None = None
     """An accepted subscription ended and the want will replace it: drop decoder state that assumed
     continuity. Receives the reason and the namespace the ended subscription was made on. Called
-    before any object of the replacement; the gap is never filled. On a move to a newer generation or
-    a rotated connection, the old subscription keeps delivering until the replacement's first object,
-    so this is called then."""
+    before any object of the replacement; the gap is never filled."""
+    on_switched: Callable[[WantSwitchedInfo], None] | None = None
+    """A move's cutover: the want now delivers from the ``to_`` subscription, and the ``from_`` one
+    was cancelled or drains its in-flight groups. Runs before the replacement's first object, the one
+    that passed ``until``. Decoders drop state that assumed continuity here; no ``on_restarted`` or
+    ``on_subscribed`` runs for a move."""
     on_error: Callable[[BaseException], None] | None = None
     """A failure the want does not retry, after which it stops and is removed: a REQUEST_ERROR no
     wait fixes (credentials, an unsupported or malformed request) as a
@@ -131,7 +160,7 @@ class _Connection:
     roots: dict[tuple[str, ...], _RootWatch] = field(default_factory=dict)
     """One discovery per followed root, shared by every want on it."""
     holds: int = 0
-    """Attempts and handoffs still using this connection; a rotation closes it once none are left."""
+    """Wants with a subscription still on this connection; a rotation closes it once none are left."""
     idle: asyncio.Future[None] | None = None
     """Set by a rotation; resolved whenever ``holds`` drops to zero."""
     rotate_at: float | None = None
@@ -154,39 +183,6 @@ class _Connection:
         return release
 
 
-@dataclass(slots=True, eq=False)
-class _Handoff:
-    """A want's previous subscription, still delivering while its replacement starts.
-
-    On a move to a newer generation or a rotated connection. It ends at the replacement's first
-    object, or when it ends on its own.
-    """
-
-    complete: Callable[[], None]
-    """Stop delivering the previous subscription, cancel it and report ``on_restarted``, then run ``held``."""
-    drop: Callable[[], None]
-    """Stop delivering and cancel it without reporting anything: the want itself was cancelled."""
-    held: Callable[[], None] | None = None
-    """The replacement's accepted ``on_subscribed``, held back until the handoff completes."""
-
-
-@dataclass(slots=True, eq=False)
-class _Cutoff:
-    """What a rotated-away subscription delivered, so its replacement on the same namespace does not
-    deliver it again: the replacement starts at the latest group, which the previous one may have delivered."""
-
-    owner: RelaySubscription
-    """The subscription that delivered it; its own objects are never cut."""
-    namespace: tuple[str, ...]
-    latest: Callable[[], tuple[int, int] | None]
-    """The latest location it delivered, read live while it still delivers."""
-
-    def already_delivered(self, obj: MoqtObject, namespace: tuple[str, ...]) -> bool:
-        """Whether ``obj`` on ``namespace`` is at or before what the owner already delivered."""
-        last = self.latest()
-        return last is not None and namespace == self.namespace and (obj.group_id, obj.object_id) <= last
-
-
 @dataclass(frozen=True, slots=True)
 class _WantOptions:
     namespace: tuple[str, ...]
@@ -203,17 +199,21 @@ class _Want:
     options: _WantOptions
     handlers: dict[str, Callable[..., None]]
     retry: _Backoff
+    until: Callable[[MoqtObject], bool]
+    drain: float
+    changes: list[Callable[[], None]] = field(default_factory=list)
+    """Told when a re-want changes the want in place, by whichever attempt or backoff is running."""
     controller: CancellationToken = field(default_factory=CancellationToken)
     namespace: tuple[str, ...] = ()
     """The namespace the latest subscription was made on: the generation's when following one."""
     generation: str | None = None
     """The generation the latest subscription was made on, when following one."""
+    connection: _Connection | None = None
+    """The connection the latest subscription was made on: a rotation moves it to the new one."""
     deferred: BaseException | None = None
+    settled_target: tuple[str, MessageParameters | None] | None = None
+    """The track and parameters when the latest attempt settled: a later re-want supersedes its outcome."""
     """A discovery failure no wait fixes, seen while backing off, for the loop to surface."""
-    handoff: _Handoff | None = None
-    """The previous subscription, while it still delivers during a move."""
-    cutoff: _Cutoff | None = None
-    """What a rotation's previous subscription delivered, kept until a replacement that was accepted ends."""
 
     def call(self, name: str, *args: object) -> None:
         """Deliver to one handler; nothing reaches a want after it was cancelled, except its own ``on_error``."""
@@ -222,6 +222,10 @@ class _Want:
         callback = self.handlers.get(name)
         if callback is not None:
             callback(*args)
+
+    def changed(self) -> None:
+        for listener in list(self.changes):
+            listener()
 
 
 def _guarded(handlers: WantHandlers) -> dict[str, Callable[..., None]]:
@@ -292,6 +296,8 @@ class SupervisedSubscriber:
         generations: bool = False,
         stale_after: float | None = None,
         retry: SupervisionBackoff | None = None,
+        until: Until = "first-object",
+        drain: float = 0.0,
     ) -> None:
         """Keep a subscription to a track open until ``unwant(key)``.
 
@@ -299,10 +305,20 @@ class SupervisedSubscriber:
         newest generation announced one field below it, and the subscriber's token must allow
         discovering the root. ``stale_after`` (seconds) resubscribes when no object arrived for that
         long, for tracks that are never silent while live. ``parameters`` is sent on every SUBSCRIBE;
-        ``retry`` is the backoff between resubscriptions (from 0.25 s, doubling up to 8 s). Wanting a
-        key again with the same namespace, track, parameters, ``generations`` and ``stale_after``
-        only swaps the handlers and the retry backoff; anything else replaces the want. Arguments
-        are checked at once.
+        ``retry`` is the backoff between resubscriptions (from 0.25 s, doubling up to 8 s).
+
+        A move (a newer generation, or a re-want with another track or parameters) is made before the
+        break, as ``switch_to`` makes one: the current subscription keeps delivering until an object
+        of the replacement passes ``until`` (``"first-object"``, the default, or a synchronous
+        predicate), and ``on_switched`` reports the cutover. Compare the object's own timeline with
+        what was delivered, never group IDs: each generation and track numbers its own groups.
+        ``drain`` (seconds, default 0) keeps the old subscription delivering its in-flight groups
+        that long after the cutover.
+
+        Wanting a key again with the same namespace and ``generations`` updates the want in place:
+        the handlers, ``retry``, ``stale_after``, ``until`` and ``drain`` are swapped, and another
+        track or parameters moves the subscription. Another namespace or ``generations`` replaces the
+        want. Arguments are checked at once.
         """
         if not isinstance(key, str):
             raise TypeError("want key must be a string")
@@ -322,6 +338,8 @@ class SupervisedSubscriber:
         if stale_after is not None:
             validate_timeout("stale_after", stale_after)
         retry_backoff = backoff_options("retry", retry, RESUBSCRIBE_BACKOFF)
+        predicate = _until_predicate(until)
+        _check_drain(drain)
         state = self._state
         if state.stopped:
             raise supervisor_closed("subscriber")
@@ -329,15 +347,28 @@ class SupervisedSubscriber:
         # A snapshot, so the caller's later changes to the parameters neither reach the wire nor the identity.
         options = _WantOptions(fields_, name, generations, stale_after, deepcopy(parameters))
         existing = state.wants.get(key)
-        if existing is not None and existing.options == options:
+        if existing is not None and (existing.options.namespace, existing.options.generations) == (
+            fields_,
+            generations,
+        ):
             existing.handlers = safe_handlers
             existing.retry = retry_backoff
+            existing.until = predicate
+            existing.drain = float(drain)
+            if existing.options == options:
+                return
+            existing.options = replace(
+                existing.options, track=name, parameters=options.parameters, stale_after=stale_after
+            )
+            existing.changed()
             return
         if existing is not None:
             self._forget(key, existing)
-        want = _Want(options, safe_handlers, retry_backoff)
+        want = _Want(options, safe_handlers, retry_backoff, predicate, float(drain))
         state.wants[key] = want
-        task = asyncio.ensure_future(_run_want(want, self._live_connection, lambda: self._forget(key, want)))
+        task = asyncio.ensure_future(
+            _run_want(want, self._live_connection, lambda: state.current, lambda: self._forget(key, want))
+        )
         _observe(task)
 
     def unwant(self, key: str) -> None:
@@ -350,9 +381,11 @@ class SupervisedSubscriber:
         """Replace the connection make-before-break, as happens on its own ``rotate_before`` before the
         credential expires.
 
-        A new connection opens, with a fresh token, and every want subscribes on it. Each want's old
-        subscription keeps delivering until the replacement's first object arrives. The old connection
-        closes once every want has moved, after 10 seconds at most. A no-op while no connection is up.
+        A new connection opens, with a fresh token, and every want moves its subscription to it as a
+        move would, keeping the old one delivering until the cutover. A want whose target is unchanged
+        cuts over on the first object the old one did not deliver, with no callback: nothing is lost
+        or repeated. The old connection closes once every want has moved, after 10 seconds at most. A
+        no-op while no connection is up.
         """
         state = self._state
         if state.stopped or state.current is None:
@@ -375,8 +408,6 @@ class SupervisedSubscriber:
 
     def _forget(self, key: str, want: _Want) -> None:
         want.controller.cancel()
-        if want.handoff is not None:
-            want.handoff.drop()
         if self._state.wants.get(key) is want:
             del self._state.wants[key]
 
@@ -487,8 +518,6 @@ async def _supervise_relay_subscriber(
         state.wants.clear()
         for want in wants:
             want.controller.cancel()
-            if want.handoff is not None:
-                want.handoff.drop()
         if state.current is not None:
             state.current.subscriber.close()
         state.current = None
@@ -750,19 +779,17 @@ class _Outcome:
     """What ended one attempt, and what the want does next.
 
     ``cancelled``: the want or the supervisor was cancelled. ``connection``: the connection ended;
-    move to the next one without delay. ``generation``: a newer generation, or none; resubscribe
-    without delay. ``rotation``: a rotation replaced the connection; resubscribe on the new one
-    without delay. ``fatal``: a failure no wait fixes; surface it and stop. ``retry``: anything else;
-    resubscribe after the backoff. ``handed_off``: the old subscription still delivers, and reports
-    its restart itself.
+    move to the next one without delay. ``moved``: the followed generation was withdrawn with none
+    newer, or the want moved before its subscription was accepted; resubscribe without delay.
+    ``fatal``: a failure no wait fixes; surface it and stop. ``retry``: anything else; resubscribe
+    after the backoff.
     """
 
-    kind: Literal["cancelled", "connection", "generation", "rotation", "fatal", "retry"]
+    kind: Literal["cancelled", "connection", "moved", "fatal", "retry"]
     accepted: bool = False
     progressed: bool = False
     reason: RestartReason | None = None
     error: BaseException | None = None
-    handed_off: bool = False
 
 
 _CANCELLED = _Outcome("cancelled")
@@ -771,11 +798,12 @@ _CANCELLED = _Outcome("cancelled")
 async def _run_want(
     want: _Want,
     live_connection: Callable[[CancellationToken], Awaitable[_Connection | None]],
+    next_connection: Callable[[], _Connection | None],
     forget: Callable[[], None],
 ) -> None:
     """Supervise ``want``; a failure the loop did not expect forgets it rather than leave it registered but dead."""
     try:
-        await _supervise_want(want, live_connection, forget)
+        await _supervise_want(want, live_connection, next_connection, forget)
     except Exception:
         forget()
         _log.exception("a want stopped on an unexpected failure and was forgotten")
@@ -784,59 +812,76 @@ async def _run_want(
 async def _supervise_want(
     want: _Want,
     live_connection: Callable[[CancellationToken], Awaitable[_Connection | None]],
+    next_connection: Callable[[], _Connection | None],
     forget: Callable[[], None],
 ) -> None:
     """Keep ``want`` subscribed until it is cancelled or fails for good."""
     scope = want.controller
     failures = 0
-    while not scope.cancelled:
-        if want.deferred is not None:
-            # A discovery refusal seen while backing off is reported as one seen during an attempt would be.
-            forget()
-            want.call("on_error", want.deferred)
-            return
-        connection = await live_connection(scope)
-        # A want replaced while waiting must not open anything: its replacement may already hold an overlapping root.
-        if connection is None or scope.cancelled:
-            return
-        # A connection a rotation is replacing takes nothing new; the replacement is already live.
-        if connection.retiring.cancelled:
-            await asyncio.sleep(0)
-            continue
-        release = connection.hold()
-        try:
-            outcome = await _attempt(want, connection)
-        finally:
-            release()
-        if scope.cancelled or outcome.kind == "cancelled":
-            return
-        if outcome.kind == "fatal":
-            forget()
-            assert outcome.error is not None
-            want.call("on_error", outcome.error)
-            return
-        reason: RestartReason | None = outcome.reason
-        if outcome.kind in ("connection", "generation", "rotation"):
-            reason = cast("RestartReason", outcome.kind)
-        # A handed-off subscription reports its restart when the handoff completes.
-        if outcome.accepted and reason is not None and not outcome.handed_off:
-            try:
-                want.call("on_restarted", reason, want.namespace)
-            except Exception:
-                # A delivery callback's failure is the application's; the want keeps its track subscribed.
-                _log.exception("on_restarted raised; the want resubscribes regardless")
-        if outcome.kind == "connection":
-            # The request can see the end before the connection reports it; wait for that rather than spin on it.
-            await wait_any([connection.ended, scope], limit=1.0)
-            continue
-        if outcome.kind != "retry":
-            continue
-        # Cached objects followed by a done are not progress: only a later group resets the backoff.
-        if outcome.progressed:
-            failures = 0
-        delay = backoff_delay(failures, want.retry)
-        failures += 1
-        await _backoff(want, connection, delay)
+
+    def rewanted() -> None:
+        # A re-want asks for something new: its first failure waits the shortest delay again.
+        nonlocal failures
+        failures = 0
+
+    want.changes.append(rewanted)
+    try:
+        while not scope.cancelled:
+            if want.deferred is not None:
+                # A discovery refusal seen while backing off is reported as one seen during an attempt would be.
+                forget()
+                want.call("on_error", want.deferred)
+                return
+            started = await live_connection(scope)
+            # A want replaced while waiting must not open anything: its replacement may already hold an
+            # overlapping root.
+            if started is None or scope.cancelled:
+                return
+            want.settled_target = None
+            want.connection = started
+            outcome = await _attempt(want, started, next_connection)
+            # A rotation may have moved the attempt to another connection: what follows waits on the one it ended on.
+            connection = want.connection or started
+            asked = want.settled_target or (want.options.track, want.options.parameters)
+            if scope.cancelled or outcome.kind == "cancelled":
+                return
+            # A re-want that came after the attempt settled asks for another track or parameters: the old
+            # target's failure is not the new one's, so try the new one at once. A subscription the failed
+            # move cancelled was a restart.
+            superseded = (want.options.track, want.options.parameters) != asked
+            if outcome.kind == "fatal" and superseded:
+                outcome = _Outcome("retry", accepted=outcome.accepted, reason=outcome.reason or "terminated")
+            if outcome.kind == "fatal":
+                forget()
+                assert outcome.error is not None
+                want.call("on_error", outcome.error)
+                return
+            reason: RestartReason | None = outcome.reason
+            if outcome.kind == "connection":
+                reason = "connection"
+            elif outcome.kind == "moved":
+                reason = "generation"
+            if outcome.accepted and reason is not None:
+                try:
+                    want.call("on_restarted", reason, want.namespace)
+                except Exception:
+                    # A delivery callback's failure is the application's; the want keeps its track subscribed.
+                    _log.exception("on_restarted raised; the want resubscribes regardless")
+            if outcome.kind == "connection":
+                # The request can see the end before the connection reports it; wait for that rather than spin on it.
+                await wait_any([connection.ended, scope], limit=1.0)
+                continue
+            # on_restarted is application code: it may have wanted another target.
+            if outcome.kind != "retry" or (want.options.track, want.options.parameters) != asked:
+                continue
+            # Cached objects followed by a done are not progress: only a later group resets the backoff.
+            if outcome.progressed:
+                failures = 0
+            delay = backoff_delay(failures, want.retry)
+            failures += 1
+            await _backoff(want, connection, delay)
+    finally:
+        want.changes.remove(rewanted)
 
 
 async def _backoff(want: _Want, connection: _Connection, delay: float) -> None:
@@ -869,10 +914,14 @@ async def _backoff(want: _Want, connection: _Connection, delay: float) -> None:
             wake.cancel()
 
     unwatch = held[0].on_change(changed) if held is not None else None
+    # A re-want asks for something the failed attempt did not: try it at once.
+    want.changes.append(wake.cancel)
     try:
         changed()
+        # A rotation replacing the connection wakes it too: the want's next attempt belongs on the new one.
         await wait_any([want.controller, connection.ended, connection.retiring, wake], limit=delay)
     finally:
+        want.changes.remove(wake.cancel)
         if unwatch is not None:
             unwatch()
         if remove_release is not None:
@@ -881,17 +930,13 @@ async def _backoff(want: _Want, connection: _Connection, delay: float) -> None:
             held[1]()
 
 
-async def _attempt(want: _Want, connection: _Connection) -> _Outcome:
-    """One subscription for ``want`` on ``connection``, from SUBSCRIBE to whatever ends it."""
+async def _attempt(want: _Want, connection: _Connection, next_connection: Callable[[], _Connection | None]) -> _Outcome:
+    """One attempt for ``want`` on ``connection``: its discovery, if it follows generations, and its subscriptions."""
     options = want.options
     scope = [want.controller, connection.ended]
 
     def cancelled_or_connection(accepted: bool) -> _Outcome:
-        if want.controller.cancelled:
-            return _CANCELLED
-        if connection.retiring.cancelled and not connection.ended.cancelled:
-            return _Outcome("rotation", accepted=accepted)
-        return _Outcome("connection", accepted=accepted)
+        return _CANCELLED if want.controller.cancelled else _Outcome("connection", accepted=accepted)
 
     namespace = options.namespace
     watch: _RootWatch | None = None
@@ -913,14 +958,26 @@ async def _attempt(want: _Want, connection: _Connection) -> _Outcome:
             found = await watch.newest([*scope, connection.retiring])
             if isinstance(found, _Failed):
                 return _discovery_failed(found.error, _any_cancelled(scope), cancelled_or_connection, accepted=False)
-            if found is None or connection.retiring.cancelled:
+            # Rotated away before a generation was found: start over on the new connection at once.
+            if found is None and connection.retiring.cancelled and not any(token.cancelled for token in scope):
+                return _Outcome("moved")
+            if found is None:
                 return cancelled_or_connection(False)
             generation = found
             namespace = (*options.namespace, generation)
-        if connection.retiring.cancelled:
-            return cancelled_or_connection(False)
+        want.namespace = namespace
         want.generation = generation
-        return await _subscribe_once(want, connection, namespace, scope, watch, generation, cancelled_or_connection)
+        # The want's own cancellation, not the connection's: a rotation moves the attempt to the next connection.
+        return await _follow(
+            want,
+            connection,
+            namespace,
+            generation,
+            [want.controller],
+            watch,
+            cancelled_or_connection,
+            next_connection,
+        )
     finally:
         remove_release()
         release()
@@ -938,262 +995,603 @@ def _any_cancelled(tokens: Sequence[CancellationToken]) -> CancellationToken:
     return token
 
 
-async def _subscribe_once(
+@dataclass(slots=True, eq=False)
+class _Slot:
+    """One subscription an attempt holds: the active one, a move's pending replacement, or an old one draining."""
+
+    namespace: tuple[str, ...]
+    """The namespace it was made on: the generation's when following one."""
+    generation: str | None
+    track: str
+    parameters: MessageParameters | None
+    connection: _Connection
+    """The connection it was made on: a rotation's replacement is on the next one."""
+    subscription: RelaySubscription | None = None
+    accepted: SubscribeOk | None = None
+    first_group: int | None = None
+    largest_group: int | None = None
+    latest: tuple[int, int] | None = None
+    """The latest object it delivered, by location: a rotation's replacement skips what is at or before it."""
+    progressed: bool = False
+    """Whether it delivered an object from a later group than its first."""
+    drain_through: int | None = None
+    """While draining after a cutover: the largest group it had delivered, through which its events
+    still reach the handlers."""
+    ended: RestartReason | None = None
+    """Why the active subscription ended while a move was pending; the move carries on without it."""
+    held: list[_HeldEvent] = field(default_factory=list)
+    """While pending: its events held until the cutover, as a switchable holds them."""
+
+    def made_with(self, namespace: tuple[str, ...], track: str, parameters: MessageParameters | None) -> bool:
+        return (self.namespace, self.track, self.parameters) == (namespace, track, parameters)
+
+    def same_target(self, other: _Slot) -> bool:
+        return self.made_with(other.namespace, other.track, other.parameters)
+
+    def cancel(self) -> None:
+        if self.subscription is not None:
+            self.subscription.cancel()
+
+    def delivered(self, obj: MoqtObject) -> None:
+        """Record ``obj`` as the latest this slot delivered, if it is later than what it had."""
+        if not _at_or_before(obj, self.latest):
+            self.latest = (obj.group_id, obj.object_id)
+
+
+def _at_or_before(obj: MoqtObject, latest: tuple[int, int] | None) -> bool:
+    """Whether ``obj`` is at or before ``latest``, by group and then object ID."""
+    return latest is not None and (obj.group_id, obj.object_id) <= latest
+
+
+@dataclass(slots=True, eq=False)
+class _RotationTo:
+    """A rotation under way: the connection the subscriptions move to, and its discovery of the root."""
+
+    connection: _Connection
+    watch: _RootWatch | None
+    release: Callable[[], None]
+
+
+async def _follow(
     want: _Want,
     connection: _Connection,
     namespace: tuple[str, ...],
-    scope: list[CancellationToken],
-    watch: _RootWatch | None,
     generation: str | None,
+    scope: list[CancellationToken],
+    initial_watch: _RootWatch | None,
     cancelled_or_connection: Callable[[bool], _Outcome],
+    next_connection: Callable[[], _Connection | None],
 ) -> _Outcome:
-    options = want.options
+    """The want's subscriptions from the first SUBSCRIBE on ``connection`` to whatever ends the attempt.
+
+    A move (a newer generation, or a re-want with another track or parameters) is made before the
+    break: the replacement opens pending while the active subscription keeps delivering, and takes
+    over once one of its objects passes ``until``. A rotation is a move to the next connection: with
+    the target unchanged, the replacement takes over at the first object the active one had not
+    delivered, and no callback marks it.
+    """
     loop = asyncio.get_running_loop()
-    accepted = False
-    # Whether the application heard of this subscription: its on_subscribed ran. A handoff can hold that back.
-    reported = False
-    # Whether this subscription's events reach the handlers; a completed handoff turns it off.
-    delivering = True
-    first_group: int | None = None
-    # The latest object delivered, by location, for a rotation's replacement to skip what was already delivered.
-    latest: tuple[int, int] | None = None
-    progressed = False
+    # The followed root's discovery on the active subscription's connection.
+    watch = initial_watch
+    settled = CancellationToken()
+    outcome: _Outcome | None = None
+    pending: _Slot | None = None
+    # Old subscriptions draining after a cutover, each with the timer that cancels it.
+    draining: dict[_Slot, asyncio.TimerHandle] = {}
+    # A move whose replacement failed, retried after the backoff unless the want asks for something else first.
+    retry_move: tuple[_Slot, asyncio.TimerHandle] | None = None
+    move_failures = 0
+    # The target of the latest move, whose failures ``move_failures`` counts.
+    move_target: tuple[tuple[str, ...], str, MessageParameters | None] | None = None
     last_object_at = 0.0
-    publisher_done = False
-    went_stale = False
-    # Set when this subscription stays open, delivering, while its replacement starts.
-    handed_off: _Handoff | None = None
-    finish = CancellationToken()
+    # A rotation under way: the connection the subscriptions move to, and its discovery of the root.
+    rotation_to: _RotationTo | None = None
+    # The discovery a rotation swapped in, released when the attempt ends; the first is the attempt's to release.
+    release_watch: Callable[[], None] = _nothing
+    unwatch: Callable[[], None] | None = None
+    unwatch_next: Callable[[], None] | None = None
+    # The connections a subscription of this attempt is on, each held so a rotation closes it only once none are.
+    holds: dict[_Connection, Callable[[], None]] = {}
+    # Stop observing each connection the attempt observed.
+    observed: list[Callable[[], None]] = []
+    # Set once any subscription of the attempt heard PUBLISH_DONE: a restarted publisher numbers its groups from 0,
+    # so a rotation's replacement no longer skips what the active subscription delivered.
+    publisher_ended = False
 
-    def report(info: SubscribeOk) -> None:
-        nonlocal reported
-        reported = True
-        want.namespace = namespace
-        want.call("on_subscribed", info, namespace)
+    def observe(on: _Connection) -> None:
+        if any(item is on for item in watched):
+            return
+        watched.append(on)
 
-    def on_subscribed(info: SubscribeOk) -> None:
-        nonlocal accepted, last_object_at
-        accepted = True
-        last_object_at = loop.time()
-        handoff = want.handoff
-        # The previous subscription keeps delivering until this one's first object: report this one then.
-        if handoff is not None:
-            # Not if it ended meanwhile: a replacement that never took over is not the one the application hears of.
-            handoff.held = lambda: None if subscription.ended.done() else report(info)
+        def on_retiring(_: object = None) -> None:
+            task = asyncio.ensure_future(rotate(on))
+            _observe(task)
+
+        if on.retiring.cancelled:
+            loop.call_soon(on_retiring)
+            return
+        on.retiring.add_callback(on_retiring)
+        observed.append(lambda: on.retiring.remove_callback(on_retiring))
+
+    watched: list[_Connection] = []
+
+    def hold_on(on: _Connection) -> None:
+        if on in holds:
+            return
+        holds[on] = on.hold()
+        observe(on)
+
+    def release_unused() -> None:
+        for on, release in list(holds.items()):
+            used = (
+                active.connection is on
+                or (pending is not None and pending.connection is on)
+                or (rotation_to is not None and rotation_to.connection is on)
+                or any(slot.connection is on for slot in draining)
+            )
+            if used:
+                continue
+            del holds[on]
+            release()
+
+    def rotating(slot: _Slot) -> bool:
+        """Whether ``slot`` replaces the active subscription on the next connection, with the same target."""
+        return slot.connection is not active.connection and slot.same_target(active)
+
+    def settle(next_outcome: _Outcome) -> None:
+        nonlocal outcome
+        if outcome is None:
+            # A failure no wait fixes still ends an accepted subscription, which a superseding re-want
+            # reports as a restart.
+            if next_outcome.kind == "fatal":
+                next_outcome = replace(next_outcome, accepted=accepted(), reason=active.ended)
+            outcome = next_outcome
+            want.settled_target = (want.options.track, want.options.parameters)
+            settled.cancel()
+
+    def over() -> bool:
+        return outcome is not None or any(token.cancelled for token in scope)
+
+    def accepted() -> bool:
+        return active.accepted is not None
+
+    def clear_retry() -> None:
+        nonlocal retry_move
+        if retry_move is not None:
+            retry_move[1].cancel()
+            retry_move = None
+
+    def stop_drain(slot: _Slot) -> None:
+        timer = draining.pop(slot, None)
+        if timer is not None:
+            timer.cancel()
+        slot.cancel()
+        release_unused()
+
+    def reaches(slot: _Slot, group_id: int) -> bool:
+        """Whether a subgroup event of ``slot`` reaches the handlers."""
+        if over():
+            return False
+        if slot is active:
+            return slot.ended is None
+        return slot in draining and slot.drain_through is not None and group_id <= slot.drain_through
+
+    def active_ended(reason: RestartReason) -> None:
+        """The active subscription ended without the connection: with a move pending, the move carries on."""
+        if pending is not None:
+            active.ended = reason
+            active.cancel()
+            return
+        settle(_Outcome("retry", accepted=accepted(), progressed=active.progressed, reason=reason))
+
+    def pending_failed(slot: _Slot, end: SubscriptionEnd | None) -> None:
+        """A move's replacement ended before its cutover."""
+        nonlocal pending, retry_move, move_failures
+        pending = None
+        slot.cancel()
+        # The connection's end reaches the active subscription and the attempt's scope as well.
+        if end is not None and end.cause == "connection-closed":
+            settle(cancelled_or_connection(accepted()))
+            return
+        failed = _classify(end, False, False, cancelled_or_connection) if end is not None else None
+        if failed is not None and failed.kind == "fatal":
+            settle(failed)
+            return
+        if active.ended is not None:
+            settle(_Outcome("retry", accepted=True, progressed=active.progressed, reason=active.ended))
+            return
+        # The active subscription keeps delivering; the move is retried after the backoff.
+
+        def retry_now() -> None:
+            nonlocal retry_move
+            if retry_move is not None and retry_move[0] is slot:
+                retry_move = None
+                reconcile()
+
+        delay = backoff_delay(move_failures, want.retry)
+        move_failures += 1
+        retry_move = (slot, loop.call_later(delay, retry_now))
+
+    def cutover(slot: _Slot, obj: MoqtObject) -> None:
+        nonlocal active, pending, move_failures, last_object_at, watch, release_watch, rotation_to, unwatch
+        nonlocal unwatch_next
+        previous = active
+        # A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
+        silent = rotating(slot)
+        pending = None
+        clear_retry()
+        move_failures = 0
+        active = slot
+        want.namespace = slot.namespace
+        want.generation = slot.generation
+        want.connection = slot.connection
+        if rotation_to is not None and rotation_to.connection is slot.connection:
+            # The followed root's discovery moves to the new connection with the subscription.
+            if unwatch is not None:
+                unwatch()
+            if unwatch_next is not None:
+                unwatch_next()
+                unwatch_next = None
+            watch = rotation_to.watch
+            release_watch = rotation_to.release
+            rotation_to = None
+            unwatch = watch.on_change(reconcile) if watch is not None else None
+        if not silent and previous.ended is None and want.drain > 0 and previous.largest_group is not None:
+            previous.drain_through = previous.largest_group
+            draining[previous] = loop.call_later(want.drain, stop_drain, previous)
         else:
-            report(info)
+            previous.cancel()
+        release_unused()
+        slot.first_group = obj.group_id
+        slot.largest_group = obj.group_id
+        last_object_at = loop.time()
+        if not silent:
+            # A subscription that delivered an object was accepted.
+            assert slot.accepted is not None
+            info = WantSwitchedInfo(previous.namespace, previous.track, slot.namespace, slot.track, slot.accepted)
+            try:
+                want.call("on_switched", info)
+            except Exception:
+                # A delivery callback's failure is the application's; the want keeps delivering.
+                _log.exception("on_switched raised; the want delivers regardless")
+        # Later groups that reached the replacement early, out of order, follow the object that cut over.
+        # Each delivery is isolated, so one raising callback loses neither the rest nor the held events.
+        replay = _held_after(slot.held, obj)
+        slot.held = []
 
-    def on_object(obj: MoqtObject) -> None:
-        nonlocal first_group, progressed, last_object_at, latest
-        if not delivering:
+        def deliver(name: str, value: object) -> None:
+            try:
+                want.call(name, value)
+            except Exception:
+                _log.exception("%s raised at a cutover; the want delivers regardless", name)
+
+        # A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
+        slot.delivered(obj)
+        if not over() and active is slot:
+            deliver("on_object", obj)
+        for held in replay:
+            if over() or active is not slot:
+                break
+            if isinstance(held, ObjectEvent):
+                slot.delivered(held.value)
+                if held.value.group_id > obj.group_id:
+                    slot.progressed = True
+                slot.largest_group = max(slot.largest_group or held.value.group_id, held.value.group_id)
+                deliver("on_object", held.value)
+            elif isinstance(held, SubgroupEndEvent):
+                deliver("on_subgroup_end", held.value)
+            else:
+                deliver("on_subgroup_reset", held.value)
+
+    def on_object(slot: _Slot, obj: MoqtObject) -> None:
+        nonlocal last_object_at
+        if over():
+            return
+        if slot is active:
+            if slot.ended is not None:
+                return
+            last_object_at = loop.time()
+            if slot.first_group is None:
+                slot.first_group = obj.group_id
+            elif obj.group_id > slot.first_group:
+                slot.progressed = True
+            if slot.largest_group is None or obj.group_id > slot.largest_group:
+                slot.largest_group = obj.group_id
+            slot.delivered(obj)
+            want.call("on_object", obj)
+            return
+        if slot in draining:
+            if slot.drain_through is not None and obj.group_id <= slot.drain_through:
+                want.call("on_object", obj)
+            return
+        if slot is not pending:
             return
         last_object_at = loop.time()
-        if first_group is None:
-            first_group = obj.group_id
-        elif obj.group_id > first_group:
-            progressed = True
-        cutoff = want.cutoff
-        if cutoff is not None and cutoff.owner is not subscription and cutoff.already_delivered(obj, namespace):
-            return
-        if not reported and want.handoff is not None:
-            want.handoff.complete()
-            # The restart callback may have cancelled the want or stopped the supervisor.
-            if not delivering or want.controller.cancelled:
+        # The active subscription's ending reaches on_ended a turn later; one already recorded counts now.
+        if active.ended is None and active.subscription is not None and active.subscription.ended.done():
+            on_ended(active, active.subscription.ended.result())
+            if over() or pending is not slot:
                 return
-        location = (obj.group_id, obj.object_id)
-        if latest is None or location > latest:
-            latest = location
-        want.call("on_object", obj)
-
-    def on_subgroup_end(info: SubgroupEnd) -> None:
-        if delivering and reported:
-            want.call("on_subgroup_end", info)
-
-    def on_subgroup_reset(info: SubgroupReset) -> None:
-        if delivering and reported:
-            want.call("on_subgroup_reset", info)
-
-    def on_publisher_done(info: PublishDone) -> None:
-        nonlocal publisher_done
-        if not delivering:
+        # A rotation's replacement starts at the latest group, which the active subscription may have delivered:
+        # skip it. Not once the publisher ended or the subscription was ended by it: a restarted publisher
+        # numbers from 0 again.
+        rotation = rotating(slot)
+        continues = not publisher_ended and active.ended in (None, "connection")
+        if rotation and continues and _at_or_before(obj, active.latest):
             return
-        publisher_done = True
-        if reported:
-            want.call("on_publisher_done", info)
-        finish.cancel()
-        # The publisher ended, whichever subscription heard it: one restarting on the namespace may number its
-        # groups from 0, so nothing it sends was delivered before.
-        want.cutoff = None
-        if handed_off is not None:
-            handed_off.complete()
+        # With the active subscription gone there is nothing left to compare with: the next object cuts over. A
+        # rotation's replacement continues the same stream, so its first new object does too.
+        passed = True
+        if active.ended is None and not rotation:
+            try:
+                passed = want.until(obj)
+            except Exception:
+                _log.exception("until raised; the want cuts over on this object")
+        # The predicate is application code: it may have moved the want again or cancelled it.
+        if not passed:
+            _hold(slot.held, ObjectEvent(obj))
+        elif not over() and pending is slot:
+            cutover(slot, obj)
 
-    try:
-        subscription: RelaySubscription = connection.subscriber.subscribe(
-            namespace,
+    def on_subscribed(slot: _Slot, info: SubscribeOk) -> None:
+        nonlocal last_object_at
+        if over():
+            return
+        slot.accepted = info
+        if slot is not active:
+            return
+        last_object_at = loop.time()
+        want.call("on_subscribed", info, slot.namespace)
+
+    def on_subgroup_event(slot: _Slot, event: SubgroupEndEvent | SubgroupResetEvent) -> None:
+        if slot is pending and not over():
+            _hold(slot.held, event)
+        elif reaches(slot, event.value.group_id):
+            want.call("on_subgroup_end" if isinstance(event, SubgroupEndEvent) else "on_subgroup_reset", event.value)
+
+    def on_publisher_done(slot: _Slot, info: PublishDone) -> None:
+        nonlocal publisher_ended
+        if over():
+            return
+        publisher_ended = True
+        if slot is pending:
+            pending_failed(slot, None)
+        elif slot is active and slot.ended is None:
+            active_ended("publisher-done")
+            want.call("on_publisher_done", info)
+
+    def on_ended(slot: _Slot, end: SubscriptionEnd) -> None:
+        if over():
+            return
+        if slot in draining:
+            stop_drain(slot)
+        elif slot is pending:
+            pending_failed(slot, end)
+        elif slot is active and slot.ended is None:
+            # The retiring connection closed under the active subscription: the rotation's replacement carries
+            # on, or is tried again on the next connection after its backoff.
+            if end.cause == "connection-closed":
+                if pending is not None and pending.connection is not slot.connection:
+                    active_ended("connection")
+                    return
+                if pending is None and retry_move is not None and retry_move[0].connection is not slot.connection:
+                    slot.ended = "connection"
+                    slot.cancel()
+                    return
+            ended = _classify(end, accepted(), slot.progressed, cancelled_or_connection)
+            if ended.kind == "retry" and ended.reason is not None:
+                active_ended(ended.reason)
+            else:
+                settle(ended)
+
+    def open_slot(target: tuple[str, ...], target_generation: str | None, on: _Connection) -> _Slot:
+        options = want.options
+        slot = _Slot(target, target_generation, options.track, options.parameters, on)
+        subscription = on.subscriber.subscribe(
+            target,
             options.track,
             RelaySubscriptionHandlers(
-                on_subscribed=on_subscribed,
-                on_object=on_object,
-                on_subgroup_end=on_subgroup_end,
-                on_subgroup_reset=on_subgroup_reset,
-                on_publisher_done=on_publisher_done,
+                on_subscribed=lambda info: on_subscribed(slot, info),
+                on_object=lambda obj: on_object(slot, obj),
+                on_subgroup_end=lambda info: on_subgroup_event(slot, SubgroupEndEvent(info)),
+                on_subgroup_reset=lambda info: on_subgroup_event(slot, SubgroupResetEvent(info)),
+                on_publisher_done=lambda info: on_publisher_done(slot, info),
             ),
             parameters=deepcopy(options.parameters),
         )
+        slot.subscription = subscription
+        hold_on(on)
+        subscription.ended.add_done_callback(lambda _: on_ended(slot, subscription.ended.result()))
+        return slot
+
+    def reconcile() -> None:
+        """Bring the subscriptions in line with what the want asks for now: its options and the newest generation."""
+        nonlocal pending, move_failures, move_target
+        if over():
+            return
+        # During a rotation the subscription belongs on the next connection, following that connection's discovery.
+        on = rotation_to.connection if rotation_to is not None else active.connection
+        discovery = rotation_to.watch if rotation_to is not None else watch
+        target = want.options.namespace
+        target_generation: str | None = None
+        if discovery is not None:
+            failure = discovery.failure()
+            if failure is not None:
+                settle(
+                    _discovery_failed(failure[0], _any_cancelled(scope), cancelled_or_connection, accepted=accepted())
+                )
+                return
+            target_generation = discovery.current()
+            # None announced: nothing to move to, so the want waits for one, as after a withdrawal.
+            if target_generation is None:
+                settle(_Outcome("moved", accepted=accepted()))
+                return
+            target = (*target, target_generation)
+        track, parameters = want.options.track, want.options.parameters
+        if active.made_with(target, track, parameters) and on is active.connection:
+            # Asked for what is active again: a pending move is no longer wanted.
+            clear_retry()
+            move_target = None
+            if pending is not None:
+                pending.cancel()
+                pending = None
+            if active.ended is not None:
+                settle(_Outcome("retry", accepted=True, progressed=active.progressed, reason=active.ended))
+            return
+        if pending is not None and pending.made_with(target, track, parameters) and pending.connection is on:
+            return
+        if (
+            retry_move is not None
+            and retry_move[0].made_with(target, track, parameters)
+            and retry_move[0].connection is on
+        ):
+            return
+        clear_retry()
+        # An unanswered subscription delivers nothing to overlap: replace it at once.
+        if not accepted():
+            settle(_Outcome("moved"))
+            return
+        if pending is not None:
+            pending.cancel()
+            pending = None
+        # A new target starts its own backoff; a retry of the same one keeps counting.
+        if move_target != (target, track, parameters):
+            move_failures = 0
+        move_target = (target, track, parameters)
+        try:
+            pending = open_slot(target, target_generation, on)
+        except Exception as error:
+            if any(token.cancelled for token in scope) or not _refused_for_good(error):
+                settle(cancelled_or_connection(True))
+            else:
+                settle(_Outcome("fatal", error=error))
+
+    try:
+        active = open_slot(namespace, generation, connection)
     except Exception as error:
+        want.settled_target = (want.options.track, want.options.parameters)
         # An argument the relay can never take is the want's fault; anything else is the connection ending
         # under the call.
         if any(token.cancelled for token in scope) or not _refused_for_good(error):
             return cancelled_or_connection(False)
         return _Outcome("fatal", error=error)
 
-    stale_task: asyncio.Future[None] | None = None
-    stale_after = options.stale_after
-    if stale_after is not None:
-        interval = max(0.01, min(1.0, stale_after / 4))
+    async def rotate(from_: _Connection) -> None:
+        """A rotation replaced the active subscription's connection: move the subscription to the next one."""
+        nonlocal rotation_to, unwatch_next
 
-        async def watch_stale() -> None:
-            nonlocal went_stale
-            while True:
-                await asyncio.sleep(interval)
-                if accepted and loop.time() - last_object_at >= stale_after:
-                    went_stale = True
-                    finish.cancel()
-                    return
+        def current_from() -> bool:
+            # The active subscription's connection, or the one a rotation is already moving to, if that one
+            # retires in turn.
+            return rotation_to.connection is from_ if rotation_to is not None else active.connection is from_
 
-        stale_task = asyncio.ensure_future(watch_stale())
-
-    moved = False
-    discovery_ended: tuple[BaseException | None] | None = None
-
-    def check_watch() -> None:
-        nonlocal moved, discovery_ended
-        if watch is None:
+        if over() or not current_from():
             return
-        discovery_ended = watch.failure()
-        if discovery_ended is not None:
-            finish.cancel()
-        elif watch.current() != generation:
-            moved = True
-            finish.cancel()
+        nxt = next_connection()
+        if nxt is None or nxt is from_ or nxt.ended.cancelled:
+            return
+        # Nothing accepted yet to overlap: start over on the new connection at once.
+        if not accepted():
+            settle(_Outcome("moved"))
+            return
+        hold_on(nxt)
+        next_watch: _RootWatch | None = None
+        release: Callable[[], None] = _nothing
+        if watch is not None:
+            try:
+                next_watch, release = _root_watch(nxt, want.options.namespace)
+            except Exception:
+                # Discovery the new connection refuses cannot follow there: restart on it as after a connection's end.
+                release_unused()
+                settle(cancelled_or_connection(accepted()))
+                return
+            found = await next_watch.newest([*scope, settled, nxt.ended])
+            if not isinstance(found, str):
+                release()
+                if not over():
+                    settle(cancelled_or_connection(accepted()))
+                release_unused()
+                return
+        if over() or not current_from():
+            release()
+            release_unused()
+            return
+        # A rotation to a connection that retired in turn gives way to this one.
+        if unwatch_next is not None:
+            unwatch_next()
+        if rotation_to is not None:
+            rotation_to.release()
+        rotation_to = _RotationTo(nxt, next_watch, release)
+        unwatch_next = next_watch.on_change(reconcile) if next_watch is not None else None
+        reconcile()
+        release_unused()
 
-    unwatch = watch.on_change(check_watch) if watch is not None else None
-    # A change that landed between choosing the generation and attaching the listener is not lost.
-    check_watch()
+    stale_task: asyncio.Future[None] | None = None
 
-    def stop_delivering() -> None:
-        nonlocal delivering
-        delivering = False
-
-    try:
-        await wait_any([*scope, finish, connection.retiring], settles=[subscription.ended])
-        if not subscription.ended.done():
-            if any(token.cancelled for token in scope):
-                return cancelled_or_connection(reported)
-            if discovery_ended is not None:
-                return _discovery_failed(
-                    discovery_ended[0], _any_cancelled(scope), cancelled_or_connection, accepted=reported
-                )
-            rotating = connection.retiring.cancelled
-            if (moved or rotating) and not publisher_done and not went_stale:
-                kind: Literal["generation", "rotation"] = "generation" if moved else "rotation"
-                # Only a subscription the application is hearing from is worth keeping; one move at a time.
-                if reported and want.handoff is None:
-                    # A subscription that delivered nothing new itself inherits what its predecessor delivered.
-                    # Its predecessor finished delivering before this one took over: keep its location, not the cutoff.
-                    inherited = want.cutoff
-                    before = inherited.latest() if inherited is not None and inherited.namespace == namespace else None
-
-                    def cutoff_latest() -> tuple[int, int] | None:
-                        return latest if latest is not None else before
-
-                    want.cutoff = _Cutoff(subscription, namespace, cutoff_latest) if kind == "rotation" else None
-                    handed_off = _hand_off(want, connection, subscription, kind, namespace, stop_delivering)
-                    return _Outcome(kind, accepted=True, handed_off=True)
-                return _Outcome(kind, accepted=reported)
-            return _Outcome(
-                "retry",
-                accepted=reported,
-                progressed=progressed,
-                reason="publisher-done" if publisher_done else "stale" if went_stale else None,
-            )
-        return _classify(subscription.ended.result(), reported, progressed, cancelled_or_connection)
-    finally:
+    def watch_stale() -> None:
+        nonlocal stale_task
         if stale_task is not None:
             stale_task.cancel()
+            stale_task = None
+        stale_after = want.options.stale_after
+        if stale_after is None:
+            return
+        interval = max(0.01, min(1.0, stale_after / 4))
+
+        async def check() -> None:
+            nonlocal last_object_at
+            while True:
+                await asyncio.sleep(interval)
+                if over() or not accepted() or loop.time() - last_object_at < stale_after:
+                    continue
+                # During a move only the old subscription went stale: the replacement gets a window of its own.
+                if pending is not None and active.ended is None:
+                    active_ended("stale")
+                    last_object_at = loop.time()
+                else:
+                    settle(_Outcome("retry", accepted=True, progressed=active.progressed, reason="stale"))
+                    return
+
+        stale_task = asyncio.ensure_future(check())
+
+    def changed() -> None:
+        watch_stale()
+        reconcile()
+
+    watch_stale()
+    want.changes.append(changed)
+    unwatch = watch.on_change(reconcile) if watch is not None else None
+    observe(connection)
+    # A change that landed between choosing the subscription and attaching the listeners is not lost.
+    reconcile()
+    try:
+        await wait_any([*scope, settled])
+        return outcome if outcome is not None else cancelled_or_connection(accepted())
+    finally:
+        # Settles the attempt, so nothing reaches the handlers from here on.
+        settle(_CANCELLED)
+        if stale_task is not None:
+            stale_task.cancel()
+        clear_retry()
         if unwatch is not None:
             unwatch()
-        # A replacement that ends before it took over never reports its held-back on_subscribed.
-        if not reported and want.handoff is not None:
-            want.handoff.held = None
-        # A replacement that took over and ended has had its turn: the next subscription may restart group numbers.
-        if reported and handed_off is None and want.cutoff is not None and want.cutoff.owner is not subscription:
-            want.cutoff = None
-        if handed_off is None:
-            delivering = False
-            subscription.cancel()
-
-
-def _hand_off(
-    want: _Want,
-    connection: _Connection,
-    subscription: RelaySubscription,
-    reason: RestartReason,
-    namespace: tuple[str, ...],
-    stop_delivering: Callable[[], None],
-) -> _Handoff:
-    """Keep ``subscription`` delivering while the want's replacement starts.
-
-    It ends at the replacement's first object, when it ends on its own, or when the want is
-    cancelled; the first two report ``on_restarted`` with ``reason``.
-    """
-    release = connection.hold()
-    over = False
-
-    def end() -> bool:
-        nonlocal over
-        if over:
-            return False
-        over = True
-        stop_delivering()
-        subscription.cancel()
-        if want.handoff is handoff:
-            want.handoff = None
-        release()
-        return True
-
-    def complete() -> None:
-        held = handoff.held
-        if not end():
-            return
-        # A want cancelled meanwhile, or a supervisor that stopped, reports nothing more.
-        if want.controller.cancelled:
-            return
-        try:
-            want.call("on_restarted", reason, namespace)
-        except Exception:
-            _log.exception("on_restarted raised; the want resubscribes regardless")
-        if want.controller.cancelled:
-            return
-        if held is not None:
-            try:
-                held()
-            except Exception:
-                _log.exception("on_subscribed raised; the want stays subscribed")
-
-    def drop() -> None:
-        end()
-
-    def on_ended(_: object) -> None:
-        try:
-            complete()
-        except Exception:
-            _log.exception("a handoff failed to complete")
-
-    handoff = _Handoff(complete, drop)
-    want.handoff = handoff
-    subscription.ended.add_done_callback(on_ended)
-    return handoff
+        if unwatch_next is not None:
+            unwatch_next()
+        for stop_observing in observed:
+            stop_observing()
+        want.changes.remove(changed)
+        for slot in list(draining):
+            stop_drain(slot)
+        if pending is not None:
+            pending.cancel()
+        active.cancel()
+        if rotation_to is not None:
+            rotation_to.release()
+            rotation_to = None
+        release_watch()
+        for release_hold in holds.values():
+            release_hold()
+        holds.clear()
 
 
 def _discovery_failed(
@@ -1368,4 +1766,4 @@ def _root_watch(connection: _Connection, root: tuple[str, ...]) -> tuple[_RootWa
     return watch, release
 
 
-__all__ = ["RestartReason", "SupervisedSubscriber", "WantHandlers", "connect_supervised_subscriber"]
+__all__ = ["RestartReason", "SupervisedSubscriber", "WantHandlers", "WantSwitchedInfo", "connect_supervised_subscriber"]

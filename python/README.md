@@ -202,12 +202,20 @@ gap in group IDs ([subgroup resets](../spec/relay-interop.md#subgroup-resets)). 
 precede trailing objects in transit, and it does not end the subscription. Cancel the subscription
 when you are finished with it.
 
+The SDK sends every `MessageParameters` field you set, but moq-relay acts on only some of them. It
+honors `subscriber_priority` and `location_filter` on the subscribe, and ignores `group_order` (the
+relay always serves Descending), `new_group_request`, both delivery timeouts and a per-request
+`authorization_tokens`. With `new_group_request` ignored there is no protocol key-frame request through
+the relay: an application that needs one sends it to the publisher on a track of its own. See
+[subscription parameters](../spec/relay-interop.md#subscription-parameters).
+
 `subscription.update(parameters)` sends REQUEST_UPDATE, the protocol's way to change what an
 accepted subscription delivers. **moq-relay does not implement it**: the relay never acknowledges an
 update, and any update, including `MessageParameters(forward=0)` or an empty one, ends the
 subscription within one round trip with `on_publisher_done` (status 2 `track ended`) and stops
-delivery; `on_update_ok` never fires. To pause, cancel the subscription and subscribe again later;
-to change priority or filters, open a new subscription
+delivery; `on_update_ok` never fires. To pause, cancel the subscription and subscribe again later.
+To change the track, the priority or the filter, use a [switchable subscription](#switching-tracks),
+which opens the new subscription before it cancels the old one
 ([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)). Subscribing with
 `parameters=MessageParameters(forward=0)` does not work either: moq-relay refuses it with request
 error 3 `FORWARD=0 not supported` through `on_error`, and the connection stays open. The protocol allows
@@ -281,6 +289,55 @@ non-empty strings. Both rules apply to publishing and subscribing alike, and are
 token provider, the transport factory, or any connection state is consulted; see the Arguments table
 in [behavior.md](../spec/behavior.md#arguments).
 
+### Switching tracks
+
+REQUEST_UPDATE names no track, so moving a viewer between layers (`video-hi`, `video-mid`,
+`video-lo`) takes a new subscription. `subscribe_switchable` keeps one set of handlers on whichever
+subscription is active and moves them make-before-break: `switch_to` subscribes to the new track
+while the old one keeps delivering, and cuts over once a new object passes `until`.
+
+```python
+from mux_relay import CancellationToken, SwitchableHandlers
+
+switchable = subscriber.subscribe_switchable(
+    namespace,
+    "video-mid",
+    SwitchableHandlers(
+        on_switched=lambda info: decoder.reset(),  # the next object starts the new layer
+        on_object=lambda obj, track: decoder.decode(obj, track),
+    ),
+)
+await switchable.subscribed
+
+
+def near_playhead(obj) -> bool:
+    # Your own timestamps, not group IDs: no later than the next frame, a few frames behind at most.
+    t = timestamp_of(obj)
+    return last_delivered - 5 * frame_duration <= t <= last_delivered + frame_duration
+
+
+# Keep the old layer open for a second to deliver groups still in flight on it.
+probe = CancellationToken()
+asyncio.get_running_loop().call_later(5, probe.cancel)
+await switchable.switch_to("video-hi", until=near_playhead, drain=1.0, cancellation=probe)
+```
+
+- Handlers see only the active subscription, and get its track name as their last argument.
+  `on_switched` receives a `SwitchedInfo` (`from_track`, `to_track`, `subscribed`) before the first
+  object of the new track. A switchable has no `update()`; switch to the same track with new
+  `parameters` to change a filter or priority. Parameters are not inherited.
+- `until` defaults to `"first-object"`. That is fine where delivery is in order, but it can skip
+  media: the relay starts a subscription at its cached latest group, which can be stale, and a
+  subscriber on another relay can lose the first object
+  ([#243](https://github.com/muxinc/relay-sdks/issues/243)). Compare your own timeline, not group IDs:
+  each track numbers its own groups.
+- `switch_to` starts at once and returns a `RelayAwaitable`. A timed-out `wait_for` on it leaves the
+  switch pending; pass `cancellation=` to abandon it. If the new subscription fails, a newer `switch_to`
+  supersedes it, or the token is cancelled, the awaitable raises and the old track keeps playing.
+  `ended` settles when the active subscription ends; `cancel()` cancels everything. See
+  [switching tracks](../spec/behavior.md#switching-tracks) for the full contract and measured
+  cutover times.
+
 ## Consume asynchronously
 
 `subscribe_events` creates a subscription owned by a single async iterator. Always use its async
@@ -348,6 +405,7 @@ subscriber.want(
     WantHandlers(
         on_object=decoder.push,
         on_restarted=lambda reason, namespace: decoder.reset(),  # the gap is not filled
+        on_switched=lambda info: decoder.reset(),  # a newer generation took over with no gap; see below
         on_error=lambda error: print("gave up on alice/video", error),
     ),
     generations=True,
@@ -375,14 +433,38 @@ such as credentials or a malformed request, reach `on_error`, and the want stops
 `SupervisionBackoff(initial_delay=..., max_delay=...)`, given as `reconnect=` to either supervisor
 or `retry=` to a want. See the [supervised contract](../spec/behavior.md#supervised-connections).
 
+A move to a newer generation is made before the break, as `switch_to` makes one. The old
+subscription keeps delivering until the new generation delivers, and `on_switched` runs at the
+cutover (with a `WantSwitchedInfo`) instead of `on_restarted`. Wanting the key again with another
+track or parameters moves the same way, so a supervised viewer changes layers without a gap:
+
+```python
+# Cut over once the new layer reaches what was already shown, and let the old one finish in-flight groups.
+subscriber.want(
+    "alice/video",
+    namespace,
+    "video-hi",
+    handlers,
+    generations=True,
+    until=lambda obj: timestamp_of(obj) >= last_shown_timestamp,
+    drain=1.0,
+)
+```
+
+`until` and `drain` mean what they mean on [`switch_to`](#switching-tracks), and apply to every move
+of the want. Compare your own timeline, never group IDs, since each generation and track numbers
+its own groups. Wanting the key again with only `until`, `drain`, `stale_after`, `retry` or the
+handlers changed swaps them without resubscribing. Another namespace, or turning `generations` on or
+off, replaces the want.
+
 Both supervisors **rotate** before the token expires ([token expiry](#token-expiry)), so a long
 session never hits the relay's deadline. `rotate_before` seconds (default 60) before `expires_at`,
 they call `get_token` again and open the replacement while the old connection still serves. The
 publisher's next generation is announced, each track moves to it once viewers subscribe there, and
-the old generation closes. The subscriber's wants subscribe on the new connection and keep the old
-subscription delivering until the new one delivers, then call `on_restarted` with reason
-`"rotation"`; nothing is lost or repeated. Call `rotate()` to do it now, for example after revoking
-a token. See [rotation](../spec/behavior.md#rotation).
+the old generation closes. Each want moves its subscription to the new connection as a move does;
+when its target is unchanged, the cutover is invisible: no callback runs and nothing is lost or
+repeated. Call `rotate()` to do it now, for example after revoking a token. See
+[rotation](../spec/behavior.md#rotation).
 
 ## Publishing lifecycle
 
@@ -773,8 +855,8 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
 | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
 | Browser `WebTransport`, or `@mux/relay-quic` on Node | aioquic native QUIC client (`mux_relay.quic.connect_quic`) |
-| `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=...)` |
-| `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)` |
+| `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry, until, drainMs }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=..., until=..., drain=seconds)` |
+| `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })`, `onSwitched({ from, to, subscribed })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)`, `on_switched(WantSwitchedInfo)` with `from_namespace`, `from_track`, `to_namespace`, `to_track` |
 | `SupervisionBackoff` in milliseconds (`initialDelayMs`, `maxDelayMs`) | `SupervisionBackoff` in seconds (`initial_delay`, `max_delay`) |
 
 ## Initial scope

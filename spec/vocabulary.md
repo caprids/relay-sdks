@@ -25,6 +25,8 @@ without a row here is a bug.
 | A subgroup stream ended cleanly or was reset | `onSubgroupEnd(info)`, `onSubgroupReset(info)` | `on_subgroup_end(info)`, `on_subgroup_reset(info)` |
 | The publisher said it is finished with the track | `onPublisherDone(info)` | `on_publisher_done(info)` |
 | Protocol notifications on the request stream | `onUpdateOk()`, `onStateNotify(parameters)`, `onGoaway(goaway)` | `on_update_ok()`, `on_state_notify(parameters)`, `on_goaway(goaway)` |
+| Subscribe through a handle that can move to another track make-before-break | `subscriber.subscribeSwitchable(options, SwitchableHandlers)` returns `SwitchableSubscription` | `subscriber.subscribe_switchable(namespace, track, SwitchableHandlers, parameters=...)` returns `SwitchableSubscription` |
+| Move it, and learn of the cutover | `switchable.switchTo(track, SwitchOptions)` (`parameters`, `until`, `drainMs`, `signal`) resolves `SwitchedInfo` (`from`, `to`, `subscribed`); `onSwitched(info)`; `switchable.track`, `switchable.pending` | `switchable.switch_to(track, parameters=..., until=..., drain=..., cancellation=...)` returns `RelayAwaitable[SwitchedInfo]` (`from_track`, `to_track`, `subscribed`); `on_switched(info)`; `switchable.track`, `switchable.pending` |
 | Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
 | A namespace was announced, or its announce withdrawn | `{ type: 'announced' \| 'unannounced', namespace }` | `NamespaceEvent(type='announced' \| 'unannounced', namespace=...)` |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
@@ -60,7 +62,8 @@ without a row here is a bug.
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
-| Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()`; `RestartReason` `'rotation'` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()`; `RestartReason` `"rotation"` |
+| A want moved make-before-break (a newer generation, or another track or parameters) | `until` and `drainMs` on `WantOptions`; `onSwitched(info)` with `WantSwitchedInfo` (`from`, `to`, each a `WantTarget` of `namespace` and `track`; `subscribed`) | `until=` and `drain=` (seconds) on `want`; `on_switched(info)` with `WantSwitchedInfo` (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`) |
+| Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()` |
 | Backoff bounds between attempts | `SupervisionBackoff` (`initialDelayMs`, `maxDelayMs`), given as `reconnect` or `retry` | `SupervisionBackoff` (`initial_delay`, `max_delay`, seconds), as `reconnect=` or `retry=` |
 | The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
 
@@ -285,6 +288,20 @@ for what it yields); `subscribeNamespace()` (the core's protocol name, which `tr
 keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
 message).
 
+## Switching tracks: `subscribeSwitchable`, `switchTo`, `onSwitched`
+
+A switchable subscription is the primitive for changing what a viewer receives
+([behavior.md](behavior.md#switching-tracks)). The entry point is a verb, `subscribeSwitchable`,
+because it sends a SUBSCRIBE like `subscribe`; the handle is named for what it can do. `switchTo`
+names the act the application asks for; `onSwitched` names the cutover once it has happened. Not
+adopted: `switchable()` (an adjective for a call that sends a request), `rendition` (a media word
+for what is, to the SDK, any track), `update` (REQUEST_UPDATE, which cannot change the track and
+which moq-relay answers by ending the subscription).
+
+Handlers take the active track's name as their last argument rather than a context record, so one
+handler set serves every track. Python spells `SwitchedInfo`'s fields `from_track` and `to_track`
+because `from` is a keyword, and gives the drain in seconds (`drain=`) as it does every duration.
+
 ## Supervised connections: `connectSupervised*`, generation, `want`, `onRestarted`
 
 The supervisors are opt-in policy over the primitives ([behavior.md](behavior.md#supervised-connections)).
@@ -317,7 +334,14 @@ says when the relay ends the session, which is the fact an application plans aro
 `tokenExpiry` (the session's end is what matters, and the grant can end it before `exp`).
 
 `onRestarted` tells a decoder that the next object starts a new subscription. It is named for that
-fact rather than for the cause, which `reason` carries. `RECONNECTING` names the publisher's state
+fact rather than for the cause, which `reason` carries.
+
+A want's make-before-break move reuses the switchable's words: `until`, `drainMs` / `drain` and
+`onSwitched` mean what they mean on `switchTo`, so the two cutovers read the same. A move is not a
+restart, because nothing was lost in between, so it gets `onSwitched` and not an `onRestarted`
+flag. A want's record is `WantSwitchedInfo` rather than `SwitchedInfo`, because a generation move
+changes the namespace as well as the track. Not adopted: a `want(key).switchTo(...)` verb. `want`
+is declarative, and wanting the key again with another track already states the change. `RECONNECTING` names the publisher's state
 when a write fails between generations, and keeps it apart from `CLOSED`, which retires a frame
 writer.
 
