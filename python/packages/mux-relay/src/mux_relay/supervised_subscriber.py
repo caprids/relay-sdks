@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from collections.abc import Awaitable, Callable, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field, fields
@@ -67,6 +68,8 @@ from .connect_session import (
 )
 from .errors import RelayError
 from .namespace_events import NamespaceEvents
+
+_log = logging.getLogger("mux_relay")
 
 RestartReason: TypeAlias = Literal["publisher-done", "stale", "generation", "connection", "terminated"]
 """Why a want replaced its subscription.
@@ -259,7 +262,7 @@ class SupervisedSubscriber:
             self._forget(key, existing)
         want = _Want(options, safe_handlers, retry_backoff)
         state.wants[key] = want
-        task = asyncio.ensure_future(_supervise_want(want, self._live_connection, lambda: self._forget(key, want)))
+        task = asyncio.ensure_future(_run_want(want, self._live_connection, lambda: self._forget(key, want)))
         _observe(task)
 
     def unwant(self, key: str) -> None:
@@ -514,6 +517,19 @@ class _Outcome:
 _CANCELLED = _Outcome("cancelled")
 
 
+async def _run_want(
+    want: _Want,
+    live_connection: Callable[[CancellationToken], Awaitable[_Connection | None]],
+    forget: Callable[[], None],
+) -> None:
+    """Supervise ``want``; a failure the loop did not expect forgets it rather than leave it registered but dead."""
+    try:
+        await _supervise_want(want, live_connection, forget)
+    except Exception:
+        forget()
+        _log.exception("a want stopped on an unexpected failure and was forgotten")
+
+
 async def _supervise_want(
     want: _Want,
     live_connection: Callable[[CancellationToken], Awaitable[_Connection | None]],
@@ -546,7 +562,11 @@ async def _supervise_want(
         elif outcome.kind == "generation":
             reason = "generation"
         if outcome.accepted and reason is not None:
-            want.call("on_restarted", reason, want.namespace)
+            try:
+                want.call("on_restarted", reason, want.namespace)
+            except Exception:
+                # A delivery callback's failure is the application's; the want keeps its track subscribed.
+                _log.exception("on_restarted raised; the want resubscribes regardless")
         if outcome.kind == "connection":
             # The request can see the end before the connection reports it; wait for that rather than spin on it.
             await wait_any([connection.ended, scope], limit=1.0)
@@ -685,7 +705,7 @@ async def _subscribe_once(
         last_object_at = loop.time()
         if first_group is None:
             first_group = obj.group_id
-        elif obj.group_id != first_group:
+        elif obj.group_id > first_group:
             progressed = True
         want.call("on_object", obj)
 

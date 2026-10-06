@@ -847,3 +847,33 @@ async def test_a_caller_that_stops_waiting_leaves_no_unretrieved_exception() -> 
     finally:
         loop.set_exception_handler(previous)
     assert [context.get("message") for context in unretrieved] == []
+
+
+async def test_a_raising_restart_callback_does_not_orphan_the_want(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+
+    def on_restarted(_reason: str, _namespace: tuple[str, ...]) -> None:
+        raise RuntimeError("restart callback failed")
+
+    subscriber.want("v", ["room"], "v", WantHandlers(on_restarted=on_restarted), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.latest.accept()
+    s.first.latest.done()
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribed despite the raising callback")
+
+
+async def test_cached_groups_replayed_newest_first_are_not_progress(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    subscriber.want("v", ["room"], "v", retry=SupervisionBackoff(initial_delay=0.04, max_delay=1))
+    loop = asyncio.get_running_loop()
+    started: list[float] = []
+    for count in range(1, 5):
+        await until(lambda count=count: len(s.first.subscriptions) == count, f"subscription {count}")
+        started.append(loop.time())
+        # A finished track still announced: its cached groups, newest first, then a done.
+        s.first.latest.accept()
+        s.first.latest.send_object(10)
+        s.first.latest.send_object(9)
+        s.first.latest.done()
+    # The delays keep doubling (0.02-0.04, 0.04-0.08, 0.08-0.16 s): nothing reset the backoff.
+    assert started[3] - started[2] >= 0.08
