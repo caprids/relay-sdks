@@ -301,6 +301,40 @@ A transport closed this way still sends a QUIC close, so the relay withdraws the
 within a round trip. A crash leaves it announced until the idle timeout; the newer generation
 still wins, as in the first case.
 
+## Token expiry
+
+A session lasts until its credential expires, and a live session cannot take a new one
+([behavior.md](behavior.md#credential-lifetime), [issue #261](https://github.com/muxinc/relay-sdks/issues/261)).
+From moq-relay 0.17.0's source:
+
+- The session holds a lease on its grant. At the grant's deadline, `Lease::ended()` returns
+  `Expired` and the connection calls `session.abort(Unauthorized)` (`rs/moq-relay/src/auth.rs`,
+  `Lease::ended`; `connection.rs`, the `lease.ended()` arm). The deadline is the JWT's `exp` with
+  the reference auth server (`moq auth serve`), and Switchboard caps every grant at the token's `exp`
+  too.
+- AUTHORIZATION_TOKEN on a later request is ignored: the session's grant authorizes every request
+  (`rs/moq-net/src/ietf/subscribe.rs`). Revalidation can move the deadline, but it re-checks the
+  connect request the session was admitted with, not a new credential.
+
+Measured on 2026-10-06 against a local moq-relay 0.17.0 (`--auth-url` pointing at a test auth
+server that granted until the token's `exp`), with the TypeScript SDK over native QUIC:
+
+- **Expiry.** A publisher and a subscriber connected with a token 6 s from its `exp`. Both sessions
+  closed 81 to 83 ms after it, with session termination code 0x2 and reason `unauthorized`, which
+  the SDK reports as `UNAUTHORIZED` in phase `connection`. The subscriber's transport reported the
+  close through `closed`, the publisher's as a session error on a stream. The auth server received
+  `end` with reason `expired`.
+- **Rotation.** A supervised publisher wrote one object per group every 40 ms for 40 s, and a
+  supervised subscriber followed its root. Both took 12 s tokens (the subscriber's 15 s) and rotated
+  5 s before expiry. The publisher rotated 5 times and the subscriber 4 times. All 989 objects
+  arrived once each, in order, with no gap longer than the 42 ms between writes, no failed write,
+  and the status `live` throughout. Each publisher rotation restarted the want with reason
+  `generation`, each subscriber rotation with `rotation`. Before the replacement subscription
+  skipped what the old one had delivered, each subscriber rotation repeated one object.
+
+To reproduce, run moq-relay with `--auth-url` pointing at `moq auth serve --key ...`, and sign
+short-lived tokens with `moq auth sign --expires`.
+
 ## Relay demand
 
 A publisher's demand is the relay's one upstream subscription for a track, not a count of

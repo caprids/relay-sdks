@@ -26,6 +26,15 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   ([#272](https://github.com/muxinc/relay-sdks/issues/272)); an `onRestarted` that throws is logged and the want stays
   subscribed. Both are in `@mux/relay/node` too. The primitives are unchanged. The examples' shared
   `announce-race.js` is retired: the demo and the live smoke test subscribe through `want`.
+- `@mux/relay`: sessions end at the token's expiry, and the supervisors now rotate before it
+  ([#261](https://github.com/muxinc/relay-sdks/issues/261)). `getToken` may return a `RelayCredential`
+  (`{ token, expiresAt }`); every connection exposes `expiresAt`, from that or the JWT's `exp` claim. Both supervisors
+  take `rotateBeforeMs` (default 60 s) and `rotate()`, and replace their connection make-before-break: the publisher
+  moves each track to the next generation once it has demand there, and the subscriber keeps a want's old
+  subscription delivering until the replacement does, reporting `onRestarted` with the new reason `rotation`. A move
+  to a newer generation is make-before-break the same way. A session closed with `UNAUTHORIZED` (0x2) after SETUP,
+  which is how moq-relay ends an expired or revoked session, is now `UNAUTHORIZED` in phase `connection` rather than
+  `TRANSPORT_ERROR` or a clean close ([#227](https://github.com/muxinc/relay-sdks/issues/227)).
 - `@mux/relay-quic`: the native QUIC transport adapter for Node, with prebuilt binaries for Linux (x64 and arm64,
   glibc and musl), macOS (arm64 and x64) and Windows (x64).
 - `@mux/moq-core`: the transport-independent MOQT sessions the SDK is built on.

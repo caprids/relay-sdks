@@ -42,6 +42,8 @@ without a row here is a bug.
 | The connection ended, and why | `connection.closed` resolves `{ error? }` | `await connection.closed` returns `Closed(error=...)` |
 | Cancel a connection's whole lifetime from outside | `AbortSignal` (platform), given as `signal` | `CancellationToken`, given as `cancellation=`; `Cancelled` is the reason it raises when `cancel()` was given none |
 | Options every connection takes: endpoint, token provider, lifetime cancellation, connection deadline, transport | `ConnectRelayOptions` (`url`, `getToken`, `signal`, `connectTimeoutMs`, `createTransport`) | the shared keyword arguments of both entry points (`url`, `get_token`, `cancellation`, `connect_timeout`, `create_transport`) |
+| A token with the time the relay stops honoring it, which a token provider may return | `RelayCredential` (`token`, `expiresAt`: a `Date`) | `RelayCredential` (`token`, `expires_at`: an aware `datetime`) |
+| When the relay will end a connection for its credential's expiry | `connection.expiresAt` (`Date \| undefined`) | `connection.expires_at` (`datetime \| None`) |
 | Options only a subscriber connection takes | `ConnectRelaySubscriberOptions`: the shared options plus `requestTimeoutMs` | `connect_relay_subscriber`'s shared keyword arguments plus `request_timeout` |
 | Options only a publisher connection takes | `ConnectRelayPublisherOptions`: the shared options plus `namespace`; no request deadline | `connect_relay_publisher`'s shared keyword arguments plus `namespace`; no request deadline |
 | Connect from Node over native QUIC, and the trust options that takes | `@mux/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
@@ -58,6 +60,7 @@ without a row here is a bug.
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
+| Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()`; `RestartReason` `'rotation'` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()`; `RestartReason` `"rotation"` |
 | Backoff bounds between attempts | `SupervisionBackoff` (`initialDelayMs`, `maxDelayMs`), given as `reconnect` or `retry` | `SupervisionBackoff` (`initial_delay`, `max_delay`, seconds), as `reconnect=` or `retry=` |
 | The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
 
@@ -304,6 +307,14 @@ Python's `want` takes the namespace and track as arguments, as `subscribe` does,
 receive the namespace as a second argument (`on_subscribed(info, namespace)`,
 `on_restarted(reason, namespace)`), as `on_status(status, error)` does, rather than through a record
 type of their own.
+
+**Rotation** names replacing a supervisor's connection before its credential expires, with the old
+one serving until the new one has taken over. It is not a reconnect (nothing was lost) and not a
+refresh (the relay cannot take a new token on a live session, so the connection itself is
+replaced). `RelayCredential` is the token with its expiry, not a second kind of token; `expiresAt`
+says when the relay ends the session, which is the fact an application plans around. Not adopted:
+`refreshToken` and `onTokenExpiring` (no token is refreshed in place), `renew`, `cycle`,
+`tokenExpiry` (the session's end is what matters, and the grant can end it before `exp`).
 
 `onRestarted` tells a decoder that the next object starts a new subscription. It is named for that
 fact rather than for the cause, which `reason` carries. `RECONNECTING` names the publisher's state
