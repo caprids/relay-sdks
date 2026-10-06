@@ -59,6 +59,7 @@ from .connect_session import (
 )
 from .namespace_events import NamespaceEvents, NamespaceRequestDependencies
 from .subscription_events import SubscriptionEvents
+from .switchable import SwitchableHandlers, SwitchableSubscription, snapshot_switchable_handlers
 
 IMPLEMENTATION_NAME = "mux-relay (Python)"
 
@@ -291,6 +292,33 @@ class RelaySubscriber:
         """
         consumers = [_HandlersConsumer(handlers)] if handlers is not None else []
         return self._subscription(self._admit(namespace, track, parameters), consumers)
+
+    def subscribe_switchable(
+        self,
+        namespace: Sequence[str],
+        track: str,
+        handlers: SwitchableHandlers | None = None,
+        *,
+        parameters: MessageParameters | None = None,
+    ) -> SwitchableSubscription:
+        """Subscribe to a track through a handle that can move to another track in the same namespace make-before-break.
+
+        :meth:`SwitchableSubscription.switch_to` opens the new subscription while this one keeps
+        delivering, and cuts over once the new one's object passes ``until``. Use it to change layers
+        (simulcast, ABR), or to change a subscription's filter or priority, which ``update()`` cannot
+        do against moq-relay. Handlers see only the active subscription, with its track name.
+        """
+        # Every argument (the handlers' shape included) before connection state.
+        callbacks = snapshot_switchable_handlers(handlers)
+        admitted = self._admit(namespace, track, parameters)
+        fields_ = admitted.track_namespace
+
+        def open_subscription(
+            name: str, params: MessageParameters | None, consumer: SubscriptionConsumer
+        ) -> RelaySubscription:
+            return self._subscription(self._admit(fields_, name, params), [consumer])
+
+        return SwitchableSubscription(open_subscription, admitted.track_name, parameters, callbacks)
 
     def subscribe_events(
         self,

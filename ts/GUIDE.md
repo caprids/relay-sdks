@@ -216,8 +216,9 @@ the relay: an application that needs one sends it to the publisher on a track of
 accepted subscription delivers. **moq-relay does not implement it**: the relay never acknowledges an
 update, and any update, including `{ forward: 0 }` or an empty one, ends the subscription within one
 round trip with `onPublisherDone` (status 2 `track ended`) and stops delivery; `onUpdateOk` never
-fires. To pause, cancel the subscription and subscribe again later; to change priority or filters,
-open a new subscription ([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)).
+fires. To pause, cancel the subscription and subscribe again later. To change the track, the priority
+or the filter, use a [switchable subscription](#switching-tracks), which opens the new subscription
+before it cancels the old one ([relay interop deviation 4](../spec/behavior.md#relay-interop-deviations)).
 Subscribing with `parameters: { forward: 0 }` does not work either: moq-relay refuses it with request error 3
 `FORWARD=0 not supported` through `onError`, and the connection stays open.
 The protocol allows updates only after acceptance, so an update issued before `onSubscribed` is
@@ -253,6 +254,48 @@ the deadline for a subscription's initial response. `ConnectRelayPublisherOption
 and has no request deadline: each track's `writeTimeoutMs` bounds its wait for demand and its
 writes. Passing `requestTimeoutMs` to `connectRelayPublisher` is a type error; untyped JavaScript
 that passes it anyway has it ignored, like any other option the call does not take.
+
+### Switching tracks
+
+REQUEST_UPDATE names no track, so moving a viewer between layers (`video-hi`, `video-mid`,
+`video-lo`) takes a new subscription. `subscribeSwitchable` keeps one set of handlers on whichever
+subscription is active and moves them make-before-break: `switchTo` subscribes to the new track while
+the old one keeps delivering, and cuts over once a new object passes `until`.
+
+```ts
+const switchable = subscriber.subscribeSwitchable(
+  { namespace, track: 'video-mid' },
+  {
+    onSwitched: ({ from, to }) => decoder.reset(), // the next object starts the new layer
+    onObject: (object, track) => decoder.decode(object, track),
+  },
+);
+await switchable.subscribed;
+
+// Cut over on a new-layer object no later than the next frame and no more than a few frames behind
+// the media already delivered (your own timestamps, not group IDs). Keep the old layer open for a
+// second to deliver groups still in flight on it.
+await switchable.switchTo('video-hi', {
+  until: (object) => {
+    const t = timestampOf(object);
+    return t <= lastDelivered + frameDuration && t >= lastDelivered - 5 * frameDuration;
+  },
+  drainMs: 1_000,
+  signal: AbortSignal.timeout(5_000),
+});
+```
+
+- Handlers see only the active subscription, and get its track name as their last argument.
+  `onSwitched` runs before the first object of the new track. A switchable has no `update()`; switch to
+  the same track with new `parameters` to change a filter or priority. Parameters are not inherited.
+- `until` defaults to `'first-object'`. That is fine where delivery is in order, but it can skip media:
+  the relay starts a subscription at its cached latest group, which can be stale, and a subscriber on
+  another relay can lose the first object ([#243](https://github.com/muxinc/relay-sdks/issues/243)).
+  Compare your own timeline, not group IDs: each track numbers its own groups.
+- If the new subscription fails, a newer `switchTo` supersedes it, or the signal aborts, `switchTo`
+  rejects and the old track keeps playing. `ended` settles when the active subscription ends;
+  `cancel()` cancels everything. See [switching tracks](../spec/behavior.md#switching-tracks) for the
+  full contract and measured cutover times.
 
 ### Browser transport limits
 

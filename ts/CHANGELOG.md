@@ -26,6 +26,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   ([#272](https://github.com/muxinc/relay-sdks/issues/272)); an `onRestarted` that throws is logged and the want stays
   subscribed. Both are in `@mux/relay/node` too. The primitives are unchanged. The examples' shared
   `announce-race.js` is retired: the demo and the live smoke test subscribe through `want`.
+- `@mux/relay`: `subscriber.subscribeSwitchable(options, handlers)` moves one set of handlers between tracks
+  make-before-break ([#264](https://github.com/muxinc/relay-sdks/issues/264)). `switchTo(track, { parameters, until,
+  drainMs, signal })` subscribes to the new track while the old one keeps delivering, cuts over on the first object
+  `until` accepts, reports `onSwitched`, and can keep the old subscription open briefly for groups still in flight.
+  It is how to change a track, filter or priority, which `update()` cannot do against moq-relay.
 - `@mux/relay-quic`: the native QUIC transport adapter for Node, with prebuilt binaries for Linux (x64 and arm64,
   glibc and musl), macOS (arm64 and x64) and Windows (x64).
 - `@mux/moq-core`: the transport-independent MOQT sessions the SDK is built on.

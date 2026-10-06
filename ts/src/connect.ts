@@ -26,6 +26,12 @@ import {
   type SubscriptionEventOptions,
   type SubscriptionEvents,
 } from './subscription-events.js';
+import {
+  createSwitchable,
+  type SwitchableHandlers,
+  type SwitchableSubscription,
+  snapshotSwitchableHandlers,
+} from './switchable.js';
 import { namespaceFields, trackName } from './validation.js';
 
 export type {
@@ -121,6 +127,14 @@ export interface RelaySubscriber {
    * `handlers.onSubscribed` and `handlers.onError` report the same answer as callbacks.
    */
   subscribe(options: RelayTrackOptions, handlers?: RelaySubscriptionHandlers): RelaySubscription;
+  /**
+   * Subscribe to a track through a handle that can move to another track in the same namespace
+   * make-before-break: `switchTo` opens the new subscription while this one keeps delivering, and
+   * cuts over once the new one's object passes `until`. Use it to change layers (simulcast, ABR), or
+   * to change a subscription's filter or priority, which `update()` cannot do against moq-relay.
+   * Handlers see only the active subscription, with its track name.
+   */
+  subscribeSwitchable(options: RelayTrackOptions, handlers?: SwitchableHandlers): SwitchableSubscription;
   /** Bounded async events. Owns its subscription; break/return cancels it. */
   subscribeEvents(options: RelayTrackOptions, buffer?: SubscriptionEventOptions): SubscriptionEvents;
   /**
@@ -218,6 +232,27 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
       // Every argument (the handlers' shape included) before connection state.
       const consumers = handlers ? [handlersConsumer(handlers)] : [];
       return subscription(admit(options), consumers);
+    },
+    subscribeSwitchable: (options, handlers) => {
+      // Every argument (the handlers' shape included) before connection state.
+      const snapshot = snapshotSwitchableHandlers(handlers);
+      const { trackNamespace, trackName: track, parameters } = admit(options);
+      return createSwitchable(
+        {
+          subscribe: (name, params, consumer) =>
+            subscription(
+              admit({
+                namespace: trackNamespace,
+                track: name,
+                ...(params === undefined ? {} : { parameters: params }),
+              }),
+              [consumer],
+            ),
+        },
+        track,
+        parameters,
+        snapshot,
+      );
     },
     subscribeEvents: (options, buffer) => {
       // Admit before building the iterator: an already-aborted signal never runs its callback.

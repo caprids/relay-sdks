@@ -53,6 +53,7 @@ from .subscription_events import (
 )
 from .supervised_publisher import PublisherGeneration, SupervisedPublisher, connect_supervised_publisher
 from .supervised_subscriber import RestartReason, SupervisedSubscriber, WantHandlers, connect_supervised_subscriber
+from .switchable import SwitchableHandlers, SwitchableSubscription, SwitchedInfo
 
 DEFAULT_ENDPOINT = "https://sjc.relay.mux.global"
 """The default Relay endpoint pinned in ``spec/protocol.json``."""
@@ -108,6 +109,9 @@ __all__ = [
     "SupervisedStatus",
     "SupervisedSubscriber",
     "SupervisionBackoff",
+    "SwitchableHandlers",
+    "SwitchableSubscription",
+    "SwitchedInfo",
     "UpdateOkEvent",
     "WantHandlers",
     "connect_relay_publisher",

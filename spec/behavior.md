@@ -196,6 +196,9 @@ Messages are not a compatibility contract; the class and the point of rejection 
   Implemented in both SDKs. moq-relay, however, never answers a REQUEST_UPDATE: any byte on the
   request stream after SUBSCRIBE_OK ends the subscription with PUBLISH_DONE `TRACK_ENDED`, so
   against it an update ends delivery ([relay interop deviation 4](#relay-interop-deviations)).
+  REQUEST_UPDATE carries no track either, so it cannot change tracks against any relay. A
+  [switchable subscription](#switching-tracks) changes the track, the filter or the priority with
+  a new subscription, make-before-break.
 - A subscribe for a namespace the relay has not seen announced is rejected, not parked: moq-relay
   0.15.8 and 0.17.0 answer request error 16 (0x10, `DOES_NOT_EXIST`) with reason `unroutable`, and
   moq-relay through 0.15.1 answered its literal 404. The same code 16 with reason `not found` means the
@@ -386,6 +389,77 @@ rejection and local/session teardown now cancel the request stream and active su
 Teardown suppresses subsequent end/reset callbacks and protocol errors from those cancelled readers;
 it does not report cancellation as a network gap. An actual reset while the subscription is active
 still invokes the gap callback. Publisher completion leaves readers active for trailing objects.
+
+## Switching tracks
+
+Changing what a viewer receives (a simulcast or ABR layer, a location filter, a priority) takes a
+new SUBSCRIBE: draft-22 REQUEST_UPDATE names no track, and moq-relay ends a subscription on any
+update. The draft recommends subscribing to the alternate track before cancelling the old one
+([draft-22 Section 3.7.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.7.2)).
+`subscriber.subscribeSwitchable(options, handlers)` / `subscriber.subscribe_switchable(namespace,
+track, handlers, parameters=...)` does that for the application
+([issue #264](https://github.com/muxinc/relay-sdks/issues/264)). Implemented in both SDKs, on the
+primitive subscriber. A supervised want still replaces its subscription break-before-make.
+
+- One subscription at a time is **active**, and only its events reach the handlers. Each handler
+  gets the active track's name as its last argument. Every subscription underneath is an ordinary
+  subscription with the lifecycle above. The handle has no `update()`.
+- `switchTo(track, { parameters, until, drainMs, signal })` / `switch_to(track, parameters=...,
+  until=..., drain=..., cancellation=...)` subscribes to `track` in the same namespace. The track
+  may be the active one, which is how to change parameters. `parameters` are not inherited: omitted
+  means none. The new subscription is **pending**, and the active one keeps delivering. The
+  arguments, the connection and the switchable's own state are checked at once. A failed check
+  leaves any pending switch alone.
+- **Cutover.** Each object of the pending subscription is offered to `until`. `'first-object'`
+  (the default) accepts the first object. A synchronous predicate accepts each object it returns
+  true for. Objects it refuses, and the pending subscription's other events, are discarded. On the
+  first accepted object:
+  1. the old subscription is cancelled;
+  2. `onSwitched` / `on_switched` runs with the old track, the new track and the new
+     subscription's SUBSCRIBE_OK;
+  3. the accepted object is delivered.
+
+  `switchTo` resolves with the same record.
+- **Avoiding a gap needs a timeline.** The SDK knows no media time, and group IDs are not one.
+  Each track numbers its own groups, and the SDK's publisher counts them from the track's first
+  sent group, so layers that gained demand at different times disagree. An application that must
+  not skip media supplies a predicate. It compares the object's own timeline (a timestamp property,
+  a frame number) with what the active subscription delivered, and accepts an object within a few
+  frames of it. The same check refuses a stale first object. The relay starts a subscription at its
+  cached latest group, and that group is old if the publisher skipped the track while nobody watched
+  it. A subscriber on another relay can also lose the first object altogether
+  ([issue #243](https://github.com/muxinc/relay-sdks/issues/243)).
+- **Drain.** Groups arrive out of order across streams, especially through another relay, so an
+  older group of the old track can still be in flight at the cutover. `drainMs` / `drain` (default
+  0) keeps the old subscription open for that long. It takes 0 up to the bound every SDK deadline
+  has (2147483647 ms, 2147483.647 s), the longest a JavaScript timer holds; beyond it, or negative,
+  is a `RangeError` / `ValueError`, and a non-number a `TypeError`. While it drains, its objects, subgroup ends
+  and resets still reach the handlers, with the old track's name, if they belong to a group no
+  later than the largest it had delivered. Its later groups and other events are discarded. When
+  the time is up, it is cancelled. An old subscription that had delivered nothing is cancelled at
+  once.
+- **A failed switch leaves the active subscription delivering.** A switch fails, reaching no
+  handler, when:
+  - the pending subscription ends before its cutover: it fails as `subscribed` would;
+  - a newer `switchTo` supersedes it: `CLOSED`;
+  - the signal or token cancels it: the signal's or token's reason;
+  - the predicate throws: that error.
+- **Endings.**
+  - `subscribed` settles with the SUBSCRIBE_OK of the first subscription to become active. If the
+    switchable ends before that, it fails as the first subscription's `subscribed` does.
+  - `ended` settles with that subscription's `SubscriptionEnd` when the active subscription ends
+    other than by a cutover, or on `cancel()`. A REQUEST_ERROR ending also reaches `onError` with
+    the track.
+  - Any pending switch then fails, with `CLOSED` or with the connection error if the connection
+    ended. Any drain stops.
+  - Publisher completion is not an ending, as for any subscription.
+  - `switchTo` on an ended switchable raises `CLOSED`.
+- **Measured** on moq-relay 0.17.0 at `*.relay.mux.global` (2026-10-06). The test switched between
+  two layers written frame for frame every 50 ms, with a frame-window predicate and a 1 s drain. The
+  cutover came about 140 ms after `switchTo` with publisher and subscriber on one relay (sjc), and
+  about 1 to 1.6 s with the subscriber on another (fra). The live smoke test asserts that no frame
+  is missing across the cutover, in both runtimes of each SDK. Without the predicate and drain, a
+  `'first-object'` switch skipped a frame in most cross-relay runs.
 
 ## Discovery
 

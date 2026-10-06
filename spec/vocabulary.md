@@ -25,6 +25,8 @@ without a row here is a bug.
 | A subgroup stream ended cleanly or was reset | `onSubgroupEnd(info)`, `onSubgroupReset(info)` | `on_subgroup_end(info)`, `on_subgroup_reset(info)` |
 | The publisher said it is finished with the track | `onPublisherDone(info)` | `on_publisher_done(info)` |
 | Protocol notifications on the request stream | `onUpdateOk()`, `onStateNotify(parameters)`, `onGoaway(goaway)` | `on_update_ok()`, `on_state_notify(parameters)`, `on_goaway(goaway)` |
+| Subscribe through a handle that can move to another track make-before-break | `subscriber.subscribeSwitchable(options, SwitchableHandlers)` returns `SwitchableSubscription` | `subscriber.subscribe_switchable(namespace, track, SwitchableHandlers, parameters=...)` returns `SwitchableSubscription` |
+| Move it, and learn of the cutover | `switchable.switchTo(track, SwitchOptions)` (`parameters`, `until`, `drainMs`, `signal`) resolves `SwitchedInfo` (`from`, `to`, `subscribed`); `onSwitched(info)`; `switchable.track`, `switchable.pending` | `switchable.switch_to(track, parameters=..., until=..., drain=..., cancellation=...)` returns `RelayAwaitable[SwitchedInfo]` (`from_track`, `to_track`, `subscribed`); `on_switched(info)`; `switchable.track`, `switchable.pending` |
 | Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
 | A namespace was announced, or its announce withdrawn | `{ type: 'announced' \| 'unannounced', namespace }` | `NamespaceEvent(type='announced' \| 'unannounced', namespace=...)` |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
@@ -281,6 +283,20 @@ the relay's state interchangeably); `watchNamespaces()` (a verb, where every oth
 for what it yields); `subscribeNamespace()` (the core's protocol name, which `trackSource` already
 keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
 message).
+
+## Switching tracks: `subscribeSwitchable`, `switchTo`, `onSwitched`
+
+A switchable subscription is the primitive for changing what a viewer receives
+([behavior.md](behavior.md#switching-tracks)). The entry point is a verb, `subscribeSwitchable`,
+because it sends a SUBSCRIBE like `subscribe`; the handle is named for what it can do. `switchTo`
+names the act the application asks for; `onSwitched` names the cutover once it has happened. Not
+adopted: `switchable()` (an adjective for a call that sends a request), `rendition` (a media word
+for what is, to the SDK, any track), `update` (REQUEST_UPDATE, which cannot change the track and
+which moq-relay answers by ending the subscription).
+
+Handlers take the active track's name as their last argument rather than a context record, so one
+handler set serves every track. Python spells `SwitchedInfo`'s fields `from_track` and `to_track`
+because `from` is a keyword, and gives the drain in seconds (`drain=`) as it does every duration.
 
 ## Supervised connections: `connectSupervised*`, generation, `want`, `onRestarted`
 

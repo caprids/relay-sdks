@@ -55,3 +55,9 @@ export type {
 } from './supervised-subscriber.js';
 export { connectSupervisedSubscriber } from './supervised-subscriber.js';
 export type { SupervisedStatus, SupervisionBackoff } from './supervision.js';
+export type {
+  SwitchableHandlers,
+  SwitchableSubscription,
+  SwitchedInfo,
+  SwitchOptions,
+} from './switchable.js';
