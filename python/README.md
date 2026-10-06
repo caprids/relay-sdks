@@ -374,10 +374,18 @@ Connecting announces the namespace once the first track is registered, and `publ
 settles when that announce has reached the wire: the relay acknowledges nothing more, and it routes
 subscribes to the namespace about a round trip later. A subscribe that arrives before then is
 rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-relay 0.15.8 and later;
-relays through 0.15.1 answered `404 Broadcast not found`). The SDK does not retry a subscribe, so a
-subscriber retries that rejection within its own budget, as a supervised subscriber's
-[want](#stay-connected-supervised-connections) does, and a process that owns both sides awaits
-`announced` before subscribing. `announced` stays pending while no solicitation covers the namespace, and the
+relays through 0.15.1 answered `404 Broadcast not found`). A subscriber on another relay of the
+cluster waits longer still, until its relay learns the route. The SDK does not retry a subscribe, so
+a subscriber either waits for `subscriber.namespace_events(prefix)` to report the namespace
+`announced`, which avoids the race, or retries that rejection within its own budget, as a supervised
+subscriber's [want](#stay-connected-supervised-connections) does. A process that owns both
+sides awaits `announced` before subscribing, which narrows the race but does not close it. On
+moq-relay 0.17.0 a subscribe on the discovering connection once `announced` arrived was never
+rejected `unroutable` (0 of 160 trials on 2026-10-06), while one sent as soon as the publisher's
+`announced` settled was rejected 6 to 14 times in 40 on the publisher's relay and every time
+on another relay ([measurements](../spec/relay-interop.md#announce-propagation)). With discovery, a
+later `unroutable` means the namespace has gone since; wait for its next `announced` rather than
+retrying on a timer ([discovery contract](../spec/behavior.md#discovery)). `announced` stays pending while no solicitation covers the namespace, and the
 connection's closure terminates it if that comes first.
 
 Each write copies its bytes and sends one independent group containing one object. Await each

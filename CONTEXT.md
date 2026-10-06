@@ -61,7 +61,9 @@ message), registration (that is a track's)
 **Announce race**:
 A subscribe that reaches the relay before it has processed the announce of its namespace. The relay
 rejects it (request error 16 with reason `unroutable` from moq-relay 0.15.8, 404 on older relays)
-rather than parking it; the application retries within its own budget, the SDK never does.
+rather than parking it; the application retries within its own budget, the SDK never does. A
+subscriber that waits for namespace discovery (`namespaceEvents` / `namespace_events`) to report
+the namespace announced avoids it (measured on moq-relay 0.17.0).
 _Avoid_: startup race, propagation delay, transient 404 (the same rejection after a retract is
 publisher recovery, a different case)
 

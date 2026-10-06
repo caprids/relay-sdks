@@ -158,9 +158,10 @@ runs of twelve trials per mode. The relay was moq-relay 0.15.1, which answered t
 | after `announced` + 500 ms | 0 / 12 |
 
 The relay answered every subscribe in about 50 ms, one round trip from that vantage point. So the
-window after `announced` is about one round trip, no SDK-side fact can close it, and a subscriber
-in another process cannot observe the announce at all: the retry belongs to the application
-([behavior.md](behavior.md#subscribing)). Earlier text said "about a second"; that was the retry
+window after `announced` is about one round trip, no publisher-side fact can close it, and the
+retry belongs to the application ([behavior.md](behavior.md#subscribing)). A subscriber in another
+process can observe the announce only through [discovery](#namespace-discovery), which closes the
+race on 0.17.0 (below). Earlier text said "about a second"; that was the retry
 interval of the original reproduction, not the window.
 
 moq-relay 0.15.8 (production from 2026-09-28) still raced, but answered request error 16 (0x10,
@@ -178,6 +179,32 @@ retry is still needed. Measured on 2026-10-05 through the examples' retry: with 
 first attempts at once after `register_track` and 1 / 30 after `announced` were rejected
 `unroutable`; with the TypeScript SDK, 4 / 10 and 0 / 10. Every rejected Python trial was accepted
 on the second attempt, and an unknown track still came back `not found` in both SDKs.
+
+A subscribe sent on the subscriber's own connection once its [discovery](#namespace-discovery)
+reports the namespace `announced` was never rejected
+([issue #269](https://github.com/muxinc/relay-sdks/issues/269)). Measured on 2026-10-06 against
+moq-relay 0.17.0, publisher on `sjc.relay.mux.global`, subscriber on sjc or on `fra.relay.mux.global`:
+a fresh namespace and publisher connection per trial, the subscriber connections already open, one
+subscribe at once after the trigger, then retries every 100 ms. Both SDKs (TypeScript in Node over
+native QUIC), four interleaved runs of ten trial pairs per SDK and relay, the two modes alternating
+within each pair:
+
+| subscribe issued | subscriber on sjc | subscriber on fra |
+| --- | --- | --- |
+| at once after the publisher's `announced` settles (baseline, Python) | 6 / 40 rejected | 40 / 40 rejected |
+| at once after the publisher's `announced` settles (baseline, TypeScript) | 14 / 40 rejected | 40 / 40 rejected |
+| at once after discovery reports `announced` (Python) | 0 / 40 rejected | 0 / 40 rejected |
+| at once after discovery reports `announced` (TypeScript) | 0 / 40 rejected | 0 / 40 rejected |
+
+Every rejection was request error 16 `unroutable`, and every rejected trial was accepted on the
+second attempt, 100 ms later. Discovery reported the namespace a median 50 ms after the publisher's
+`register_track` / `registerTrack` on sjc and 147 to 151 ms (at most 283 ms) on fra. The window on
+another relay is correspondingly wider: a subscriber there that subscribed as soon as the
+publisher's `announced` settled lost the race every time. The relay builds NAMESPACE entries from the same origin it
+routes subscribes on (`run_subscribe_namespace_stream` → `origin.announced()` in
+`rs/moq-net/src/ietf/publisher.rs` at `moq-relay-v0.17.0`), including a route learned from a cluster
+peer, which matches what was measured. That is an observation of 0.17.0, not a guarantee the
+protocol makes.
 
 ## Namespace discovery
 
@@ -207,9 +234,10 @@ includes routes learned from cluster peers.
   the snapshot arrived one round trip after the request (~50 ms, ~110 ms). A new announce arrived
   ~50 ms (~140 ms) after the publisher's `announced`, and a clean close was withdrawn within
   ~400 ms. A SIGKILLed publisher was withdrawn after ~12.2 s (~12.3 s), at the QUIC idle timeout.
-  Across the four smoke runs that day (both SDKs), the subscribes issued after the namespace was
-  discovered were never rejected `unroutable` (0 of 8). That is too few to drop the
-  [announce race](#announce-propagation) retry.
+- A subscribe on the same connection at once after `announced` was never rejected `unroutable`:
+  0 of 160 trials on 2026-10-06, in both SDKs, on the publisher's relay and on another one, against
+  6 to 14 of 40 (same relay) and 40 of 40 (other relay) for a subscribe right after the publisher's
+  `announced` ([announce propagation](#announce-propagation)).
 
 ## Supervised generations
 

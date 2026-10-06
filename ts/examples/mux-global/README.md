@@ -25,7 +25,9 @@ subscriber started before the namespace announcement is visible can receive requ
 `unroutable` (`404 Broadcast not found` on relays before 0.15.8). The demo subscribes through a
 [supervised subscriber](../../GUIDE.md#stay-connected-supervised-connections)'s `want`, which retries
 that rejection with backoff (from 250 ms, capped at 8 seconds), resubscribes after a publisher
-restart, and reconnects a lost subscriber connection; the live smoke test does the same. Only a
+restart, and reconnects a lost subscriber connection; the live smoke test does the same. A
+subscriber that instead waits for discovery to report the namespace `announced` avoids the race and
+needs no retry ([discovery and the announce race](../../GUIDE.md#discover-namespaces)). Only a
 rejection no wait fixes, such as an unauthorized track, reaches `onError` and fails the run. The overall `--timeout` bounds waiting, retries, and reception.
 
 The write deadline (15 seconds in the demo) covers that wait and the transport steps after it.

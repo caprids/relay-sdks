@@ -346,8 +346,15 @@ matches whole fields, and a prefix the token does not cover is silent rather tha
 connection discovers each prefix tree once: a prefix that equals, contains or falls under one
 already being discovered throws `PREFIX_OVERLAP` until that iterator ends. If the relay ends the
 request, the iterator first reports every remaining namespace `unannounced`, then finishes.
-`announced` means the relay routes the namespace, not that its tracks have content: keep the
-announce-race retry when subscribing. See the [discovery contract](../spec/behavior.md#discovery).
+`announced` means the relay routes the namespace, not that its tracks have content.
+
+Subscribing on the same connection once `announced` arrives avoids the announce race, so it needs
+no timed retry: on moq-relay 0.17.0 such a subscribe was never rejected `unroutable` (0 of 160 trials
+on 2026-10-06), while one sent as soon as the publisher's `announced` settled was rejected 6 to 14
+times in 40 on the publisher's relay and every time on another relay
+([measurements](../spec/relay-interop.md#announce-propagation)). A later `unroutable` means the
+namespace has gone since; wait for its next `announced` rather than retrying on a timer. See the
+[discovery contract](../spec/behavior.md#discovery).
 
 ## Stay connected: supervised connections
 
@@ -414,10 +421,13 @@ Connecting announces the namespace once the first track is registered, and `publ
 settles when that announce has reached the wire: the relay acknowledges nothing more, and it routes
 subscribes to the namespace about a round trip later. A subscribe that arrives before then is
 rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-relay 0.15.8 and later;
-relays through 0.15.1 answered `404 Broadcast not found`). `subscribe()` does not retry, so a
-subscriber retries that rejection within its own budget, or uses a supervised subscriber's `want`,
-which retries it for you (the demo and the live smoke test do), and a page that owns both sides
-awaits `announced` before subscribing. `announced` stays pending while no solicitation covers the namespace, and the
+relays through 0.15.1 answered `404 Broadcast not found`). A subscriber on another relay of the
+cluster waits longer still, until its relay learns the route. `subscribe()` does not retry, so a
+subscriber either waits for [discovery](#discover-namespaces) to report the namespace `announced`,
+which avoids the race, or retries that rejection within its own budget, or uses a supervised
+subscriber's `want`, which retries it for you (the demo and the live smoke test do). A page that
+owns both sides awaits `announced` before subscribing, which narrows the race but does not close
+it. `announced` stays pending while no solicitation covers the namespace, and the
 connection's closure rejects it if that comes first; it is pre-handled, so nobody has to await it.
 
 Each write copies its bytes and sends one independent group containing one object. The payload is a
