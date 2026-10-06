@@ -2568,4 +2568,43 @@ describe('rotation before the credential expires (#261)', () => {
       await changes.return?.();
     });
   });
+  describe('Codex review of the merge, pass 7', () => {
+    it('keeps a followed rotation silent when the next connection rotates before its discovery answers', async () => {
+      // The second connection's credential is short: it is rotated away before its discovery answers.
+      const { subscriber, connections } = await subscribers([
+        undefined,
+        new Date(Date.now() + 300),
+        new Date(Date.now() + 3_600_000),
+      ]);
+      const seen: string[] = [];
+      subscriber.want(
+        'v',
+        { namespace: ['room'], track: 'v', generations: true, retry: fast },
+        {
+          onObject: (object) => seen.push(`object ${object.groupId}`),
+          onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
+          onSwitched: () => seen.push('switched'),
+        },
+      );
+      await until(() => connections[0]!.discoveries.length === 1, 'discovery');
+      const generation = newGeneration(1_000);
+      connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', generation] });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(5);
+      subscriber.rotate();
+      await until(() => connections[1]?.discoveries.length === 1, 'discovery on the second connection');
+      // Before it answers, the second connection is rotated away too, and the first one closes.
+      await until(() => connections[2]?.discoveries.length === 1, 'discovery on the third connection');
+      connections[0]!.end();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      connections[2]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', generation] });
+      await until(() => connections[2]!.subscriptions.length === 1, 'replacement on the third connection');
+      const replacement = connections[2]!.subscriptions[0]!;
+      replacement.accept();
+      replacement.object(5); // already delivered
+      replacement.object(6);
+      expect(seen).toEqual(['object 5', 'object 6']);
+    });
+  });
 });

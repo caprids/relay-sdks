@@ -1031,7 +1031,7 @@ async function follow(
   const observed = new Map<Connection, () => void>();
   const observe = (on: Connection) => {
     if (observed.has(on)) return;
-    const onRetiring = () => void rotate(on);
+    const onRetiring = () => rotate(on);
     on.retiring.addEventListener('abort', onRetiring, { once: true });
     observed.set(on, () => on.retiring.removeEventListener('abort', onRetiring));
     if (on.retiring.aborted) queueMicrotask(onRetiring);
@@ -1274,7 +1274,10 @@ async function follow(
         activeEnded('connection');
         return;
       }
-      if (end.cause === 'connection-closed' && !pending && retryMove && retryMove.connection !== slot.connection) {
+      const elsewhere =
+        (retryMove && retryMove.connection !== slot.connection) ||
+        (rotationTo && rotationTo.connection !== slot.connection);
+      if (end.cause === 'connection-closed' && !pending && elsewhere) {
         slot.ended = 'connection';
         slot.subscription.cancel();
         return;
@@ -1352,6 +1355,8 @@ async function follow(
         return;
       }
       targetGeneration = discovery.current();
+      // A rotation's discovery on the next connection has found nothing yet: wait for it, the old one still delivers.
+      if (targetGeneration === undefined && rotationTo) return;
       // None announced: nothing to move to, so the want waits for one, as after a withdrawal.
       if (targetGeneration === undefined) {
         settle({ kind: 'moved', accepted: accepted() });
@@ -1403,7 +1408,7 @@ async function follow(
   }
 
   /** A rotation replaced the active subscription's connection: move the subscription to the next one. */
-  const rotate = async (from: Connection) => {
+  const rotate = (from: Connection) => {
     if (over()) return;
     // The active subscription's connection, or the one a rotation is already moving to, if that one retires in turn.
     if (rotationTo ? rotationTo.connection !== from : active.connection !== from) return;
@@ -1426,19 +1431,9 @@ async function follow(
         settle(cancelledOrConnection(accepted()));
         return;
       }
-      const found = await nextWatch.newest(AbortSignal.any([scope, settled.signal, next.signal]));
-      if (found.kind !== 'found') {
-        release();
-        if (!over()) settle(cancelledOrConnection(accepted()));
-        releaseUnused();
-        return;
-      }
     }
-    if (over() || (rotationTo ? rotationTo.connection !== from : active.connection !== from)) {
-      release();
-      releaseUnused();
-      return;
-    }
+    // Recorded at once, before the new connection's discovery has found the generation: reconcile waits for it, and
+    // the rotation is in flight meanwhile, so the old connection closing or this one retiring in turn keeps continuity.
     // A rotation to a connection that retired in turn gives way to this one.
     unwatchNext?.();
     rotationTo?.release();
