@@ -287,9 +287,18 @@ export async function superviseRelaySubscriber(
   /** The connection a rotation is replacing, while its wants move off it. */
   let retiring: Connection | undefined;
   /** Asks the live connection to rotate; replaced for each connection served. */
-  let requestRotation: () => void = () => {};
-  /** A `rotate()` made during a rotation's overlap, for the replacement once it is served. */
-  let rotateNext = false;
+  /**
+   * Set by `rotate()` while a connection is up, and consumed by the rotation that answers it: the next one to start, or
+   * one whose replacement is still connecting or being discarded.
+   */
+  let rotateRequested = false;
+  /** Wakes a serve loop waiting for its rotation; replaced for each wait. */
+  let wakeRotation: () => void = () => {};
+  const requestRotation = () => {
+    if (stopped || !current) return;
+    rotateRequested = true;
+    wakeRotation();
+  };
 
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
@@ -439,10 +448,6 @@ export async function superviseRelaySubscriber(
     }
     current = next.live;
     retiring = old;
-    // The replacement is live: a `rotate()` from now on is for it, taken up once the overlap ends.
-    requestRotation = () => {
-      rotateNext = true;
-    };
     setStatus('live');
     for (const wake of connectionWaiters.splice(0)) wake();
     const idle = new Promise<void>((resolve) => {
@@ -475,20 +480,12 @@ export async function superviseRelaySubscriber(
     const scope = new AbortController();
     /** Cleared once an automatic rotation found no fresher credential: only `rotate()` tries again. */
     let automatic = true;
-    let handedOver = false;
     try {
       for (;;) {
-        let manual = false;
         const asked = new Promise<void>((resolve) => {
-          requestRotation = () => {
-            manual = true;
-            resolve();
-          };
+          wakeRotation = resolve;
         });
-        if (rotateNext) {
-          rotateNext = false;
-          requestRotation();
-        }
+        if (rotateRequested) wakeRotation();
         const due = rotationDue(
           automatic ? opened.live.rotateAt : undefined,
           asked,
@@ -496,26 +493,24 @@ export async function superviseRelaySubscriber(
         ).then(() => undefined);
         const outcome = await Promise.race([subscriber.closed, due]);
         if (outcome !== undefined || stopped) return outcome ?? {};
-        // A `rotate()` while the replacement connects makes this rotation a manual one: it takes the replacement.
-        requestRotation = () => {
-          manual = true;
+        // A `rotate()` before the replacement is current makes this rotation a manual one: it takes the replacement.
+        let manual = false;
+        const isManual = () => {
+          if (rotateRequested) {
+            rotateRequested = false;
+            manual = true;
+          }
+          return manual;
         };
-        const next = await rotateFrom(opened, () => manual);
-        if (next) {
-          handedOver = true;
-          return { next };
-        }
+        isManual();
+        const next = await rotateFrom(opened, isManual);
+        if (next) return { next };
         if (opened.live.signal.aborted || stopped) return await subscriber.closed;
         if (!manual) automatic = false;
       }
     } finally {
       scope.abort();
-      // After a rotation, a `rotate()` before the replacement is served is still for the replacement.
-      requestRotation = handedOver
-        ? () => {
-            rotateNext = true;
-          }
-        : () => {};
+      wakeRotation = () => {};
     }
   };
 

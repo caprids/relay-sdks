@@ -202,9 +202,18 @@ export async function superviseRelayPublisher(
   /** Aborts the connection attempt in progress only: once connected, a generation is closed, not aborted. */
   let attemptInProgress: AbortController | undefined;
   /** Asks the live generation to rotate; replaced for each generation served. */
-  let requestRotation: () => void = () => {};
-  /** A `rotate()` made during a rotation's overlap, for the replacement once it is served. */
-  let rotateNext = false;
+  /**
+   * Set by `rotate()` while a connection is up, and consumed by the rotation that answers it: the next one to start, or
+   * one whose replacement is still connecting or being discarded.
+   */
+  let rotateRequested = false;
+  /** Wakes a serve loop waiting for its rotation; replaced for each wait. */
+  let wakeRotation: () => void = () => {};
+  const requestRotation = () => {
+    if (stopped || !current) return;
+    rotateRequested = true;
+    wakeRotation();
+  };
 
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
@@ -343,10 +352,6 @@ export async function superviseRelayPublisher(
     }
     current = next;
     retiring = live;
-    // The replacement is live: a `rotate()` from now on is for it, taken up once the overlap ends.
-    requestRotation = () => {
-      rotateNext = true;
-    };
     const moved = [...tracks.values()].map((track) => track.handOver(next));
     setStatus('live');
     report(next);
@@ -386,20 +391,12 @@ export async function superviseRelayPublisher(
     const scope = new AbortController();
     /** Cleared once an automatic rotation found no fresher credential: only `rotate()` tries again. */
     let automatic = true;
-    let handedOver = false;
     try {
       for (;;) {
-        let manual = false;
         const asked = new Promise<void>((resolve) => {
-          requestRotation = () => {
-            manual = true;
-            resolve();
-          };
+          wakeRotation = resolve;
         });
-        if (rotateNext) {
-          rotateNext = false;
-          requestRotation();
-        }
+        if (rotateRequested) wakeRotation();
         const due = rotationDue(
           automatic ? live.rotateAt : undefined,
           asked,
@@ -407,26 +404,24 @@ export async function superviseRelayPublisher(
         ).then(() => undefined);
         const outcome = await Promise.race([live.publisher.closed, due]);
         if (outcome !== undefined || stopped) return outcome ?? {};
-        // A `rotate()` while the replacement connects makes this rotation a manual one: it takes the replacement.
-        requestRotation = () => {
-          manual = true;
+        // A `rotate()` before the replacement is current makes this rotation a manual one: it takes the replacement.
+        let manual = false;
+        const isManual = () => {
+          if (rotateRequested) {
+            rotateRequested = false;
+            manual = true;
+          }
+          return manual;
         };
-        const next = await rotateFrom(live, () => manual);
-        if (next) {
-          handedOver = true;
-          return { next };
-        }
+        isManual();
+        const next = await rotateFrom(live, isManual);
+        if (next) return { next };
         if (live.ended || stopped) return await live.publisher.closed;
         if (!manual) automatic = false;
       }
     } finally {
       scope.abort();
-      // After a rotation, a `rotate()` before the replacement is served is still for the replacement.
-      requestRotation = handedOver
-        ? () => {
-            rotateNext = true;
-          }
-        : () => {};
+      wakeRotation = () => {};
     }
   };
 
@@ -863,7 +858,8 @@ function supervisedGroup(
     write: (payload, options) => mapped(() => group.write(payload, options)),
     writeText: (text, options) => mapped(() => group.writeText(text, options)),
     writeJSON: (value, options) => mapped(() => group.writeJSON(value, options)),
-    close: () => mapped(() => group.close()).finally(release),
+    // Released by `mapped` only once the group is closed: a refused close (WRITE_PENDING) keeps it holding.
+    close: () => mapped(() => group.close()),
     abort: (reason) => {
       aborted = true;
       try {

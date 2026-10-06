@@ -1666,4 +1666,84 @@ describe('rotation before the credential expires (#261)', () => {
       expect(publisher.status).toBe('closed');
     });
   });
+  describe('Codex pass 10 fixes', () => {
+    it('keeps the old generation open when closing a group there is refused', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'video' });
+      connections[0]!.tracks.get('video')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      const group = await writer.openGroup();
+      publisher.rotate();
+      await until(() => connections[1]?.tracks.has('video') === true, 'next generation');
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await writer.write(new Uint8Array([7]));
+      connections[0]!.tracks.get('video')!.failNext = new RelayError('WRITE_PENDING', 'busy', 'closing');
+      await expect(group.close()).rejects.toMatchObject({ code: 'WRITE_PENDING' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(connections[0]!.closeCalls).toBe(0);
+      await group.close();
+      await until(() => connections[0]!.closeCalls === 1, 'old generation closed once the group did');
+    });
+
+    it('answers a rotate() made while a discarded replacement closes', async () => {
+      const soon = new Date(Date.now() + 200);
+      const gate = deferred();
+      const connections: FakePublisher[] = [];
+      const publisher = await superviseRelayPublisher(
+        async (options) => {
+          const fake = fakePublisher([...options.namespace], soon);
+          if (connections.length === 1) {
+            const close = fake.close.bind(fake);
+            fake.close = async () => {
+              await gate.promise;
+              await close();
+            };
+          }
+          connections.push(fake);
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', namespace: ['room'], reconnect: fast, rotateBeforeMs: 150 },
+      );
+      cleanup.push(() => {
+        gate.resolve();
+        return publisher.close();
+      });
+      await until(() => connections.length === 2, 'automatic replacement connected');
+      await new Promise((resolve) => setTimeout(resolve, 10)); // being discarded: its close is held
+      publisher.rotate();
+      gate.resolve();
+      await until(() => connections.length === 3, 'the manual rotation');
+      await until(() => connections[0]!.closeCalls === 1, 'the replacement taken');
+      expect(publisher.generation?.namespace).toEqual(connections[2]!.namespace);
+    });
+
+    it('answers a rotate() called from onGeneration after a reconnect', async () => {
+      const connections: FakePublisher[] = [];
+      let rotateFromCallback = false;
+      let supervised: SupervisedPublisher | undefined;
+      const publisher = await superviseRelayPublisher(
+        async (options) => {
+          const fake = fakePublisher([...options.namespace]);
+          connections.push(fake);
+          return fake;
+        },
+        {
+          url: 'https://relay.example.com/moq',
+          namespace: ['room'],
+          reconnect: fast,
+          onGeneration: () => {
+            if (rotateFromCallback) {
+              rotateFromCallback = false;
+              supervised?.rotate();
+            }
+          },
+        },
+      );
+      supervised = publisher;
+      cleanup.push(() => publisher.close());
+      rotateFromCallback = true;
+      connections[0]!.end(new Error('lost'));
+      await until(() => connections.length === 3, 'the rotation asked for from onGeneration');
+    });
+  });
 });

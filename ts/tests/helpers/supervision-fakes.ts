@@ -155,6 +155,11 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
               },
               async close() {
                 if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'closing');
+                if (track.failNext !== undefined) {
+                  const error = track.failNext;
+                  track.failNext = undefined;
+                  throw error;
+                }
                 closed = true;
               },
               abort() {
