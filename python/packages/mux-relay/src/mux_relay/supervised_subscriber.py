@@ -1236,7 +1236,7 @@ async def _follow(
         # A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
         silent = rotating(slot)
         # Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
-        if silent and not target_ended(slot) and previous.ended in (None, "connection"):
+        if silent and not target_ended(slot) and previous.ended != "publisher-done":
             slot.skip_through = _later(previous.latest, previous.skip_through)
         ended_targets.clear()
         pending = None
@@ -1337,7 +1337,9 @@ async def _follow(
         # skip it. Not once the publisher ended or the subscription was ended by it: a restarted publisher
         # numbers from 0 again.
         rotation = rotating(slot)
-        continues = not target_ended(slot) and active.ended in (None, "connection")
+        # Only PUBLISH_DONE says the publisher may number from 0 again; a stale, terminated or disconnected
+        # subscription does not.
+        continues = not target_ended(slot) and active.ended != "publisher-done"
         if rotation and continues and _at_or_before(obj, active.latest):
             return
         # With the active subscription gone there is nothing left to compare with: the next object cuts over. A

@@ -2362,3 +2362,33 @@ async def test_keeps_skipping_repeats_when_only_another_targets_publisher_ended(
     replacement.send_object(4)  # a's cached group, already delivered
     replacement.send_object(5)
     assert seen == ["4", "5"]
+
+
+# ------------------------------------------------------------------ Codex review of the merge, pass 2 (#261)
+
+
+async def test_keeps_skipping_repeats_when_the_old_subscription_went_stale_during_a_rotation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[int] = []
+    subscriber.want(
+        "v",
+        ["room"],
+        "v",
+        WantHandlers(on_object=lambda o: seen.append(o.group_id)),
+        stale_after=0.04,
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(10)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    replacement = s.connections[1].subscriptions[0]
+    replacement.accept()
+    await until(lambda: s.first.subscriptions[0].cancelled, "old subscription went stale")
+    replacement.send_object(10)  # already delivered
+    replacement.send_object(9)  # late, already behind what was delivered
+    replacement.send_object(11)
+    assert seen == [10, 11]
