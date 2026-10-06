@@ -26,7 +26,10 @@ subscriber started before the namespace announcement is visible can receive requ
 with backoff starting at 500 ms and capped at 2 seconds, through `subscribeWithRetry` in
 `examples/shared/announce-race.js`, the one copy of that policy the demo and the live smoke test
 share. In combined mode it first awaits `publisher.announced`, the announce reaching the wire, which
-removes most of the race; the relay still needs about a round trip after it. Other rejections fail
+removes most of the race; the relay still needs about a round trip after it.
+The demo does not use namespace discovery, so it keeps the retry; a subscriber that waits for
+discovery to report the namespace `announced` avoids the race and needs no retry
+([discovery and the announce race](../../GUIDE.md#discover-namespaces)). Other rejections fail
 the run. The overall `--timeout` bounds waiting, retries, and reception.
 
 The write deadline (15 seconds in the demo) covers that wait and the transport steps after it.

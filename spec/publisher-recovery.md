@@ -98,9 +98,13 @@ it with [discovery](behavior.md#discovery): `namespaceEvents` / `namespace_event
 reports each generation `announced` when it announces, and `unannounced` when it closes (within
 about 400 ms) or crashes (about 12 s later, at the relay's QUIC idle timeout). Viewers can then
 explicitly switch to the new generation and cancel the old subscriptions. This avoids relying on
-reuse of the ended namespace's cached state. A crashed generation stays `announced` until the
-timeout, and `announced` has not been measured as a guarantee that the next subscribe routes
-([namespace discovery](relay-interop.md#namespace-discovery)). Startup retry, freshness checks, and a bounded switch deadline remain necessary.
+reuse of the ended namespace's cached state. A subscribe on the discovering connection once a new
+generation is `announced` routes at once: on moq-relay 0.17.0 it was never rejected `unroutable`
+(0 of 160 trials on 2026-10-06, on the publisher's relay and on another;
+[announce propagation](relay-interop.md#announce-propagation)), so a viewer that switches on
+`announced` needs no timed retry for the announce race. A crashed generation stays `announced`
+until the timeout, so freshness checks and a bounded switch deadline remain necessary. A viewer that
+subscribes without waiting for discovery, at startup or to a fixed namespace, keeps the startup retry.
 An application channel is still needed for anything beyond which namespaces are announced, such as
 which generation is newest. Discovery reports namespaces in arrival order, not by generation.
 

@@ -189,11 +189,13 @@ Messages are not a compatibility contract; the class and the point of rejection 
   moq-relay through 0.15.1 answered its literal 404. The same code 16 with reason `not found` means the
   namespace is announced but the track is not, which is not the race. The relay routes subscribes to
   a namespace only once it has processed the publisher's announce, about one round trip after the
-  publisher's `announced` settles ([announce propagation](relay-interop.md#announce-propagation)),
-  so a subscribe that races the announce is rejected the same way. The SDK reports that rejection
-  like any other, through `subscribed` and `on_error`, and does not retry a subscribe; the
-  application retries it within its own budget rather than treating it as fatal. The examples share
-  one helper per language for this; it retries 16 `unroutable` and the older 404 only, never
+  publisher's `announced` settles, and later on a subscriber's relay that learns the route from a
+  cluster peer ([announce propagation](relay-interop.md#announce-propagation)), so a subscribe that
+  races the announce is rejected the same way. The SDK reports that rejection like any other,
+  through `subscribed` and `on_error`, and does not retry a subscribe. An application avoids the
+  race by subscribing once its [discovery](#discovery) reports the namespace `announced`, or else
+  retries the rejection within its own budget rather than treating it as fatal. The examples do
+  not use discovery, so they still retry; they share one helper per language for this, which retries 16 `unroutable` and the older 404 only, never
   16 `not found` ([issue #136](https://github.com/muxinc/relay-sdks/issues/136)).
 - The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It surfaces
   a reset when the relay forwards it, which may be well after the publisher's abort: moq-relay 0.15.8
@@ -418,6 +420,15 @@ The iterator owns the request, never the connection.
   An event is about the relay's routing table, not a publisher's health: `announced` does not mean
   any track has content, and a namespace two publishers announce
   ([duplicate announce](relay-interop.md#duplicate-announce)) is reported once.
+- Discovery is how a subscriber avoids the [announce race](#subscribing). A subscribe sent on the
+  same connection once `announced` arrives was never rejected `unroutable` on moq-relay 0.17.0
+  (0 of 160 trials on 2026-10-06, both SDKs, same relay and another relay), while one sent as soon
+  as the publisher's `announced` settled was rejected 6 to 14 of 40 times on the same relay and
+  40 of 40 on another ([announce propagation](relay-interop.md#announce-propagation)). This is an
+  observation of that relay, not a protocol guarantee. A subscriber that waits for `announced` needs
+  no timed retry for the race. A later `unroutable` means the namespace has gone since; `unannounced`
+  follows, and the next `announced` is the cue to subscribe again. `not found` still means the track
+  is not there.
 - Endings: a REQUEST_ERROR, the request timeout, or the request's stream failing raises
   `SubscriptionRequestError`. A stream that fails without a REQUEST_ERROR first waits up to the
   same closure grace as a subscription. The connection ending raises
