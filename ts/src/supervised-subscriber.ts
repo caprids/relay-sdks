@@ -1041,8 +1041,8 @@ async function follow(
     }
   };
   /**
-   * Set once any subscription of the attempt heard PUBLISH_DONE: a restarted publisher numbers its groups from 0, so a
-   * rotation's replacement no longer skips what the active subscription delivered.
+   * Set when a pending replacement heard PUBLISH_DONE, until the next cutover: a restarted publisher numbers its groups
+   * from 0, so a rotation's replacement no longer skips what the active subscription delivered.
    */
   let publisherEnded = false;
   /** Whether `slot` replaces the active subscription on the next connection, with the same target. */
@@ -1112,6 +1112,7 @@ async function follow(
     const from = active;
     // A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
     const silent = rotating(slot);
+    publisherEnded = false;
     pending = undefined;
     clearRetry();
     moveFailures = 0;
@@ -1273,7 +1274,9 @@ async function follow(
         },
         onPublisherDone: (info) => {
           if (!slot || over()) return;
-          publisherEnded = true;
+          // Heard on the replacement: the publisher behind both ended. An old subscription a move left behind hearing
+          // its own publisher end says nothing about the current one.
+          if (slot === pending) publisherEnded = true;
           if (slot === pending) pendingFailed(slot, undefined);
           else if (slot === active && !slot.ended) {
             activeEnded('publisher-done');

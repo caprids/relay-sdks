@@ -2316,6 +2316,34 @@ describe('rotation before the credential expires (#261)', () => {
       await until(() => connections[0]!.subscriptions[0]!.cancelled, 'old subscription cancelled');
     });
 
+    it('keeps skipping repeats on a rotation after the generation a move left behind ended', async () => {
+      const { subscriber, connections, seen } = await following();
+      const older = newGeneration(1_000);
+      const newer = newGeneration(2_000);
+      const discovery = connections[0]!.discoveries[0]!;
+      discovery.push({ type: 'announced', namespace: ['room', older] });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      const first = connections[0]!.subscriptions[0]!;
+      first.accept();
+      first.object(5);
+      discovery.push({ type: 'announced', namespace: ['room', newer] });
+      await until(() => connections[0]!.subscriptions.length === 2, 'move');
+      const moved = connections[0]!.subscriptions[1]!;
+      moved.accept();
+      moved.object(0);
+      first.done(); // the old generation's publisher closed after the move: not the current publisher
+      moved.object(1);
+      subscriber.rotate();
+      await until(() => connections[1]?.discoveries.length === 1, 'discovery on the new connection');
+      connections[1]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', newer] });
+      await until(() => connections[1]!.subscriptions.length === 1, 'replacement');
+      const replacement = connections[1]!.subscriptions[0]!;
+      replacement.accept();
+      replacement.object(1); // already delivered
+      replacement.object(2);
+      expect(seen).toEqual(['object 5', `switched ${older} -> ${newer}`, 'object 0', 'object 1', 'object 2']);
+    });
+
     it('reports a newer generation found on the new connection as a move', async () => {
       const { subscriber, connections, seen } = await following();
       const older = newGeneration(1_000);
