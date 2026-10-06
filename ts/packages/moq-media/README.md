@@ -54,7 +54,9 @@ The publisher path below works in Chromium, Firefox and Safari:
 - **Video.** Stamp frames drawn from the camera with `clock.now()`.
 - **Audio.** Route the microphone through an `AudioContext`. Stamp audio from the context clock
   through `clock.sourceTimeline()`, and calibrate it about once a second from
-  `getOutputTimestamp()`.
+  `getOutputTimestamp()`. Add `baseLatency + outputLatency` to that `contextTime`. The output
+  timestamp describes the speaker, while the worklet sees microphone input at the render time,
+  which is that much ahead.
 - **Device changes.** The context resamples whatever device is connected and keeps running while
   devices change, so switching microphones does not shift the timeline.
 - **Chromium alternative.** Where `MediaStreamTrackProcessor` exists, its timestamps count from the
@@ -76,7 +78,8 @@ const video = new VideoFrame(canvas, { timestamp: clock.now() });
 // AudioWorklet chunks carry their context time; recalibrate about once a second.
 const context = clock.sourceTimeline();
 const { contextTime, performanceTime } = audioContext.getOutputTimestamp();
-context.calibrate(contextTime * 1e6, performanceTime * 1000);
+const renderTime = contextTime + audioContext.baseLatency + audioContext.outputLatency; // speaker → render time
+context.calibrate(renderTime * 1e6, performanceTime * 1000);
 const audioTimestampUs = context.timestampUs(chunkContextTime * 1e6);
 
 const playout = createPlayoutClock();

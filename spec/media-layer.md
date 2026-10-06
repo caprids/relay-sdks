@@ -306,9 +306,16 @@ default, because Firefox has none and Safari's handles video only, in workers (M
   every browser has.
 - **Audio.** Route the microphone through an `AudioContext` (`MediaStreamAudioSourceNode` into an
   `AudioWorkletNode`), and stamp each chunk with the context time of its first frame, in
-  microseconds, through a source timeline. About once a second, call
-  `calibrate(contextTime × 1e6, performanceTime × 1000)` with the pair from
+  microseconds, through a source timeline. About once a second, calibrate it from
   `AudioContext.getOutputTimestamp()` (Chrome 57, Firefox 70, Safari 14.1).
+- **Calibrating for capture.** `getOutputTimestamp()` pairs `performanceTime` with the context
+  time reaching the *speaker* (`contextTime`). The worklet, though, sees fresh microphone input at
+  the context's *render* time, which runs ahead of the speaker by the output delay. So add that
+  delay back:
+  `calibrate((contextTime + baseLatency + outputLatency) × 1e6, performanceTime × 1000)`, reading
+  both latencies fresh each time (`baseLatency`: Chrome 58, Firefox 70, Safari 14.1). Calibrated
+  on `contextTime` alone, audio would be stamped early by the publisher's own output delay. A
+  change of output device would also move audio against video, even with the same microphone.
 - **Why the AudioContext.** The context runs at one fixed sample rate whatever the microphone is,
   because the browser resamples. When the user switches devices, say from a laptop microphone at
   48 kHz to Bluetooth earbuds at 16 kHz, the count does not change rate. The context also keeps
