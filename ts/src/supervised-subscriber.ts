@@ -710,6 +710,8 @@ async function follow(
   /** A move whose replacement failed, retried after the backoff unless the want asks for something else first. */
   let retryMove: { key: string; timer: ReturnType<typeof setTimeout> } | undefined;
   let moveFailures = 0;
+  /** The target of the latest move, whose failures `moveFailures` counts. */
+  let moveTarget: string | undefined;
   let lastObjectAt = 0;
   const accepted = () => active.accepted !== undefined;
 
@@ -801,19 +803,29 @@ async function follow(
       // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
       console.error(new Error('onSwitched threw; the want delivers regardless', { cause: error }));
     }
+    // Later groups that reached the replacement early, out of order, follow the object that cut over. Each delivery
+    // is isolated, so one throwing callback loses neither the rest nor the held events.
+    const replay = heldAfter(slot.held, object);
+    slot.held = [];
+    const deliver = (call: () => void) => {
+      try {
+        call();
+      } catch (error) {
+        // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+        console.error(new Error('A want handler threw at a cutover; the want delivers regardless', { cause: error }));
+      }
+    };
     // A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
-    if (!over() && active === slot) handlers().onObject?.(object);
-    // Later groups that reached the replacement early, out of order, follow the object that cut over.
-    for (const event of heldAfter(slot.held, object)) {
+    if (!over() && active === slot) deliver(() => handlers().onObject?.(object));
+    for (const event of replay) {
       if (over() || active !== slot) break;
       if (event.type === 'object') {
-        if (event.value.groupId > slot.firstGroup) slot.progressed = true;
+        if (event.value.groupId > (slot.firstGroup as number)) slot.progressed = true;
         if (event.value.groupId > (slot.largestGroup as number)) slot.largestGroup = event.value.groupId;
-        handlers().onObject?.(event.value);
-      } else if (event.type === 'subgroupEnd') handlers().onSubgroupEnd?.(event.value);
-      else handlers().onSubgroupReset?.(event.value);
+        deliver(() => handlers().onObject?.(event.value));
+      } else if (event.type === 'subgroupEnd') deliver(() => handlers().onSubgroupEnd?.(event.value));
+      else deliver(() => handlers().onSubgroupReset?.(event.value));
     }
-    slot.held = [];
   };
 
   const onObject = (slot: Slot | undefined, object: MoqtObject) => {
@@ -927,6 +939,7 @@ async function follow(
     if (key === active.key) {
       // Asked for what is active again: a pending move is no longer wanted.
       clearRetry();
+      moveTarget = undefined;
       if (pending) {
         pending.subscription.cancel();
         pending = undefined;
@@ -945,6 +958,9 @@ async function follow(
       pending.subscription.cancel();
       pending = undefined;
     }
+    // A new target starts its own backoff; a retry of the same one keeps counting.
+    if (moveTarget !== key) moveFailures = 0;
+    moveTarget = key;
     try {
       pending = open(target, targetGeneration);
     } catch (error) {

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass, fields
@@ -47,6 +48,8 @@ from ._validation import track_name
 from .cancellation import CancellationToken
 from .connect_session import MAX_TIMEOUT
 from .errors import RelayError
+
+_log = logging.getLogger("mux_relay")
 
 
 @dataclass(frozen=True, slots=True)
@@ -495,17 +498,27 @@ class SwitchableSubscription:
         switched = SwitchedInfo(from_track=previous.track, to_track=switching.track, subscribed=switching.accepted)
         if not switching.future.done():
             switching.future.set_result(switched)
-        self._call("on_switched", switched)
+        # Later groups that reached the new subscription early, out of order, follow the object that cut
+        # over. Each delivery is isolated, so one raising handler loses neither the rest nor the held events.
+        replay = _held_after(switching.held, obj)
+        switching.held = []
+
+        def deliver(name: str, *args: object) -> None:
+            try:
+                self._call(name, *args)
+            except Exception:
+                _log.exception("%s raised at a cutover; the switchable delivers regardless", name)
+
+        deliver("on_switched", switched)
         # A handler may have switched again or cancelled; the object still belongs to this cutover.
         if self._end is None and self._active is switching:
-            self._call("on_object", obj, switching.track)
-        for held in _held_after(switching.held, obj):
+            deliver("on_object", obj, switching.track)
+        for held in replay:
             if self._end is not None or self._active is not switching:
                 break
             if isinstance(held, ObjectEvent) and held.value.group_id > self._active_largest_group:
                 self._active_largest_group = held.value.group_id
-            self._call(_EVENT_HANDLERS[held.type] or "", held.value, switching.track)
-        switching.held = []
+            deliver(_EVENT_HANDLERS[held.type] or "", held.value, switching.track)
 
     # ------------------------------------------------------------------ the lifecycle
 

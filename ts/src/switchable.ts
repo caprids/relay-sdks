@@ -354,16 +354,27 @@ export function createSwitchable(
     markSubscribed(info);
     const switched = { from: from.track, to: switching.track, subscribed: info };
     switching.resolve(switched);
-    call('onSwitched', switched);
+    // Later groups that reached the new subscription early, out of order, follow the object that cut over. Each
+    // delivery is isolated, so one throwing handler loses neither the rest nor the held events.
+    const replay = heldAfter(switching.held, object);
+    switching.held = [];
+    const deliver = (name: keyof SwitchableHandlers, ...args: unknown[]) => {
+      try {
+        call(name, ...args);
+      } catch (error) {
+        // biome-ignore lint/suspicious/noConsole: the application's handler failed and has no caller to report to
+        console.error(new Error(`${name} threw at a cutover; the switchable delivers regardless`, { cause: error }));
+      }
+    };
+    deliver('onSwitched', switched);
     // A handler may have switched again or cancelled; the object still belongs to this cutover.
-    if (!end && active === switching) call('onObject', object, switching.track);
-    for (const event of heldAfter(switching.held, object)) {
+    if (!end && active === switching) deliver('onObject', object, switching.track);
+    for (const event of replay) {
       if (end || active !== switching) break;
       if (event.type === 'object' && event.value.groupId > (activeLargestGroup as number))
         activeLargestGroup = event.value.groupId;
-      call(EVENT_HANDLERS[event.type], event.value, switching.track);
+      deliver(EVENT_HANDLERS[event.type], event.value, switching.track);
     }
-    switching.held = [];
   };
 
   /** The consumer for one slot: active events go to the handlers, pending ones to the cutover check. */

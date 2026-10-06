@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, cast
@@ -1137,6 +1138,52 @@ async def test_a_pending_move_survives_the_old_subscription_going_stale(cleanup:
     second.send_object(0)  # the old one is gone: cuts over whatever until says
     assert switched_at(g.r.seen[1:]) == ["object 10", SWITCHED, "object 0"]
     await until(lambda: "restarted stale" in g.r.seen, "the replacement went stale too")
+
+
+async def test_held_later_groups_replay_even_when_a_handler_raises_at_the_cutover(
+    cleanup: list[Callable[[], object]], caplog: pytest.LogCaptureFixture
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    objects: list[int] = []
+
+    def on_object(obj: MoqtObject) -> None:
+        objects.append(obj.group_id)
+        if obj.group_id == 5:
+            raise RuntimeError("decoder failed")
+
+    handlers = WantHandlers(on_object=on_object)
+    subscriber.want("v", ["room"], "a", handlers, until=lambda obj: obj.group_id == 5)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.want("v", ["room"], "b", handlers, until=lambda obj: obj.group_id == 5)
+    await until(lambda: len(s.first.subscriptions) == 2, "pending move")
+    b = s.first.subscriptions[1]
+    b.accept()
+    b.send_object(6)
+    b.send_object(7)
+    b.send_object(5)
+    assert objects == [5, 6, 7]
+    assert "raised at a cutover" in caplog.text
+
+
+async def test_a_new_move_target_starts_its_own_backoff(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    retry = SupervisionBackoff(initial_delay=0.06, max_delay=60)
+    subscriber.want("v", ["room"], "a", retry=retry)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.want("v", ["room"], "b", retry=retry)
+    for n in range(2, 5):
+        await until(lambda n=n: len(s.first.subscriptions) == n, f"move to b, attempt {n - 1}")
+        s.first.subscriptions[n - 1].reject(0x10, "unroutable")
+    # b has failed three times: its next retry would wait 0.24 to 0.48 s.
+    subscriber.want("v", ["room"], "c", retry=retry)
+    await until(lambda: s.first.latest.track == "c", "move to c")
+    rejected_at = time.monotonic()
+    s.first.latest.reject(0x10, "unroutable")
+    count = len(s.first.subscriptions)
+    await until(lambda: len(s.first.subscriptions) == count + 1, "c retried")
+    assert time.monotonic() - rejected_at < 0.2
 
 
 async def test_a_withdrawn_generation_with_none_newer_still_restarts(cleanup: list[Callable[[], object]]) -> None:

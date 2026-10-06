@@ -1279,6 +1279,68 @@ describe('make-before-break moves (#282)', () => {
     await until(() => seen.includes('restarted stale'), 'the replacement went stale too');
   });
 
+  it('replays the held later groups even when a handler throws at the cutover', async () => {
+    const logged: unknown[] = [];
+    const original = console.error;
+    console.error = (error: unknown) => logged.push(error);
+    cleanup.push(() => {
+      console.error = original;
+    });
+    const { subscriber, connections } = await start();
+    const objects: number[] = [];
+    subscriber.want(
+      'v',
+      { namespace: ['room'], track: 'a', until: (object) => object.groupId === 5 },
+      {
+        onObject: (object) => {
+          objects.push(object.groupId);
+          if (object.groupId === 5) throw new Error('decoder failed');
+        },
+      },
+    );
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want(
+      'v',
+      { namespace: ['room'], track: 'b', until: (object) => object.groupId === 5 },
+      {
+        onObject: (object) => {
+          objects.push(object.groupId);
+          if (object.groupId === 5) throw new Error('decoder failed');
+        },
+      },
+    );
+    await until(() => subs(connections[0]!).length === 2, 'pending move');
+    const b = subs(connections[0]!)[1]!;
+    b.accept();
+    b.object(6);
+    b.object(7);
+    b.object(5);
+    expect(objects).toEqual([5, 6, 7]);
+    expect(logged).toHaveLength(1);
+  });
+
+  it("starts a new move target on its own backoff, not the superseded one's", async () => {
+    const { subscriber, connections } = await start();
+    const retry = { initialDelayMs: 60, maxDelayMs: 60_000 };
+    subscriber.want('v', { namespace: ['room'], track: 'a', retry });
+    await until(() => subs(connections[0]!).length === 1, 'subscribe');
+    subs(connections[0]!)[0]!.accept();
+    subscriber.want('v', { namespace: ['room'], track: 'b', retry });
+    for (let n = 2; n <= 4; n++) {
+      await until(() => subs(connections[0]!).length === n, `move to b, attempt ${n - 1}`);
+      subs(connections[0]!)[n - 1]!.reject(UNROUTABLE);
+    }
+    // b has failed three times: its next retry would wait 240 to 480 ms.
+    subscriber.want('v', { namespace: ['room'], track: 'c', retry });
+    await until(() => subs(connections[0]!).at(-1)!.options.track === 'c', 'move to c');
+    const rejectedAt = Date.now();
+    subs(connections[0]!).at(-1)!.reject(UNROUTABLE);
+    const count = subs(connections[0]!).length;
+    await until(() => subs(connections[0]!).length === count + 1, 'c retried');
+    expect(Date.now() - rejectedAt).toBeLessThan(200);
+  });
+
   it('still restarts when the generation is withdrawn with none newer', async () => {
     const { connections, seen, discovery, old } = await onOldGeneration();
     discovery.push({ type: 'unannounced', namespace: ['room', old] });

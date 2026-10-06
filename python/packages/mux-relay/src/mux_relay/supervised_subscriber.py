@@ -808,6 +808,8 @@ async def _follow(
     # A move whose replacement failed, retried after the backoff unless the want asks for something else first.
     retry_move: tuple[_Slot, asyncio.TimerHandle] | None = None
     move_failures = 0
+    # The target of the latest move, whose failures ``move_failures`` counts.
+    move_target: tuple[tuple[str, ...], str, MessageParameters | None] | None = None
     last_object_at = 0.0
 
     def settle(next_outcome: _Outcome) -> None:
@@ -903,23 +905,32 @@ async def _follow(
         except Exception:
             # A delivery callback's failure is the application's; the want keeps delivering.
             _log.exception("on_switched raised; the want delivers regardless")
+        # Later groups that reached the replacement early, out of order, follow the object that cut over.
+        # Each delivery is isolated, so one raising callback loses neither the rest nor the held events.
+        replay = _held_after(slot.held, obj)
+        slot.held = []
+
+        def deliver(name: str, value: object) -> None:
+            try:
+                want.call(name, value)
+            except Exception:
+                _log.exception("%s raised at a cutover; the want delivers regardless", name)
+
         # A handler may have moved the want again or cancelled it; the object still belongs to this cutover.
         if not over() and active is slot:
-            want.call("on_object", obj)
-        # Later groups that reached the replacement early, out of order, follow the object that cut over.
-        for held in _held_after(slot.held, obj):
+            deliver("on_object", obj)
+        for held in replay:
             if over() or active is not slot:
                 break
             if isinstance(held, ObjectEvent):
                 if held.value.group_id > obj.group_id:
                     slot.progressed = True
                 slot.largest_group = max(slot.largest_group or held.value.group_id, held.value.group_id)
-                want.call("on_object", held.value)
+                deliver("on_object", held.value)
             elif isinstance(held, SubgroupEndEvent):
-                want.call("on_subgroup_end", held.value)
+                deliver("on_subgroup_end", held.value)
             else:
-                want.call("on_subgroup_reset", held.value)
-        slot.held = []
+                deliver("on_subgroup_reset", held.value)
 
     def on_object(slot: _Slot, obj: MoqtObject) -> None:
         nonlocal last_object_at
@@ -1017,7 +1028,7 @@ async def _follow(
 
     def reconcile() -> None:
         """Bring the subscriptions in line with what the want asks for now: its options and the newest generation."""
-        nonlocal pending
+        nonlocal pending, move_failures, move_target
         if over():
             return
         target = want.options.namespace
@@ -1039,6 +1050,7 @@ async def _follow(
         if active.made_with(target, track, parameters):
             # Asked for what is active again: a pending move is no longer wanted.
             clear_retry()
+            move_target = None
             if pending is not None:
                 pending.cancel()
                 pending = None
@@ -1057,6 +1069,10 @@ async def _follow(
         if pending is not None:
             pending.cancel()
             pending = None
+        # A new target starts its own backoff; a retry of the same one keeps counting.
+        if move_target != (target, track, parameters):
+            move_failures = 0
+        move_target = (target, track, parameters)
         try:
             pending = open_slot(target, target_generation)
         except Exception as error:
