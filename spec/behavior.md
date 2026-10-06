@@ -644,8 +644,7 @@ Both supervisors:
   - **The pending subscription fails before its cutover.** A rejection no wait fixes is surfaced,
     and the want stops, unless the key was wanted again with another target first. Then the want
     reports `onRestarted` for the subscription it cancelled (its own ending's reason, else
-    `terminated`), and tries the new
-    target at once. Any other failure leaves the current subscription delivering, and the move
+    `terminated`), and tries the new target at once. Any other failure leaves the current subscription delivering, and the move
     is retried after the retry backoff, sooner if the want asks for something else. If the old
     subscription had already ended, `onRestarted` reports its reason instead, and the want
     resubscribes as after any restart.
