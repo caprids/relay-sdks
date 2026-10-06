@@ -402,6 +402,42 @@ history subscribes with `RelativeGroupFilter` / `{ type: 'relative-group' }` (`g
 either reaches depends on what the relay still holds; on 0.15.8 the absolute case above started
 later than it asked for.
 
+## Subscription parameters
+
+`MessageParameters` exposes every draft-22 SUBSCRIBE parameter, and both SDKs send whatever the
+application sets. moq-relay decides which it acts on. Read from the source at tag
+`moq-relay-v0.17.0` (`Subscribe` in `rs/moq-net/src/ietf/subscribe.rs`, the SUBSCRIBE serve path in
+`rs/moq-net/src/ietf/publisher.rs`) and measured on production 0.17.0 on 2026-10-06
+([issue #265](https://github.com/muxinc/relay-sdks/issues/265)):
+
+| parameter | moq-relay 0.17.0 | effect for an application |
+| --- | --- | --- |
+| SUBSCRIBER_PRIORITY (`0x20`) | honored on SUBSCRIBE: it sets the priority the relay serves this viewer with. It is not passed upstream (the relay's own SUBSCRIBE carried 255 when the viewer asked for 7) | set it on the SUBSCRIBE; changing it later with `update()` ends the subscription ([deviation 4](behavior.md#relay-interop-deviations)) |
+| publisher priority (track property `0x0E`) | honored: carried in group headers and SUBSCRIBE_OK | — |
+| LOCATION_FILTER (`0x21`) | honored, with draft-20 framing on every draft | see [late subscribers](#late-subscribers-and-location-filters) and [LOCATION_FILTER framing](#draft-22-location_filter-framing) |
+| GROUP_ORDER (`0x22`) | decoded and **ignored**: SUBSCRIBE_OK states Descending whatever the viewer asked for and whatever the publisher declared (DEFAULT_PUBLISHER_GROUP_ORDER), and the relay's upstream SUBSCRIBE always asks for Descending | do not rely on group order. Asking for Ascending does not get it: a late subscriber's cached groups arrived in no consistent order (7 of 7 runs; for example groups `[2..10, 1, 11, 12]`) |
+| NEW_GROUP_REQUEST (`0x32`) | decoded and **ignored**, on SUBSCRIBE and REQUEST_UPDATE: never forwarded upstream, neither in the SUBSCRIBE for a track without a subscription nor as a REQUEST_UPDATE for one already served, which draft-22 §9.20.19 requires of a relay | there is no protocol key-frame request through this relay. An application that needs one (a decoder error, a layer switch) carries the request on its own track back to the publisher |
+| OBJECT_DELIVERY_TIMEOUT (`0x02`), SUBGROUP_DELIVERY_TIMEOUT (`0x06`) | decoded and ignored; not passed upstream | only the publisher's own values apply ([delivery timeouts](behavior.md#delivery-timeouts)) |
+| AUTHORIZATION_TOKEN (`0x03`) on a request | ignored: the session's grant authorizes every request | authorize at connect time |
+| FORWARD (`0x10`) = 0 | refused per request: REQUEST_ERROR 3 `FORWARD=0 not supported`, session stays open | see [deviation 4](behavior.md#relay-interop-deviations) |
+| range filters (`0x25` to `0x28`) | refused per request: REQUEST_ERROR 3 `range filters not supported` | — |
+| INCLUDE_PROPERTIES (`0x35`) | honored | one raw byte from 0.17.0; see the top of this page |
+
+Neither SDK's publisher declares DYNAMIC_GROUPS (`0x30`) or acts on a NEW_GROUP_REQUEST, so a relay
+that forwarded it would not change the outcome for an SDK publisher yet. The relay's upstream
+SUBSCRIBE to an SDK publisher carries FORWARD 1, its own priority, GROUP_ORDER Descending, a
+LOCATION_FILTER and a FILL_PARAMETERS, and nothing the viewer asked for beyond the track.
+
+To re-check after a relay upgrade, run the probe below. It subscribes with each ignored parameter
+set, records the relay's upstream SUBSCRIBE and any REQUEST_UPDATE as the publisher receives them,
+the group order SUBSCRIBE_OK states, and the order a late subscriber's cached groups arrive in. It
+exits non-zero, with the differing rows, when the relay no longer does what this table says. It is
+a relay fact, not an SDK contract, so only the Python SDK runs it.
+
+```sh
+RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python:probe:relay-parameters
+```
+
 ## Subgroup resets
 
 moq-relay 0.15.8 forwards a subgroup reset once it has begun forwarding that subgroup, but not at

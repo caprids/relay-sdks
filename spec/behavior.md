@@ -170,6 +170,11 @@ Messages are not a compatibility contract; the class and the point of rejection 
   needs earlier groups asks for them with a relative-group or absolute filter; an absolute start is
   served from the requested group while the relay still caches it. The SDK sends the
   filter it is given and adds none.
+- The SDK sends every subscription parameter the application sets. Which ones take effect is the
+  relay's choice: moq-relay 0.17.0 ignores GROUP_ORDER, NEW_GROUP_REQUEST and the delivery
+  timeouts on a SUBSCRIBE, and refuses FORWARD = 0 and range filters
+  ([subscription parameters](relay-interop.md#subscription-parameters)). The SDK does not warn
+  about an ignored parameter.
 - The request timeout bounds only the subscription's initial response. An accepted subscription
   has no application inactivity deadline. The SDK schedules no application-level keepalive: keeping
   the transport connected is left to peer traffic and the transport's own keepalive, which
