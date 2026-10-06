@@ -245,12 +245,11 @@ class _State:
     current: _Connection | None = None
     retiring: _Connection | None = None
     """The connection a rotation is replacing, while its wants move off it."""
-    rotation: asyncio.Future[None] | None = None
-    """Resolved by ``rotate()`` to rotate the live connection; replaced for each connection served."""
-    queue_next: bool = False
-    """Set during a rotation's overlap: a ``rotate()`` then is for the replacement, taken up once it is served."""
-    rotate_next: bool = False
-    """A ``rotate()`` made during a rotation's overlap, for the replacement once it is served."""
+    rotate_requested: bool = False
+    """Set by ``rotate()`` while a connection is up, and consumed by the rotation that answers it: the next one
+    to start, or one whose replacement is still connecting or being discarded."""
+    wake: asyncio.Future[None] | None = None
+    """Wakes a serve loop waiting for its rotation; replaced for each wait."""
     waiters: list[asyncio.Future[None]] = field(default_factory=list)
 
     def wake_waiters(self) -> None:
@@ -356,12 +355,11 @@ class SupervisedSubscriber:
         closes once every want has moved, after 10 seconds at most. A no-op while no connection is up.
         """
         state = self._state
-        rotation = state.rotation
-        if rotation is not None and not rotation.done():
-            rotation.set_result(None)
-        elif state.queue_next:
-            # The replacement is live, mid-overlap: rotate it once it is served.
-            state.rotate_next = True
+        if state.stopped or state.current is None:
+            return
+        state.rotate_requested = True
+        if state.wake is not None and not state.wake.done():
+            state.wake.set_result(None)
 
     def close(self) -> None:
         """Stop reconnecting, cancel every want and close the connection. Idempotent."""
@@ -580,9 +578,6 @@ async def _supervise_relay_subscriber(
                 return None
         state.current = nxt
         state.retiring = old
-        # The replacement is current: a rotate() from now on is for it, not this rotation.
-        state.rotation = None
-        state.queue_next = True
         set_status("live")
         state.wake_waiters()
         old.idle = loop.create_future()
@@ -613,35 +608,39 @@ async def _supervise_relay_subscriber(
         # Cleared once an automatic rotation found no fresher credential: only rotate() tries again.
         automatic = True
         while True:
-            asked: asyncio.Future[None] = loop.create_future()
-            state.rotation = asked
-            state.queue_next = False
-            if state.rotate_next:
-                state.rotate_next = False
-                asked.set_result(None)
-            due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, asked))
+            wake: asyncio.Future[None] = loop.create_future()
+            state.wake = wake
+            if state.rotate_requested:
+                wake.set_result(None)
+            due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, wake))
             _observe(due)
             try:
                 await wait_any([lifetime], settles=[live.subscriber.closed, due])
                 if live.subscriber.closed.done() or state.stopped:
                     return await live.subscriber.closed
-                manual = asked.done()
-                # A rotate() while the replacement connects makes this rotation a manual one: it takes the replacement.
-                promote: asyncio.Future[None] = loop.create_future()
-                state.rotation = promote
-                nxt = await rotate_from(live, lambda manual=manual, promote=promote: manual or promote.done())
-                if state.rotation is promote:
-                    state.rotation = None
+                # A rotate() before the replacement is current makes this rotation a manual one: it takes the
+                # replacement.
+                manual = False
+
+                def is_manual() -> bool:
+                    nonlocal manual
+                    if state.rotate_requested:
+                        state.rotate_requested = False
+                        manual = True
+                    return manual
+
+                is_manual()
+                nxt = await rotate_from(live, is_manual)
                 if nxt is not None:
                     return nxt
                 if live.ended.cancelled or state.stopped:
                     return await live.subscriber.closed
-                if not manual and not promote.done():
+                if not manual:
                     automatic = False
             finally:
                 due.cancel()
-                if state.rotation is asked:
-                    state.rotation = None
+                if state.wake is wake:
+                    state.wake = None
 
     async def run() -> None:
         nonlocal first

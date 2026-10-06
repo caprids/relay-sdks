@@ -1625,3 +1625,89 @@ async def test_closes_a_replacement_generation_that_close_could_not_see_yet() ->
 def _observe_close(close: Awaitable[None]) -> None:
     task = asyncio.ensure_future(close)
     task.add_done_callback(lambda done: done.exception())
+
+
+# ------------------------------------------------------------------ Codex pass 10 fixes (#261)
+
+
+async def test_keeps_the_old_generation_open_when_closing_a_group_there_is_refused(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    writer = publisher.register_track("video")
+    p.connections[0].tracks["video"].set_demand(True)
+    await until(lambda: writer.has_demand, "demand")
+    group = await writer.open_group()
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "next generation")
+    p.connections[1].tracks["video"].set_demand(True)
+    await writer.write(b"\x07")
+    p.connections[0].tracks["video"].fail_next = RelayError("busy", code="WRITE_PENDING", phase="closing")
+    with pytest.raises(RelayError) as refused:
+        await group.close()
+    assert refused.value.code == "WRITE_PENDING"
+    await asyncio.sleep(0.02)
+    assert p.connections[0].close_calls == 0
+    await group.close()
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed once the group did")
+
+
+async def test_answers_a_rotate_made_while_a_discarded_replacement_closes(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    soon = _in(0.2)
+    gate = asyncio.Event()
+    connections: list[FakePublisher] = []
+
+    async def connect(namespace: tuple[str, ...], _attempt: CancellationToken) -> Any:
+        fake = FakePublisher(namespace, soon)
+        if len(connections) == 1:
+            original = fake.close
+
+            async def held_close() -> None:
+                await gate.wait()
+                await original()
+
+            fake.close = held_close  # ty: ignore[invalid-assignment]
+        connections.append(fake)
+        return fake
+
+    publisher = await _supervise_relay_publisher(connect, ["room"], reconnect=FAST, rotate_before=0.15)
+
+    async def close() -> None:
+        gate.set()
+        await publisher.close()
+
+    cleanup.append(close)
+    await until(lambda: len(connections) == 2, "automatic replacement connected")
+    await asyncio.sleep(0.01)  # being discarded: its close is held
+    publisher.rotate()
+    gate.set()
+    await until(lambda: len(connections) == 3, "the manual rotation")
+    await until(lambda: connections[0].close_calls == 1, "the replacement taken")
+    assert publisher.generation is not None and publisher.generation.namespace == connections[2].namespace
+
+
+async def test_answers_a_rotate_called_from_on_generation_after_a_reconnect(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    connections: list[FakePublisher] = []
+    rotate_from_callback = [False]
+    supervised: list[SupervisedPublisher] = []
+
+    async def connect(namespace: tuple[str, ...], _attempt: CancellationToken) -> Any:
+        fake = FakePublisher(namespace)
+        connections.append(fake)
+        return fake
+
+    def on_generation(_info: object) -> None:
+        if rotate_from_callback[0]:
+            rotate_from_callback[0] = False
+            supervised[0].rotate()
+
+    publisher = await _supervise_relay_publisher(connect, ["room"], reconnect=FAST, on_generation=on_generation)
+    supervised.append(publisher)
+    cleanup.append(publisher.close)
+    rotate_from_callback[0] = True
+    connections[0].end(RuntimeError("lost"))
+    await until(lambda: len(connections) == 3, "the rotation asked for from on_generation")

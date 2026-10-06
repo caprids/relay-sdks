@@ -514,10 +514,8 @@ class _SupervisedGroupWriter(RelayGroupWriter):
         await self.write(_encode_json(value), properties=properties, status=status)
 
     async def close(self) -> None:
-        try:
-            await self._mapped(self._group.close)
-        finally:
-            self._release()
+        # Released by `_mapped` only once the group is closed: a refused close (WRITE_PENDING) keeps it holding.
+        await self._mapped(self._group.close)
 
     def abort(self, reason: BaseException | None = None) -> None:
         self._aborted = True
@@ -539,12 +537,11 @@ class _State:
     """The generation a rotation is replacing, while its tracks move off it."""
     status: SupervisedStatus = "connecting"
     stopped: bool = False
-    rotation: asyncio.Future[None] | None = None
-    """Resolved by ``rotate()`` to rotate the live generation; replaced for each generation served."""
-    queue_next: bool = False
-    """Set during a rotation's overlap: a ``rotate()`` then is for the replacement, taken up once it is served."""
-    rotate_next: bool = False
-    """A ``rotate()`` made during a rotation's overlap, for the replacement once it is served."""
+    rotate_requested: bool = False
+    """Set by ``rotate()`` while a connection is up, and consumed by the rotation that answers it: the next one
+    to start, or one whose replacement is still connecting or being discarded."""
+    wake: asyncio.Future[None] | None = None
+    """Wakes a serve loop waiting for its rotation; replaced for each wait."""
     draining: set[asyncio.Future[None]] = field(default_factory=set)
     """Retired generations still closing: draining groups the relay has not acknowledged. ``close()`` waits for them."""
 
@@ -624,12 +621,11 @@ class SupervisedPublisher:
         at most. A no-op while no generation is up.
         """
         state = self._state
-        rotation = state.rotation
-        if rotation is not None and not rotation.done():
-            rotation.set_result(None)
-        elif state.queue_next:
-            # The replacement is live, mid-overlap: rotate it once it is served.
-            state.rotate_next = True
+        if state.stopped or state.current is None:
+            return
+        state.rotate_requested = True
+        if state.wake is not None and not state.wake.done():
+            state.wake.set_result(None)
 
     async def close(self) -> None:
         """Stop reconnecting and close the live generation as :meth:`RelayPublisher.close` does. Idempotent."""
@@ -856,9 +852,6 @@ async def _supervise_relay_publisher(
                 return None
         state.current = nxt
         state.retiring = live
-        # The replacement is current: a rotate() from now on is for it, not this rotation.
-        state.rotation = None
-        state.queue_next = True
         moved = [track._hand_over(nxt) for track in list(state.tracks.values())]
         set_status("live")
         report(nxt)
@@ -912,35 +905,39 @@ async def _supervise_relay_publisher(
         # Cleared once an automatic rotation found no fresher credential: only rotate() tries again.
         automatic = True
         while True:
-            asked: asyncio.Future[None] = loop.create_future()
-            state.rotation = asked
-            state.queue_next = False
-            if state.rotate_next:
-                state.rotate_next = False
-                asked.set_result(None)
-            due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, asked))
+            wake: asyncio.Future[None] = loop.create_future()
+            state.wake = wake
+            if state.rotate_requested:
+                wake.set_result(None)
+            due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, wake))
             _observe(due)
             try:
                 await wait_any([stopping], settles=[live.publisher.closed, due])
                 if live.publisher.closed.done() or state.stopped:
                     return await live.publisher.closed
-                manual = asked.done()
-                # A rotate() while the replacement connects makes this rotation a manual one: it takes the replacement.
-                promote: asyncio.Future[None] = loop.create_future()
-                state.rotation = promote
-                nxt = await rotate_from(live, lambda manual=manual, promote=promote: manual or promote.done())
-                if state.rotation is promote:
-                    state.rotation = None
+                # A rotate() before the replacement is current makes this rotation a manual one: it takes the
+                # replacement.
+                manual = False
+
+                def is_manual() -> bool:
+                    nonlocal manual
+                    if state.rotate_requested:
+                        state.rotate_requested = False
+                        manual = True
+                    return manual
+
+                is_manual()
+                nxt = await rotate_from(live, is_manual)
                 if nxt is not None:
                     return nxt
                 if live.ended or state.stopped:
                     return await live.publisher.closed
-                if not manual and not promote.done():
+                if not manual:
                     automatic = False
             finally:
                 due.cancel()
-                if state.rotation is asked:
-                    state.rotation = None
+                if state.wake is wake:
+                    state.wake = None
 
     async def run() -> None:
         nonlocal first

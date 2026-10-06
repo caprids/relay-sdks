@@ -124,6 +124,9 @@ class FakeGroup:
     async def close(self) -> None:
         if self._track.closed:
             raise RelayError("Published track is closed", code="CLOSED", phase="closing")
+        if self._track.fail_next is not None:
+            error, self._track.fail_next = self._track.fail_next, None
+            raise error
         self.closed = True
 
     def abort(self, reason: BaseException | None = None) -> None:
