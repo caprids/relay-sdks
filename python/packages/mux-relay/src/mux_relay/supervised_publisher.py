@@ -529,9 +529,11 @@ async def _supervise_relay_publisher(
                 live.ended = True
                 with contextlib.suppress(Exception):
                     await live.publisher.close()
-            set_status("closed")
-            if not closed.done():
-                closed.set_result(Closed(error))
+            try:
+                set_status("closed")
+            finally:
+                if not closed.done():
+                    closed.set_result(Closed(error))
 
         shutdown = asyncio.ensure_future(finish())
         _observe(shutdown)
@@ -602,10 +604,20 @@ async def _supervise_relay_publisher(
             await wait_any([stopping], limit=backoff_delay(attempt, backoff))
             attempt += 1
 
-    runner = asyncio.ensure_future(run())
+    async def supervise() -> None:
+        try:
+            await run()
+        except Exception as error:
+            # An application callback (on_status, on_generation) raised: stop rather than leave the
+            # supervisor neither reconnecting nor closed, and fail a caller still waiting to connect.
+            await stop(error)
+
+    runner = asyncio.ensure_future(supervise())
     _observe(runner)
     started = first
     assert started is not None
+    # A caller that stops waiting detaches from the shield, which then no longer observes the result.
+    _observe(started)
     try:
         await asyncio.shield(started)
     except asyncio.CancelledError:

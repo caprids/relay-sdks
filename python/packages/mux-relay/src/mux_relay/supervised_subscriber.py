@@ -390,9 +390,11 @@ async def _supervise_relay_subscriber(
             state.current.subscriber.close()
         state.current = None
         state.wake_waiters()
-        set_status("closed")
-        if not closed.done():
-            closed.set_result(Closed(error))
+        try:
+            set_status("closed")
+        finally:
+            if not closed.done():
+                closed.set_result(Closed(error))
 
     def on_cancelled(reason: BaseException) -> None:
         stop(reason)
@@ -446,10 +448,20 @@ async def _supervise_relay_subscriber(
             await wait_any([lifetime], limit=backoff_delay(attempt, backoff))
             attempt += 1
 
-    runner = asyncio.ensure_future(run())
+    async def supervise() -> None:
+        try:
+            await run()
+        except Exception as error:
+            # An application callback (on_status, on_generation) raised: stop rather than leave the
+            # supervisor neither reconnecting nor closed, and fail a caller still waiting to connect.
+            stop(error)
+
+    runner = asyncio.ensure_future(supervise())
     _observe(runner)
     started = first
     assert started is not None
+    # A caller that stops waiting detaches from the shield, which then no longer observes the result.
+    _observe(started)
     try:
         await asyncio.shield(started)
     except asyncio.CancelledError:

@@ -951,8 +951,21 @@ async def verify(
     would.
     """
     result = Verified(video_groups=set(), problems=[])
-    subscriber = await connect_supervised_subscriber(config.url, get_token=lambda: config.token, cancellation=lifetime)
     assert result.problems is not None
+    # Bounded, connection included: the run's own duration timer starts only after this returns, and a
+    # supervised connection that keeps failing, an announce that no solicitation covers, or a relay that
+    # keeps refusing the namespace would otherwise hold the media back forever.
+    deadline = asyncio.get_running_loop().time() + VERIFY_STARTUP_TIMEOUT
+    try:
+        async with asyncio.timeout_at(deadline):
+            subscriber = await connect_supervised_subscriber(
+                config.url, get_token=lambda: config.token, cancellation=lifetime
+            )
+    except TimeoutError:
+        # Verification is diagnostic: record it and let the media start.
+        result.problems.append(f"verify: subscriber not connected within {VERIFY_STARTUP_TIMEOUT:g} s")
+        return None, result
+
     assert result.video_groups is not None
     problems = result.problems
     groups = result.video_groups
@@ -1058,18 +1071,15 @@ async def verify(
             ),
         )
 
-    # Bounded: the run's own duration timer starts only after this returns, and an announce that no
-    # solicitation covers (or a relay that keeps refusing the namespace) would otherwise hold the
-    # media back forever.
     try:
-        async with asyncio.timeout(VERIFY_STARTUP_TIMEOUT):
+        async with asyncio.timeout_at(deadline):
             await publisher.announced
             log("verify: namespace announced", {"namespace": "/".join(config.namespace)})
             await all_subscribed.wait()
     except TimeoutError:
         # Verification is diagnostic: record it and let the media start.
         problems.append(
-            f"verify: subscribes not accepted within {VERIFY_STARTUP_TIMEOUT:g} s "
+            f"verify: subscribes not accepted within {VERIFY_STARTUP_TIMEOUT:g} s of starting "
             "(announce pending, or the namespace still unknown to the relay)"
         )
 

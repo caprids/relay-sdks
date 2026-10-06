@@ -27,7 +27,7 @@ from mux_relay import (
     SupervisionBackoff,
     WantHandlers,
 )
-from mux_relay._supervision import RESUBSCRIBE_BACKOFF, _Backoff, backoff_delay, new_generation
+from mux_relay._supervision import RESUBSCRIBE_BACKOFF, _Backoff, backoff_delay, new_generation, wait_any
 from mux_relay.supervised_publisher import _supervise_relay_publisher
 from mux_relay.supervised_subscriber import _supervise_relay_subscriber
 
@@ -778,3 +778,72 @@ async def test_surfaces_a_permanent_discovery_failure_seen_while_backing_off(
     await asyncio.sleep(0.01)
     s.first.discoveries[0].fail(request_error(0x1, "unauthorized"))
     await until(lambda: len(r.errors) == 1, "on_error")
+
+
+# ------------------------------------------------------------------ regressions from the Python review
+
+
+async def test_a_raising_status_callback_stops_the_supervisors_instead_of_hanging() -> None:
+    boom = RuntimeError("status callback failed")
+
+    def on_status(status: str, _error: BaseException | None) -> None:
+        if status == "live":
+            raise boom
+
+    p = Publishers()
+    with pytest.raises(RuntimeError) as raised:
+        await asyncio.wait_for(_supervise_relay_publisher(p.connect, ["room"], on_status=on_status), 1)
+    assert raised.value is boom
+    assert p.connections[0].close_calls == 1
+
+    s = Subscribers()
+    with pytest.raises(RuntimeError) as raised:
+        await asyncio.wait_for(_supervise_relay_subscriber(s.connect, on_status=on_status), 1)
+    assert raised.value is boom
+    assert s.first.closed.done()
+
+
+async def test_a_raising_generation_callback_closes_the_publisher(cleanup: list[Callable[[], object]]) -> None:
+    p = Publishers()
+    generations = 0
+
+    def on_generation(_info: object) -> None:
+        nonlocal generations
+        generations += 1
+        if generations == 2:
+            raise RuntimeError("second generation callback failed")
+
+    publisher = await _supervise_relay_publisher(p.connect, ["room"], reconnect=FAST, on_generation=on_generation)
+    cleanup.append(publisher.close)
+    p.connections[0].end(RuntimeError("lost"))
+    closed = await asyncio.wait_for(publisher.closed, 1)
+    assert isinstance(closed.error, RuntimeError)
+    assert publisher.status == "closed"
+
+
+async def test_a_caller_that_stops_waiting_leaves_no_unretrieved_exception() -> None:
+    async def hang(*args: object) -> Any:
+        # Like the real connect, the attempt ends with its token's reason once the supervisor stops.
+        attempt = cast(CancellationToken, args[-1])
+        await wait_any([attempt])
+        attempt.throw_if_cancelled()
+
+    loop = asyncio.get_running_loop()
+    unretrieved: list[dict[str, Any]] = []
+    previous = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, context: unretrieved.append(context))
+    try:
+        for start in (
+            lambda: _supervise_relay_publisher(hang, ["room"]),
+            lambda: _supervise_relay_subscriber(hang),
+        ):
+            with pytest.raises(TimeoutError):
+                await asyncio.wait_for(start(), 0.02)
+        await asyncio.sleep(0.01)
+        import gc
+
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(previous)
+    assert [context.get("message") for context in unretrieved] == []
