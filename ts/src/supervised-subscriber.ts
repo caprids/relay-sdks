@@ -1013,7 +1013,9 @@ async function follow(
   /** Old subscriptions draining after a cutover, each with the timer that cancels it. */
   const draining = new Map<Slot, ReturnType<typeof setTimeout>>();
   /** A move whose replacement failed, retried after the backoff unless the want asks for something else first. */
-  let retryMove: { key: string; connection: Connection; timer: ReturnType<typeof setTimeout> } | undefined;
+  let retryMove:
+    | { key: string; connection: Connection; timer: ReturnType<typeof setTimeout>; unobserve(): void }
+    | undefined;
   let moveFailures = 0;
   /** The target of the latest move, whose failures `moveFailures` counts. */
   let moveTarget: string | undefined;
@@ -1065,6 +1067,7 @@ async function follow(
 
   const clearRetry = () => {
     clearTimeout(retryMove?.timer);
+    retryMove?.unobserve();
     retryMove = undefined;
   };
   const stopDrain = (slot: Slot) => {
@@ -1109,18 +1112,28 @@ async function follow(
     }
     // The active subscription keeps delivering; the move is retried after the backoff.
     const key = slot.key;
+    const on = slot.connection;
+    // The connection the move is to be retried on closing leaves nothing to retry on: restart now, not after the delay.
+    const closed = () => {
+      if (retryMove?.connection !== on || over()) return;
+      clearRetry();
+      settle(cancelledOrConnection(accepted()));
+    };
+    on.signal.addEventListener('abort', closed, { once: true });
     retryMove = {
       key,
-      connection: slot.connection,
+      connection: on,
       timer: setTimeout(
         () => {
           if (retryMove?.key !== key) return;
-          retryMove = undefined;
+          clearRetry();
           reconcile();
         },
         backoffDelay(moveFailures++, want.retry),
       ),
+      unobserve: () => on.signal.removeEventListener('abort', closed),
     };
+    if (on.signal.aborted) closed();
   };
 
   const cutover = (slot: Slot, object: MoqtObject) => {

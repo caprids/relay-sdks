@@ -586,7 +586,11 @@ type WriteOptions = { properties?: readonly PublishProperty[]; signal?: AbortSig
 /** One registered track across generations: its writer, the binding to the live generation, and demand. */
 class SupervisedTrack {
   readonly writer: RelayTrackWriter;
-  #binding: { generation: Generation; writer: RelayTrackWriter } | undefined;
+  /**
+   * The live generation's writer. `covered` is set when a move reported the writer's `true`: its iterator's next `true`
+   * is that same demand, not a new one, unless a `false` came first.
+   */
+  #binding: { generation: Generation; writer: RelayTrackWriter; covered?: boolean } | undefined;
   /** The generation a rotation is moving this track to, until it moves. */
   #pending:
     | {
@@ -742,7 +746,7 @@ class SupervisedTrack {
     if (stay && !force) return;
     this.#pending = undefined;
     if (binding && !binding.generation.ended) this.#retired.set(binding.generation, binding.writer);
-    this.#binding = { generation: pending.generation, writer: pending.writer };
+    this.#binding = { generation: pending.generation, writer: pending.writer, covered: pending.writer.hasDemand };
     // The move reports the next generation's demand as it is now: `true` again if it has demand, so demand-driven state
     // reaches it, or the loss of demand. Values its iterator had queued before the move are stale and not reported.
     this.#emitDemand(pending.writer.hasDemand);
@@ -784,7 +788,8 @@ class SupervisedTrack {
       for await (const value of changes) {
         const bound = this.#binding?.generation === generation;
         if (!bound && this.#pending?.generation !== generation) break;
-        const repeated = value && previous === true;
+        // Any `true` after this iterator's first value is new demand: a repeat, or demand back after a `false`.
+        const renewed = value && previous !== undefined;
         previous = value;
         // Demand leaving a generation a rotation is moving off: move first if the next one has demand, so the track
         // reports no `false` it did not have. The move reports the next generation's own demand.
@@ -792,9 +797,15 @@ class SupervisedTrack {
           this.#maybeMove();
           if (this.#binding?.generation !== generation) continue;
         }
-        // Report only what is true of the writer now: a value queued before a move or a newer change is stale. A
-        // change is reported, and so is a repeated `true`, which demand-driven state is written again on.
-        if (bound && value === writer.hasDemand && (value !== this.#lastDemand || repeated)) this.#emitDemand(value);
+        const binding = this.#binding;
+        if (bound && binding) {
+          // A `false` is not reported when the writer has demand again by now, but the `true` after it is renewed
+          // demand all the same, which demand-driven state (a catalog) is written again on. Only the move's own `true`
+          // is not repeated.
+          if (!value) binding.covered = false;
+          if (value && binding.covered) binding.covered = false;
+          else if (value === writer.hasDemand && (value !== this.#lastDemand || renewed)) this.#emitDemand(value);
+        }
         // Demand arriving on the next generation, or leaving the current one, is what moves a rotating track.
         this.#maybeMove();
       }

@@ -2495,4 +2495,52 @@ describe('rotation before the credential expires (#261)', () => {
       await changes.return?.();
     });
   });
+  describe('Codex review of the merge, pass 5', () => {
+    it('reports demand that came back after a false the writer no longer had', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'catalog' });
+      const track = connections[0]!.tracks.get('catalog')!;
+      track.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const changes = writer.demandChanges();
+      expect((await changes.next()).value).toBe(true);
+      // The relay replaced its upstream subscription: false then true, both queued before the supervisor runs.
+      track.setDemand(false);
+      track.setDemand(true);
+      const next = await Promise.race([
+        changes.next(),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50)),
+      ]);
+      expect(next?.value).toBe(true);
+      await changes.return?.();
+    });
+
+    it('restarts at once when the connection a failed rotation would retry on closes', async () => {
+      const connections: FakeSubscriber[] = [];
+      const subscriber = await superviseRelaySubscriber(
+        async () => {
+          const fake = fakeSubscriber();
+          connections.push(fake);
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', reconnect: fast },
+      );
+      cleanup.push(() => subscriber.close());
+      subscriber.want('v', {
+        namespace: ['room'],
+        track: 'v',
+        retry: { initialDelayMs: 60_000, maxDelayMs: 60_000 },
+      });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'replacement');
+      connections[1]!.subscriptions[0]!.reject(UNROUTABLE); // retried on the new connection after a minute
+      connections[0]!.end(); // the old connection goes
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      connections[1]!.end(new Error('lost')); // and so does the one the retry was for
+      await until(() => connections[2]?.subscriptions.length === 1, 'subscribed on the next connection at once');
+    });
+  });
 });
