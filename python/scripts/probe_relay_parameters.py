@@ -159,10 +159,15 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         await publisher.announced
         oks: list[SubscribeOk] = []
         live: list[int] = []
+        burst: set[int] = set()
 
         def on_live(obj: MoqtObject) -> None:
             if obj.status == "normal":
                 live.append(obj.group_id)
+
+                # Burst objects are told apart by size: warm-up writes can still be in flight.
+                if len(obj.payload) == BURST_PAYLOAD:
+                    burst.add(obj.group_id)
 
         # A subscribe that races the announce is refused (spec/relay-interop.md); retry it.
         refused: list[Any] = []
@@ -222,20 +227,17 @@ async def run(endpoint: str, token: str | None, namespace: list[str], report: An
         )
 
         # Groups the relay caches, each large enough that the order they are served in can show.
-        burst_start = max(live) + 1
-        burst_end = burst_start + BURST_GROUPS - 1
-
         for _ in range(BURST_GROUPS):
             await track.write(bytes(BURST_PAYLOAD))
 
-        burst = set(range(burst_start, burst_end + 1))
-        await wait_for(lambda: burst <= set(live), "the burst on the first subscriber")
+        await wait_for(lambda: len(burst) >= BURST_GROUPS, "the burst on the first subscriber")
+        burst_start = min(burst)
         updates_before = len(updates)
         late_oks: list[SubscribeOk] = []
         arrivals: list[int] = []
 
         def on_late(obj: MoqtObject) -> None:
-            if obj.status == "normal" and obj.object_id == 0:
+            if obj.status == "normal" and obj.group_id in burst:
                 arrivals.append(obj.group_id)
 
         late.subscribe(
