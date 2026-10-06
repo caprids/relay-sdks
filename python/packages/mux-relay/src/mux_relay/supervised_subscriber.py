@@ -616,7 +616,8 @@ async def _supervise_relay_subscriber(
         old.idle = loop.create_future()
         # Every want on the old connection ends its attempt there and subscribes on the new one.
         old.retiring.cancel()
-        if old.holds == 0:
+        # A want's rotation runs in the turn `retiring` is cancelled and may already have released the last hold.
+        if old.holds == 0 and not old.idle.done():
             old.idle.set_result(None)
         # The replacement ending cuts the overlap short too: the wants on it need the next connection now. So
         # does its own rotation falling due, for a credential shorter than the overlap.
@@ -1121,8 +1122,12 @@ async def _follow(
             return
 
         def on_retiring(_: object = None) -> None:
-            task = asyncio.ensure_future(rotate(on))
-            _observe(task)
+            # Runs inside the supervisor's cancel(): a failure here is this want's, never the supervisor's.
+            try:
+                rotate(on)
+            except Exception:
+                _log.exception("a want's rotation failed; it restarts as after a connection's end")
+                settle(cancelled_or_connection(accepted()))
 
         if on.retiring.cancelled:
             observed[on] = _nothing
@@ -1159,6 +1164,7 @@ async def _follow(
 
     def settle(next_outcome: _Outcome) -> None:
         nonlocal outcome
+
         if outcome is None:
             # A failure no wait fixes still ends an accepted subscription, which a superseding re-want
             # reports as a restart.
@@ -1413,7 +1419,10 @@ async def _follow(
                 if pending is not None and pending.connection is not slot.connection:
                     active_ended("connection")
                     return
-                if pending is None and retry_move is not None and retry_move[0].connection is not slot.connection:
+                elsewhere = (retry_move is not None and retry_move[0].connection is not slot.connection) or (
+                    rotation_to is not None and rotation_to.connection is not slot.connection
+                )
+                if pending is None and elsewhere:
                     slot.ended = "connection"
                     slot.cancel()
                     return
@@ -1461,6 +1470,10 @@ async def _follow(
                 )
                 return
             target_generation = discovery.current()
+            # A rotation's discovery on the next connection has found nothing yet: wait for it, the old one still
+            # delivers.
+            if target_generation is None and rotation_to is not None:
+                return
             # None announced: nothing to move to, so the want waits for one, as after a withdrawal.
             if target_generation is None:
                 settle(_Outcome("moved", accepted=accepted()))
@@ -1515,7 +1528,7 @@ async def _follow(
             return cancelled_or_connection(False)
         return _Outcome("fatal", error=error)
 
-    async def rotate(from_: _Connection) -> None:
+    def rotate(from_: _Connection) -> None:
         """A rotation replaced the active subscription's connection: move the subscription to the next one."""
         nonlocal rotation_to, unwatch_next
 
@@ -1544,18 +1557,9 @@ async def _follow(
                 release_unused()
                 settle(cancelled_or_connection(accepted()))
                 return
-            found = await next_watch.newest([*scope, settled, nxt.ended])
-            if not isinstance(found, str):
-                release()
-                if not over():
-                    settle(cancelled_or_connection(accepted()))
-                release_unused()
-                return
-        if over() or not current_from():
-            release()
-            release_unused()
-            return
-        # A rotation to a connection that retired in turn gives way to this one.
+        # Recorded at once, before the new connection's discovery has found the generation: reconcile waits for it,
+        # and the rotation is in flight meanwhile, so the old connection closing or this one retiring in turn keeps
+        # continuity. A rotation to a connection that retired in turn gives way to this one.
         if unwatch_next is not None:
             unwatch_next()
         if rotation_to is not None:

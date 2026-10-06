@@ -1031,7 +1031,18 @@ async function follow(
   const observed = new Map<Connection, () => void>();
   const observe = (on: Connection) => {
     if (observed.has(on)) return;
-    const onRetiring = () => rotate(on);
+    // Runs inside the supervisor's abort of the retiring signal: an unexpected failure restarts this want alone.
+    const onRetiring = () => {
+      try {
+        rotate(on);
+      } catch (error) {
+        // biome-ignore lint/suspicious/noConsole: the want's own failure, with no caller to report it to
+        console.error(
+          new Error('A want failed to start its rotation; it restarts on the new connection', { cause: error }),
+        );
+        settle(cancelledOrConnection(accepted()));
+      }
+    };
     on.retiring.addEventListener('abort', onRetiring, { once: true });
     observed.set(on, () => on.retiring.removeEventListener('abort', onRetiring));
     if (on.retiring.aborted) queueMicrotask(onRetiring);

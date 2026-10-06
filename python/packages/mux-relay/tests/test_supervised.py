@@ -2530,3 +2530,45 @@ async def test_reports_the_relay_renewing_demand_after_a_move_its_own_demand_tri
     nxt.set_demand(True)  # the relay replaced its upstream subscription
     assert await asyncio.wait_for(anext(changes), 0.05) is True
     await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+# ------------------------------------------------------------------ Codex review of the merge, pass 7 (#261)
+
+
+async def test_keeps_a_followed_rotation_silent_when_the_next_connection_rotates_before_its_discovery_answers(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    # The second connection's credential is short: it is rotated away before its discovery answers.
+    subscriber, s = await start_rotating_subscriber(cleanup, [None, _in(0.3), _in(3600)])
+    seen: list[str] = []
+    subscriber.want(
+        "v",
+        ["room"],
+        "v",
+        WantHandlers(
+            on_object=lambda obj: seen.append(f"object {obj.group_id}"),
+            on_restarted=lambda reason, _namespace: seen.append(f"restarted {reason}"),
+            on_switched=lambda _info: seen.append("switched"),
+        ),
+        generations=True,
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.discoveries) == 1, "discovery")
+    generation = new_generation(1_000)
+    s.first.discoveries[0].push("announced", ["room", generation])
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(5)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].discoveries) == 1, "second discovery")
+    # Before it answers, the second connection is rotated away too, and the first one closes.
+    await until(lambda: len(s.connections) == 3 and len(s.connections[2].discoveries) == 1, "third discovery")
+    s.first.end()
+    await asyncio.sleep(0.01)
+    s.connections[2].discoveries[0].push("announced", ["room", generation])
+    await until(lambda: len(s.connections[2].subscriptions) == 1, "replacement on the third connection")
+    replacement = s.connections[2].subscriptions[0]
+    replacement.accept()
+    replacement.send_object(5)  # already delivered
+    replacement.send_object(6)
+    assert seen == ["object 5", "object 6"]
