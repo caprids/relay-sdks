@@ -2315,3 +2315,50 @@ async def test_reports_a_newer_generation_found_on_the_new_connection_as_a_move(
     replacement.accept()
     replacement.send_object(0)
     assert seen == ["object 3", f"switched {older} -> {newer}", "object 0"]
+
+
+# ------------------------------------------------------------------ Codex review of the merge (#261)
+
+
+async def test_skips_an_object_the_old_subscription_delivered_that_reaches_the_replacement_late(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[int] = []
+    subscriber.want("v", ["room"], "v", WantHandlers(on_object=lambda o: seen.append(o.group_id)), retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(4)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    replacement = s.connections[1].subscriptions[0]
+    replacement.accept()
+    replacement.send_object(5)  # cuts over
+    replacement.send_object(4)  # group 4's stream arrives late
+    replacement.send_object(6)
+    assert seen == [4, 5, 6]
+
+
+async def test_keeps_skipping_repeats_when_only_another_targets_publisher_ended(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[str] = []
+    handlers = WantHandlers(on_object=lambda o: seen.append(f"{o.group_id}"))
+    subscriber.want("v", ["room"], "a", handlers, retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe a")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(4)
+    subscriber.want("v", ["room"], "b", handlers, retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 2, "pending b")
+    s.first.subscriptions[1].done()  # b's publisher ended
+    subscriber.want("v", ["room"], "a", handlers, retry=FAST)  # back to a
+    await asyncio.sleep(0.01)
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "replacement for a")
+    replacement = s.connections[1].subscriptions[0]
+    assert replacement.track == "a"
+    replacement.accept()
+    replacement.send_object(4)  # a's cached group, already delivered
+    replacement.send_object(5)
+    assert seen == ["4", "5"]

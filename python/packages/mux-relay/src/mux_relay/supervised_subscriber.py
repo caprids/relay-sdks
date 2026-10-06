@@ -1012,6 +1012,9 @@ class _Slot:
     largest_group: int | None = None
     latest: tuple[int, int] | None = None
     """The latest object it delivered, by location: a rotation's replacement skips what is at or before it."""
+    skip_through: tuple[int, int] | None = None
+    """After a rotation's silent cutover, the latest object its predecessor delivered: an earlier object
+    arriving late on another stream was delivered already, and is skipped."""
     progressed: bool = False
     """Whether it delivered an object from a later group than its first."""
     drain_through: int | None = None
@@ -1036,6 +1039,15 @@ class _Slot:
         """Record ``obj`` as the latest this slot delivered, if it is later than what it had."""
         if not _at_or_before(obj, self.latest):
             self.latest = (obj.group_id, obj.object_id)
+
+
+def _later(a: tuple[int, int] | None, b: tuple[int, int] | None) -> tuple[int, int] | None:
+    """The later of two locations, either of which may be unknown."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
 
 
 def _at_or_before(obj: MoqtObject, latest: tuple[int, int] | None) -> bool:
@@ -1092,28 +1104,30 @@ async def _follow(
     unwatch_next: Callable[[], None] | None = None
     # The connections a subscription of this attempt is on, each held so a rotation closes it only once none are.
     holds: dict[_Connection, Callable[[], None]] = {}
-    # Stop observing each connection the attempt observed.
-    observed: list[Callable[[], None]] = []
-    # Set when a pending replacement heard PUBLISH_DONE, until the next cutover: a restarted publisher numbers its
-    # groups from 0, so a rotation's replacement no longer skips what the active subscription delivered.
-    publisher_ended = False
+    # How to stop observing each connection the attempt observes; dropped with its hold.
+    observed: dict[_Connection, Callable[[], None]] = {}
+    # The targets a pending replacement heard PUBLISH_DONE on, until the next cutover: a restarted publisher
+    # numbers its groups from 0, so a rotation's replacement for that target no longer skips what the active
+    # subscription delivered. Another target's publisher ending says nothing about the active one's.
+    ended_targets: list[tuple[tuple[str, ...], str, MessageParameters | None]] = []
+
+    def target_ended(slot: _Slot) -> bool:
+        return any(slot.made_with(*target) for target in ended_targets)
 
     def observe(on: _Connection) -> None:
-        if any(item is on for item in watched):
+        if on in observed:
             return
-        watched.append(on)
 
         def on_retiring(_: object = None) -> None:
             task = asyncio.ensure_future(rotate(on))
             _observe(task)
 
         if on.retiring.cancelled:
+            observed[on] = _nothing
             loop.call_soon(on_retiring)
             return
         on.retiring.add_callback(on_retiring)
-        observed.append(lambda: on.retiring.remove_callback(on_retiring))
-
-    watched: list[_Connection] = []
+        observed[on] = lambda: on.retiring.remove_callback(on_retiring)
 
     def hold_on(on: _Connection) -> None:
         if on in holds:
@@ -1133,6 +1147,9 @@ async def _follow(
                 continue
             del holds[on]
             release()
+            stop_observing = observed.pop(on, None)
+            if stop_observing is not None:
+                stop_observing()
 
     def rotating(slot: _Slot) -> bool:
         """Whether ``slot`` replaces the active subscription on the next connection, with the same target."""
@@ -1214,11 +1231,14 @@ async def _follow(
 
     def cutover(slot: _Slot, obj: MoqtObject) -> None:
         nonlocal active, pending, move_failures, last_object_at, watch, release_watch, rotation_to, unwatch
-        nonlocal unwatch_next, publisher_ended
+        nonlocal unwatch_next
         previous = active
         # A rotation that keeps the target continues the same stream: nothing to mark, and no drain to repeat objects.
         silent = rotating(slot)
-        publisher_ended = False
+        # Same stream, same numbering: what the old subscription delivered stays delivered, even arriving late here.
+        if silent and not target_ended(slot) and previous.ended in (None, "connection"):
+            slot.skip_through = _later(previous.latest, previous.skip_through)
+        ended_targets.clear()
         pending = None
         clear_retry()
         move_failures = 0
@@ -1289,7 +1309,7 @@ async def _follow(
         if over():
             return
         if slot is active:
-            if slot.ended is not None:
+            if slot.ended is not None or _at_or_before(obj, slot.skip_through):
                 return
             last_object_at = loop.time()
             if slot.first_group is None:
@@ -1317,7 +1337,7 @@ async def _follow(
         # skip it. Not once the publisher ended or the subscription was ended by it: a restarted publisher
         # numbers from 0 again.
         rotation = rotating(slot)
-        continues = not publisher_ended and active.ended in (None, "connection")
+        continues = not target_ended(slot) and active.ended in (None, "connection")
         if rotation and continues and _at_or_before(obj, active.latest):
             return
         # With the active subscription gone there is nothing left to compare with: the next object cuts over. A
@@ -1351,13 +1371,12 @@ async def _follow(
             want.call("on_subgroup_end" if isinstance(event, SubgroupEndEvent) else "on_subgroup_reset", event.value)
 
     def on_publisher_done(slot: _Slot, info: PublishDone) -> None:
-        nonlocal publisher_ended
         if over():
             return
         # Heard on the replacement: the publisher behind both ended. An old subscription a move left behind
         # hearing its own publisher end says nothing about the current one.
         if slot is pending:
-            publisher_ended = True
+            ended_targets.append((slot.namespace, slot.track, slot.parameters))
             pending_failed(slot, None)
         elif slot is active and slot.ended is None:
             active_ended("publisher-done")
@@ -1580,8 +1599,9 @@ async def _follow(
             unwatch()
         if unwatch_next is not None:
             unwatch_next()
-        for stop_observing in observed:
+        for stop_observing in observed.values():
             stop_observing()
+        observed.clear()
         want.changes.remove(changed)
         for slot in list(draining):
             stop_drain(slot)
