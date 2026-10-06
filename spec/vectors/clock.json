@@ -104,6 +104,17 @@
       ]
     },
     {
+      "name": "silence is measured from when a report arrives, not from the moment it describes",
+      "options": { "audioTimeoutUs": "50000" },
+      "steps": [
+        { "at": "100000", "report": "500000", "reportAt": "0" },
+        { "at": "100000", "mode": "audio", "position": "600000" },
+        { "at": "100000", "due": "500000", "expect": { "action": "drop", "offsetUs": "-100000" } },
+        { "at": "150000", "mode": "audio", "position": "650000" },
+        { "at": "150001", "mode": "wall", "position": "650001" }
+      ]
+    },
+    {
       "name": "stopping audio paces by wall clock from the current position",
       "steps": [
         { "at": "0", "stopAudio": true },

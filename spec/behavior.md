@@ -1026,7 +1026,8 @@ to both languages.
   at `now()`. It maps sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
   (`createPlayoutClock` / `PlayoutClock`) is master-audio: its position is the latest audio report
   plus elapsed local time. It paces by wall clock while idle, after `stopAudio` / `stop_audio`,
-  and after `audioTimeoutUs` (500 ms) without a report. `due` answers `wait` (early by at most
+  and after `audioTimeoutUs` (500 ms) without a report arriving (measured from arrival, not
+  from the report's `atUs`). `due` answers `wait` (early by at most
   `maxVideoDelayUs`, 1 s), `show` (late by at most `lateDropUs`, 40 ms), or `drop`. A frame further
   ahead is shown at once. Wall pacing re-anchors on a frame more than `maxVideoDelayUs` off either
   way. Both clocks read an injected monotonic microsecond source and need no DOM or transport. The

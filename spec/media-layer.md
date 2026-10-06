@@ -318,7 +318,8 @@ Audio is the master. The audio path calls `reportAudio(timestampUs, atUs?)` /
 less the jitter-buffer depth, `AudioContext.outputLatency`, and any extra path, such as a WebRTC
 loopback for echo cancellation. Between reports the clock extrapolates at real-time rate:
 `position = reported + (now − at)`. Reports re-anchor it, so the audio device's drift never builds
-up.
+up. Audio silence is measured from when the latest report arrived, not from its `at`, so a report
+that describes a moment slightly in the past still counts as fresh.
 
 The clock has three modes:
 

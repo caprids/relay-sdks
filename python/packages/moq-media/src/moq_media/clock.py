@@ -139,7 +139,7 @@ class PlayoutDecision:
 class _Anchor:
     media_us: float
     at_us: float
-    audio: bool
+    received_us: float | None = None  # when an audio report arrived; silence is measured from here, not at_us
 
 
 class PlayoutClock:
@@ -175,7 +175,8 @@ class PlayoutClock:
         anchor = self._anchor
         if anchor is None:
             return "idle"
-        return "audio" if anchor.audio and now - anchor.at_us <= self._audio_timeout_us else "wall"
+        received = anchor.received_us
+        return "audio" if received is not None and now - received <= self._audio_timeout_us else "wall"
 
     def _position_at(self, now: float) -> float | None:
         anchor = self._anchor
@@ -192,15 +193,16 @@ class PlayoutClock:
         That is what was handed to the output, less the jitter-buffer depth, the output latency, and any extra path.
         """
         media = _finite(timestamp_us, "timestamp_us")
-        at = self._source() if at_us is None else _finite(at_us, "at_us")
-        self._anchor = _Anchor(media, at, audio=True)
+        received = self._source()
+        at = received if at_us is None else _finite(at_us, "at_us")
+        self._anchor = _Anchor(media, at, received)
 
     def stop_audio(self) -> None:
         """Audio is muted or ended: pace by wall clock from the current position."""
         now = self._source()
         position = self._position_at(now)
         if self._mode_at(now) == "audio" and position is not None:
-            self._anchor = _Anchor(position, now, audio=False)
+            self._anchor = _Anchor(position, now)
 
     def due(self, timestamp_us: int) -> PlayoutDecision:
         """Decide whether the frame with this timeline timestamp should wait, be shown now, or be dropped."""
@@ -209,13 +211,13 @@ class PlayoutClock:
         mode = self._mode_at(now)
         position = self._position_at(now)
         if mode == "idle" or position is None:
-            self._anchor = _Anchor(timestamp_us, now, audio=False)
+            self._anchor = _Anchor(timestamp_us, now)
             return PlayoutDecision("show", 0)
         offset = timestamp_us - position
         offset_us = _round(offset)
         if mode == "wall" and abs(offset) > self._max_video_delay_us:
             # A timeline jump or a stall: follow the video rather than drop or hold every later frame.
-            self._anchor = _Anchor(timestamp_us, now, audio=False)
+            self._anchor = _Anchor(timestamp_us, now)
             return PlayoutDecision("show", offset_us)
         if offset > self._max_video_delay_us:
             # Audio stays the master: a frame that far ahead is not on its timeline, and holding it freezes the picture.

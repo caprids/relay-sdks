@@ -203,9 +203,13 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
   if (audioTimeoutUs <= 0) throw new RangeError('audioTimeoutUs must be positive');
 
   // The timeline position `mediaUs` was current at local time `atUs`; it advances in real time from there.
-  let anchor: { mediaUs: number; atUs: number; audio: boolean } | undefined;
-  const modeAt = (now: number): PlayoutMode =>
-    !anchor ? 'idle' : anchor.audio && now - anchor.atUs <= audioTimeoutUs ? 'audio' : 'wall';
+  // An audio anchor also keeps when its report arrived: silence is measured from arrival, not from `atUs`.
+  let anchor: { mediaUs: number; atUs: number; receivedUs?: number } | undefined;
+  const modeAt = (now: number): PlayoutMode => {
+    if (!anchor) return 'idle';
+    const received = anchor.receivedUs;
+    return received !== undefined && now - received <= audioTimeoutUs ? 'audio' : 'wall';
+  };
   const positionAt = (now: number) => (anchor ? anchor.mediaUs + (now - anchor.atUs) : undefined);
 
   return {
@@ -214,11 +218,12 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
     },
     reportAudio(timestampUs, atUs) {
       const mediaUs = finite(timestampUs, 'Audio timestamp');
-      anchor = { mediaUs, atUs: atUs === undefined ? source() : finite(atUs, 'Audio report time'), audio: true };
+      const receivedUs = source();
+      anchor = { mediaUs, atUs: atUs === undefined ? receivedUs : finite(atUs, 'Audio report time'), receivedUs };
     },
     stopAudio() {
       const now = source();
-      if (modeAt(now) === 'audio') anchor = { mediaUs: positionAt(now) as number, atUs: now, audio: false };
+      if (modeAt(now) === 'audio') anchor = { mediaUs: positionAt(now) as number, atUs: now };
     },
     due(timestampUs) {
       finite(timestampUs, 'Frame timestamp');
@@ -226,14 +231,14 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
       const mode = modeAt(now);
       const position = positionAt(now);
       if (mode === 'idle' || position === undefined) {
-        anchor = { mediaUs: timestampUs, atUs: now, audio: false };
+        anchor = { mediaUs: timestampUs, atUs: now };
         return { action: 'show', offsetUs: 0 };
       }
       const offset = timestampUs - position;
       const offsetUs = Math.round(offset);
       if (mode === 'wall' && Math.abs(offset) > maxVideoDelayUs) {
         // A timeline jump or a stall: follow the video rather than drop or hold every later frame.
-        anchor = { mediaUs: timestampUs, atUs: now, audio: false };
+        anchor = { mediaUs: timestampUs, atUs: now };
         return { action: 'show', offsetUs };
       }
       // Audio stays the master: a frame that far ahead is not on its timeline, and holding it would freeze the picture.
