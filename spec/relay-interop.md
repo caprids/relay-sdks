@@ -197,6 +197,10 @@ includes routes learned from cluster peers.
   the pushed PUBLISH_NAMESPACE with NOT_SUPPORTED and retry interval 0, which the relay reads as
   "never offer this again" (`refusal()` in `publisher.rs`) for the rest of the session.
 - A prefix outside the session's grant gets REQUEST_OK and no entries, not an error.
+- It does not answer an overlapping SUBSCRIBE_NAMESPACE with PREFIX_OVERLAP, as draft-20 §10.19
+  requires: a probe on 2026-10-06 held `[a, b, c]` and `[a, b, c, pre]` open on one session, and
+  both received the namespace they share. The SDKs refuse an overlapping prefix before sending it, so
+  applications see the same rule against any relay.
 - The relay writes NAMESPACE again for a namespace it already advertised when that namespace's
   route changes, so entries are not edge-triggered on the wire. The SDKs drop those repeats.
 - Measured on 2026-10-06 against sjc, and from fra for a publisher on sjc (TypeScript SDK, Node):

@@ -24,6 +24,7 @@ from moq_core import (
 from ._bounded_events import BoundedEvents, BoundedEventSink
 from ._subscription import SubscriptionConnectionClosedError, SubscriptionRequestError
 from .cancellation import CancellationToken
+from .errors import RelayError
 
 _log = logging.getLogger("mux_relay")
 
@@ -50,12 +51,43 @@ class NamespaceRequestDependencies:
     """Observe the connection's closure in the turn it happens; returns the removal."""
     transport_ended: Callable[[], bool]
     """Whether the transport has already ended, before the session has reported the closure."""
+    prefixes: set[tuple[str, ...]]
+    """The connection's prefixes with a namespace request open; see :func:`_claim_prefix`."""
+
+
+def _claim_prefix(prefixes: set[tuple[str, ...]], prefix: tuple[str, ...]) -> Callable[[], None]:
+    """Hold ``prefix`` for one request, or refuse it when it overlaps one already held.
+
+    Draft-20 §10.19 has a relay answer an overlapping SUBSCRIBE_NAMESPACE on the same session with
+    PREFIX_OVERLAP. moq-relay 0.17.0 does not, so the SDK refuses it itself, before anything is sent,
+    and behaves the same against every relay. Returns the release.
+    """
+    for held in prefixes:
+        shorter, longer = (held, prefix) if len(held) <= len(prefix) else (prefix, held)
+        if longer[: len(shorter)] == shorter:
+            raise RelayError(
+                f"This connection already discovers {list(held)!r}, which overlaps {list(prefix)!r}; "
+                "one request per prefix tree",
+                code="PREFIX_OVERLAP",
+                phase="subscription",
+            )
+    prefixes.add(prefix)
+    return lambda: prefixes.discard(prefix)
 
 
 class _NamespaceRequest:
     """The request one iterator owns: the core handle, the closure observation and the announced set."""
 
-    __slots__ = ("_announced", "_core", "_ended", "_prefix", "_remove_closed", "_sink", "_transport_ended")
+    __slots__ = (
+        "_announced",
+        "_core",
+        "_ended",
+        "_prefix",
+        "_release_prefix",
+        "_remove_closed",
+        "_sink",
+        "_transport_ended",
+    )
 
     def __init__(
         self,
@@ -70,6 +102,7 @@ class _NamespaceRequest:
         self._announced: set[tuple[str, ...]] = set()
         self._transport_ended = dependencies.transport_ended
         self._remove_closed: Callable[[], None] = lambda: None
+        self._release_prefix = _claim_prefix(dependencies.prefixes, prefix)
 
         # A connection that has already ended tells the observer at once, ending this before any send.
         self._remove_closed = dependencies.observe_closed(
@@ -103,13 +136,19 @@ class _NamespaceRequest:
         if self._ended:
             return False
         self._ended = True
+        self._release_prefix()
         self._remove_closed()
         if self._core is not None:
             self._core.cancel(reason)
         return True
 
     def _finish(self, error: BaseException | None) -> None:
-        if self._end(error):
+        if not self._end(error):
+            return
+        # A clean end keeps what is queued: the withdrawals the core reports for it come just before.
+        if error is None:
+            self._sink.complete()
+        else:
             self._sink.ended(error)
 
     def _change(self, kind: Literal["announced", "unannounced"], suffix: list[str]) -> None:

@@ -106,7 +106,6 @@ async def test_sends_subscribe_namespace_for_the_prefix_and_yields_full_namespac
         await request.send(encode_namespace(["alice"]))
         await request.send(encode_namespace(["alice"]))  # a relay repeat (route change) is not passed on
         await request.send(encode_namespace([]))
-        await request.send(encode_namespace_done(["bob"]))  # never announced here
         await request.send(encode_namespace_done(["alice"]))
         await request.send(encode_namespace(["alice"]))
 
@@ -173,7 +172,7 @@ async def test_ends_with_subscription_request_error_when_the_stream_resets_after
     assert failure.value.request_error.retry_interval == 0
 
 
-async def test_ends_cleanly_when_the_relay_finishes_the_request(
+async def test_withdraws_what_is_still_announced_then_ends_cleanly_when_the_relay_finishes_the_request(
     connected: tuple[FakeTransport, RelaySubscriber],
 ) -> None:
     fake, connection = connected
@@ -182,8 +181,11 @@ async def test_ends_cleanly_when_the_relay_finishes_the_request(
         await request.first_message
         await request.send(encode_request_ok())
         await request.send(encode_namespace(["alice"]))
-        assert await anext(events) == NamespaceEvent("announced", ("room", "alice"))
         await request.fin()
+        # Nothing was read before the end: the queued events survive it.
+        await settle()
+        assert await anext(events) == NamespaceEvent("announced", ("room", "alice"))
+        assert await anext(events) == NamespaceEvent("unannounced", ("room", "alice"))
         with pytest.raises(StopAsyncIteration):
             await anext(events)
         assert await asyncio.wait_for(request.client_end, 1) == "fin"
@@ -267,3 +269,56 @@ async def test_raises_when_the_core_cannot_encode_the_prefix_and_leaves_the_conn
         message = await request.first_message
         assert isinstance(message, SubscribeNamespace)
         assert message.track_namespace_prefix == ["room"]
+
+
+async def test_refuses_a_prefix_overlapping_one_this_connection_is_discovering_until_that_one_ends(
+    connected: tuple[FakeTransport, RelaySubscriber],
+) -> None:
+    fake, connection = connected
+    first = connection.namespace_events(["room", "a"])
+    await fake.next_request_stream()
+    for prefix in (["room"], ["room", "a"], ["room", "a", "b"]):
+        with pytest.raises(RelayError) as refused:
+            connection.namespace_events(prefix)
+        assert (refused.value.code, refused.value.phase) == ("PREFIX_OVERLAP", "subscription")
+    # A sibling is no overlap: fields match whole.
+    sibling = connection.namespace_events(["room", "ab"])
+    first.close()
+    sibling.close()
+    again = connection.namespace_events(["room"])
+    again.close()
+
+
+async def test_releases_the_prefix_when_the_request_ends_or_the_connection_closes(
+    connected: tuple[FakeTransport, RelaySubscriber],
+) -> None:
+    fake, connection = connected
+    events = connection.namespace_events(["room"])
+    request = await fake.next_request_stream()
+    await request.first_message
+    await request.send(encode_request_error(REQUEST_ERROR_CODE.UNAUTHORIZED, "no"))
+    with pytest.raises(SubscriptionRequestError):
+        await anext(events)
+    # The ended request no longer holds the prefix.
+    held = connection.namespace_events(["room"])
+    await fake.next_request_stream()
+    fake.drop_transport()
+    with pytest.raises(SubscriptionConnectionClosedError):
+        await anext(held)
+    assert connection._prefixes == set()
+
+
+async def test_close_after_a_clean_end_discards_what_is_queued(
+    connected: tuple[FakeTransport, RelaySubscriber],
+) -> None:
+    fake, connection = connected
+    events = connection.namespace_events(["room"])
+    request = await fake.next_request_stream()
+    await request.first_message
+    await request.send(encode_request_ok())
+    await request.send(encode_namespace(["alice"]))
+    await request.fin()
+    await settle()
+    events.close()
+    with pytest.raises(StopAsyncIteration):
+        await anext(events)

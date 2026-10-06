@@ -1113,6 +1113,60 @@ describe('createMoqtSession', () => {
       harness.session.destroy();
     });
 
+    it('closes the session on NAMESPACE_DONE for a namespace never named (§10.19)', async () => {
+      const harness = createSessionHarness();
+
+      harness.sendServerSetup();
+
+      const onNamespaceDone = vi.fn();
+
+      harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'] }, { onNamespaceDone });
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeRequestOk());
+      await request.send(encodeNamespace(['alice']));
+      await request.send(encodeNamespaceDone(['bob']));
+
+      await vi.waitFor(() => expect(harness.getCloseInfo()?.closeCode).toBe(SESSION_ERROR.PROTOCOL_VIOLATION));
+      expect(onNamespaceDone).not.toHaveBeenCalled();
+    });
+
+    it('withdraws each active namespace when the accepted request ends (§10.19)', async () => {
+      for (const ending of ['fin', 'reset'] as const) {
+        const harness = createSessionHarness();
+
+        harness.sendServerSetup();
+
+        const calls: unknown[] = [];
+
+        harness.session.subscribeNamespace(
+          { trackNamespacePrefix: ['room'] },
+          {
+            onNamespaceDone: (suffix) => calls.push(['done', suffix]),
+            onEnd: (info) => calls.push(['end', 'error' in info]),
+          }
+        );
+        const request = await harness.nextRequestStream();
+
+        await request.firstMessage;
+        await request.send(encodeRequestOk());
+        await request.send(encodeNamespace(['alice']));
+        await request.send(encodeNamespace(['bob']));
+        await request.send(encodeNamespaceDone(['bob']));
+        if (ending === 'fin') await request.fin();
+        else request.reset(new Error('gone'));
+
+        await vi.waitFor(() => expect(calls).toHaveLength(3));
+        expect(calls).toEqual([
+          ['done', ['bob']],
+          ['done', ['alice']],
+          ['end', ending === 'reset'],
+        ]);
+        harness.session.destroy();
+      }
+    });
+
     it('reports a FIN after REQUEST_OK as a clean end and FINs back', async () => {
       const harness = createSessionHarness();
 

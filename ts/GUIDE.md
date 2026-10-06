@@ -342,7 +342,10 @@ Namespaces already announced arrive first, about one round trip after the call, 
 between them and later changes. A publisher's clean `close()` is reported `unannounced` within a few
 hundred milliseconds. A crashed publisher is reported only at the relay's QUIC idle timeout, about
 12 s later. An announce on another relay of the cluster looks the same as a local one. A prefix
-matches whole fields, and a prefix the token does not cover is silent rather than rejected.
+matches whole fields, and a prefix the token does not cover is silent rather than rejected. One
+connection discovers each prefix tree once: a prefix that equals, contains or falls under one
+already being discovered throws `PREFIX_OVERLAP` until that iterator ends. If the relay ends the
+request, the iterator first reports every remaining namespace `unannounced`, then finishes.
 `announced` means the relay routes the namespace, not that its tracks have content: keep the
 announce-race retry when subscribing. See the [discovery contract](../spec/behavior.md#discovery).
 

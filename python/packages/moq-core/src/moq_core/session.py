@@ -201,9 +201,16 @@ class NamespaceSubscriptionHandlers:
     on_error: Callable[[RequestError], None] | None = None
     """The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure or timeout."""
     on_namespace: Callable[[list[str]], None] | None = None
-    """NAMESPACE (§10.19): a namespace under the prefix is available."""
+    """NAMESPACE (§10.17): a namespace under the prefix is available.
+
+    A peer may name one again (moq-relay does when its route changes); each call is passed on.
+    """
     on_namespace_done: Callable[[list[str]], None] | None = None
-    """NAMESPACE_DONE (§10.20): a namespace the peer named is no longer available."""
+    """NAMESPACE_DONE (§10.18): a namespace the peer named is no longer available.
+
+    Also called for each namespace still active when the accepted request ends (§10.19), just before
+    ``on_end``. One for a namespace never named closes the session with PROTOCOL_VIOLATION (§10.19).
+    """
     on_end: Callable[[BaseException | None], None] | None = None
     """The accepted request ended; no entry follows.
 
@@ -306,7 +313,7 @@ class MoqtSubscribeOptions:
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class MoqtSubscribeNamespaceOptions:
-    """The prefix and parameters for a SUBSCRIBE_NAMESPACE (§10.18)."""
+    """The prefix and parameters for a SUBSCRIBE_NAMESPACE (§10.19)."""
 
     track_namespace_prefix: Sequence[str]
     """Namespace prefix to discover; NAMESPACE entries name namespaces relative to it."""
@@ -423,6 +430,8 @@ class _NamespaceSubscriptionRecord(_RequestRecord):
     handlers: NamespaceSubscriptionHandlers
     accepted: bool = False
     """REQUEST_OK arrived. Settlement alone is not acceptance: REQUEST_ERROR settles the request too."""
+    active: dict[tuple[str, ...], list[str]] = field(default_factory=dict)
+    """Suffixes named by NAMESPACE and not yet withdrawn."""
 
 
 @dataclass(slots=True)
@@ -800,7 +809,7 @@ class MoqtSession:
     def subscribe_namespace(
         self, options: MoqtSubscribeNamespaceOptions, handlers: NamespaceSubscriptionHandlers | None = None
     ) -> NamespaceSubscription:
-        """Send SUBSCRIBE_NAMESPACE (§10.18) on a new request stream and return its handle at once.
+        """Send SUBSCRIBE_NAMESPACE (§10.19) on a new request stream and return its handle at once.
 
         The peer answers REQUEST_OK, then names the namespaces under the prefix with NAMESPACE /
         NAMESPACE_DONE on the same stream. A relay that pushes unsolicited PUBLISH_NAMESPACE instead
@@ -825,6 +834,11 @@ class MoqtSession:
             # A failed stream is dropped here, since a cancel after the end no longer touches it.
             if error is not None and record.stream is not None:
                 record.stream.cancel(error)
+            # §10.19: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
+            active = list(record.active.values())
+            record.active.clear()
+            for suffix in active:
+                _call(handlers.on_namespace_done, list(suffix))
             _call(handlers.on_end, error)
 
         def on_failure(error: RequestError) -> None:
@@ -1045,7 +1059,7 @@ class MoqtSession:
                 if record.stream is not None:
                     spawn(record.stream.fin_write())
             case Namespace() | NamespaceDone():
-                # Entries follow REQUEST_OK (§10.18); one before it, or after REQUEST_ERROR, is outside
+                # Entries follow REQUEST_OK (§10.19); one before it, or after REQUEST_ERROR, is outside
                 # the stream's grammar.
                 if not record.accepted:
                     self._fatal(
@@ -1053,10 +1067,17 @@ class MoqtSession:
                     )
                     return
 
+                suffix = list(message.track_namespace_suffix)
                 if isinstance(message, Namespace):
-                    _call(record.handlers.on_namespace, list(message.track_namespace_suffix))
+                    record.active[tuple(suffix)] = suffix
+                    _call(record.handlers.on_namespace, list(suffix))
+                elif record.active.pop(tuple(suffix), None) is not None:
+                    _call(record.handlers.on_namespace_done, suffix)
                 else:
-                    _call(record.handlers.on_namespace_done, list(message.track_namespace_suffix))
+                    # §10.19: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
+                    self._fatal(
+                        MoqtProtocolError("NAMESPACE_DONE before its NAMESPACE on a subscribe-namespace request stream")
+                    )
             case Goaway():
                 _call(record.handlers.on_goaway, message)
             case _:

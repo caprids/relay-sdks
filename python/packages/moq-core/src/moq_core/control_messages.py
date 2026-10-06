@@ -1253,7 +1253,7 @@ def encode_publish_namespace(request: PublishNamespace) -> bytes:
 
 
 def encode_namespace(track_namespace_suffix: Sequence[str]) -> bytes:
-    """NAMESPACE (§10.19): announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream.
+    """NAMESPACE (§10.17): announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream.
 
     The body is the namespace suffix relative to that stream's subscribed prefix and nothing else:
     peers bound-check the tuple against the frame length (moq-lite-rs treats even a zero parameter
@@ -1265,7 +1265,7 @@ def encode_namespace(track_namespace_suffix: Sequence[str]) -> bytes:
 
 
 def encode_namespace_done(track_namespace_suffix: Sequence[str]) -> bytes:
-    """NAMESPACE_DONE (§10.20): retract a NAMESPACE announcement (same body shape)."""
+    """NAMESPACE_DONE (§10.18): retract a NAMESPACE announcement (same body shape)."""
     body = ByteWriter()
     _write_track_namespace(body, track_namespace_suffix)
     return _frame_message(MESSAGE_TYPE.NAMESPACE_DONE, body)

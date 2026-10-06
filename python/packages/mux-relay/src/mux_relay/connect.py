@@ -218,10 +218,12 @@ class RelaySubscriber:
     Publishing uses a separate connection and token; see :func:`connect_relay_publisher`.
     """
 
-    __slots__ = ("_closed", "_lifetime", "_track_source")
+    __slots__ = ("_closed", "_lifetime", "_prefixes", "_track_source")
 
     def __init__(self, lifetime: RelaySessionLifetime[MoqtSession]) -> None:
         self._lifetime = lifetime
+        # Prefixes with a namespace request open on this connection (namespace_events.py, `_claim_prefix`).
+        self._prefixes: set[tuple[str, ...]] = set()
         self._track_source = _BorrowedTrackSource(lifetime)
         self._closed: RelayAwaitable[Closed] = RelayAwaitable(lifetime.closed)
 
@@ -323,8 +325,11 @@ class RelaySubscriber:
         withdrawal; the relay sends no marker between the two. A relay rejection ends it with
         :class:`SubscriptionRequestError`, the connection ending with
         :class:`SubscriptionConnectionClosedError`, a full queue with
-        :class:`SubscriptionOverflowError`; a relay that finishes the request ends it cleanly. See
-        spec/behavior.md, "Discovery", for the timing. ``prefix`` follows the namespace rules.
+        :class:`SubscriptionOverflowError`; a relay that finishes the request ends it cleanly, after
+        the queued events and an ``unannounced`` for each namespace still announced. See
+        spec/behavior.md, "Discovery", for the timing. ``prefix`` follows the namespace rules; one that
+        equals, contains or falls under a prefix this connection is already discovering raises a
+        ``RelayError`` with code ``PREFIX_OVERLAP`` before anything is sent.
         """
         # Arguments before connection state, as on the other entry points.
         fields = namespace_fields(prefix)
@@ -335,6 +340,7 @@ class RelaySubscriber:
                 subscribe_namespace=session.subscribe_namespace,
                 observe_closed=self._lifetime.observe_closed,
                 transport_ended=self._lifetime.transport_ended,
+                prefixes=self._prefixes,
             ),
             fields,
             capacity=capacity,

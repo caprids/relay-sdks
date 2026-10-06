@@ -58,8 +58,13 @@ export function createSubscriptionEvents(
 export interface BoundedEventSink<E> {
   /** One event; past the capacity the iterator ends with `SubscriptionOverflowError`. */
   event(event: E): void;
-  /** The producer ended: `undefined` finishes the iterator cleanly, anything else is thrown from `next()`. */
+  /**
+   * The producer ended: `undefined` finishes the iterator cleanly, anything else is thrown from `next()`. Either way
+   * the queue is discarded.
+   */
   ended(error?: unknown): void;
+  /** The producer finished cleanly: queued events are still read, then the iterator is done. */
+  complete(): void;
 }
 
 /** The single-consumer iterator both events forms share: an owned request, a queue bound and a signal. */
@@ -114,6 +119,13 @@ export function createBoundedEvents<E>(
       if (ended) return;
       finish(error);
     },
+    complete() {
+      if (ended) return;
+      // A pending read only exists while the queue is empty, so finishing settles it as done.
+      const rest = queue;
+      finish();
+      queue = rest;
+    },
   };
   if (signal?.aborted) abort();
   else {
@@ -134,16 +146,21 @@ export function createBoundedEvents<E>(
     },
     next() {
       if (pending) return Promise.reject(new Error('Only one pending subscription read is supported'));
+      // Events left by a clean completion are read before the end.
+      if (queue.length > 0) return Promise.resolve({ done: false, value: queue.shift() as E });
       if (ended)
         return failure === undefined ? Promise.resolve({ done: true, value: undefined }) : Promise.reject(failure);
-      if (queue.length > 0) return Promise.resolve({ done: false, value: queue.shift() as E });
       return new Promise((resolve, reject) => {
         pending = { resolve, reject };
       });
     },
-    close: () => finish(),
+    close: () => {
+      finish();
+      queue = [];
+    },
     async return() {
       finish();
+      queue = [];
       return { done: true, value: undefined };
     },
   };

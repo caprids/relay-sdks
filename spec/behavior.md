@@ -52,6 +52,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `NAMESPACE_ENDED` | The relay ended the namespace announcement; open a replacement publisher if appropriate. |
 | `SUBSCRIPTION_REQUEST_FAILED` | An async subscription request failed; inspect its preserved MOQT request error and the connection state. |
 | `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
+| `PREFIX_OVERLAP` | `namespaceEvents` / `namespace_events` was given a prefix that equals, contains or falls under one this connection is already discovering (draft-20 §10.19). Nothing was sent. Widen one iterator's prefix and filter, end the other iterator first, or use another connection. |
 | `UPDATE_QUEUE_FULL` | More than eight updates were issued before the subscription was accepted; await acceptance (`onSubscribed` / `on_subscribed`) before updating again. Nothing was sent for the refused update. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. It can be group-level: the relay may stop one group's stream while its subscription continues, so check `hasDemand` / `has_demand` rather than assume demand ended. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
@@ -383,11 +384,19 @@ The iterator owns the request, never the connection.
 - Each event is `announced` or `unannounced`, with the full namespace: the prefix's fields followed
   by the rest, sent verbatim. The relay names each namespace relative to the prefix, and the SDK
   joins the two. A namespace equal to the prefix is reported as the prefix itself.
-- The events are edge-triggered per namespace. The relay re-sends an announce when its route
-  changes, and those repeats are dropped, as is a withdrawal of a namespace this iterator never
-  reported. An application that tracks the `announced` set holds the relay's current view.
+- The events are edge-triggered per namespace. Draft-20 lets a relay name a namespace again, and
+  moq-relay does when its route changes. Those repeats are dropped, so an application that tracks
+  the `announced` set holds the relay's current view. A NAMESPACE_DONE for a namespace the relay
+  never named closes the connection with `PROTOCOL_VIOLATION`, as draft-20 §10.19 requires.
 - The prefix follows the namespace argument rules (1 to 32 non-empty fields), checked before
-  connection state. It matches whole fields: `['room', 'a']` does not cover `['room', 'ab']`.
+  connection state. Draft-20 also allows an empty prefix, meaning every namespace; the SDK does
+  not. The prefix matches whole fields: `['room', 'a']` does not cover `['room', 'ab']`.
+- One connection discovers each prefix tree once. Draft-20 §10.19 has a relay answer a
+  SUBSCRIBE_NAMESPACE whose prefix overlaps one already open on the session (equal, shorter or
+  longer, field by field) with PREFIX_OVERLAP. moq-relay 0.17.0 does not enforce this, so the SDK
+  refuses such a prefix itself, with `PREFIX_OVERLAP` in phase `subscription`, before anything is
+  sent, and behaves the same against every relay. The prefix is free again once its iterator has
+  ended. To watch both `['room']` and `['room', 'a']`, discover `['room']` and filter.
 - The subscriber connection's SETUP carries the SOLICIT option (`0x40B5A` = 1,
   draft-lcurley-moq-solicit-00), so the relay advertises namespaces only on these requests. Without
   it, moq-relay 0.17.0 pushes an unsolicited PUBLISH_NAMESPACE for everything in scope right after
@@ -414,8 +423,10 @@ The iterator owns the request, never the connection.
   same closure grace as a subscription. The connection ending raises
   `SubscriptionConnectionClosedError`, a full queue `SubscriptionOverflowError`, and the signal or
   cancellation its reason. A relay that finishes the request cleanly ends the iterator without an
-  error. A GOAWAY on the request stream is not surfaced; the connection's GOAWAY ends the
-  connection.
+  error, after `unannounced` for every namespace still announced (draft-20 §10.19 treats the end
+  of the response stream as a withdrawal of each), and after any events still queued, which a
+  clean end does not discard. After an error ending, treat every namespace as withdrawn. A GOAWAY
+  on the request stream is not surfaced; the connection's GOAWAY ends the connection.
 
 ## Publishing
 

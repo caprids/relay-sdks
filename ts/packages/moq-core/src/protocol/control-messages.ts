@@ -1166,7 +1166,7 @@ export function encodePublishNamespace(request: PublishNamespaceRequest): Uint8A
 }
 
 /**
- * NAMESPACE (§10.19) — announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream. The body is
+ * NAMESPACE (§10.17) — announce one namespace on an accepted inbound SUBSCRIBE_NAMESPACE request stream. The body is
  * the namespace suffix relative to that stream's subscribed prefix and nothing else: peers bound-check the tuple
  * against the frame length (moq-lite-rs treats even a zero parameter count as a malformed entry and kills the announce
  * stream), so no parameter block is written.
@@ -1178,7 +1178,7 @@ export function encodeNamespace(trackNamespaceSuffix: TrackNamespace): Uint8Arra
   return frameMessage(MESSAGE_TYPE.NAMESPACE, body);
 }
 
-/** NAMESPACE_DONE (§10.20) — retract a NAMESPACE announcement (same body shape). */
+/** NAMESPACE_DONE (§10.18) — retract a NAMESPACE announcement (same body shape). */
 export function encodeNamespaceDone(trackNamespaceSuffix: TrackNamespace): Uint8Array {
   const body = new ByteWriter();
 

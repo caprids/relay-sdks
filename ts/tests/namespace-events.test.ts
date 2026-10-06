@@ -69,7 +69,6 @@ it('sends SUBSCRIBE_NAMESPACE for the prefix and yields full namespaces, edge-tr
   await request.send(encodeNamespace(['alice']));
   await request.send(encodeNamespace(['alice'])); // a relay repeat (route change) is not passed on
   await request.send(encodeNamespace([]));
-  await request.send(encodeNamespaceDone(['bob'])); // never announced here
   await request.send(encodeNamespaceDone(['alice']));
   await request.send(encodeNamespace(['alice']));
 
@@ -119,16 +118,37 @@ it('ends with SubscriptionRequestError when the relay rejects the request', asyn
   });
 });
 
-it('ends cleanly when the relay finishes the request', async () => {
+it('withdraws what is still announced, then ends cleanly, when the relay finishes the request', async () => {
   const { fake, connection } = await setup();
   const events = connection.namespaceEvents({ prefix: ['room'] });
   const request = await fake.nextRequestStream();
   await request.firstMessage;
   await request.send(encodeRequestOk());
   await request.send(encodeNamespace(['alice']));
-  expect((await events.next()).value).toEqual({ type: 'announced', namespace: ['room', 'alice'] });
   await request.fin();
+  // Nothing was read before the end: the queued events survive it.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect((await events.next()).value).toEqual({ type: 'announced', namespace: ['room', 'alice'] });
+  expect((await events.next()).value).toEqual({ type: 'unannounced', namespace: ['room', 'alice'] });
   expect(await events.next()).toMatchObject({ done: true });
+});
+
+it('refuses a prefix overlapping one this connection is discovering, until that one ends', async () => {
+  const { fake, connection } = await setup();
+  const first = connection.namespaceEvents({ prefix: ['room', 'a'] });
+  await fake.nextRequestStream();
+  for (const prefix of [['room'], ['room', 'a'], ['room', 'a', 'b']]) {
+    expect(() => connection.namespaceEvents({ prefix })).toThrow(
+      expect.objectContaining({ code: 'PREFIX_OVERLAP', phase: 'subscription' }),
+    );
+  }
+  // A sibling is no overlap: fields match whole.
+  const sibling = connection.namespaceEvents({ prefix: ['room', 'ab'] });
+  first.close();
+  sibling.close();
+  const again = connection.namespaceEvents({ prefix: ['room'] });
+  expect(again).toBeDefined();
+  again.close();
 });
 
 it('ends with SubscriptionConnectionClosedError when the connection drops', async () => {

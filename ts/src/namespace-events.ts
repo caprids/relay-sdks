@@ -6,6 +6,7 @@
  * request's ending onto the subscription error classes.
  */
 import { isStreamFailure, type MoqtSession, REQUEST_ERROR_CODE, type RequestError } from '@mux/moq-core';
+import { RelayError } from './errors.js';
 import { CLOSURE_GRACE_MS, SubscriptionConnectionClosedError, SubscriptionRequestError } from './subscription.js';
 import { type BoundedEventSink, createBoundedEvents, type SubscriptionEventOptions } from './subscription-events.js';
 
@@ -41,6 +42,28 @@ export interface NamespaceRequestDependencies {
   subscribeNamespace: MoqtSession['subscribeNamespace'];
   /** Observe the connection's closure in the turn it happens; returns the removal. */
   observeClosed(observer: (error?: unknown) => void): () => void;
+  /** The connection's prefixes with a namespace request open; see {@link claimPrefix}. */
+  prefixes: Set<readonly string[]>;
+}
+
+/**
+ * Hold `prefix` for one request, or refuse it when it overlaps one already held: draft-20 §10.19 has a relay answer an
+ * overlapping SUBSCRIBE_NAMESPACE on the same session with PREFIX_OVERLAP. moq-relay 0.17.0 does not, so the SDK
+ * refuses it itself, before anything is sent, and behaves the same against every relay. Returns the release.
+ */
+function claimPrefix(prefixes: Set<readonly string[]>, prefix: readonly string[]): () => void {
+  for (const held of prefixes) {
+    const [shorter, longer] = held.length <= prefix.length ? [held, prefix] : [prefix, held];
+    if (shorter.every((field, i) => field === longer[i])) {
+      throw new RelayError(
+        'PREFIX_OVERLAP',
+        `This connection already discovers ${JSON.stringify(held)}, which overlaps ${JSON.stringify(prefix)}; one request per prefix tree`,
+        'subscription',
+      );
+    }
+  }
+  prefixes.add(prefix);
+  return () => prefixes.delete(prefix);
 }
 
 /** Open the iterator over `prefix`, whose fields the caller has already admitted. */
@@ -61,16 +84,20 @@ function openNamespaceRequest(
   let core: { cancel(reason?: unknown): void } | undefined;
   let removeClosed: () => void = () => {};
   let cancelGrace: () => void = () => {};
+  const releasePrefix = claimPrefix(deps.prefixes, prefix);
   // Keyed by the suffix's JSON: a field may hold any character, a separator could collide.
   const announced = new Set<string>();
 
   const finish = (error?: unknown) => {
     if (ended) return;
     ended = true;
+    releasePrefix();
     removeClosed();
     cancelGrace();
     core?.cancel(error);
-    sink.ended(error);
+    // A clean end keeps what is queued: the withdrawals the core reports for it come just before.
+    if (error === undefined) sink.complete();
+    else sink.ended(error);
   };
   /**
    * The same rule a subscription follows: a REQUEST_ERROR ends the request one microtask later, so a
@@ -116,6 +143,7 @@ function openNamespaceRequest(
     } catch (error) {
       // Encoding can refuse the request (a field too long for the wire); leave nothing observing.
       ended = true;
+      releasePrefix();
       removeClosed();
       throw error;
     }

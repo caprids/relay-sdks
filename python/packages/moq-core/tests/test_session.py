@@ -1054,6 +1054,53 @@ class TestSubscribeNamespace:
         assert await asyncio.wait_for(request.client_end, 1) == "reset"
         harness.session.destroy()
 
+    async def test_closes_the_session_on_namespace_done_for_a_namespace_never_named(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        on_namespace_done = Recorder()
+
+        harness.session.subscribe_namespace(_room(), NamespaceSubscriptionHandlers(on_namespace_done=on_namespace_done))
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_ok())
+        await request.send(encode_namespace(["alice"]))
+        await request.send(encode_namespace_done(["bob"]))
+
+        await wait_for(lambda: harness.fake.close_info is not None)
+        assert harness.fake.close_info is not None
+        assert harness.fake.close_info.close_code == SESSION_ERROR.PROTOCOL_VIOLATION
+        assert not on_namespace_done.called
+
+    @pytest.mark.parametrize("ending", ["fin", "reset"])
+    async def test_withdraws_each_active_namespace_when_the_accepted_request_ends(self, ending: str) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        calls: list[object] = []
+
+        harness.session.subscribe_namespace(
+            _room(),
+            NamespaceSubscriptionHandlers(
+                on_namespace_done=lambda suffix: calls.append(("done", suffix)),
+                on_end=lambda error: calls.append(("end", error is not None)),
+            ),
+        )
+        request = await harness.fake.next_request_stream()
+
+        await request.first_message
+        await request.send(encode_request_ok())
+        await request.send(encode_namespace(["alice"]))
+        await request.send(encode_namespace(["bob"]))
+        await request.send(encode_namespace_done(["bob"]))
+        if ending == "fin":
+            await request.fin()
+        else:
+            request.reset(RuntimeError("gone"))
+
+        await wait_for(lambda: len(calls) == 3)
+        assert calls == [("done", ["bob"]), ("done", ["alice"]), ("end", ending == "reset")]
+        harness.session.destroy()
+
     async def test_reports_a_fin_after_request_ok_as_a_clean_end_and_fins_back(self) -> None:
         harness = create_session_harness()
         harness.fake.send_server_setup()

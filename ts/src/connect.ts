@@ -170,6 +170,9 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
     }),
   );
 
+  /** Prefixes with a namespace request open on this connection (namespace-events.ts, `claimPrefix`). */
+  const prefixes = new Set<readonly string[]>();
+
   const trackSource: MoqTrackSource = Object.freeze({
     closed,
     subscribe: (options: MoqtSubscribeOptions, handlers: SubscriptionHandlers) => {
@@ -225,7 +228,7 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
       const prefix = namespaceFields(given);
       assertOpen();
       return createNamespaceEvents(
-        { subscribeNamespace: (...args) => connected.subscribeNamespace(...args), observeClosed },
+        { subscribeNamespace: (...args) => connected.subscribeNamespace(...args), observeClosed, prefixes },
         prefix,
         { ...(capacity === undefined ? {} : { capacity }), ...(signal === undefined ? {} : { signal }) },
       );

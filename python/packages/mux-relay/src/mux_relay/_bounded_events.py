@@ -37,9 +37,16 @@ class BoundedEventSink(Generic[E]):
         self._events._push(event)
 
     def ended(self, error: BaseException | None = None) -> None:
-        """The producer ended: ``None`` finishes the iterator cleanly, anything else is raised from reads."""
+        """The producer ended: ``None`` finishes the iterator cleanly, anything else is raised from reads.
+
+        Either way the queue is discarded.
+        """
         # An ending the iterator started (close, cancellation, overflow) echoes back here.
         self._events._finish(error)
+
+    def complete(self) -> None:
+        """The producer finished cleanly: queued events are still read, then the iterator is done."""
+        self._events._finish(None, keep_queue=True)
 
 
 class BoundedEvents(Generic[E]):
@@ -95,12 +102,14 @@ class BoundedEvents(Generic[E]):
             return
         self._queue.append(event)
 
-    def _finish(self, error: BaseException | None = None) -> None:
+    def _finish(self, error: BaseException | None = None, *, keep_queue: bool = False) -> None:
         if self._ended:
             return
         self._ended = True
         self._failure = error
-        self._queue.clear()
+        # A pending read only exists while the queue is empty, so keeping it still settles that read as done.
+        if not keep_queue:
+            self._queue.clear()
         if self._cancellation is not None:
             self._cancellation.remove_callback(self._finish)
         if self._request is not None:
@@ -122,11 +131,14 @@ class BoundedEvents(Generic[E]):
                 # A handoff already completed before teardown belongs to the consumer, like TS.
                 if handed is not None:
                     return handed[0]
+            # Events left by a clean completion are read before the end.
+            if self._queue:
+                return self._queue.popleft()
             if self._ended:
                 if self._failure is not None:
                     raise self._failure
                 raise StopAsyncIteration
-            return self._queue.popleft()
+            raise RuntimeError("unreachable: an empty queue on a live iterator is awaited")
         except asyncio.CancelledError:
             self.close()
             raise
@@ -136,6 +148,7 @@ class BoundedEvents(Generic[E]):
     def close(self) -> None:
         """Discard queued events and settle pending reads as EOF. Idempotent."""
         self._finish()
+        self._queue.clear()
 
     async def aclose(self) -> None:
         """:meth:`close` as a coroutine, for ``contextlib.aclosing`` and other async-iterator cleanup."""

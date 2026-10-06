@@ -269,9 +269,16 @@ export interface NamespaceSubscriptionHandlers {
   onOk?(): void;
   /** The request failed before or instead of REQUEST_OK: REQUEST_ERROR, or a stream failure. */
   onError?(error: RequestError): void;
-  /** NAMESPACE (§10.19): a namespace under the prefix is available. */
+  /**
+   * NAMESPACE (§10.17): a namespace under the prefix is available. A peer may name one again (moq-relay does when its
+   * route changes); each call is passed on.
+   */
   onNamespace?(trackNamespaceSuffix: TrackNamespace): void;
-  /** NAMESPACE_DONE (§10.20): a namespace the peer named is no longer available. */
+  /**
+   * NAMESPACE_DONE (§10.18): a namespace the peer named is no longer available. Also called for each namespace still
+   * active when the accepted request ends (§10.19), just before `onEnd`. One for a namespace never named closes the
+   * session with PROTOCOL_VIOLATION (§10.19).
+   */
   onNamespaceDone?(trackNamespaceSuffix: TrackNamespace): void;
   /**
    * The accepted request ended: the peer finished its side of the stream (no `error`), or the stream failed (`error`
@@ -382,7 +389,7 @@ export interface MoqtSession {
   /** Send TRACK_STATUS (§10.15) on a new request stream and report its one response through `handlers`. */
   trackStatus(options: MoqtSubscribeOptions, handlers?: TrackStatusHandlers): void;
   /**
-   * Send SUBSCRIBE_NAMESPACE (§10.18) on a new request stream: the peer answers REQUEST_OK, then names the namespaces
+   * Send SUBSCRIBE_NAMESPACE (§10.19) on a new request stream: the peer answers REQUEST_OK, then names the namespaces
    * under the prefix with NAMESPACE / NAMESPACE_DONE on the same stream. A relay that pushes unsolicited
    * PUBLISH_NAMESPACE instead only stops doing so when SETUP carried `SETUP_OPTION.SOLICIT`.
    */
@@ -466,6 +473,8 @@ interface NamespaceSubscriptionRecord extends RequestRecordBase {
   handlers: NamespaceSubscriptionHandlers;
   /** REQUEST_OK arrived. Settlement alone is not acceptance: REQUEST_ERROR settles the request too. */
   accepted?: boolean;
+  /** Suffixes named by NAMESPACE and not yet withdrawn, keyed by their JSON. */
+  active: Map<string, TrackNamespace>;
 }
 
 interface AliasWaiter {
@@ -788,7 +797,13 @@ class MoqtSessionImpl implements MoqtSession {
     handlers: NamespaceSubscriptionHandlers = {}
   ): NamespaceSubscription {
     const requestId = this.#allocateRequestId();
-    const record: NamespaceSubscriptionRecord = { requestId, handlers, cancelled: false, settled: false };
+    const record: NamespaceSubscriptionRecord = {
+      requestId,
+      handlers,
+      cancelled: false,
+      settled: false,
+      active: new Map(),
+    };
     const message = encodeSubscribeNamespace({
       requestId,
       trackNamespacePrefix: options.trackNamespacePrefix,
@@ -802,6 +817,10 @@ class MoqtSessionImpl implements MoqtSession {
       if (!this.#namespaceSubscriptions.delete(requestId)) return;
       // A failed stream is dropped here: session teardown only reaches the records it still holds.
       if (error !== undefined) record.stream?.cancel(error);
+      // §10.19: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
+      const active = [...record.active.values()];
+      record.active.clear();
+      for (const suffix of active) handlers.onNamespaceDone?.(suffix);
       handlers.onEnd?.(error === undefined ? {} : { error });
     };
 
@@ -1055,7 +1074,7 @@ class MoqtSessionImpl implements MoqtSession {
         break;
       case 'namespace':
       case 'namespace-done':
-        // Entries follow REQUEST_OK (§10.18); one before it, or after REQUEST_ERROR, is outside the
+        // Entries follow REQUEST_OK (§10.19); one before it, or after REQUEST_ERROR, is outside the
         // stream's grammar.
         if (!record.accepted) {
           this.#fatal(
@@ -1064,8 +1083,17 @@ class MoqtSessionImpl implements MoqtSession {
           return;
         }
 
-        if (message.kind === 'namespace') record.handlers.onNamespace?.(message.trackNamespaceSuffix);
-        else record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix);
+        if (message.kind === 'namespace') {
+          record.active.set(JSON.stringify(message.trackNamespaceSuffix), message.trackNamespaceSuffix);
+          record.handlers.onNamespace?.(message.trackNamespaceSuffix);
+        } else if (record.active.delete(JSON.stringify(message.trackNamespaceSuffix))) {
+          record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix);
+        } else {
+          // §10.19: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
+          this.#fatal(
+            new MoqtProtocolError('NAMESPACE_DONE before its NAMESPACE on a subscribe-namespace request stream')
+          );
+        }
         break;
       case 'goaway':
         record.handlers.onGoaway?.(message);
