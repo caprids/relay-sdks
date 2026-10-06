@@ -2543,4 +2543,29 @@ describe('rotation before the credential expires (#261)', () => {
       await until(() => connections[2]?.subscriptions.length === 1, 'subscribed on the next connection at once');
     });
   });
+  describe('Codex review of the merge, pass 6', () => {
+    it('reports the relay renewing demand after a move its own demand triggered', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'catalog' });
+      connections[0]!.tracks.get('catalog')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const changes = writer.demandChanges();
+      expect((await changes.next()).value).toBe(true);
+      publisher.rotate();
+      await until(() => connections[1]?.tracks.has('catalog') === true, 'next generation');
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const next = connections[1]!.tracks.get('catalog')!;
+      next.setDemand(true); // its iterator yields this and moves the track
+      expect((await changes.next()).value).toBe(true); // the move
+      await until(() => connections[0]!.closeCalls === 1, 'old generation closed');
+      next.setDemand(true); // the relay replaced its upstream subscription
+      const renewed = await Promise.race([
+        changes.next(),
+        new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 50)),
+      ]);
+      expect(renewed?.value).toBe(true);
+      await changes.return?.();
+    });
+  });
 });

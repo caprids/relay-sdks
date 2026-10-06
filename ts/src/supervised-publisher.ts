@@ -597,6 +597,8 @@ class SupervisedTrack {
         generation: Generation;
         writer: RelayTrackWriter;
         moved(): void;
+        /** The value its demand iterator yielded last, while pending. */
+        seen?: boolean;
       }
     | undefined;
   /** The holds of groups open on any generation, released when the track closes and ends them. */
@@ -746,7 +748,10 @@ class SupervisedTrack {
     if (stay && !force) return;
     this.#pending = undefined;
     if (binding && !binding.generation.ended) this.#retired.set(binding.generation, binding.writer);
-    this.#binding = { generation: pending.generation, writer: pending.writer, covered: pending.writer.hasDemand };
+    // The move reports `true` for demand the iterator has not yielded yet; one it already yielded is not covered, so the
+    // next `true` it yields is new demand.
+    const covered = pending.writer.hasDemand && pending.seen !== true;
+    this.#binding = { generation: pending.generation, writer: pending.writer, covered };
     // The move reports the next generation's demand as it is now: `true` again if it has demand, so demand-driven state
     // reaches it, or the loss of demand. Values its iterator had queued before the move are stale and not reported.
     this.#emitDemand(pending.writer.hasDemand);
@@ -787,7 +792,9 @@ class SupervisedTrack {
     try {
       for await (const value of changes) {
         const bound = this.#binding?.generation === generation;
-        if (!bound && this.#pending?.generation !== generation) break;
+        const pending = this.#pending?.generation === generation ? this.#pending : undefined;
+        if (!bound && !pending) break;
+        if (pending) pending.seen = value;
         // Any `true` after this iterator's first value is new demand: a repeat, or demand back after a `false`.
         const renewed = value && previous !== undefined;
         previous = value;
