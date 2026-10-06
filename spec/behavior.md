@@ -197,9 +197,8 @@ Messages are not a compatibility contract; the class and the point of rejection 
   through `subscribed` and `on_error`, and does not retry a subscribe. An application avoids the
   race by subscribing once its [discovery](#discovery) reports the namespace `announced`, or else
   retries the rejection within its own budget rather than treating it as fatal. A
-  [supervised subscriber](#supervised-subscriber)'s want retries it, and the Python examples, which
-  do not use discovery, still share a helper for it until that SDK gains one; both retry 16
-  `unroutable` and the older 404 without reporting them, never treating 16 `not found` as the race
+  [supervised subscriber](#supervised-subscriber)'s want retries it: 16 `unroutable` and the older
+  404 without reporting them, never treating 16 `not found` as the race
   ([issue #136](https://github.com/muxinc/relay-sdks/issues/136)).
 - The SDK surfaces every subgroup reset it receives, and connection closure, explicitly. It surfaces
   a reset when the relay forwards it, which may be well after the publisher's abort: moq-relay 0.15.8
@@ -450,7 +449,8 @@ built only on them: `connectSupervisedPublisher` / `connect_supervised_publisher
 `connectSupervisedSubscriber` / `connect_supervised_subscriber`. It owns the recovery policy in
 [publisher recovery](publisher-recovery.md), so live applications don't each write it again
 ([issue #260](https://github.com/muxinc/relay-sdks/issues/260)). Neither supervisor changes what
-the primitives do. The Python SDK gains them in its own change.
+the primitives do. Python gives the backoff bounds and `stale_after` in seconds, and its want
+handlers take the namespace as a second argument.
 
 Both supervisors:
 
@@ -963,9 +963,9 @@ and subscribes on the same random namespace, then asserts:
 
 1. A publisher connection and a subscriber connection both open with the supplied token.
 2. Once the publisher's `announced` settles, subscriptions to two tracks on the namespace are
-   accepted, retrying the fresh-namespace rejection while the announce propagates. In TypeScript
-   a [supervised subscriber](#supervised-subscriber)'s wants make them and never resubscribe
-   during the run. In Python the examples' helper makes them and the report records the retries.
+   accepted, retrying the fresh-namespace rejection while the announce propagates. A
+   [supervised subscriber](#supervised-subscriber)'s wants make them and never resubscribe
+   during the run.
 3. Binary payloads, an empty payload, and a text payload all arrive intact. Each is written once,
    after a warm-up marker the subscriber drops has arrived on that track: a `SUBSCRIBE_OK` does not
    mean the path to the publisher is ready ([a viewer on another relay](relay-interop.md#a-viewer-on-another-relay)).
@@ -978,8 +978,7 @@ and subscribes on the same random namespace, then asserts:
 7. A want following a [supervised publisher](#supervised-publisher)'s root receives the first
    generation's objects. When a second supervised publisher starts on the same root while the
    first is still up, the want moves to the newer generation, reports `onRestarted` with reason
-   `generation`, and receives its objects. The report records how long the move took. (TypeScript
-   only until the Python SDK gains the supervisors.)
+   `generation`, and receives its objects. The report records how long the move took.
 8. All connections close cleanly once the test closes them.
 
 Adding an assertion here means adding it to every SDK's smoke test.

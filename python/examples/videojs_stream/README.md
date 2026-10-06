@@ -183,9 +183,11 @@ finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skip
 | `endedTracks` | Present only when a track ended, listing which |
 
 `--verify` runs an in-process subscriber on the same tracks and prints what a player would see, which
-is how the example is checked without a browser. It waits for the publisher's `announced` and
-subscribes through the examples' announce-race retry (`examples/shared/announce_race.py`), logging
-any retry as `verify: subscribe retried`. The catalog line lists the tracks `parse_msf_catalog`
+is how the example is checked without a browser. It is a
+[supervised subscriber](../../README.md#stay-connected-supervised-connections) whose wants retry the
+announce race and resubscribe after a publisher's done, logging each resubscription as
+`verify: resubscribing`, and it waits for the publisher's `announced` and every track's acceptance
+before the media starts. The catalog line lists the tracks `parse_msf_catalog`
 reads back from the received document (name, packaging, codec, size or sample rate, init-data
 bytes); a document it rejects is reported as a problem. With relay 0.14.17, expect
 `keyframesWithConfig=0`: its output omits the Video Config object property, so players configure

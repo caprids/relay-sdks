@@ -257,6 +257,13 @@ Measured on 2026-10-06 against `sjc.relay.mux.global` (moq-relay 0.17.0) with th
   `RECONNECTING` (10 or 11 per run), and nothing was replayed. The want restarted with reason
   `generation` when the old generation was withdrawn, or `publisher-done` when the done arrived
   first.
+- **The same with the Python SDK** (native QUIC on aioquic, same day and relay). The generation
+  switch took 202 to 203 ms in 4 of 4 smoke runs. In the in-process reconnect, 5 of 5 runs had the
+  next generation up 624 to 741 ms after the close and the want receiving its objects 764 to 881 ms
+  after it, with 6 to 8 writes failing at once with `RECONNECTING`. The write in flight at the close
+  failed with `TRANSPORT_ERROR` instead: closing the transport locally makes aioquic drain for about
+  300 ms before the session ends, longer than the supervisor waits for the end to explain a failure.
+  A relay's close or an idle timeout ends the session in the same turn its streams fail.
 
 A transport closed this way still sends a QUIC close, so the relay withdraws the old generation
 within a round trip. A crash leaves it announced until the idle timeout; the newer generation

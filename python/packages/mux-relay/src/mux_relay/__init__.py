@@ -28,6 +28,7 @@ from moq_core import (
 
 from ._awaitable import RelayAwaitable
 from ._subscription import RelaySubscription, SubscriptionEnd, SubscriptionEndKind
+from ._supervision import SupervisedStatus, SupervisionBackoff
 from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import ConnectingTransport, RelayTransportFactory
@@ -50,6 +51,8 @@ from .subscription_events import (
     SubscriptionRequestError,
     UpdateOkEvent,
 )
+from .supervised_publisher import PublisherGeneration, SupervisedPublisher, connect_supervised_publisher
+from .supervised_subscriber import RestartReason, SupervisedSubscriber, WantHandlers, connect_supervised_subscriber
 
 DEFAULT_ENDPOINT = "https://sjc.relay.mux.global"
 """The default Relay endpoint pinned in ``spec/protocol.json``."""
@@ -73,6 +76,7 @@ __all__ = [
     "ObjectEvent",
     "PublishDone",
     "PublisherDoneEvent",
+    "PublisherGeneration",
     "RelayAwaitable",
     "RelayError",
     "RelayErrorCode",
@@ -85,6 +89,7 @@ __all__ = [
     "RelayTrackWriter",
     "RelayTransportFactory",
     "RequestError",
+    "RestartReason",
     "StateNotifyEvent",
     "SubgroupEndEvent",
     "SubgroupResetEvent",
@@ -99,9 +104,16 @@ __all__ = [
     "SubscriptionHandlers",
     "SubscriptionOverflowError",
     "SubscriptionRequestError",
+    "SupervisedPublisher",
+    "SupervisedStatus",
+    "SupervisedSubscriber",
+    "SupervisionBackoff",
     "UpdateOkEvent",
+    "WantHandlers",
     "connect_relay_publisher",
     "connect_relay_subscriber",
+    "connect_supervised_publisher",
+    "connect_supervised_subscriber",
     "read_json",
     "read_text",
 ]

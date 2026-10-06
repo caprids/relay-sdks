@@ -17,3 +17,12 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   subscriber's SETUP now sends the MoQ Solicit option, so the relay advertises namespaces only on that request.
 - `mux-moq-core`: `MoqtSession.subscribe_namespace` (SUBSCRIBE_NAMESPACE with NAMESPACE / NAMESPACE_DONE) and
   `SETUP_OPTION.SOLICIT`.
+- `mux-relay`: opt-in supervised connections, as in the TypeScript SDK
+  ([#260](https://github.com/muxinc/relay-sdks/issues/260)). `connect_supervised_publisher` reconnects with backoff,
+  serving the root namespace plus a fresh generation field per connection, and rebinds the same track writers to every
+  generation; a write between generations raises the new `RECONNECTING` code and is never replayed.
+  `connect_supervised_subscriber` keeps tracks subscribed through `want(key, namespace, track, WantHandlers(...))`: it
+  retries the announce race, resubscribes after a done, a rejection or a stale track, moves to replacement
+  connections, follows a supervised publisher's newest generation through discovery, and reports `on_restarted`. The
+  primitives are unchanged. The examples' shared `announce_race.py` is retired: the demo, the Video.js example's
+  `--verify` viewer and the live smoke test subscribe through `want`.

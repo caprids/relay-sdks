@@ -297,6 +297,58 @@ Futures/Tasks are cancelled with their exceptions observed. Callbacks are never 
 `subscribe_events` for async consumers. Handlers are snapshotted at subscription creation; later
 assignments to the handler object do not change that subscription.
 
+## Stay connected: supervised connections
+
+`connect_relay_publisher` and `connect_relay_subscriber` never reconnect or resubscribe. A live
+application that has to survive network loss can use the supervisors instead. They take the same
+connection options and return once their first connection is up.
+
+```python
+from mux_relay import SupervisionBackoff, WantHandlers, connect_supervised_publisher, connect_supervised_subscriber
+
+publisher = await connect_supervised_publisher(
+    url,
+    namespace=["room", participant_id],  # the root: each connection serves root + one generation field
+    get_token=get_token,
+    on_status=lambda status, error: print("publisher", status, error),
+)
+video = publisher.register_track("video")  # the same writer across reconnects
+
+subscriber = await connect_supervised_subscriber(url, get_token=get_token)
+subscriber.want(
+    "alice/video",
+    ["room", "alice"],
+    "video",
+    WantHandlers(
+        on_object=decoder.push,
+        on_restarted=lambda reason, namespace: decoder.reset(),  # the gap is not filled
+        on_error=lambda error: print("gave up on alice/video", error),
+    ),
+    generations=True,
+    stale_after=3.0,
+)
+```
+
+The supervised publisher reconnects with backoff (from 0.5 s up to 10 s) whenever its connection
+ends. Each connection is a new **generation** with its own namespace, the root plus a field that
+sorts by start time. Each one gets a fresh namespace because moq-relay 0.17.0 never hands existing
+subscriptions to a reconnected publisher, and can keep serving a dead one's cached objects
+([publisher recovery](../spec/publisher-recovery.md)). Every registered track is registered again on
+each generation. Writes are never replayed: while no generation is up, a write raises `RECONNECTING`
+at once, and an operation the connection's end interrupted raises it too, so write the next object,
+or the next keyframe, when it is live again. A `mux_relay.media.FrameWriter` on a supervised track
+treats it as an interruption and resumes at the next keyframe.
+
+`want(key, namespace, track, handlers, ...)` keeps one track subscribed until `unwant(key)`. It
+retries the announce race, resubscribes after `PUBLISH_DONE` or a rejection a wait may fix (from
+0.25 s up to 8 s), and moves to the replacement connection. With `stale_after` (seconds), it also
+resubscribes a track that went silent; set that only for tracks that are never silent while live.
+With `generations=True`, it discovers the publisher's root and stays on the newest generation,
+moving as soon as a newer one is announced, with no application channel. Rejections no wait fixes,
+such as credentials or a malformed request, reach `on_error`, and the want stops. Backoff bounds are
+`SupervisionBackoff(initial_delay=..., max_delay=...)`, given as `reconnect=` to either supervisor
+or `retry=` to a want. See the [supervised contract](../spec/behavior.md#supervised-connections).
+
 ## Publishing lifecycle
 
 A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate
@@ -325,8 +377,8 @@ rejected with request error 16 (`DOES_NOT_EXIST`), reason `unroutable` (moq-rela
 relays through 0.15.1 answered `404 Broadcast not found`). A subscriber on another relay of the
 cluster waits longer still, until its relay learns the route. The SDK does not retry a subscribe, so
 a subscriber either waits for `subscriber.namespace_events(prefix)` to report the namespace
-`announced`, which avoids the race, or retries that rejection within its own budget (the examples
-and the live smoke test share `examples/shared/announce_race.py` for it). A process that owns both
+`announced`, which avoids the race, or retries that rejection within its own budget, as a supervised
+subscriber's [want](#stay-connected-supervised-connections) does. A process that owns both
 sides awaits `announced` before subscribing, which narrows the race but does not close it. On
 moq-relay 0.17.0 a subscribe on the discovering connection once `announced` arrived was never
 rejected `unroutable` (0 of 160 trials on 2026-10-06), while one sent as soon as the publisher's
@@ -517,6 +569,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `SUBSCRIPTION_OVERFLOW` | The event buffer filled; the subscription was cancelled. Choose a suitable capacity or faster consumption before subscribing again. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
+| `RECONNECTING` | A supervised publisher had no generation up, or the connection ended under the operation; nothing was replayed. Write the next object, or the next keyframe, once it is live. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
 | `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later (older relays' refusals reach a browser as `TRANSPORT_ERROR`; see #14). |
@@ -538,7 +591,8 @@ operation's phase, so the code alone does not rule out partial delivery.
 
 No code or phase promises safe replay. Account for previous attempts, data freshness, and your
 application's deduplication policy. Successful writes mean transport acceptance, not viewer
-acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED` is the one code that
+acknowledgment. The primitives do not retry or reconnect; the
+[supervisors](#stay-connected-supervised-connections) do. `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too), in
 any phase. TypeScript reports it too, in phase `connecting`; in a browser only against moq-relay
@@ -683,6 +737,9 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
 | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
 | Browser `WebTransport`, or `@mux/relay-quic` on Node | aioquic native QUIC client (`mux_relay.quic.connect_quic`) |
+| `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=...)` |
+| `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)` |
+| `SupervisionBackoff` in milliseconds (`initialDelayMs`, `maxDelayMs`) | `SupervisionBackoff` in seconds (`initial_delay`, `max_delay`) |
 
 ## Initial scope
 
@@ -690,7 +747,7 @@ This slice supports one connection, arbitrary reliable-stream track subscription
 updates and cancellation, plus data-only publication on a dedicated connection. The generic core
 also exposes FETCH and TRACK_STATUS. The protocol is pinned to `moqt-20`.
 
-Automatic reconnection, token refresh on a live session, datagram reception, and discovery of
+Token refresh on a live session, datagram reception, and discovery of
 tracks within a namespace are not implemented yet. Namespace discovery is `namespace_events`
 ([discovery contract](../spec/behavior.md#discovery)). A GOAWAY ends the connection with a `RelayError` of code `GOAWAY`;
 subscriptions still awaiting their first response end with it (`subscribed` raises
