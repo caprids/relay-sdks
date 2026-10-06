@@ -568,6 +568,10 @@ async def _supervise_relay_subscriber(
                 failures += 1
         if nxt is None:
             return None
+        # close() may have run while the helper's result was on its way here: it could not see this connection.
+        if state.stopped:
+            nxt.subscriber.close()
+            return None
         if not old.ended.cancelled and not manual():
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = old.subscriber.expires_at, nxt.subscriber.expires_at
@@ -662,6 +666,10 @@ async def _supervise_relay_subscriber(
                     attempt += 1
                     continue
                 if live is None:
+                    return
+                # close() may have run while the helper's result was on its way here: it could not see this connection.
+                if state.stopped:
+                    live.subscriber.close()
                     return
                 state.current = live
                 set_status("live")

@@ -1558,3 +1558,70 @@ async def test_takes_the_replacement_when_rotate_is_called_while_an_automatic_ro
     await until(lambda: len(connections) == 2 and connections[0].close_calls == 1, "replacement taken")
     assert connections[1].close_calls == 0
     assert publisher.generation is not None and publisher.generation.namespace == connections[1].namespace
+
+
+# ------------------------------------------------------------------ Codex pass 9 fixes (#261)
+
+
+async def test_closes_a_replacement_subscriber_that_close_could_not_see_yet() -> None:
+    connections: list[FakeSubscriber] = []
+    statuses: list[str] = []
+    supervised: list[SupervisedSubscriber] = []
+
+    class ClosingSubscriber(FakeSubscriber):
+        @property
+        def expires_at(self) -> datetime | None:
+            # Read once the helper has checked for shutdown and is handing the connection back.
+            supervised[0].close()
+            return None
+
+        @expires_at.setter
+        def expires_at(self, _value: datetime | None) -> None:
+            pass
+
+    async def connect(_attempt: CancellationToken) -> Any:
+        fake = ClosingSubscriber() if len(connections) == 1 else FakeSubscriber()
+        connections.append(fake)
+        return fake
+
+    subscriber = await _supervise_relay_subscriber(
+        connect, reconnect=FAST, on_status=lambda status, _error: statuses.append(status)
+    )
+    supervised.append(subscriber)
+    subscriber.rotate()
+    await until(lambda: "closed" in statuses, "closed")
+    await asyncio.sleep(0.02)
+    assert statuses == ["live", "closed"]
+    await until(lambda: connections[1].closed.done(), "replacement closed")
+
+
+async def test_closes_a_replacement_generation_that_close_could_not_see_yet() -> None:
+    connections: list[FakePublisher] = []
+    supervised: list[SupervisedPublisher] = []
+
+    class ClosingPublisher(FakePublisher):
+        @property
+        def expires_at(self) -> datetime | None:
+            _observe_close(supervised[0].close())
+            return None
+
+        @expires_at.setter
+        def expires_at(self, _value: datetime | None) -> None:
+            pass
+
+    async def connect(namespace: tuple[str, ...], _attempt: CancellationToken) -> Any:
+        fake = ClosingPublisher(namespace) if len(connections) == 1 else FakePublisher(namespace)
+        connections.append(fake)
+        return fake
+
+    publisher = await _supervise_relay_publisher(connect, ["room"], reconnect=FAST)
+    supervised.append(publisher)
+    publisher.rotate()
+    await until(lambda: len(connections) == 2 and connections[1].close_calls == 1, "replacement closed")
+    await asyncio.wait_for(publisher.closed, 1)
+    assert publisher.status == "closed"
+
+
+def _observe_close(close: Awaitable[None]) -> None:
+    task = asyncio.ensure_future(close)
+    task.add_done_callback(lambda done: done.exception())

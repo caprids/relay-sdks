@@ -840,6 +840,12 @@ async def _supervise_relay_publisher(
                 failures += 1
         if nxt is None:
             return None
+        # close() may have run while the helper's result was on its way here: it could not see this connection.
+        if state.stopped:
+            nxt.ended = True
+            with contextlib.suppress(Exception):
+                await nxt.publisher.close()
+            return None
         if not live.ended and not manual():
             # A credential that expires no later than the live one replaces nothing: the relay would end both together.
             was, now = live.publisher.expires_at, nxt.publisher.expires_at
@@ -959,6 +965,12 @@ async def _supervise_relay_publisher(
                     attempt += 1
                     continue
                 if live is None:
+                    return
+                # close() may have run while the helper's result was on its way here: it could not see this connection.
+                if state.stopped:
+                    live.ended = True
+                    with contextlib.suppress(Exception):
+                        await live.publisher.close()
                     return
                 state.current = live
                 for track in list(state.tracks.values()):
