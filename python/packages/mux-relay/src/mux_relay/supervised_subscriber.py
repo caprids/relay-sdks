@@ -1565,6 +1565,10 @@ async def _follow(
         if rotation_to is not None:
             rotation_to.release()
         rotation_to = _RotationTo(nxt, next_watch, release)
+        # A move waiting to be retried on a connection being rotated away is the rotation's to make now, on the
+        # next one: left in place, its connection closing would restart the want.
+        if retry_move is not None and retry_move[0].connection is not nxt:
+            clear_retry()
         unwatch_next = next_watch.on_change(reconcile) if next_watch is not None else None
         reconcile()
         release_unused()

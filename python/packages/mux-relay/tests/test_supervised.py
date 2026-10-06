@@ -2572,3 +2572,39 @@ async def test_keeps_a_followed_rotation_silent_when_the_next_connection_rotates
     replacement.send_object(5)  # already delivered
     replacement.send_object(6)
     assert seen == ["object 5", "object 6"]
+
+
+# ------------------------------------------------------------------ Bugbot on 910723d (#261)
+
+
+async def test_does_not_restart_a_followed_rotation_when_a_move_was_waiting_to_be_retried_on_the_old_connection(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    seen: list[str] = []
+    handlers = WantHandlers(
+        on_object=lambda obj: seen.append(f"object {obj.group_id}"),
+        on_restarted=lambda reason, _namespace: seen.append(f"restarted {reason}"),
+        on_switched=lambda info: seen.append(f"switched to {info.to_track}"),
+    )
+    subscriber.want("v", ["room"], "a", handlers, generations=True, retry=SLOW)
+    await until(lambda: len(s.first.discoveries) == 1, "discovery")
+    generation = new_generation(1_000)
+    s.first.discoveries[0].push("announced", ["room", generation])
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe a")
+    s.first.subscriptions[0].accept()
+    s.first.subscriptions[0].send_object(5)
+    subscriber.want("v", ["room"], "b", handlers, generations=True, retry=SLOW)
+    await until(lambda: len(s.first.subscriptions) == 2, "move to b")
+    s.first.subscriptions[1].reject(0x10, "unroutable")  # the move waits a minute to be retried
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].discoveries) == 1, "discovery on the next")
+    s.first.end()  # the old connection closes before the new discovery answers
+    await asyncio.sleep(0.01)
+    s.connections[1].discoveries[0].push("announced", ["room", generation])
+    await until(lambda: len(s.connections[1].subscriptions) == 1, "b on the new connection")
+    replacement = s.connections[1].subscriptions[0]
+    assert replacement.track == "b"
+    replacement.accept()
+    replacement.send_object(0)
+    assert seen == ["object 5", "switched to b", "object 0"]
