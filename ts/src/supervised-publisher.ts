@@ -340,7 +340,9 @@ export async function superviseRelayPublisher(
       await next.publisher.close().catch(() => {});
       return undefined;
     }
-    if (!live.ended && !manual()) {
+    // Consulted whatever happened to the old generation: a queued `rotate()` is answered by this replacement.
+    const asked = manual();
+    if (!live.ended && !asked) {
       // A credential that expires no later than the live one replaces nothing: the relay would end both together.
       const was = live.publisher.expiresAt?.getTime();
       const now = next.publisher.expiresAt?.getTime();

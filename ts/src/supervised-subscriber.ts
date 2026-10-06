@@ -437,7 +437,9 @@ export async function superviseRelaySubscriber(
       next.live.subscriber.close();
       return undefined;
     }
-    if (!old.signal.aborted && !manual()) {
+    // Consulted whatever happened to the old connection: a queued `rotate()` is answered by this replacement.
+    const asked = manual();
+    if (!old.signal.aborted && !asked) {
       // A credential that expires no later than the live one replaces nothing: the relay would end both together.
       const was = old.subscriber.expiresAt?.getTime();
       const now = next.live.subscriber.expiresAt?.getTime();
@@ -930,9 +932,9 @@ async function subscribeOnce(
           publisherDone = true;
           if (reported) handlers().onPublisherDone?.(info);
           finish.abort();
-          // The publisher ended: one restarting on the namespace may number its groups from 0, so nothing it sends was
-          // delivered before.
-          if (want.cutoff?.owner === subscription) want.cutoff = undefined;
+          // The publisher ended, whichever subscription heard it: one restarting on the namespace may number its groups
+          // from 0, so nothing it sends was delivered before.
+          want.cutoff = undefined;
           handedOff?.complete();
         },
       },

@@ -1363,7 +1363,7 @@ describe('rotation before the credential expires (#261)', () => {
       subscriber.rotate();
       await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
       connections[1]!.subscriptions[0]!.accept();
-      connections[1]!.subscriptions[0]!.done();
+      connections[1]!.subscriptions[0]!.terminate({ errorCode: 0x0, retryInterval: 0, reason: 'internal error' });
       old.object(3);
       await until(() => connections[1]!.subscriptions.length === 2, 'retry on the new connection');
       const retry = connections[1]!.subscriptions[1]!;
@@ -1782,6 +1782,49 @@ describe('rotation before the credential expires (#261)', () => {
       restarted.object(0);
       restarted.object(1);
       expect(seen).toEqual([9, 0, 1]);
+    });
+  });
+  describe('Codex pass 12 fixes', () => {
+    it('drops the cutoff when the replacement hears the publisher end before taking over', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: number[] = [];
+      subscriber.want('v', { namespace: ['room'], track: 'v', retry: fast }, { onObject: (o) => seen.push(o.groupId) });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      connections[0]!.subscriptions[0]!.accept();
+      connections[0]!.subscriptions[0]!.object(10);
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.accept();
+      connections[1]!.subscriptions[0]!.done(); // the publisher ended, heard on the replacement
+      await until(() => connections[1]!.subscriptions.length === 2, 'retry');
+      const restarted = connections[1]!.subscriptions[1]!;
+      restarted.accept();
+      restarted.object(0); // the restarted publisher, while the old subscription is still open
+      connections[0]!.end(); // the old connection closes without a done
+      restarted.object(1);
+      expect(seen).toEqual([10, 0, 1]);
+    });
+
+    it('answers a queued rotate() with the replacement even when the old connection ended first', async () => {
+      const gate = deferred();
+      const connections: FakeSubscriber[] = [];
+      const subscriber = await superviseRelaySubscriber(
+        async () => {
+          if (connections.length === 1) await gate.promise;
+          const fake = fakeSubscriber(connections.length === 0 ? new Date(Date.now() + 200) : undefined);
+          connections.push(fake);
+          return fake;
+        },
+        { url: 'https://relay.example.com/moq', reconnect: fast, rotateBeforeMs: 150 },
+      );
+      cleanup.push(() => subscriber.close());
+      await new Promise((resolve) => setTimeout(resolve, 150)); // the automatic rotation is connecting
+      subscriber.rotate();
+      connections[0]!.end(new Error('lost'));
+      gate.resolve();
+      await until(() => connections.length === 2 && subscriber.status === 'live', 'replacement adopted');
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(connections).toHaveLength(2);
     });
   });
 });
