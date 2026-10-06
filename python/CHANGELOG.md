@@ -33,6 +33,10 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 - `mux-moq-media` (imported as `moq_media`): LOC and MSF format helpers. `build_msf_catalog` leaves `isComplete`
   out, since a live broadcast is not complete (msf-01 §5.1.3), and `build_msf_end_catalog` builds the §11.3 catalog
   that ends a broadcast: `isComplete: true` and no tracks ([#284](https://github.com/muxinc/relay-sdks/issues/284)).
+- `mux-moq-media`: one timeline per broadcast, and a playout clock for audio/video sync
+  ([#285](https://github.com/muxinc/relay-sdks/issues/285)). `BroadcastClock` stamps every track from one origin
+  (`from_source_us`, and `sample_timeline` for sample counters). `PlayoutClock` takes audio reports and answers
+  `due(timestamp_us)` with a `PlayoutDecision` to wait, show, or drop, falling back to wall-clock pacing without audio.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
   subscriber's SETUP now sends the MoQ Solicit option, so the relay advertises namespaces only on that request.

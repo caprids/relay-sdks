@@ -9,7 +9,9 @@ example as their first caller; the `register_media` handle that would compose th
 builder and `update()` of a served document remain proposals. Of the readers (stage 3), the
 catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_catalog`
 ([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
-`--verify` logs its track list; the object-to-frame reader remains a proposal. Public names for the
+`--verify` logs its track list; the object-to-frame reader remains a proposal. The
+[shared timeline and playout clock](#shared-timeline-and-playout-clock) ship in both format
+packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)). Public names for the
 implemented stages are recorded in [vocabulary.md](vocabulary.md).
 
 This design was written 2026-09-18. Its before/after sketches describe the eventual API; they are
@@ -234,6 +236,119 @@ symmetric with `read_text` and `read_json`:
 - Turn an object plus the track's received timescale into a frame: payload, timestamp in
   microseconds, keyframe flag from object ID 0, and any config property that survived the relay.
   Video.js's `toLocFrame` is the reference, including its acceptance of the draft-03 timestamp ID.
+
+## Shared timeline and playout clock
+
+[Issue #285](https://github.com/muxinc/relay-sdks/issues/285). Implemented in both format packages;
+[behavior.md](behavior.md#media-helpers) holds the testable rules.
+
+### One timeline per broadcast
+
+A broadcast is the set of media tracks one MSF catalog lists. Its publisher stamps every one of
+them from one broadcast clock:
+
+- The LOC Timestamp of each object is the presentation time of its first sample, in microseconds
+  since the broadcast's origin. The origin is a moment at or before the first capture on any track,
+  so no track needs a negative timestamp. Each track declares Timescale 1,000,000
+  (`locTrackProperties` / `loc_track_properties`).
+- Audio and video share that origin. A track never starts its own count at zero: audio stamped from
+  a sample counter is anchored at the broadcast time of its first sample, and video stamped from
+  capture timestamps is shifted by the same origin as everything else.
+- The catalog states nothing extra. Every LOC media track in one catalog is on that catalog's
+  timeline. There is no `timeline` field, because msf-01 defines none and a player ignores fields
+  it does not know. msf-01's `renderGroup` (§5.2.11) is the standard way to say tracks are meant to
+  play together; the builder can emit it if a publisher ever lists tracks that are not.
+- A timeline belongs to one catalog namespace. A supervised publisher's next generation is a new
+  broadcast with a new origin. A player resets its playout clock wherever it resets its decoders:
+  at a Restart, at a Move, and on a new catalog.
+- Timelines of different broadcasts are unrelated. Syncing between broadcasts or participants is
+  out of scope.
+
+What the relay does to timestamps is in
+[Relay property handling](behavior.md#relay-property-handling). A track with a declared timescale
+keeps the publisher's timestamps, rescaled to microseconds. A track without one, or an object
+without a Timestamp, gets the relay's own clock instead. A received Timestamp cannot tell you which
+of these happened, so a player must not use relay-clock stamps to sync, and a publisher must declare
+the timescale on every media track. The format helpers do this by default.
+
+### Broadcast clock (publisher)
+
+`createBroadcastClock()` / `BroadcastClock()` fixes the origin and maps the common timestamp
+sources onto the timeline. It reads an injected monotonic microsecond source. The default source
+is `performance.now()` in TypeScript and `time.monotonic_ns()` in Python, which is the clock that
+Chromium's `MediaStreamTrackProcessor` stamps `VideoFrame` and `AudioData` with.
+
+| Operation | TypeScript | Python | Result |
+| --- | --- | --- | --- |
+| Origin, on the source clock | `originUs` | `origin_us` | Defaults to the source's time at creation |
+| Time on the timeline now | `now()` | `now_us()` | `source − origin`, integer µs |
+| Map a source timestamp | `fromSourceUs(t)` | `from_source_us(t)` | `t − origin`, rounded to integer µs |
+| Anchor a sample counter | `sampleTimeline(rate, { firstSampleUs })` | `sample_timeline(rate, first_sample_us=)` | A mapper; the anchor defaults to `now()` |
+| Sample index to timestamp | `timeline.timestampUs(n)` | `timeline.timestamp_us(n)` | `anchor + floor(n × 1,000,000 / rate)` |
+
+A source time before the origin maps to a negative number, which the LOC helpers refuse. That frame
+was captured before the broadcast started: create the clock before you start capturing, or pass the
+earliest capture time as the origin. Stamp the encoder's input (`new VideoFrame(frame, { timestamp })`,
+the `AudioData` timestamp) and the encoded chunks carry the timeline, so `chunkToLocFrame` passes it
+through unchanged. If a chunk still carries source time, `timestampOffsetUs: -clock.originUs` maps it.
+A sample counter runs on the audio device's clock, which drifts against the monotonic source by up
+to about 100 ppm. Over a long broadcast, re-anchor with a new `sampleTimeline` when the two disagree
+by more than a frame.
+
+### Playout clock (player)
+
+`createPlayoutClock()` / `PlayoutClock()` answers one question for the video renderer: when should
+the frame with this timestamp be shown? It is DOM-free and transport-agnostic, with the same
+injected time source as the broadcast clock, so a Python player or a test drives it with numbers.
+
+Audio is the master. The audio path calls `reportAudio(timestampUs, atUs?)` /
+`report_audio(timestamp_us, at_us=None)` with the timeline timestamp that is audible at local time
+`at` (default: now). That is the timestamp leaving the speaker: what was handed to the output,
+less the jitter-buffer depth, `AudioContext.outputLatency`, and any extra path, such as a WebRTC
+loopback for echo cancellation. Between reports the clock extrapolates at real-time rate:
+`position = reported + (now − at)`. Reports re-anchor it, so the audio device's drift never builds
+up.
+
+The clock has three modes:
+
+| Mode | When | Position |
+| --- | --- | --- |
+| `idle` | Created, or after `reset()`, with nothing reported or asked yet | None; the next `due()` anchors wall pacing |
+| `audio` | A report arrived within `audioTimeoutUs` | Extrapolated from the latest report |
+| `wall` | No audio has ever been reported, after `stopAudio()` / `stop_audio()`, or once reports have been silent for `audioTimeoutUs` | Wall clock from an anchor: the first frame asked about from `idle`, or the audio position when audio went quiet, so nothing jumps |
+
+The next audio report returns the clock to `audio`.
+
+`due(timestampUs)` compares the frame with the position: `offset = timestamp − position`, where
+positive means the frame is early. The decision is one of three:
+
+| Decision | When | The renderer |
+| --- | --- | --- |
+| `wait`, with `waitUs = ceil(offset)` | `0 < offset ≤ maxVideoDelayUs` | Holds the frame and asks again after the wait |
+| `show` | `−lateDropUs ≤ offset ≤ 0`, or a re-sync (below) | Shows it now |
+| `drop` | `offset < −lateDropUs` | Discards it; audio has already moved past it |
+
+Every decision carries `offsetUs`, rounded to integer µs, so the application can log its sync error.
+From `idle`, the first `due()` anchors wall pacing on that frame and returns `show` with offset 0.
+
+Re-sync with `maxVideoDelayUs`. In `audio` mode, a frame more than `maxVideoDelayUs` early is
+shown now and not held: video that far ahead of audio means the two tracks are not on one timeline,
+and freezing the picture would not fix that. The offset reports the gap. In `wall` mode, a frame
+more than `maxVideoDelayUs` early or late re-anchors the clock on itself and is shown. This covers
+a timeline jump and recovery after a network stall, which would otherwise make every later frame
+late. A late frame in `audio` mode is always judged against audio and dropped. If video is late
+consistently, the audio path needs a deeper buffer, and the clock cannot add one.
+
+| Option | TypeScript | Python | Default | Why |
+| --- | --- | --- | --- | --- |
+| Late-drop threshold | `lateDropUs` | `late_drop_us` | 40,000 | A late frame makes audio effectively early; EBU R37 puts the audio-early limit at 40 ms |
+| Lead before re-sync | `maxVideoDelayUs` | `max_video_delay_us` | 1,000,000 | Above a deep audio jitter buffer plus output latency |
+| Audio silence before wall pacing | `audioTimeoutUs` | `audio_timeout_us` | 500,000 | Reports come every 10–20 ms; half a second without one is a stall or a mute |
+| Time source | `now` | `now_us` | `performance.now()` µs / `time.monotonic_ns() // 1000` | Injected so tests are exact |
+
+The clock does not buffer, decode, or render frames, and it never changes how much audio is buffered.
+The target it is built for is the broadcast guidance of ITU-R BT.1359 and EBU R37: audio within
+about ±45 ms of video, and not audibly early.
 
 ## Package placement
 

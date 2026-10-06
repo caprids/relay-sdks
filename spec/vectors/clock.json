@@ -1,0 +1,146 @@
+{
+  "source": "Derived from spec/media-layer.md, Shared timeline and playout clock (issue #285); boundary cases follow its tables",
+  "broadcast": [
+    {
+      "name": "the origin defaults to the source time at creation",
+      "createdAt": "5000000",
+      "steps": [
+        { "at": "5000000", "now": "0" },
+        { "at": "5033333", "now": "33333" },
+        { "at": "5033333", "fromSource": "5100000", "expect": "100000" },
+        { "at": "5033333", "fromSource": "4999000", "expect": "-1000" }
+      ]
+    },
+    {
+      "name": "an explicit origin is kept",
+      "createdAt": "5000000",
+      "originUs": "4000000",
+      "steps": [
+        { "at": "5000000", "now": "1000000" },
+        { "at": "5000000", "fromSource": "4000000", "expect": "0" }
+      ]
+    }
+  ],
+  "sampleTimelines": [
+    {
+      "name": "48 kHz anchored at the broadcast time it was created",
+      "createdAt": "5000000",
+      "timelineAt": "5020000",
+      "sampleRate": "48000",
+      "samples": [
+        ["0", "20000"],
+        ["1", "20020"],
+        ["960", "40000"],
+        ["47999", "1019979"],
+        ["48000", "1020000"]
+      ]
+    },
+    {
+      "name": "44.1 kHz with an explicit first-sample time, exact past 2^53 sample-microseconds",
+      "createdAt": "0",
+      "timelineAt": "0",
+      "sampleRate": "44100",
+      "firstSampleUs": "0",
+      "samples": [
+        ["1", "22"],
+        ["441", "10000"],
+        ["15876000000", "360000000000"],
+        ["15876000001", "360000000022"]
+      ]
+    }
+  ],
+  "playout": [
+    {
+      "name": "the first frame anchors wall pacing; wait, show, the late boundary, then drop",
+      "steps": [
+        { "at": "1000", "mode": "idle", "position": null },
+        { "at": "1000", "due": "5000000", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "1000", "mode": "wall", "position": "5000000" },
+        { "at": "11000", "due": "5033333", "expect": { "action": "wait", "offsetUs": "23333", "waitUs": "23333" } },
+        { "at": "34333", "due": "5033333", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "74333", "due": "5033333", "expect": { "action": "show", "offsetUs": "-40000" } },
+        { "at": "74334", "due": "5033333", "expect": { "action": "drop", "offsetUs": "-40001" } }
+      ]
+    },
+    {
+      "name": "audio is the master and the clock extrapolates between reports",
+      "steps": [
+        { "at": "0", "report": "200000" },
+        { "at": "0", "mode": "audio", "position": "200000" },
+        { "at": "20000", "position": "220000" },
+        { "at": "20000", "due": "250000", "expect": { "action": "wait", "offsetUs": "30000", "waitUs": "30000" } },
+        { "at": "20000", "due": "220000", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "20000", "due": "180000", "expect": { "action": "show", "offsetUs": "-40000" } },
+        { "at": "20000", "due": "179999", "expect": { "action": "drop", "offsetUs": "-40001" } },
+        { "at": "30000", "report": "225000", "reportAt": "25000" },
+        { "at": "30000", "mode": "audio", "position": "230000" },
+        { "at": "30000", "due": "1230000", "expect": { "action": "wait", "offsetUs": "1000000", "waitUs": "1000000" } },
+        { "at": "30000", "due": "1230001", "expect": { "action": "show", "offsetUs": "1000001" } },
+        { "at": "30000", "mode": "audio", "position": "230000" },
+        { "at": "30000", "due": "0", "expect": { "action": "drop", "offsetUs": "-230000" } }
+      ]
+    },
+    {
+      "name": "silent audio falls back to wall pacing without a jump, and a report takes over again",
+      "steps": [
+        { "at": "0", "report": "0" },
+        { "at": "500000", "mode": "audio", "position": "500000" },
+        { "at": "500001", "mode": "wall", "position": "500001" },
+        { "at": "600000", "due": "600000", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "700000", "report": "650000" },
+        { "at": "700000", "mode": "audio", "position": "650000" }
+      ]
+    },
+    {
+      "name": "stopping audio paces by wall clock from the current position",
+      "steps": [
+        { "at": "0", "stopAudio": true },
+        { "at": "0", "mode": "idle", "position": null },
+        { "at": "0", "report": "1000" },
+        { "at": "100000", "stopAudio": true },
+        { "at": "100000", "mode": "wall", "position": "101000" },
+        { "at": "200000", "stopAudio": true },
+        { "at": "200000", "mode": "wall", "position": "201000" },
+        { "at": "200000", "due": "201000", "expect": { "action": "show", "offsetUs": "0" } }
+      ]
+    },
+    {
+      "name": "wall pacing re-anchors on a frame beyond the maximum video delay, early or late",
+      "steps": [
+        { "at": "0", "due": "0", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "0", "due": "1000000", "expect": { "action": "wait", "offsetUs": "1000000", "waitUs": "1000000" } },
+        { "at": "0", "due": "1000001", "expect": { "action": "show", "offsetUs": "1000001" } },
+        { "at": "10000", "mode": "wall", "position": "1010001" },
+        { "at": "2010001", "due": "1033334", "expect": { "action": "show", "offsetUs": "-1976668" } },
+        { "at": "2010001", "position": "1033334" },
+        { "at": "2010001", "due": "1000000", "expect": { "action": "show", "offsetUs": "-33334" } },
+        { "at": "2010001", "due": "900000", "expect": { "action": "drop", "offsetUs": "-133334" } }
+      ]
+    },
+    {
+      "name": "reset returns to idle and the next frame anchors again",
+      "steps": [
+        { "at": "0", "report": "400000" },
+        { "at": "10000", "reset": true },
+        { "at": "10000", "mode": "idle", "position": null },
+        { "at": "20000", "due": "7000", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "20000", "mode": "wall", "position": "7000" }
+      ]
+    },
+    {
+      "name": "options change every threshold",
+      "options": { "lateDropUs": "0", "maxVideoDelayUs": "100000", "audioTimeoutUs": "1000" },
+      "steps": [
+        { "at": "0", "report": "0" },
+        { "at": "1000", "mode": "audio", "position": "1000" },
+        { "at": "1000", "due": "999", "expect": { "action": "drop", "offsetUs": "-1" } },
+        { "at": "1000", "due": "101001", "expect": { "action": "show", "offsetUs": "100001" } },
+        { "at": "1001", "mode": "wall", "position": "1001" },
+        { "at": "1001", "due": "1001", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "1001", "due": "101001", "expect": { "action": "wait", "offsetUs": "100000", "waitUs": "100000" } },
+        { "at": "1001", "due": "101002", "expect": { "action": "show", "offsetUs": "100001" } },
+        { "at": "1001", "position": "101002" }
+      ]
+    }
+  ]
+}

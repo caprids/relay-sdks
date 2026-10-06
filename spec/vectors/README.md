@@ -14,6 +14,7 @@ Conventions:
 | File | Covers |
 | --- | --- |
 | `media.json` | Exact MSF catalog UTF-8 JSON, LOC properties, MSF source URLs, H.264 avcC and access units, and rejected inputs |
+| `clock.json` | The broadcast clock's origin, source mapping and sample timelines, and the playout clock's modes and wait/show/drop decisions, per `../media-layer.md` "Shared timeline and playout clock" |
 | `varint.json` | MOQT variable-length integers, draft-ietf-moq-transport-22 §8.1 |
 | `setup-options.json` | The PATH and AUTHORITY setup options the core sends for an endpoint URL and token, by framing, per `../transport-adapter.md` TA-6; TypeScript only until Python speaks native QUIC (#199) |
 | `location-filter.json` | The LOCATION_FILTER parameter in both drafts the SDKs speak: draft-ietf-moq-transport-22 §9.20.9 and its draft-20 §5.1.2 spelling, the draft-20-only normalization, and rejected values |
