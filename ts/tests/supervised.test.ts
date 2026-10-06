@@ -1746,4 +1746,42 @@ describe('rotation before the credential expires (#261)', () => {
       await until(() => connections.length === 3, 'the rotation asked for from onGeneration');
     });
   });
+  describe('Codex pass 11 fixes', () => {
+    it('releases the old generation when a group there is aborted through its signal', async () => {
+      const { publisher, connections } = await publishers([]);
+      const writer = publisher.registerTrack({ track: 'video' });
+      connections[0]!.tracks.get('video')!.setDemand(true);
+      await until(() => writer.hasDemand, 'demand');
+      const abort = new AbortController();
+      await writer.openGroup({ signal: abort.signal });
+      publisher.rotate();
+      await until(() => connections[1]?.tracks.has('video') === true, 'next generation');
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await writer.write(new Uint8Array([7]));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(connections[0]!.closeCalls).toBe(0);
+      abort.abort();
+      await until(() => connections[0]!.closeCalls === 1, 'old generation closed after the abort', 500);
+    });
+
+    it('drops the cutoff when the outgoing publisher ends, so a restarted one is delivered from group 0', async () => {
+      const { subscriber, connections } = await subscribers();
+      const seen: number[] = [];
+      subscriber.want('v', { namespace: ['room'], track: 'v', retry: fast }, { onObject: (o) => seen.push(o.groupId) });
+      await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+      const old = connections[0]!.subscriptions[0]!;
+      old.accept();
+      old.object(9);
+      subscriber.rotate();
+      await until(() => connections[1]?.subscriptions.length === 1, 'resubscribe');
+      connections[1]!.subscriptions[0]!.reject(UNROUTABLE); // the replacement is not up yet
+      old.done(); // the publisher ended
+      await until(() => connections[1]!.subscriptions.length === 2, 'retry');
+      const restarted = connections[1]!.subscriptions[1]!;
+      restarted.accept();
+      restarted.object(0);
+      restarted.object(1);
+      expect(seen).toEqual([9, 0, 1]);
+    });
+  });
 });

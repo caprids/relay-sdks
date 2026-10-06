@@ -930,6 +930,9 @@ async function subscribeOnce(
           publisherDone = true;
           if (reported) handlers().onPublisherDone?.(info);
           finish.abort();
+          // The publisher ended: one restarting on the namespace may number its groups from 0, so nothing it sends was
+          // delivered before.
+          if (want.cutoff?.owner === subscription) want.cutoff = undefined;
           handedOff?.complete();
         },
       },

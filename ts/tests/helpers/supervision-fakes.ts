@@ -134,9 +134,12 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
           async writeJSON(value) {
             await track.writer.writeText(JSON.stringify(value));
           },
-          async openGroup() {
+          async openGroup(groupOptions?: { signal?: AbortSignal }) {
             if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
             let closed = false;
+            groupOptions?.signal?.addEventListener('abort', () => {
+              closed = true;
+            });
             const group = {
               groupId: track.writes.length,
               objectCount: 0,

@@ -633,15 +633,23 @@ class SupervisedTrack {
           // The generation the group was opened on, read before the await: a disconnect meanwhile clears the binding.
           // The group holds the generation open until it is closed or aborted.
           const hold = use(generation);
+          const signal = options?.signal;
+          const onAbort = () => {
+            if (group.closed) release();
+          };
           const release = () => {
             track.#groupHolds.delete(release);
             generation.groupHolds.delete(release);
+            signal?.removeEventListener('abort', onAbort);
             hold();
           };
           track.#groupHolds.add(release);
           generation.groupHolds.add(release);
           // Opened under a connection that has ended meanwhile: nothing will release it on the end.
           if (generation.ended) release();
+          // A group its signal aborted is closed without the wrapper hearing of it: release then, or now if already so.
+          if (group.closed) release();
+          else signal?.addEventListener('abort', onAbort, { once: true });
           return supervisedGroup(group, () => track.#closed, generation, release);
         }),
       write: (payload, options?: WriteOptions) => onLive((writer) => writer.write(payload, options)),
