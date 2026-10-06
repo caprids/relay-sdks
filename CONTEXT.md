@@ -12,7 +12,8 @@ internal, relay-side and test vocabulary that the code, its tests and its review
 **Namespace**:
 The ordered tuple of non-empty string fields that scopes a publisher connection and every track
 under it. The application supplies it in full and it travels verbatim: a slash inside a field is part
-of that field, and the SDK never splits, joins or prefixes. It is never a single string.
+of that field, and the SDK never splits, joins or prefixes. The one exception is a supervised
+publisher, which appends one generation field to the application's root. It is never a single string.
 _Avoid_: path, prefix, channel, broadcast
 
 **Track name**:
@@ -63,6 +64,29 @@ rejects it (request error 16 with reason `unroutable` from moq-relay 0.15.8, 404
 rather than parking it; the application retries within its own budget, the SDK never does.
 _Avoid_: startup race, propagation delay, transient 404 (the same rejection after a retract is
 publisher recovery, a different case)
+
+### Supervising
+
+**Supervisor**:
+The opt-in policy layer over a connection primitive: it reconnects with backoff and keeps the
+application's tracks registered or subscribed across connections. The primitives never do either.
+_Avoid_: auto-reconnect (the primitives have no such mode), manager, hub, client
+
+**Generation**:
+One supervised publisher connection, and the namespace it serves: the root plus one field that sorts
+by start time. Each reconnect is a new generation, which the relay treats as a new publisher.
+_Avoid_: session, epoch, incarnation, reconnect count
+
+**Want**:
+A supervised subscriber's standing request for one track, keyed by the application, held across
+subscriptions until it is withdrawn. Each subscription it makes is an ordinary subscription.
+_Avoid_: subscription (that is one attempt), watch, follow
+
+**Restart**:
+The point where a want's accepted subscription ended and a replacement will deliver the next
+objects, live, with the gap unfilled. A decoder resets there.
+_Avoid_: resume (nothing resumes), reconnect (that is the connection's), retry (a rejected attempt
+was never accepted)
 
 ### Media publishing internals
 

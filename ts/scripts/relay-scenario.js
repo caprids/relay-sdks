@@ -6,8 +6,12 @@
  * It resolves the result object on success and rejects with the first failure. Reporting the outcome,
  * redacting the token and choosing the exit code are the launcher's business.
  */
-import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
-import { subscribeWithRetry } from '../examples/shared/announce-race.js';
+import {
+  connectRelayPublisher,
+  connectRelaySubscriber,
+  connectSupervisedPublisher,
+  connectSupervisedSubscriber,
+} from '@mux/relay';
 
 /**
  * @param {object} options
@@ -29,6 +33,8 @@ export async function runRelayScenario({
 }) {
   let publisher;
   let subscriber;
+  let watcher;
+  const supervisedPublishers = [];
   let lateSubscriber;
   let lateLargestObject;
   let discovery;
@@ -121,18 +127,30 @@ export async function runRelayScenario({
       }
     })();
     // Assertion 2. The announce left with the first registered track; the relay routes subscribes to
-    // the namespace about a round trip later, so the subscribe retries the rejection it may still answer.
+    // the namespace about a round trip later. The supervised subscriber's wants retry the rejection it
+    // may still answer, and report only what they do not retry.
     await publisher.announced;
     await report({ phase: 'announced' });
     await waitFor(() => discovered.some((event) => event.type === 'announced'), 'discovery: announced');
     await report({ phase: 'discovered', afterMs: discovered[0].ms });
-    const retries = { events: 0, status: 0 };
+    watcher = await connectSupervisedSubscriber({
+      url: subEndpoint,
+      getToken: () => token,
+      signal: lifetime.signal,
+      createTransport,
+      onStatus: (status, error) => {
+        if (status === 'reconnecting' && !closing) errors.push(`supervised subscriber reconnecting: ${String(error)}`);
+      },
+    });
+    await report({ phase: 'supervised subscriber connected' });
+    const subscribed = new Set();
     for (const track of ['events', 'status']) {
-      await subscribeWithRetry(
-        subscriber,
+      watcher.want(
+        track,
         { namespace, track },
         {
           onSubscribed: () => {
+            subscribed.add(track);
             void report({ phase: 'subscribed', track });
           },
           onObject: (object) => {
@@ -140,19 +158,15 @@ export async function runRelayScenario({
             if (isWarmUp(object.payload)) warmed.add(track);
             else received[track].push(Array.from(object.payload));
           },
-          onError: (error) => errors.push(`${track}: ${error.errorCode} ${error.reason}`),
+          onError: (error) => errors.push(`${track}: ${String(error)}`),
           onSubgroupReset: ({ error }) => errors.push(`${track} reset: ${String(error)}`),
-        },
-        {
-          signal: lifetime.signal,
-          onRetry: (attempt, delayMs) => {
-            retries[track] += 1;
-            void report({ phase: 'subscribe retried', track, attempt, delayMs });
+          onRestarted: ({ reason }) => {
+            if (!closing) errors.push(`${track} resubscribed unexpectedly: ${reason}`);
           },
         },
       );
     }
-    if (errors.length > 0) throw new Error(errors.join('; '));
+    await waitFor(() => subscribed.size === 2, 'both wants subscribed');
     const warmUpWrites = { events: await warmUpTrack('events', events), status: await warmUpTrack('status', status) };
     await report({ phase: 'warmed up', writes: warmUpWrites });
     for (const payload of expectedEvents) await events.write(new Uint8Array(payload));
@@ -187,6 +201,8 @@ export async function runRelayScenario({
       },
     );
     await waitFor(() => lateLargestObject !== undefined, 'late SUBSCRIBE_OK with LARGEST_OBJECT');
+    // The track's end would make its want resubscribe and replay the cached group (spec/publisher-recovery.md).
+    watcher.unwant('events');
     events.close();
     await status.write(new Uint8Array([43]));
     await waitForCount('status', 2);
@@ -198,7 +214,9 @@ export async function runRelayScenario({
       throw new Error(`Payload mismatch: ${JSON.stringify(received)}`);
     }
     if (errors.length > 0) throw new Error(errors.join('; '));
-    // A clean publisher close withdraws the announce; the subscriber's discovery hears it.
+    // A clean publisher close withdraws the announce; the subscriber's discovery hears it. The want on
+    // its last track goes first, so the publisher's done does not start a resubscription.
+    watcher.unwant('status');
     const closedAt = performance.now();
     closedOnPurpose.add('publisher');
     await publisher.close();
@@ -208,25 +226,88 @@ export async function runRelayScenario({
     if (JSON.stringify(discovered.map((event) => event.type)) !== '["announced","unannounced"]') {
       throw new Error(`Discovery mismatch: ${JSON.stringify(discovered)}`);
     }
+
+    // Assertion 8. A want following a supervised publisher's root moves to a newer generation that
+    // announces while the old one is still up, the way a restarted publisher replaces a crashed one
+    // whose announce the relay still holds.
+    const root = [...namespace, 'supervised'];
+    const beats = [];
+    const restarts = [];
+    let currentNamespace;
+    watcher.want(
+      'beat',
+      { namespace: root, track: 'beat', generations: true },
+      {
+        onSubscribed: (_, context) => {
+          currentNamespace = context.namespace;
+        },
+        onObject: (object) => {
+          if (object.status === 'normal') beats.push(new TextDecoder().decode(object.payload));
+        },
+        onRestarted: ({ reason }) => restarts.push(reason),
+        onError: (error) => errors.push(`beat: ${String(error)}`),
+      },
+    );
+    const startGeneration = async (label) => {
+      const supervised = await connectSupervisedPublisher({
+        url: endpoint,
+        createTransport,
+        namespace: root,
+        getToken: () => token,
+        signal: lifetime.signal,
+      });
+      supervisedPublishers.push(supervised);
+      return { supervised, label, writer: supervised.registerTrack({ track: 'beat', writeTimeoutMs: 2_000 }) };
+    };
+    // Write until this generation's beats arrive: a SUBSCRIBE_OK does not prove the path is ready.
+    const beatUntilReceived = async ({ writer, label }) => {
+      const until = performance.now() + 15_000;
+      for (let n = 0; !beats.some((beat) => beat.startsWith(`${label}:`)); n += 1) {
+        if (errors.length > 0) throw new Error(errors.join('; '));
+        if (performance.now() >= until) throw new Error(`Timed out waiting for generation ${label}'s beats`);
+        try {
+          await writer.write(new TextEncoder().encode(`${label}:${n}`));
+        } catch (error) {
+          if (!['SUBSCRIPTION_CHANGED', 'WRITE_TIMEOUT'].includes(error?.code)) throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    };
+    const first = await startGeneration('first');
+    await report({ phase: 'first generation', namespace: first.supervised.generation.namespace });
+    await beatUntilReceived(first);
+    const second = await startGeneration('second');
+    const switchStarted = performance.now();
+    await beatUntilReceived(second);
+    const switchedAfterMs = Math.round(performance.now() - switchStarted);
+    if (JSON.stringify(currentNamespace) !== JSON.stringify(second.supervised.generation.namespace)) {
+      throw new Error(`Want stayed on ${JSON.stringify(currentNamespace)}`);
+    }
+    if (!restarts.includes('generation')) throw new Error(`No generation restart: ${JSON.stringify(restarts)}`);
+    await report({ phase: 'followed newer generation', afterMs: switchedAfterMs, restarts });
+    watcher.unwant('beat');
+    if (errors.length > 0) throw new Error(errors.join('; '));
+
     return {
       endpoint,
       subscriberEndpoint: subEndpoint,
       namespace,
       events: received.events.length,
       status: received.status.length,
-      announceRaceRetries: retries,
       warmUpWrites,
       binaryAndEmptyPayloads: 'passed',
       independentTrackClose: 'passed',
       lateSubscriberLargestObject: lateLargestObject,
       discovery: { announced: 'passed', withdrawnAfterMs },
+      generationSwitch: { afterMs: switchedAfterMs, restarts },
     };
   } finally {
     closing = true;
     clearTimeout(deadline);
     discovery?.close();
+    watcher?.close();
     try {
-      await publisher?.close();
+      await Promise.all([publisher?.close(), ...supervisedPublishers.map((supervised) => supervised.close())]);
     } finally {
       subscriber?.close();
       lateSubscriber?.close();

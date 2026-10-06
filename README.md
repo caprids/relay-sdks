@@ -75,9 +75,10 @@ failed on the other, which is a bug in an adapter or in the
 [transport adapter contract](spec/transport-adapter.md), unless a rerun shows a relay flake.
 Any result but `PASS` exits nonzero.
 
-The test waits for the publisher's `announced`, subscribes through the examples' announce-race
-retry and reports how often it retried, warms each track up until a marker arrives, checks binary
-and empty payloads plus independent track closure, then closes both connections. It defaults to
+The test waits for the publisher's `announced`, subscribes through a supervised subscriber's wants,
+warms each track up until a marker arrives, checks binary and empty payloads plus independent track
+closure, checks that a want follows a supervised publisher's newer generation, then closes every
+connection. It defaults to
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
 another relay to put the subscribers there. Namespace fields sent by
 the SDK are absolute: include the token's root prefix when required by the relay.

@@ -211,6 +211,29 @@ includes routes learned from cluster peers.
   discovered were never rejected `unroutable` (0 of 8). That is too few to drop the
   [announce race](#announce-propagation) retry.
 
+## Supervised generations
+
+Measured on 2026-10-06 against `sjc.relay.mux.global` (moq-relay 0.17.0) with the TypeScript SDK
+([behavior.md](behavior.md#supervised-connections), [issue #260](https://github.com/muxinc/relay-sdks/issues/260)):
+
+- **A newer generation while the old one is still up.** A want following a root moved to a second
+  supervised publisher's generation, and received its objects, about 200 ms after that publisher
+  connected. That was one smoke run in Node and one in Chromium. The relay still held the first
+  generation's announce, so this is the
+  [duplicate announce](#duplicate-announce) case resolved by the generation order rather than the
+  relay's hash ranking.
+- **In-process reconnect.** The supervised publisher's native QUIC transport was closed from
+  underneath it while it wrote one object every 50 ms. Reconnection backoff started at 200 ms. In
+  5 of 5 runs the next generation was up 515 to 595 ms after the close, and the subscriber's want
+  received its objects 656 to 742 ms after it. Writes in between failed at once with
+  `RECONNECTING` (10 or 11 per run), and nothing was replayed. The want restarted with reason
+  `generation` when the old generation was withdrawn, or `publisher-done` when the done arrived
+  first.
+
+A transport closed this way still sends a QUIC close, so the relay withdraws the old generation
+within a round trip. A crash leaves it announced until the idle timeout; the newer generation
+still wins, as in the first case.
+
 ## Relay demand
 
 A publisher's demand is the relay's one upstream subscription for a track, not a count of

@@ -24,6 +24,12 @@ export type RelayErrorCode =
    * tree on a session. Widen one iterator's prefix and filter, or use a second connection.
    */
   | 'PREFIX_OVERLAP'
+  /**
+   * A supervised publisher's track was written while no generation was up, or the connection under the operation
+   * ended, in phase `connection`. Nothing is replayed: write the next object once the publisher is live again. A frame
+   * writer treats it as an interruption, not a retirement.
+   */
+  | 'RECONNECTING'
   | 'GOAWAY'
   | 'TRANSPORT_ERROR'
   | 'TRANSPORT_UNAVAILABLE'

@@ -4,7 +4,11 @@ Replacing a publisher connection restores an upstream source for new subscriptio
 **not** move existing subscribers to that source (moq-relay 0.15.8 and 0.17.0 never do), and a new
 subscription need not succeed immediately.
 These are relay lifecycle limits tracked in [#34](https://github.com/muxinc/relay-sdks/issues/34).
-The SDKs do not automatically reconnect or resubscribe.
+The connection primitives do not automatically reconnect or resubscribe. The opt-in
+[supervised connections](behavior.md#supervised-connections) implement the policy below for live
+applications: a fresh generation namespace per publisher connection, wants that retry and
+resubscribe, a stale timer, and generation-following through discovery. The rest of this page is
+what they do, and what an application without them must do itself.
 
 ## What a subscriber can observe
 
@@ -88,8 +92,8 @@ A useful policy is:
 
 The SDK cannot choose these thresholds or interpret these payloads for a raw byte track. This
 policy belongs in the application or player; changing a request timeout will not implement it.
-The simple examples retry initial announcement races, but are not complete subscriber recovery
-supervisors.
+A supervised subscriber's `staleAfterMs` is that freshness threshold. It is set per track by the
+application, because only the application knows which tracks may be silent.
 
 ## When predictable handoff matters
 
@@ -101,8 +105,10 @@ explicitly switch to the new generation and cancel the old subscriptions. This a
 reuse of the ended namespace's cached state. A crashed generation stays `announced` until the
 timeout, and `announced` has not been measured as a guarantee that the next subscribe routes
 ([namespace discovery](relay-interop.md#namespace-discovery)). Startup retry, freshness checks, and a bounded switch deadline remain necessary.
-An application channel is still needed for anything beyond which namespaces are announced, such as
-which generation is newest. Discovery reports namespaces in arrival order, not by generation.
+Discovery reports namespaces in arrival order, not by generation. A
+[supervised publisher](behavior.md#supervised-publisher) names its generations so they sort by start
+time, and a supervised subscriber's want with `generations: true` follows the newest one announced,
+so which generation is newest needs no application channel either.
 
 For a fixed namespace, keep the recovery policy above and budget for relay convergence. SDK-side
 retry can mitigate a stall, but cannot rebind an existing subscription at the relay or guarantee a

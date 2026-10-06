@@ -5,8 +5,7 @@
  * Node with @mux/relay-quic's `createTransport`, and in a browser with WebTransport it runs as is,
  * on the SDK's default transport. `log` receives one plain object per event so the runner can print it.
  */
-import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
-import { subscribeWithRetry } from '../shared/announce-race.js';
+import { connectRelayPublisher, connectSupervisedSubscriber } from '@mux/relay';
 import { writeWithRetry } from '../shared/demand-timeout.js';
 
 const encoder = new TextEncoder();
@@ -84,20 +83,25 @@ export async function runDemo(
     }
 
     if (mode !== 'publish') {
+      // The supervised subscriber reconnects on its own, so a lost connection is logged, not a failure.
       const subscriber = await watch(
         'subscriber',
-        connectRelaySubscriber({ url, createTransport, getToken: () => token, signal: lifetime.signal }),
+        connectSupervisedSubscriber({
+          url,
+          createTransport,
+          getToken: () => token,
+          signal: lifetime.signal,
+          onStatus: (status, error) => {
+            if (status === 'reconnecting') log({ event: 'subscriber reconnecting', detail: describe(error) });
+          },
+        }),
       );
       log({ event: 'subscriber connected', url });
-      // Same process as the publisher: subscribing before its announce reached the wire would be
-      // rejected for certain; after it, the shared retry covers the round trip the relay still needs.
-      if (publisher) await publisher.announced;
-      // subscribeWithRetry runs in the background (nothing below depends on its result), but
-      // subscribe() can itself throw synchronously (e.g. a namespace too long to encode); catch that
-      // here instead of leaving it an unhandled rejection, so the run fails promptly on the real
-      // error rather than idling until the deadline. Our own abort ends its wait; that is not a failure.
-      void subscribeWithRetry(
-        subscriber,
+      // The want keeps the track subscribed until the run ends: it retries the announce race (a subscribe
+      // that reaches the relay before the publisher's announce), resubscribes after a publisher restart,
+      // and moves to a new connection. Only a rejection no wait fixes reaches onError, and ends the run.
+      subscriber.want(
+        'ticks',
         { namespace, track },
         {
           onSubscribed: (ok) =>
@@ -113,19 +117,13 @@ export async function runDemo(
               ...inspect(object.payload),
             });
           },
-          onError: (error) => report(`subscribe rejected: code ${error.errorCode} ${error.reason}`),
+          onError: (error) =>
+            report(`subscribe rejected: code ${error.requestError?.errorCode ?? error.code} ${error.message}`),
           onSubgroupReset: ({ groupId, error }) => report(`group ${groupId} reset: ${describe(error)}`),
           onPublisherDone: (done) => log({ event: 'publisher done', status: done.statusCode, reason: done.reason }),
+          onRestarted: ({ reason }) => log({ event: 'resubscribing', reason }),
         },
-        {
-          signal: lifetime.signal,
-          onRetry: () => log({ event: 'waiting', detail: 'namespace not announced yet; retrying the subscribe' }),
-        },
-      ).catch((error) => {
-        if (lifetime.signal.aborted) return;
-        report(`subscribe failed: ${describe(error)}`);
-        lifetime.abort(error);
-      });
+      );
     }
 
     if (writer) {
