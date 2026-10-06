@@ -49,6 +49,7 @@ from moq_media import (
     VideoTrackInfo,
     annexb_to_avcc,
     build_msf_catalog,
+    build_msf_end_catalog,
     compose_player_url,
     loc_properties,
     parse_msf_catalog,
@@ -63,6 +64,7 @@ from mux_relay import (
     RelayAwaitable,
     RelayError,
     RelayPublisher,
+    RelayTrackWriter,
     SubscriptionRequestError,
     WantHandlers,
     connect_relay_publisher,
@@ -766,6 +768,23 @@ def stale_for(queue: LiveQueue) -> Callable[[EncodedSample], bool]:
     return lambda sample: queue.lag(sample) > queue.max_lag
 
 
+async def end_broadcast(track: RelayTrackWriter, log: Log) -> None:
+    """Tell the catalog's current viewers the broadcast is over (msf-01 §11.3).
+
+    Only for a deliberate stop, after the media tracks closed (each close sends PUBLISH_DONE Track
+    Ended). Without demand nobody is listening, and a write would wait for a subscription.
+    """
+    if not track.has_demand:
+        return
+
+    try:
+        await track.write(build_msf_end_catalog(generated_at_ms=int(time.time() * 1000)))
+    except RelayError as error:
+        log("end-of-broadcast catalog not sent", {"error": describe(error)})
+    else:
+        log("end-of-broadcast catalog sent", {})
+
+
 async def serve_catalog(catalog: CatalogService, stats: Stats, on_track_end: TrackEndHandler) -> None:
     """Run the SDK's catalog service, and fold its end and its counters into the run's accounting."""
     try:
@@ -1121,6 +1140,18 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     lifetime.add_callback(on_cancelled)
 
+    # The deadline is a deliberate stop: it ends the media but leaves the publisher connection open,
+    # so the run can end the broadcast with the msf-01 §11.3 catalog. Anything else that ends the
+    # lifetime ends the connection with it.
+    deadline_reached = Cancelled("duration reached")
+    connection = CancellationToken()
+
+    def end_connection(reason: BaseException) -> None:
+        if reason is not deadline_reached:
+            connection.cancel(reason)
+
+    lifetime.add_callback(end_connection)
+
     def watch(label: str, closed: RelayAwaitable[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
             if not closing:
@@ -1130,7 +1161,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
         closed.add_done_callback(done)
 
     publisher: RelayPublisher = await connect_relay_publisher(
-        config.url, namespace=config.namespace, get_token=lambda: config.token, cancellation=lifetime
+        config.url, namespace=config.namespace, get_token=lambda: config.token, cancellation=connection
     )
     watch("publisher", publisher.closed)
     log("publisher connected", {"url": config.url, "namespace": "/".join(config.namespace)})
@@ -1186,11 +1217,14 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     stats.started = time.monotonic()
     producer.start()
-    deadline = loop.call_later(config.duration, lambda: lifetime.cancel()) if config.duration else None
+    deadline = loop.call_later(config.duration, lambda: lifetime.cancel(deadline_reached)) if config.duration else None
     media_task = tasks[-1]
+    stopped_normally = False
+    failure: BaseException | None = None
 
     try:
         await asyncio.wait([stopped, media_task], return_when=asyncio.FIRST_COMPLETED)
+        stopped_normally = True
     finally:
         closing = True
 
@@ -1215,23 +1249,30 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
         if verifier is not None:
             verifier.close()
 
+        # Inspect after joining/draining: failures that arrive in the same turn as a deadline
+        # must not depend on which callback woke asyncio.wait first.
+        if stopped_normally:
+            failure = run_failure(
+                producer_error=producer.error,
+                media_failure=media_task.exception() if not media_task.cancelled() else None,
+                cancel_reason=lifetime.reason,
+                track_end_reason=track_end_reason,
+            )
+
         video_track.close()
-        catalog_track.close()
 
         if audio_track is not None:
             audio_track.close()
 
+        # A clean finish (the deadline, or a file without --loop running out) ends the broadcast.
+        # A failure did not end it on purpose, and Ctrl-C cancels the run before it could write.
+        if stopped_normally and failure is None:
+            await end_broadcast(catalog_track, log)
+
+        catalog_track.close()
         await publisher.close()
         stats.finished = time.monotonic()
 
-    # Inspect after joining/draining: failures that arrive in the same turn as a deadline
-    # must not depend on which callback woke asyncio.wait first.
-    failure = run_failure(
-        producer_error=producer.error,
-        media_failure=media_task.exception() if not media_task.cancelled() else None,
-        cancel_reason=lifetime.reason,
-        track_end_reason=track_end_reason,
-    )
     if failure is not None:
         raise failure
 

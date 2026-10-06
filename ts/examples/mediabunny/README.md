@@ -42,7 +42,10 @@ durations; LOC properties retain presentation timestamps, including B-frame reor
 for initial demand (the SDK's default 10-second
 write deadline applies), starts pacing when the first keyframe can be sent, and re-sends the catalog
 on every relay subscription. At EOF it stops accepting catalog demand and drains any active catalog
-write before closing that track; genuine catalog failures still fail the run. After loss of demand
+write, then ends the broadcast as msf-01 §11.3 describes: it closes the video track, writes the
+end-of-broadcast catalog (`buildMsfEndCatalog`: `isComplete: true`, no tracks) if the catalog track
+has demand, and closes the catalog track. Genuine catalog failures still fail the run, and a failed
+or aborted run never sends the end-of-broadcast catalog. After loss of demand
 it keeps pacing and skips packets, including keyframes, until demand returns;
 publication resumes at the next keyframe. Writes are
 serial and any write failure stops the run. Demand can disappear between a notification and a

@@ -73,6 +73,23 @@ def test_catalog_round_trip(vector: dict[str, Any]) -> None:
     assert readable(parsed) == vector["parsed"]
 
 
+def build_end(raw: dict[str, Any]) -> bytes:
+    return media.build_msf_end_catalog(generated_at_ms=int(raw["generatedAt"]) if "generatedAt" in raw else None)
+
+
+@pytest.mark.parametrize("vector", VECTORS["endCatalogs"], ids=lambda v: v["name"])
+def test_end_catalog_bytes_and_round_trip(vector: dict[str, Any]) -> None:
+    document = build_end(vector["input"])
+    assert document == vector["json"].encode("utf-8")
+    assert readable(media.parse_msf_catalog(document, catalog_namespace=["room"])) == vector["parsed"]
+
+
+@pytest.mark.parametrize("vector", VECTORS["endCatalogErrors"], ids=lambda v: v["name"])
+def test_end_catalog_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        build_end(vector["input"])
+
+
 @pytest.mark.parametrize("vector", VECTORS["catalogs"], ids=lambda v: v["name"])
 def test_catalog_reads_back_its_inputs(vector: dict[str, Any]) -> None:
     raw = vector["input"]

@@ -74,7 +74,11 @@ def build_msf_catalog(
     data: Sequence[DataTrackInfo] = (),
     generated_at_ms: int | None = None,
 ) -> bytes:
-    """The independent MSF catalog JSON for a live LOC broadcast, byte-compatible with the Video.js parser."""
+    """The independent MSF catalog JSON for a live LOC broadcast, byte-compatible with the Video.js parser.
+
+    The catalog leaves ``isComplete`` out: msf-01 §5.1.3 forbids it while false, and once present it can
+    never be removed. End a broadcast with :func:`build_msf_end_catalog`.
+    """
     if isinstance(namespace, str):
         raise ValueError("namespace must be a sequence of fields, not a string")
     if not namespace or any(not field or "/" in field for field in namespace):
@@ -142,12 +146,22 @@ def build_msf_catalog(
         {
             "version": MSF_CATALOG_VERSION,
             "generatedAt": generated_at_ms,
-            "isComplete": True,
             "tracks": tracks,
             "initDataList": init_data_list or None,
         }
     )
 
+    return _encode_json(catalog).encode("utf-8")
+
+
+def build_msf_end_catalog(*, generated_at_ms: int | None = None) -> bytes:
+    """The catalog that ends a broadcast (msf-01 §11.3): ``isComplete: true`` and no tracks.
+
+    It commits that no track will be added and no content published, so send it only for a broadcast
+    that ends on purpose, once every media track has ended (closing a track sends PUBLISH_DONE Track
+    Ended), and never on a crash or lost connection.
+    """
+    catalog = _prune({"version": MSF_CATALOG_VERSION, "generatedAt": generated_at_ms, "isComplete": True, "tracks": []})
     return _encode_json(catalog).encode("utf-8")
 
 

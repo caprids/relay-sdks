@@ -42,3 +42,6 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   Next Object filter closes the session there; use a relative start of 0
   ([#275](https://github.com/muxinc/relay-sdks/issues/275)).
 - `@mux/moq-media` and `@mux/moq-mediabunny`: LOC and MSF format helpers, and an optional Mediabunny adapter.
+  `buildMsfCatalog` leaves `isComplete` out, since a live broadcast is not complete (msf-01 §5.1.3), and
+  `buildMsfEndCatalog` builds the §11.3 catalog that ends a broadcast: `isComplete: true` and no tracks
+  ([#284](https://github.com/muxinc/relay-sdks/issues/284)).

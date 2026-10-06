@@ -149,11 +149,23 @@ function recordingPublisher(
   return { publisher, tracks };
 }
 
-it('publishes the file in keyframe groups and ends the catalog service at EOF', async () => {
-  const { publisher, tracks } = recordingPublisher();
+const catalogDocuments = (tracks: ReturnType<typeof recordingPublisher>['tracks']) =>
+  tracks.get('catalog')!.groups.map((group) => JSON.parse(new TextDecoder().decode(group[0]!.payload)));
+
+it('publishes the file in keyframe groups and ends the broadcast at EOF', async () => {
+  const videoClosedAtCatalogWrite: boolean[] = [];
+  const { publisher, tracks } = recordingPublisher({
+    catalogWrite: async () => {
+      videoClosedAtCatalogWrite.push(tracks.get('video')!.writer.closed);
+    },
+  });
   await publishVideoFile(file, publisher, ['demo']);
-  expect(tracks.get('catalog')!.groups.map((group) => group.length)).toEqual([1]);
-  const catalog = JSON.parse(new TextDecoder().decode(tracks.get('catalog')!.groups[0]![0]!.payload));
+  expect(tracks.get('catalog')!.groups.map((group) => group.length)).toEqual([1, 1]);
+  const [catalog, end] = catalogDocuments(tracks);
+  // msf-01 §5.1.3 and §11.3: the live catalog is not complete; the last one, sent after the video track ended, is.
+  expect(catalog).not.toHaveProperty('isComplete');
+  expect(end).toEqual({ version: 'draft-01', generatedAt: expect.any(Number), isComplete: true, tracks: [] });
+  expect(videoClosedAtCatalogWrite).toEqual([false, true]);
   expect(Number.isInteger(catalog.tracks[0].bitrate)).toBe(true);
   expect(catalog.tracks[0].bitrate).toBeGreaterThan(0);
   expect(catalog.tracks[0].framerate).toBeGreaterThan(0);
@@ -170,6 +182,8 @@ it('stops on a write failure and closes both tracks', async () => {
   const { publisher, tracks } = recordingPublisher({ failVideo: true });
   await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('Video write failed');
   expect([...tracks.values()].every(({ writer }) => writer.closed)).toBe(true);
+  // A failure is not the end of the broadcast.
+  expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
 });
 
 it('cancels a pacing wait and closes both tracks', async () => {
@@ -197,7 +211,7 @@ it('drains a catalog write that is still pending when video reaches EOF', async 
     catalog.resolve();
     await completion;
   }
-  expect(tracks.get('catalog')!.groups.map((group) => group.length)).toEqual([1]);
+  expect(tracks.get('catalog')!.groups.map((group) => group.length)).toEqual([1, 1]);
   expect([...tracks.values()].every(({ writer }) => writer.closed)).toBe(true);
 });
 

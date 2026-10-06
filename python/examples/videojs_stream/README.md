@@ -149,7 +149,11 @@ policy, and the option of switching viewers to a fresh generation-specific names
 
 The catalog is served by the SDK's `CatalogService`: one single-object write per relay
 subscription, retried after a one-second pause while demand remains, with only the current document
-kept. Failed writes and media groups reset their stream and keep the track open while the publisher
+kept. A clean finish (the `--duration` deadline, or a file without `--loop` running out) ends the
+broadcast as msf-01 §11.3 describes: the media tracks close, then the end-of-broadcast catalog
+(`isComplete: true`, no tracks) goes to current catalog viewers, then the catalog track closes. The
+deadline leaves the publisher connection open for that. A failure or Ctrl-C does not send it.
+Failed writes and media groups reset their stream and keep the track open while the publisher
 connection remains open; the frame writer reports such a frame as interrupted and the example counts
 it as skipped. Shutdown cancels the pause. Data that already reached the relay cannot be withdrawn.
 A closed track or connection is terminal. The SDK decides that from the error code or the writer's

@@ -1,6 +1,7 @@
 """Real encoder bitrate and deterministic deadline/error ordering for the video example."""
 
 import asyncio
+import json
 import threading
 from types import SimpleNamespace
 from typing import Any, cast
@@ -71,8 +72,8 @@ async def test_duration_drains_before_classifying_failures(
     monkeypatch: pytest.MonkeyPatch, delayed: bool, failure: str | None
 ) -> None:
     loop = asyncio.get_running_loop()
-    lifetime: CancellationToken | None = None
-    ready = asyncio.Event()
+    connection: CancellationToken | None = None
+    events: list[tuple[str, str]] = []
     problem = Cancelled("unrelated cancellation") if failure == "unrelated_cancel" else RuntimeError("real failure")
 
     class Producer:
@@ -98,32 +99,43 @@ async def test_duration_drains_before_classifying_failures(
                 self.error = problem
 
     class Track:
+        has_demand = True
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        async def write(self, payload: bytes) -> None:
+            events.append((self.name, payload.decode()))
+
         def close(self) -> None:
-            pass
+            events.append((self.name, "close"))
 
     class Publisher:
         closed = loop.create_future()
 
-        def register_track(self, *_: Any, **__: Any) -> Track:
-            return Track()
+        def register_track(self, name: str, *_: Any, **__: Any) -> Track:
+            return Track(name)
 
         async def close(self) -> None:
             pass
 
     async def connect(*_: Any, cancellation: CancellationToken, **__: Any) -> Publisher:
-        nonlocal lifetime
-        lifetime = cancellation
-        lifetime.add_callback(lambda _: ready.set())
+        nonlocal connection
+        connection = cancellation
         return Publisher()
 
     async def catalog(*_: Any) -> None:
         await asyncio.Future()
 
-    async def media(*_: Any) -> None:
-        await ready.wait()
+    async def media(*args: Any) -> None:
+        lifetime: CancellationToken = args[-1]
+        if not lifetime.cancelled:
+            ready = asyncio.Event()
+            lifetime.add_callback(lambda _: ready.set())
+            await ready.wait()
         if delayed:
             await asyncio.sleep(0)
-        assert lifetime is not None and lifetime.reason is not None
+        assert lifetime.reason is not None
         raise problem if failure in ("media", "unrelated_cancel") else lifetime.reason
 
     monkeypatch.setattr(stream, "Producer", Producer)
@@ -141,6 +153,23 @@ async def test_duration_drains_before_classifying_failures(
             await stream.run(config, stats, lambda *_: None)
         assert caught.value.__cause__ is problem
     assert stats.finished is not None
+
+    # msf-01 §11.3: a deliberate stop keeps the connection open, ends the media tracks, then sends the
+    # end-of-broadcast catalog before closing the catalog track. A failure never sends it.
+    assert connection is not None and not connection.cancelled
+    catalog_events = [event for event in events if event[0] == stream.CATALOG_TRACK]
+    if failure is None:
+        assert events.index((stream.VIDEO_TRACK, "close")) < events.index(catalog_events[0])
+        ((_, document), closed) = catalog_events
+        assert json.loads(document) | {"generatedAt": 0} == {
+            "version": "draft-01",
+            "generatedAt": 0,
+            "isComplete": True,
+            "tracks": [],
+        }
+        assert closed == (stream.CATALOG_TRACK, "close")
+    else:
+        assert catalog_events == [(stream.CATALOG_TRACK, "close")]
 
 
 @pytest.mark.parametrize("cancel_after_turns", [None, 2, 3, 4, 5, 6, 7, 8])

@@ -1,5 +1,6 @@
 import {
   buildMsfCatalog,
+  buildMsfEndCatalog,
   CATALOG_TRACK,
   locProperties,
   locTrackProperties,
@@ -118,6 +119,15 @@ export async function publishVideoFile(
         // Stop accepting demand before draining the current write; closing a track cancels writes.
         videoDone = true;
         await catalogWrite;
+        // The file ran out, so the broadcast is over (msf-01 §11.3): end the video track (PUBLISH_DONE Track Ended),
+        // then tell current viewers with the end-of-broadcast catalog. Without demand nobody is listening.
+        videoWriter.close();
+        if (catalogWriter.hasDemand) {
+          await catalogWriter.write(buildMsfEndCatalog({ generatedAt: Date.now() }), {
+            properties: locProperties(0),
+            signal,
+          });
+        }
         catalogWriter.close();
       } finally {
         group?.abort();

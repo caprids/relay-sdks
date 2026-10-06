@@ -907,12 +907,18 @@ to both languages.
   Callers supply configs only on keyframes. Timestamps arrive in microseconds; other timescales
   round to the nearest integer tick, ties upward. Inputs and the resulting tick count must be
   nonnegative safe integers (at most 2^53−1); the timescale must be positive.
-- The independent MSF catalog is compact UTF-8 JSON with `version: "draft-01"`, `isComplete: true`,
-  and explicit per-track namespace, LOC packaging, and live status. Absent optional fields are
+- The independent MSF catalog is compact UTF-8 JSON with `version: "draft-01"` and explicit
+  per-track namespace, LOC packaging, and live status. It omits `isComplete`: msf-01 §5.1.3 forbids
+  the field while false and forbids removing it once added. Absent optional fields are
   omitted, as is empty init data. Catalog strings must be valid Unicode, with no lone surrogates.
   Entries are ordered video, audio, then data in caller order. Init-data entries have
   `<track-name>-init` IDs and inline base64 data. Numbers must be finite; integral values must be safe integers and have no decimal suffix.
   Fractional values use ECMAScript JSON number spelling, including its exponent threshold.
+- The end-of-broadcast catalog (`buildMsfEndCatalog` / `build_msf_end_catalog`) is msf-01 §11.3's
+  final document: `version`, the optional `generatedAt`, `isComplete: true`, and an empty `tracks`
+  array, encoded by the same rules. A publisher sends it only when a broadcast ends on purpose,
+  after every media track has ended (closing a track sends PUBLISH_DONE Track Ended), and never on
+  a crash or a lost connection.
 - `avc1` and `avc3` video entries are withheld without non-empty init data. With avcC, the codec
   suffix comes from the record's profile/constraints/level; the `avc1`/`avc3` prefix is retained.
   Header inspection rejects truncated/wrong-version headers; it does not decode SPS semantics.

@@ -1,5 +1,5 @@
 {
-  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers.",
+  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers.",
   "catalogs": [
     {
       "name": "h264-opus",
@@ -22,11 +22,11 @@
         },
         "generatedAt": "1700000000000"
       },
-      "json": "{\"version\":\"draft-01\",\"generatedAt\":1700000000000,\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc1.42C014\",\"width\":640,\"height\":360,\"framerate\":30,\"bitrate\":1500000},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\",\"bitrate\":96000}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
+      "json": "{\"version\":\"draft-01\",\"generatedAt\":1700000000000,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc1.42C014\",\"width\":640,\"height\":360,\"framerate\":30,\"bitrate\":1500000},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\",\"bitrate\":96000}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
       "parsed": {
         "version": "draft-01",
         "generatedAt": 1700000000000,
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -75,10 +75,10 @@
         },
         "audio": {}
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -108,10 +108,10 @@
           "initData": ""
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": []
       }
     },
@@ -127,10 +127,10 @@
           "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc3.42C014\"}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"codec\":\"avc3.42C014\"}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -158,10 +158,10 @@
           "codec": "vp8"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -189,10 +189,10 @@
           "framerate": "29.97"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":29.97}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":29.97}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -226,10 +226,10 @@
           }
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"métadata\",\"role\":\"metadata\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"métadata\",\"role\":\"metadata\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -267,10 +267,10 @@
           "initData": "1210"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"audio-init\",\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"mp4a.40.2\",\"samplerate\":44100,\"channelConfig\":\"1\"}],\"initDataList\":[{\"id\":\"audio-init\",\"type\":\"inline\",\"data\":\"EhA=\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"audio-init\",\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"mp4a.40.2\",\"samplerate\":44100,\"channelConfig\":\"1\"}],\"initDataList\":[{\"id\":\"audio-init\",\"type\":\"inline\",\"data\":\"EhA=\"}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -297,10 +297,10 @@
           "live"
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": []
       }
     },
@@ -316,10 +316,10 @@
           "framerate": "0.000001"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":0.000001}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":0.000001}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -348,10 +348,10 @@
           "framerate": "0.0000001"
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":1e-7}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\",\"framerate\":1e-7}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -383,10 +383,10 @@
           "initData": ""
         }
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"codec\":\"vp8\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -426,10 +426,10 @@
           }
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"📽️\",\"role\":\"metadata\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"📽️\",\"role\":\"metadata\"}]}",
       "parsed": {
         "version": "draft-01",
-        "isComplete": true,
+        "isComplete": false,
         "tracks": [
           {
             "namespace": [
@@ -606,6 +606,39 @@
             "name": "\ud800"
           }
         ]
+      }
+    }
+  ],
+  "endCatalogs": [
+    {
+      "name": "end-of-broadcast",
+      "input": {
+        "generatedAt": "1746104606044"
+      },
+      "json": "{\"version\":\"draft-01\",\"generatedAt\":1746104606044,\"isComplete\":true,\"tracks\":[]}",
+      "parsed": {
+        "version": "draft-01",
+        "generatedAt": 1746104606044,
+        "isComplete": true,
+        "tracks": []
+      }
+    },
+    {
+      "name": "end-of-broadcast-untimed",
+      "input": {},
+      "json": "{\"version\":\"draft-01\",\"isComplete\":true,\"tracks\":[]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": true,
+        "tracks": []
+      }
+    }
+  ],
+  "endCatalogErrors": [
+    {
+      "name": "unsafe-generated-at",
+      "input": {
+        "generatedAt": "9007199254740992"
       }
     }
   ],
