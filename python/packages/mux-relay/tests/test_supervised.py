@@ -1477,3 +1477,57 @@ async def test_keeps_a_replacements_rotation_deadline_from_when_it_connected_ove
     await until(lambda: len(connections) == 3, "second rotation", 2.0)
     # Half of the 600 ms credential: 300 ms after the replacement connected, not 300 ms plus half what was left.
     assert connected_at[2] - connected_at[1] < 0.4
+
+
+# ------------------------------------------------------------------ Codex pass 7 fixes (#261)
+
+
+async def test_serves_the_next_generation_while_the_old_one_drains_and_close_waits_for_the_drain() -> None:
+    drained = asyncio.Event()
+    connections: list[FakePublisher] = []
+
+    async def connect(namespace: tuple[str, ...], _attempt: CancellationToken) -> Any:
+        fake = FakePublisher(namespace)
+        if not connections:
+            original = fake.close
+
+            async def slow_close() -> None:
+                fake.close_calls += 1
+                await drained.wait()
+                fake.close_calls -= 1
+                await original()
+
+            fake.close = slow_close  # ty: ignore[invalid-assignment]
+        connections.append(fake)
+        return fake
+
+    publisher = await _supervise_relay_publisher(connect, ["room"], reconnect=FAST)
+    try:
+        publisher.rotate()
+        await until(lambda: connections[0].close_calls == 1, "old generation draining")
+        publisher.rotate()  # the next generation is served while the old one drains
+        await until(lambda: len(connections) == 3, "a rotation during the drain")
+        closing = asyncio.ensure_future(publisher.close())
+        await asyncio.sleep(0.02)
+        assert not closing.done()
+        drained.set()
+        await asyncio.wait_for(closing, 1)
+    finally:
+        drained.set()
+        await publisher.close()
+
+
+async def test_takes_up_a_rotate_made_during_the_overlap_once_the_overlap_ends(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_rotating_subscriber(cleanup)
+    subscriber.want("silent", ["room"], "silent", retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    s.first.subscriptions[0].accept()
+    subscriber.rotate()
+    await until(lambda: len(s.connections) == 2 and len(s.connections[1].subscriptions) == 1, "resubscribe")
+    subscriber.rotate()  # during the overlap: the silent old subscription still holds it open
+    await asyncio.sleep(0.02)
+    assert len(s.connections) == 2
+    s.first.end()
+    await until(lambda: len(s.connections) == 3, "the rotation asked for during the overlap")

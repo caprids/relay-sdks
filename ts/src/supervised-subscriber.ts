@@ -470,6 +470,7 @@ export async function superviseRelaySubscriber(
     const scope = new AbortController();
     /** Cleared once an automatic rotation found no fresher credential: only `rotate()` tries again. */
     let automatic = true;
+    let handedOver = false;
     try {
       for (;;) {
         let manual = false;
@@ -492,13 +493,21 @@ export async function superviseRelaySubscriber(
         if (outcome !== undefined || stopped) return outcome ?? {};
         requestRotation = () => {};
         const next = await rotateFrom(opened, manual);
-        if (next) return { next };
+        if (next) {
+          handedOver = true;
+          return { next };
+        }
         if (opened.live.signal.aborted || stopped) return await subscriber.closed;
         if (!manual) automatic = false;
       }
     } finally {
       scope.abort();
-      requestRotation = () => {};
+      // After a rotation, a `rotate()` before the replacement is served is still for the replacement.
+      requestRotation = handedOver
+        ? () => {
+            rotateNext = true;
+          }
+        : () => {};
     }
   };
 

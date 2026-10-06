@@ -247,6 +247,10 @@ class _State:
     """The connection a rotation is replacing, while its wants move off it."""
     rotation: asyncio.Future[None] | None = None
     """Resolved by ``rotate()`` to rotate the live connection; replaced for each connection served."""
+    queue_next: bool = False
+    """Set during a rotation's overlap: a ``rotate()`` then is for the replacement, taken up once it is served."""
+    rotate_next: bool = False
+    """A ``rotate()`` made during a rotation's overlap, for the replacement once it is served."""
     waiters: list[asyncio.Future[None]] = field(default_factory=list)
 
     def wake_waiters(self) -> None:
@@ -351,9 +355,13 @@ class SupervisedSubscriber:
         subscription keeps delivering until the replacement's first object arrives. The old connection
         closes once every want has moved, after 10 seconds at most. A no-op while no connection is up.
         """
-        rotation = self._state.rotation
+        state = self._state
+        rotation = state.rotation
         if rotation is not None and not rotation.done():
             rotation.set_result(None)
+        elif state.queue_next:
+            # The replacement is live, mid-overlap: rotate it once it is served.
+            state.rotate_next = True
 
     def close(self) -> None:
         """Stop reconnecting, cancel every want and close the connection. Idempotent."""
@@ -568,6 +576,7 @@ async def _supervise_relay_subscriber(
                 return None
         state.current = nxt
         state.retiring = old
+        state.queue_next = True
         set_status("live")
         state.wake_waiters()
         old.idle = loop.create_future()
@@ -600,6 +609,10 @@ async def _supervise_relay_subscriber(
         while True:
             asked: asyncio.Future[None] = loop.create_future()
             state.rotation = asked
+            state.queue_next = False
+            if state.rotate_next:
+                state.rotate_next = False
+                asked.set_result(None)
             due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, asked))
             _observe(due)
             try:

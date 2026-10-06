@@ -541,6 +541,12 @@ class _State:
     stopped: bool = False
     rotation: asyncio.Future[None] | None = None
     """Resolved by ``rotate()`` to rotate the live generation; replaced for each generation served."""
+    queue_next: bool = False
+    """Set during a rotation's overlap: a ``rotate()`` then is for the replacement, taken up once it is served."""
+    rotate_next: bool = False
+    """A ``rotate()`` made during a rotation's overlap, for the replacement once it is served."""
+    draining: set[asyncio.Future[None]] = field(default_factory=set)
+    """Retired generations still closing: draining groups the relay has not acknowledged. ``close()`` waits for them."""
 
 
 class SupervisedPublisher:
@@ -617,9 +623,13 @@ class SupervisedPublisher:
         has none on the old one. The old generation closes once every track has moved, after 10 seconds
         at most. A no-op while no generation is up.
         """
-        rotation = self._state.rotation
+        state = self._state
+        rotation = state.rotation
         if rotation is not None and not rotation.done():
             rotation.set_result(None)
+        elif state.queue_next:
+            # The replacement is live, mid-overlap: rotate it once it is served.
+            state.rotate_next = True
 
     async def close(self) -> None:
         """Stop reconnecting and close the live generation as :meth:`RelayPublisher.close` does. Idempotent."""
@@ -743,6 +753,8 @@ async def _supervise_relay_publisher(
             for live in open_generations:
                 with contextlib.suppress(Exception):
                     await live.publisher.close()
+            if state.draining:
+                await asyncio.gather(*state.draining, return_exceptions=True)
             try:
                 set_status("closed")
             finally:
@@ -838,6 +850,7 @@ async def _supervise_relay_publisher(
                 return None
         state.current = nxt
         state.retiring = live
+        state.queue_next = True
         moved = [track._hand_over(nxt) for track in list(state.tracks.values())]
         set_status("live")
         report(nxt)
@@ -866,14 +879,24 @@ async def _supervise_relay_publisher(
         for track in list(state.tracks.values()):
             track._settle()
         live.ended = True
+        # A track whose next generation ended before it moved is still bound here: it has no generation now.
+        for track in list(state.tracks.values()):
+            track._unbind_generation(live)
         if state.retiring is live:
             state.retiring = None
-        with contextlib.suppress(Exception):
-            await live.publisher.close()
-        for track in list(state.tracks.values()):
-            track._forget(live)
-            # A track whose next generation ended before it moved is still bound here: it has no generation now.
-            track._unbind_generation(live)
+
+        # Closing drains the old generation's unacknowledged groups for up to a write deadline; the next
+        # generation is served meanwhile, and close() waits for the drain.
+        async def drain_old() -> None:
+            with contextlib.suppress(Exception):
+                await live.publisher.close()
+            for track in list(state.tracks.values()):
+                track._forget(live)
+
+        drain = asyncio.ensure_future(drain_old())
+        _observe(drain)
+        state.draining.add(drain)
+        drain.add_done_callback(state.draining.discard)
         return nxt
 
     async def serve(live: _Generation) -> Closed | _Generation:
@@ -883,6 +906,10 @@ async def _supervise_relay_publisher(
         while True:
             asked: asyncio.Future[None] = loop.create_future()
             state.rotation = asked
+            state.queue_next = False
+            if state.rotate_next:
+                state.rotate_next = False
+                asked.set_result(None)
             due = asyncio.ensure_future(rotation_due(live.rotate_at if automatic else None, asked))
             _observe(due)
             try:
