@@ -476,7 +476,7 @@ Python also retains the example's `TRACK_TIMESCALE_PROPERTIES` as a tuple; new c
 `loc_track_properties()` for fresh properties.
 
 Track fields use camelCase in TypeScript and snake_case in Python (`initData` / `init_data`,
-`channelConfig` / `channel_config`, `isLive` / `is_live`). Catalog generation time is `generatedAt` /
+`channelConfig` / `channel_config`, `isLive` / `is_live`, the read-only `renderGroup` / `render_group`). Catalog generation time is `generatedAt` /
 `generated_at_ms`; completeness is `isComplete` / `is_complete`.
 
 The catalog reader mirrors the builder: `parse` because it reads a document the SDK did not
@@ -493,6 +493,39 @@ They consume standard decoder configs and native encoded video/audio chunks. The
 `@mux/moq-mediabunny` file-input integration exports `packetToLocFrame` and
 `PacketToLocFrameOptions`; it retains compatibility re-exports of the config mappers and `LocFrame`.
 Python keeps its PyAV Annex B conversion helpers.
+
+## Shared timeline and playout clock
+
+The broadcast and playout clocks of [media-layer.md](media-layer.md#shared-timeline-and-playout-clock)
+([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), exported from `@mux/moq-media` and
+`moq_media`. TypeScript uses factories that return interfaces, like the rest of that package; Python
+uses classes, like `CatalogService` and `FrameWriter`.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| The publisher's one clock for every track | `createBroadcastClock(options?)` → `BroadcastClock` (`BroadcastClockOptions`) | `BroadcastClock(now_us=None, origin_us=None)` |
+| The broadcast's zero on the source clock | `clock.originUs` | `clock.origin_us` |
+| Microseconds since the broadcast started | `clock.now()` | `clock.now_us()` |
+| Map a time on the clock's own source onto the timeline | `clock.fromSourceUs(t)` | `clock.from_source_us(t)` |
+| Map a clock with another origin and rate | `clock.sourceTimeline({ toleranceUs })` → `SourceTimeline` (`SourceTimelineOptions`) | `clock.source_timeline(tolerance_us=5_000)` → `SourceTimeline` |
+| A measured (source time, clock time) pair | `timeline.calibrate(s, atUs?)` → re-anchored | `timeline.calibrate(s, at_us=None)` → re-anchored |
+| Source time to timestamp; current anchor | `timeline.timestampUs(s)`; `timeline.anchorSourceUs` | `timeline.timestamp_us(s)`; `timeline.anchor_source_us` |
+| Anchor a sample counter | `clock.sampleTimeline(rate, { firstSampleUs })` → `SampleTimeline` (`SampleTimelineOptions`) | `clock.sample_timeline(rate, first_sample_us=None)` → `SampleTimeline` |
+| Sample index to timestamp | `timeline.timestampUs(n)` | `timeline.timestamp_us(n)` |
+| The player's clock | `createPlayoutClock(options?)` → `PlayoutClock` (`PlayoutClockOptions`) | `PlayoutClock(now_us=None, late_drop_us=40_000, max_video_delay_us=1_000_000, audio_timeout_us=500_000)` |
+| Audio with this timestamp is audible | `reportAudio(timestampUs, atUs?)` | `report_audio(timestamp_us, at_us=None)` |
+| Audio muted or ended | `stopAudio()` | `stop_audio()` |
+| When to show a video frame | `due(timestampUs)` → `PlayoutDecision` (`PlayoutWait` / `PlayoutShow` / `PlayoutDrop`) | `due(timestamp_us)` → `PlayoutDecision(action, offset_us, wait_us)` |
+| Decision kinds | `action: 'wait' \| 'show' \| 'drop'` | `PlayoutAction`: `"wait"`, `"show"`, `"drop"` |
+| What paces the clock | `mode`: `PlayoutMode` (`'idle'`, `'audio'`, `'wall'`) | `mode`: `PlayoutMode` |
+| Position now / forget anchors | `position()`, `reset()` | `position_us()`, `reset()` |
+| Injected time source | `now: MicrosecondClock` | `now_us: Callable[[], int]` |
+
+"Playout", not "playback": the clock decides when to present, and does not play anything. Python's
+`now_us()` and `position_us()` carry the unit because there is no type to say it; TypeScript's
+`now()` and `position()` follow `performance.now()`. The issue's `timeline: "shared"` catalog field
+was not added. msf-01 defines no such field, so the builder uses msf-01's own `renderGroup`
+instead.
 
 ## Media publishing: `FrameWriter`, `CatalogService`
 

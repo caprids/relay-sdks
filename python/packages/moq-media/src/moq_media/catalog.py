@@ -66,6 +66,13 @@ def _prune(entry: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in entry.items() if value is not None}
 
 
+MEDIA_RENDER_GROUP = 1
+"""The render group (msf-01 §5.2.11) every video and audio entry joins: one broadcast timeline, played together.
+
+The builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be identical across a render group.
+"""
+
+
 def build_msf_catalog(
     namespace: Sequence[str],
     *,
@@ -114,6 +121,7 @@ def build_msf_catalog(
                     **register_init_data(video.name, video.init_data),
                     "name": video.name,
                     "role": "video",
+                    "renderGroup": MEDIA_RENDER_GROUP,
                     "codec": codec,
                     "width": video.width,
                     "height": video.height,
@@ -131,6 +139,7 @@ def build_msf_catalog(
                     **register_init_data(audio.name, audio.init_data),
                     "name": audio.name,
                     "role": "audio",
+                    "renderGroup": MEDIA_RENDER_GROUP,
                     "codec": audio.codec,
                     "samplerate": 48_000 if audio.codec == "opus" else audio.samplerate,
                     "channelConfig": audio.channel_config,
@@ -217,6 +226,8 @@ class MsfCatalogTrack:
     samplerate: int | None = None
     channel_config: str | None = None
     bitrate: int | None = None
+    render_group: int | None = None
+    """Render group (§5.2.11): tracks sharing one are meant to play together."""
     init_data: bytes | None = None
     """Decoder init data, resolved from ``initRef`` through the catalog's inline ``initDataList``."""
 
@@ -304,6 +315,7 @@ def _parse_track(
         samplerate=_integer(raw.get("samplerate")),
         channel_config=_string(raw.get("channelConfig")),
         bitrate=_integer(raw.get("bitrate")),
+        render_group=_integer(raw.get("renderGroup")),
         init_data=None if init_ref is None else init_data_list.get(init_ref),
     )
 

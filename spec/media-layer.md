@@ -9,7 +9,9 @@ example as their first caller; the `register_media` handle that would compose th
 builder and `update()` of a served document remain proposals. Of the readers (stage 3), the
 catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_catalog`
 ([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
-`--verify` logs its track list; the object-to-frame reader remains a proposal. Public names for the
+`--verify` logs its track list; the object-to-frame reader remains a proposal. The
+[shared timeline and playout clock](#shared-timeline-and-playout-clock) ship in both format
+packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)). Public names for the
 implemented stages are recorded in [vocabulary.md](vocabulary.md).
 
 This design was written 2026-09-18. Its before/after sketches describe the eventual API; they are
@@ -234,6 +236,190 @@ symmetric with `read_text` and `read_json`:
 - Turn an object plus the track's received timescale into a frame: payload, timestamp in
   microseconds, keyframe flag from object ID 0, and any config property that survived the relay.
   Video.js's `toLocFrame` is the reference, including its acceptance of the draft-03 timestamp ID.
+
+## Shared timeline and playout clock
+
+[Issue #285](https://github.com/muxinc/relay-sdks/issues/285). Implemented in both format packages;
+[behavior.md](behavior.md#media-helpers) holds the testable rules.
+
+### One timeline per broadcast
+
+A broadcast is the set of media tracks one MSF catalog lists. Its publisher stamps every one of
+them from one broadcast clock:
+
+- The LOC Timestamp of each object is the presentation time of its first sample, in microseconds
+  since the broadcast's origin. The origin is a moment at or before the first capture on any track,
+  so no track needs a negative timestamp. Each track declares Timescale 1,000,000
+  (`locTrackProperties` / `loc_track_properties`).
+- Audio and video share that origin. A track never starts its own count at zero: audio stamped from
+  a sample counter is anchored at the broadcast time of its first sample, and video stamped from
+  capture timestamps is shifted by the same origin as everything else.
+- The catalog puts the video and audio entries in one render group: `renderGroup: 1` (msf-01
+  §5.2.11, "tracks with the same group number SHOULD be rendered simultaneously"). That is
+  msf-01's way to say tracks play together, and moq-rs catalogs already send it. There is no
+  `timeline` field, because msf-01 defines none and a player ignores fields it does not know. The
+  builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be identical within
+  a render group. The catalog reader returns `renderGroup` as declared. The Video.js MoQ player
+  parses it but does not act on it yet.
+- Without a declared Timescale, LOC defines the Timestamp as wall-clock microseconds since the
+  Unix epoch. With one, the zero point is the application's, and this convention fixes it at the
+  broadcast's origin. Nothing here maps that origin to wall-clock time yet. msf-01's Media Timeline
+  track (§7) is the standard way, and it is
+  [issue #291](https://github.com/muxinc/relay-sdks/issues/291).
+- A timeline belongs to one catalog namespace. A supervised publisher's next generation is a new
+  broadcast with a new origin. A player resets its playout clock wherever it resets its decoders:
+  at a Restart, at a Move, and on a new catalog.
+- Timelines of different broadcasts are unrelated. Syncing between broadcasts or participants is
+  out of scope.
+
+What the relay does to timestamps is in
+[Relay property handling](behavior.md#relay-property-handling). A track with a declared timescale
+keeps the publisher's timestamps, rescaled to microseconds. A track without one, or an object
+without a Timestamp, gets the relay's own clock instead. A received Timestamp cannot tell you which
+of these happened, so a player must not use relay-clock stamps to sync, and a publisher must declare
+the timescale on every media track. The format helpers do this by default.
+
+### Broadcast clock (publisher)
+
+`createBroadcastClock()` / `BroadcastClock()` fixes the origin and maps the common timestamp
+sources onto the timeline. It reads an injected monotonic microsecond source. The default source
+is `performance.now()` in TypeScript and `time.monotonic_ns()` in Python.
+
+Every other clock a publisher reads has its own origin, and often its own rate. A source timeline
+maps one of them onto the broadcast timeline. The application calibrates it with measured pairs:
+"source time `s` happened at `at` on the broadcast clock's source". A pair replaces the current
+anchor when there is none, or when the anchor predicts it more than `toleranceUs` off (default
+5 ms): the source drifted, or it jumped. Between anchors, timestamps keep the source's own spacing.
+A timeline never calibrated anchors its first timestamp at the moment it arrives.
+
+| Operation | TypeScript | Python | Result |
+| --- | --- | --- | --- |
+| Origin, on the source clock | `originUs` | `origin_us` | Integer µs; defaults to the source's time at creation, rounded |
+| Time on the timeline now | `now()` | `now_us()` | `source − origin`, integer µs |
+| Map a time on the clock's own source | `fromSourceUs(t)` | `from_source_us(t)` | `t − origin`, rounded to integer µs, ties upward |
+| Map a clock with another origin | `sourceTimeline({ toleranceUs })` | `source_timeline(tolerance_us=)` | A mapper; tolerance defaults to 5,000 |
+| Measured pair | `timeline.calibrate(s, at?)` | `timeline.calibrate(s, at_us=)` | Re-anchors (returns true) when unanchored or off by more than the tolerance |
+| Source time to timestamp | `timeline.timestampUs(s)` | `timeline.timestamp_us(s)` | `anchor + round(s − anchor s)`; unanchored, the first call anchors at `now()` |
+| Anchor a sample counter | `sampleTimeline(rate, { firstSampleUs })` | `sample_timeline(rate, first_sample_us=)` | A mapper; the anchor defaults to `now()` |
+| Sample index to timestamp | `timeline.timestampUs(n)` | `timeline.timestamp_us(n)` | `anchor + floor(n × 1,000,000 / rate)` |
+
+#### Browser capture
+
+The recipe has to work in Chromium, Firefox and Safari. `MediaStreamTrackProcessor` cannot be the
+default, because Firefox has none and Safari's handles video only, in workers (MDN compat data,
+2026-10). The portable path:
+
+- **Video.** Draw the camera into a canvas, or wrap a `<video>` element in a `VideoFrame`, and stamp
+  each frame with `clock.now()` when it is captured. That clock is `performance.now()`, which
+  every browser has.
+- **Audio.** Route the microphone through an `AudioContext` (`MediaStreamAudioSourceNode` into an
+  `AudioWorkletNode`), and stamp each chunk with the context time of its first frame, in
+  microseconds, through a source timeline. About once a second, calibrate it from
+  `AudioContext.getOutputTimestamp()` (Chrome 57, Firefox 70, Safari 14.1).
+- **Calibrating for capture.** `getOutputTimestamp()` pairs `performanceTime` with the context
+  time reaching the *speaker* (`contextTime`). The worklet, though, sees fresh microphone input at
+  the context's *render* time, which runs ahead of the speaker by the output delay. So add that
+  delay back:
+  `calibrate((contextTime + baseLatency + outputLatency) × 1e6, performanceTime × 1000)`, reading
+  both latencies fresh each time (`baseLatency`: Chrome 58, Firefox 70, Safari 14.1). Calibrated
+  on `contextTime` alone, audio would be stamped that much in the future, so players would play it
+late against video by the publisher's own output delay. A
+  change of output device would also move audio against video, even with the same microphone.
+- **Why the AudioContext.** The context runs at one fixed sample rate whatever the microphone is,
+  because the browser resamples. When the user switches devices, say from a laptop microphone at
+  48 kHz to Bluetooth earbuds at 16 kHz, the count does not change rate. The context also keeps
+  running through the gap while the device switches, emitting silence, so the count never stalls.
+- **Drift.** The context clock follows the output device, so it drifts against
+  `performance.now()`, and it changes when the output device does. Regular calibration absorbs
+  both. A new `AudioContext` restarts its time at zero, and the next calibration is far enough
+  off to re-anchor.
+- **The Chromium alternative.** Where `MediaStreamTrackProcessor` exists, its `VideoFrame` and
+  `AudioData` timestamps count from the system's monotonic zero, not from `performance.now()`'s
+  ([Chromium](https://chromium.googlesource.com/chromium/src/+/211cf780d86979929937ef73b6a27f13b9ea8e70%5E!/)).
+  Map them through an uncalibrated source timeline. The first frame's capture-to-callback delay
+  becomes a constant offset of a few milliseconds.
+
+No browser API reports a microphone's own input latency. Bluetooth input can arrive 100–200 ms
+later than a built-in microphone, and a timeline built from when samples reach the page cannot see
+that. Audio from such a device is stamped late by that amount, so a player plays it late against
+video. Subtract a known capture latency from the audio timestamps if you have one. Measuring it on
+real devices is [issue #290](https://github.com/muxinc/relay-sdks/issues/290).
+
+#### Stamping
+
+A source time before the origin maps to a negative number, which the LOC helpers refuse. That frame
+was captured before the broadcast started: create the clock before you start capturing, or pass the
+earliest capture time as the origin. Stamp the encoder's input (`new VideoFrame(frame, { timestamp })`,
+the `AudioData` timestamp) and the encoded chunks carry the timeline, so `chunkToLocFrame` passes it
+through unchanged. If a chunk still carries the clock's own source time, `timestampOffsetUs:
+-clock.originUs` maps it; the origin is a whole number of microseconds so that offset is valid.
+A sample timeline suits sources with no clock of their own to calibrate against, such as a file
+or a synthetic tone. A live device's counter drifts against the monotonic source by up to about
+100 ppm, and it changes rate and stalls when the device changes. Use a calibrated source timeline
+for live capture instead.
+
+### Playout clock (player)
+
+`createPlayoutClock()` / `PlayoutClock()` answers one question for the video renderer: when should
+the frame with this timestamp be shown? It is DOM-free and transport-agnostic, with the same
+injected time source as the broadcast clock, so a Python player or a test drives it with numbers.
+
+Audio is the master. The audio path calls `reportAudio(timestampUs, atUs?)` /
+`report_audio(timestamp_us, at_us=None)` with the timeline timestamp that is audible at local time
+`at` (default: now). That is the timestamp leaving the speaker. In a browser,
+`AudioContext.getOutputTimestamp()` gives this in every engine: the context time reaching the
+output (`contextTime`) and when (`performanceTime`). The player maps that context time to the
+media timestamp it scheduled there, then reports `reportAudio(mediaUs, performanceTime × 1000)`.
+Read it fresh for every report: the output delay changes with the device. Switching to Bluetooth
+earbuds can add 150 ms or more, and a value cached at startup leaves video that far ahead. Where
+an application reports at handover time instead, it subtracts the jitter-buffer depth, the
+current `outputLatency`, and any extra path, such as a WebRTC loopback for echo cancellation. A
+step in the output delay moves the position once. Video then holds frames, or drops them, by that
+step and stays in sync after it. Between reports the clock extrapolates at real-time rate:
+`position = reported + (now − at)`. Reports re-anchor it, so the audio device's drift never builds
+up. Audio silence is measured from when the latest report arrived, not from its `at`, so a report
+that describes a moment slightly in the past still counts as fresh.
+
+The clock has three modes:
+
+| Mode | When | Position |
+| --- | --- | --- |
+| `idle` | Created, or after `reset()`, with nothing reported or asked yet | None; the next `due()` anchors wall pacing |
+| `audio` | A report arrived within `audioTimeoutUs` | Extrapolated from the latest report |
+| `wall` | No audio has ever been reported, after `stopAudio()` / `stop_audio()`, or once reports have been silent for `audioTimeoutUs` | Wall clock from an anchor: the first frame asked about from `idle`, or the audio position when audio went quiet, so nothing jumps |
+
+The next audio report returns the clock to `audio`.
+
+`due(timestampUs)` compares the frame with the position: `offset = timestamp − position`, where
+positive means the frame is early. The decision is one of three:
+
+| Decision | When | The renderer |
+| --- | --- | --- |
+| `wait`, with `waitUs = ceil(offset)` | `0 < offset ≤ maxVideoDelayUs` | Holds the frame and asks again after the wait |
+| `show` | `−lateDropUs ≤ offset ≤ 0`, or a re-sync (below) | Shows it now |
+| `drop` | `offset < −lateDropUs` | Discards it; audio has already moved past it |
+
+Every decision carries `offsetUs`, rounded to integer µs, so the application can log its sync error.
+From `idle`, the first `due()` anchors wall pacing on that frame and returns `show` with offset 0.
+
+Re-sync with `maxVideoDelayUs`. In `audio` mode, a frame more than `maxVideoDelayUs` early is
+shown now and not held: video that far ahead of audio means the two tracks are not on one timeline,
+and freezing the picture would not fix that. The offset reports the gap. In `wall` mode, a frame
+more than `maxVideoDelayUs` early or late re-anchors the clock on itself and is shown. This covers
+a timeline jump and recovery after a network stall, which would otherwise make every later frame
+late. A late frame in `audio` mode is always judged against audio and dropped. If video is late
+consistently, the audio path needs a deeper buffer, and the clock cannot add one.
+
+| Option | TypeScript | Python | Default | Why |
+| --- | --- | --- | --- | --- |
+| Late-drop threshold | `lateDropUs` | `late_drop_us` | 40,000 | A late frame makes audio effectively early; EBU R37 puts the audio-early limit at 40 ms |
+| Lead before re-sync | `maxVideoDelayUs` | `max_video_delay_us` | 1,000,000 | Above a deep audio jitter buffer plus output latency |
+| Audio silence before wall pacing | `audioTimeoutUs` | `audio_timeout_us` | 500,000 | Reports come every 10–20 ms; half a second without one is a stall or a mute |
+| Time source | `now` | `now_us` | `performance.now()` µs / `time.monotonic_ns() // 1000` | Injected so tests are exact |
+
+The clock does not buffer, decode, or render frames, and it never changes how much audio is buffered.
+The target it is built for is the broadcast guidance of ITU-R BT.1359 and EBU R37: audio within
+about ±45 ms of video, and not audibly early.
 
 ## Package placement
 

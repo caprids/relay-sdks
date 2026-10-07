@@ -29,11 +29,20 @@ close it (msf-01 §11.3). Do not send it after a crash or a lost connection.
 
 `parse_msf_catalog` reads an independent catalog object's payload back into an `MsfCatalog` of
 `MsfCatalogTrack` descriptions: namespace tuple, name, packaging, live status, role, codec,
-dimensions, rates, bitrate, and init data resolved from `initRef` to bytes. It raises `ValueError`
+dimensions, rates, bitrate, render group, and init data resolved from `initRef` to bytes. It raises `ValueError`
 on unsupported versions and delta updates, ignores unknown fields, and returns non-`loc` packagings
 (such as moq-rs `cmaf`) as declared.
 
-Shared vectors live in `spec/vectors/media.json`. See `UPSTREAM.json` for Video.js provenance.
+Every media track in one catalog shares one timeline: LOC timestamps in microseconds from one origin,
+with the timescale declared on each track. `BroadcastClock()` fixes that origin on the monotonic
+clock. Use `from_source_us` for capture timestamps on that clock. Use `source_timeline()` for a clock with
+its own origin and rate, kept in line with `calibrate(source_us, at_us=...)` pairs. Use
+`sample_timeline(48_000)` for a sample counter with nothing to calibrate against, such as a file. `PlayoutClock()` is the player side. Audio is the master: report what is
+audible with `report_audio(timestamp_us)`, and `due(timestamp_us)` returns a `PlayoutDecision` to
+wait, show, or drop a video frame. With no audio it paces by wall clock. See
+[spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
+
+Shared vectors live in `spec/vectors/media.json` and `spec/vectors/clock.json`. See `UPSTREAM.json` for Video.js provenance.
 Publishing handles and the object-to-frame reader are later stages of `spec/media-layer.md`.
 
 ```python

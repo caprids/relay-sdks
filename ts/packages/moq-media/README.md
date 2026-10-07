@@ -41,11 +41,56 @@ purpose, close the media tracks first (each close tells subscribers the track en
 (msf-01 §11.3). Do not send it after a crash or a lost connection.
 
 `parseMsfCatalog` reads an independent catalog object's payload back into track descriptions:
-namespace tuple, name, packaging, live status, role, codec, dimensions, rates, bitrate, and init
-data resolved from `initRef` to bytes. It rejects unsupported versions and delta updates, ignores
-unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as declared.
+namespace tuple, name, packaging, live status, role, codec, dimensions, rates, bitrate, render
+group, and init data resolved from `initRef` to bytes. It rejects unsupported versions and delta
+updates, ignores unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as
+declared.
 
-Shared vectors live in `spec/vectors/media.json`. See `UPSTREAM.json` for Video.js provenance.
+Every media track in one catalog shares one timeline: LOC timestamps in microseconds from one origin,
+with the timescale declared on each track. `createBroadcastClock()` fixes that origin on the
+`performance.now()` clock.
+
+The publisher path below works in Chromium, Firefox and Safari:
+
+- **Video.** Stamp frames drawn from the camera with `clock.now()`.
+- **Audio.** Route the microphone through an `AudioContext`. Stamp audio from the context clock
+  through `clock.sourceTimeline()`, and calibrate it about once a second from
+  `getOutputTimestamp()`. Add `baseLatency + outputLatency` to that `contextTime`. The output
+  timestamp describes the speaker, while the worklet sees microphone input at the render time,
+  which is that much ahead.
+- **Device changes.** The context resamples whatever device is connected and keeps running while
+  devices change, so switching microphones does not shift the timeline.
+- **Chromium alternative.** Where `MediaStreamTrackProcessor` exists, its timestamps count from the
+  system's monotonic zero, so map them through an uncalibrated `sourceTimeline()`.
+- **Microphone latency.** No browser reports a microphone's own input latency. Bluetooth input
+  arrives late by an amount the timeline cannot see; see
+  [#290](https://github.com/muxinc/relay-sdks/issues/290).
+
+On the player, `createPlayoutClock()` makes audio the master. Report what is audible with
+`reportAudio(mediaUs, atUs)`, read fresh from `getOutputTimestamp()` each time, because the output
+delay changes with the device. Video asks `due(timestampUs)` for a `wait`, `show`, or `drop`
+decision. With no audio, the clock paces by wall clock. Neither clock needs the DOM; see
+[spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
+
+```ts
+const clock = createBroadcastClock();
+const video = new VideoFrame(canvas, { timestamp: clock.now() });
+
+// AudioWorklet chunks carry their context time; recalibrate about once a second.
+const context = clock.sourceTimeline();
+const { contextTime, performanceTime } = audioContext.getOutputTimestamp();
+const renderTime = contextTime + audioContext.baseLatency + audioContext.outputLatency; // speaker → render time
+context.calibrate(renderTime * 1e6, performanceTime * 1000);
+const audioTimestampUs = context.timestampUs(chunkContextTime * 1e6);
+
+const playout = createPlayoutClock();
+const out = audioContext.getOutputTimestamp(); // fresh on every report
+playout.reportAudio(mediaTimestampAt(out.contextTime), out.performanceTime * 1000);
+const decision = playout.due(frame.timestamp);
+if (decision.action === 'wait') setTimeout(retry, decision.waitUs / 1000);
+```
+
+Shared vectors live in `spec/vectors/media.json` and `spec/vectors/clock.json`. See `UPSTREAM.json` for Video.js provenance.
 Publishing handles and the object-to-frame reader are later stages of `spec/media-layer.md`.
 
 ```ts

@@ -50,7 +50,12 @@ def test_catalog_errors(vector: dict[str, Any]) -> None:
 
 def readable(catalog: media.MsfCatalog) -> dict[str, Any]:
     """The vectors' ``parsed`` form: camelCase, lists for tuples, init data as hex, ``None`` omitted."""
-    names = {"is_live": "isLive", "channel_config": "channelConfig", "init_data": "initData"}
+    names = {
+        "is_live": "isLive",
+        "channel_config": "channelConfig",
+        "init_data": "initData",
+        "render_group": "renderGroup",
+    }
     tracks = []
     for track in catalog.tracks:
         fields: dict[str, Any] = {}

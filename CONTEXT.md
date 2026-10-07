@@ -135,6 +135,21 @@ reports `closed` afterwards. It ends the frame writer and the catalog service, a
 touches the track. Whether the relay closed the track or the connection ended is not distinguished.
 _Avoid_: terminal error, track death, disconnect
 
+### Media timing
+
+**Broadcast timeline**:
+The one microsecond timeline that every LOC media track listed in one catalog is stamped on, from an
+origin at or before the first capture. It belongs to one catalog namespace, so a supervised
+publisher's next generation starts a new one. Relay-clock stamps on a track that declares no
+timescale are not on it.
+_Avoid_: shared clock, media clock, wall clock (that is the local monotonic source), PTS base
+
+**Playout clock**:
+A player's position on one broadcast timeline, which video frames are scheduled against. Audio
+reports drive it while they arrive; otherwise it follows the local clock (wall pacing). It resets
+wherever the decoders reset.
+_Avoid_: playback clock, master clock, sync clock, jitter buffer (the audio path owns that)
+
 ### Subscribing internals
 
 **Subscription**:

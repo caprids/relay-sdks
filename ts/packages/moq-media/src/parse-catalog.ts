@@ -38,6 +38,8 @@ export interface MsfCatalogTrack {
   channelConfig?: string;
   /** Bits per second; integral values only. */
   bitrate?: number;
+  /** Render group (§5.2.11): tracks sharing one are meant to play together; integral values only. */
+  renderGroup?: number;
   /** Decoder init data, resolved from `initRef` through the catalog's inline `initDataList`. */
   initData?: Uint8Array;
 }
@@ -126,6 +128,7 @@ function parseCatalogTrack(
       samplerate: integer(raw['samplerate']),
       channelConfig: string(raw['channelConfig']),
       bitrate: integer(raw['bitrate']),
+      renderGroup: integer(raw['renderGroup']),
       initData: initRef === undefined ? undefined : initDataList.get(initRef),
     }),
   };

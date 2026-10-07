@@ -963,6 +963,8 @@ size and a timestamp only, so no other object property can survive it.
   track's. With Timescale 1,000,000 a supplied Timestamp passes through unchanged.
 - A track without a declared Timescale gets relay-clock timestamps on every object, replacing any
   Timestamp the publisher supplied. So does an object without a Timestamp on a declared track.
+  This departs from LOC, which defines a Timestamp without a Timescale as wall-clock microseconds
+  since the Unix epoch. Such a stamp from a publisher does not survive this relay.
 - `SUBSCRIBE_OK` carries the relay's own track properties for every track: Timescale (`0x08`) =
   1,000,000, Default Publisher Priority (`0x0E`) = 128, and Default Publisher Group Order (`0x22`,
   decimal 34) = 2 (descending). A publisher's own `0x0E` passes through, its `0x22` is replaced
@@ -991,7 +993,9 @@ Compared with the 0.14.17 and 0.15.1 observations, the `0x0E` in `SUBSCRIBE_OK` 
 invalid-value refusal are new.
 
 For publisher-defined media timing, declare a track timescale and put timestamps in that unit on
-objects. Interpret received timestamps using the received track timescale; a timestamp's presence
+objects. To sync a broadcast's tracks, stamp them all from one clock; that convention, and the
+player's playout clock, are in
+[media-layer.md, Shared timeline and playout clock](media-layer.md#shared-timeline-and-playout-clock). Interpret received timestamps using the received track timescale; a timestamp's presence
 alone does not establish that the publisher supplied it. Do not treat a relay-generated timestamp
 as the application's event time or a synchronized wall clock. Put application metadata that must
 arrive intact in the payload (or a separate metadata track's payload). For the Video.js media
@@ -1048,8 +1052,10 @@ to both languages.
 - `avc1` and `avc3` video entries are withheld without non-empty init data. With avcC, the codec
   suffix comes from the record's profile/constraints/level; the `avc1`/`avc3` prefix is retained.
   Header inspection rejects truncated/wrong-version headers; it does not decode SPS semantics.
-- Opus always declares 48,000 Hz and defaults to channel configuration `"2"`. Data entries have
-  only name and optional role beyond the common fields, and reject the media roles `video`,
+- Opus always declares 48,000 Hz and defaults to channel configuration `"2"`. Video and audio
+  entries carry `renderGroup: 1` (msf-01 §5.2.11): one broadcast timeline, played together. No
+  target latency or buffer is set. Data entries have only name and optional role beyond the
+  common fields, and reject the media roles `video`,
   `signlanguage`, `audio`, `audiodescription`, `caption`, and `subtitle`. Track names must be
   non-empty and unique, including tracks temporarily withheld pending init data.
 - Namespace inputs are sequences of fields, never bare strings. Catalog namespace fields must be
@@ -1095,6 +1101,25 @@ to both languages.
   empty string and absent `isLive` as false. `initRef` resolves through `initDataList` to bytes;
   an unresolved reference leaves the track without init data. Every builder document must read
   back as its vector's `parsed` value.
+- One timeline per broadcast, and the playout clock
+  ([media-layer.md](media-layer.md#shared-timeline-and-playout-clock), issue #285): every LOC media
+  track one catalog lists is stamped in microseconds from one origin at or before the first capture,
+  with Timescale declared on the track. A timeline belongs to one catalog namespace, so a new
+  supervised generation starts a new one. The broadcast clock (`createBroadcastClock` /
+  `BroadcastClock`) has an integer-microsecond origin. It maps times on its own source as
+  `source − origin`, rounded to whole microseconds with ties upward. It maps a capture clock with
+  another origin and rate (an `AudioContext`, Chromium's `MediaStreamTrackProcessor`) through a
+  source timeline: `anchor + round(s − anchor s)`. A calibration pair `(s, at)` re-anchors when there
+  is no anchor, or when the anchor is off by more than `toleranceUs` (5 ms). Uncalibrated, the first
+  timestamp anchors at `now()`. No helper knows a microphone's input latency (#290). It maps sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
+  (`createPlayoutClock` / `PlayoutClock`) is master-audio: its position is the latest audio report
+  plus elapsed local time. It paces by wall clock while idle, after `stopAudio` / `stop_audio`,
+  and after `audioTimeoutUs` (500 ms) without a report arriving (measured from arrival, not
+  from the report's `atUs`). `due` answers `wait` (early by at most
+  `maxVideoDelayUs`, 1 s), `show` (late by at most `lateDropUs`, 40 ms), or `drop`. A frame further
+  ahead is shown at once. Wall pacing re-anchors on a frame more than `maxVideoDelayUs` off either
+  way. Both clocks read an injected monotonic microsecond source and need no DOM or transport. The
+  decisions are pinned by `vectors/clock.json`. Implemented in both SDKs.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below,
   implemented in Python; a `register_media` publishing handle and the object-to-frame reader are

@@ -8,6 +8,24 @@ export {
   type MsfEndCatalogInput,
   type VideoTrackInfo,
 } from './catalog.js';
+export {
+  type BroadcastClock,
+  type BroadcastClockOptions,
+  createBroadcastClock,
+  createPlayoutClock,
+  type MicrosecondClock,
+  type PlayoutClock,
+  type PlayoutClockOptions,
+  type PlayoutDecision,
+  type PlayoutDrop,
+  type PlayoutMode,
+  type PlayoutShow,
+  type PlayoutWait,
+  type SampleTimeline,
+  type SampleTimelineOptions,
+  type SourceTimeline,
+  type SourceTimelineOptions,
+} from './clock.js';
 export { avcCodecString } from './h264.js';
 export {
   AUDIO_TRACK,
