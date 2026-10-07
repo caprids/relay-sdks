@@ -68,3 +68,9 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `createPlayoutClock` takes audio reports and answers `due(timestampUs)` with wait, show, or drop, falling back to
   wall-clock pacing without audio. Both are DOM-free. `buildMsfCatalog` puts video and audio in one render group
   (`renderGroup: 1`, msf-01 §5.2.11), and `parseMsfCatalog` returns `renderGroup`.
+- `@mux/moq-media`: format helpers for msf-01's Media Timeline track, which maps media time to wall-clock time
+  ([#291](https://github.com/muxinc/relay-sdks/issues/291)). The broadcast clock records its origin as Unix-epoch
+  microseconds (`originEpochUs`). `mediaTimelineEntry` turns a timeline timestamp and a group into a record,
+  `buildMediaTimeline` and `parseMediaTimeline` write and read a timeline object, and `buildMsfCatalog` announces
+  the track through `mediaTimeline` (`packaging` and `role` `mediatimeline`, `depends` on the video track by
+  default). `parseMsfCatalog` returns `depends` and `mimetype`. Publishing the track is not wired up yet.

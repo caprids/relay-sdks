@@ -40,6 +40,13 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `due(timestamp_us)` with a `PlayoutDecision` to wait, show, or drop, falling back to wall-clock pacing without audio.
   `build_msf_catalog` puts video and audio in one render group (`renderGroup: 1`, msf-01 §5.2.11), and
   `parse_msf_catalog` returns `render_group`.
+- `mux-moq-media`: format helpers for msf-01's Media Timeline track, which maps media time to wall-clock time
+  ([#291](https://github.com/muxinc/relay-sdks/issues/291)). `BroadcastClock` records its origin as Unix-epoch
+  microseconds (`origin_epoch_us`). `media_timeline_entry` turns a timeline timestamp and a group into a
+  `MediaTimelineEntry`, `build_media_timeline` and `parse_media_timeline` write and read a timeline object, and
+  `build_msf_catalog` announces the track through `media_timeline=MediaTimelineTrackInfo()` (`packaging` and `role`
+  `mediatimeline`, `depends` on the video track by default). `parse_msf_catalog` returns `depends` and `mimetype`.
+  Publishing the track is not wired up yet.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
   subscriber's SETUP now sends the MoQ Solicit option, so the relay advertises namespaces only on that request.

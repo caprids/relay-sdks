@@ -1120,6 +1120,27 @@ to both languages.
   ahead is shown at once. Wall pacing re-anchors on a frame more than `maxVideoDelayUs` off either
   way. Both clocks read an injected monotonic microsecond source and need no DOM or transport. The
   decisions are pinned by `vectors/clock.json`. Implemented in both SDKs.
+- The Media Timeline track (msf-01 §7; [media-layer.md](media-layer.md#media-timeline-track),
+  issue #291). The broadcast clock's `originEpochUs` / `origin_epoch_us` is the origin as integer
+  Unix-epoch microseconds: as given, or else read once at creation as the system clock
+  (`Date.now()`, `time.time_ns()`) less the source time elapsed since the origin. An entry for a
+  timeline timestamp `t` and location `(g, o)` (object defaults to 0) is
+  `[floor(t / 1000), [g, o], floor((originEpochUs + t) / 1000)]`, with 0 as the wall-clock time when no
+  epoch is given. Every number must be a nonnegative safe integer, the wall-clock sum included.
+  The document builder encodes entries in the order given as compact JSON. The reader rejects a
+  payload that is not a UTF-8 JSON array (no byte-order mark, no `NaN`/`Infinity`). It reads a
+  record whose first three items are a number, an array whose first two items are numbers, and a
+  number, all nonnegative safe integers, and ignores extra items. It skips every other record.
+  It does not decompress. The catalog builder's
+  optional timeline description emits one entry after video and audio and before data:
+  `packaging` and `role` `mediatimeline`, `mimetype` `application/json`, `isLive`, and `depends`.
+  `depends` defaults to the video track's name, else the audio track's. Each name must be a
+  video or audio track of the same catalog, and the list must be non-empty with no duplicates.
+  Names listed but withheld pending init data are left out, and the entry is withheld when none
+  remains. The timeline's name defaults to `timeline` and joins the uniqueness check. The catalog
+  reader returns `depends` (string items only) and `mimetype` as declared. Cadence (one entry per
+  video group), retention and publishing are publisher rules in media-layer.md. Implemented in both
+  SDKs as format helpers only.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below,
   implemented in Python; a `register_media` publishing handle and the object-to-frame reader are

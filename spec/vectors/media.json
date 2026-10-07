@@ -1,5 +1,5 @@
 {
-  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers.",
+  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 §7, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional origin epoch (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers.",
   "catalogs": [
     {
       "name": "h264-opus",
@@ -453,6 +453,291 @@
           }
         ]
       }
+    },
+    {
+      "name": "media-timeline-default",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "avc1.FFFFFF",
+          "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
+        },
+        "audio": {},
+        "mediaTimeline": {},
+        "data": [
+          {
+            "name": "chat"
+          }
+        ]
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"renderGroup\":1,\"codec\":\"avc1.42C014\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room/live\",\"packaging\":\"mediatimeline\",\"isLive\":true,\"name\":\"timeline\",\"role\":\"mediatimeline\",\"mimetype\":\"application/json\",\"depends\":[\"video\"]},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "avc1.42C014",
+            "renderGroup": 1,
+            "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "timeline",
+            "packaging": "mediatimeline",
+            "isLive": true,
+            "role": "mediatimeline",
+            "mimetype": "application/json",
+            "depends": [
+              "video"
+            ]
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "chat",
+            "packaging": "loc",
+            "isLive": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "media-timeline-audio-only",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {},
+        "mediaTimeline": {}
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room/live\",\"packaging\":\"mediatimeline\",\"isLive\":true,\"name\":\"timeline\",\"role\":\"mediatimeline\",\"mimetype\":\"application/json\",\"depends\":[\"audio\"]}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "timeline",
+            "packaging": "mediatimeline",
+            "isLive": true,
+            "role": "mediatimeline",
+            "mimetype": "application/json",
+            "depends": [
+              "audio"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "media-timeline-named-depends-both",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "avc1.FFFFFF",
+          "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80",
+          "name": "cam"
+        },
+        "audio": {
+          "name": "mic"
+        },
+        "mediaTimeline": {
+          "name": "history",
+          "depends": [
+            "mic",
+            "cam"
+          ]
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"cam-init\",\"name\":\"cam\",\"role\":\"video\",\"renderGroup\":1,\"codec\":\"avc1.42C014\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"mic\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room/live\",\"packaging\":\"mediatimeline\",\"isLive\":true,\"name\":\"history\",\"role\":\"mediatimeline\",\"mimetype\":\"application/json\",\"depends\":[\"mic\",\"cam\"]}],\"initDataList\":[{\"id\":\"cam-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "cam",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "avc1.42C014",
+            "renderGroup": 1,
+            "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "mic",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "history",
+            "packaging": "mediatimeline",
+            "isLive": true,
+            "role": "mediatimeline",
+            "mimetype": "application/json",
+            "depends": [
+              "mic",
+              "cam"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "name": "media-timeline-withheld-with-video",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "avc1.42E01F"
+        },
+        "audio": {},
+        "mediaTimeline": {}
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "media-timeline-drops-withheld-dependency",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "video": {
+          "codec": "avc1.42E01F"
+        },
+        "audio": {},
+        "mediaTimeline": {
+          "depends": [
+            "video",
+            "audio"
+          ]
+        }
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room/live\",\"packaging\":\"mediatimeline\",\"isLive\":true,\"name\":\"timeline\",\"role\":\"mediatimeline\",\"mimetype\":\"application/json\",\"depends\":[\"audio\"]}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "timeline",
+            "packaging": "mediatimeline",
+            "isLive": true,
+            "role": "mediatimeline",
+            "mimetype": "application/json",
+            "depends": [
+              "audio"
+            ]
+          }
+        ]
+      }
     }
   ],
   "catalogErrors": [
@@ -617,6 +902,126 @@
             "name": "\ud800"
           }
         ]
+      }
+    },
+    {
+      "name": "media-timeline-without-media",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "mediaTimeline": {},
+        "data": [
+          {
+            "name": "chat"
+          }
+        ]
+      }
+    },
+    {
+      "name": "media-timeline-depends-unknown",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {},
+        "mediaTimeline": {
+          "depends": [
+            "video"
+          ]
+        }
+      }
+    },
+    {
+      "name": "media-timeline-depends-data",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {},
+        "data": [
+          {
+            "name": "chat"
+          }
+        ],
+        "mediaTimeline": {
+          "depends": [
+            "chat"
+          ]
+        }
+      }
+    },
+    {
+      "name": "media-timeline-depends-empty",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {},
+        "mediaTimeline": {
+          "depends": []
+        }
+      }
+    },
+    {
+      "name": "media-timeline-depends-duplicate",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {},
+        "mediaTimeline": {
+          "depends": [
+            "audio",
+            "audio"
+          ]
+        }
+      }
+    },
+    {
+      "name": "media-timeline-depends-itself",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {},
+        "mediaTimeline": {
+          "depends": [
+            "timeline"
+          ]
+        }
+      }
+    },
+    {
+      "name": "media-timeline-name-taken",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {},
+        "mediaTimeline": {
+          "name": "audio"
+        }
+      }
+    },
+    {
+      "name": "media-timeline-name-empty",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "audio": {},
+        "mediaTimeline": {
+          "name": ""
+        }
       }
     }
   ],
@@ -787,6 +1192,43 @@
             ],
             "name": "u",
             "packaging": "",
+            "isLive": false
+          }
+        ]
+      }
+    },
+    {
+      "name": "media-timeline-fields",
+      "source": "msf-01 §5.6.9's timeline entry, with a non-string item in depends; a second entry has a wrong-typed mimetype and depends. depends keeps its string items; both fields are read only with their JSON type.",
+      "catalogNamespace": [
+        "conference"
+      ],
+      "json": "{\"version\":\"1\",\"tracks\":[{\"name\":\"history\",\"namespace\":\"conference.example.com/conference123/alice\",\"packaging\":\"mediatimeline\",\"mimetype\":\"application/json\",\"depends\":[\"1080p-video\",7,\"audio\"]},{\"name\":\"x\",\"packaging\":\"loc\",\"mimetype\":5,\"depends\":\"audio\"}]}",
+      "parsed": {
+        "version": "1",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "conference.example.com",
+              "conference123",
+              "alice"
+            ],
+            "name": "history",
+            "packaging": "mediatimeline",
+            "isLive": false,
+            "mimetype": "application/json",
+            "depends": [
+              "1080p-video",
+              "audio"
+            ]
+          },
+          {
+            "namespace": [
+              "conference"
+            ],
+            "name": "x",
+            "packaging": "loc",
             "isLive": false
           }
         ]
@@ -1216,6 +1658,312 @@
       "pps": [
         "68ce3c80"
       ]
+    }
+  ],
+  "timelineEntries": [
+    {
+      "name": "msf-01 example's first record",
+      "timestampUs": "0",
+      "group": "0",
+      "originEpochUs": "1759924158381000",
+      "entry": [
+        0,
+        [
+          0,
+          0
+        ],
+        1759924158381
+      ]
+    },
+    {
+      "name": "floors media time and wall-clock time",
+      "timestampUs": "2002999",
+      "group": "1",
+      "originEpochUs": "1759924158381500",
+      "entry": [
+        2002,
+        [
+          1,
+          0
+        ],
+        1759924160384
+      ]
+    },
+    {
+      "name": "explicit object",
+      "timestampUs": "33333",
+      "group": "7",
+      "object": "3",
+      "originEpochUs": "1000",
+      "entry": [
+        33,
+        [
+          7,
+          3
+        ],
+        34
+      ]
+    },
+    {
+      "name": "unknown wall-clock time is 0",
+      "timestampUs": "4004000",
+      "group": "2",
+      "entry": [
+        4004,
+        [
+          2,
+          0
+        ],
+        0
+      ]
+    },
+    {
+      "name": "largest safe sum",
+      "timestampUs": "1",
+      "group": "9007199254740991",
+      "object": "9007199254740991",
+      "originEpochUs": "9007199254740990",
+      "entry": [
+        0,
+        [
+          9007199254740991,
+          9007199254740991
+        ],
+        9007199254740
+      ]
+    }
+  ],
+  "timelineEntryErrors": [
+    {
+      "name": "negative timestamp",
+      "timestampUs": "-1",
+      "group": "0"
+    },
+    {
+      "name": "unsafe timestamp",
+      "timestampUs": "9007199254740992",
+      "group": "0"
+    },
+    {
+      "name": "fractional timestamp",
+      "timestampUs": "1.5",
+      "group": "0"
+    },
+    {
+      "name": "negative group",
+      "timestampUs": "0",
+      "group": "-1"
+    },
+    {
+      "name": "unsafe object",
+      "timestampUs": "0",
+      "group": "0",
+      "object": "9007199254740992"
+    },
+    {
+      "name": "negative epoch",
+      "timestampUs": "0",
+      "group": "0",
+      "originEpochUs": "-1"
+    },
+    {
+      "name": "unsafe wall-clock sum",
+      "timestampUs": "2",
+      "group": "0",
+      "originEpochUs": "9007199254740990"
+    }
+  ],
+  "timelines": [
+    {
+      "name": "msf-01 §7.1.1 example",
+      "entries": [
+        [
+          0,
+          [
+            0,
+            0
+          ],
+          1759924158381
+        ],
+        [
+          2002,
+          [
+            1,
+            0
+          ],
+          1759924160383
+        ],
+        [
+          4004,
+          [
+            2,
+            0
+          ],
+          1759924162385
+        ],
+        [
+          6006,
+          [
+            3,
+            0
+          ],
+          1759924164387
+        ],
+        [
+          8008,
+          [
+            4,
+            0
+          ],
+          1759924166389
+        ]
+      ],
+      "json": "[[0,[0,0],1759924158381],[2002,[1,0],1759924160383],[4004,[2,0],1759924162385],[6006,[3,0],1759924164387],[8008,[4,0],1759924166389]]"
+    },
+    {
+      "name": "empty",
+      "entries": [],
+      "json": "[]"
+    },
+    {
+      "name": "order kept, largest safe values",
+      "entries": [
+        [
+          5,
+          [
+            9007199254740991,
+            1
+          ],
+          0
+        ],
+        [
+          1,
+          [
+            0,
+            0
+          ],
+          9007199254740991
+        ]
+      ],
+      "json": "[[5,[9007199254740991,1],0],[1,[0,0],9007199254740991]]"
+    }
+  ],
+  "timelineErrors": [
+    {
+      "name": "negative media time",
+      "entries": [
+        [
+          -1,
+          [
+            0,
+            0
+          ],
+          0
+        ]
+      ]
+    },
+    {
+      "name": "fractional wall-clock time",
+      "entries": [
+        [
+          0,
+          [
+            0,
+            0
+          ],
+          0.5
+        ]
+      ]
+    },
+    {
+      "name": "unsafe group",
+      "entries": [
+        [
+          0,
+          [
+            9007199254740992,
+            0
+          ],
+          0
+        ]
+      ]
+    }
+  ],
+  "timelineReads": [
+    {
+      "name": "lenient records",
+      "source": "Synthetic: records of the wrong shape are skipped, a §7.4 template array among them; extra items are ignored; integral floats read as integers.",
+      "json": "[[0,[0,0],1759924158381],[1,[2,0,9],3,\"x\"],[2.0,[3,0],4],[1.5,[0,0],0],[-1,[0,0],0],[0,[0],0],[0,\"0,0\",0],\"record\",[0,[0,0]],[0,2002,[0,0],[1,0],1759924158381,2002],[0,[9007199254740992,0],0],{\"a\":1},[true,[0,0],0],[0,[0,false],0]]",
+      "entries": [
+        [
+          0,
+          [
+            0,
+            0
+          ],
+          1759924158381
+        ],
+        [
+          1,
+          [
+            2,
+            0
+          ],
+          3
+        ],
+        [
+          2,
+          [
+            3,
+            0
+          ],
+          4
+        ]
+      ]
+    },
+    {
+      "name": "msf-01 §7.1.1 example, spaced",
+      "json": "[\n  [0, [0,0], 1759924158381],\n  [2002, [1,0], 1759924160383]\n]",
+      "entries": [
+        [
+          0,
+          [
+            0,
+            0
+          ],
+          1759924158381
+        ],
+        [
+          2002,
+          [
+            1,
+            0
+          ],
+          1759924160383
+        ]
+      ]
+    }
+  ],
+  "timelineReadErrors": [
+    {
+      "name": "object",
+      "json": "{\"entries\":[]}"
+    },
+    {
+      "name": "truncated",
+      "json": "[[0,[0,0],0]"
+    },
+    {
+      "name": "nan",
+      "json": "[[NaN,[0,0],0]]"
+    },
+    {
+      "name": "byte-order mark",
+      "json": "\ufeff[]"
+    },
+    {
+      "name": "number",
+      "json": "7"
     }
   ]
 }

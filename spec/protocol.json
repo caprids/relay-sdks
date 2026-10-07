@@ -40,7 +40,8 @@
     "tracks": {
       "catalog": "catalog",
       "video": "video",
-      "audio": "audio"
+      "audio": "audio",
+      "mediaTimeline": "timeline"
     },
     "properties": {
       "timestamp": 16,

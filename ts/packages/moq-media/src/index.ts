@@ -3,6 +3,7 @@ export {
   buildMsfCatalog,
   buildMsfEndCatalog,
   type DataTrackInfo,
+  type MediaTimelineTrackInfo,
   MSF_CATALOG_VERSION,
   type MsfCatalogInput,
   type MsfEndCatalogInput,
@@ -38,6 +39,7 @@ export {
   type LocPropertiesOptions,
   locProperties,
   locTrackProperties,
+  MEDIA_TIMELINE_TRACK,
   MICROSECONDS_PER_SECOND,
   MSF_DOCUMENT,
   VIDEO_TRACK,
@@ -49,6 +51,13 @@ export {
   parseMsfCatalog,
 } from './parse-catalog.js';
 export { type ComposeMoqSourceOptions, composeMoqSource, encodeNameComponent, encodeNamespaceName } from './source.js';
+export {
+  buildMediaTimeline,
+  type MediaTimelineEntry,
+  type MediaTimelineEntryInput,
+  mediaTimelineEntry,
+  parseMediaTimeline,
+} from './timeline.js';
 export {
   audioTrackFromDecoderConfig,
   type ChunkToLocFrameOptions,

@@ -30,6 +30,12 @@ export interface BroadcastClockOptions {
    * the source's time now, rounded to whole microseconds.
    */
   originUs?: number;
+  /**
+   * The origin as integer Unix-epoch microseconds. Defaults to `Date.now()` at creation less the
+   * source time elapsed since the origin, read once. `Date.now()` rather than `performance.timeOrigin +
+   * performance.now()`, which can fall behind the system clock by however long the page has slept.
+   */
+  originEpochUs?: number;
 }
 
 /** Options for {@link BroadcastClock.sampleTimeline}. */
@@ -80,6 +86,8 @@ export interface SourceTimeline {
 export interface BroadcastClock {
   /** The broadcast's zero, on the source clock. */
   readonly originUs: number;
+  /** The broadcast's zero as microseconds since the Unix epoch: the wall-clock time media timeline entries use. */
+  readonly originEpochUs: number;
   /** Microseconds since the broadcast started. */
   now(): number;
   /**
@@ -100,12 +108,16 @@ export interface BroadcastClock {
 /** Fix a broadcast's origin and map capture timestamps and sample counters onto its microsecond timeline. */
 export function createBroadcastClock(options: BroadcastClockOptions = {}): BroadcastClock {
   const source = options.now ?? performanceMicroseconds;
-  const originUs = options.originUs === undefined ? Math.round(finite(source(), 'Source time')) : options.originUs;
+  const createdUs = finite(source(), 'Source time');
+  const originUs = options.originUs === undefined ? Math.round(createdUs) : options.originUs;
   safeInteger(originUs, 'originUs', Number.MIN_SAFE_INTEGER);
+  const originEpochUs = options.originEpochUs ?? Math.round(Date.now() * 1000 - (createdUs - originUs));
+  safeInteger(originEpochUs, 'originEpochUs', 0);
   const fromSourceUs = (sourceUs: number) => Math.round(finite(sourceUs, 'Source time') - originUs);
   const now = () => fromSourceUs(source());
   return {
     originUs,
+    originEpochUs,
     now,
     fromSourceUs,
     sourceTimeline({ toleranceUs = 5_000 } = {}) {

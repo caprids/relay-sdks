@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 
 from .h264 import avc_codec_string
-from .loc import AUDIO_TRACK, VIDEO_TRACK
+from .loc import AUDIO_TRACK, MEDIA_TIMELINE_TRACK, VIDEO_TRACK
 
 MSF_CATALOG_VERSION = "draft-01"
 
@@ -59,6 +59,18 @@ class DataTrackInfo:
     """Must not be a media role (``video``, ``audio``, ``caption`` and the like)."""
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MediaTimelineTrackInfo:
+    """The Media Timeline track (msf-01 §7) :func:`build_msf_catalog` announces.
+
+    The entry is listed only while a track it depends on is listed; see ``spec/media-layer.md``.
+    """
+
+    name: str = MEDIA_TIMELINE_TRACK
+    depends: Sequence[str] | None = None
+    """The video or audio track the timeline's locations point into. Default: the video track, else the audio track."""
+
+
 _MEDIA_ROLES = frozenset({"video", "audio", "caption", "subtitle", "audiodescription", "signlanguage"})
 
 
@@ -79,6 +91,7 @@ def build_msf_catalog(
     video: VideoTrackInfo | None = None,
     audio: AudioTrackInfo | None = None,
     data: Sequence[DataTrackInfo] = (),
+    media_timeline: MediaTimelineTrackInfo | None = None,
     generated_at_ms: int | None = None,
 ) -> bytes:
     """The independent MSF catalog JSON for a live LOC broadcast, byte-compatible with the Video.js parser.
@@ -90,12 +103,20 @@ def build_msf_catalog(
         raise ValueError("namespace must be a sequence of fields, not a string")
     if not namespace or any(not field or "/" in field for field in namespace):
         raise ValueError("catalog namespace fields must be non-empty and contain no slash")
-    descriptions = [track for track in (video, audio, *data) if track is not None]
+    descriptions = [track for track in (video, audio, media_timeline, *data) if track is not None]
     names = [track.name for track in descriptions]
     if any(not name for name in names) or len(set(names)) != len(names):
         raise ValueError("catalog track names must be non-empty and unique")
     if any(track.role in _MEDIA_ROLES for track in data):
         raise ValueError("data tracks must not use media roles")
+    media_names = [track.name for track in (video, audio) if track is not None]
+    depends: list[str] = []
+    if media_timeline is not None:
+        if isinstance(media_timeline.depends, str):
+            raise ValueError("media timeline depends must be a sequence of track names, not a string")
+        depends = list(media_timeline.depends if media_timeline.depends is not None else media_names[:1])
+        if not depends or len(set(depends)) != len(depends) or any(name not in media_names for name in depends):
+            raise ValueError("media timeline depends must name distinct video or audio tracks of this catalog")
     namespace_text = "/".join(namespace)
     shared: dict[str, object] = {"namespace": namespace_text, "packaging": "loc", "isLive": True}
     init_data_list: list[dict[str, str]] = []
@@ -146,6 +167,19 @@ def build_msf_catalog(
                     "bitrate": audio.bitrate,
                 }
             )
+        )
+
+    listed = {track["name"] for track in tracks}
+    if media_timeline is not None and (indexed := [name for name in depends if name in listed]):
+        tracks.append(
+            {
+                **shared,
+                "packaging": "mediatimeline",
+                "name": media_timeline.name,
+                "role": "mediatimeline",
+                "mimetype": "application/json",
+                "depends": indexed,
+            }
         )
 
     for track in data:
@@ -228,6 +262,10 @@ class MsfCatalogTrack:
     bitrate: int | None = None
     render_group: int | None = None
     """Render group (§5.2.11): tracks sharing one are meant to play together."""
+    mimetype: str | None = None
+    """MIME type (§5.2.19), e.g. ``application/json`` on a media timeline track."""
+    depends: tuple[str, ...] | None = None
+    """Names of the tracks this one depends on (§5.2.14), its string items only."""
     init_data: bytes | None = None
     """Decoder init data, resolved from ``initRef`` through the catalog's inline ``initDataList``."""
 
@@ -301,6 +339,7 @@ def _parse_track(
     # the fields with "/", which the builder therefore rejects inside a field. Empty fields are dropped.
     namespace = raw.get("namespace")
     init_ref = _string(raw.get("initRef"))
+    depends = raw.get("depends")
 
     return MsfCatalogTrack(
         namespace=tuple(field for field in namespace.split("/") if field) if isinstance(namespace, str) else inherited,
@@ -316,6 +355,8 @@ def _parse_track(
         channel_config=_string(raw.get("channelConfig")),
         bitrate=_integer(raw.get("bitrate")),
         render_group=_integer(raw.get("renderGroup")),
+        mimetype=_string(raw.get("mimetype")),
+        depends=tuple(name for name in depends if isinstance(name, str)) if isinstance(depends, list) else None,
         init_data=None if init_ref is None else init_data_list.get(init_ref),
     )
 

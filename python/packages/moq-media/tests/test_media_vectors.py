@@ -33,6 +33,7 @@ def build(raw: dict[str, Any]) -> bytes:
         video=media.VideoTrackInfo(**track_input(raw["video"])) if "video" in raw else None,
         audio=media.AudioTrackInfo(**track_input(raw["audio"])) if "audio" in raw else None,
         data=[media.DataTrackInfo(**track) for track in raw.get("data", [])],
+        media_timeline=media.MediaTimelineTrackInfo(**raw["mediaTimeline"]) if "mediaTimeline" in raw else None,
         generated_at_ms=int(raw["generatedAt"]) if "generatedAt" in raw else None,
     )
 
@@ -141,6 +142,77 @@ def test_catalog_read_rejects_non_utf8() -> None:
         media.parse_msf_catalog(b'{"version":"draft-01","tracks":[]}', catalog_namespace="room")
 
 
+def record(entry: media.MediaTimelineEntry) -> list[Any]:
+    """The vectors' form of an entry: msf-01's ``[mediaTimeMs, [group, object], wallclockMs]``."""
+    return [entry.media_time_ms, [entry.group, entry.object], entry.wallclock_ms]
+
+
+def entry(raw: list[Any]) -> media.MediaTimelineEntry:
+    return media.MediaTimelineEntry(media_time_ms=raw[0], group=raw[1][0], object=raw[1][1], wallclock_ms=raw[2])
+
+
+def decimal(text: str) -> Any:
+    """A vector's decimal string; fractional ones stay floats so the helpers can refuse them."""
+    return float(text) if "." in text else int(text)
+
+
+def timeline_entry(raw: dict[str, Any]) -> media.MediaTimelineEntry:
+    return media.media_timeline_entry(
+        decimal(raw["timestampUs"]),
+        decimal(raw["group"]),
+        object=decimal(raw.get("object", "0")),
+        origin_epoch_us=decimal(raw["originEpochUs"]) if "originEpochUs" in raw else None,
+    )
+
+
+@pytest.mark.parametrize("vector", VECTORS["timelineEntries"], ids=lambda v: v["name"])
+def test_timeline_entries(vector: dict[str, Any]) -> None:
+    assert record(timeline_entry(vector)) == vector["entry"]
+
+
+@pytest.mark.parametrize("vector", VECTORS["timelineEntryErrors"], ids=lambda v: v["name"])
+def test_timeline_entry_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        timeline_entry(vector)
+
+
+@pytest.mark.parametrize("vector", VECTORS["timelines"], ids=lambda v: v["name"])
+def test_timeline_bytes_and_round_trip(vector: dict[str, Any]) -> None:
+    document = media.build_media_timeline([entry(raw) for raw in vector["entries"]])
+    assert document == vector["json"].encode("utf-8")
+    assert [record(read) for read in media.parse_media_timeline(document)] == vector["entries"]
+
+
+@pytest.mark.parametrize("vector", VECTORS["timelineErrors"], ids=lambda v: v["name"])
+def test_timeline_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        media.build_media_timeline([entry(raw) for raw in vector["entries"]])
+
+
+@pytest.mark.parametrize("vector", VECTORS["timelineReads"], ids=lambda v: v["name"])
+def test_timeline_reads(vector: dict[str, Any]) -> None:
+    read = media.parse_media_timeline(vector["json"].encode("utf-8"))
+    assert [record(entry) for entry in read] == vector["entries"]
+    assert all(isinstance(value, int) for entry in read for value in record(entry)[::2])
+
+
+@pytest.mark.parametrize("vector", VECTORS["timelineReadErrors"], ids=lambda v: v["name"])
+def test_timeline_read_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        media.parse_media_timeline(vector["json"].encode("utf-8"))
+
+
+def test_timeline_read_rejects_non_utf8() -> None:
+    with pytest.raises(ValueError):
+        media.parse_media_timeline(b'[[0,[0,0],0],"\xff"]')
+
+
+def test_timeline_entry_from_a_broadcast_clock() -> None:
+    clock = media.BroadcastClock(now_us=lambda: 0, origin_us=0, origin_epoch_us=1_759_924_158_381_000)
+    timeline = media.media_timeline_entry(2_002_000, 1, origin_epoch_us=clock.origin_epoch_us)
+    assert record(timeline) == [2002, [1, 0], 1_759_924_160_383]
+
+
 @pytest.mark.parametrize("vector", VECTORS["loc"], ids=lambda v: v["name"])
 def test_loc(vector: dict[str, Any]) -> None:
     properties = media.loc_properties(
@@ -224,7 +296,12 @@ def test_protocol_pins() -> None:
         "msfDocument": media.MSF_DOCUMENT,
         "catalogVersion": media.MSF_CATALOG_VERSION,
         "defaultTimescale": media.MICROSECONDS_PER_SECOND,
-        "tracks": {"catalog": media.CATALOG_TRACK, "video": media.VIDEO_TRACK, "audio": media.AUDIO_TRACK},
+        "tracks": {
+            "catalog": media.CATALOG_TRACK,
+            "video": media.VIDEO_TRACK,
+            "audio": media.AUDIO_TRACK,
+            "mediaTimeline": media.MEDIA_TIMELINE_TRACK,
+        },
         "properties": {
             "timestamp": media.LOC_TIMESTAMP,
             "timescale": media.LOC_TIMESCALE,

@@ -11,6 +11,7 @@ MICROSECONDS_PER_SECOND = 1_000_000
 CATALOG_TRACK = "catalog"
 VIDEO_TRACK = "video"
 AUDIO_TRACK = "audio"
+MEDIA_TIMELINE_TRACK = "timeline"
 
 LOC_DOCUMENT = "draft-ietf-moq-loc-04"
 MSF_DOCUMENT = "draft-ietf-moq-msf-01"
