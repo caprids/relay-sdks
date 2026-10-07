@@ -343,7 +343,8 @@ No browser API reports a microphone's own input latency. Bluetooth input can arr
 later than a built-in microphone, and a timeline built from when samples reach the page cannot see
 that. Audio from such a device is stamped late by that amount, so a player plays it late against
 video. Subtract a known capture latency from the audio timestamps if you have one. Measuring it on
-real devices is [issue #290](https://github.com/muxinc/relay-sdks/issues/290).
+real devices is [issue #290](https://github.com/muxinc/relay-sdks/issues/290), with the
+[device latency lab](../tools/device-latency/README.md).
 
 #### Stamping
 

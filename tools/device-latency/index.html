@@ -1,0 +1,875 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Device Latency Lab</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa; --fg: #1d1d1b; --muted: #6b6b66; --line: #dcdcd6; --panel: #ffffff;
+    --accent: #2f5bd3; --ok: #1f7a3a; --bad: #b3261e; --warn: #8a5a00;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #161615; --fg: #ececea; --muted: #a0a09a; --line: #34342f; --panel: #1f1f1d;
+      --accent: #8aa8ff; --ok: #6fcf8a; --bad: #ff8a80; --warn: #e0b050; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; }
+  main { max-width: 1040px; margin: 0 auto; padding: 24px 16px 64px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  p { margin: 0 0 8px; }
+  .muted { color: var(--muted); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px;
+    margin-top: 16px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
+  label { display: block; font-size: 13px; color: var(--muted); }
+  select, input[type=text], input[type=number] { width: 100%; font: inherit; padding: 6px 8px;
+    border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); }
+  button { font: inherit; padding: 7px 14px; border-radius: 6px; border: 1px solid var(--line);
+    background: var(--bg); color: var(--fg); cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .45; cursor: default; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
+  ol { margin: 4px 0 0; padding-left: 20px; }
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  .ok { color: var(--ok); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  textarea { width: 100%; min-height: 120px; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    background: var(--bg); color: var(--fg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
+  code { font: 13px ui-monospace, SFMono-Regular, Menlo, monospace; }
+  #status { font-weight: 600; }
+  .runs li { margin-bottom: 2px; }
+  .done::after { content: " ✓"; color: var(--ok); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Device latency lab</h1>
+  <p class="muted">Measures microphone input latency and output latency against the
+    <a href="https://github.com/muxinc/relay-sdks/blob/main/spec/media-layer.md#browser-capture">browser capture recipe</a>
+    for <a href="https://github.com/muxinc/relay-sdks/issues/290">issue #290</a>. Nothing leaves this page until you
+    export it.</p>
+  <p class="muted" id="features"></p>
+
+  <section>
+    <h2>1. Allow the microphone</h2>
+    <p>Browsers hide device names until a page may use the microphone.</p>
+    <div class="row"><button id="unlock" class="primary">Allow microphone</button><span id="unlock-status" class="muted"></span></div>
+  </section>
+
+  <section>
+    <h2>2. Pick a run</h2>
+    <div class="grid">
+      <div><label for="preset">Run</label><select id="preset"></select></div>
+      <div><label for="primary">Microphone under test</label><select id="primary"></select></div>
+      <div><label for="reference">Reference microphone (optional)</label><select id="reference"></select></div>
+      <div><label for="sink">Output device</label><select id="sink"></select></div>
+      <div><label for="declared">Output in use, as you set it (recorded with every click)</label><input id="declared" type="text"></div>
+      <div><label for="rate">AudioContext sample rate</label><select id="rate">
+        <option value="">Browser default</option><option>48000</option><option>44100</option><option>24000</option><option>16000</option>
+      </select></div>
+      <div><label for="level">Click level</label><select id="level">
+        <option value="0.25">Quiet</option><option value="0.5" selected>Normal</option><option value="0.9">Loud</option>
+      </select></div>
+      <div><label for="period">Seconds between clicks</label><input id="period" type="number" min="1.5" max="5" step="0.5" value="2"></div>
+      <div><label for="notes">Notes for this run (model, noise control, distance…)</label><input id="notes" type="text"></div>
+      <div><label><input id="mstp" type="checkbox"> Also read MediaStreamTrackProcessor timestamps (Chromium)</label></div>
+    </div>
+    <p style="margin-top:12px"><strong id="preset-title"></strong></p>
+    <ol id="preset-steps"></ol>
+    <div class="row">
+      <button id="start" class="primary">Start run</button>
+      <button id="stop" disabled>Stop run</button>
+      <button id="mark-output" disabled>I switched the output now</button>
+      <span id="status" class="muted">Idle</span>
+    </div>
+  </section>
+
+  <section>
+    <h2>Live</h2>
+    <p class="muted" id="live-context">No run.</p>
+    <div class="table-wrap"><table>
+      <thead><tr><th>#</th><th>Output</th><th>Input</th><th>Loopback ms</th><th>Stamp − claim ms</th>
+        <th>outputLatency ms</th><th>MSTP − claim ms</th><th>Match</th></tr></thead>
+      <tbody id="live-rows"></tbody>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>3. Results in this browser</h2>
+    <p class="muted">Kept in this browser until you clear them. Medians over the clicks that matched.</p>
+    <ul class="runs" id="run-list"></ul>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Run</th><th>Output</th><th>Input</th><th>n</th><th>Loopback ms</th><th>Stamp − claim ms</th>
+        <th>outputLatency ms</th><th>MSTP − claim ms</th><th>Input − reference ms</th></tr></thead>
+      <tbody id="summary-rows"></tbody>
+    </table></div>
+    <div class="row">
+      <button id="download" class="primary">Download JSON</button>
+      <button id="copy">Copy JSON</button>
+      <button id="clear">Clear results</button>
+      <span id="export-status" class="muted"></span>
+    </div>
+  </section>
+
+</main>
+
+<script type="module">
+// What every number means: see README.md next to this file.
+const TOOL_VERSION = 1;
+const STORAGE_KEY = 'relay-sdks-device-latency-v1';
+const CHIRP_SECONDS = 0.02; // 500 Hz to 3 kHz fits a Bluetooth headset's narrowband microphone
+const CHIRP_FROM_HZ = 500;
+const CHIRP_TO_HZ = 3000;
+const LEAD_SECONDS = 0.25; // a click is scheduled this far ahead of the context's current time
+const SEARCH_SECONDS = 1.0; // how long after a click its echo may arrive
+const SEARCH_BEFORE_SECONDS = 0.05;
+const KEEP_SECONDS = 8;
+const SELF_TEST_DELAY_SECONDS = 0.1;
+const MATCH_MIN_NCC = 0.3; // a looser or stricter cut can be applied to the exported raw values
+const MATCH_MIN_SNR_DB = 12;
+const CLAP_THRESHOLD_RATIO = 20;
+
+const PRESETS = [
+  { id: 'self-test', mode: 'self-test', title: 'Self-test (no hardware)', output: 'none (digital loop)',
+    primary: 'none', reference: 'none',
+    steps: ['Checks the page itself: the click is fed back digitally through a 100 ms delay, no speaker or microphone.',
+      'Run it for 5 clicks. Loopback must read 100.0 ms on every row. If it does not, stop and report that.'] },
+  { id: 'speaker-mic', mode: 'chirp', title: 'Built-in speakers → built-in mic', output: 'Built-in speakers',
+    primary: 'builtin', reference: 'none',
+    steps: ['Disconnect or put away every Bluetooth audio device.', 'Set the output to the built-in speakers (macOS Sound menu), volume about half.',
+      'Quiet room. Start, wait for 15 matched clicks, Stop.'] },
+  { id: 'speaker-airpods-mic', mode: 'chirp', title: 'Built-in speakers → AirPods mic (reference: built-in mic)',
+    output: 'Built-in speakers', primary: 'airpods', reference: 'builtin',
+    steps: ['Connect the AirPods. Set the output back to the built-in speakers.',
+      'Hold both AirPods right next to the built-in microphone, so both mics hear the click from the same spot.',
+      'Pick the AirPods as the microphone under test and the built-in mic as reference.',
+      'Start, wait for 15 matched clicks, Stop. If the browser cannot open both mics, run it again with Reference: none.'] },
+  { id: 'airpods-out-mic', mode: 'chirp', title: 'AirPods output (music mode) → built-in mic', output: 'AirPods',
+    primary: 'builtin', reference: 'none',
+    steps: ['Set the output to the AirPods. Do not use the AirPods mic in this run.',
+      'Take one AirPod out and hold it against the built-in microphone.',
+      'Start, wait for 15 matched clicks, Stop.'] },
+  { id: 'airpods-call-mode', mode: 'chirp', title: 'AirPods output (call mode, AirPods mic open) → built-in mic',
+    output: 'AirPods (mic open)', primary: 'builtin', reference: 'airpods',
+    steps: ['Output stays on the AirPods. Opening the AirPods mic as reference puts them in call mode.',
+      'Hold one AirPod against the built-in microphone.',
+      'Start, wait for 15 matched clicks, Stop.'] },
+  { id: 'speaker-usb-mic', mode: 'chirp', title: 'Built-in speakers → USB mic (reference: built-in mic)',
+    output: 'Built-in speakers', primary: 'usb', reference: 'builtin',
+    steps: ['Skip this run if you have no USB microphone.', 'Output on the built-in speakers. Put the USB mic next to the built-in mic.',
+      'Start, wait for 15 matched clicks, Stop.'] },
+  { id: 'switch-output', mode: 'chirp', title: 'Switch output mid-run: speakers → AirPods → speakers',
+    output: 'Built-in speakers', primary: 'builtin', reference: 'none',
+    steps: ['Mic: built-in. Output: built-in speakers. Hold one AirPod against the built-in mic for the whole run.',
+      'Start. After 10 matched clicks, switch the output to the AirPods (Output device menu above, or the macOS Sound menu), type "AirPods" into "Output in use", and press "I switched the output now".',
+      'After 10 more, switch back to the speakers the same way, then 10 more, then Stop.'] },
+  { id: 'switch-mic', mode: 'chirp', title: 'Switch mic mid-run: built-in → AirPods → built-in', output: 'Built-in speakers',
+    primary: 'builtin', reference: 'none',
+    steps: ['Output: built-in speakers. Hold both AirPods next to the built-in mic for the whole run.',
+      'Start. After 10 matched clicks, choose the AirPods in "Microphone under test" (it switches live).',
+      'After 10 more, switch back to the built-in mic, then 10 more, then Stop.'] },
+  { id: 'clap', mode: 'clap', title: 'Clap: AirPods mic vs built-in mic, no speaker', output: 'none',
+    primary: 'airpods', reference: 'builtin',
+    steps: ['Hold the AirPods right next to the built-in microphone.',
+      'Start, then clap sharply 10 times, about 2 s apart, 30–50 cm from the mics. Stop.',
+      'This gives the AirPods mic delay relative to the built-in mic only: a clap has no known start time.'] },
+];
+
+const $ = (id) => document.getElementById(id);
+const r3 = (x) => (x === null || x === undefined || !Number.isFinite(x) ? null : Math.round(x * 1000) / 1000);
+const median = (xs) => {
+  const v = xs.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!v.length) return null;
+  const m = v.length >> 1;
+  return v.length % 2 ? v[m] : (v[m - 1] + v[m]) / 2;
+};
+
+function browserName(ua = navigator.userAgent) {
+  if (/Firefox\//.test(ua)) return 'firefox';
+  if (/Edg\//.test(ua)) return 'edge';
+  if (/Chrome\//.test(ua)) return 'chrome';
+  if (/Safari\//.test(ua)) return 'safari';
+  return 'other';
+}
+
+function features() {
+  const proto = window.AudioContext?.prototype ?? {};
+  return {
+    audioWorklet: typeof AudioWorkletNode === 'function',
+    getOutputTimestamp: 'getOutputTimestamp' in proto,
+    baseLatency: 'baseLatency' in proto,
+    outputLatency: 'outputLatency' in proto,
+    setSinkId: 'setSinkId' in proto,
+    mediaStreamTrackProcessor: typeof window.MediaStreamTrackProcessor === 'function',
+  };
+}
+
+// --- The #285 clock, ported line for line from ts/packages/moq-media/src/clock.ts (createBroadcastClock). ---
+function createBroadcastClock() {
+  const source = () => performance.now() * 1000;
+  const originUs = Math.round(source());
+  const fromSourceUs = (sourceUs) => Math.round(sourceUs - originUs);
+  const now = () => fromSourceUs(source());
+  return {
+    originUs, now, fromSourceUs,
+    sourceTimeline({ toleranceUs = 5_000 } = {}) {
+      let anchor;
+      return {
+        calibrate(sourceUs, atUs) {
+          const measured = atUs === undefined ? now() : fromSourceUs(atUs);
+          if (anchor && Math.abs(anchor.timestampUs + Math.round(sourceUs - anchor.sourceUs) - measured) <= toleranceUs) {
+            return false;
+          }
+          anchor = { sourceUs, timestampUs: measured };
+          return true;
+        },
+        timestampUs(sourceUs) {
+          anchor ??= { sourceUs, timestampUs: now() };
+          return anchor.timestampUs + Math.round(sourceUs - anchor.sourceUs);
+        },
+      };
+    },
+  };
+}
+
+// --- Signal processing ---
+function makeChirp(sampleRate, level = 1) {
+  const n = Math.round(CHIRP_SECONDS * sampleRate);
+  const out = new Float32Array(n);
+  const k = (CHIRP_TO_HZ - CHIRP_FROM_HZ) / CHIRP_SECONDS;
+  for (let i = 0; i < n; i++) {
+    const t = i / sampleRate;
+    const window = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / (n - 1));
+    out[i] = level * window * Math.sin(2 * Math.PI * (CHIRP_FROM_HZ * t + 0.5 * k * t * t));
+  }
+  return out;
+}
+
+function fft(re, im, inverse) {
+  const n = re.length;
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) { [re[i], re[j]] = [re[j], re[i]]; [im[i], im[j]] = [im[j], im[i]]; }
+  }
+  for (let size = 2; size <= n; size <<= 1) {
+    const angle = ((inverse ? 2 : -2) * Math.PI) / size;
+    const wr = Math.cos(angle), wi = Math.sin(angle), half = size >> 1;
+    for (let start = 0; start < n; start += size) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < half; k++) {
+        const a = start + k, b = a + half;
+        const tr = re[b] * cr - im[b] * ci, ti = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - tr; im[b] = im[a] - ti; re[a] += tr; im[a] += ti;
+        const ncr = cr * wr - ci * wi; ci = cr * wi + ci * wr; cr = ncr;
+      }
+    }
+  }
+  if (inverse) for (let i = 0; i < n; i++) { re[i] /= n; im[i] /= n; }
+}
+
+// Where `template` best matches inside `x`: the peak of the correlation envelope, so a speaker that inverts
+// polarity or shifts phase still lines up. Returns the start index and how clear the match is.
+function locate(x, template) {
+  const valid = x.length - template.length + 1;
+  if (valid <= 0) return null;
+  let n = 1;
+  while (n < x.length + template.length) n <<= 1;
+  const xr = new Float64Array(n), xi = new Float64Array(n), tr = new Float64Array(n), ti = new Float64Array(n);
+  xr.set(x); tr.set(template);
+  fft(xr, xi, false); fft(tr, ti, false);
+  for (let k = 0; k < n; k++) {
+    const a = xr[k], b = xi[k], c = tr[k], d = -ti[k];
+    // Analytic signal: keep DC and Nyquist, double positive frequencies, drop negative ones.
+    const gain = k === 0 || k === n / 2 ? 1 : k < n / 2 ? 2 : 0;
+    xr[k] = gain * (a * c - b * d); xi[k] = gain * (a * d + b * c);
+  }
+  fft(xr, xi, true);
+  const envelope = new Float64Array(valid);
+  let best = 0, at = 0;
+  for (let k = 0; k < valid; k++) {
+    envelope[k] = Math.hypot(xr[k], xi[k]);
+    if (envelope[k] > best) { best = envelope[k]; at = k; }
+  }
+  let templateEnergy = 0, windowEnergy = 0;
+  for (let i = 0; i < template.length; i++) { templateEnergy += template[i] ** 2; windowEnergy += x[at + i] ** 2; }
+  const ncc = best / Math.sqrt(templateEnergy * windowEnergy || 1);
+  const floor = median(Array.from(envelope)) || 1e-12;
+  return { index: at, ncc, snrDb: 20 * Math.log10(best / floor) };
+}
+
+// --- Session (persists in this browser) ---
+function newSession() {
+  return {
+    tool: 'relay-sdks/tools/device-latency', toolVersion: TOOL_VERSION, issue: 290,
+    browser: browserName(), userAgent: navigator.userAgent, platform: navigator.platform,
+    createdAt: new Date().toISOString(), features: features(), crossOriginIsolated: self.crossOriginIsolated === true,
+    devices: [], runs: [],
+  };
+}
+function loadSession() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? 'null');
+    if (saved?.toolVersion === TOOL_VERSION) return saved;
+  } catch {}
+  return newSession();
+}
+function saveSession() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(session)); } catch {}
+}
+let session = loadSession();
+session.userAgent = navigator.userAgent;
+session.features = features();
+session.crossOriginIsolated = self.crossOriginIsolated === true;
+
+// --- Devices ---
+let devices = [];
+async function refreshDevices() {
+  devices = await navigator.mediaDevices.enumerateDevices();
+  session.devices = devices.filter((d) => d.kind !== 'videoinput')
+    .map((d) => ({ kind: d.kind, label: d.label, default: d.deviceId === 'default' }));
+  fillDeviceSelects();
+}
+function guess(role, list) {
+  const test = { builtin: /built-?in|macbook|internal/i, airpods: /airpods|bluetooth|headset|hands-free/i,
+    usb: /usb/i }[role];
+  return test ? list.find((d) => test.test(d.label) && d.deviceId !== 'default')?.deviceId : undefined;
+}
+function fillSelect(select, list, { none, wanted } = {}) {
+  const previous = select.value;
+  select.replaceChildren();
+  if (none) select.append(new Option(none, ''));
+  for (const d of list) select.append(new Option(d.label || `(unnamed ${d.kind})`, d.deviceId));
+  select.value = wanted ?? previous;
+  if (select.selectedIndex < 0) select.selectedIndex = 0;
+}
+function fillDeviceSelects(applyPreset = false) {
+  const inputs = devices.filter((d) => d.kind === 'audioinput');
+  const outputs = devices.filter((d) => d.kind === 'audiooutput');
+  const preset = currentPreset();
+  fillSelect($('primary'), inputs, { none: preset.mode === 'self-test' ? 'None (self-test)' : undefined,
+    wanted: applyPreset ? guess(preset.primary, inputs) ?? '' : undefined });
+  fillSelect($('reference'), inputs, { none: 'None', wanted: applyPreset ? guess(preset.reference, inputs) ?? '' : undefined });
+  if (features().setSinkId) fillSelect($('sink'), outputs, { none: 'System default output' });
+  else {
+    $('sink').replaceChildren(new Option('This browser follows the macOS Sound menu', ''));
+    $('sink').disabled = true;
+  }
+}
+
+// --- Run engine ---
+let active = null;
+
+function currentPreset() { return PRESETS.find((p) => p.id === $('preset').value) ?? PRESETS[0]; }
+
+function event(kind, detail = {}) {
+  if (!active) return;
+  active.run.events.push({ perfMs: r3(performance.now()), contextTime: r3(active.ctx.currentTime), kind, ...detail });
+}
+
+function outputTimestamp(ctx) {
+  const ts = ctx.getOutputTimestamp?.() ?? {};
+  return {
+    contextTime: ts.contextTime ?? null, performanceTime: ts.performanceTime ?? null,
+    baseLatency: ctx.baseLatency ?? null, outputLatency: ctx.outputLatency ?? null,
+  };
+}
+
+async function attachMic(slot, deviceId) {
+  const a = active;
+  const old = a.mics[slot];
+  if (old) {
+    old.source.disconnect(); old.stream.getTracks().forEach((t) => t.stop());
+    if (slot === 0) stopMstp();
+    a.mics[slot] = null;
+  }
+  if (!deviceId) return;
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: {
+    deviceId: { exact: deviceId }, echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+  if (a !== active) { stream.getTracks().forEach((t) => t.stop()); return; }
+  const track = stream.getAudioTracks()[0];
+  const source = a.ctx.createMediaStreamSource(stream);
+  source.connect(a.node, 0, slot);
+  a.mics[slot] = { stream, source, track, label: track.label };
+  const role = slot === 0 ? 'primary' : 'reference';
+  for (const kind of ['mute', 'unmute', 'ended']) track.addEventListener(kind, () => event(`track-${kind}`, { slot: role, label: track.label }));
+  a.run.inputs.push({ slot: role, label: track.label, perfMs: r3(performance.now()), settings: track.getSettings?.() ?? null });
+  event('mic-attached', { slot: role, label: track.label });
+  if (slot === 0 && $('mstp').checked) startMstp(track);
+}
+
+function startMstp(track) {
+  if (!features().mediaStreamTrackProcessor) return;
+  const a = active;
+  const clone = track.clone();
+  const reader = new MediaStreamTrackProcessor({ track: clone }).readable.getReader();
+  const m = { label: track.label, reader, clone, chunks: [], anchor: null, lags: [], minLagUs: Infinity, jumpUs: 0 };
+  a.mstp = m;
+  a.run.mstp.push({ label: track.label, perfMs: r3(performance.now()), anchor: null, frames: 0, sampleRate: null,
+    maxTimestampJumpUs: 0, arrivalMinusEndUs: null });
+  const record = a.run.mstp.at(-1);
+  (async () => {
+    for (;;) {
+      const { value, done } = await reader.read().catch(() => ({ done: true }));
+      if (done || a.mstp !== m) { value?.close(); break; }
+      const arrivalUs = performance.now() * 1000;
+      const data = new Float32Array(value.numberOfFrames);
+      value.copyTo(data, { planeIndex: 0, format: 'f32-planar' });
+      const chunk = { tsUs: value.timestamp, sampleRate: value.sampleRate, data };
+      value.close();
+      const endUs = chunk.tsUs + (data.length / chunk.sampleRate) * 1e6;
+      const last = m.chunks.at(-1);
+      // How far a buffer's timestamp strays from the previous one's end: jitter, or a gap.
+      if (last) m.jumpUs = Math.max(m.jumpUs, Math.abs(last.tsUs + (last.data.length / last.sampleRate) * 1e6 - chunk.tsUs));
+      // As the recipe says: the first frame anchors an uncalibrated source timeline at its arrival.
+      m.anchor ??= { tsUs: chunk.tsUs, perfUs: arrivalUs };
+      // arrival − end of buffer: performance.now() and AudioData count from different zeros, so only the spread and
+      // the difference between microphones in one page load mean anything.
+      const lag = arrivalUs - endUs;
+      m.minLagUs = Math.min(m.minLagUs, lag);
+      if (m.lags.length < 4000) m.lags.push(lag);
+      m.chunks.push(chunk);
+      while (m.chunks.length && m.chunks[0].tsUs < chunk.tsUs - KEEP_SECONDS * 1e6) m.chunks.shift();
+      Object.assign(record, { anchor: { tsUs: m.anchor.tsUs, perfMs: r3(m.anchor.perfUs / 1000) },
+        frames: record.frames + data.length, sampleRate: chunk.sampleRate, maxTimestampJumpUs: r3(m.jumpUs),
+        arrivalMinusEndUs: { min: Math.round(m.minLagUs), median: Math.round(median(m.lags)), max: Math.round(Math.max(...m.lags)) } });
+    }
+  })();
+}
+
+function stopMstp() {
+  const m = active?.mstp;
+  if (!m) return;
+  active.mstp = null;
+  m.reader.cancel().catch(() => {});
+  m.clone.stop();
+}
+
+// The contiguous capture of one slot from `from` (a context frame) for `length` frames, or null if not all there.
+function segment(slot, from, length) {
+  const out = new Float32Array(length);
+  let covered = 0;
+  for (const c of active.chunks[slot]) {
+    const start = Math.max(from, c.frame), end = Math.min(from + length, c.frame + c.data.length);
+    if (end <= start) continue;
+    out.set(c.data.subarray(start - c.frame, end - c.frame), start - from);
+    covered += end - start;
+  }
+  return covered === length ? out : null;
+}
+
+// The broadcast timestamp the recipe gave the chunk holding `frame`, carried to that frame.
+function stampOf(slot, frame) {
+  const c = active.chunks[slot].find((c) => frame >= c.frame && frame < c.frame + c.data.length);
+  return c ? c.stampUs + Math.round(((frame - c.frame) / active.ctx.sampleRate) * 1e6) : null;
+}
+
+// When the browser says context time `t` is audible, from the output timestamp sampled nearest to it.
+function claimPerfMs(t) {
+  let best = null;
+  for (const s of active.run.samples) {
+    if (!s[3]) continue;
+    if (!best || Math.abs(s[2] - t) < Math.abs(best[2] - t)) best = s;
+  }
+  return best ? { perfMs: best[3] + (t - best[2]) * 1000, baseLatency: best[4], outputLatency: best[5] } : null;
+}
+
+function analyseChirp(chirp) {
+  const a = active, sr = a.ctx.sampleRate;
+  const claim = claimPerfMs(chirp.contextTime);
+  Object.assign(chirp, { claimPerfMs: r3(claim?.perfMs), baseLatencyMs: r3(claim?.baseLatency * 1000),
+    outputLatencyMs: r3(claim?.outputLatency * 1000), detections: [] });
+  const from = chirp.frame - Math.round(SEARCH_BEFORE_SECONDS * sr);
+  const length = Math.round((SEARCH_BEFORE_SECONDS + SEARCH_SECONDS) * sr) + a.template.length;
+  for (const slot of [0, 1]) {
+    const label = slot === 0 ? chirp.primary : chirp.reference;
+    if (!label) continue;
+    const x = segment(slot, from, length);
+    if (!x) { chirp.detections.push({ slot: slot ? 'reference' : 'primary', label, missing: true }); continue; }
+    const hit = locate(x, a.template);
+    const frame = from + hit.index;
+    const stampUs = stampOf(slot, frame);
+    const stampPerfMs = stampUs === null ? null : (a.clock.originUs + stampUs) / 1000;
+    chirp.detections.push({ slot: slot ? 'reference' : 'primary', label, frame,
+      loopbackMs: r3(((frame - chirp.frame) / sr) * 1000), stampPerfMs: r3(stampPerfMs),
+      stampMinusClaimMs: r3(claim && stampPerfMs !== null ? stampPerfMs - claim.perfMs : null),
+      ncc: r3(hit.ncc), snrDb: r3(hit.snrDb), matched: hit.ncc >= MATCH_MIN_NCC && hit.snrDb >= MATCH_MIN_SNR_DB });
+  }
+  const [p, r] = chirp.detections;
+  if (p?.matched && r?.matched) chirp.primaryMinusReferenceMs = r3(p.loopbackMs - r.loopbackMs);
+  if (a.mstp?.anchor && claim) chirp.mstp = analyseMstp(a.mstp, claim.perfMs);
+  renderLive(chirp);
+}
+
+function analyseMstp(m, claimMs) {
+  const first = m.chunks[0];
+  if (!first) return null;
+  const sr = first.sampleRate;
+  const toPerfMs = (tsUs) => (m.anchor.perfUs + (tsUs - m.anchor.tsUs)) / 1000;
+  const chunks = m.chunks.filter((c) => c.sampleRate === sr && toPerfMs(c.tsUs + (c.data.length / sr) * 1e6) >= claimMs - SEARCH_BEFORE_SECONDS * 1000
+    && toPerfMs(c.tsUs) <= claimMs + SEARCH_SECONDS * 1000 + CHIRP_SECONDS * 1000);
+  if (!chunks.length) return { label: m.label, missing: true };
+  const x = new Float32Array(chunks.reduce((n, c) => n + c.data.length, 0));
+  let offset = 0;
+  for (const c of chunks) { x.set(c.data, offset); offset += c.data.length; }
+  const hit = locate(x, makeChirp(sr));
+  if (!hit) return { label: m.label, missing: true };
+  // The buffer that holds the match, so jitter between buffers does not accumulate.
+  let index = hit.index, holder = chunks[0];
+  for (const c of chunks) { holder = c; if (index < c.data.length) break; index -= c.data.length; }
+  const tsUs = holder.tsUs + (index / sr) * 1e6;
+  const anchored = toPerfMs(tsUs);
+  return { label: m.label, sampleRate: sr, timestampUs: r3(tsUs), anchoredPerfMs: r3(anchored),
+    anchoredMinusClaimMs: r3(anchored - claimMs), ncc: r3(hit.ncc), snrDb: r3(hit.snrDb),
+    matched: hit.ncc >= MATCH_MIN_NCC && hit.snrDb >= MATCH_MIN_SNR_DB };
+}
+
+// Clap mode: find sharp onsets on the primary mic, then line the reference up against them.
+function analyseClaps() {
+  const a = active, sr = a.ctx.sampleRate, hop = Math.round(0.005 * sr);
+  const latest = a.chunks[0].at(-1);
+  if (!latest) return;
+  const end = latest.frame + latest.data.length - Math.round(0.6 * sr);
+  a.clapScan ??= a.chunks[0][0]?.frame ?? 0;
+  while (a.clapScan + hop <= end) {
+    const x = segment(0, a.clapScan, hop);
+    a.clapScan += hop;
+    if (!x) continue;
+    let e = 0;
+    for (const v of x) e += v * v;
+    const rms = Math.sqrt(e / hop);
+    a.clapFloor.push(rms);
+    if (a.clapFloor.length > 400) a.clapFloor.shift();
+    const floor = median(a.clapFloor) || 1e-6;
+    if (rms < floor * CLAP_THRESHOLD_RATIO || rms < 0.01 || a.clapScan - a.lastClap < 0.4 * sr) continue;
+    a.lastClap = a.clapScan;
+    const onset = a.clapScan - hop;
+    const clap = { n: a.run.claps.length + 1, frame: onset, primary: a.mics[0]?.label ?? null,
+      reference: a.mics[1]?.label ?? null, rmsOverFloor: r3(rms / floor) };
+    const stampUs = stampOf(0, onset);
+    clap.stampPerfMs = stampUs === null ? null : r3((a.clock.originUs + stampUs) / 1000);
+    const template = segment(0, onset - Math.round(0.01 * sr), Math.round(0.1 * sr));
+    const ref = segment(1, onset - Math.round(0.4 * sr), Math.round(0.9 * sr));
+    if (template && ref) {
+      const hit = locate(ref, template);
+      const refFrame = onset - Math.round(0.4 * sr) + hit.index + Math.round(0.01 * sr);
+      Object.assign(clap, { referenceFrame: refFrame, primaryMinusReferenceMs: r3(((onset - refFrame) / sr) * 1000),
+        ncc: r3(hit.ncc), snrDb: r3(hit.snrDb), matched: hit.ncc >= MATCH_MIN_NCC });
+    }
+    a.run.claps.push(clap);
+    renderLiveClap(clap);
+  }
+}
+
+async function startRun() {
+  const preset = currentPreset();
+  const rate = Number($('rate').value) || undefined;
+  // Created and resumed inside the click, before any await: Safari only starts audio from a user gesture.
+  const ctx = new AudioContext(rate ? { sampleRate: rate, latencyHint: 'interactive' } : { latencyHint: 'interactive' });
+  const resumed = ctx.resume();
+  const clock = createBroadcastClock();
+  const run = {
+    id: `${preset.id}-${session.runs.length + 1}`, preset: preset.id, title: preset.title, mode: preset.mode,
+    startedAt: new Date().toISOString(), clockOriginPerfMs: r3(clock.originUs / 1000),
+    context: { sampleRate: ctx.sampleRate, requestedSampleRate: rate ?? null, latencyHint: 'interactive' },
+    notes: $('notes').value, level: Number($('level').value), periodSeconds: Number($('period').value), inputs: [], mstp: [], chirps: [],
+    claps: [], calibrations: [], samples: [], events: [], errors: [],
+    samplesColumns: ['perfMs', 'currentTime', 'contextTime', 'performanceTime', 'baseLatency', 'outputLatency'],
+    match: { minNcc: MATCH_MIN_NCC, minSnrDb: MATCH_MIN_SNR_DB },
+  };
+  active = { ctx, clock, run, timeline: clock.sourceTimeline(), mics: [null, null], chunks: [[], []], mstp: null,
+    timers: [], template: makeChirp(ctx.sampleRate), clapFloor: [], lastClap: -Infinity, declared: $('declared').value };
+  const a = active;
+  setRunning(true);
+  try {
+    await resumed;
+    if ($('sink').value && ctx.setSinkId) await ctx.setSinkId($('sink').value);
+    await ctx.audioWorklet.addModule('capture-worklet.js');
+    a.node = new AudioWorkletNode(ctx, 'capture', { numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [1] });
+    const silent = ctx.createGain();
+    silent.gain.value = 0;
+    a.node.connect(silent).connect(ctx.destination);
+    a.bus = ctx.createGain();
+    const buffer = ctx.createBuffer(1, a.template.length, ctx.sampleRate);
+    buffer.copyToChannel(makeChirp(ctx.sampleRate, run.level), 0);
+    a.buffer = buffer;
+    ctx.addEventListener('statechange', () => event('context-state', { state: ctx.state }));
+    ctx.addEventListener?.('sinkchange', () => event('sinkchange', { sinkId: typeof ctx.sinkId === 'string' ? ctx.sinkId : 'object' }));
+    a.node.port.onmessage = ({ data: { slot, frame, data } }) => {
+      // The recipe: stamp each chunk with the context time of its first frame, through the calibrated timeline.
+      const stampUs = a.timeline.timestampUs((frame / ctx.sampleRate) * 1e6);
+      const chunks = a.chunks[slot];
+      chunks.push({ frame, data, stampUs });
+      while (chunks.length && chunks[0].frame < frame - KEEP_SECONDS * ctx.sampleRate) chunks.shift();
+    };
+    if (preset.mode === 'self-test') {
+      const delay = ctx.createDelay(1);
+      delay.delayTime.value = SELF_TEST_DELAY_SECONDS;
+      a.bus.connect(delay);
+      // A near-silent source keeps the delay line active, so the worklet sees samples between clicks too. Firefox
+      // treats a zero offset as silence and lets the line go idle a second after each click.
+      const keepAlive = ctx.createConstantSource();
+      keepAlive.offset.value = 1e-6;
+      keepAlive.connect(delay);
+      keepAlive.start();
+      delay.connect(a.node, 0, 0);
+      const loop = ctx.createMediaStreamDestination();
+      delay.connect(loop);
+      a.mics[0] = { label: 'self-test loop', source: delay, stream: loop.stream };
+      run.inputs.push({ slot: 'primary', label: 'self-test loop', perfMs: r3(performance.now()) });
+      if ($('mstp').checked) startMstp(loop.stream.getAudioTracks()[0]);
+    } else {
+      a.bus.connect(ctx.destination);
+      await attachMic(0, $('primary').value);
+      if ($('reference').value) {
+        try { await attachMic(1, $('reference').value); }
+        catch (e) { run.errors.push(`reference mic: ${e.name}: ${e.message}`); event('reference-failed', { error: String(e) }); }
+      }
+      if (!a.mics[0]) throw new Error('Pick a microphone under test');
+    }
+    run.context.baseLatency = r3(ctx.baseLatency ?? null);
+    run.context.outputLatency = r3(ctx.outputLatency ?? null);
+    run.context.sinkId = typeof ctx.sinkId === 'string' ? ctx.sinkId : null;
+    event('started', { declaredOutput: a.declared });
+
+    const sample = () => {
+      const ts = outputTimestamp(ctx);
+      run.samples.push([r3(performance.now()), r3(ctx.currentTime), ts.contextTime, ts.performanceTime, ts.baseLatency, ts.outputLatency]);
+    };
+    const calibrate = () => {
+      const ts = outputTimestamp(ctx);
+      if (!ts.performanceTime) return; // Firefox reports zeros until output starts
+      const renderTime = ts.contextTime + (ts.baseLatency ?? 0) + (ts.outputLatency ?? 0);
+      const reanchored = a.timeline.calibrate(renderTime * 1e6, ts.performanceTime * 1000);
+      run.calibrations.push({ perfMs: r3(performance.now()), contextTime: ts.contextTime, performanceTime: ts.performanceTime,
+        baseLatencyMs: r3(ts.baseLatency * 1000), outputLatencyMs: r3(ts.outputLatency === null ? null : ts.outputLatency * 1000),
+        reanchored });
+    };
+    const schedule = () => {
+      if (preset.mode === 'clap') return;
+      const frame = Math.ceil((ctx.currentTime + LEAD_SECONDS) * ctx.sampleRate);
+      const source = ctx.createBufferSource();
+      source.buffer = a.buffer;
+      source.connect(a.bus);
+      source.start(frame / ctx.sampleRate);
+      run.chirps.push({ n: run.chirps.length + 1, frame, contextTime: frame / ctx.sampleRate,
+        scheduledPerfMs: r3(performance.now()), declaredOutput: a.declared, sinkId: run.context.sinkId,
+        primary: a.mics[0]?.label ?? null, reference: a.mics[1]?.label ?? null, pending: true });
+    };
+    const analyse = () => {
+      if (preset.mode === 'clap') return analyseClaps();
+      for (const chirp of run.chirps) {
+        if (!chirp.pending || ctx.currentTime < chirp.contextTime + SEARCH_SECONDS + CHIRP_SECONDS) continue;
+        // Wait for the worklet's batches to cover the search window, up to a few seconds.
+        const needed = chirp.frame + Math.round((SEARCH_SECONDS + CHIRP_SECONDS) * ctx.sampleRate);
+        const arrived = (slot) => { const last = a.chunks[slot].at(-1); return last && last.frame + last.data.length >= needed; };
+        const waiting = [chirp.primary && !arrived(0), chirp.reference && !arrived(1)].some(Boolean);
+        if (waiting && ctx.currentTime < chirp.contextTime + SEARCH_SECONDS + 3) continue;
+        delete chirp.pending;
+        analyseChirp(chirp);
+      }
+      $('live-context').textContent = `Context ${ctx.sampleRate} Hz, ${ctx.state}. baseLatency ${fmt(ctx.baseLatency * 1000)} ms, ` +
+        `outputLatency ${ctx.outputLatency === undefined ? 'not supported' : `${fmt(ctx.outputLatency * 1000)} ms`}. ` +
+        `Clicks matched: ${run.chirps.filter((c) => c.detections?.[0]?.matched).length}.`;
+    };
+    sample(); calibrate();
+    a.timers.push(setInterval(sample, 200), setInterval(calibrate, 1000), setInterval(analyse, 250),
+      setInterval(schedule, run.periodSeconds * 1000));
+    $('status').textContent = 'Running';
+  } catch (e) {
+    run.errors.push(`${e.name}: ${e.message}`);
+    $('status').textContent = `Failed: ${e.message}`;
+    await stopRun();
+  }
+}
+
+async function stopRun() {
+  const a = active;
+  if (!a) return;
+  a.timers.forEach(clearInterval);
+  // Clicks still waiting for their search window are analysed with what has arrived.
+  // A click whose search window had not ended is kept, marked, and left out of the summary.
+  for (const chirp of a.run.chirps) if (chirp.pending) { delete chirp.pending; chirp.incomplete = true; }
+  event('stopped');
+  stopMstp();
+  for (const m of a.mics) m?.stream.getTracks?.().forEach((t) => t.stop());
+  active = null;
+  await a.ctx.close().catch(() => {});
+  a.run.stoppedAt = new Date().toISOString();
+  session.runs.push(a.run);
+  saveSession();
+  setRunning(false);
+  if (!$('status').textContent.startsWith('Failed')) $('status').textContent = 'Stopped; saved';
+  renderSummary();
+}
+
+// --- UI ---
+const fmt = (x) => (x === null || x === undefined || !Number.isFinite(x) ? '—' : x.toFixed(1));
+
+function setRunning(running) {
+  $('start').disabled = running;
+  $('stop').disabled = !running;
+  $('mark-output').disabled = !running;
+  $('preset').disabled = running;
+  $('rate').disabled = running;
+  if (running) $('live-rows').replaceChildren();
+}
+
+function cells(row, values) {
+  const tr = document.createElement('tr');
+  for (const v of values) {
+    const td = document.createElement('td');
+    if (v && typeof v === 'object') { td.textContent = v.text; td.className = v.className ?? ''; }
+    else td.textContent = v ?? '—';
+    tr.append(td);
+  }
+  row.prepend(tr);
+}
+
+function renderLive(chirp) {
+  for (const d of chirp.detections) {
+    cells($('live-rows'), [chirp.n, chirp.declaredOutput, `${d.slot}: ${d.label}`,
+      d.missing ? 'no audio' : fmt(d.loopbackMs), fmt(d.stampMinusClaimMs), fmt(chirp.outputLatencyMs),
+      d.slot === 'primary' ? fmt(chirp.mstp?.anchoredMinusClaimMs) : '',
+      d.missing ? { text: 'missing', className: 'bad' } : d.matched ? { text: `yes (${d.ncc})`, className: 'ok' }
+        : { text: `no (${d.ncc}, ${fmt(d.snrDb)} dB)`, className: 'warn' }]);
+  }
+}
+function renderLiveClap(clap) {
+  cells($('live-rows'), [clap.n, '—', `clap: ${clap.primary} vs ${clap.reference ?? 'no reference'}`,
+    `Δ ${fmt(clap.primaryMinusReferenceMs)}`, '', '', '',
+    clap.matched ? { text: `yes (${clap.ncc})`, className: 'ok' } : { text: 'no', className: 'warn' }]);
+}
+
+// One summary row per run, output and input: switch runs split at each switch.
+function summarise(run) {
+  const groups = new Map();
+  const add = (key, init) => groups.get(key) ?? groups.set(key, init()).get(key);
+  for (const chirp of run.chirps) {
+    for (const d of chirp.detections ?? []) {
+      if (!d.matched) continue;
+      const g = add(`${chirp.declaredOutput}|${d.slot}|${d.label}`, () => ({ output: chirp.declaredOutput,
+        input: `${d.slot === 'reference' ? 'ref: ' : ''}${d.label}`, loop: [], err: [], out: [], mstp: [], rel: [] }));
+      g.loop.push(d.loopbackMs); g.err.push(d.stampMinusClaimMs); g.out.push(chirp.outputLatencyMs);
+      if (d.slot === 'primary') {
+        if (chirp.mstp?.matched) g.mstp.push(chirp.mstp.anchoredMinusClaimMs);
+        if (chirp.primaryMinusReferenceMs !== undefined) g.rel.push(chirp.primaryMinusReferenceMs);
+      }
+    }
+  }
+  for (const clap of run.claps ?? []) {
+    if (!clap.matched) continue;
+    const g = add(`clap|${clap.primary}`, () => ({ output: 'none (clap)', input: clap.primary, loop: [], err: [], out: [], mstp: [], rel: [] }));
+    g.rel.push(clap.primaryMinusReferenceMs);
+  }
+  return [...groups.values()].map((g) => ({ run: run.id, output: g.output, input: g.input, n: Math.max(g.loop.length, g.rel.length),
+    loopbackMs: median(g.loop), stampMinusClaimMs: median(g.err), outputLatencyMs: median(g.out), mstpMinusClaimMs: median(g.mstp),
+    primaryMinusReferenceMs: median(g.rel) }));
+}
+
+function renderSummary() {
+  $('summary-rows').replaceChildren();
+  for (const run of [...session.runs].reverse()) {
+    for (const s of summarise(run).reverse()) {
+      cells($('summary-rows'), [s.run, s.output, s.input, s.n, fmt(s.loopbackMs), fmt(s.stampMinusClaimMs),
+        fmt(s.outputLatencyMs), fmt(s.mstpMinusClaimMs), fmt(s.primaryMinusReferenceMs)]);
+    }
+  }
+  const done = new Set(session.runs.map((r) => r.preset));
+  $('run-list').replaceChildren(...PRESETS.map((p) => {
+    const li = document.createElement('li');
+    li.textContent = p.title;
+    if (done.has(p.id)) li.className = 'done';
+    return li;
+  }));
+}
+
+function showPreset() {
+  const p = currentPreset();
+  $('preset-title').textContent = p.title;
+  $('preset-steps').replaceChildren(...p.steps.map((s) => Object.assign(document.createElement('li'), { textContent: s })));
+  $('declared').value = p.output;
+  fillDeviceSelects(true);
+  $('primary').disabled = p.mode === 'self-test';
+  $('reference').disabled = p.mode === 'self-test';
+}
+
+function exportJson() {
+  return JSON.stringify({ ...session, exportedAt: new Date().toISOString(), summary: session.runs.flatMap(summarise) });
+}
+
+// --- Wiring ---
+const f = features();
+$('features').textContent = `${browserName()}: getOutputTimestamp ${f.getOutputTimestamp ? 'yes' : 'no'}, outputLatency ` +
+  `${f.outputLatency ? 'yes' : 'no'}, setSinkId ${f.setSinkId ? 'yes' : 'no'}, MediaStreamTrackProcessor ` +
+  `${f.mediaStreamTrackProcessor ? 'yes' : 'no'}, AudioWorklet ${f.audioWorklet ? 'yes' : 'no'}, cross-origin isolated ` +
+  `${self.crossOriginIsolated ? 'yes' : 'no (start it with serve.py for the finest timer resolution)'}.`;
+$('mstp').checked = f.mediaStreamTrackProcessor;
+$('mstp').disabled = !f.mediaStreamTrackProcessor;
+$('preset').append(...PRESETS.map((p) => new Option(p.title, p.id)));
+$('preset').addEventListener('change', showPreset);
+$('unlock').addEventListener('click', async () => {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((t) => t.stop());
+    await refreshDevices();
+    showPreset();
+    $('unlock-status').textContent = `Allowed. ${devices.filter((d) => d.kind === 'audioinput').length} microphones found.`;
+  } catch (e) {
+    $('unlock-status').textContent = `Not allowed: ${e.message}`;
+  }
+});
+navigator.mediaDevices?.addEventListener('devicechange', async () => {
+  await refreshDevices();
+  event('devicechange', { devices: session.devices.map((d) => `${d.kind}: ${d.label}`) });
+});
+$('start').addEventListener('click', startRun);
+$('stop').addEventListener('click', stopRun);
+$('mark-output').addEventListener('click', () => {
+  active.declared = $('declared').value;
+  event('output-switch-marked', { declaredOutput: active.declared });
+});
+$('declared').addEventListener('change', () => { if (active) active.declared = $('declared').value; });
+$('primary').addEventListener('change', async () => {
+  if (!active || currentPreset().mode === 'self-test') return;
+  event('mic-switch-requested', { to: $('primary').selectedOptions[0]?.text });
+  try { await attachMic(0, $('primary').value); } catch (e) { active?.run.errors.push(`mic switch: ${e.name}: ${e.message}`); }
+});
+$('sink').addEventListener('change', async () => {
+  const text = $('sink').selectedOptions[0]?.text;
+  if (!active?.ctx.setSinkId) return;
+  try {
+    await active.ctx.setSinkId($('sink').value);
+    active.run.context.sinkId = $('sink').value;
+    event('setSinkId', { label: text });
+  } catch (e) { active.run.errors.push(`setSinkId: ${e.name}: ${e.message}`); }
+});
+$('download').addEventListener('click', () => {
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const a = Object.assign(document.createElement('a'), {
+    href: URL.createObjectURL(new Blob([exportJson()], { type: 'application/json' })),
+    download: `device-latency-${browserName()}-${stamp}.json` });
+  document.body.append(a); a.click(); a.remove();
+  $('export-status').textContent = `Saved ${a.download} to your downloads.`;
+});
+$('copy').addEventListener('click', async () => {
+  try { await navigator.clipboard.writeText(exportJson()); $('export-status').textContent = 'Copied.'; }
+  catch (e) { $('export-status').textContent = `Copy failed (${e.message}); use Download.`; }
+});
+$('clear').addEventListener('click', () => {
+  if (!confirm('Delete every run recorded in this browser?')) return;
+  session = newSession(); saveSession(); renderSummary();
+});
+window.deviceLatency = { get session() { return session; }, get active() { return active; }, exportJson };
+showPreset();
+renderSummary();
+</script>
+</body>
+</html>
