@@ -29,7 +29,7 @@ close it (msf-01 §11.3). Do not send it after a crash or a lost connection.
 
 `parse_msf_catalog` reads an independent catalog object's payload back into an `MsfCatalog` of
 `MsfCatalogTrack` descriptions: namespace tuple, name, packaging, live status, role, codec,
-dimensions, rates, bitrate, and init data resolved from `initRef` to bytes. It raises `ValueError`
+dimensions, rates, bitrate, render group, and init data resolved from `initRef` to bytes. It raises `ValueError`
 on unsupported versions and delta updates, ignores unknown fields, and returns non-`loc` packagings
 (such as moq-rs `cmaf`) as declared.
 

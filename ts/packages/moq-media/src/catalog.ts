@@ -108,6 +108,13 @@ function registerInitData(entries: MsfInitDataEntry[], name: string, initData: U
 }
 
 /**
+ * The render group (msf-01 §5.2.11) every video and audio entry joins: they are stamped on one broadcast timeline
+ * and meant to play together. The builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be
+ * identical across a render group.
+ */
+const MEDIA_RENDER_GROUP = 1;
+
+/**
  * Build the publisher's independent MSF catalog JSON for a live broadcast.
  *
  * The catalog leaves `isComplete` out: msf-01 §5.1.3 forbids it while false, and once present it can never be
@@ -145,6 +152,7 @@ export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
         ...registerInitData(initDataList, video.name, video.initData),
         name: video.name,
         role: 'video',
+        renderGroup: MEDIA_RENDER_GROUP,
         codec,
         width: video.width,
         height: video.height,
@@ -161,6 +169,7 @@ export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
         ...registerInitData(initDataList, audio.name, audio.initData),
         name: audio.name,
         role: 'audio',
+        renderGroup: MEDIA_RENDER_GROUP,
         codec: audio.codec,
         samplerate: audio.codec === 'opus' ? 48000 : audio.samplerate,
         channelConfig: audio.channelConfig,

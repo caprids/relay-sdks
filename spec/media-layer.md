@@ -254,10 +254,18 @@ them from one broadcast clock:
 - Audio and video share that origin. A track never starts its own count at zero: audio stamped from
   a sample counter is anchored at the broadcast time of its first sample, and video stamped from
   capture timestamps is shifted by the same origin as everything else.
-- The catalog states nothing extra. Every LOC media track in one catalog is on that catalog's
-  timeline. There is no `timeline` field, because msf-01 defines none and a player ignores fields
-  it does not know. msf-01's `renderGroup` (§5.2.11) is the standard way to say tracks are meant to
-  play together; the builder can emit it if a publisher ever lists tracks that are not.
+- The catalog puts the video and audio entries in one render group: `renderGroup: 1` (msf-01
+  §5.2.11, "tracks with the same group number SHOULD be rendered simultaneously"). That is
+  msf-01's way to say tracks play together, and moq-rs catalogs already send it. There is no
+  `timeline` field, because msf-01 defines none and a player ignores fields it does not know. The
+  builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be identical within
+  a render group. The catalog reader returns `renderGroup` as declared. The Video.js MoQ player
+  parses it but does not act on it yet.
+- Without a declared Timescale, LOC defines the Timestamp as wall-clock microseconds since the
+  Unix epoch. With one, the zero point is the application's, and this convention fixes it at the
+  broadcast's origin. Nothing here maps that origin to wall-clock time yet. msf-01's Media Timeline
+  track (§7) is the standard way, and it is
+  [issue #291](https://github.com/muxinc/relay-sdks/issues/291).
 - A timeline belongs to one catalog namespace. A supervised publisher's next generation is a new
   broadcast with a new origin. A player resets its playout clock wherever it resets its decoders:
   at a Restart, at a Move, and on a new catalog.

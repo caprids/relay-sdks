@@ -881,6 +881,8 @@ size and a timestamp only, so no other object property can survive it.
   track's. With Timescale 1,000,000 a supplied Timestamp passes through unchanged.
 - A track without a declared Timescale gets relay-clock timestamps on every object, replacing any
   Timestamp the publisher supplied. So does an object without a Timestamp on a declared track.
+  This departs from LOC, which defines a Timestamp without a Timescale as wall-clock microseconds
+  since the Unix epoch. Such a stamp from a publisher does not survive this relay.
 - `SUBSCRIBE_OK` carries the relay's own track properties for every track: Timescale (`0x08`) =
   1,000,000, Default Publisher Priority (`0x0E`) = 128, and Default Publisher Group Order (`0x22`,
   decimal 34) = 2 (descending). A publisher's own `0x0E` passes through, its `0x22` is replaced
@@ -968,8 +970,10 @@ to both languages.
 - `avc1` and `avc3` video entries are withheld without non-empty init data. With avcC, the codec
   suffix comes from the record's profile/constraints/level; the `avc1`/`avc3` prefix is retained.
   Header inspection rejects truncated/wrong-version headers; it does not decode SPS semantics.
-- Opus always declares 48,000 Hz and defaults to channel configuration `"2"`. Data entries have
-  only name and optional role beyond the common fields, and reject the media roles `video`,
+- Opus always declares 48,000 Hz and defaults to channel configuration `"2"`. Video and audio
+  entries carry `renderGroup: 1` (msf-01 §5.2.11): one broadcast timeline, played together. No
+  target latency or buffer is set. Data entries have only name and optional role beyond the
+  common fields, and reject the media roles `video`,
   `signlanguage`, `audio`, `audiodescription`, `caption`, and `subtitle`. Track names must be
   non-empty and unique, including tracks temporarily withheld pending init data.
 - Namespace inputs are sequences of fields, never bare strings. Catalog namespace fields must be

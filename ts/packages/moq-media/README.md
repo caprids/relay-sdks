@@ -41,9 +41,10 @@ purpose, close the media tracks first (each close tells subscribers the track en
 (msf-01 §11.3). Do not send it after a crash or a lost connection.
 
 `parseMsfCatalog` reads an independent catalog object's payload back into track descriptions:
-namespace tuple, name, packaging, live status, role, codec, dimensions, rates, bitrate, and init
-data resolved from `initRef` to bytes. It rejects unsupported versions and delta updates, ignores
-unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as declared.
+namespace tuple, name, packaging, live status, role, codec, dimensions, rates, bitrate, render
+group, and init data resolved from `initRef` to bytes. It rejects unsupported versions and delta
+updates, ignores unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as
+declared.
 
 Every media track in one catalog shares one timeline: LOC timestamps in microseconds from one origin,
 with the timescale declared on each track. `createBroadcastClock()` fixes that origin on the

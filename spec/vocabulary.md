@@ -465,7 +465,7 @@ Python also retains the example's `TRACK_TIMESCALE_PROPERTIES` as a tuple; new c
 `loc_track_properties()` for fresh properties.
 
 Track fields use camelCase in TypeScript and snake_case in Python (`initData` / `init_data`,
-`channelConfig` / `channel_config`, `isLive` / `is_live`). Catalog generation time is `generatedAt` /
+`channelConfig` / `channel_config`, `isLive` / `is_live`, the read-only `renderGroup` / `render_group`). Catalog generation time is `generatedAt` /
 `generated_at_ms`; completeness is `isComplete` / `is_complete`.
 
 The catalog reader mirrors the builder: `parse` because it reads a document the SDK did not
@@ -513,7 +513,8 @@ uses classes, like `CatalogService` and `FrameWriter`.
 "Playout", not "playback": the clock decides when to present, and does not play anything. Python's
 `now_us()` and `position_us()` carry the unit because there is no type to say it; TypeScript's
 `now()` and `position()` follow `performance.now()`. The issue's `timeline: "shared"` catalog field
-was not added; the convention is documented instead (msf-01 defines no such field).
+was not added. msf-01 defines no such field, so the builder uses msf-01's own `renderGroup`
+instead.
 
 ## Media publishing: `FrameWriter`, `CatalogService`
 

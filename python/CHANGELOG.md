@@ -38,6 +38,8 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   (`from_source_us`, a calibrated `source_timeline` for a clock with its own origin and rate, and
   `sample_timeline` for sample counters). `PlayoutClock` takes audio reports and answers
   `due(timestamp_us)` with a `PlayoutDecision` to wait, show, or drop, falling back to wall-clock pacing without audio.
+  `build_msf_catalog` puts video and audio in one render group (`renderGroup: 1`, msf-01 §5.2.11), and
+  `parse_msf_catalog` returns `render_group`.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
   subscriber's SETUP now sends the MoQ Solicit option, so the relay advertises namespaces only on that request.

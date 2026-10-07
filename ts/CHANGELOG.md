@@ -57,4 +57,5 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   (`sourceTimeline` with `calibrate` for an `AudioContext` clock or `MediaStreamTrackProcessor` timestamps, so the
   publisher path works in Chromium, Firefox and Safari; `sampleTimeline` for sample counters).
   `createPlayoutClock` takes audio reports and answers `due(timestampUs)` with wait, show, or drop, falling back to
-  wall-clock pacing without audio. Both are DOM-free.
+  wall-clock pacing without audio. Both are DOM-free. `buildMsfCatalog` puts video and audio in one render group
+  (`renderGroup: 1`, msf-01 §5.2.11), and `parseMsfCatalog` returns `renderGroup`.
