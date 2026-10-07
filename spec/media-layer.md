@@ -11,7 +11,9 @@ catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_c
 ([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
 `--verify` logs its track list; the object-to-frame reader remains a proposal. The
 [shared timeline and playout clock](#shared-timeline-and-playout-clock) ship in both format
-packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)). Public names for the
+packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), and the WebCodecs example
+publishes audio on that timeline, measured live in browsers
+([issue #288](https://github.com/muxinc/relay-sdks/issues/288)). Public names for the
 implemented stages are recorded in [vocabulary.md](vocabulary.md).
 
 This design was written 2026-09-18. Its before/after sketches describe the eventual API; they are
@@ -314,25 +316,41 @@ default, because Firefox has none and Safari's handles video only, in workers (M
   every browser has.
 - **Audio.** Route the microphone through an `AudioContext` (`MediaStreamAudioSourceNode` into an
   `AudioWorkletNode`), and stamp each chunk with the context time of its first frame, in
-  microseconds, through a source timeline. About once a second, calibrate it from
-  `AudioContext.getOutputTimestamp()` (Chrome 57, Firefox 70, Safari 14.1).
-- **Calibrating for capture.** `getOutputTimestamp()` pairs `performanceTime` with the context
-  time reaching the *speaker* (`contextTime`). The worklet, though, sees fresh microphone input at
-  the context's *render* time, which runs ahead of the speaker by the output delay. So add that
-  delay back:
-  `calibrate((contextTime + baseLatency + outputLatency) × 1e6, performanceTime × 1000)`, reading
-  both latencies fresh each time (`baseLatency`: Chrome 58, Firefox 70, Safari 14.1). Calibrated
-  on `contextTime` alone, audio would be stamped that much in the future, so players would play it
-late against video by the publisher's own output delay. A
-  change of output device would also move audio against video, even with the same microphone.
+  microseconds, through a source timeline calibrated from the context's render clock.
+- **Calibrating for capture.** The worklet sees fresh microphone input when the context renders.
+  So the calibration pair is a context time and the `performance.now()` time at which it was
+  rendered. The worklet posts each block with the context frame rendered so far (`currentFrame`
+  plus the quantum). The main thread times each block's arrival, and over a sliding one-second
+  window the block that arrived soonest after its render gives the pair:
+  `calibrate(renderedUs, arrivalUs)`. Messages only ever arrive late, so the earliest is the best
+  estimate. Calibrating on every block costs nothing, because a pair re-anchors only when it
+  disagrees by more than the tolerance. The example's `render-clock.ts` and `capture-microphone.ts`
+  implement this.
+- **Not `getOutputTimestamp()`.** The engines disagree on what it returns. Chromium (147) follows
+  the Web Audio spec: `contextTime` is reaching the *speaker* at `performanceTime`, so render time
+  is `contextTime + baseLatency + outputLatency`. Firefox (148) returns
+  `currentTime − outputLatency` and `performance.now() − outputLatency`, which is the render pair
+  shifted back by the output delay, and it steps with each audio callback. The formula
+  `calibrate((contextTime + baseLatency + outputLatency) × 1e6, performanceTime × 1000)` agrees with
+  the render clock to within about 15 ms in Chromium (median 5 ms). In Firefox it stamps audio early
+  by the output delay: 40–50 ms, measured on a PulseAudio null sink.
+- **Contiguous blocks.** Start a new block wherever `currentFrame` is not the frame expected next.
+  On a new node's first `process()` call, Chromium (147) reports `currentFrame` 0 and only later the
+  real frame. A block stamped from that 0 starts tens of milliseconds before its samples.
 - **Why the AudioContext.** The context runs at one fixed sample rate whatever the microphone is,
   because the browser resamples. When the user switches devices, say from a laptop microphone at
   48 kHz to Bluetooth earbuds at 16 kHz, the count does not change rate. The context also keeps
   running through the gap while the device switches, emitting silence, so the count never stalls.
 - **Drift.** The context clock follows the output device, so it drifts against
   `performance.now()`, and it changes when the output device does. Regular calibration absorbs
-  both. A new `AudioContext` restarts its time at zero, and the next calibration is far enough
-  off to re-anchor.
+  both. A new `AudioContext` restarts its time at zero: give it its own render clock and source
+  timeline.
+- **Encoders.** Do not trust an audio encoder to carry input timestamps through. Chromium's Opus
+  encoder counts samples from its first input and ignores later gaps. Firefox's stamps each chunk
+  6.5 ms (its lookahead) before the input it came from. Feed the encoder one contiguous sample
+  count, and map each chunk back to context time through the block its timestamp falls in. Encode
+  every block, with or without demand, so the count never skips. A new context needs a new
+  encoder.
 - **The Chromium alternative.** Where `MediaStreamTrackProcessor` exists, its `VideoFrame` and
   `AudioData` timestamps count from the system's monotonic zero, not from `performance.now()`'s
   ([Chromium](https://chromium.googlesource.com/chromium/src/+/211cf780d86979929937ef73b6a27f13b9ea8e70%5E!/)).
@@ -366,14 +384,17 @@ injected time source as the broadcast clock, so a Python player or a test drives
 
 Audio is the master. The audio path calls `reportAudio(timestampUs, atUs?)` /
 `report_audio(timestamp_us, at_us=None)` with the timeline timestamp that is audible at local time
-`at` (default: now). That is the timestamp leaving the speaker. In a browser,
-`AudioContext.getOutputTimestamp()` gives this in every engine: the context time reaching the
-output (`contextTime`) and when (`performanceTime`). The player maps that context time to the
-media timestamp it scheduled there, then reports `reportAudio(mediaUs, performanceTime × 1000)`.
-Read it fresh for every report: the output delay changes with the device. Switching to Bluetooth
-earbuds can add 150 ms or more, and a value cached at startup leaves video that far ahead. Where
-an application reports at handover time instead, it subtracts the jitter-buffer depth, the
-current `outputLatency`, and any extra path, such as a WebRTC loopback for echo cancellation. A
+`at` (default: now). That is the timestamp leaving the speaker. In a browser, take the context
+time audible now from the render clock: `currentTime` sampled against `performance.now()`,
+min-filtered as for capture, minus `baseLatency + outputLatency`. The player maps that context
+time to the media timestamp it scheduled there, then reports `reportAudio(mediaUs, nowUs)`.
+`getOutputTimestamp()` gives the same answer in Chromium, but in Firefox (148) its pair is the
+render pair, and reporting from it plays audio late by the output delay (33–36 ms measured). Read
+the latencies fresh for every report: the output delay changes with the device. Switching to
+Bluetooth earbuds can add 150 ms or more, and a value cached at startup leaves video that far
+ahead. Where an application reports at handover time instead, it subtracts the jitter-buffer
+depth, the current `outputLatency`, and any extra path, such as a WebRTC loopback for echo
+cancellation. A
 step in the output delay moves the position once. Video then holds frames, or drops them, by that
 step and stays in sync after it. Between reports the clock extrapolates at real-time rate:
 `position = reported + (now − at)`. Reports re-anchor it, so the audio device's drift never builds
@@ -420,6 +441,58 @@ consistently, the audio path needs a deeper buffer, and the clock cannot add one
 The clock does not buffer, decode, or render frames, and it never changes how much audio is buffered.
 The target it is built for is the broadcast guidance of ITU-R BT.1359 and EBU R37: audio within
 about ±45 ms of video, and not audibly early.
+
+A player's decoders do not carry timestamps through either. After a gap in its input, Chromium's
+Opus decoder (147) keeps counting from before the gap, so reset the audio decoder wherever the next
+timestamp is not the one expected. Chromium does not trim Opus's 6.5 ms pre-skip, so its decoded
+audio plays that much late.
+
+#### Measured in browsers
+
+[Issue #288](https://github.com/muxinc/relay-sdks/issues/288). `mise run ts:test:av-sync` publishes
+the WebCodecs example's canvas and microphone and plays them back in the same page, through the
+production Relay in Chromium and through the in-memory relay hub in Firefox. Every 600 ms the canvas
+flashes white and a synthetic microphone beeps. The A/V offset is how much later the beep reached
+the player's output after it was emitted than the white frame was shown after it was captured.
+Frame quantization does not count, because the white frame's own capture time is the video
+reference. The figures are net of the beep's path to the capture worklet. That path stands in for
+a real microphone's input latency, which no browser reports (#290), and it was 0–55 ms here.
+"Settled" leaves out events emitted or played within 2 s of any switch. Results from 2026-10-07, in
+ms, positive when audio is late:
+
+| Phase | Chromium 147, Relay: settled mean [min, max] | Firefox 148, hub: settled mean [min, max] |
+| --- | --- | --- |
+| Baseline | 3.9 [−6.1, 22.3] | −2.4 [−13.6, 0.4] |
+| Second microphone (16 kHz) | 2.0 [−13.9, 10.0] | −0.4 [−1.6, 0.8] |
+| Replaced capture context | 2.5 [−6.7, 10.3] | −0.5 [−2.2, 2.4] |
+| Output delay +200 ms | 8.4 [−4.1, 28.9] | −0.2 [−6.9, 4.1] |
+| Audio resumed after a 3 s gap | 8.3 [−6.0, 27.1] | −4.3 [−6.2, −0.9] |
+
+Across all phases, Chromium's mean was 4.7 ms (p95 17.5, worst 28.9) and Firefox's was −1.5 ms
+(p95 5.6, worst −13.6). Transients stayed within the same bounds: the worst event in the 2 s after
+any switch was −14.1 ms in Chromium and −8.2 ms in Firefox. The output-delay step held video once
+for about 230 ms, as designed. During the audio gap the clock paced video by the wall clock, with no
+dropped frame and no pause between frames longer than 44 ms. With the defaults (`lateDropUs` 40 ms,
+`maxVideoDelayUs` 1 s, `audioTimeoutUs` 500 ms), no frame was dropped in any phase. The one
+outlier came at startup: the first flash, emitted before any audio had reached the player, was off
+by −246 ms while the clock was still pacing by the wall clock.
+
+The same runs show how far `getOutputTimestamp()`'s capture formula lands from the render clock.
+In Chromium it was +5 ms (median; p5 −1, p95 16). In Firefox it was −48 ms (p5 −50, p95 −42),
+which would stamp audio that much early. With players reporting from `getOutputTimestamp()`, Firefox
+played audio 33–36 ms late; Chromium's settled offsets stayed within ±17 ms.
+
+Firefox cannot run against the Relay: its WebTransport (148) offers no protocols and has no
+`protocol` attribute, and the SDK refuses a session that negotiates none
+([transport-adapter.md](transport-adapter.md), TA-7). Firefox also needs an audio server: without
+one, its `AudioContext` stays suspended. Its H.264 `VideoEncoder` (148, Linux) holds about 41 frames,
+1.4 s, even with `latencyMode: 'realtime'`, while VP8, VP9 and AV1 return each frame within
+milliseconds. So its video arrives that much after its audio. The playout clock keeps audio the
+master and would drop video that late, so the Firefox run gives the player a 1.6 s audio jitter
+buffer. Playwright's WebKit (Safari 26.4's engine, on Linux) runs the hub scenario with short phases
+(settled offsets 4–7 ms), but at full length it stops responding partway through. It cannot open a
+WebTransport session to the Relay, and its `getOutputTimestamp()` is seconds off. It is opt-in
+(`AV_SYNC_RUNS=webkit:hub`) and says nothing about Safari on macOS.
 
 ## Package placement
 

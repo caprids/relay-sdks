@@ -150,6 +150,13 @@ reports drive it while they arrive; otherwise it follows the local clock (wall p
 wherever the decoders reset.
 _Avoid_: playback clock, master clock, sync clock, jitter buffer (the audio path owns that)
 
+**Render clock**:
+When an `AudioContext` renders, on `performance.now()`'s clock: of the observations of a context time
+and when it was seen over the last second, the one seen soonest. Capture calibrates its source
+timeline from it, and a player subtracts the output delay from it to know what is audible. It is not
+`getOutputTimestamp()`, whose pair means the speaker in Chromium and the render shifted back in Firefox.
+_Avoid_: output timestamp, audio clock, context clock
+
 ### Subscribing internals
 
 **Subscription**:

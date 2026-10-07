@@ -66,6 +66,12 @@ tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts"
 run = "pnpm test:relay"
 
+[tasks."ts:test:av-sync"]
+description = "Opt-in live A/V sync test of the WebCodecs example: Chromium through the Relay, Firefox through an in-memory hub (RELAY_TOKEN)"
+depends = ["ts:install"]
+dir = "ts"
+run = "pnpm test:av-sync"
+
 [tasks."ts:test:conformance"]
 description = "Run the transport adapter conformance suite in headless Chromium against the Python accepting end"
 depends = ["ts:install", "python:install"]

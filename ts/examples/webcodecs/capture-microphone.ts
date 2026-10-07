@@ -1,0 +1,218 @@
+import type { BroadcastClock, SourceTimeline } from '@mux/moq-media';
+import { createRenderClock, type RenderClock } from './render-clock.js';
+
+const PROCESSOR = 'relay-sdk-microphone-capture';
+
+// Runs on the audio rendering thread. It cuts the (down-mixed, mono) input into fixed blocks and posts each with the
+// context frame of its first sample, plus the context frame rendered so far: the main thread times that arrival. With
+// no microphone connected the input has no channels, and the block is silence, so the count never stalls. A block
+// holds only contiguous frames: where currentFrame is not the frame expected next, the partial block is dropped and a
+// new one starts. Chromium (147) reports currentFrame 0 on a new node's first process() call, then the real frame.
+const WORKLET_SOURCE = `
+class MicrophoneCapture extends AudioWorkletProcessor {
+  constructor(options) {
+    super();
+    this.size = options.processorOptions.blockFrames;
+    this.block = new Float32Array(this.size);
+    this.filled = 0;
+    this.first = 0;
+    this.next = -1;
+  }
+  process(inputs) {
+    const channel = inputs[0] && inputs[0][0];
+    const frames = channel ? channel.length : 128;
+    if (currentFrame !== this.next) this.filled = 0;
+    this.next = currentFrame + frames;
+    for (let offset = 0; offset < frames; ) {
+      if (this.filled === 0) this.first = currentFrame + offset;
+      const count = Math.min(frames - offset, this.size - this.filled);
+      if (channel) this.block.set(channel.subarray(offset, offset + count), this.filled);
+      else this.block.fill(0, this.filled, this.filled + count);
+      offset += count;
+      this.filled += count;
+      if (this.filled === this.size) {
+        const samples = this.block;
+        this.port.postMessage({ frame: this.first, samples, rendered: currentFrame + frames }, [samples.buffer]);
+        this.block = new Float32Array(this.size);
+        this.filled = 0;
+      }
+    }
+    return true;
+  }
+}
+registerProcessor('${PROCESSOR}', MicrophoneCapture);
+`;
+
+// A processor name registers once per context: a second module defining it would throw.
+const loaded = new WeakMap<BaseAudioContext, Promise<void>>();
+function loadWorklet(context: BaseAudioContext): Promise<void> {
+  let loading = loaded.get(context);
+  if (!loading) {
+    const url = URL.createObjectURL(new Blob([WORKLET_SOURCE], { type: 'text/javascript' }));
+    loading = context.audioWorklet
+      .addModule(url)
+      .catch((error: unknown) => {
+        loaded.delete(context);
+        throw error;
+      })
+      .finally(() => URL.revokeObjectURL(url));
+    loaded.set(context, loading);
+  }
+  return loading;
+}
+
+/** One block of microphone samples, mono, timed on one `AudioContext`'s clock. */
+export interface MicrophoneBlock {
+  /** The samples. */
+  samples: Float32Array<ArrayBuffer>;
+  /** The context's sample rate. */
+  sampleRate: number;
+  /** The context time of the first sample, in whole microseconds: the encoder's input timestamp. */
+  contextUs: number;
+  /** Maps this context's time onto the broadcast timeline. Each context has its own, so it changes with the context. */
+  timeline: SourceTimeline;
+}
+
+/** A microphone routed through an `AudioContext` and an `AudioWorklet`, timed on a broadcast clock. */
+export interface MicrophoneCapture {
+  /** The broadcast clock the timelines map onto. Stamp every other track of the broadcast from it too. */
+  readonly clock: BroadcastClock;
+  /** The context capture runs on now. */
+  readonly context: AudioContext;
+  /**
+   * Capture another microphone in the same context, or none (silence). The context resamples whatever the device's
+   * rate, and its count runs on through the switch.
+   */
+  useStream(stream: MediaStream | undefined): void;
+  /**
+   * Move capture to another context, as when the application rebuilds its audio graph. The new context's time starts
+   * over, so it gets a timeline of its own. The old context stays the caller's to close.
+   */
+  useContext(context: AudioContext): Promise<void>;
+  /** Receives every block. `publishCanvas` sets it. */
+  onblock: ((block: MicrophoneBlock) => void) | undefined;
+  /** Stop capturing. The contexts stay the caller's to close. */
+  close(): void;
+}
+
+/** Options for {@link captureMicrophone}. */
+export interface CaptureMicrophoneOptions {
+  /** The context to capture in. Default: a new 48 kHz context, the rate Opus encodes at. */
+  context?: AudioContext;
+  /** Block length in milliseconds; each block is one encoder input. Default 20, one Opus frame. */
+  blockMs?: number;
+}
+
+interface Leg {
+  context: AudioContext;
+  node: AudioWorkletNode;
+  source: MediaStreamAudioSourceNode | undefined;
+  renders: RenderClock;
+  timeline: SourceTimeline;
+}
+
+/**
+ * Capture `stream` through an `AudioContext`: the recipe in spec/media-layer.md, "Browser capture", which works in
+ * every engine because it needs no `MediaStreamTrackProcessor`. Each block's samples are stamped with context time
+ * and mapped onto `clock`'s timeline through a source timeline, calibrated on every block from the render clock: when
+ * the worklet saw fresh input, on the broadcast clock's own source.
+ *
+ * The context must be running: create or resume it from a user gesture.
+ */
+export async function captureMicrophone(
+  clock: BroadcastClock,
+  stream: MediaStream | undefined,
+  options: CaptureMicrophoneOptions = {},
+): Promise<MicrophoneCapture> {
+  const blockMs = options.blockMs ?? 20;
+  // The broadcast clock's own source, so calibration pairs and timestamps share one time base.
+  const sourceNowUs = () => clock.now() + clock.originUs;
+  let current = stream;
+  let closed = false;
+  let leg: Leg | undefined;
+
+  const connect = (target: Leg) => {
+    target.source?.disconnect();
+    target.source = current ? target.context.createMediaStreamSource(current) : undefined;
+    target.source?.connect(target.node);
+  };
+  const open = async (context: AudioContext): Promise<Leg> => {
+    await loadWorklet(context);
+    const blockFrames = Math.round((context.sampleRate * blockMs) / 1000);
+    const node = new AudioWorkletNode(context, PROCESSOR, {
+      numberOfInputs: 1,
+      numberOfOutputs: 1,
+      outputChannelCount: [1],
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      channelInterpretation: 'speakers',
+      processorOptions: { blockFrames },
+    });
+    const opened: Leg = {
+      context,
+      node,
+      source: undefined,
+      renders: createRenderClock(),
+      timeline: clock.sourceTimeline(),
+    };
+    node.port.onmessage = ({
+      data,
+    }: MessageEvent<{ frame: number; samples: Float32Array<ArrayBuffer>; rendered: number }>) => {
+      const { sampleRate } = context;
+      opened.renders.observe((data.rendered * 1_000_000) / sampleRate, sourceNowUs());
+      const best = opened.renders.best();
+      // Re-anchors only when the best pair disagrees with the anchor by more than the tolerance.
+      if (best) opened.timeline.calibrate(best.contextUs, best.atUs);
+      capture.onblock?.({
+        samples: data.samples,
+        sampleRate,
+        contextUs: Math.round((data.frame * 1_000_000) / sampleRate),
+        timeline: opened.timeline,
+      });
+    };
+    // Outputs are silent; connecting one keeps every engine pulling the node.
+    node.connect(context.destination);
+    return opened;
+  };
+  const close = (target: Leg) => {
+    target.node.port.onmessage = null;
+    target.source?.disconnect();
+    target.node.disconnect();
+  };
+
+  const capture: MicrophoneCapture = {
+    clock,
+    get context() {
+      return (leg as Leg).context;
+    },
+    onblock: undefined,
+    useStream(next) {
+      if (closed) throw new Error('Microphone capture is closed');
+      current = next;
+      if (leg) connect(leg);
+    },
+    async useContext(context) {
+      if (closed) throw new Error('Microphone capture is closed');
+      const next = await open(context);
+      if (closed) {
+        close(next);
+        return;
+      }
+      try {
+        connect(next);
+      } catch (error) {
+        close(next);
+        throw error;
+      }
+      const previous = leg;
+      leg = next;
+      if (previous) close(previous);
+    },
+    close() {
+      closed = true;
+      if (leg) close(leg);
+    },
+  };
+  await capture.useContext(options.context ?? new AudioContext({ sampleRate: 48_000 }));
+  return capture;
+}

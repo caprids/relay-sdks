@@ -53,11 +53,12 @@ with the timescale declared on each track. `createBroadcastClock()` fixes that o
 The publisher path below works in Chromium, Firefox and Safari:
 
 - **Video.** Stamp frames drawn from the camera with `clock.now()`.
-- **Audio.** Route the microphone through an `AudioContext`. Stamp audio from the context clock
-  through `clock.sourceTimeline()`, and calibrate it about once a second from
-  `getOutputTimestamp()`. Add `baseLatency + outputLatency` to that `contextTime`. The output
-  timestamp describes the speaker, while the worklet sees microphone input at the render time,
-  which is that much ahead.
+- **Audio.** Route the microphone through an `AudioContext` and an `AudioWorklet`. Stamp audio
+  from the context clock through `clock.sourceTimeline()`, calibrated with the context's render
+  clock: a context time and when it was rendered, from the worklet block that reached the main
+  thread soonest after its render. Do not calibrate from `getOutputTimestamp()`: Firefox returns
+  the render pair shifted back by the output delay, which stamps audio that much early. The
+  WebCodecs example's `capture-microphone.ts` does this.
 - **Device changes.** The context resamples whatever device is connected and keeps running while
   devices change, so switching microphones does not shift the timeline.
 - **Chromium alternative.** Where `MediaStreamTrackProcessor` exists, its timestamps count from the
@@ -67,8 +68,8 @@ The publisher path below works in Chromium, Firefox and Safari:
   [#290](https://github.com/muxinc/relay-sdks/issues/290).
 
 On the player, `createPlayoutClock()` makes audio the master. Report what is audible with
-`reportAudio(mediaUs, atUs)`, read fresh from `getOutputTimestamp()` each time, because the output
-delay changes with the device. Video asks `due(timestampUs)` for a `wait`, `show`, or `drop`
+`reportAudio(mediaUs, atUs)`: the context time rendered now, less `baseLatency + outputLatency`
+read fresh each time, because the output delay changes with the device. Video asks `due(timestampUs)` for a `wait`, `show`, or `drop`
 decision. With no audio, the clock paces by wall clock. Neither clock needs the DOM; see
 [spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
 
@@ -76,16 +77,15 @@ decision. With no audio, the clock paces by wall clock. Neither clock needs the 
 const clock = createBroadcastClock();
 const video = new VideoFrame(canvas, { timestamp: clock.now() });
 
-// AudioWorklet chunks carry their context time; recalibrate about once a second.
+// AudioWorklet blocks carry their context time. `renderedUs` / `arrivedUs`: the best pair of the last second.
 const context = clock.sourceTimeline();
-const { contextTime, performanceTime } = audioContext.getOutputTimestamp();
-const renderTime = contextTime + audioContext.baseLatency + audioContext.outputLatency; // speaker → render time
-context.calibrate(renderTime * 1e6, performanceTime * 1000);
-const audioTimestampUs = context.timestampUs(chunkContextTime * 1e6);
+context.calibrate(renderedUs, arrivedUs);
+const audioTimestampUs = context.timestampUs(blockContextUs);
 
 const playout = createPlayoutClock();
-const out = audioContext.getOutputTimestamp(); // fresh on every report
-playout.reportAudio(mediaTimestampAt(out.contextTime), out.performanceTime * 1000);
+// The context time audible now: rendered now, less the output delay read fresh on every report.
+const latencyUs = (audioContext.baseLatency + audioContext.outputLatency) * 1e6;
+playout.reportAudio(mediaTimestampAt(nowRenderedUs - latencyUs), performance.now() * 1000);
 const decision = playout.due(frame.timestamp);
 if (decision.action === 'wait') setTimeout(retry, decision.waitUs / 1000);
 ```
