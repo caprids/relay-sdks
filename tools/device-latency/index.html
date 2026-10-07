@@ -182,6 +182,8 @@ const PRESETS = [
 ];
 
 const $ = (id) => document.getElementById(id);
+// Seconds to milliseconds, keeping a missing value (an engine without outputLatency) missing rather than 0.
+const ms = (seconds) => (seconds === null || seconds === undefined ? null : r3(seconds * 1000));
 const r3 = (x) => (x === null || x === undefined || !Number.isFinite(x) ? null : Math.round(x * 1000) / 1000);
 const median = (xs) => {
   const v = xs.filter(Number.isFinite).sort((a, b) => a - b);
@@ -384,6 +386,7 @@ function outputTimestamp(ctx) {
 
 async function attachMic(slot, deviceId) {
   const a = active;
+  if (!a) return;
   const old = a.mics[slot];
   if (old) {
     old.source.disconnect(); old.stream.getTracks().forEach((t) => t.stop());
@@ -484,8 +487,8 @@ function claimPerfMs(t) {
 function analyseChirp(chirp) {
   const a = active, sr = a.ctx.sampleRate;
   const claim = claimPerfMs(chirp.contextTime);
-  Object.assign(chirp, { claimPerfMs: r3(claim?.perfMs), baseLatencyMs: r3(claim?.baseLatency * 1000),
-    outputLatencyMs: r3(claim?.outputLatency * 1000), detections: [] });
+  Object.assign(chirp, { claimPerfMs: r3(claim?.perfMs), baseLatencyMs: ms(claim?.baseLatency),
+    outputLatencyMs: ms(claim?.outputLatency), detections: [] });
   const from = chirp.frame - Math.round(SEARCH_BEFORE_SECONDS * sr);
   const length = Math.round((SEARCH_BEFORE_SECONDS + SEARCH_SECONDS) * sr) + a.template.length;
   for (const slot of [0, 1]) {
@@ -587,11 +590,15 @@ async function startRun() {
   active = { ctx, clock, run, timeline: clock.sourceTimeline(), mics: [null, null], chunks: [[], []], mstp: null,
     timers: [], template: makeChirp(ctx.sampleRate), clapFloor: [], lastClap: -Infinity, declared: $('declared').value };
   const a = active;
+  // Stop can land during any await below; it closes the context, and this start must then go no further.
+  const stopped = () => active !== a;
   setRunning(true);
   try {
     await resumed;
-    if ($('sink').value && ctx.setSinkId) await ctx.setSinkId($('sink').value);
+    if (!stopped() && $('sink').value && ctx.setSinkId) await ctx.setSinkId($('sink').value);
+    if (stopped()) return;
     await ctx.audioWorklet.addModule('capture-worklet.js');
+    if (stopped()) return;
     a.node = new AudioWorkletNode(ctx, 'capture', { numberOfInputs: 2, numberOfOutputs: 1, outputChannelCount: [1] });
     const silent = ctx.createGain();
     silent.gain.value = 0;
@@ -628,10 +635,12 @@ async function startRun() {
     } else {
       a.bus.connect(ctx.destination);
       await attachMic(0, $('primary').value);
+      if (stopped()) return;
       if ($('reference').value) {
         try { await attachMic(1, $('reference').value); }
         catch (e) { run.errors.push(`reference mic: ${e.name}: ${e.message}`); event('reference-failed', { error: String(e) }); }
       }
+      if (stopped()) return;
       if (!a.mics[0]) throw new Error('Pick a microphone under test');
     }
     run.context.baseLatency = r3(ctx.baseLatency ?? null);
@@ -649,7 +658,7 @@ async function startRun() {
       const renderTime = ts.contextTime + (ts.baseLatency ?? 0) + (ts.outputLatency ?? 0);
       const reanchored = a.timeline.calibrate(renderTime * 1e6, ts.performanceTime * 1000);
       run.calibrations.push({ perfMs: r3(performance.now()), contextTime: ts.contextTime, performanceTime: ts.performanceTime,
-        baseLatencyMs: r3(ts.baseLatency * 1000), outputLatencyMs: r3(ts.outputLatency === null ? null : ts.outputLatency * 1000),
+        baseLatencyMs: ms(ts.baseLatency), outputLatencyMs: ms(ts.outputLatency),
         reanchored });
     };
     const schedule = () => {
@@ -685,6 +694,7 @@ async function startRun() {
     $('status').textContent = 'Running';
   } catch (e) {
     run.errors.push(`${e.name}: ${e.message}`);
+    if (stopped()) return;
     $('status').textContent = `Failed: ${e.message}`;
     await stopRun();
   }
