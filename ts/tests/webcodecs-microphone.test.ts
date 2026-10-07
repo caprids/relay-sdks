@@ -37,7 +37,11 @@ class FakeContext {
 type WorkletMessage = { frame: number; samples: Float32Array<ArrayBuffer>; rendered: number };
 const nodes: FakeWorkletNode[] = [];
 class FakeWorkletNode extends FakeNode {
-  port: { onmessage: ((event: { data: WorkletMessage }) => void) | null } = { onmessage: null };
+  port = {
+    onmessage: null as ((event: { data: WorkletMessage }) => void) | null,
+    postMessage: vi.fn(),
+    close: vi.fn(),
+  };
   readonly options: AudioWorkletNodeOptions;
   constructor(_context: FakeContext, _name: string, options: AudioWorkletNodeOptions) {
     super();
@@ -109,6 +113,9 @@ it('switches microphones in the same context and replaces the context with a fre
   await capture.useContext(asContext(second));
   expect(capture.context).toBe(second);
   expect((nodes[0] as FakeWorkletNode).port.onmessage).toBeNull();
+  // The processor returns true from process() until told to stop; a disconnected node alone keeps running.
+  expect((nodes[0] as FakeWorkletNode).port.postMessage).toHaveBeenCalledWith('stop');
+  expect((nodes[0] as FakeWorkletNode).port.close).toHaveBeenCalled();
   expect((nodes[0] as FakeWorkletNode).disconnect).toHaveBeenCalled();
   expect(nodes[1]?.options.processorOptions).toEqual({ blockFrames: 882 });
   expect(second.sources[0]?.stream).toEqual({ name: 'earbuds' });
@@ -128,7 +135,7 @@ it('posts contiguous blocks only, starting over where currentFrame jumps', async
   await captureMicrophone(clock(), undefined, { context: asContext(new FakeContext()) });
   let Processor: (new (options: unknown) => { process(inputs: Float32Array[][]): boolean }) | undefined;
   class Base {
-    port = { postMessage: vi.fn() };
+    port: { postMessage: ReturnType<typeof vi.fn>; onmessage?: () => void } = { postMessage: vi.fn() };
   }
   new Function('AudioWorkletProcessor', 'registerProcessor', workletSources[0] as string)(
     Base,
@@ -139,7 +146,7 @@ it('posts contiguous blocks only, starting over where currentFrame jumps', async
   if (!Processor) throw new Error('The worklet registered no processor');
   const processor = new Processor({ processorOptions: { blockFrames: 256 } }) as unknown as {
     process(inputs: Float32Array[][]): boolean;
-    port: { postMessage: ReturnType<typeof vi.fn> };
+    port: { postMessage: ReturnType<typeof vi.fn>; onmessage?: () => void };
   };
   const run = (frame: number, value?: number) => {
     vi.stubGlobal('currentFrame', frame);
@@ -163,4 +170,8 @@ it('posts contiguous blocks only, starting over where currentFrame jumps', async
   ]);
   expect(posted[0]?.samples.slice(127, 129)).toEqual(Float32Array.of(0.2, 0.3));
   expect(posted[1]?.samples.slice(127, 129)).toEqual(Float32Array.of(0, 0.4));
+  // Closing capture stops the processor, so the engine can drop it.
+  processor.port.onmessage?.();
+  expect(run(2304, 0.7)).toBe(false);
+  expect(processor.port.postMessage).toHaveBeenCalledTimes(3);
 });

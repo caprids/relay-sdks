@@ -104,7 +104,13 @@ try {
       page.on('pageerror', (error) => report({ runtime, pageerror: error.message }));
       await page.exposeFunction('reportPhase', (value) => report({ runtime, ...value }));
       await page.goto(`http://127.0.0.1:${server.address().port}/`);
-      const result = await page.evaluate(
+      // A page that stops responding, or an AudioContext that never starts, would otherwise hang the run forever.
+      const budgetMs = (6 * phaseSeconds + 60) * 1000 + jitterMsFor(name);
+      let watchdog;
+      const expired = new Promise((_, reject) => {
+        watchdog = setTimeout(() => reject(new Error(`No result within ${budgetMs / 1000} s`)), budgetMs);
+      });
+      const evaluation = page.evaluate(
         async ({ transport, endpoint, token, namespace, reportMethod, phaseSeconds, jitterMs }) => {
           const { runAvSyncScenario } = await import('/scripts/av-sync/scenario.js');
           let scenarioTransport = { kind: 'relay', endpoint, token };
@@ -133,10 +139,14 @@ try {
         },
         { transport, endpoint, token, namespace, reportMethod, phaseSeconds, jitterMs: jitterMsFor(name) },
       );
+      // The browser closes in `finally`, which ends an evaluation the watchdog gave up on.
+      evaluation.catch(() => {});
+      const result = await Promise.race([evaluation, expired]).finally(() => clearTimeout(watchdog));
       const verdicts = result.phases.map((phase) => {
         // Without audio, video must keep moving: the clock falls back to the wall clock, with no stall.
         if (!phase.audio) {
-          return { phase: phase.phase, ok: (phase.modes.wall ?? 0) > 0 && phase.longestGapMs <= MAX_STALL_MS };
+          const ok = (phase.modes.wall ?? 0) > 0 && phase.framesShown > 0 && phase.longestGapMs <= MAX_STALL_MS;
+          return { phase: phase.phase, ok };
         }
         // Net of the synthetic microphone's path to the capture input, which stands in for a real microphone's input
         // latency: no browser API reports it, so neither the recipe nor the player can correct for it (#290).

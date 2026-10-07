@@ -5,7 +5,8 @@ const PROCESSOR = 'relay-sdk-microphone-capture';
 
 // Runs on the audio rendering thread. It cuts the (down-mixed, mono) input into fixed blocks and posts each with the
 // context frame of its first sample, plus the context frame rendered so far: the main thread times that arrival. With
-// no microphone connected the input has no channels, and the block is silence, so the count never stalls. A block
+// no microphone connected the input has no channels, and the block is silence, so the count never stalls. Any message
+// from the main thread stops it: process() always returns true otherwise, which would keep it running. A block
 // holds only contiguous frames: where currentFrame is not the frame expected next, the partial block is dropped and a
 // new one starts. Chromium (147) reports currentFrame 0 on a new node's first process() call, then the real frame.
 const WORKLET_SOURCE = `
@@ -17,8 +18,14 @@ class MicrophoneCapture extends AudioWorkletProcessor {
     this.filled = 0;
     this.first = 0;
     this.next = -1;
+    this.stopped = false;
+    this.port.onmessage = () => {
+      this.stopped = true;
+    };
   }
   process(inputs) {
+    // Returning false lets the engine drop a processor whose capture has closed.
+    if (this.stopped) return false;
     const channel = inputs[0] && inputs[0][0];
     const frames = channel ? channel.length : 128;
     if (currentFrame !== this.next) this.filled = 0;
@@ -176,6 +183,8 @@ export async function captureMicrophone(
   };
   const close = (target: Leg) => {
     target.node.port.onmessage = null;
+    target.node.port.postMessage('stop');
+    target.node.port.close();
     target.source?.disconnect();
     target.node.disconnect();
   };

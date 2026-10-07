@@ -71,8 +71,11 @@ export interface Player {
   setOutputDelay(delayMs: number): void;
   /** Ignore incoming audio objects, as if the publisher went quiet; reports stop once the buffer drains. */
   setAudioPaused(paused: boolean): void;
-  /** Reset the longest-gap counter. */
-  resetGap(): void;
+  /**
+   * The longest gap between shown frames since the last call, counting a gap still open now, in ms; restarts the
+   * count. A stall that outlasts a phase is counted in the phase it began in, and again in the next.
+   */
+  takeLongestGapMs(): number;
   stop(): Promise<void>;
 }
 
@@ -345,8 +348,11 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     setAudioPaused(paused) {
       audioPaused = paused;
     },
-    resetGap() {
+    takeLongestGapMs() {
+      const openGapMs = lastShownUs === undefined ? 0 : Math.round((performance.now() * 1000 - lastShownUs) / 1000);
+      const longest = Math.max(stats.longestGapMs, openGapMs);
       stats.longestGapMs = 0;
+      return longest;
     },
     async stop() {
       stopped = true;

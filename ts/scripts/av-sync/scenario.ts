@@ -283,8 +283,8 @@ export async function runAvSyncScenario(options: ScenarioOptions): Promise<Scena
     const playing = player;
     // A snapshot closes the previous phase's counters; the gap and the modes then restart for the next one.
     const snapshot = (): PlayerStats => {
-      const stats = { ...playing.stats, modes: { ...playing.stats.modes } };
-      playing.resetGap();
+      const longestGapMs = playing.takeLongestGapMs();
+      const stats = { ...playing.stats, longestGapMs, modes: { ...playing.stats.modes } };
       playing.stats.modes = {};
       return stats;
     };
