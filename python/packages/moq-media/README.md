@@ -42,6 +42,22 @@ audible with `report_audio(timestamp_us)`, and `due(timestamp_us)` returns a `Pl
 wait, show, or drop a video frame. With no audio it paces by wall clock. See
 [spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
 
+The clock also records its origin as Unix-epoch microseconds, `clock.origin_epoch_us`, read once
+from `time.time_ns()`. That is what msf-01's Media Timeline track needs: one record per video group,
+mapping media time and the group's location to wall-clock time, for seeking, playlists, and lining
+up broadcasts. Announce it with `media_timeline=MediaTimelineTrackInfo()` in `build_msf_catalog`,
+and on each new video group open a timeline group holding every retained record. The track is not
+published for you yet; see
+[spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
+
+```python
+entries: list[MediaTimelineEntry] = []
+# On each keyframe that opens video group `group_id`:
+entries.append(media_timeline_entry(timestamp_us, group_id, origin_epoch_us=clock.origin_epoch_us))
+await timeline_track.write(build_media_timeline(entries))  # one object, one group
+read = parse_media_timeline(timeline_object.payload)
+```
+
 Shared vectors live in `spec/vectors/media.json` and `spec/vectors/clock.json`. See `UPSTREAM.json` for Video.js provenance.
 Publishing handles and the object-to-frame reader are later stages of `spec/media-layer.md`.
 

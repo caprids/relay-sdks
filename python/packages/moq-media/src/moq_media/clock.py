@@ -101,18 +101,34 @@ class BroadcastClock:
 
     ``now_us`` is the time source in microseconds, ``time.monotonic_ns() // 1000`` by default. ``origin_us`` is the
     broadcast's zero on that source in integer microseconds, at or before the first capture; it defaults to the
-    source's time now, rounded to whole microseconds.
+    source's time now, rounded to whole microseconds. ``origin_epoch_us`` is that origin as Unix-epoch microseconds;
+    it defaults to ``time.time_ns()`` at creation less the source time elapsed since the origin, read once.
     """
 
-    def __init__(self, *, now_us: Callable[[], int] | None = None, origin_us: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        now_us: Callable[[], int] | None = None,
+        origin_us: int | None = None,
+        origin_epoch_us: int | None = None,
+    ) -> None:
         self._source = now_us or _monotonic_us
-        origin = _round(_finite(self._source(), "now_us")) if origin_us is None else origin_us
+        created = _finite(self._source(), "now_us")
+        origin = _round(created) if origin_us is None else origin_us
         self._origin_us = _integer(origin, "origin_us", -_SAFE_INTEGER)
+        if origin_epoch_us is None:
+            origin_epoch_us = _round(time.time_ns() // 1000 - (created - self._origin_us))
+        self._origin_epoch_us = _integer(origin_epoch_us, "origin_epoch_us", 0)
 
     @property
     def origin_us(self) -> int:
         """The broadcast's zero, on the source clock."""
         return self._origin_us
+
+    @property
+    def origin_epoch_us(self) -> int:
+        """The broadcast's zero as microseconds since the Unix epoch: the wall-clock time media timeline entries use."""
+        return self._origin_epoch_us
 
     def now_us(self) -> int:
         """Return the microseconds since the broadcast started."""

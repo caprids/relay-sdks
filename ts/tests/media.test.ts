@@ -18,7 +18,16 @@ interface RawCatalog {
   video?: RawTrack & { codec: string };
   audio?: RawTrack;
   data?: media.DataTrackInfo[];
+  mediaTimeline?: media.MediaTimelineTrackInfo;
   generatedAt?: string;
+}
+type TimelineRecord = [number, [number, number], number];
+interface RawTimelineEntry {
+  name: string;
+  timestampUs: string;
+  group: string;
+  object?: string;
+  originEpochUs?: string;
 }
 interface Vectors {
   catalogs: { name: string; input: RawCatalog; json: string; parsed: unknown }[];
@@ -38,6 +47,12 @@ interface Vectors {
   urls: { name: string; origin: string; namespace: string[]; token?: string; trackName?: string; url: string }[];
   urlErrors: { origin: string; namespace: string[] }[];
   h264: { name: string; avcc: string; codec: string }[];
+  timelineEntries: (RawTimelineEntry & { entry: TimelineRecord })[];
+  timelineEntryErrors: RawTimelineEntry[];
+  timelines: { name: string; entries: TimelineRecord[]; json: string }[];
+  timelineErrors: { name: string; entries: TimelineRecord[] }[];
+  timelineReads: { name: string; json: string; entries: TimelineRecord[] }[];
+  timelineReadErrors: { name: string; json: string }[];
 }
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/media.json', import.meta.url), 'utf8')) as Vectors;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -64,9 +79,67 @@ function input(raw: RawCatalog): media.MsfCatalogInput {
     ...(raw.video ? { video: track(raw.video) as unknown as media.VideoTrackInfo } : {}),
     ...(raw.audio ? { audio: track(raw.audio) as media.AudioTrackInfo } : {}),
     ...(raw.data ? { data: raw.data } : {}),
+    ...(raw.mediaTimeline ? { mediaTimeline: raw.mediaTimeline } : {}),
     ...(raw.generatedAt !== undefined ? { generatedAt: Number(raw.generatedAt) } : {}),
   };
 }
+
+/** The vectors' form of an entry: msf-01's `[mediaTimeMs, [group, object], wallclockMs]`. */
+const record = (entry: media.MediaTimelineEntry): TimelineRecord => [
+  entry.mediaTimeMs,
+  [entry.group, entry.object],
+  entry.wallclockMs,
+];
+const entry = ([mediaTimeMs, [group, object], wallclockMs]: TimelineRecord): media.MediaTimelineEntry => ({
+  mediaTimeMs,
+  group,
+  object,
+  wallclockMs,
+});
+const timelineEntry = (raw: RawTimelineEntry) =>
+  media.mediaTimelineEntry({
+    timestampUs: Number(raw.timestampUs),
+    group: Number(raw.group),
+    ...(raw.object !== undefined ? { object: Number(raw.object) } : {}),
+    ...(raw.originEpochUs !== undefined ? { originEpochUs: Number(raw.originEpochUs) } : {}),
+  });
+
+describe('shared media timeline vectors', () => {
+  for (const vector of vectors.timelineEntries) {
+    it(`entry ${vector.name}`, () => expect(record(timelineEntry(vector))).toEqual(vector.entry));
+  }
+  for (const vector of vectors.timelineEntryErrors) {
+    it(`rejects entry ${vector.name}`, () => expect(() => timelineEntry(vector)).toThrow(RangeError));
+  }
+  for (const vector of vectors.timelines) {
+    it(`timeline ${vector.name}: exact bytes and reader round trip`, () => {
+      const document = media.buildMediaTimeline(vector.entries.map(entry));
+      expect(hex(document)).toBe(hex(new TextEncoder().encode(vector.json)));
+      expect(media.parseMediaTimeline(document).map(record)).toEqual(vector.entries);
+    });
+  }
+  for (const vector of vectors.timelineErrors) {
+    it(`rejects timeline ${vector.name}`, () =>
+      expect(() => media.buildMediaTimeline(vector.entries.map(entry))).toThrow(RangeError));
+  }
+  for (const vector of vectors.timelineReads) {
+    it(`reads timeline ${vector.name}`, () =>
+      expect(media.parseMediaTimeline(new TextEncoder().encode(vector.json)).map(record)).toEqual(vector.entries));
+  }
+  for (const vector of vectors.timelineReadErrors) {
+    it(`rejects reading timeline ${vector.name}`, () =>
+      expect(() => media.parseMediaTimeline(new TextEncoder().encode(vector.json))).toThrow());
+  }
+  it('rejects a timeline payload that is not UTF-8', () => {
+    const payload = new Uint8Array([...new TextEncoder().encode('[[0,[0,0],0],"'), 0xff, 0x22, 0x5d]);
+    expect(() => media.parseMediaTimeline(payload)).toThrow();
+  });
+  it('stamps entries from a broadcast clock', () => {
+    const clock = media.createBroadcastClock({ now: () => 0, originUs: 0, originEpochUs: 1_759_924_158_381_000 });
+    const timeline = media.mediaTimelineEntry({ timestampUs: 2_002_000, group: 1, originEpochUs: clock.originEpochUs });
+    expect(record(timeline)).toEqual([2002, [1, 0], 1_759_924_160_383]);
+  });
+});
 
 describe('shared media vectors', () => {
   for (const vector of vectors.catalogs) {
@@ -162,7 +235,12 @@ it('pins every media constant', () => {
     msfDocument: media.MSF_DOCUMENT,
     catalogVersion: media.MSF_CATALOG_VERSION,
     defaultTimescale: media.MICROSECONDS_PER_SECOND,
-    tracks: { catalog: media.CATALOG_TRACK, video: media.VIDEO_TRACK, audio: media.AUDIO_TRACK },
+    tracks: {
+      catalog: media.CATALOG_TRACK,
+      video: media.VIDEO_TRACK,
+      audio: media.AUDIO_TRACK,
+      mediaTimeline: media.MEDIA_TIMELINE_TRACK,
+    },
     properties: {
       timestamp: media.LOC_TIMESTAMP,
       timescale: media.LOC_TIMESCALE,

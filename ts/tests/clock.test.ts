@@ -33,6 +33,15 @@ type Vectors = {
     steps: { calibrate?: string; calibrateAt?: string; source?: string; expect: string | boolean }[];
   }[];
   playout: { name: string; options?: Record<string, string>; steps: Step[] }[];
+  epochOrigins: {
+    name: string;
+    createdAt: string;
+    originUs?: string;
+    systemClockMs: string;
+    givenOriginEpochUs?: string;
+    originEpochUs: string;
+  }[];
+  epochOriginErrors: { name: string; givenOriginEpochUs: string }[];
 };
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/clock.json', import.meta.url), 'utf8')) as Vectors;
 
@@ -59,6 +68,25 @@ describe('spec/vectors/clock.json', () => {
       if (step.now !== undefined) expect(clock.now()).toBe(Number(step.now));
       if (step.fromSource !== undefined) expect(clock.fromSourceUs(Number(step.fromSource))).toBe(Number(step.expect));
     }
+  });
+
+  it.each(vectors.epochOrigins)('origin epoch: $name', (vector) => {
+    const systemClock = vi.spyOn(Date, 'now').mockReturnValue(Number(vector.systemClockMs));
+    try {
+      const clock = createBroadcastClock({
+        now: source(Number(vector.createdAt)).now,
+        ...(vector.originUs !== undefined ? { originUs: Number(vector.originUs) } : {}),
+        ...(vector.givenOriginEpochUs !== undefined ? { originEpochUs: Number(vector.givenOriginEpochUs) } : {}),
+      });
+      expect(clock.originEpochUs).toBe(Number(vector.originEpochUs));
+      expect(systemClock).toHaveBeenCalledTimes(vector.givenOriginEpochUs === undefined ? 1 : 0);
+    } finally {
+      systemClock.mockRestore();
+    }
+  });
+
+  it.each(vectors.epochOriginErrors)('rejects origin epoch: $name', ({ givenOriginEpochUs }) => {
+    expect(() => createBroadcastClock({ now: () => 0, originEpochUs: Number(givenOriginEpochUs) })).toThrow(RangeError);
   });
 
   it.each(vectors.sampleTimelines)('sample timeline: $name', (vector) => {
@@ -146,6 +174,22 @@ describe('createBroadcastClock', () => {
       copyTo: (destination: Uint8Array) => destination.set([0x65]),
     } as unknown as EncodedVideoChunk;
     expect(chunkToLocFrame(chunk, { timestampOffsetUs: -clock.originUs }).timestampUs).toBe(clock.fromSourceUs(34_333));
+  });
+
+  it('reads the system clock for the origin epoch by default', () => {
+    const before = Date.now() * 1000;
+    const clock = createBroadcastClock();
+    expect(clock.originEpochUs).toBeGreaterThanOrEqual(before - 1000);
+    expect(clock.originEpochUs).toBeLessThanOrEqual(Date.now() * 1000 + 1000);
+  });
+
+  it('rounds the origin epoch measured from a fractional source', () => {
+    const systemClock = vi.spyOn(Date, 'now').mockReturnValue(2000);
+    try {
+      expect(createBroadcastClock({ now: () => 1000.5, originUs: 0 }).originEpochUs).toBe(2_000_000 - 1000);
+    } finally {
+      systemClock.mockRestore();
+    }
   });
 
   it('calibrates at the time source now by default', () => {

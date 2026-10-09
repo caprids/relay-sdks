@@ -40,6 +40,10 @@ export interface MsfCatalogTrack {
   bitrate?: number;
   /** Render group (§5.2.11): tracks sharing one are meant to play together; integral values only. */
   renderGroup?: number;
+  /** MIME type (§5.2.19), e.g. `'application/json'` on a media timeline track. */
+  mimetype?: string;
+  /** Names of the tracks this one depends on (§5.2.14), its string items only. */
+  depends?: string[];
   /** Decoder init data, resolved from `initRef` through the catalog's inline `initDataList`. */
   initData?: Uint8Array;
 }
@@ -129,6 +133,8 @@ function parseCatalogTrack(
       channelConfig: string(raw['channelConfig']),
       bitrate: integer(raw['bitrate']),
       renderGroup: integer(raw['renderGroup']),
+      mimetype: string(raw['mimetype']),
+      depends: Array.isArray(raw['depends']) ? raw['depends'].filter(isString) : undefined,
       initData: initRef === undefined ? undefined : initDataList.get(initRef),
     }),
   };

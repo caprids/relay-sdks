@@ -503,8 +503,9 @@ uses classes, like `CatalogService` and `FrameWriter`.
 
 | Concept | TypeScript | Python |
 | --- | --- | --- |
-| The publisher's one clock for every track | `createBroadcastClock(options?)` → `BroadcastClock` (`BroadcastClockOptions`) | `BroadcastClock(now_us=None, origin_us=None)` |
+| The publisher's one clock for every track | `createBroadcastClock(options?)` → `BroadcastClock` (`BroadcastClockOptions`) | `BroadcastClock(now_us=None, origin_us=None, origin_epoch_us=None)` |
 | The broadcast's zero on the source clock | `clock.originUs` | `clock.origin_us` |
+| The broadcast's zero as Unix-epoch microseconds | `clock.originEpochUs` | `clock.origin_epoch_us` |
 | Microseconds since the broadcast started | `clock.now()` | `clock.now_us()` |
 | Map a time on the clock's own source onto the timeline | `clock.fromSourceUs(t)` | `clock.from_source_us(t)` |
 | Map a clock with another origin and rate | `clock.sourceTimeline({ toleranceUs })` → `SourceTimeline` (`SourceTimelineOptions`) | `clock.source_timeline(tolerance_us=5_000)` → `SourceTimeline` |
@@ -526,6 +527,29 @@ uses classes, like `CatalogService` and `FrameWriter`.
 `now()` and `position()` follow `performance.now()`. The issue's `timeline: "shared"` catalog field
 was not added. msf-01 defines no such field, so the builder uses msf-01's own `renderGroup`
 instead.
+
+## Media Timeline track
+
+msf-01 §7's Media Timeline track, which maps a broadcast's media time to wall-clock time
+([media-layer.md](media-layer.md#media-timeline-track),
+[issue #291](https://github.com/muxinc/relay-sdks/issues/291)). Exported from `@mux/moq-media` and
+`moq_media`.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| One record: media time, location, wall-clock time | `MediaTimelineEntry { mediaTimeMs, group, object, wallclockMs }` | `MediaTimelineEntry(media_time_ms, group, object, wallclock_ms)` |
+| The record for a timeline timestamp | `mediaTimelineEntry({ timestampUs, group, object?, originEpochUs? })` (`MediaTimelineEntryInput`) | `media_timeline_entry(timestamp_us, group, *, object=0, origin_epoch_us=None)` |
+| Build a timeline object's bytes | `buildMediaTimeline(entries)` | `build_media_timeline(entries)` |
+| Read a timeline object's payload | `parseMediaTimeline(payload)` | `parse_media_timeline(payload)` |
+| Announce the track in the catalog | `MediaTimelineTrackInfo { name?, depends? }`, `MsfCatalogInput.mediaTimeline` | `MediaTimelineTrackInfo(name=, depends=)`, `build_msf_catalog(media_timeline=)` |
+| Catalog fields as read | `MsfCatalogTrack.depends`, `.mimetype` | `MsfCatalogTrack.depends`, `.mimetype` |
+| Default track name | `MEDIA_TIMELINE_TRACK` (`timeline`) | `MEDIA_TIMELINE_TRACK` |
+
+"Wallclock" is msf-01's spelling for Unix-epoch time and appears only in the entry field that
+carries it. The clock's property says `Epoch`, because `CONTEXT.md` keeps "wall clock" for the local
+monotonic source. `depends` keeps msf-01's JSON name rather than Video.js's `dependencies`, like
+the reader's other fields. Not added: helpers for the §7.4 template, a stateful timeline that holds
+entries, and a reader for MSF_COMPRESSION payloads.
 
 ## Media publishing: `FrameWriter`, `CatalogService`
 

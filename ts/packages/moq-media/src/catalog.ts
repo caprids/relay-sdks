@@ -1,6 +1,6 @@
 /** Independent LOC/MSF catalogs, adapted from Video.js build-catalog.ts. */
 import { avcCodecString } from './h264.js';
-import { AUDIO_TRACK, VIDEO_TRACK } from './loc.js';
+import { AUDIO_TRACK, MEDIA_TIMELINE_TRACK, VIDEO_TRACK } from './loc.js';
 /** Version emitted — the newest version `parseMsfCatalog` accepts. */
 export const MSF_CATALOG_VERSION = 'draft-01';
 
@@ -56,6 +56,20 @@ export interface DataTrackInfo {
   role?: string;
 }
 
+/**
+ * The Media Timeline track (msf-01 §7) {@link buildMsfCatalog} announces. The entry is listed only while a track it
+ * depends on is listed; see spec/media-layer.md, "Media Timeline track".
+ */
+export interface MediaTimelineTrackInfo {
+  /** Track name. Default {@link MEDIA_TIMELINE_TRACK}. */
+  name?: string;
+  /**
+   * The video or audio track the timeline's locations point into (§5.2.14). Default: the video track, else the audio
+   * track.
+   */
+  depends?: readonly string[];
+}
+
 /** What {@link buildMsfCatalog} advertises: the namespace and the tracks published under it. */
 export interface MsfCatalogInput {
   /** Track namespace tuple every track is published under. */
@@ -70,6 +84,8 @@ export interface MsfCatalogInput {
    * plumbing).
    */
   data?: readonly DataTrackInfo[];
+  /** The Media Timeline track that maps the broadcast's media time to wall-clock time, if any. */
+  mediaTimeline?: MediaTimelineTrackInfo;
   /** Catalog generation time (§5.2.24), epoch milliseconds. */
   generatedAt?: number;
 }
@@ -131,12 +147,24 @@ export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
   const audio = input.audio
     ? { codec: 'opus', samplerate: 48000, channelConfig: '2', ...input.audio, name: input.audio.name ?? AUDIO_TRACK }
     : undefined;
-  const names = [video, audio, ...(input.data ?? [])].filter((track) => track !== undefined).map((track) => track.name);
+  const timeline = input.mediaTimeline
+    ? { ...input.mediaTimeline, name: input.mediaTimeline.name ?? MEDIA_TIMELINE_TRACK }
+    : undefined;
+  const names = [video, audio, timeline, ...(input.data ?? [])]
+    .filter((track) => track !== undefined)
+    .map((track) => track.name);
   if (names.some((name) => !name) || new Set(names).size !== names.length)
     throw new Error('catalog track names must be non-empty and unique');
   const mediaRoles = new Set(['video', 'audio', 'caption', 'subtitle', 'audiodescription', 'signlanguage']);
   if (input.data?.some((track) => track.role !== undefined && mediaRoles.has(track.role)))
     throw new Error('data tracks must not use media roles');
+  const mediaNames = [video, audio].filter((track) => track !== undefined).map((track) => track.name);
+  const depends = timeline ? [...(timeline.depends ?? mediaNames.slice(0, 1))] : [];
+  if (
+    timeline &&
+    (depends.length === 0 || new Set(depends).size !== depends.length || depends.some((n) => !mediaNames.includes(n)))
+  )
+    throw new Error('media timeline depends must name distinct video or audio tracks of this catalog');
   const h264 = video !== undefined && /^(avc1|avc3)(\.|$)/.test(video.codec);
   const namespace = input.namespace.join('/');
   const shared = { namespace, packaging: 'loc', isLive: true };
@@ -176,6 +204,19 @@ export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
         bitrate: audio.bitrate,
       })
     );
+  }
+
+  const listed = new Set(tracks.map(({ name }) => name));
+  const indexed = depends.filter((name) => listed.has(name));
+  if (timeline && indexed.length > 0) {
+    tracks.push({
+      ...shared,
+      packaging: 'mediatimeline',
+      name: timeline.name,
+      role: 'mediatimeline',
+      mimetype: 'application/json',
+      depends: indexed,
+    });
   }
 
   // Data tracks carry no media fields, so the player treats them as non-renderable.

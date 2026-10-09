@@ -4,6 +4,7 @@ from .catalog import (
     MSF_CATALOG_VERSION,
     AudioTrackInfo,
     DataTrackInfo,
+    MediaTimelineTrackInfo,
     MsfCatalog,
     MsfCatalogTrack,
     VideoTrackInfo,
@@ -37,6 +38,7 @@ from .loc import (
     LOC_TIMESCALE,
     LOC_TIMESTAMP,
     LOC_VIDEO_CONFIG,
+    MEDIA_TIMELINE_TRACK,
     MICROSECONDS_PER_SECOND,
     MSF_DOCUMENT,
     TRACK_TIMESCALE_PROPERTIES,
@@ -49,6 +51,12 @@ from .source import (
     encode_name_component,
     encode_namespace_name,
 )
+from .timeline import (
+    MediaTimelineEntry,
+    build_media_timeline,
+    media_timeline_entry,
+    parse_media_timeline,
+)
 
 __all__ = [
     "AUDIO_TRACK",
@@ -58,6 +66,7 @@ __all__ = [
     "LOC_TIMESCALE",
     "LOC_TIMESTAMP",
     "LOC_VIDEO_CONFIG",
+    "MEDIA_TIMELINE_TRACK",
     "MICROSECONDS_PER_SECOND",
     "MSF_CATALOG_VERSION",
     "MSF_DOCUMENT",
@@ -67,6 +76,8 @@ __all__ = [
     "BroadcastClock",
     "DataTrackInfo",
     "H264Config",
+    "MediaTimelineEntry",
+    "MediaTimelineTrackInfo",
     "MsfCatalog",
     "MsfCatalogTrack",
     "PlayoutAction",
@@ -79,6 +90,7 @@ __all__ = [
     "annexb_to_avcc",
     "avc_codec_string",
     "build_avcc",
+    "build_media_timeline",
     "build_msf_catalog",
     "build_msf_end_catalog",
     "compose_player_url",
@@ -88,6 +100,8 @@ __all__ = [
     "iter_annexb_nal_units",
     "loc_properties",
     "loc_track_properties",
+    "media_timeline_entry",
     "nal_unit_type",
+    "parse_media_timeline",
     "parse_msf_catalog",
 ]

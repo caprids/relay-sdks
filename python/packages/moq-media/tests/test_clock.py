@@ -45,6 +45,32 @@ def test_broadcast_clock_vectors(vector: dict[str, Any]) -> None:
             assert clock.from_source_us(int(step["fromSource"])) == int(step["expect"])
 
 
+@pytest.mark.parametrize("vector", VECTORS["epochOrigins"], ids=lambda vector: vector["name"])
+def test_epoch_origin_vectors(vector: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    reads: list[int] = []
+
+    def system_clock() -> int:
+        reads.append(1)
+        return int(vector["systemClockMs"]) * 1_000_000
+
+    monkeypatch.setattr(time, "time_ns", system_clock)
+    origin, given = vector.get("originUs"), vector.get("givenOriginEpochUs")
+    clock = BroadcastClock(
+        now_us=Source(int(vector["createdAt"])),
+        origin_us=None if origin is None else int(origin),
+        origin_epoch_us=None if given is None else int(given),
+    )
+    assert clock.origin_epoch_us == int(vector["originEpochUs"])
+    assert len(reads) == (0 if given is not None else 1)
+
+
+@pytest.mark.parametrize("vector", VECTORS["epochOriginErrors"], ids=lambda vector: vector["name"])
+def test_epoch_origin_errors(vector: dict[str, Any]) -> None:
+    given = vector["givenOriginEpochUs"]
+    with pytest.raises(ValueError):
+        BroadcastClock(now_us=Source(0), origin_epoch_us=float(given) if "." in given else int(given))  # ty: ignore[invalid-argument-type]
+
+
 @pytest.mark.parametrize("vector", VECTORS["sampleTimelines"], ids=lambda vector: vector["name"])
 def test_sample_timeline_vectors(vector: dict[str, Any]) -> None:
     source = Source(int(vector["createdAt"]))
@@ -108,6 +134,16 @@ class TestBroadcastClock:
         clock = BroadcastClock()
         assert before <= clock.origin_us <= time.monotonic_ns() // 1000
         assert 0 <= clock.now_us() < 1_000_000
+
+    def test_reads_the_system_clock_for_the_origin_epoch_by_default(self) -> None:
+        before = time.time_ns() // 1000
+        clock = BroadcastClock()
+        assert before - 1_000 <= clock.origin_epoch_us <= time.time_ns() // 1000 + 1_000
+
+    def test_rounds_the_origin_epoch_measured_from_a_fractional_source(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(time, "time_ns", lambda: 2_000_000_000)
+        clock = BroadcastClock(now_us=lambda: 1000.5, origin_us=0)  # ty: ignore[invalid-argument-type]
+        assert clock.origin_epoch_us == 2_000_000 - 1000
 
     def test_calibrates_at_the_time_source_now_by_default(self) -> None:
         source = Source(0)

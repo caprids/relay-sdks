@@ -1,5 +1,5 @@
 {
-  "source": "Derived from spec/media-layer.md, Shared timeline and playout clock (issue #285); boundary cases follow its tables",
+  "source": "Derived from spec/media-layer.md, Shared timeline and playout clock (issue #285); boundary cases follow its tables. epochOrigins follow its Media Timeline track section (issue #291): systemClockMs is the system clock (Date.now(), time.time_ns()) when the clock is created, and createdAt the source time then",
   "broadcast": [
     {
       "name": "the origin defaults to the source time at creation",
@@ -204,5 +204,16 @@
         { "at": "1001", "position": "101002" }
       ]
     }
+  ],
+  "epochOrigins": [
+    { "name": "the default origin is the system clock at creation", "createdAt": "5000000", "systemClockMs": "1759924158381", "originEpochUs": "1759924158381000" },
+    { "name": "an earlier origin is the system clock less the time since it", "createdAt": "5000000", "originUs": "4000000", "systemClockMs": "1759924158381", "originEpochUs": "1759924157381000" },
+    { "name": "a later origin is ahead of the system clock", "createdAt": "5000000", "originUs": "5000250", "systemClockMs": "1759924158381", "originEpochUs": "1759924158381250" },
+    { "name": "an explicit epoch is kept and the system clock is not read", "createdAt": "5000000", "systemClockMs": "1759924158381", "givenOriginEpochUs": "1759924150000123", "originEpochUs": "1759924150000123" }
+  ],
+  "epochOriginErrors": [
+    { "name": "negative", "givenOriginEpochUs": "-1" },
+    { "name": "unsafe", "givenOriginEpochUs": "9007199254740992" },
+    { "name": "fractional", "givenOriginEpochUs": "1.5" }
   ]
 }
