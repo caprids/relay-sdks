@@ -11,6 +11,7 @@ This is an initial development workspace. Package names are provisional and publ
 | `spec/` | Protocol pins, the behavior contract every SDK implements, and language-neutral test vectors | Source of truth |
 | `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol and `@mux/moq-media` format packages, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
 | `python/` | Python SDK `mux-relay` and the generic `mux-moq-core` and `mux-moq-media` packages (imported as `moq_core` and `moq_media`), as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
+| `tools/` | Hardware measurement rigs, such as the [device latency lab](tools/device-latency/README.md) for microphone and output latency | Run by hand |
 
 Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (browser WebTransport) or
 [Python quickstart](python/README.md#first-round-trip) (native asyncio). Both use local packages
