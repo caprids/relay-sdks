@@ -21,6 +21,8 @@ export const CATALOG_TRACK = 'catalog';
 export const VIDEO_TRACK = 'video';
 /** Default track name for the catalog's audio track. */
 export const AUDIO_TRACK = 'audio';
+/** Default track name for the catalog's Media Timeline track (msf-01 §7). */
+export const MEDIA_TIMELINE_TRACK = 'timeline';
 
 function integer(value: number, name: string, positive = false): void {
   if (!Number.isSafeInteger(value) || value < (positive ? 1 : 0)) {

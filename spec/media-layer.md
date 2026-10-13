@@ -11,8 +11,10 @@ catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_c
 ([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
 `--verify` logs its track list; the object-to-frame reader remains a proposal. The
 [shared timeline and playout clock](#shared-timeline-and-playout-clock) ship in both format
-packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), and the WebCodecs example
-publishes audio on that timeline, measured live in browsers
+packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), and so do the
+[Media Timeline track](#media-timeline-track)'s format helpers
+([issue #291](https://github.com/muxinc/relay-sdks/issues/291)). The WebCodecs example publishes
+audio on the shared timeline, measured live in browsers
 ([issue #288](https://github.com/muxinc/relay-sdks/issues/288)). Public names for the
 implemented stages are recorded in [vocabulary.md](vocabulary.md).
 
@@ -265,9 +267,8 @@ them from one broadcast clock:
   parses it but does not act on it yet.
 - Without a declared Timescale, LOC defines the Timestamp as wall-clock microseconds since the
   Unix epoch. With one, the zero point is the application's, and this convention fixes it at the
-  broadcast's origin. Nothing here maps that origin to wall-clock time yet. msf-01's Media Timeline
-  track (§7) is the standard way, and it is
-  [issue #291](https://github.com/muxinc/relay-sdks/issues/291).
+  broadcast's origin. The broadcast clock records that origin's wall-clock time, and msf-01's
+  Media Timeline track (§7) publishes the mapping: see [Media Timeline track](#media-timeline-track).
 - A timeline belongs to one catalog namespace. A supervised publisher's next generation is a new
   broadcast with a new origin. A player resets its playout clock wherever it resets its decoders:
   at a Restart, at a Move, and on a new catalog.
@@ -297,6 +298,7 @@ A timeline never calibrated anchors its first timestamp at the moment it arrives
 | Operation | TypeScript | Python | Result |
 | --- | --- | --- | --- |
 | Origin, on the source clock | `originUs` | `origin_us` | Integer µs; defaults to the source's time at creation, rounded |
+| Origin, as wall-clock time | `originEpochUs` | `origin_epoch_us` | Integer µs since the Unix epoch; defaults to the system clock at creation less the time since the origin (see [Media Timeline track](#media-timeline-track)) |
 | Time on the timeline now | `now()` | `now_us()` | `source − origin`, integer µs |
 | Map a time on the clock's own source | `fromSourceUs(t)` | `from_source_us(t)` | `t − origin`, rounded to integer µs, ties upward |
 | Map a clock with another origin | `sourceTimeline({ toleranceUs })` | `source_timeline(tolerance_us=)` | A mapper; tolerance defaults to 5,000 |
@@ -493,6 +495,125 @@ buffer. Playwright's WebKit (Safari 26.4's engine, on Linux) runs the hub scenar
 (settled offsets 4–7 ms), but at full length it stops responding partway through. It cannot open a
 WebTransport session to the Relay, and its `getOutputTimestamp()` is seconds off. It is opt-in
 (`AV_SYNC_RUNS=webkit:hub`) and says nothing about Safari on macOS.
+
+## Media Timeline track
+
+[Issue #291](https://github.com/muxinc/relay-sdks/issues/291). Format helpers implemented in both
+format packages; [behavior.md](behavior.md#media-helpers) holds the testable rules. Publishing the
+track over a connection is not implemented yet.
+
+The broadcast timeline is zeroed at the broadcast's origin on a monotonic clock, so nothing in a
+LOC timestamp says what time it was. msf-01's Media Timeline track (§7) is the standard way to say
+it: an optional track, announced in the catalog, whose records map media time and an MOQT location
+to wall-clock time. It is MSF's counterpart of HLS `PROGRAM-DATE-TIME`, and it is what seeking
+behind the live edge, generating HLS or DASH playlists, and lining up broadcasts from different
+publishers need. The other option, zeroing the timeline at the Unix epoch so LOC timestamps carry
+wall-clock time directly, would read as wall-clock time even when the publisher's clock is wrong,
+and the relay replaces such stamps anyway (see
+[Relay property handling](behavior.md#relay-property-handling)).
+
+### Entries
+
+A timeline object's payload is a JSON array of records, each `[mediaTimeMs, [group, object],
+wallclockMs]` (msf-01 §7.1.1):
+
+- `mediaTimeMs` is the media time of the first sample in the referenced object, floored to whole
+  milliseconds: `floor(timestampUs / 1000)` of its LOC timestamp on the broadcast timeline.
+- `[group, object]` is that object's location in the track the timeline indexes.
+- `wallclockMs` is milliseconds since the Unix epoch: `floor((originEpochUs + timestampUs) / 1000)`.
+  Without a known epoch it is 0, as §7.1.1 says for unknown wall-clock time.
+
+The wall-clock time is the capture time of the indexed frame on the publisher's system clock, read
+off the broadcast timeline. It is not when the encoder produced the frame, which §7.1.1 names, and
+the difference is the encoder's latency. Capture time is what lines broadcasts up with each other
+and what a packager writes as `PROGRAM-DATE-TIME`.
+
+### Cadence
+
+One entry per group of the indexed track, for the group's first object. Under keyframe grouping
+that is one entry per video keyframe group, so there is an entry at every random-access point and
+nowhere else. That is what a seek needs, at one record per GOP, typically every one or two seconds.
+
+The timeline indexes video. Audio is one group per frame, 50 or more a second, and an entry for
+each would multiply the document for no gain: every track in the render group is stamped on the
+same broadcast timeline, so a player that has found the video location for a media time finds the
+audio for it by timestamp. An audio-only broadcast indexes its audio track at most once a second.
+
+The §7.4 template, which states the mapping as a start and a constant stride, is not used. A live
+encoder's GOPs vary in length (scene cuts, keyframe requests), and §7.4 requires the explicit track
+whenever durations vary.
+
+### Catalog entry
+
+`buildMsfCatalog` / `build_msf_catalog` takes an optional `mediaTimeline` / `media_timeline`
+description and lists the track after video and audio, before data tracks:
+
+```json
+{"namespace":"room/live","packaging":"mediatimeline","isLive":true,"name":"timeline","role":"mediatimeline","mimetype":"application/json","depends":["video"]}
+```
+
+- §7.2 requires a "type" of `mediatimeline`, but msf-01 has no field called `type`. Both the
+  packaging table (Table 3) and the role table (Table 4) list `mediatimeline`, so the entry sets
+  both. The MIME type is the `application/json` §7.2 requires.
+- `depends` (§5.2.14, required by §7.2) names the track the entries' locations point into. It
+  defaults to the video track, or to the audio track when there is no video, and every name must be
+  a media track in the same catalog. msf-01's example (§5.6.9) lists video and audio together, but
+  a location does not say which track it is in, so this catalog lists one.
+- While every track it depends on is withheld (an `avc1` entry waiting for its avcC), the
+  timeline entry is withheld too.
+- The default track name is `timeline` (`MEDIA_TIMELINE_TRACK`).
+
+The Video.js MoQ player (`mmcc/moq`, checked 2026-10-07) does not subscribe to a media timeline
+track. Its catalog parser keeps `depends` and treats any track not packaged as `loc` as
+non-renderable, so announcing the track changes nothing for it. Its `timeline.ts` has helpers for
+the §7.4 template that nothing calls. Reading the explicit track for seeking is player work.
+
+### The origin's wall-clock time
+
+The broadcast clock records its origin as Unix-epoch microseconds, `originEpochUs` /
+`origin_epoch_us`, so a publisher can emit entries without measuring anything else. A caller may
+set it, for example from a capture device's own wall-clock stamps. Otherwise the clock reads the
+system clock once, at creation, and subtracts the time between the origin and that moment on its
+own source:
+
+- TypeScript reads `Date.now()`. `performance.timeOrigin + performance.now()` is finer, but it
+  can fall behind the system clock, by however long the page has slept, where `performance.now()`
+  does not advance while the machine sleeps. `Date.now()` is off by under a millisecond, which an
+  entry floors away anyway.
+- Python reads `time.time_ns()`.
+
+Since it is read once, entries advance at the monotonic clock's rate from then on, not the system
+clock's. The two can drift apart by tens of parts per million, a fraction of a second in an hour,
+and an NTP step during the broadcast does not move the timeline. A publisher that needs to track
+the system clock over a long broadcast can compute each entry's wall-clock time itself.
+
+### Publishing the track
+
+Format helpers only for now. The rules a publisher follows, and which a later publishing helper
+will implement:
+
+- msf-01 §7.3 requires the first object of every timeline group to be an independent document:
+  every record accumulated and still accessible. Each new entry opens a new timeline group whose
+  only object is the independent document of the retained entries. A viewer that joins at the
+  relay's current group gets the whole history in one object. The incremental objects §7.3 allows
+  after the first are not used.
+- How many entries to retain is the publisher's choice: as far back as its viewers can still fetch,
+  and well under the object size limit. One entry is about 35 bytes, so an hour of two-second
+  GOPs is about 65 KB.
+- A supervised publisher's next generation is a new broadcast with a new namespace, catalog,
+  broadcast clock and origin. Its timeline starts empty. The old entries point at locations in a
+  namespace the new catalog does not list, so they are not carried over. Wall-clock time is what
+  joins two generations: each one's entries map its own media time onto the same epoch.
+
+### Reading
+
+`parseMediaTimeline` / `parse_media_timeline` reads one timeline object's payload into entries, in
+document order. It rejects a payload that is not a UTF-8 JSON array. Within the array it is
+lenient, as msf-01 is for catalogs: a record is read when its first three items are a number, an
+array whose first two items are numbers, and a number, all non-negative safe integers. Extra items are ignored, and
+anything else, a §7.4 template array among them, is skipped. Whether the payload is independent or
+incremental is the caller's to know from the object's position in its group. MSF_COMPRESSION
+payloads are not decompressed.
 
 ## Package placement
 

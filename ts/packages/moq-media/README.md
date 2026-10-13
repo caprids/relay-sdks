@@ -90,6 +90,21 @@ const decision = playout.due(frame.timestamp);
 if (decision.action === 'wait') setTimeout(retry, decision.waitUs / 1000);
 ```
 
+The clock also records its origin as Unix-epoch microseconds, `clock.originEpochUs`, read once from
+`Date.now()`. That is what msf-01's Media Timeline track needs: one record per video group, mapping
+media time and the group's location to wall-clock time, for seeking, playlists, and lining up
+broadcasts. Announce it with `mediaTimeline: {}` in `buildMsfCatalog`, and on each new video group
+open a timeline group holding every retained record. The track is not published for you yet; see
+[spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
+
+```ts
+const entries: MediaTimelineEntry[] = [];
+// On each keyframe that opens video group `groupId`:
+entries.push(mediaTimelineEntry({ timestampUs, group: groupId, originEpochUs: clock.originEpochUs }));
+await timelineTrack.write(buildMediaTimeline(entries)); // one object, one group
+const read = parseMediaTimeline(timelineObject.payload);
+```
+
 Shared vectors live in `spec/vectors/media.json` and `spec/vectors/clock.json`. See `UPSTREAM.json` for Video.js provenance.
 Publishing handles and the object-to-frame reader are later stages of `spec/media-layer.md`.
 
