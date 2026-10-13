@@ -1,6 +1,7 @@
-import { LOC_TIMESTAMP, LOC_VIDEO_CONFIG } from '@mux/moq-media';
+import { createBroadcastClock, LOC_TIMESTAMP, LOC_VIDEO_CONFIG, type SourceTimeline } from '@mux/moq-media';
 import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@mux/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { MicrophoneCapture } from '../examples/webcodecs/capture-microphone.js';
 import { publishCanvas } from '../examples/webcodecs/publish-canvas.js';
 import { NO_DELIVERY_TIMEOUTS } from '../src/delivery-timeouts.js';
 import { createSettlingGroups } from '../src/settling-groups.js';
@@ -59,10 +60,68 @@ class TestEncoder {
   }
 }
 
+class TestAudioData {
+  readonly timestamp: number;
+  readonly numberOfFrames: number;
+  readonly sampleRate: number;
+  close = vi.fn();
+  constructor(init: AudioDataInit) {
+    this.timestamp = init.timestamp;
+    this.numberOfFrames = init.numberOfFrames;
+    this.sampleRate = init.sampleRate;
+  }
+}
+class TestAudioEncoder {
+  static instances: TestAudioEncoder[] = [];
+  static isConfigSupported = vi.fn(async () => ({ supported: true }));
+  /** Firefox's encoder stamps its output this much before the input it came from; Chromium's does not. */
+  static lookaheadUs = 0;
+  state = 'unconfigured';
+  encodeQueueSize = 0;
+  config?: AudioEncoderConfig;
+  inputs: number[] = [];
+  private firstUs: number | undefined;
+  private frames = 0;
+  close = vi.fn(() => {
+    this.state = 'closed';
+  });
+  readonly callbacks: AudioEncoderInit;
+  constructor(callbacks: AudioEncoderInit) {
+    this.callbacks = callbacks;
+    TestAudioEncoder.instances.push(this);
+  }
+  configure(config: AudioEncoderConfig) {
+    this.config = config;
+    this.state = 'configured';
+  }
+  encode(data: TestAudioData) {
+    this.inputs.push(data.timestamp);
+    // Chromium's policy: count samples from the first input, whatever later input timestamps say.
+    this.firstUs ??= data.timestamp;
+    const countedUs = this.firstUs + Math.round((this.frames * 1_000_000) / data.sampleRate);
+    this.frames += data.numberOfFrames;
+    const bytes = new Uint8Array([0xfc, this.inputs.length]);
+    this.callbacks.output({
+      type: 'key',
+      timestamp: Math.max(0, countedUs - TestAudioEncoder.lookaheadUs),
+      duration: 20_000,
+      byteLength: bytes.length,
+      copyTo(destination) {
+        if (!ArrayBuffer.isView(destination)) throw new Error('Expected an output view');
+        new Uint8Array(destination.buffer, destination.byteOffset, destination.byteLength).set(bytes);
+      },
+    });
+  }
+}
+
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
   vi.stubGlobal('VideoEncoder', TestEncoder);
   vi.stubGlobal('VideoFrame', TestFrame);
+  vi.stubGlobal('AudioEncoder', TestAudioEncoder);
+  vi.stubGlobal('AudioData', TestAudioData);
+  TestAudioEncoder.instances.length = 0;
+  TestAudioEncoder.lookaheadUs = 0;
   frames.length = 0;
   TestEncoder.isConfigSupported.mockResolvedValue({ supported: true });
 });
@@ -158,12 +217,36 @@ function recordingPublisher(
   return { publisher, tracks, disconnect };
 }
 
-function run(options: Parameters<typeof recordingPublisher>[0] = {}) {
+function run(options: Parameters<typeof recordingPublisher>[0] = {}, microphone?: MicrophoneCapture) {
   const recorded = recordingPublisher(options);
   const stop = new AbortController();
-  const result = publishCanvas(canvas, recorded.publisher, ['demo'], { signal: stop.signal });
+  const result = publishCanvas(canvas, recorded.publisher, ['demo'], {
+    signal: stop.signal,
+    ...(microphone ? { microphone } : {}),
+  });
   return { ...recorded, stop, result };
 }
+
+/** A microphone whose blocks the test delivers, with context 0 at broadcast time 5 ms. */
+function testMicrophone() {
+  const clock = createBroadcastClock();
+  const timeline = clock.sourceTimeline();
+  timeline.calibrate(0, clock.originUs + 5_000);
+  const microphone: MicrophoneCapture = {
+    clock,
+    context: { sampleRate: 48_000 } as AudioContext,
+    onblock: undefined,
+    useStream() {},
+    async useContext() {},
+    close() {},
+  };
+  const deliver = (contextUs: number, on: SourceTimeline = timeline) =>
+    microphone.onblock?.({ samples: new Float32Array(960), sampleRate: 48_000, contextUs, timeline: on });
+  return { clock, timeline, microphone, deliver };
+}
+
+const timestampsOf = (groups: { properties: readonly PublishProperty[] }[][]) =>
+  groups.map((group) => group.map(({ properties }) => properties.find(({ type }) => type === LOC_TIMESTAMP)?.value));
 
 it('publishes native encoder output and retained config in keyframe groups, then releases resources', async () => {
   const session = run();
@@ -341,4 +424,93 @@ it('encodes only enough to obtain the catalog before video demand arrives', asyn
     session.stop.abort(new Error('Stopped'));
     await completion;
   }
+});
+
+it.each([
+  ['counts samples, as Chromium does', 0, [5_000, 25_000, 65_000, 100_000]],
+  ['stamps before its input by its lookahead, as Firefox does', 6_500, [5_000, 18_500, 38_500, 100_000]],
+])(
+  'publishes the microphone as Opus on the broadcast timeline when the encoder %s',
+  async (_, lookaheadUs, expected) => {
+    TestAudioEncoder.lookaheadUs = lookaheadUs;
+    const mic = testMicrophone();
+    const session = run({}, mic.microphone);
+    const completion = expect(session.result).rejects.toThrow('Stopped');
+    await vi.advanceTimersByTimeAsync(0);
+    // Three blocks, the third after a stretch the worklet never saw, then a replaced context with its own timeline.
+    mic.deliver(0);
+    mic.deliver(20_000);
+    mic.deliver(60_000);
+    const replaced = mic.clock.sourceTimeline();
+    replaced.calibrate(0, mic.clock.originUs + 100_000);
+    mic.deliver(0, replaced);
+    await vi.advanceTimersByTimeAsync(0);
+    const audio = session.tracks.get('audio')!;
+    // One group per frame, each stamped where its block was captured.
+    expect(audio.objects.map((group) => group.length)).toEqual([1, 1, 1, 1]);
+    expect(timestampsOf(audio.objects)).toEqual(expected.map((value) => [value]));
+    // The encoder sees one contiguous count; a new context gets a new encoder.
+    const [first, second] = TestAudioEncoder.instances;
+    expect(first?.inputs).toEqual([0, 20_000, 40_000]);
+    expect(first?.close).toHaveBeenCalled();
+    expect(second?.inputs).toEqual([0]);
+    expect(first?.config).toMatchObject({ codec: 'opus', sampleRate: 48_000, numberOfChannels: 1, bitrate: 64_000 });
+    const catalog = JSON.parse(new TextDecoder().decode(session.tracks.get('catalog')!.objects[0]![0]!.bytes));
+    expect(catalog.tracks[1]).toMatchObject({
+      name: 'audio',
+      codec: 'opus',
+      samplerate: 48_000,
+      channelConfig: '1',
+      bitrate: 64_000,
+      renderGroup: 1,
+    });
+    session.stop.abort(new Error('Stopped'));
+    await completion;
+    expect(audio.writer.closed).toBe(true);
+    expect(mic.microphone.onblock).toBeUndefined();
+    expect(second?.close).toHaveBeenCalled();
+  },
+);
+
+it('encodes every block without audio demand, and sends nothing stamped before the origin', async () => {
+  const mic = testMicrophone();
+  const session = run({}, mic.microphone);
+  const completion = expect(session.result).rejects.toThrow('Stopped');
+  await vi.advanceTimersByTimeAsync(0);
+  const audio = session.tracks.get('audio')!;
+  audio.demand(false);
+  mic.deliver(0);
+  mic.deliver(20_000);
+  audio.demand(true);
+  mic.deliver(40_000);
+  // A context whose time 0 came before the broadcast's origin: its first block has no place on the timeline.
+  const early = mic.clock.sourceTimeline();
+  early.calibrate(0, mic.clock.originUs - 10_000);
+  mic.deliver(0, early);
+  mic.deliver(20_000, early);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(TestAudioEncoder.instances[0]?.inputs).toEqual([0, 20_000, 40_000]);
+  expect(timestampsOf(audio.objects)).toEqual([[45_000], [10_000]]);
+  session.stop.abort(new Error('Stopped'));
+  await completion;
+});
+
+it('stamps video from the broadcast clock and refuses a microphone on another clock', async () => {
+  const mic = testMicrophone();
+  vi.advanceTimersByTime(1000);
+  const session = run({}, mic.microphone);
+  const completion = expect(session.result).rejects.toThrow('Stopped');
+  await vi.advanceTimersByTimeAsync(34);
+  // The microphone's clock started a second before publishing did.
+  expect(timestampsOf(session.tracks.get('video')!.objects)[0]).toEqual([1_000_000, 1_033_000]);
+  session.stop.abort(new Error('Stopped'));
+  await completion;
+  const signal = new AbortController().signal;
+  await expect(
+    publishCanvas(canvas, recordingPublisher().publisher, ['demo'], {
+      signal,
+      microphone: mic.microphone,
+      clock: createBroadcastClock(),
+    }),
+  ).rejects.toThrow('same broadcast clock');
 });

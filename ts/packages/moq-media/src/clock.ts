@@ -70,7 +70,7 @@ export interface SourceTimeline {
   readonly anchorSourceUs: number | undefined;
   /**
    * Record that source time `sourceUs` happened at `atUs` on the broadcast clock's own source (default: now), for
-   * example `AudioContext.getOutputTimestamp()`'s `contextTime` and `performanceTime`, both in microseconds. The pair
+   * example an `AudioContext` time and the `performance.now()` time it was rendered at, both in microseconds. The pair
    * becomes the anchor when there is none, or when the current anchor predicts it more than `toleranceUs` off: the
    * source drifted, or jumped, as an `AudioContext` does when it is replaced. Returns whether the anchor changed.
    */
