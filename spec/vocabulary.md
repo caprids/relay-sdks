@@ -562,26 +562,31 @@ template, incremental documents, and a reader for MSF_COMPRESSION payloads.
 
 ## Media publishing: `FrameWriter`, `CatalogService`
 
-The media publishing policy the Video.js example proved, lifted into the Python product package as
-`mux_relay.media` ([issue #84](https://github.com/muxinc/relay-sdks/issues/84)); its contract is the
-"Media publishing" section of [behavior.md](behavior.md#media-publishing). The TypeScript column is
-empty until that SDK gains the module. The root package exports none of these names in either
-language; `python/packages/mux-relay/tests/test_exports.py` pins the module's list.
+The media publishing policy the Video.js example proved, lifted into each product package
+([issue #84](https://github.com/muxinc/relay-sdks/issues/84) for Python as `mux_relay.media`,
+[issue #263](https://github.com/muxinc/relay-sdks/issues/263) for TypeScript as the
+`@mux/relay/media` subpath); its contract is the "Media publishing" section of
+[behavior.md](behavior.md#media-publishing). Neither root package exports these names; the
+`media` exports are pinned by `python/packages/mux-relay/tests/test_exports.py` and by the
+TypeScript package's export test. TypeScript uses factories that return interfaces, like
+`@mux/moq-media`; Python uses classes.
 
 | Concept | TypeScript | Python |
 | --- | --- | --- |
-| Serve a state-shaped track: send its document on every relay subscription | — (not yet implemented) | `CatalogService(track, document, retry_delay=1.0)` |
-| Run the service until cancelled or the track ends | — | `await service.serve()` |
-| Documents accepted, and failures that were retried | — | `service.sends`, `service.failures` |
-| Serve a state-shaped track whose document the application replaces | — | `DocumentService(track, document=None, retry_delay=1.0)`; `serve()`, `sends`, `failures` as above |
-| Replace the document and send it while the relay is subscribed; the latest | — | `service.update(document)`; `service.document` |
-| Map encoded frames onto a track's groups | — | `FrameWriter(track, grouping="keyframe", stale=None)`; `grouping="frame"` for one group per frame |
-| Send one frame if the relay wants it | — | `await writer.write(frame)` returns a `FrameOutcome` |
-| What became of a frame | — | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `interrupted`, `ended`), `error`, `group_id` |
-| One encoded frame as the writer sees it | — | `Frame`, a protocol: `payload`, `key`, `properties`, `discontinuity` |
-| FIN the open group and refuse further frames | — | `await writer.close()` |
-| The writer ended, and how | — | `writer.closed`, `writer.ended` |
-| Groups opened and objects accepted | — | `writer.groups`, `writer.objects` |
+| Serve a state-shaped track: send its document on every relay subscription | `createCatalogService(track, document, { retryDelayMs })` → `CatalogService` (`CatalogServiceOptions`; default 1000) | `CatalogService(track, document, retry_delay=1.0)` |
+| Run the service until cancelled or the track ends | `await service.serve({ signal })` | `await service.serve()` |
+| Documents accepted, and failures that were retried | `service.sends`, `service.failures` | `service.sends`, `service.failures` |
+| Serve a state-shaped track whose document the application replaces | `createDocumentService(track, document?, { retryDelayMs })` → `DocumentService`; `serve`, `sends`, `failures` as above | `DocumentService(track, document=None, retry_delay=1.0)`; `serve()`, `sends`, `failures` as above |
+| Replace the document and send it while the relay is subscribed; the latest | `service.update(document)`; `service.document` | `service.update(document)`; `service.document` |
+| Map encoded frames onto a track's groups | `createFrameWriter(track, { grouping, stale, maxBacklog, onKeyframeNeeded })` → `FrameWriter` (`FrameWriterOptions`); `grouping: 'frame'` for one group per frame | `FrameWriter(track, grouping="keyframe", stale=None, max_backlog=None, on_keyframe_needed=None)`; `grouping="frame"` for one group per frame |
+| Send one frame if the relay wants it | `writer.write(frame)` → `Promise<FrameOutcome>`, callable without awaiting | `await writer.write(frame)` returns a `FrameOutcome`; concurrent calls are served in order |
+| What became of a frame | `FrameOutcome { kind, error?, groupId? }`, `kind` a `FrameOutcomeKind`: `'sent'`, `'skipped'`, `'stale'`, `'dropped'`, `'interrupted'`, `'ended'` | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `dropped`, `interrupted`, `ended`), `error`, `group_id` |
+| One encoded frame as the writer sees it | `Frame { payload, key, properties?, discontinuity? }`; `@mux/moq-media`'s `LocFrame` qualifies | `Frame`, a protocol: `payload`, `key`, `properties`, `discontinuity` |
+| Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8, or 25 under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
+| The next frame sent must be a keyframe; told on each entry | `writer.keyframeNeeded`; `onKeyframeNeeded()` | `writer.keyframe_needed`; `on_keyframe_needed()` |
+| FIN the open group and refuse further frames | `await writer.close()` | `await writer.close()` |
+| The writer ended, and how | `writer.closed`, `writer.ended` | `writer.closed`, `writer.ended` |
+| Groups opened and objects accepted | `writer.groups`, `writer.objects` | `writer.groups`, `writer.objects` |
 
 `FrameWriter.write` keeps the SDK's one verb for sending bytes, one tier above
 `RelayTrackWriter.write`: it sends when the relay wants the frame, and its return value is what
@@ -591,6 +596,17 @@ exception per frame would be the caller's whole loop.
 
 `Frame` is a protocol, not a class. The application's own encoded-sample type qualifies once it
 carries the frame's object properties, so nothing is converted between the encoder and the writer.
+
+`dropped` is not `stale`: a drop says the transport fell behind, while staleness is the application's
+own clock. "Backlog", not "queue": the writer queues nothing it would rather send late, and its
+bound is what it drops at. "Keyframe needed", not "keyframe request": NEW_GROUP_REQUEST is the
+relay's request, which the SDKs do not send.
+
+Not adopted from [issue #263](https://github.com/muxinc/relay-sdks/issues/263): `createMediaSink`
+and `push()` (the frame writer already is that concept, and `write` is the SDK's one verb for
+sending); `sink.hasDemand` (the track has it, and its `demandChanges()`); `sink.attach(writer)` (a
+supervised publisher's writers outlive its generations, and a move to a new one is a demand change);
+`maxQueue` (the bound is the backlog's).
 
 Not adopted: `FramePublisher.publish()` ("publisher" is the connection role, and `publish()` was
 already rejected as the name of a step that does not send); `MediaTrackWriter.write_frame()`
