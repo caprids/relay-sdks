@@ -136,6 +136,13 @@ for (const name of Object.keys(sdkExports)) {
   const own = name.startsWith('connect');
   assert.equal(nodeExports[name] === sdkExports[name], !own, `${name} ${own ? 'defaults the transport' : 'is shared'}`);
 }
+// The media entry point exports only the media publishing policy, which the root leaves out (#263).
+const mediaPolicy = await import('../dist/media.js');
+assert.deepEqual(Object.keys(mediaPolicy).sort(), [
+  'createCatalogService',
+  'createDocumentService',
+  'createFrameWriter',
+]);
 // Its declarations stand without the optional adapter installed.
 const nodeDeclarations = (await readFile(resolve(root, 'dist/node.d.ts'), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
 assert.doesNotMatch(nodeDeclarations, /['"]@mux\/relay-quic['"]/, 'dist/node.d.ts must not import @mux/relay-quic');

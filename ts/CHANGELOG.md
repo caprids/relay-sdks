@@ -11,6 +11,13 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 
 - `@mux/relay`: `connectRelayPublisher` and `connectRelaySubscriber` for browsers over WebTransport, and
   `@mux/relay/node` for Node 24+ over native QUIC.
+- `@mux/relay/media`: the media publishing policy Python has as `mux_relay.media`
+  ([#263](https://github.com/muxinc/relay-sdks/issues/263)). `createFrameWriter(track, options)` maps encoded frames
+  onto groups (a group per keyframe, or per frame) and can be called from a WebCodecs output callback without
+  awaiting: frames wait in a bounded backlog (`maxBacklog`), and when it overflows the writer drops rather than queues.
+  Every frame gets one `FrameOutcome`, and `keyframeNeeded` / `onKeyframeNeeded` say when the encoder should force a
+  keyframe. `createCatalogService` and `createDocumentService` serve the MSF catalog and the media timeline on every
+  relay subscription. The WebCodecs example publishes through all three.
 - `@mux/relay`: `subscriber.namespaceEvents({ prefix })` discovers which namespaces under a prefix are announced
   ([#259](https://github.com/muxinc/relay-sdks/issues/259)). The subscriber's SETUP now carries the SOLICIT option,
   so the relay advertises namespaces only when asked. A prefix overlapping one the connection already discovers is
