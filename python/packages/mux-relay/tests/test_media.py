@@ -550,7 +550,7 @@ class TestBacklog:
         assert sent_stamps(track) == [[0], [2], [3]]
         assert track.groups[0].aborts == [], "the frame being written is not touched"
 
-    async def test_a_cancelled_waiting_write_leaves_the_backlog(self) -> None:
+    async def test_a_cancelled_waiting_write_leaves_the_backlog_and_a_gap_in_the_gop(self) -> None:
         gate = asyncio.Event()
         track = FakeTrackWriter(block=gate)
         writer: FrameWriter[Sample] = FrameWriter(track)
@@ -565,10 +565,31 @@ class TestBacklog:
         await settle()
 
         assert writer.backlog == 1
+        assert writer.keyframe_needed, "the deltas after the cancelled one have nothing to decode against"
         gate.set()
-        assert (await first).kind == "sent" and (await third).kind == "sent"
+        assert (await first).kind == "sent"
+        assert (await third).kind == "skipped"
         assert second.cancelled()
-        assert sent_stamps(track) == [[0, 2]]
+        assert sent_stamps(track) == [[0]]
+        assert (await writer.write(key(3))).kind == "sent"
+
+    async def test_a_write_in_the_same_turn_as_a_demand_change_skips_the_retired_group(self) -> None:
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track)
+        assert await kinds(writer, [key(0)]) == ["sent"]
+
+        track.bind(True)  # no yield: the demand watch has not seen it yet
+        assert await kinds(writer, [delta(1)]) == ["skipped"]
+        assert writer.keyframe_needed
+
+    async def test_a_discontinuous_keyframe_is_the_recovery_and_asks_for_nothing(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+        assert await kinds(writer, [key(0), delta(1)]) == ["sent", "sent"]
+
+        assert await kinds(writer, [key(2, discontinuity=True)]) == ["sent"]
+        assert not writer.keyframe_needed and calls == []
 
     async def test_close_right_after_a_waiting_write_is_cancelled_still_closes(self) -> None:
         gate = asyncio.Event()
@@ -697,7 +718,7 @@ class TestKeyframeNeeded:
 
         assert calls == [True]
         assert await kinds(writer, [delta(2)]) == ["skipped"], "the old GOP cannot continue on the new subscription"
-        assert track.groups[0].aborts == [None] and not track.groups[0].finished
+        assert track.groups[0].closed and not track.groups[0].finished, "the slot ended it, not a FIN"
         assert await kinds(writer, [key(3), delta(4)]) == ["sent", "sent"]
         assert sent_stamps(track) == [[0, 1], [3, 4]]
 

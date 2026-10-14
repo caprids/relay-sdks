@@ -31,6 +31,11 @@ class FakeGroupWriter:
         self.aborted = asyncio.Event()
 
     @property
+    def closed(self) -> bool:
+        """True once the group was FINed or reset, as the real group writer reports."""
+        return self.finished or self.failure is not None
+
+    @property
     def payloads(self) -> list[bytes]:
         return [payload for payload, _ in self.objects]
 
@@ -98,8 +103,18 @@ class FakeTrackWriter:
         self._failures[(step, on)] = (error, retire)
 
     def bind(self, demand: bool) -> None:
-        """The relay subscribed (``True``, repeated for a replacement subscription) or unsubscribed."""
+        """The relay subscribed (``True``, repeated for a replacement subscription) or unsubscribed.
+
+        Like the write slot, this ends an open group at once: its next step raises ``SUBSCRIPTION_CHANGED``.
+        """
         self.has_demand = demand
+
+        for group in self.groups:
+            if not group.finished and group.failure is None:
+                group.failure = RelayError(
+                    "Relay subscription changed during a write or group", code="SUBSCRIPTION_CHANGED", phase="writing"
+                )
+                group.aborted.set()
 
         if not self.closed:
             for queue in self._watchers:

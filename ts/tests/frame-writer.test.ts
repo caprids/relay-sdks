@@ -123,6 +123,18 @@ describe('keyframe grouping', () => {
     }
   });
 
+  it('skips a delta written in the same turn as a demand change, before the watcher has seen it', async () => {
+    for (const value of [true, false]) {
+      const track = slotTrack();
+      const writer = createFrameWriter(track.writer);
+      await writer.write(key());
+      track.demand(value);
+      const next = await writer.write(delta());
+      expect([value, next.kind]).toEqual([value, 'skipped']);
+      expect(writer.keyframeNeeded).toBe(true);
+    }
+  });
+
   it('reports the frame being written when demand changes as interrupted by the write slot', async () => {
     const track = slotTrack();
     const writer = createFrameWriter(track.writer);

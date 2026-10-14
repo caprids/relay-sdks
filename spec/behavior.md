@@ -1197,7 +1197,9 @@ Implemented in both SDKs.
   output callback cannot await may call `write` without waiting for the previous one. Frames waiting
   behind the one being written are the writer's backlog, bounded by `maxBacklog` / `max_backlog` (a
   positive integer; default 8 under keyframe grouping, 25 under frame grouping). A caller that awaits
-  every write never has a backlog.
+  every write never has a backlog. A waiting write that is cancelled (Python; a TypeScript promise
+  cannot be) leaves the backlog, and under keyframe grouping leaves a gap the same way a drop does:
+  the open group is reset before the next frame, and a keyframe is needed.
 - A frame that arrives at a full backlog means the transport has fallen behind, and the writer drops
   rather than queues. Under keyframe grouping every waiting frame is dropped and the open group is
   reset at once; the frame being written into it, if any, is dropped too. The arriving frame then

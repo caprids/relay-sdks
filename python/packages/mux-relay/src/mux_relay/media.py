@@ -64,6 +64,9 @@ class _GroupWriter(Protocol):
     @property
     def group_id(self) -> int: ...
 
+    @property
+    def closed(self) -> bool: ...
+
     async def write(
         self,
         payload: bytes,
@@ -308,6 +311,12 @@ class FrameWriter(Generic[F]):
                     for index, waiting in enumerate(self._backlog):
                         if waiting is entry:
                             del self._backlog[index]
+
+                            if self._grouping == "keyframe":
+                                # The GOP now has a gap: the frames after this one cannot join it.
+                                self._reset_pending = True
+                                self._need_keyframe()
+
                             break
 
                 raise
@@ -457,6 +466,12 @@ class FrameWriter(Generic[F]):
             raise
 
     async def _map_into_gop(self, frame: F, epoch: int) -> FrameOutcome:
+        if self._group is not None and self._group.closed:
+            # The write slot ended the group when relay demand changed, which can be before the demand
+            # watch has run: the GOP in progress cannot continue.
+            self._group = None
+            self._need_keyframe()
+
         if self._reset_pending:
             # Relay demand changed since the last frame: the GOP in progress cannot continue.
             self._reset_pending = False
@@ -469,7 +484,10 @@ class FrameWriter(Generic[F]):
             # Whatever group is open depended on frames that will never be sent.
             reset = self._reset_group()
             self._recovering = True
-            self._need_keyframe()
+
+            if stale or not frame.key:
+                # A keyframe after the discontinuity is the recovery itself.
+                self._need_keyframe()
 
         if not stale and self._dropping and not frame.key:
             return FrameOutcome("dropped")

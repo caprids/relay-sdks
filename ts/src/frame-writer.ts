@@ -328,6 +328,12 @@ export function createFrameWriter<F extends Frame = Frame>(
       return { kind: 'ended', error: ended };
     }
     if (!keyframes) return ownGroup(frame);
+    if (group?.closed) {
+      // The write slot ended the group when relay demand changed, which can be before the demand watcher has run: the
+      // GOP in progress cannot continue.
+      group = undefined;
+      needKeyframe();
+    }
     if (resetBeforeNext) {
       resetBeforeNext = false;
       resetGroup();
