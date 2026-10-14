@@ -172,8 +172,12 @@ it('subtracts the capture latency of each microphone, asked again on every switc
   node.post(960);
   node.post(1920);
   expect(blocks.slice(1).map((block) => block.captureLatencyUs)).toEqual([30_000, 190_000]);
+  // The switch frame is rounded: 0.28 s × 48 kHz is 13440.000000000002 in floating point.
+  context.currentTime = 0.28;
   capture.useStream(undefined);
   expect(blocks[0]?.timeline.captureLatencyUs).toBe(0);
+  node.post(13_440);
+  expect(blocks.at(-1)?.captureLatencyUs).toBe(0);
   expect(asked).toEqual(['laptop', 'earbuds', undefined]);
 });
 

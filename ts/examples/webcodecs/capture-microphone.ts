@@ -167,7 +167,8 @@ export async function captureMicrophone(
     target.timeline.captureLatencyUs = latencyUs;
     // Blocks rendered before this frame came from the previous microphone, and some may still be queued on the port.
     const { currentTime = 0, sampleRate } = target.context;
-    target.latencies.push({ fromFrame: Math.ceil(currentTime * sampleRate), latencyUs });
+    // currentTime is a whole frame count over the rate; rounding undoes the float error (0.28 × 48000 = 13440.000…2).
+    target.latencies.push({ fromFrame: Math.round(currentTime * sampleRate), latencyUs });
     target.source?.disconnect();
     target.source = current ? target.context.createMediaStreamSource(current) : undefined;
     target.source?.connect(target.node);
