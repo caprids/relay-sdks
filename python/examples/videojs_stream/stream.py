@@ -39,7 +39,6 @@ from av.video.frame import PictureType
 from moq_media import (
     AUDIO_TRACK,
     CATALOG_TRACK,
-    LOC_TIMESTAMP,
     LOC_VIDEO_CONFIG,
     MICROSECONDS_PER_SECOND,
     TRACK_TIMESCALE_PROPERTIES,
@@ -52,6 +51,7 @@ from moq_media import (
     build_msf_end_catalog,
     compose_player_url,
     loc_properties,
+    loc_timestamp_us,
     parse_msf_catalog,
 )
 from mux_relay import (
@@ -243,6 +243,8 @@ class VideoEncoder:
         self._context = context
         self.width = width
         self.height = height
+        # Added to media time in the LOC Timestamp only: the wire carries Unix-epoch microseconds (media-layer.md).
+        self.epoch_us = 0
 
     def encode(self, frame: av.VideoFrame, *, keyframe: bool = False) -> list[EncodedSample]:
         # Always set: a frame decoded from a file carries its source's picture type, and with
@@ -261,7 +263,7 @@ class VideoEncoder:
             timestamp_us=timestamp_us,
             payload=annexb_to_avcc(bytes(packet)),
             key=key,
-            properties=loc_properties(timestamp_us, video_config=self.avcc if key else None),
+            properties=loc_properties(self.epoch_us + timestamp_us, video_config=self.avcc if key else None),
         )
 
 
@@ -281,6 +283,7 @@ class AudioEncoder:
         self._fifo = AudioFifo()
         self._origin_us: int | None = None
         self._samples_out = 0
+        self.epoch_us = 0  # as VideoEncoder.epoch_us
 
     def encode(self, frame: av.AudioFrame, timestamp_us: int) -> list[EncodedSample]:
         """Encode one decoded frame whose first sample plays at ``timestamp_us`` on the shared timeline."""
@@ -307,7 +310,7 @@ class AudioEncoder:
                         timestamp_us=timestamp,
                         payload=bytes(packet),
                         key=True,
-                        properties=loc_properties(timestamp),
+                        properties=loc_properties(self.epoch_us + timestamp),
                     )
                 )
 
@@ -504,6 +507,11 @@ class Producer:
             return len(container.streams.audio) > 0
 
     def start(self) -> None:
+        # Media time 0 is due now: pin it to the system clock so every track is stamped in epoch microseconds.
+        epoch_us = time.time_ns() // 1000
+        self.video.epoch_us = epoch_us
+        if self.audio is not None:
+            self.audio.epoch_us = epoch_us
         for queue in self._queues.values():
             queue.started = time.monotonic()
         self._thread.start()
@@ -1021,9 +1029,10 @@ async def verify(
 
         result.video_objects += 1
         groups.add(obj.group_id)
-        timestamp = next((p.value for p in obj.properties if p.type == LOC_TIMESTAMP), None)
+        # The relay may rescale timestamps; its SUBSCRIBE_OK declares the Timescale it delivers.
+        timestamp = loc_timestamp_us(obj.properties, track_properties=track_properties.get(VIDEO_TRACK, ()))
 
-        if not isinstance(timestamp, int):
+        if timestamp is None:
             problems.append("video object without a LOC timestamp")
             return
 
@@ -1045,6 +1054,7 @@ async def verify(
             result.audio_objects += 1
 
     subscribed: set[str] = set()
+    track_properties: dict[str, list[KeyValuePair]] = {}
     all_subscribed = asyncio.Event()
 
     def on_error(track: str) -> Callable[[BaseException], None]:
@@ -1059,7 +1069,8 @@ async def verify(
         return failed
 
     def on_subscribed(track: str) -> Callable[[Any, tuple[str, ...]], None]:
-        def accepted(_info: Any, _namespace: tuple[str, ...]) -> None:
+        def accepted(info: Any, _namespace: tuple[str, ...]) -> None:
+            track_properties[track] = list(getattr(info, "track_properties", ()))
             subscribed.add(track)
             if len(subscribed) == len(tracks):
                 all_subscribed.set()

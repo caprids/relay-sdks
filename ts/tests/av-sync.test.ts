@@ -38,7 +38,7 @@ it('finds tone onsets after enough quiet, across blocks and resets', () => {
 });
 
 it('pairs each emitted flash and beep with what the player showed and played', () => {
-  const originUs = 1_000_000;
+  const zeroUs = 1_000_000;
   const emitted = [
     { beepAtUs: 2_000_000, flashAtUs: 2_000_500 },
     // Nothing was heard for this one: it is left out.
@@ -53,7 +53,7 @@ it('pairs each emitted flash and beep with what the player showed and played', (
   const beeps = [{ timestampUs: 1_030_000, audibleAtUs: 2_135_000 }];
   // It reached the capture input 25 ms after it was emitted.
   const arrivals = [2_025_000];
-  expect(matchEvents(emitted, flashes, beeps, originUs, arrivals)).toEqual([
+  expect(matchEvents(emitted, flashes, beeps, zeroUs, arrivals)).toEqual([
     {
       beepAtUs: 2_000_000,
       heardAtUs: 2_135_000,
@@ -65,7 +65,7 @@ it('pairs each emitted flash and beep with what the player showed and played', (
       syncMs: 10,
     },
   ]);
-  expect(matchEvents(emitted, flashes, beeps, originUs)).toEqual([
+  expect(matchEvents(emitted, flashes, beeps, zeroUs)).toEqual([
     { beepAtUs: 2_000_000, heardAtUs: 2_135_000, offsetMs: 35, captureMs: 30, playoutMs: 5 },
   ]);
 });

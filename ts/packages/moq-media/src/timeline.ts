@@ -18,17 +18,17 @@ export interface MediaTimelineEntry {
 
 /** What {@link mediaTimelineEntry} needs to know about one object. */
 export interface MediaTimelineEntryInput {
-  /** The object's LOC timestamp on the broadcast timeline, in integer microseconds. */
+  /** The object's LOC timestamp, in integer microseconds. */
   timestampUs: number;
   /** The object's group ID. */
   group: number;
   /** The object's ID. Default 0, the group's first object. */
   object?: number;
   /**
-   * The broadcast's origin as Unix-epoch microseconds (`BroadcastClock.originEpochUs`). Without it the wall-clock
-   * time is 0, as msf-01 says for unknown wall-clock time.
+   * When that media was captured, in integer Unix-epoch microseconds. Defaults to `timestampUs`, which on the
+   * broadcast clock's timeline is that time; 0 means unknown, as msf-01 allows.
    */
-  originEpochUs?: number;
+  wallclockUs?: number;
 }
 
 function whole(value: number, name: string): number {
@@ -36,15 +36,14 @@ function whole(value: number, name: string): number {
   return value;
 }
 
-/** The record for one object of the indexed track, stamped from the broadcast timeline. */
+/** The record for one object of the indexed track. */
 export function mediaTimelineEntry(input: MediaTimelineEntryInput): MediaTimelineEntry {
   const timestampUs = whole(input.timestampUs, 'timestampUs');
-  const wallclockUs = input.originEpochUs === undefined ? 0 : whole(input.originEpochUs, 'originEpochUs') + timestampUs;
   return {
     mediaTimeMs: Math.floor(timestampUs / 1000),
     group: whole(input.group, 'group'),
     object: whole(input.object ?? 0, 'object'),
-    wallclockMs: Math.floor(whole(wallclockUs, 'wall-clock time') / 1000),
+    wallclockMs: Math.floor(whole(input.wallclockUs ?? timestampUs, 'wallclockUs') / 1000),
   };
 }
 

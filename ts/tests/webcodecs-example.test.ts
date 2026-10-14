@@ -222,14 +222,17 @@ function run(options: Parameters<typeof recordingPublisher>[0] = {}, microphone?
   const stop = new AbortController();
   const result = publishCanvas(canvas, recorded.publisher, ['demo'], {
     signal: stop.signal,
-    ...(microphone ? { microphone } : {}),
+    ...(microphone ? { microphone } : { clock: testClock() }),
   });
   return { ...recorded, stop, result };
 }
 
+/** A broadcast clock pinned at epoch 0, so timestamps count from its origin and read as the test's own times. */
+const testClock = () => createBroadcastClock({ originEpochUs: 0 });
+
 /** A microphone whose blocks the test delivers, with context 0 at broadcast time 5 ms. */
 function testMicrophone() {
-  const clock = createBroadcastClock();
+  const clock = testClock();
   const timeline = clock.sourceTimeline();
   timeline.calibrate(0, clock.originUs + 5_000);
   const microphone: MicrophoneCapture = {
@@ -472,7 +475,7 @@ it.each([
   },
 );
 
-it('encodes every block without audio demand, and sends nothing stamped before the origin', async () => {
+it('encodes every block without audio demand, and sends nothing stamped before the epoch', async () => {
   const mic = testMicrophone();
   const session = run({}, mic.microphone);
   const completion = expect(session.result).rejects.toThrow('Stopped');
@@ -483,7 +486,7 @@ it('encodes every block without audio demand, and sends nothing stamped before t
   mic.deliver(20_000);
   audio.demand(true);
   mic.deliver(40_000);
-  // A context whose time 0 came before the broadcast's origin: its first block has no place on the timeline.
+  // A context whose time 0 came before epoch 0 on this test clock: its first block has no place on the timeline.
   const early = mic.clock.sourceTimeline();
   early.calibrate(0, mic.clock.originUs - 10_000);
   mic.deliver(0, early);

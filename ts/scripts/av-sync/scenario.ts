@@ -158,7 +158,6 @@ export async function runAvSyncScenario(options: ScenarioOptions): Promise<Scena
     });
     await options.report({ phase: 'connected' });
 
-    // The clock first: nothing may be captured before its origin.
     const clock = createBroadcastClock();
     const first = await syntheticMicrophone(48_000);
     closers.push(() => first.close());
@@ -178,7 +177,11 @@ export async function runAvSyncScenario(options: ScenarioOptions): Promise<Scena
       second = await syntheticMicrophone(48_000);
     }
     closers.push(() => second.close());
-    const microphone = await captureMicrophone(clock, first.stream, { context: captureContext });
+    const microphone = await captureMicrophone(clock, first.stream, {
+      context: captureContext,
+      // Synthetic: the beep reaches the worklet with no device in between, and the tap below measures the path.
+      captureLatencyUs: () => 0,
+    });
     closers.push(() => microphone.close());
     // A tap on the microphone's own blocks times when each beep reached the capture input: the block's arrival on the
     // main thread, min-filtered as render-clock.ts does. That splits the path delay (a real microphone's input
@@ -203,7 +206,7 @@ export async function runAvSyncScenario(options: ScenarioOptions): Promise<Scena
         const atUs = renders.renderedAtUs(onsetUs);
         if (atUs === undefined) continue;
         arrivals.push(atUs);
-        stampVsArrivalMs.push(Math.round((block.timeline.timestampUs(onsetUs) - (atUs - clock.originUs)) / 100) / 10);
+        stampVsArrivalMs.push(Math.round((block.timeline.timestampUs(onsetUs) - clock.fromSourceUs(atUs)) / 100) / 10);
       }
       const { context } = microphone;
       const { contextTime = 0, performanceTime = 0 } = context.getOutputTimestamp();
@@ -332,7 +335,7 @@ export async function runAvSyncScenario(options: ScenarioOptions): Promise<Scena
     await sleep(1000);
     check();
 
-    const events = matchEvents(emitted, flashes, beeps, clock.originUs, arrivals);
+    const events = matchEvents(emitted, flashes, beeps, clock.originUs - clock.originEpochUs, arrivals);
     const sorted = [...formulaVsRenderMs].sort((a, b) => a - b);
     const percentile = (fraction: number) =>
       Math.round((sorted[Math.min(sorted.length - 1, Math.floor(fraction * sorted.length))] ?? Number.NaN) * 10) / 10;

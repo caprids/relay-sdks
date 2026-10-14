@@ -44,6 +44,7 @@ from .loc import (
     TRACK_TIMESCALE_PROPERTIES,
     VIDEO_TRACK,
     loc_properties,
+    loc_timestamp_us,
     loc_track_properties,
 )
 from .source import (
@@ -99,6 +100,7 @@ __all__ = [
     "extract_parameter_sets",
     "iter_annexb_nal_units",
     "loc_properties",
+    "loc_timestamp_us",
     "loc_track_properties",
     "media_timeline_entry",
     "nal_unit_type",

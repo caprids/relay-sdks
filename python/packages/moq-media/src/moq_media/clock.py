@@ -1,4 +1,4 @@
-"""One timeline per broadcast, and a playout clock for audio/video sync.
+"""One timeline for every broadcast, anchored at the Unix epoch, and a playout clock for audio/video sync.
 
 Neither clock touches a transport or an output device: both read an injected monotonic microsecond source. See
 ``spec/media-layer.md``, "Shared timeline and playout clock".
@@ -57,13 +57,27 @@ class SourceTimeline:
     """Maps timestamps from a clock with its own origin and rate onto the broadcast timeline.
 
     Calibrate it with measured pairs of source time and time on the broadcast clock's own source; without a
-    calibration, the first timestamp mapped is anchored at the clock's ``now_us()``.
+    calibration, the first timestamp mapped is anchored at the clock's ``now_us()``. ``capture_latency_us`` is
+    subtracted from every timestamp.
     """
 
-    def __init__(self, clock: "BroadcastClock", tolerance_us: int) -> None:
+    def __init__(self, clock: "BroadcastClock", tolerance_us: int, capture_latency_us: int = 0) -> None:
         self._clock = clock
         self._tolerance_us = tolerance_us
+        self._capture_latency_us = _integer(capture_latency_us, "capture_latency_us", 0)
         self._anchor: tuple[float, int] | None = None
+
+    @property
+    def capture_latency_us(self) -> int:
+        """The capture device's input delay in integer microseconds, subtracted from every timestamp.
+
+        Set it again when the input device changes; it applies from the next timestamp and never to calibration.
+        """
+        return self._capture_latency_us
+
+    @capture_latency_us.setter
+    def capture_latency_us(self, value: int) -> None:
+        self._capture_latency_us = _integer(value, "capture_latency_us", 0)
 
     @property
     def anchor_source_us(self) -> float | None:
@@ -85,7 +99,7 @@ class SourceTimeline:
         return True
 
     def timestamp_us(self, source_us: int) -> int:
-        """Return the broadcast time of this source timestamp, rounded to whole microseconds.
+        """Return the broadcast time of this source timestamp, rounded to whole microseconds, less the capture latency.
 
         Without an anchor, the first call anchors this timestamp at the clock's ``now_us()``.
         """
@@ -93,16 +107,17 @@ class SourceTimeline:
         if self._anchor is None:
             self._anchor = (source_us, self._clock.now_us())
         anchor_source, anchor_timestamp = self._anchor
-        return anchor_timestamp + _round(source_us - anchor_source)
+        return anchor_timestamp + _round(source_us - anchor_source) - self._capture_latency_us
 
 
 class BroadcastClock:
-    """A publisher's single clock: every track in the broadcast is stamped from it, in microseconds since its origin.
+    """A publisher's single clock: every track in the broadcast is stamped from it, in Unix-epoch microseconds.
 
-    ``now_us`` is the time source in microseconds, ``time.monotonic_ns() // 1000`` by default. ``origin_us`` is the
-    broadcast's zero on that source in integer microseconds, at or before the first capture; it defaults to the
-    source's time now, rounded to whole microseconds. ``origin_epoch_us`` is that origin as Unix-epoch microseconds;
-    it defaults to ``time.time_ns()`` at creation less the source time elapsed since the origin, read once.
+    ``now_us`` is the monotonic time source in microseconds, ``time.monotonic_ns() // 1000`` by default.
+    ``origin_us`` is a moment on that source in integer microseconds; it defaults to the source's time now, rounded
+    to whole microseconds. ``origin_epoch_us`` is that moment as Unix-epoch microseconds; it defaults to
+    ``time.time_ns()`` at creation less the source time elapsed since the origin, read once. A time ``t`` on the
+    source maps to ``origin_epoch_us + t - origin_us``, so the timeline advances at the source's rate.
     """
 
     def __init__(
@@ -122,35 +137,36 @@ class BroadcastClock:
 
     @property
     def origin_us(self) -> int:
-        """The broadcast's zero, on the source clock."""
+        """The origin, on the source clock."""
         return self._origin_us
 
     @property
     def origin_epoch_us(self) -> int:
-        """The broadcast's zero as microseconds since the Unix epoch: the wall-clock time media timeline entries use."""
+        """The origin as microseconds since the Unix epoch."""
         return self._origin_epoch_us
 
     def now_us(self) -> int:
-        """Return the microseconds since the broadcast started."""
+        """Return the timeline now: microseconds since the Unix epoch."""
         return self.from_source_us(self._source())
 
     def from_source_us(self, source_us: int) -> int:
-        """Map a timestamp on this clock's own source to the broadcast timeline, rounded to whole microseconds.
+        """Map a timestamp on this clock's own source to Unix-epoch microseconds, rounded to whole microseconds.
 
-        A time before the origin maps to a negative number, which the LOC helpers refuse. For a capture clock with
-        another origin, use :meth:`source_timeline`.
+        For a capture clock with another origin, use :meth:`source_timeline`.
         """
-        return _round(_finite(source_us, "source_us") - self._origin_us)
+        return self._origin_epoch_us + _round(_finite(source_us, "source_us") - self._origin_us)
 
-    def source_timeline(self, *, tolerance_us: int = 5_000) -> SourceTimeline:
+    def source_timeline(self, *, tolerance_us: int = 5_000, capture_latency_us: int = 0) -> SourceTimeline:
         """Map a clock with its own origin and rate, kept on the broadcast timeline by calibration.
 
         An ``AudioContext``-style clock, or capture timestamps from another origin. ``tolerance_us`` is how far a
-        calibration may disagree with the current anchor before it replaces it.
+        calibration may disagree with the current anchor before it replaces it. ``capture_latency_us`` is the
+        capture device's input delay, subtracted from every timestamp; no helper knows it, so the application
+        supplies it and sets it again when the device changes.
         """
         if _finite(tolerance_us, "tolerance_us") < 0:
             raise ValueError("tolerance_us must not be negative")
-        return SourceTimeline(self, tolerance_us)
+        return SourceTimeline(self, tolerance_us, capture_latency_us)
 
     def sample_timeline(self, sample_rate: int, *, first_sample_us: int | None = None) -> SampleTimeline:
         """Anchor a sample counter at ``first_sample_us`` on the timeline (default: now).

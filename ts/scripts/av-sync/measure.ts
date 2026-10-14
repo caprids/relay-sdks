@@ -97,8 +97,9 @@ export interface MatchedEvent {
 }
 
 /**
- * Pair each emitted event with the flash frame and the beep the player reported. `originUs` is the broadcast clock's
- * origin on the same `performance.now()` clock, which turns broadcast timestamps into capture times. A flash's frame is
+ * Pair each emitted event with the flash frame and the beep the player reported. `zeroUs` is where broadcast timestamp
+ * 0 falls on the same `performance.now()` clock (`clock.originUs − clock.originEpochUs`), which turns broadcast
+ * timestamps into capture times. A flash's frame is
  * the first one stamped at or after the canvas turned white, within `windowUs`; its beep is the onset nearest the
  * emitted beep, within `windowUs`. Events missing either are left out. `arrivals` are when beep onsets reached the
  * capture input, on the same clock; the first within `windowUs` after an emission splits off the path delay.
@@ -107,25 +108,25 @@ export function matchEvents(
   emitted: readonly EmittedEvent[],
   flashes: readonly ShownFlash[],
   beeps: readonly HeardBeep[],
-  originUs: number,
+  zeroUs: number,
   arrivals: readonly number[] = [],
   windowUs = 200_000,
 ): MatchedEvent[] {
   const matched: MatchedEvent[] = [];
   const ms = (us: number) => Math.round(us / 100) / 10;
   for (const event of emitted) {
-    const flashTimestampUs = event.flashAtUs - originUs;
+    const flashTimestampUs = event.flashAtUs - zeroUs;
     const flash = flashes
       .filter((candidate) => candidate.timestampUs >= flashTimestampUs - 1_000)
       .filter((candidate) => candidate.timestampUs < flashTimestampUs + windowUs)
       .sort((a, b) => a.timestampUs - b.timestampUs)[0];
-    const beepTimestampUs = event.beepAtUs - originUs;
+    const beepTimestampUs = event.beepAtUs - zeroUs;
     const beep = beeps
       .filter((candidate) => Math.abs(candidate.timestampUs - beepTimestampUs) < windowUs)
       .sort((a, b) => Math.abs(a.timestampUs - beepTimestampUs) - Math.abs(b.timestampUs - beepTimestampUs))[0];
     if (!flash || !beep) continue;
     const audioDelayUs = beep.audibleAtUs - event.beepAtUs;
-    const videoDelayUs = flash.shownAtUs - (flash.timestampUs + originUs);
+    const videoDelayUs = flash.shownAtUs - (flash.timestampUs + zeroUs);
     const offsetUs = audioDelayUs - videoDelayUs;
     const captureUs = beep.timestampUs - beepTimestampUs;
     const arrivalUs = arrivals

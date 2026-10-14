@@ -68,7 +68,9 @@ class MediaTimelineTrackInfo:
 
     name: str = MEDIA_TIMELINE_TRACK
     depends: Sequence[str] | None = None
-    """The video or audio track the timeline's locations point into. Default: the video track, else the audio track."""
+    """The video and audio tracks the timeline applies to (msf-01 §7.2); its locations point into the first.
+
+    Default: the video track followed by the audio track, whichever the catalog has."""
 
 
 _MEDIA_ROLES = frozenset({"video", "audio", "caption", "subtitle", "audiodescription", "signlanguage"})
@@ -114,7 +116,7 @@ def build_msf_catalog(
     if media_timeline is not None:
         if isinstance(media_timeline.depends, str):
             raise ValueError("media timeline depends must be a sequence of track names, not a string")
-        depends = list(media_timeline.depends if media_timeline.depends is not None else media_names[:1])
+        depends = list(media_timeline.depends if media_timeline.depends is not None else media_names)
         if not depends or len(set(depends)) != len(depends) or any(name not in media_names for name in depends):
             raise ValueError("media timeline depends must name distinct video or audio tracks of this catalog")
     namespace_text = "/".join(namespace)

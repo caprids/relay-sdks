@@ -33,20 +33,20 @@ def _whole(value: object, name: str) -> int:
 
 
 def media_timeline_entry(
-    timestamp_us: int, group: int, *, object: int = 0, origin_epoch_us: int | None = None
+    timestamp_us: int, group: int, *, object: int = 0, wallclock_us: int | None = None
 ) -> MediaTimelineEntry:
     """Return the record for an object whose LOC timestamp on the broadcast timeline is ``timestamp_us``.
 
-    ``origin_epoch_us`` is the broadcast's origin as Unix-epoch microseconds (``BroadcastClock.origin_epoch_us``);
-    without it the wall-clock time is 0, as msf-01 says for unknown wall-clock time.
+    ``wallclock_us`` is when that media was captured, as Unix-epoch microseconds. It defaults to ``timestamp_us``,
+    since the broadcast timeline is anchored at the epoch; pass 0 for unknown, as msf-01 allows.
     """
     _whole(timestamp_us, "timestamp_us")
-    wallclock_us = 0 if origin_epoch_us is None else _whole(origin_epoch_us, "origin_epoch_us") + timestamp_us
+    wallclock = timestamp_us if wallclock_us is None else _whole(wallclock_us, "wallclock_us")
     return MediaTimelineEntry(
         media_time_ms=timestamp_us // 1000,
         group=_whole(group, "group"),
         object=_whole(object, "object"),
-        wallclock_ms=_whole(wallclock_us, "wall-clock time") // 1000,
+        wallclock_ms=wallclock // 1000,
     )
 
 

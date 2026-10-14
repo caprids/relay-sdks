@@ -1037,6 +1037,14 @@ to both languages.
   Callers supply configs only on keyframes. Timestamps arrive in microseconds; other timescales
   round to the nearest integer tick, ties upward. Inputs and the resulting tick count must be
   nonnegative safe integers (at most 2^53−1); the timescale must be positive.
+- The LOC timestamp reader (`locTimestampUs` / `loc_timestamp_us`, issue #290) returns an object's
+  Timestamp (0x10) in microseconds, or nothing when the object has no Timestamp that is a
+  nonnegative safe integer. It scales by the first Timescale that is a positive safe integer,
+  looking at the object's Timescale (0x08), then the track properties' (as `SUBSCRIBE_OK` carries
+  them), then the catalog's `timescale`, and skipping any other value. The result is
+  `round(value × 1,000,000 / timescale)`, ties upward. With no Timescale it is the value itself,
+  LOC's wall-clock microseconds. A result past 2^53−1 reads as nothing. Pinned by `vectors/media.json`
+  `locTimestamps`.
 - The independent MSF catalog is compact UTF-8 JSON with `version: "draft-01"` and explicit
   per-track namespace, LOC packaging, and live status. It omits `isComplete`: msf-01 §5.1.3 forbids
   the field while false and forbids removing it once added. Absent optional fields are
@@ -1101,17 +1109,20 @@ to both languages.
   empty string and absent `isLive` as false. `initRef` resolves through `initDataList` to bytes;
   an unresolved reference leaves the track without init data. Every builder document must read
   back as its vector's `parsed` value.
-- One timeline per broadcast, and the playout clock
-  ([media-layer.md](media-layer.md#shared-timeline-and-playout-clock), issue #285): every LOC media
-  track one catalog lists is stamped in microseconds from one origin at or before the first capture,
-  with Timescale declared on the track. A timeline belongs to one catalog namespace, so a new
-  supervised generation starts a new one. The broadcast clock (`createBroadcastClock` /
-  `BroadcastClock`) has an integer-microsecond origin. It maps times on its own source as
-  `source − origin`, rounded to whole microseconds with ties upward. It maps a capture clock with
-  another origin and rate (an `AudioContext`, Chromium's `MediaStreamTrackProcessor`) through a
-  source timeline: `anchor + round(s − anchor s)`. A calibration pair `(s, at)` re-anchors when there
-  is no anchor, or when the anchor is off by more than `toleranceUs` (5 ms). Uncalibrated, the first
-  timestamp anchors at `now()`. No helper knows a microphone's input latency (#290). It maps sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
+- One timeline, and the playout clock
+  ([media-layer.md](media-layer.md#shared-timeline-and-playout-clock), issues #285 and #290): every
+  LOC media track one catalog lists is stamped in microseconds since the Unix epoch, its capture
+  time on the publisher's system clock, with Timescale 1,000,000 declared on the track. The
+  broadcast clock (`createBroadcastClock` / `BroadcastClock`) pins an integer-microsecond origin
+  on its monotonic source (`originUs`) to an integer Unix-epoch time (`originEpochUs`). It maps
+  times on its own source as `originEpochUs + source − originUs`, rounded to whole microseconds
+  with ties upward. It maps a capture clock with another origin and rate (an `AudioContext`,
+  Chromium's `MediaStreamTrackProcessor`) through a source timeline:
+  `anchor + round(s − anchor s) − captureLatencyUs`. A calibration pair `(s, at)` re-anchors when
+  there is no anchor, or when the anchor (without the capture latency) is off by more than
+  `toleranceUs` (5 ms). Uncalibrated, the first timestamp anchors at `now()`. The capture latency
+  defaults to 0, must be a nonnegative safe integer, and can be changed between timestamps; no
+  helper knows a device's latency. It maps sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
   (`createPlayoutClock` / `PlayoutClock`) is master-audio: its position is the latest audio report
   plus elapsed local time. It paces by wall clock while idle, after `stopAudio` / `stop_audio`,
   and after `audioTimeoutUs` (500 ms) without a report arriving (measured from arrival, not
@@ -1124,9 +1135,9 @@ to both languages.
   issue #291). The broadcast clock's `originEpochUs` / `origin_epoch_us` is the origin as integer
   Unix-epoch microseconds: as given, or else read once at creation as the system clock
   (`Date.now()`, `time.time_ns()`) less the source time elapsed since the origin. An entry for a
-  timeline timestamp `t` and location `(g, o)` (object defaults to 0) is
-  `[floor(t / 1000), [g, o], floor((originEpochUs + t) / 1000)]`, with 0 as the wall-clock time when no
-  epoch is given. Every number must be a nonnegative safe integer, the wall-clock sum included.
+  timeline timestamp `t`, location `(g, o)` (object defaults to 0) and wall-clock time `w`
+  (defaults to `t`, the epoch-anchored timeline; 0 means unknown) is
+  `[floor(t / 1000), [g, o], floor(w / 1000)]`. Every number must be a nonnegative safe integer.
   The document builder encodes entries in the order given as compact JSON. The reader rejects a
   payload that is not a UTF-8 JSON array (no byte-order mark, no `NaN`/`Infinity`). It reads a
   record whose first three items are a number, an array whose first two items are numbers, and a
@@ -1134,7 +1145,7 @@ to both languages.
   It does not decompress. The catalog builder's
   optional timeline description emits one entry after video and audio and before data:
   `packaging` and `role` `mediatimeline`, `mimetype` `application/json`, `isLive`, and `depends`.
-  `depends` defaults to the video track's name, else the audio track's. Each name must be a
+  `depends` defaults to the video track's name followed by the audio track's, whichever exist. Each name must be a
   video or audio track of the same catalog, and the list must be non-empty with no duplicates.
   Names listed but withheld pending init data are left out, and the entry is withheld when none
   remains. The timeline's name defaults to `timeline` and joins the uniqueness check. The catalog

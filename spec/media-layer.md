@@ -240,24 +240,47 @@ symmetric with `read_text` and `read_json`:
 - Turn an object plus the track's received timescale into a frame: payload, timestamp in
   microseconds, keyframe flag from object ID 0, and any config property that survived the relay.
   Video.js's `toLocFrame` is the reference, including its acceptance of the draft-03 timestamp ID.
+  Its timestamp part ships as `locTimestampUs` / `loc_timestamp_us`
+  ([issue #290](https://github.com/muxinc/relay-sdks/issues/290)): an object's Timestamp in
+  microseconds, scaled by the first Timescale it finds on the object, then in the track properties
+  (`SUBSCRIBE_OK`'s, as the relay sends them), then in the catalog. With none, the Timestamp already
+  is microseconds since the epoch (LOC §2.3.1.1). Reading `0x10` as raw microseconds works against
+  moq-relay only because it rescales every timestamp to microseconds and declares Timescale
+  1,000,000; a relay that passes the publisher's Timescale through needs the scaling.
 
 ## Shared timeline and playout clock
 
 [Issue #285](https://github.com/muxinc/relay-sdks/issues/285). Implemented in both format packages;
 [behavior.md](behavior.md#media-helpers) holds the testable rules.
 
-### One timeline per broadcast
+### One timeline, anchored at the Unix epoch
 
 A broadcast is the set of media tracks one MSF catalog lists. Its publisher stamps every one of
 them from one broadcast clock:
 
-- The LOC Timestamp of each object is the presentation time of its first sample, in microseconds
-  since the broadcast's origin. The origin is a moment at or before the first capture on any track,
-  so no track needs a negative timestamp. Each track declares Timescale 1,000,000
-  (`locTrackProperties` / `loc_track_properties`).
-- Audio and video share that origin. A track never starts its own count at zero: audio stamped from
+- The LOC Timestamp of each object is the presentation time of its first sample: its capture time,
+  in microseconds since the Unix epoch on the publisher's system clock. Each track declares
+  Timescale 1,000,000 (`locTrackProperties` / `loc_track_properties`). That is LOC's own default
+  unit and zero (draft-04 §2.3.1.1: without a Timescale, the Timestamp is wall-clock microseconds
+  since the epoch). The Timescale is declared anyway because moq-relay replaces the Timestamp of a
+  track without one with its own clock (see below). With a Timescale, LOC §2.3.1.2 leaves the
+  anchor to the application, and this convention fixes it at the epoch.
+- Audio and video share that anchor. A track never starts its own count at zero: audio stamped from
   a sample counter is anchored at the broadcast time of its first sample, and video stamped from
-  capture timestamps is shifted by the same origin as everything else.
+  capture timestamps is mapped onto the same epoch as everything else.
+- Every broadcast on this convention shares one unit and one zero, so timestamps line up across
+  catalogs as well as within one: huddle participants, a third-party data track, several viewers
+  playing in lockstep. That is the only binding between catalogs that the drafts define (msf-01
+  §5.2.8 `targetLatency`, §7 Media Timeline, §8 Event Timeline, all in wall-clock time). How well
+  two broadcasts line up is bounded by how far apart their publishers' system clocks are, and by
+  each publisher's capture-latency error (see [Capture latency](#capture-latency)).
+- [Issue #290](https://github.com/muxinc/relay-sdks/issues/290) chose this over #285's original
+  convention, which zeroed each broadcast at its own monotonic origin. Under that convention a
+  player could reach wall-clock time only through the millisecond-resolution Media Timeline, which
+  rules out honouring `targetLatency` per frame and leaves syncing between broadcasts undefined.
+  The cost is that a publisher with a wrong system clock now produces wrong wall-clock times, and
+  that nothing in msf-01 signals which anchor a broadcast uses: a player that reads these
+  timestamps as wall-clock time relies on this convention.
 - The catalog puts the video and audio entries in one render group: `renderGroup: 1` (msf-01
   §5.2.11, "tracks with the same group number SHOULD be rendered simultaneously"). That is
   msf-01's way to say tracks play together, and moq-rs catalogs already send it. There is no
@@ -265,15 +288,13 @@ them from one broadcast clock:
   builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be identical within
   a render group. The catalog reader returns `renderGroup` as declared. The Video.js MoQ player
   parses it but does not act on it yet.
-- Without a declared Timescale, LOC defines the Timestamp as wall-clock microseconds since the
-  Unix epoch. With one, the zero point is the application's, and this convention fixes it at the
-  broadcast's origin. The broadcast clock records that origin's wall-clock time, and msf-01's
-  Media Timeline track (§7) publishes the mapping: see [Media Timeline track](#media-timeline-track).
-- A timeline belongs to one catalog namespace. A supervised publisher's next generation is a new
-  broadcast with a new origin. A player resets its playout clock wherever it resets its decoders:
-  at a Restart, at a Move, and on a new catalog.
-- Timelines of different broadcasts are unrelated. Syncing between broadcasts or participants is
-  out of scope.
+- A supervised publisher's next generation is a new broadcast with a new broadcast clock. Its
+  timestamps continue on the same epoch, less any step in the system clock between the two
+  clocks' creation. A player still resets its playout clock wherever it resets its decoders: at a
+  Restart, at a Move, and on a new catalog.
+- The playout clock below syncs the tracks of one broadcast. Playing several broadcasts in lockstep
+  (msf-01 §5.2.9: "Players with identical buffer lengths are likely to be synchronized") needs no
+  more than a shared target latency on the viewer's own wall clock, and is left to the player.
 
 What the relay does to timestamps is in
 [Relay property handling](behavior.md#relay-property-handling). A track with a declared timescale
@@ -284,9 +305,14 @@ the timescale on every media track. The format helpers do this by default.
 
 ### Broadcast clock (publisher)
 
-`createBroadcastClock()` / `BroadcastClock()` fixes the origin and maps the common timestamp
-sources onto the timeline. It reads an injected monotonic microsecond source. The default source
-is `performance.now()` in TypeScript and `time.monotonic_ns()` in Python.
+`createBroadcastClock()` / `BroadcastClock()` pins one moment on a monotonic source to the system
+clock, and maps the common timestamp sources onto the epoch timeline from there. It reads an
+injected monotonic microsecond source. The default source is `performance.now()` in TypeScript and
+`time.monotonic_ns()` in Python. The pinned moment is the origin: `originUs` on the source and
+`originEpochUs` on the epoch (see [The origin's wall-clock time](#the-origins-wall-clock-time) for
+how the system clock is read). A time on the source maps to `originEpochUs + (t − originUs)`, so
+the timeline advances at the monotonic source's rate and an NTP step during the broadcast does not
+move it.
 
 Every other clock a publisher reads has its own origin, and often its own rate. A source timeline
 maps one of them onto the broadcast timeline. The application calibrates it with measured pairs:
@@ -298,12 +324,13 @@ A timeline never calibrated anchors its first timestamp at the moment it arrives
 | Operation | TypeScript | Python | Result |
 | --- | --- | --- | --- |
 | Origin, on the source clock | `originUs` | `origin_us` | Integer µs; defaults to the source's time at creation, rounded |
-| Origin, as wall-clock time | `originEpochUs` | `origin_epoch_us` | Integer µs since the Unix epoch; defaults to the system clock at creation less the time since the origin (see [Media Timeline track](#media-timeline-track)) |
-| Time on the timeline now | `now()` | `now_us()` | `source − origin`, integer µs |
-| Map a time on the clock's own source | `fromSourceUs(t)` | `from_source_us(t)` | `t − origin`, rounded to integer µs, ties upward |
-| Map a clock with another origin | `sourceTimeline({ toleranceUs })` | `source_timeline(tolerance_us=)` | A mapper; tolerance defaults to 5,000 |
+| Origin, as wall-clock time | `originEpochUs` | `origin_epoch_us` | Integer µs since the Unix epoch; defaults to the system clock at creation less the time since the origin |
+| Time on the timeline now | `now()` | `now_us()` | `originEpochUs + source − originUs`, integer µs |
+| Map a time on the clock's own source | `fromSourceUs(t)` | `from_source_us(t)` | `originEpochUs + t − originUs`, rounded to integer µs, ties upward |
+| Map a clock with another origin | `sourceTimeline({ toleranceUs, captureLatencyUs })` | `source_timeline(tolerance_us=, capture_latency_us=)` | A mapper; tolerance defaults to 5,000, capture latency to 0 |
 | Measured pair | `timeline.calibrate(s, at?)` | `timeline.calibrate(s, at_us=)` | Re-anchors (returns true) when unanchored or off by more than the tolerance |
-| Source time to timestamp | `timeline.timestampUs(s)` | `timeline.timestamp_us(s)` | `anchor + round(s − anchor s)`; unanchored, the first call anchors at `now()` |
+| Source time to timestamp | `timeline.timestampUs(s)` | `timeline.timestamp_us(s)` | `anchor + round(s − anchor s) − captureLatencyUs`; unanchored, the first call anchors at `now()` |
+| Change the capture latency | `timeline.captureLatencyUs = n` | `timeline.capture_latency_us = n` | Integer µs, at least 0; applies to later timestamps, not to calibration |
 | Anchor a sample counter | `sampleTimeline(rate, { firstSampleUs })` | `sample_timeline(rate, first_sample_us=)` | A mapper; the anchor defaults to `now()` |
 | Sample index to timestamp | `timeline.timestampUs(n)` | `timeline.timestamp_us(n)` | `anchor + floor(n × 1,000,000 / rate)` |
 
@@ -359,21 +386,53 @@ default, because Firefox has none and Safari's handles video only, in workers (M
   Map them through an uncalibrated source timeline. The first frame's capture-to-callback delay
   becomes a constant offset of a few milliseconds.
 
-No browser API reports a microphone's own input latency. Bluetooth input can arrive 100–200 ms
-later than a built-in microphone, and a timeline built from when samples reach the page cannot see
-that. Audio from such a device is stamped late by that amount, so a player plays it late against
-video. Subtract a known capture latency from the audio timestamps if you have one. Measuring it on
-real devices is [issue #290](https://github.com/muxinc/relay-sdks/issues/290), with the
-[device latency lab](../tools/device-latency/README.md).
+#### Capture latency
+
+No browser API reports a microphone's own input latency. A timeline built from when samples reach
+the page cannot see the time before that, so audio is stamped late by it, a player plays it late
+against video, and on the shared epoch it is late against every other participant too. Chromium's
+`MediaStreamTrack.getSettings().latency` does not help: it read 2.7 ms for the built-in microphone
+and 5.3 ms for AirPods below, against real delays of about 30 ms and 190 ms.
+
+A source timeline subtracts a capture latency the application supplies, `captureLatencyUs` /
+`capture_latency_us`, from every timestamp it returns, so the Timestamp keeps LOC's meaning: the
+presentation time of the first sample. Calibration pairs are unaffected. Set it when the source
+timeline is created and again whenever the input device changes; a change applies from the next
+timestamp. The helpers ship no device table. An application that knows its devices sets the
+latency per device. The WebCodecs example estimates from the microphone's label: 190 ms for a
+Bluetooth headset (a label containing "AirPods" or "Bluetooth"), 30 ms otherwise.
+
+Measured with the [device latency lab](../tools/device-latency/README.md) on macOS 26.6 (MacBook
+Air, Chrome and Firefox, 2026-10-13; raw results on
+[issue #290](https://github.com/muxinc/relay-sdks/issues/290)). The figure is how late the capture
+recipe stamps a click, net of what the browser reports for the output path:
+
+| Input | Output | Chrome | Firefox |
+| --- | --- | --- | --- |
+| Built-in microphone | Built-in speakers | 30 ms | 35–38 ms |
+| AirPods microphone | Built-in speakers | 162–192 ms | — (no clean run) |
+| Built-in microphone, AirPods mic open (call mode) | AirPods | 470 ms | 117 ms, with the output misreported |
+| AirPods microphone, call mode | AirPods | 600 ms | 511 ms |
+
+The AirPods microphone delivers about 160 ms later than the built-in one; a reference-microphone
+run (161.8 ms) and a clap run (157.8 ms) agree. Call mode, which macOS enters whenever an
+application opens the AirPods microphone while playing to them, is 470–600 ms off in both browsers,
+and its output delay moves too, so no constant corrects it well.
+
+The same runs show the output side, which the playout clock reads from `outputLatency`. On AirPods
+in music mode, Chrome reports 171 ms and misses about 30 ms more. Firefox keeps reporting 34 ms and
+misses about 320 ms. After a switch back to the speakers, Firefox's `outputLatency` stays at the
+AirPods value (165 ms), and Chrome keeps about 44 ms of extra error. Both are player-side errors:
+the playout clock plays audio that much late, or early, and no publisher correction reaches them.
 
 #### Stamping
 
-A source time before the origin maps to a negative number, which the LOC helpers refuse. That frame
-was captured before the broadcast started: create the clock before you start capturing, or pass the
-earliest capture time as the origin. Stamp the encoder's input (`new VideoFrame(frame, { timestamp })`,
-the `AudioData` timestamp) and the encoded chunks carry the timeline, so `chunkToLocFrame` passes it
-through unchanged. If a chunk still carries the clock's own source time, `timestampOffsetUs:
--clock.originUs` maps it; the origin is a whole number of microseconds so that offset is valid.
+Stamp the encoder's input (`new VideoFrame(frame, { timestamp })`, the `AudioData` timestamp) and
+the encoded chunks carry the timeline, so `chunkToLocFrame` passes it through unchanged. WebCodecs
+timestamps are 64-bit microseconds, so epoch values fit. If a chunk still carries the clock's own
+source time, `timestampOffsetUs: clock.originEpochUs - clock.originUs` maps it; both are whole
+microseconds, so that offset is valid. A camera has a capture latency too, typically a frame or
+two; subtract it from the video timestamps if you know it.
 A sample timeline suits sources with no clock of their own to calibrate against, such as a file
 or a synthetic tone. A live device's counter drifts against the monotonic source by up to about
 100 ppm, and it changes rate and stalls when the device changes. Use a calibrated source timeline
@@ -480,6 +539,10 @@ dropped frame and no pause between frames longer than 44 ms. With the defaults (
 outlier came at startup: the first flash, emitted before any audio had reached the player, was off
 by −246 ms while the clock was still pacing by the wall clock.
 
+A re-run on 2026-10-14, after #290 moved every timestamp onto the Unix epoch, gave the same
+picture with 8 s phases: settled means between 2.2 and 5.3 ms in Chromium through the Relay and
+between −3.6 and 0.8 ms in Firefox through the hub, with no frame dropped in either.
+
 The same runs show how far `getOutputTimestamp()`'s capture formula lands from the render clock.
 In Chromium it was +5 ms (median; p5 −1, p95 16). In Firefox it was −48 ms (p5 −50, p95 −42),
 which would stamp audio that much early. With players reporting from `getOutputTimestamp()`, Firefox
@@ -503,15 +566,13 @@ WebTransport session to the Relay, and its `getOutputTimestamp()` is seconds off
 format packages; [behavior.md](behavior.md#media-helpers) holds the testable rules. Publishing the
 track over a connection is not implemented yet.
 
-The broadcast timeline is zeroed at the broadcast's origin on a monotonic clock, so nothing in a
-LOC timestamp says what time it was. msf-01's Media Timeline track (§7) is the standard way to say
-it: an optional track, announced in the catalog, whose records map media time and an MOQT location
-to wall-clock time. It is MSF's counterpart of HLS `PROGRAM-DATE-TIME`, and it is what seeking
-behind the live edge, generating HLS or DASH playlists, and lining up broadcasts from different
-publishers need. The other option, zeroing the timeline at the Unix epoch so LOC timestamps carry
-wall-clock time directly, would read as wall-clock time even when the publisher's clock is wrong,
-and the relay replaces such stamps anyway (see
-[Relay property handling](behavior.md#relay-property-handling)).
+msf-01's Media Timeline track (§7) is an optional track, announced in the catalog, whose records
+map media time and an MOQT location to wall-clock time. It is MSF's counterpart of HLS
+`PROGRAM-DATE-TIME`. Since #290 the broadcast timeline is itself wall-clock time, so a player that
+knows this convention does not need the track to learn when a frame was captured; one that does
+not can still read it here. What the track also gives is the map from time to location:
+seeking behind the live edge, and generating HLS or DASH playlists, need to know which group to
+fetch for a given time, and a LOC timestamp is only visible once the object has arrived.
 
 ### Entries
 
@@ -521,13 +582,15 @@ wallclockMs]` (msf-01 §7.1.1):
 - `mediaTimeMs` is the media time of the first sample in the referenced object, floored to whole
   milliseconds: `floor(timestampUs / 1000)` of its LOC timestamp on the broadcast timeline.
 - `[group, object]` is that object's location in the track the timeline indexes.
-- `wallclockMs` is milliseconds since the Unix epoch: `floor((originEpochUs + timestampUs) / 1000)`.
-  Without a known epoch it is 0, as §7.1.1 says for unknown wall-clock time.
+- `wallclockMs` is milliseconds since the Unix epoch when that media was captured, floored. On the
+  epoch-anchored broadcast timeline that is the timestamp itself, so the two numbers are equal. An
+  entry helper caller with another anchor passes the wall-clock time explicitly, or 0 for unknown,
+  as §7.1.1 allows.
 
-The wall-clock time is the capture time of the indexed frame on the publisher's system clock, read
-off the broadcast timeline. It is not when the encoder produced the frame, which §7.1.1 names, and
-the difference is the encoder's latency. Capture time is what lines broadcasts up with each other
-and what a packager writes as `PROGRAM-DATE-TIME`.
+The wall-clock time is the capture time of the indexed frame on the publisher's system clock. It
+is not when the encoder produced the frame, which §7.1.1 names, and the difference is the encoder's
+latency. Capture time is what lines broadcasts up with each other and what a packager writes as
+`PROGRAM-DATE-TIME`. This departs from §7.1.1's wording; see [Spec gaps](#spec-gaps).
 
 ### Cadence
 
@@ -535,10 +598,12 @@ One entry per group of the indexed track, for the group's first object. Under ke
 that is one entry per video keyframe group, so there is an entry at every random-access point and
 nowhere else. That is what a seek needs, at one record per GOP, typically every one or two seconds.
 
-The timeline indexes video. Audio is one group per frame, 50 or more a second, and an entry for
-each would multiply the document for no gain: every track in the render group is stamped on the
-same broadcast timeline, so a player that has found the video location for a media time finds the
-audio for it by timestamp. An audio-only broadcast indexes its audio track at most once a second.
+The entries' locations point into video, the first track in `depends`. Audio is one group per
+frame, 50 or more a second, and an entry for each would multiply the document for no gain: every
+track in the render group is stamped on the same broadcast timeline, so a player that has found the
+video location for a media time finds the audio for it by timestamp. msf-01 §7.2 still requires
+`depends` to list every track the timeline applies to, so audio is listed after video. An
+audio-only broadcast indexes its audio track at most once a second.
 
 The §7.4 template, which states the mapping as a start and a constant stride, is not used. A live
 encoder's GOPs vary in length (scene cuts, keyframe requests), and §7.4 requires the explicit track
@@ -550,16 +615,16 @@ whenever durations vary.
 description and lists the track after video and audio, before data tracks:
 
 ```json
-{"namespace":"room/live","packaging":"mediatimeline","isLive":true,"name":"timeline","role":"mediatimeline","mimetype":"application/json","depends":["video"]}
+{"namespace":"room/live","packaging":"mediatimeline","isLive":true,"name":"timeline","role":"mediatimeline","mimetype":"application/json","depends":["video","audio"]}
 ```
 
 - §7.2 requires a "type" of `mediatimeline`, but msf-01 has no field called `type`. Both the
   packaging table (Table 3) and the role table (Table 4) list `mediatimeline`, so the entry sets
   both. The MIME type is the `application/json` §7.2 requires.
-- `depends` (§5.2.14, required by §7.2) names the track the entries' locations point into. It
-  defaults to the video track, or to the audio track when there is no video, and every name must be
-  a media track in the same catalog. msf-01's example (§5.6.9) lists video and audio together, but
-  a location does not say which track it is in, so this catalog lists one.
+- `depends` (§5.2.14, required by §7.2) lists every track the timeline applies to, as msf-01's
+  example (§5.6.9) does. It defaults to the video and then the audio track, whichever the catalog
+  has, and every name must be a media track in the same catalog. A location does not say which
+  track it is in, so the entries' locations point into the first track listed.
 - While every track it depends on is withheld (an `avc1` entry waiting for its avcC), the
   timeline entry is withheld too.
 - The default track name is `timeline` (`MEDIA_TIMELINE_TRACK`).
@@ -572,21 +637,21 @@ the §7.4 template that nothing calls. Reading the explicit track for seeking is
 ### The origin's wall-clock time
 
 The broadcast clock records its origin as Unix-epoch microseconds, `originEpochUs` /
-`origin_epoch_us`, so a publisher can emit entries without measuring anything else. A caller may
-set it, for example from a capture device's own wall-clock stamps. Otherwise the clock reads the
-system clock once, at creation, and subtracts the time between the origin and that moment on its
-own source:
+`origin_epoch_us`, and every timestamp it hands out is counted from there. A caller may set it, for
+example from a capture device's own wall-clock stamps. Otherwise the clock reads the system clock
+once, at creation, and subtracts the time between the origin and that moment on its own source:
 
 - TypeScript reads `Date.now()`. `performance.timeOrigin + performance.now()` is finer, but it
   can fall behind the system clock, by however long the page has slept, where `performance.now()`
-  does not advance while the machine sleeps. `Date.now()` is off by under a millisecond, which an
-  entry floors away anyway.
+  does not advance while the machine sleeps. `Date.now()` has millisecond resolution, well inside
+  the error of a system clock synced over the network.
 - Python reads `time.time_ns()`.
 
-Since it is read once, entries advance at the monotonic clock's rate from then on, not the system
-clock's. The two can drift apart by tens of parts per million, a fraction of a second in an hour,
-and an NTP step during the broadcast does not move the timeline. A publisher that needs to track
-the system clock over a long broadcast can compute each entry's wall-clock time itself.
+Since it is read once, timestamps advance at the monotonic clock's rate from then on, not the
+system clock's. The two can drift apart by tens of parts per million, a fraction of a second in an
+hour, and an NTP step during the broadcast does not move the timeline. A step mid-broadcast would
+otherwise move every track at once and break the playout clock's pacing. A long broadcast that has
+to follow the system clock can be re-anchored at a new generation.
 
 ### Publishing the track
 
@@ -604,7 +669,7 @@ will implement:
 - A supervised publisher's next generation is a new broadcast with a new namespace, catalog,
   broadcast clock and origin. Its timeline starts empty. The old entries point at locations in a
   namespace the new catalog does not list, so they are not carried over. Wall-clock time is what
-  joins two generations: each one's entries map its own media time onto the same epoch.
+  joins two generations, and both stamp their media with it directly.
 
 ### Reading
 
@@ -615,6 +680,30 @@ array whose first two items are numbers, and a number, all non-negative safe int
 anything else, a §7.4 template array among them, is skipped. Whether the payload is independent or
 incremental is the caller's to know from the object's position in its group. MSF_COMPRESSION
 payloads are not decompressed.
+
+## Spec gaps
+
+Questions the drafts leave open, found while settling #290. Each is worth raising on the MSF or LOC
+draft; until then, this repository's answer is its convention.
+
+- **No anchor for a render group.** msf-01 §5.2.11 says tracks in a render group "SHOULD be
+  rendered simultaneously", and §4.2 aligns alternates, but nothing says the tracks of a group
+  share a timestamp anchor, and nothing signals which anchor a track with a declared Timescale
+  uses (LOC §2.3.1.2: "application-defined"). This repository anchors every track at the Unix
+  epoch. draft-frindell-moq-timestamp-00 proposes a clock identifier and an origin, which would
+  let a publisher say so.
+- **`targetLatency` needs wall-clock time per frame.** msf-01 §5.2.8 defines it from the time a
+  frame was encoded, in UTC. With an application-defined anchor, the only route to that time is
+  the Media Timeline, at millisecond resolution and only at the indexed locations.
+- **Encoded or captured.** msf-01 §5.2.8 and §7.1.1 both say "encoded". Lip sync, syncing across
+  participants and `PROGRAM-DATE-TIME` all need capture time, which is what this repository
+  stamps and indexes. draft-nandakumar-moq-tempo-00 carries an explicit capture timestamp next to a
+  playout delay.
+- **Two timescales.** msf-01 §5.2.21's catalog `timescale` and LOC's Timescale property (`0x08`)
+  have no rule for how they relate or which wins. The readers here take the object's property
+  first, then the track's, then the catalog's, as the Video.js MoQ player does.
+- **Capture latency has no field.** No draft has a place to declare it, so it is folded into the
+  Timestamp (see [Capture latency](#capture-latency)).
 
 ## Package placement
 

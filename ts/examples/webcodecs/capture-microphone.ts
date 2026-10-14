@@ -102,12 +102,28 @@ export interface MicrophoneCapture {
   close(): void;
 }
 
+/**
+ * A rough capture latency for the microphone in `stream`, in microseconds, from its label: 190 ms for a Bluetooth
+ * headset, 30 ms for any other device, and 0 without a labelled audio track (silence, or a synthetic source). The
+ * figures are the macOS measurements in spec/media-layer.md, "Capture latency"; no browser API reports the real value.
+ */
+export function estimateCaptureLatencyUs(stream: MediaStream | undefined): number {
+  const label = stream?.getAudioTracks()[0]?.label ?? '';
+  if (!label) return 0;
+  return /airpods|bluetooth/i.test(label) ? 190_000 : 30_000;
+}
+
 /** Options for {@link captureMicrophone}. */
 export interface CaptureMicrophoneOptions {
   /** The context to capture in. Default: a new 48 kHz context, the rate Opus encodes at. */
   context?: AudioContext;
   /** Block length in milliseconds; each block is one encoder input. Default 20, one Opus frame. */
   blockMs?: number;
+  /**
+   * The capture latency of the microphone in a stream, in integer microseconds, subtracted from every timestamp.
+   * Asked again whenever the stream changes. Default {@link estimateCaptureLatencyUs}.
+   */
+  captureLatencyUs?: (stream: MediaStream | undefined) => number;
 }
 
 interface Leg {
@@ -132,13 +148,15 @@ export async function captureMicrophone(
   options: CaptureMicrophoneOptions = {},
 ): Promise<MicrophoneCapture> {
   const blockMs = options.blockMs ?? 20;
+  const latencyOf = options.captureLatencyUs ?? estimateCaptureLatencyUs;
   // The broadcast clock's own source, so calibration pairs and timestamps share one time base.
-  const sourceNowUs = () => clock.now() + clock.originUs;
+  const sourceNowUs = () => clock.now() - clock.originEpochUs + clock.originUs;
   let current = stream;
   let closed = false;
   let leg: Leg | undefined;
 
   const connect = (target: Leg) => {
+    target.timeline.captureLatencyUs = latencyOf(current);
     target.source?.disconnect();
     target.source = current ? target.context.createMediaStreamSource(current) : undefined;
     target.source?.connect(target.node);

@@ -1,6 +1,7 @@
 /**
- * One timeline per broadcast, and a playout clock for audio/video sync. No DOM, no transport: both clocks read an
- * injected monotonic microsecond source. See spec/media-layer.md, "Shared timeline and playout clock".
+ * One timeline for every broadcast, in Unix-epoch microseconds, and a playout clock for audio/video sync. No DOM, no
+ * transport: both clocks read an injected monotonic microsecond source. See spec/media-layer.md, "Shared timeline and
+ * playout clock".
  */
 import { MICROSECONDS_PER_SECOND } from './loc.js';
 
@@ -26,8 +27,8 @@ export interface BroadcastClockOptions {
   /** The time source, in microseconds. Defaults to `performance.now()`. */
   now?: MicrosecondClock;
   /**
-   * The broadcast's zero on the source clock, in integer microseconds: at or before the first capture. Defaults to
-   * the source's time now, rounded to whole microseconds.
+   * The moment on the source clock that is pinned to the system clock, in integer microseconds. Defaults to the
+   * source's time now, rounded to whole microseconds.
    */
   originUs?: number;
   /**
@@ -40,7 +41,7 @@ export interface BroadcastClockOptions {
 
 /** Options for {@link BroadcastClock.sampleTimeline}. */
 export interface SampleTimelineOptions {
-  /** The broadcast time of sample 0, in integer microseconds. Defaults to the clock's `now()`. */
+  /** The broadcast time of sample 0, in integer Unix-epoch microseconds. Defaults to the clock's `now()`. */
   firstSampleUs?: number;
 }
 
@@ -58,6 +59,8 @@ export interface SampleTimeline {
 export interface SourceTimelineOptions {
   /** How far a calibration may disagree with the current anchor before it replaces it, in µs. Default 5,000. */
   toleranceUs?: number;
+  /** The capture device's input delay, subtracted from every timestamp, in integer µs. Default 0. */
+  captureLatencyUs?: number;
 }
 
 /**
@@ -69,6 +72,12 @@ export interface SourceTimeline {
   /** The source time of the current anchor; `undefined` until the first calibration or timestamp. */
   readonly anchorSourceUs: number | undefined;
   /**
+   * How long the capture device holds a sample before the source sees it, in integer microseconds, subtracted from
+   * every timestamp so it stays the capture time. No browser API reports it: set it from a known device latency, and
+   * again when the device changes. It does not affect calibration.
+   */
+  captureLatencyUs: number;
+  /**
    * Record that source time `sourceUs` happened at `atUs` on the broadcast clock's own source (default: now), for
    * example an `AudioContext` time and the `performance.now()` time it was rendered at, both in microseconds. The pair
    * becomes the anchor when there is none, or when the current anchor predicts it more than `toleranceUs` off: the
@@ -77,23 +86,27 @@ export interface SourceTimeline {
   calibrate(sourceUs: number, atUs?: number): boolean;
   /**
    * The broadcast time of this source timestamp: the anchor's broadcast time plus the source's own elapsed time,
-   * rounded to whole microseconds. Without an anchor, the first call anchors this timestamp at the clock's `now()`.
+   * rounded to whole microseconds, less the capture latency. Without an anchor, the first call anchors this timestamp
+   * at the clock's `now()`.
    */
   timestampUs(sourceUs: number): number;
 }
 
-/** A publisher's single clock: every track in the broadcast is stamped from it, in microseconds since its origin. */
+/**
+ * A publisher's single clock: every track in the broadcast is stamped from it, in microseconds since the Unix epoch.
+ * One moment on a monotonic source is pinned to the system clock, and the timeline advances at the source's rate.
+ */
 export interface BroadcastClock {
-  /** The broadcast's zero, on the source clock. */
+  /** The pinned moment, on the source clock. */
   readonly originUs: number;
-  /** The broadcast's zero as microseconds since the Unix epoch: the wall-clock time media timeline entries use. */
+  /** The pinned moment as microseconds since the Unix epoch. */
   readonly originEpochUs: number;
-  /** Microseconds since the broadcast started. */
+  /** The timeline now: Unix-epoch microseconds. */
   now(): number;
   /**
    * Map a timestamp on this clock's own source, such as `performance.now()` microseconds taken at capture, to the
-   * broadcast timeline. A time before the origin maps to a negative number, which the LOC helpers refuse. For a
-   * capture clock with another origin, use {@link BroadcastClock.sourceTimeline}.
+   * timeline: `originEpochUs + sourceUs − originUs`. For a capture clock with another origin, use
+   * {@link BroadcastClock.sourceTimeline}.
    */
   fromSourceUs(sourceUs: number): number;
   /** Map a clock with its own origin and rate, kept on the broadcast timeline by calibration. */
@@ -105,7 +118,7 @@ export interface BroadcastClock {
   sampleTimeline(sampleRate: number, options?: SampleTimelineOptions): SampleTimeline;
 }
 
-/** Fix a broadcast's origin and map capture timestamps and sample counters onto its microsecond timeline. */
+/** Pin a monotonic source to the system clock and map capture timestamps and sample counters onto the epoch. */
 export function createBroadcastClock(options: BroadcastClockOptions = {}): BroadcastClock {
   const source = options.now ?? performanceMicroseconds;
   const createdUs = finite(source(), 'Source time');
@@ -113,19 +126,26 @@ export function createBroadcastClock(options: BroadcastClockOptions = {}): Broad
   safeInteger(originUs, 'originUs', Number.MIN_SAFE_INTEGER);
   const originEpochUs = options.originEpochUs ?? Math.round(Date.now() * 1000 - (createdUs - originUs));
   safeInteger(originEpochUs, 'originEpochUs', 0);
-  const fromSourceUs = (sourceUs: number) => Math.round(finite(sourceUs, 'Source time') - originUs);
+  const fromSourceUs = (sourceUs: number) => originEpochUs + Math.round(finite(sourceUs, 'Source time') - originUs);
   const now = () => fromSourceUs(source());
   return {
     originUs,
     originEpochUs,
     now,
     fromSourceUs,
-    sourceTimeline({ toleranceUs = 5_000 } = {}) {
+    sourceTimeline({ toleranceUs = 5_000, captureLatencyUs = 0 } = {}) {
       if (!(finite(toleranceUs, 'toleranceUs') >= 0)) throw new RangeError('toleranceUs must not be negative');
+      let latencyUs = safeInteger(captureLatencyUs, 'captureLatencyUs', 0);
       let anchor: { sourceUs: number; timestampUs: number } | undefined;
       return {
         get anchorSourceUs() {
           return anchor?.sourceUs;
+        },
+        get captureLatencyUs() {
+          return latencyUs;
+        },
+        set captureLatencyUs(value: number) {
+          latencyUs = safeInteger(value, 'captureLatencyUs', 0);
         },
         calibrate(sourceUs, atUs) {
           finite(sourceUs, 'Source time');
@@ -142,7 +162,7 @@ export function createBroadcastClock(options: BroadcastClockOptions = {}): Broad
         timestampUs(sourceUs) {
           finite(sourceUs, 'Source time');
           anchor ??= { sourceUs, timestampUs: now() };
-          return anchor.timestampUs + Math.round(sourceUs - anchor.sourceUs);
+          return anchor.timestampUs + Math.round(sourceUs - anchor.sourceUs) - latencyUs;
         },
       };
     },

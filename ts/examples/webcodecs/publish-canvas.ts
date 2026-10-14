@@ -39,8 +39,7 @@ export interface PublishCanvasOptions {
   /** Aborting stops publishing. */
   signal: AbortSignal;
   /**
-   * The broadcast clock every track is stamped from. Default: the microphone's, or a new one. Create it before you
-   * start capturing, so nothing is captured before its origin.
+   * The broadcast clock every track is stamped from. Default: the microphone's, or a new one.
    */
   clock?: BroadcastClock;
   /** A microphone to publish as Opus on the same timeline, from `captureMicrophone`. Capture stays the caller's. */
@@ -232,7 +231,7 @@ export async function publishCanvas(
     if (microphone && audioTrack && audioConfig) {
       // Every audio frame is its own group: Opus frames decode independently, so a lost one costs only itself.
       const writeAudio = (chunk: EncodedAudioChunk, timestampUs: number) => {
-        // Captured before the broadcast's origin: there is no place for it on the timeline. Without demand, unsent.
+        // Before the Unix epoch, as on a clock pinned near zero: LOC has no place for it. Without demand, unsent.
         if (timestampUs < 0 || !audioTrack.hasDemand) return;
         if (pendingAudio >= 25) throw new Error('Encoded audio queue is full; transport cannot keep up');
         const frame = chunkToLocFrame(chunk, { timestampOffsetUs: timestampUs - chunk.timestamp });

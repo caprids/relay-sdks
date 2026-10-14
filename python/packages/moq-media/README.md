@@ -33,19 +33,26 @@ dimensions, rates, bitrate, render group, and init data resolved from `initRef` 
 on unsupported versions and delta updates, ignores unknown fields, and returns non-`loc` packagings
 (such as moq-rs `cmaf`) as declared.
 
-Every media track in one catalog shares one timeline: LOC timestamps in microseconds from one origin,
-with the timescale declared on each track. `BroadcastClock()` fixes that origin on the monotonic
-clock. Use `from_source_us` for capture timestamps on that clock. Use `source_timeline()` for a clock with
-its own origin and rate, kept in line with `calibrate(source_us, at_us=...)` pairs. Use
+Every media track shares one timeline: LOC timestamps are capture times in microseconds since the
+Unix epoch, with Timescale 1,000,000 declared on each track. `BroadcastClock()` pins a moment on the
+monotonic clock to the system clock (`origin_us`, `origin_epoch_us`) and counts from there. Use
+`from_source_us` for capture timestamps on that clock. Use `source_timeline()` for a clock with
+its own origin and rate, kept in line with `calibrate(source_us, at_us=...)` pairs. No browser or OS
+reports a microphone's input delay, so pass the one you know as `capture_latency_us=` and set
+`timeline.capture_latency_us` again when the device changes (about 30 ms for a laptop microphone,
+190 ms for AirPods). Use
 `sample_timeline(48_000)` for a sample counter with nothing to calibrate against, such as a file. `PlayoutClock()` is the player side. Audio is the master: report what is
 audible with `report_audio(timestamp_us)`, and `due(timestamp_us)` returns a `PlayoutDecision` to
 wait, show, or drop a video frame. With no audio it paces by wall clock. See
 [spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
 
-The clock also records its origin as Unix-epoch microseconds, `clock.origin_epoch_us`, read once
-from `time.time_ns()`. That is what msf-01's Media Timeline track needs: one record per video group,
-mapping media time and the group's location to wall-clock time, for seeking, playlists, and lining
-up broadcasts. Announce it with `media_timeline=MediaTimelineTrackInfo()` in `build_msf_catalog`,
+On the subscriber side, `loc_timestamp_us(obj.properties, track_properties=ok.track_properties)`
+reads an object's Timestamp in microseconds, applying whichever Timescale the object, the
+`SUBSCRIBE_OK` track properties, or the catalog (`catalog_timescale=`) declares.
+
+msf-01's Media Timeline track holds one record per video group, mapping media time and the group's
+location to wall-clock time, for seeking and playlists. On the epoch timeline the two times are the
+same, so an entry needs only the timestamp and the group. Announce it with `media_timeline=MediaTimelineTrackInfo()` in `build_msf_catalog`,
 and on each new video group open a timeline group holding every retained record. The track is not
 published for you yet; see
 [spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
@@ -53,7 +60,7 @@ published for you yet; see
 ```python
 entries: list[MediaTimelineEntry] = []
 # On each keyframe that opens video group `group_id`:
-entries.append(media_timeline_entry(timestamp_us, group_id, origin_epoch_us=clock.origin_epoch_us))
+entries.append(media_timeline_entry(timestamp_us, group_id))
 await timeline_track.write(build_media_timeline(entries))  # one object, one group
 read = parse_media_timeline(timeline_object.payload)
 ```
