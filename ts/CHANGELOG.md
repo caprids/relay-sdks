@@ -61,18 +61,22 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `buildMsfCatalog` leaves `isComplete` out, since a live broadcast is not complete (msf-01 §5.1.3), and
   `buildMsfEndCatalog` builds the §11.3 catalog that ends a broadcast: `isComplete: true` and no tracks
   ([#284](https://github.com/muxinc/relay-sdks/issues/284)).
-- `@mux/moq-media`: one timeline per broadcast, and a playout clock for audio/video sync
-  ([#285](https://github.com/muxinc/relay-sdks/issues/285)). `createBroadcastClock` stamps every track from one origin
+- `@mux/moq-media`: one timeline, and a playout clock for audio/video sync
+  ([#285](https://github.com/muxinc/relay-sdks/issues/285)). `createBroadcastClock` stamps every track in microseconds
+  since the Unix epoch, so broadcasts line up with each other ([#290](https://github.com/muxinc/relay-sdks/issues/290))
   (`sourceTimeline` with `calibrate` for an `AudioContext` clock or `MediaStreamTrackProcessor` timestamps, so the
-  publisher path works in Chromium, Firefox and Safari; `sampleTimeline` for sample counters).
-  `createPlayoutClock` takes audio reports and answers `due(timestampUs)` with wait, show, or drop, falling back to
-  wall-clock pacing without audio. Both are DOM-free. `buildMsfCatalog` puts video and audio in one render group
-  (`renderGroup: 1`, msf-01 §5.2.11), and `parseMsfCatalog` returns `renderGroup`.
+  publisher path works in Chromium, Firefox and Safari; `sampleTimeline` for sample counters). `createPlayoutClock`
+  takes audio reports and answers `due(timestampUs)` with wait, show, or drop, falling back to wall-clock pacing without
+  audio. Both are DOM-free. `buildMsfCatalog` puts video and audio in one render group (`renderGroup: 1`, msf-01
+  §5.2.11), and `parseMsfCatalog` returns `renderGroup`.
 - `@mux/moq-media`: format helpers for msf-01's Media Timeline track, which maps media time to wall-clock time
-  ([#291](https://github.com/muxinc/relay-sdks/issues/291)). The broadcast clock records its origin as Unix-epoch
-  microseconds (`originEpochUs`). `mediaTimelineEntry` turns a timeline timestamp and a group into a record,
-  `buildMediaTimeline` and `parseMediaTimeline` write and read a timeline object, and `buildMsfCatalog` announces
-  the track through `mediaTimeline` (`packaging` and `role` `mediatimeline`, `depends` on the video track by
-  default). `parseMsfCatalog` returns `depends` and `mimetype`. `createMediaTimeline({ originEpochUs, maxEntries })`
-  keeps one broadcast's records (512 by default, oldest dropped) and returns the document to send for each new entry,
-  and the WebCodecs example publishes the track ([#292](https://github.com/muxinc/relay-sdks/issues/292)).
+  ([#291](https://github.com/muxinc/relay-sdks/issues/291)). `mediaTimelineEntry` turns a timeline timestamp and a group
+  into a record, `buildMediaTimeline` and `parseMediaTimeline` write and read a timeline object, and `buildMsfCatalog`
+  announces the track through `mediaTimeline` (`packaging` and `role` `mediatimeline`, `depends` on the video and audio
+  tracks by default). `parseMsfCatalog` returns `depends` and `mimetype`. `createMediaTimeline({ maxEntries })` keeps
+  one broadcast's records (512 by default, oldest dropped) and returns the document to send for each new entry, and the
+  WebCodecs example publishes the track ([#292](https://github.com/muxinc/relay-sdks/issues/292)).
+- `@mux/moq-media`: capture times on one epoch, and a Timescale-aware reader
+  ([#290](https://github.com/muxinc/relay-sdks/issues/290)). Source timelines take a settable `captureLatencyUs`,
+  subtracted from every timestamp, for the input delay no browser reports. `locTimestampUs` reads an object's LOC
+  Timestamp in microseconds, applying the object's or the track's Timescale.

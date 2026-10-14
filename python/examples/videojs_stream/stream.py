@@ -40,14 +40,12 @@ from av.video.frame import PictureType
 from moq_media import (
     AUDIO_TRACK,
     CATALOG_TRACK,
-    LOC_TIMESTAMP,
     LOC_VIDEO_CONFIG,
     MEDIA_TIMELINE_TRACK,
     MICROSECONDS_PER_SECOND,
     TRACK_TIMESCALE_PROPERTIES,
     VIDEO_TRACK,
     AudioTrackInfo,
-    BroadcastClock,
     H264Config,
     MediaTimeline,
     MediaTimelineEntry,
@@ -58,6 +56,7 @@ from moq_media import (
     build_msf_end_catalog,
     compose_player_url,
     loc_properties,
+    loc_timestamp_us,
     parse_media_timeline,
     parse_msf_catalog,
 )
@@ -252,6 +251,8 @@ class VideoEncoder:
         self._context = context
         self.width = width
         self.height = height
+        # Added to media time in the LOC Timestamp only: the wire carries Unix-epoch microseconds (media-layer.md).
+        self.epoch_us = 0
 
     def encode(self, frame: av.VideoFrame, *, keyframe: bool = False) -> list[EncodedSample]:
         # Always set: a frame decoded from a file carries its source's picture type, and with
@@ -270,7 +271,7 @@ class VideoEncoder:
             timestamp_us=timestamp_us,
             payload=annexb_to_avcc(bytes(packet)),
             key=key,
-            properties=loc_properties(timestamp_us, video_config=self.avcc if key else None),
+            properties=loc_properties(self.epoch_us + timestamp_us, video_config=self.avcc if key else None),
         )
 
 
@@ -290,6 +291,7 @@ class AudioEncoder:
         self._fifo = AudioFifo()
         self._origin_us: int | None = None
         self._samples_out = 0
+        self.epoch_us = 0  # as VideoEncoder.epoch_us
 
     def encode(self, frame: av.AudioFrame, timestamp_us: int) -> list[EncodedSample]:
         """Encode one decoded frame whose first sample plays at ``timestamp_us`` on the shared timeline."""
@@ -316,7 +318,7 @@ class AudioEncoder:
                         timestamp_us=timestamp,
                         payload=bytes(packet),
                         key=True,
-                        properties=loc_properties(timestamp),
+                        properties=loc_properties(self.epoch_us + timestamp),
                     )
                 )
 
@@ -512,11 +514,14 @@ class Producer:
         with av.open(str(self._config.input)) as container:
             return len(container.streams.audio) > 0
 
-    def start(self, clock: BroadcastClock | None = None) -> None:
-        """Start encoding, paced so media time 0 is the broadcast clock's origin (a new clock by default)."""
-        clock = clock or BroadcastClock()
+    def start(self) -> None:
+        # Media time 0 is due now: pin it to the system clock so every track is stamped in epoch microseconds.
+        epoch_us = time.time_ns() // 1000
+        self.video.epoch_us = epoch_us
+        if self.audio is not None:
+            self.audio.epoch_us = epoch_us
         for queue in self._queues.values():
-            queue.started = clock.origin_us / MICROSECONDS_PER_SECOND
+            queue.started = time.monotonic()
         self._thread.start()
 
     def stop(self) -> None:
@@ -1079,9 +1084,10 @@ async def verify(
 
         result.video_objects += 1
         groups.add(obj.group_id)
-        timestamp = next((p.value for p in obj.properties if p.type == LOC_TIMESTAMP), None)
+        # The relay may rescale timestamps; its SUBSCRIBE_OK declares the Timescale it delivers.
+        timestamp = loc_timestamp_us(obj.properties, track_properties=track_properties.get(VIDEO_TRACK, ()))
 
-        if not isinstance(timestamp, int):
+        if timestamp is None:
             problems.append("video object without a LOC timestamp")
             return
 
@@ -1128,6 +1134,7 @@ async def verify(
         result.timeline = entries
 
     subscribed: set[str] = set()
+    track_properties: dict[str, list[KeyValuePair]] = {}
     all_subscribed = asyncio.Event()
 
     def on_error(track: str) -> Callable[[BaseException], None]:
@@ -1142,7 +1149,8 @@ async def verify(
         return failed
 
     def on_subscribed(track: str) -> Callable[[Any, tuple[str, ...]], None]:
-        def accepted(_info: Any, _namespace: tuple[str, ...]) -> None:
+        def accepted(info: Any, _namespace: tuple[str, ...]) -> None:
+            track_properties[track] = list(getattr(info, "track_properties", ()))
             subscribed.add(track)
             if len(subscribed) == len(tracks):
                 all_subscribed.set()
@@ -1334,27 +1342,19 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     if audio_track is not None:
         writers["audio"] = FrameWriter(audio_track, grouping="frame", stale=stale_for(queues["audio"]))
 
+    timeline = MediaTimeline(max_entries=TIMELINE_MAX_ENTRIES)
+
+    def index_video_group(sample: EncodedSample, group_id: int) -> None:
+        # The entry's media time is the keyframe's LOC timestamp, which on the epoch timeline is its capture time too.
+        timestamp_us = loc_timestamp_us(sample.properties)
+        assert timestamp_us is not None, "every sample carries its LOC timestamp"
+        timeline_service.update(timeline.add(timestamp_us, group_id))
+        stats.timeline_entries += 1
+
     tasks = [
         asyncio.ensure_future(serve_catalog(catalog, stats, on_track_end)),
         asyncio.ensure_future(serve_timeline(timeline_service, stats, on_track_end)),
         asyncio.ensure_future(request_keyframes(video_track, producer.keyframe_requested)),
-    ]
-    verifier: Any = None
-    verified: Verified | None = None
-
-    if config.verify:
-        verifier, verified = await verify(config, publisher, lifetime, log)
-
-    # The broadcast starts here: media time 0 is the clock's origin, and the timeline's wall-clock
-    # times are counted from its Unix-epoch reading.
-    clock = BroadcastClock()
-    timeline = MediaTimeline(origin_epoch_us=clock.origin_epoch_us, max_entries=TIMELINE_MAX_ENTRIES)
-
-    def index_video_group(sample: EncodedSample, group_id: int) -> None:
-        timeline_service.update(timeline.add(sample.timestamp_us, group_id))
-        stats.timeline_entries += 1
-
-    tasks.append(
         asyncio.ensure_future(
             publish_live_media(
                 queues,
@@ -1367,10 +1367,16 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
                 timeline=timeline_service,
                 on_video_group=index_video_group,
             )
-        )
-    )
+        ),
+    ]
+    verifier: Any = None
+    verified: Verified | None = None
+
+    if config.verify:
+        verifier, verified = await verify(config, publisher, lifetime, log)
+
     stats.started = time.monotonic()
-    producer.start(clock)
+    producer.start()
     deadline = loop.call_later(config.duration, lambda: lifetime.cancel(deadline_reached)) if config.duration else None
     media_task = tasks[-1]
     stopped_normally = False

@@ -1,23 +1,25 @@
 {
-  "source": "Derived from spec/media-layer.md, Shared timeline and playout clock (issue #285); boundary cases follow its tables. epochOrigins follow its Media Timeline track section (issue #291): systemClockMs is the system clock (Date.now(), time.time_ns()) when the clock is created, and createdAt the source time then",
+  "source": "Derived from spec/media-layer.md, Shared timeline and playout clock (issues #285 and #290); boundary cases follow its tables. epochOrigins follow its Media Timeline track section (issue #291): systemClockMs is the system clock (Date.now(), time.time_ns()) when the clock is created, and createdAt the source time then. Timeline vectors give originEpochUs, so their timestamps are Unix-epoch microseconds. A source timeline's captureLatencyUs is its initial capture latency, and a captureLatency step changes it; captureLatencyErrors must be rejected both at creation and when set",
   "broadcast": [
     {
-      "name": "the origin defaults to the source time at creation",
+      "name": "the origin defaults to the source time at creation; a time before it still maps onto the epoch",
       "createdAt": "5000000",
+      "originEpochUs": "1759924158381000",
       "steps": [
-        { "at": "5000000", "now": "0" },
-        { "at": "5033333", "now": "33333" },
-        { "at": "5033333", "fromSource": "5100000", "expect": "100000" },
-        { "at": "5033333", "fromSource": "4999000", "expect": "-1000" }
+        { "at": "5000000", "now": "1759924158381000" },
+        { "at": "5033333", "now": "1759924158414333" },
+        { "at": "5033333", "fromSource": "5100000", "expect": "1759924158481000" },
+        { "at": "5033333", "fromSource": "4999000", "expect": "1759924158380000" }
       ]
     },
     {
       "name": "an explicit origin is kept",
       "createdAt": "5000000",
+      "originEpochUs": "1759924158381000",
       "originUs": "4000000",
       "steps": [
-        { "at": "5000000", "now": "1000000" },
-        { "at": "5000000", "fromSource": "4000000", "expect": "0" }
+        { "at": "5000000", "now": "1759924159381000" },
+        { "at": "5000000", "fromSource": "4000000", "expect": "1759924158381000" }
       ]
     }
   ],
@@ -25,27 +27,29 @@
     {
       "name": "48 kHz anchored at the broadcast time it was created",
       "createdAt": "5000000",
+      "originEpochUs": "1759924158381000",
       "timelineAt": "5020000",
       "sampleRate": "48000",
       "samples": [
-        ["0", "20000"],
-        ["1", "20020"],
-        ["960", "40000"],
-        ["47999", "1019979"],
-        ["48000", "1020000"]
+        ["0", "1759924158401000"],
+        ["1", "1759924158401020"],
+        ["960", "1759924158421000"],
+        ["47999", "1759924159400979"],
+        ["48000", "1759924159401000"]
       ]
     },
     {
       "name": "44.1 kHz with an explicit first-sample time, exact past 2^53 sample-microseconds",
       "createdAt": "0",
+      "originEpochUs": "1759924158381000",
       "timelineAt": "0",
       "sampleRate": "44100",
-      "firstSampleUs": "0",
+      "firstSampleUs": "1759924158381000",
       "samples": [
-        ["1", "22"],
-        ["441", "10000"],
-        ["15876000000", "360000000000"],
-        ["15876000001", "360000000022"]
+        ["1", "1759924158381022"],
+        ["441", "1759924158391000"],
+        ["15876000000", "1760284158381000"],
+        ["15876000001", "1760284158381022"]
       ]
     }
   ],
@@ -53,11 +57,22 @@
     {
       "name": "a capture clock with its own origin is anchored at the broadcast time its first timestamp arrives",
       "createdAt": "5000000",
+      "originEpochUs": "1759924158381000",
       "steps": [
-        { "at": "5010000", "source": "123456789000", "expect": "10000" },
-        { "at": "5090000", "source": "123456822333", "expect": "43333" },
-        { "at": "5090000", "source": "123456788000", "expect": "9000" },
-        { "at": "9000000", "source": "123456789000", "expect": "10000" }
+        { "at": "5010000", "source": "123456789000", "expect": "1759924158391000" },
+        { "at": "5090000", "source": "123456822333", "expect": "1759924158424333" },
+        { "at": "5090000", "source": "123456788000", "expect": "1759924158390000" },
+        { "at": "9000000", "source": "123456789000", "expect": "1759924158391000" }
+      ]
+    },
+    {
+      "name": "an uncalibrated timeline subtracts its capture latency from the anchored timestamp too",
+      "createdAt": "5000000",
+      "originEpochUs": "1759924158381000",
+      "captureLatencyUs": "160000",
+      "steps": [
+        { "at": "5200000", "source": "7000", "expect": "1759924158421000" },
+        { "at": "5300000", "source": "107000", "expect": "1759924158521000" }
       ]
     }
   ],
@@ -65,27 +80,44 @@
     {
       "name": "measured pairs anchor, correct drift beyond the tolerance, and restart after a discontinuity",
       "createdAt": "0",
+      "originEpochUs": "1759924158381000",
       "steps": [
         { "calibrate": "1000000", "calibrateAt": "10000", "expect": true },
-        { "source": "1020000", "expect": "30000" },
+        { "source": "1020000", "expect": "1759924158411000" },
         { "calibrate": "2000000", "calibrateAt": "1013000", "expect": false },
-        { "source": "2000000", "expect": "1010000" },
+        { "source": "2000000", "expect": "1759924159391000" },
         { "calibrate": "3000000", "calibrateAt": "2015000", "expect": false },
         { "calibrate": "3000000", "calibrateAt": "2015001", "expect": true },
-        { "source": "3000000", "expect": "2015001" },
+        { "source": "3000000", "expect": "1759924160396001" },
         { "calibrate": "0", "calibrateAt": "3000000", "expect": true },
-        { "source": "20000", "expect": "3020000" }
+        { "source": "20000", "expect": "1759924161401000" }
       ]
     },
     {
       "name": "a tolerance of zero follows every differing measurement",
       "createdAt": "0",
+      "originEpochUs": "1759924158381000",
       "toleranceUs": "0",
       "steps": [
         { "calibrate": "0", "calibrateAt": "0", "expect": true },
         { "calibrate": "1000", "calibrateAt": "1000", "expect": false },
         { "calibrate": "2000", "calibrateAt": "2001", "expect": true },
-        { "source": "3000", "expect": "3001" }
+        { "source": "3000", "expect": "1759924158384001" }
+      ]
+    },
+    {
+      "name": "a capture latency is subtracted from every timestamp, changes between timestamps, and leaves calibration alone",
+      "createdAt": "0",
+      "originEpochUs": "1759924158381000",
+      "captureLatencyUs": "30000",
+      "steps": [
+        { "calibrate": "1000000", "calibrateAt": "10000", "expect": true },
+        { "source": "1020000", "expect": "1759924158381000" },
+        { "calibrate": "2000000", "calibrateAt": "1013000", "expect": false },
+        { "captureLatency": "190000" },
+        { "source": "2000000", "expect": "1759924159201000" },
+        { "captureLatency": "0" },
+        { "source": "2000000", "expect": "1759924159391000" }
       ]
     }
   ],
@@ -215,5 +247,10 @@
     { "name": "negative", "givenOriginEpochUs": "-1" },
     { "name": "unsafe", "givenOriginEpochUs": "9007199254740992" },
     { "name": "fractional", "givenOriginEpochUs": "1.5" }
+  ],
+  "captureLatencyErrors": [
+    { "name": "negative", "captureLatencyUs": "-1" },
+    { "name": "unsafe", "captureLatencyUs": "9007199254740992" },
+    { "name": "fractional", "captureLatencyUs": "1.5" }
   ]
 }

@@ -16,21 +16,36 @@ type Step = {
   due?: string;
 };
 type Vectors = {
-  broadcast: { name: string; createdAt: string; originUs?: string; steps: Step[] }[];
+  broadcast: { name: string; createdAt: string; originEpochUs: string; originUs?: string; steps: Step[] }[];
   sampleTimelines: {
     name: string;
     createdAt: string;
+    originEpochUs: string;
     timelineAt: string;
     sampleRate: string;
     firstSampleUs?: string;
     samples: [string, string][];
   }[];
-  sourceTimelines: { name: string; createdAt: string; steps: { at: string; source: string; expect: string }[] }[];
+  sourceTimelines: {
+    name: string;
+    createdAt: string;
+    originEpochUs: string;
+    captureLatencyUs?: string;
+    steps: { at: string; source: string; expect: string }[];
+  }[];
   calibratedTimelines: {
     name: string;
     createdAt: string;
+    originEpochUs: string;
     toleranceUs?: string;
-    steps: { calibrate?: string; calibrateAt?: string; source?: string; expect: string | boolean }[];
+    captureLatencyUs?: string;
+    steps: {
+      calibrate?: string;
+      calibrateAt?: string;
+      source?: string;
+      captureLatency?: string;
+      expect?: string | boolean;
+    }[];
   }[];
   playout: { name: string; options?: Record<string, string>; steps: Step[] }[];
   epochOrigins: {
@@ -42,6 +57,7 @@ type Vectors = {
     originEpochUs: string;
   }[];
   epochOriginErrors: { name: string; givenOriginEpochUs: string }[];
+  captureLatencyErrors: { name: string; captureLatencyUs: string }[];
 };
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/clock.json', import.meta.url), 'utf8')) as Vectors;
 
@@ -57,10 +73,11 @@ function decision(raw: { action: string; offsetUs: string; waitUs?: string }): P
 }
 
 describe('spec/vectors/clock.json', () => {
-  it.each(vectors.broadcast)('broadcast clock: $name', ({ createdAt, originUs, steps }) => {
+  it.each(vectors.broadcast)('broadcast clock: $name', ({ createdAt, originEpochUs, originUs, steps }) => {
     const time = source(Number(createdAt));
     const clock = createBroadcastClock({
       now: time.now,
+      originEpochUs: Number(originEpochUs),
       ...(originUs !== undefined ? { originUs: Number(originUs) } : {}),
     });
     for (const step of steps) {
@@ -91,7 +108,7 @@ describe('spec/vectors/clock.json', () => {
 
   it.each(vectors.sampleTimelines)('sample timeline: $name', (vector) => {
     const time = source(Number(vector.createdAt));
-    const clock = createBroadcastClock({ now: time.now });
+    const clock = createBroadcastClock({ now: time.now, originEpochUs: Number(vector.originEpochUs) });
     time.set(Number(vector.timelineAt));
     const timeline = clock.sampleTimeline(
       Number(vector.sampleRate),
@@ -101,29 +118,51 @@ describe('spec/vectors/clock.json', () => {
       expect(timeline.timestampUs(Number(index))).toBe(Number(timestamp));
   });
 
-  it.each(vectors.sourceTimelines)('source timeline: $name', ({ createdAt, steps }) => {
-    const time = source(Number(createdAt));
-    const timeline = createBroadcastClock({ now: time.now }).sourceTimeline();
-    expect(timeline.anchorSourceUs).toBeUndefined();
-    for (const step of steps) {
-      time.set(Number(step.at));
-      expect(timeline.timestampUs(Number(step.source))).toBe(Number(step.expect));
-    }
-    expect(timeline.anchorSourceUs).toBe(Number(steps[0]?.source));
-  });
+  it.each(vectors.sourceTimelines)(
+    'source timeline: $name',
+    ({ createdAt, originEpochUs, captureLatencyUs, steps }) => {
+      const time = source(Number(createdAt));
+      const timeline = createBroadcastClock({ now: time.now, originEpochUs: Number(originEpochUs) }).sourceTimeline(
+        captureLatencyUs !== undefined ? { captureLatencyUs: Number(captureLatencyUs) } : {},
+      );
+      expect(timeline.anchorSourceUs).toBeUndefined();
+      for (const step of steps) {
+        time.set(Number(step.at));
+        expect(timeline.timestampUs(Number(step.source))).toBe(Number(step.expect));
+      }
+      expect(timeline.anchorSourceUs).toBe(Number(steps[0]?.source));
+    },
+  );
 
-  it.each(vectors.calibratedTimelines)('calibrated timeline: $name', ({ createdAt, toleranceUs, steps }) => {
-    const time = source(Number(createdAt));
-    const timeline = createBroadcastClock({ now: time.now }).sourceTimeline(
-      toleranceUs !== undefined ? { toleranceUs: Number(toleranceUs) } : {},
-    );
-    for (const step of steps) {
-      if (step.calibrate !== undefined) {
+  it.each(vectors.calibratedTimelines)('calibrated timeline: $name', (vector) => {
+    const time = source(Number(vector.createdAt));
+    const timeline = createBroadcastClock({
+      now: time.now,
+      originEpochUs: Number(vector.originEpochUs),
+    }).sourceTimeline({
+      ...(vector.toleranceUs !== undefined ? { toleranceUs: Number(vector.toleranceUs) } : {}),
+      ...(vector.captureLatencyUs !== undefined ? { captureLatencyUs: Number(vector.captureLatencyUs) } : {}),
+    });
+    for (const step of vector.steps) {
+      if (step.captureLatency !== undefined) {
+        timeline.captureLatencyUs = Number(step.captureLatency);
+        expect(timeline.captureLatencyUs).toBe(Number(step.captureLatency));
+      } else if (step.calibrate !== undefined) {
         expect(timeline.calibrate(Number(step.calibrate), Number(step.calibrateAt))).toBe(step.expect);
       } else {
         expect(timeline.timestampUs(Number(step.source))).toBe(Number(step.expect));
       }
     }
+  });
+
+  it.each(vectors.captureLatencyErrors)('rejects capture latency: $name', ({ captureLatencyUs }) => {
+    const clock = createBroadcastClock({ now: () => 0 });
+    expect(() => clock.sourceTimeline({ captureLatencyUs: Number(captureLatencyUs) })).toThrow(RangeError);
+    const timeline = clock.sourceTimeline({ captureLatencyUs: 1000 });
+    expect(() => {
+      timeline.captureLatencyUs = Number(captureLatencyUs);
+    }).toThrow(RangeError);
+    expect(timeline.captureLatencyUs).toBe(1000);
   });
 
   it.each(vectors.playout)('playout clock: $name', ({ options = {}, steps }) => {
@@ -154,11 +193,11 @@ describe('createBroadcastClock', () => {
   it('reads performance.now() in microseconds by default', () => {
     const now = vi.spyOn(performance, 'now').mockReturnValue(2000.25);
     try {
-      const clock = createBroadcastClock();
+      const clock = createBroadcastClock({ originEpochUs: 1_759_924_158_381_000 });
       expect(clock.originUs).toBe(2_000_250);
       now.mockReturnValue(2033.5);
-      expect(clock.now()).toBe(33_250);
-      expect(clock.fromSourceUs(2_100_000)).toBe(99_750);
+      expect(clock.now()).toBe(1_759_924_158_381_000 + 33_250);
+      expect(clock.fromSourceUs(2_100_000)).toBe(1_759_924_158_381_000 + 99_750);
     } finally {
       now.mockRestore();
     }
@@ -173,7 +212,9 @@ describe('createBroadcastClock', () => {
       byteLength: 1,
       copyTo: (destination: Uint8Array) => destination.set([0x65]),
     } as unknown as EncodedVideoChunk;
-    expect(chunkToLocFrame(chunk, { timestampOffsetUs: -clock.originUs }).timestampUs).toBe(clock.fromSourceUs(34_333));
+    expect(chunkToLocFrame(chunk, { timestampOffsetUs: clock.originEpochUs - clock.originUs }).timestampUs).toBe(
+      clock.fromSourceUs(34_333),
+    );
   });
 
   it('reads the system clock for the origin epoch by default', () => {
@@ -194,7 +235,7 @@ describe('createBroadcastClock', () => {
 
   it('calibrates at the time source now by default', () => {
     let now = 0;
-    const clock = createBroadcastClock({ now: () => now });
+    const clock = createBroadcastClock({ now: () => now, originEpochUs: 0 });
     const context = clock.sourceTimeline();
     now = 250_000;
     expect(context.calibrate(7_000_000)).toBe(true);
@@ -203,9 +244,9 @@ describe('createBroadcastClock', () => {
   });
 
   it('rounds a fractional source time to the nearest microsecond, ties upward', () => {
-    const clock = createBroadcastClock({ now: () => 10.5, originUs: 0 });
-    expect(clock.now()).toBe(11);
-    expect(clock.fromSourceUs(0.4)).toBe(0);
+    const clock = createBroadcastClock({ now: () => 10.5, originUs: 0, originEpochUs: 1_000 });
+    expect(clock.now()).toBe(1_011);
+    expect(clock.fromSourceUs(0.4)).toBe(1_000);
   });
 
   it('rejects a non-finite origin or source time and an invalid sample rate or index', () => {
@@ -223,7 +264,7 @@ describe('createBroadcastClock', () => {
         .sourceTimeline()
         .calibrate(0, Number.NaN),
     ).toThrow(RangeError);
-    const clock = createBroadcastClock({ now: () => 0 });
+    const clock = createBroadcastClock({ now: () => 0, originEpochUs: 0 });
     expect(() => clock.fromSourceUs(Number.POSITIVE_INFINITY)).toThrow(RangeError);
     expect(() => clock.sampleTimeline(0)).toThrow(RangeError);
     expect(() => clock.sampleTimeline(44_100.5)).toThrow(RangeError);

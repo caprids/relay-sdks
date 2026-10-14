@@ -64,8 +64,8 @@ export interface MediaTimelineTrackInfo {
   /** Track name. Default {@link MEDIA_TIMELINE_TRACK}. */
   name?: string;
   /**
-   * The video or audio track the timeline's locations point into (§5.2.14). Default: the video track, else the audio
-   * track.
+   * The video and audio tracks the timeline applies to (§5.2.14, §7.2); its locations point into the first. Default:
+   * the video track, then the audio track, whichever exist.
    */
   depends?: readonly string[];
 }
@@ -159,7 +159,7 @@ export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
   if (input.data?.some((track) => track.role !== undefined && mediaRoles.has(track.role)))
     throw new Error('data tracks must not use media roles');
   const mediaNames = [video, audio].filter((track) => track !== undefined).map((track) => track.name);
-  const depends = timeline ? [...(timeline.depends ?? mediaNames.slice(0, 1))] : [];
+  const depends = timeline ? [...(timeline.depends ?? mediaNames)] : [];
   if (
     timeline &&
     (depends.length === 0 || new Set(depends).size !== depends.length || depends.some((n) => !mediaNames.includes(n)))

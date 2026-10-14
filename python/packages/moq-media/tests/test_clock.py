@@ -28,6 +28,14 @@ class Source:
         return self.current
 
 
+def epoch(vector: dict[str, Any]) -> int:
+    return int(vector["originEpochUs"])
+
+
+def number(raw: str) -> int:
+    return float(raw) if "." in raw else int(raw)  # ty: ignore[invalid-return-type]
+
+
 def decision(raw: dict[str, str]) -> PlayoutDecision:
     return PlayoutDecision(raw["action"], int(raw["offsetUs"]), int(raw.get("waitUs", "0")))  # ty: ignore[invalid-argument-type]
 
@@ -36,7 +44,9 @@ def decision(raw: dict[str, str]) -> PlayoutDecision:
 def test_broadcast_clock_vectors(vector: dict[str, Any]) -> None:
     source = Source(int(vector["createdAt"]))
     origin = vector.get("originUs")
-    clock = BroadcastClock(now_us=source, origin_us=None if origin is None else int(origin))
+    clock = BroadcastClock(
+        now_us=source, origin_us=None if origin is None else int(origin), origin_epoch_us=epoch(vector)
+    )
     for step in vector["steps"]:
         source.current = int(step["at"])
         if "now" in step:
@@ -74,7 +84,7 @@ def test_epoch_origin_errors(vector: dict[str, Any]) -> None:
 @pytest.mark.parametrize("vector", VECTORS["sampleTimelines"], ids=lambda vector: vector["name"])
 def test_sample_timeline_vectors(vector: dict[str, Any]) -> None:
     source = Source(int(vector["createdAt"]))
-    clock = BroadcastClock(now_us=source)
+    clock = BroadcastClock(now_us=source, origin_epoch_us=epoch(vector))
     source.current = int(vector["timelineAt"])
     first = vector.get("firstSampleUs")
     timeline = clock.sample_timeline(int(vector["sampleRate"]), first_sample_us=None if first is None else int(first))
@@ -85,7 +95,8 @@ def test_sample_timeline_vectors(vector: dict[str, Any]) -> None:
 @pytest.mark.parametrize("vector", VECTORS["sourceTimelines"], ids=lambda vector: vector["name"])
 def test_source_timeline_vectors(vector: dict[str, Any]) -> None:
     source = Source(int(vector["createdAt"]))
-    timeline = BroadcastClock(now_us=source).source_timeline()
+    latency = int(vector.get("captureLatencyUs", "0"))
+    timeline = BroadcastClock(now_us=source, origin_epoch_us=epoch(vector)).source_timeline(capture_latency_us=latency)
     assert timeline.anchor_source_us is None
     for step in vector["steps"]:
         source.current = int(step["at"])
@@ -96,13 +107,30 @@ def test_source_timeline_vectors(vector: dict[str, Any]) -> None:
 @pytest.mark.parametrize("vector", VECTORS["calibratedTimelines"], ids=lambda vector: vector["name"])
 def test_calibrated_timeline_vectors(vector: dict[str, Any]) -> None:
     tolerance = vector.get("toleranceUs")
-    clock = BroadcastClock(now_us=Source(int(vector["createdAt"])))
-    timeline = clock.source_timeline() if tolerance is None else clock.source_timeline(tolerance_us=int(tolerance))
+    clock = BroadcastClock(now_us=Source(int(vector["createdAt"])), origin_epoch_us=epoch(vector))
+    timeline = clock.source_timeline(
+        tolerance_us=5_000 if tolerance is None else int(tolerance),
+        capture_latency_us=int(vector.get("captureLatencyUs", "0")),
+    )
     for step in vector["steps"]:
-        if "calibrate" in step:
+        if "captureLatency" in step:
+            timeline.capture_latency_us = int(step["captureLatency"])
+            assert timeline.capture_latency_us == int(step["captureLatency"])
+        elif "calibrate" in step:
             assert timeline.calibrate(int(step["calibrate"]), at_us=int(step["calibrateAt"])) is step["expect"]
         else:
             assert timeline.timestamp_us(int(step["source"])) == int(step["expect"])
+
+
+@pytest.mark.parametrize("vector", VECTORS["captureLatencyErrors"], ids=lambda vector: vector["name"])
+def test_capture_latency_errors(vector: dict[str, Any]) -> None:
+    clock = BroadcastClock(now_us=Source(0))
+    with pytest.raises(ValueError):
+        clock.source_timeline(capture_latency_us=number(vector["captureLatencyUs"]))
+    timeline = clock.source_timeline(capture_latency_us=1_000)
+    with pytest.raises(ValueError):
+        timeline.capture_latency_us = number(vector["captureLatencyUs"])
+    assert timeline.capture_latency_us == 1_000
 
 
 @pytest.mark.parametrize("vector", VECTORS["playout"], ids=lambda vector: vector["name"])
@@ -133,7 +161,7 @@ class TestBroadcastClock:
         before = time.monotonic_ns() // 1000
         clock = BroadcastClock()
         assert before <= clock.origin_us <= time.monotonic_ns() // 1000
-        assert 0 <= clock.now_us() < 1_000_000
+        assert 0 <= clock.now_us() - clock.origin_epoch_us < 1_000_000
 
     def test_reads_the_system_clock_for_the_origin_epoch_by_default(self) -> None:
         before = time.time_ns() // 1000
@@ -147,7 +175,7 @@ class TestBroadcastClock:
 
     def test_calibrates_at_the_time_source_now_by_default(self) -> None:
         source = Source(0)
-        context = BroadcastClock(now_us=source).source_timeline()
+        context = BroadcastClock(now_us=source, origin_epoch_us=0).source_timeline()
         source.current = 250_000
         assert context.calibrate(7_000_000) is True
         assert context.anchor_source_us == 7_000_000
@@ -158,9 +186,9 @@ class TestBroadcastClock:
         assert clock.origin_us == 1000
 
     def test_rounds_fractional_source_times_to_the_nearest_microsecond_ties_upward(self) -> None:
-        clock = BroadcastClock(now_us=lambda: 0, origin_us=0)
-        assert clock.from_source_us(10.5) == 11  # ty: ignore[invalid-argument-type]
-        assert clock.from_source_us(-0.5) == 0  # ty: ignore[invalid-argument-type]
+        clock = BroadcastClock(now_us=lambda: 0, origin_us=0, origin_epoch_us=1_000_000)
+        assert clock.from_source_us(10.5) == 1_000_011  # ty: ignore[invalid-argument-type]
+        assert clock.from_source_us(-0.5) == 1_000_000  # ty: ignore[invalid-argument-type]
         assert isinstance(clock.from_source_us(10.4), int)  # ty: ignore[invalid-argument-type]
 
     def test_rejects_bad_origins_source_times_rates_and_indexes(self) -> None:
@@ -187,7 +215,7 @@ class TestBroadcastClock:
         with pytest.raises(ValueError):
             clock.sample_timeline(48_000, first_sample_us=0.5)  # ty: ignore[invalid-argument-type]
         timeline = clock.sample_timeline(48_000)
-        assert (timeline.sample_rate, timeline.first_sample_us) == (48_000, 0)
+        assert (timeline.sample_rate, timeline.first_sample_us) == (48_000, clock.origin_epoch_us)
         for index in (-1, 1.5, True):
             with pytest.raises(ValueError):
                 timeline.timestamp_us(index)  # ty: ignore[invalid-argument-type]

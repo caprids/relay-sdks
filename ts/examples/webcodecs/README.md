@@ -27,7 +27,7 @@ const publisher = await connectRelayPublisher({ url, namespace, getToken: () => 
 const stop = new AbortController();
 // Wire your stop button to stop.abort(). Capture/drawing remains owned by your application.
 console.log(composeMoqSource(url, namespace)); // supply authorized subscriber credentials in the player
-// Optional audio. Create the clock before capturing anything; create the context in a user gesture.
+// Optional audio. Create the context in a user gesture.
 const clock = createBroadcastClock();
 const context = new AudioContext({ sampleRate: 48_000 });
 const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -45,7 +45,7 @@ try {
 
 ## Audio and the shared timeline
 
-Both tracks are stamped from one broadcast clock
+Both tracks are stamped from one broadcast clock, in microseconds since the Unix epoch
 ([spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock)). Video frames
 get `clock.now()` when they are captured. The microphone runs through an `AudioContext` and an
 `AudioWorklet`, which works in Chromium, Firefox and Safari: no `MediaStreamTrackProcessor`. The
@@ -67,9 +67,12 @@ every Opus frame is its own group.
   its lookahead. The example feeds the encoder one contiguous count and maps each chunk back to
   context time through the block it came from. Not the worklet's first `currentFrame`: Chromium
   reports 0 on a new node's first call, so a block restarts wherever the frame count jumps.
-- **What nobody can see.** A microphone's own input latency, such as Bluetooth's 100–200 ms, reaches
-  no browser API. Audio from such a device is stamped late by that much
-  ([#290](https://github.com/muxinc/relay-sdks/issues/290)).
+- **What nobody can see.** A microphone's own input latency reaches no browser API. The example
+  estimates it from the device label with `estimateCaptureLatencyUs`, 190 ms for a Bluetooth headset
+  and 30 ms otherwise (measured on macOS,
+  [spec/media-layer.md](../../../spec/media-layer.md#capture-latency)), and subtracts it from every
+  audio timestamp; it asks again on every `useStream`. Pass `captureLatencyUs` to
+  `captureMicrophone` with your own figures.
 
 `mise run ts:test:av-sync` runs this example end to end and measures the A/V offset a player gets,
 with device switches; see [spec/media-layer.md](../../../spec/media-layer.md#measured-in-browsers)
@@ -91,10 +94,11 @@ writes, and keeps an eight-chunk hard cap for bursts of internally buffered enco
 not silently drop encoded deltas to relieve transport backpressure.
 Subscription changes reset video to the next keyframe and re-serve the catalog on replacement
 demand. A `timeline` track (msf-01 §7, announced in the catalog) maps each video group to the capture
-time of its keyframe as Unix-epoch time: once a keyframe has opened a group, `createMediaTimeline` adds a
-record, and the document of every retained record goes out as a new group, and again on each new
-timeline subscription. A keyframe skipped for lack of demand adds nothing. Audio is encoded whether or not it has demand, and sent only with it; a frame stamped before
-the broadcast's origin is not sent. Other write errors, encoder errors, and cancellation close its
+time of its keyframe: once a keyframe has opened a group, `createMediaTimeline` adds a record, and the
+document of every retained record goes out as a new group, and again on each new timeline
+subscription. A keyframe skipped for lack of demand adds nothing. Audio is encoded whether or not it
+has demand, and sent only with it; a frame stamped before the Unix epoch (possible only on a clock
+pinned near zero) is not sent. Other write errors, encoder errors, and cancellation close its
 tracks and encoders; the caller closes the connection and the microphone. There is no automatic
 reconnection or adaptive bitrate policy in this example. After the
 connection ends, for example after a network outage longer than about 5 s in Chromium, nothing

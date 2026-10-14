@@ -19,17 +19,17 @@ export interface MediaTimelineEntry {
 
 /** What {@link mediaTimelineEntry} needs to know about one object. */
 export interface MediaTimelineEntryInput {
-  /** The object's LOC timestamp on the broadcast timeline, in integer microseconds. */
+  /** The object's LOC timestamp, in integer microseconds. */
   timestampUs: number;
   /** The object's group ID. */
   group: number;
   /** The object's ID. Default 0, the group's first object. */
   object?: number;
   /**
-   * The broadcast's origin as Unix-epoch microseconds (`BroadcastClock.originEpochUs`). Without it the wall-clock
-   * time is 0, as msf-01 says for unknown wall-clock time.
+   * When that media was captured, in integer Unix-epoch microseconds. Defaults to `timestampUs`, which on the
+   * broadcast clock's timeline is that time; 0 means unknown, as msf-01 allows.
    */
-  originEpochUs?: number;
+  wallclockUs?: number;
 }
 
 function whole(value: number, name: string): number {
@@ -37,15 +37,14 @@ function whole(value: number, name: string): number {
   return value;
 }
 
-/** The record for one object of the indexed track, stamped from the broadcast timeline. */
+/** The record for one object of the indexed track. */
 export function mediaTimelineEntry(input: MediaTimelineEntryInput): MediaTimelineEntry {
   const timestampUs = whole(input.timestampUs, 'timestampUs');
-  const wallclockUs = input.originEpochUs === undefined ? 0 : whole(input.originEpochUs, 'originEpochUs') + timestampUs;
   return {
     mediaTimeMs: Math.floor(timestampUs / 1000),
     group: whole(input.group, 'group'),
     object: whole(input.object ?? 0, 'object'),
-    wallclockMs: Math.floor(whole(wallclockUs, 'wall-clock time') / 1000),
+    wallclockMs: Math.floor(whole(input.wallclockUs ?? timestampUs, 'wallclockUs') / 1000),
   };
 }
 
@@ -64,17 +63,9 @@ export function buildMediaTimeline(entries: readonly MediaTimelineEntry[]): Uint
 
 /** Options for {@link createMediaTimeline}. */
 export interface MediaTimelineOptions {
-  /**
-   * The broadcast's origin as Unix-epoch microseconds (`BroadcastClock.originEpochUs`). Without it every wall-clock
-   * time is 0.
-   */
-  originEpochUs?: number;
   /** How many entries the document keeps; past it, the oldest is dropped. Default 512, about 18 KB. */
   maxEntries?: number;
 }
-
-/** One object of the indexed track, for {@link MediaTimeline.add}. */
-export type MediaTimelineAddInput = Omit<MediaTimelineEntryInput, 'originEpochUs'>;
 
 /** The retained entries of one broadcast's media timeline, and the independent document they make. */
 export interface MediaTimeline {
@@ -86,7 +77,7 @@ export interface MediaTimeline {
    * Record one object, once per group of the indexed track for its first object, when that object was sent; return
    * the document. A rejected argument throws and leaves the timeline unchanged.
    */
-  add(input: MediaTimelineAddInput): Uint8Array;
+  add(input: MediaTimelineEntryInput): Uint8Array;
 }
 
 /**
@@ -94,8 +85,7 @@ export interface MediaTimeline {
  * new broadcast and starts a new timeline.
  */
 export function createMediaTimeline(options: MediaTimelineOptions = {}): MediaTimeline {
-  const { originEpochUs, maxEntries = 512 } = options;
-  if (originEpochUs !== undefined) whole(originEpochUs, 'originEpochUs');
+  const { maxEntries = 512 } = options;
   if (whole(maxEntries, 'maxEntries') < 1) throw new RangeError('maxEntries must be a positive safe integer');
   const entries: MediaTimelineEntry[] = [];
   return {
@@ -106,7 +96,7 @@ export function createMediaTimeline(options: MediaTimelineOptions = {}): MediaTi
       return buildMediaTimeline(entries);
     },
     add(input) {
-      entries.push(mediaTimelineEntry({ ...input, ...(originEpochUs === undefined ? {} : { originEpochUs }) }));
+      entries.push(mediaTimelineEntry(input));
       if (entries.length > maxEntries) entries.shift();
       return buildMediaTimeline(entries);
     },

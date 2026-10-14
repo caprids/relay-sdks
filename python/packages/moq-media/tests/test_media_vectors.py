@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import moq_media as media
+from moq_core import KeyValuePair
 
 SPEC = Path(__file__).resolve().parents[4] / "spec"
 VECTORS = json.loads((SPEC / "vectors/media.json").read_text())
@@ -161,7 +162,7 @@ def timeline_entry(raw: dict[str, Any]) -> media.MediaTimelineEntry:
         decimal(raw["timestampUs"]),
         decimal(raw["group"]),
         object=decimal(raw.get("object", "0")),
-        origin_epoch_us=decimal(raw["originEpochUs"]) if "originEpochUs" in raw else None,
+        wallclock_us=decimal(raw["wallclockUs"]) if "wallclockUs" in raw else None,
     )
 
 
@@ -208,8 +209,7 @@ def test_timeline_read_rejects_non_utf8() -> None:
 
 
 def media_timeline(raw: dict[str, Any]) -> media.MediaTimeline:
-    origin = decimal(raw["originEpochUs"]) if "originEpochUs" in raw else None
-    return media.MediaTimeline(origin_epoch_us=origin, max_entries=decimal(raw["maxEntries"]))
+    return media.MediaTimeline(max_entries=decimal(raw["maxEntries"]))
 
 
 @pytest.mark.parametrize("vector", VECTORS["timelineRetention"], ids=lambda v: v["name"])
@@ -218,7 +218,10 @@ def test_timeline_retention(vector: dict[str, Any]) -> None:
     document = timeline.document
     for add in vector["adds"]:
         document = timeline.add(
-            decimal(add["timestampUs"]), decimal(add["group"]), object=decimal(add.get("object", "0"))
+            decimal(add["timestampUs"]),
+            decimal(add["group"]),
+            object=decimal(add.get("object", "0")),
+            wallclock_us=decimal(add["wallclockUs"]) if "wallclockUs" in add else None,
         )
     assert document == timeline.document == vector["json"].encode("utf-8")
     assert [record(read) for read in timeline.entries] == json.loads(vector["json"])
@@ -231,24 +234,38 @@ def test_timeline_retention_errors(vector: dict[str, Any]) -> None:
 
 
 def test_timeline_rejected_add_leaves_it_unchanged() -> None:
-    timeline = media.MediaTimeline(origin_epoch_us=1_000, max_entries=1)
-    timeline.add(0, 0)
+    timeline = media.MediaTimeline(max_entries=1)
+    timeline.add(1_000, 0)
     with pytest.raises(ValueError):
         timeline.add(-1, 1)
-    assert timeline.document == b"[[0,[0,0],1]]"
+    assert timeline.document == b"[[1,[0,0],1]]"
 
 
 def test_a_new_timeline_starts_empty() -> None:
     # A supervised publisher's next generation is a new broadcast: it makes a new timeline, not a cleared one.
-    first = media.MediaTimeline(origin_epoch_us=1_000)
-    first.add(0, 0)
-    assert media.MediaTimeline(origin_epoch_us=2_000).document == b"[]"
+    media.MediaTimeline().add(1_000, 0)
+    assert media.MediaTimeline().document == b"[]"
 
 
 def test_timeline_entry_from_a_broadcast_clock() -> None:
     clock = media.BroadcastClock(now_us=lambda: 0, origin_us=0, origin_epoch_us=1_759_924_158_381_000)
-    timeline = media.media_timeline_entry(2_002_000, 1, origin_epoch_us=clock.origin_epoch_us)
-    assert record(timeline) == [2002, [1, 0], 1_759_924_160_383]
+    timeline = media.media_timeline_entry(clock.from_source_us(2_002_000), 1)
+    assert record(timeline) == [1_759_924_160_383, [1, 0], 1_759_924_160_383]
+
+
+def kv_pairs(raw: list[list[Any]]) -> list[KeyValuePair]:
+    """The vectors' ``[type, decimal or hex]`` pairs: even types carry integers, odd types bytes."""
+    return [KeyValuePair(t, bytes.fromhex(v) if t % 2 else int(v)) for t, v in raw]
+
+
+@pytest.mark.parametrize("vector", VECTORS["locTimestamps"], ids=lambda v: v["name"])
+def test_loc_timestamps(vector: dict[str, Any]) -> None:
+    read = media.loc_timestamp_us(
+        kv_pairs(vector["properties"]),
+        track_properties=kv_pairs(vector.get("trackProperties", [])),
+    )
+    expected = vector["timestampUs"]
+    assert read == (None if expected is None else int(expected))
 
 
 @pytest.mark.parametrize("vector", VECTORS["loc"], ids=lambda v: v["name"])

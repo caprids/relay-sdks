@@ -1,7 +1,11 @@
 import { resolveObjectURL } from 'node:buffer';
 import { createBroadcastClock } from '@mux/moq-media';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-import { captureMicrophone, type MicrophoneBlock } from '../examples/webcodecs/capture-microphone.js';
+import {
+  captureMicrophone,
+  estimateCaptureLatencyUs,
+  type MicrophoneBlock,
+} from '../examples/webcodecs/capture-microphone.js';
 
 class FakeNode {
   connect = vi.fn();
@@ -23,6 +27,7 @@ class FakeContext {
     }),
   };
   sources: FakeNode[] = [];
+  currentTime = 0;
   readonly sampleRate: number;
   constructor(sampleRate = 48_000) {
     this.sampleRate = sampleRate;
@@ -55,7 +60,9 @@ class FakeWorkletNode extends FakeNode {
 }
 
 let nowUs = 0;
-const clock = () => createBroadcastClock({ now: () => nowUs, originUs: 0 });
+// Pinned at epoch 0, so timestamps count from the origin and read as the test's own times.
+const clock = () => createBroadcastClock({ now: () => nowUs, originUs: 0, originEpochUs: 0 });
+const noLatency = () => 0;
 const asContext = (context: FakeContext) => context as unknown as AudioContext;
 const stream = (name: string) => ({ name }) as unknown as MediaStream;
 
@@ -71,7 +78,10 @@ afterEach(() => {
 
 it('stamps each block with context time, calibrated from when blocks arrive', async () => {
   const context = new FakeContext();
-  const capture = await captureMicrophone(clock(), stream('mic'), { context: asContext(context) });
+  const capture = await captureMicrophone(clock(), stream('mic'), {
+    context: asContext(context),
+    captureLatencyUs: noLatency,
+  });
   const blocks: MicrophoneBlock[] = [];
   capture.onblock = (block) => blocks.push(block);
   const node = nodes[0] as FakeWorkletNode;
@@ -96,7 +106,10 @@ it('stamps each block with context time, calibrated from when blocks arrive', as
 
 it('switches microphones in the same context and replaces the context with a fresh timeline', async () => {
   const first = new FakeContext();
-  const capture = await captureMicrophone(clock(), stream('laptop'), { context: asContext(first) });
+  const capture = await captureMicrophone(clock(), stream('laptop'), {
+    context: asContext(first),
+    captureLatencyUs: noLatency,
+  });
   const blocks: MicrophoneBlock[] = [];
   capture.onblock = (block) => blocks.push(block);
   const [laptop] = first.sources;
@@ -129,6 +142,53 @@ it('switches microphones in the same context and replaces the context with a fre
   capture.close();
   expect((nodes[1] as FakeWorkletNode).port.onmessage).toBeNull();
   expect(() => capture.useStream(undefined)).toThrow('closed');
+});
+
+it('subtracts the capture latency of each microphone, asked again on every switch', async () => {
+  const latencies: Record<string, number> = { laptop: 30_000, earbuds: 190_000 };
+  const asked: (string | undefined)[] = [];
+  const context = new FakeContext();
+  const capture = await captureMicrophone(clock(), stream('laptop'), {
+    context: asContext(context),
+    captureLatencyUs: (current) => {
+      const name = (current as unknown as { name: string } | undefined)?.name;
+      asked.push(name);
+      return name ? (latencies[name] ?? 0) : 0;
+    },
+  });
+  const blocks: MicrophoneBlock[] = [];
+  capture.onblock = (block) => blocks.push(block);
+  const node = nodes[0] as FakeWorkletNode;
+  // Rendered up to 20 ms of context time, observed at 50 ms: context 0 is broadcast 30 ms, less the laptop 30 ms.
+  nowUs = 50_000;
+  node.post(0);
+  expect(blocks[0]?.timeline.timestampUs(0)).toBe(0);
+  expect(blocks[0]?.captureLatencyUs).toBe(30_000);
+  // Switched once the context has rendered 40 ms: a laptop block still queued keeps the laptop latency.
+  context.currentTime = 0.04;
+  capture.useStream(stream('earbuds'));
+  expect(blocks[0]?.timeline.captureLatencyUs).toBe(190_000);
+  expect(blocks[0]?.timeline.timestampUs(200_000)).toBe(40_000);
+  node.post(960);
+  node.post(1920);
+  expect(blocks.slice(1).map((block) => block.captureLatencyUs)).toEqual([30_000, 190_000]);
+  // The switch frame is rounded: 0.28 s × 48 kHz is 13440.000000000002 in floating point.
+  context.currentTime = 0.28;
+  capture.useStream(undefined);
+  expect(blocks[0]?.timeline.captureLatencyUs).toBe(0);
+  node.post(13_440);
+  expect(blocks.at(-1)?.captureLatencyUs).toBe(0);
+  expect(asked).toEqual(['laptop', 'earbuds', undefined]);
+});
+
+it('estimates capture latency from the microphone label', () => {
+  const labelled = (label: string) => ({ getAudioTracks: () => [{ label }] }) as unknown as MediaStream;
+  expect(estimateCaptureLatencyUs(labelled('MacBook Air Microphone (Built-in)'))).toBe(30_000);
+  expect(estimateCaptureLatencyUs(labelled('AirPods'))).toBe(190_000);
+  expect(estimateCaptureLatencyUs(labelled('Jabra Evolve2 (Bluetooth)'))).toBe(190_000);
+  expect(estimateCaptureLatencyUs(labelled(''))).toBe(0);
+  expect(estimateCaptureLatencyUs({ getAudioTracks: () => [] } as unknown as MediaStream)).toBe(0);
+  expect(estimateCaptureLatencyUs(undefined)).toBe(0);
 });
 
 it('posts contiguous blocks only, starting over where currentFrame jumps', async () => {

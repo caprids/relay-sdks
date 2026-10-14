@@ -22,13 +22,13 @@ interface RawCatalog {
   generatedAt?: string;
 }
 type TimelineRecord = [number, [number, number], number];
-type RawTimelineAdd = { timestampUs: string; group: string; object?: string };
+type RawTimelineAdd = { timestampUs: string; group: string; object?: string; wallclockUs?: string };
 interface RawTimelineEntry {
   name: string;
   timestampUs: string;
   group: string;
   object?: string;
-  originEpochUs?: string;
+  wallclockUs?: string;
 }
 interface Vectors {
   catalogs: { name: string; input: RawCatalog; json: string; parsed: unknown }[];
@@ -45,6 +45,12 @@ interface Vectors {
     audioConfig?: string;
     properties: [number, string][];
   }[];
+  locTimestamps: {
+    name: string;
+    properties: [number, string][];
+    trackProperties?: [number, string][];
+    timestampUs: string | null;
+  }[];
   urls: { name: string; origin: string; namespace: string[]; token?: string; trackName?: string; url: string }[];
   urlErrors: { origin: string; namespace: string[] }[];
   h264: { name: string; avcc: string; codec: string }[];
@@ -57,11 +63,10 @@ interface Vectors {
   timelineRetention: {
     name: string;
     maxEntries: string;
-    originEpochUs?: string;
     adds: RawTimelineAdd[];
     json: string;
   }[];
-  timelineRetentionErrors: { name: string; maxEntries: string; originEpochUs?: string }[];
+  timelineRetentionErrors: { name: string; maxEntries: string }[];
 }
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/media.json', import.meta.url), 'utf8')) as Vectors;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -110,14 +115,11 @@ const timelineEntry = (raw: RawTimelineEntry) =>
     timestampUs: Number(raw.timestampUs),
     group: Number(raw.group),
     ...(raw.object !== undefined ? { object: Number(raw.object) } : {}),
-    ...(raw.originEpochUs !== undefined ? { originEpochUs: Number(raw.originEpochUs) } : {}),
+    ...(raw.wallclockUs !== undefined ? { wallclockUs: Number(raw.wallclockUs) } : {}),
   });
 
-const mediaTimeline = (raw: { maxEntries: string; originEpochUs?: string }) =>
-  media.createMediaTimeline({
-    maxEntries: Number(raw.maxEntries),
-    ...(raw.originEpochUs !== undefined ? { originEpochUs: Number(raw.originEpochUs) } : {}),
-  });
+const mediaTimeline = (raw: { maxEntries: string }) =>
+  media.createMediaTimeline({ maxEntries: Number(raw.maxEntries) });
 
 describe('shared media timeline vectors', () => {
   for (const vector of vectors.timelineEntries) {
@@ -158,6 +160,7 @@ describe('shared media timeline vectors', () => {
           timestampUs: Number(add.timestampUs),
           group: Number(add.group),
           ...(add.object !== undefined ? { object: Number(add.object) } : {}),
+          ...(add.wallclockUs !== undefined ? { wallclockUs: Number(add.wallclockUs) } : {}),
         });
       }
       const expected = hex(new TextEncoder().encode(vector.json));
@@ -170,20 +173,24 @@ describe('shared media timeline vectors', () => {
     it(`rejects retention ${vector.name}`, () => expect(() => mediaTimeline(vector)).toThrow(RangeError));
   }
   it('leaves the timeline unchanged after a rejected entry', () => {
-    const timeline = media.createMediaTimeline({ originEpochUs: 1_000, maxEntries: 1 });
-    timeline.add({ timestampUs: 0, group: 0 });
+    const timeline = media.createMediaTimeline({ maxEntries: 1 });
+    timeline.add({ timestampUs: 1_000, group: 0 });
     expect(() => timeline.add({ timestampUs: -1, group: 1 })).toThrow(RangeError);
-    expect(new TextDecoder().decode(timeline.document)).toBe('[[0,[0,0],1]]');
+    expect(new TextDecoder().decode(timeline.document)).toBe('[[1,[0,0],1]]');
   });
   it('starts each broadcast with an empty timeline', () => {
     // A supervised publisher's next generation is a new broadcast: it makes a new timeline, not a cleared one.
-    media.createMediaTimeline({ originEpochUs: 1_000 }).add({ timestampUs: 0, group: 0 });
-    expect(new TextDecoder().decode(media.createMediaTimeline({ originEpochUs: 2_000 }).document)).toBe('[]');
+    media.createMediaTimeline().add({ timestampUs: 1_000, group: 0 });
+    expect(new TextDecoder().decode(media.createMediaTimeline().document)).toBe('[]');
   });
   it('stamps entries from a broadcast clock', () => {
-    const clock = media.createBroadcastClock({ now: () => 0, originUs: 0, originEpochUs: 1_759_924_158_381_000 });
-    const timeline = media.mediaTimelineEntry({ timestampUs: 2_002_000, group: 1, originEpochUs: clock.originEpochUs });
-    expect(record(timeline)).toEqual([2002, [1, 0], 1_759_924_160_383]);
+    const clock = media.createBroadcastClock({
+      now: () => 2_002_000,
+      originUs: 0,
+      originEpochUs: 1_759_924_158_381_000,
+    });
+    const timeline = media.mediaTimelineEntry({ timestampUs: clock.now(), group: 1 });
+    expect(record(timeline)).toEqual([1_759_924_160_383, [1, 0], 1_759_924_160_383]);
   });
 });
 
@@ -235,6 +242,16 @@ describe('shared media vectors', () => {
       );
       expect(media.locTrackProperties(Number(vector.timescale ?? '1000000'))).toEqual([properties[1]]);
     });
+  }
+  const pairs = (raw: [number, string][]) =>
+    raw.map(([type, value]) => ({ type, value: type % 2 === 0 ? Number(value) : bytes(value) }));
+  for (const vector of vectors.locTimestamps) {
+    it(`LOC timestamp ${vector.name}`, () =>
+      expect(
+        media.locTimestampUs(pairs(vector.properties), {
+          ...(vector.trackProperties ? { trackProperties: pairs(vector.trackProperties) } : {}),
+        }),
+      ).toBe(vector.timestampUs === null ? undefined : Number(vector.timestampUs)));
   }
   for (const vector of vectors.urls) {
     it(`URL ${vector.name}`, () =>

@@ -228,14 +228,17 @@ function run(options: Parameters<typeof recordingPublisher>[0] = {}, microphone?
   const stop = new AbortController();
   const result = publishCanvas(canvas, recorded.publisher, ['demo'], {
     signal: stop.signal,
-    ...(microphone ? { microphone } : {}),
+    ...(microphone ? { microphone } : { clock: testClock() }),
   });
   return { ...recorded, stop, result };
 }
 
+/** A broadcast clock pinned at epoch 0, so timestamps count from its origin and read as the test's own times. */
+const testClock = () => createBroadcastClock({ originEpochUs: 0 });
+
 /** A microphone whose blocks the test delivers, with context 0 at broadcast time 5 ms. */
 function testMicrophone() {
-  const clock = createBroadcastClock();
+  const clock = testClock();
   const timeline = clock.sourceTimeline();
   timeline.calibrate(0, clock.originUs + 5_000);
   const microphone: MicrophoneCapture = {
@@ -246,8 +249,14 @@ function testMicrophone() {
     async useContext() {},
     close() {},
   };
-  const deliver = (contextUs: number, on: SourceTimeline = timeline) =>
-    microphone.onblock?.({ samples: new Float32Array(960), sampleRate: 48_000, contextUs, timeline: on });
+  const deliver = (contextUs: number, on: SourceTimeline = timeline, captureLatencyUs = on.captureLatencyUs) =>
+    microphone.onblock?.({
+      samples: new Float32Array(960),
+      sampleRate: 48_000,
+      contextUs,
+      timeline: on,
+      captureLatencyUs,
+    });
   return { clock, timeline, microphone, deliver };
 }
 
@@ -304,9 +313,8 @@ it('publishes a media timeline entry for each keyframe group that went out', asy
     [0, 0, keyframes[0]],
     [1, 0, keyframes[1]],
   ]);
-  // Capture time as Unix-epoch time: the clock read Date.now() once, and entries advance with media time.
-  expect(Math.abs(entries[0]!.wallclockMs - Date.now())).toBeLessThan(10_000);
-  expect(entries[1]!.wallclockMs - entries[0]!.wallclockMs).toBeCloseTo(entries[1]!.mediaTimeMs, -1);
+  // The broadcast timeline is Unix-epoch time (pinned at 0 here), so each record's two times agree.
+  for (const { mediaTimeMs, wallclockMs } of entries) expect(wallclockMs).toBe(mediaTimeMs);
   timeline.demand(true); // a replacement subscription gets the latest document again
   await vi.advanceTimersByTimeAsync(0);
   expect(timeline.objects[2]![0]!.bytes).toEqual(timeline.objects[1]![0]!.bytes);
@@ -524,7 +532,23 @@ it.each([
   },
 );
 
-it('encodes every block without audio demand, and sends nothing stamped before the origin', async () => {
+it('stamps audio with the capture latency of the microphone it came from, not the one switched to since', async () => {
+  const mic = testMicrophone();
+  const session = run({}, mic.microphone);
+  const completion = expect(session.result).rejects.toThrow('Stopped');
+  await vi.advanceTimersByTimeAsync(0);
+  mic.timeline.captureLatencyUs = 30_000;
+  mic.deliver(40_000);
+  // Captured on the 30 ms microphone, encoded after a switch to a 190 ms one.
+  mic.timeline.captureLatencyUs = 190_000;
+  mic.deliver(60_000, mic.timeline, 30_000);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(timestampsOf(session.tracks.get('audio')!.objects)).toEqual([[15_000], [35_000]]);
+  session.stop.abort(new Error('Stopped'));
+  await completion;
+});
+
+it('encodes every block without audio demand, and sends nothing stamped before the epoch', async () => {
   const mic = testMicrophone();
   const session = run({}, mic.microphone);
   const completion = expect(session.result).rejects.toThrow('Stopped');
@@ -535,7 +559,7 @@ it('encodes every block without audio demand, and sends nothing stamped before t
   mic.deliver(20_000);
   audio.demand(true);
   mic.deliver(40_000);
-  // A context whose time 0 came before the broadcast's origin: its first block has no place on the timeline.
+  // A context whose time 0 came before epoch 0 on this test clock: its first block has no place on the timeline.
   const early = mic.clock.sourceTimeline();
   early.calibrate(0, mic.clock.originUs - 10_000);
   mic.deliver(0, early);

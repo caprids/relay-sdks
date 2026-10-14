@@ -78,6 +78,11 @@ export interface MicrophoneBlock {
   contextUs: number;
   /** Maps this context's time onto the broadcast timeline. Each context has its own, so it changes with the context. */
   timeline: SourceTimeline;
+  /**
+   * The capture latency of the microphone these samples came from, by the context frame each microphone was connected
+   * at. The timeline's value moves on at a device switch, while blocks captured before it may still be in flight.
+   */
+  captureLatencyUs: number;
 }
 
 /** A microphone routed through an `AudioContext` and an `AudioWorklet`, timed on a broadcast clock. */
@@ -102,12 +107,28 @@ export interface MicrophoneCapture {
   close(): void;
 }
 
+/**
+ * A rough capture latency for the microphone in `stream`, in microseconds, from its label: 190 ms for a Bluetooth
+ * headset, 30 ms for any other device, and 0 without a labelled audio track (silence, or a synthetic source). The
+ * figures are the macOS measurements in spec/media-layer.md, "Capture latency"; no browser API reports the real value.
+ */
+export function estimateCaptureLatencyUs(stream: MediaStream | undefined): number {
+  const label = stream?.getAudioTracks()[0]?.label ?? '';
+  if (!label) return 0;
+  return /airpods|bluetooth/i.test(label) ? 190_000 : 30_000;
+}
+
 /** Options for {@link captureMicrophone}. */
 export interface CaptureMicrophoneOptions {
   /** The context to capture in. Default: a new 48 kHz context, the rate Opus encodes at. */
   context?: AudioContext;
   /** Block length in milliseconds; each block is one encoder input. Default 20, one Opus frame. */
   blockMs?: number;
+  /**
+   * The capture latency of the microphone in a stream, in integer microseconds, subtracted from every timestamp.
+   * Asked again whenever the stream changes. Default {@link estimateCaptureLatencyUs}.
+   */
+  captureLatencyUs?: (stream: MediaStream | undefined) => number;
 }
 
 interface Leg {
@@ -116,6 +137,8 @@ interface Leg {
   source: MediaStreamAudioSourceNode | undefined;
   renders: RenderClock;
   timeline: SourceTimeline;
+  /** Each microphone's capture latency, from the context frame it was connected at; oldest first. */
+  latencies: { fromFrame: number; latencyUs: number }[];
 }
 
 /**
@@ -132,13 +155,20 @@ export async function captureMicrophone(
   options: CaptureMicrophoneOptions = {},
 ): Promise<MicrophoneCapture> {
   const blockMs = options.blockMs ?? 20;
+  const latencyOf = options.captureLatencyUs ?? estimateCaptureLatencyUs;
   // The broadcast clock's own source, so calibration pairs and timestamps share one time base.
-  const sourceNowUs = () => clock.now() + clock.originUs;
+  const sourceNowUs = () => clock.now() - clock.originEpochUs + clock.originUs;
   let current = stream;
   let closed = false;
   let leg: Leg | undefined;
 
   const connect = (target: Leg) => {
+    const latencyUs = latencyOf(current);
+    target.timeline.captureLatencyUs = latencyUs;
+    // Blocks rendered before this frame came from the previous microphone, and some may still be queued on the port.
+    const { currentTime = 0, sampleRate } = target.context;
+    // currentTime is a whole frame count over the rate; rounding undoes the float error (0.28 × 48000 = 13440.000…2).
+    target.latencies.push({ fromFrame: Math.round(currentTime * sampleRate), latencyUs });
     target.source?.disconnect();
     target.source = current ? target.context.createMediaStreamSource(current) : undefined;
     target.source?.connect(target.node);
@@ -161,6 +191,7 @@ export async function captureMicrophone(
       source: undefined,
       renders: createRenderClock(),
       timeline: clock.sourceTimeline(),
+      latencies: [],
     };
     node.port.onmessage = ({
       data,
@@ -170,11 +201,16 @@ export async function captureMicrophone(
       const best = opened.renders.best();
       // Re-anchors only when the best pair disagrees with the anchor by more than the tolerance.
       if (best) opened.timeline.calibrate(best.contextUs, best.atUs);
+      const { latencies } = opened;
+      while (latencies.length > 1 && (latencies[1] as (typeof latencies)[number]).fromFrame <= data.frame) {
+        latencies.shift();
+      }
       capture.onblock?.({
         samples: data.samples,
         sampleRate,
         contextUs: Math.round((data.frame * 1_000_000) / sampleRate),
         timeline: opened.timeline,
+        captureLatencyUs: latencies[0]?.latencyUs ?? opened.timeline.captureLatencyUs,
       });
     };
     // Outputs are silent; connecting one keeps every engine pulling the node.

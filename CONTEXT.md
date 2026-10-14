@@ -145,9 +145,10 @@ timescale are not on it.
 _Avoid_: shared clock, media clock, wall clock (that is the local monotonic source), PTS base
 
 **Media timeline**:
-A broadcast's optional track that maps media time on the broadcast timeline, and the location of
-each video group's first object, to capture time as Unix-epoch time (msf-01's "wallclock"). It
-belongs to one catalog namespace, so a supervised publisher's next generation starts an empty one.
+A broadcast's optional track that maps media time on the broadcast timeline to the location of each
+video group's first object, and to its capture time as Unix-epoch time (msf-01's "wallclock"). It
+is how a player finds which group to fetch for a time. It belongs to one catalog namespace, so a
+supervised publisher's next generation starts an empty one.
 _Avoid_: timeline (ambiguous with the broadcast timeline and the clock's source and sample
 timelines), program date time, wall clock track (wall clock is the local monotonic source)
 

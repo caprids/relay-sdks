@@ -76,9 +76,9 @@ An unrelated encoder or publishing error still fails the run even if it coincide
 | Track | Shape |
 | --- | --- |
 | `catalog` | One MSF `draft-01` catalog JSON per group, re-sent whenever the relay (re)subscribes; viewers who join while the relay stays subscribed get the relay's cached copy. Lists the `video` (and `audio`) tracks with `packaging: "loc"`, the `avc1.PPCCLL` codec string derived from the encoder's SPS, and the avcC decoder configuration inline in `initDataList`. |
-| `video` | LOC-packaged H.264 in AVCC form (length-prefixed NAL units, parameter sets out of band). One MOQT group per GOP: object 0 is the keyframe, later objects the P-frames. Object properties: Timestamp (0x10, microseconds), Timescale (0x08), and Video Config (0x0D, the avcC) on keyframes. |
+| `video` | LOC-packaged H.264 in AVCC form (length-prefixed NAL units, parameter sets out of band). One MOQT group per GOP: object 0 is the keyframe, later objects the P-frames. Object properties: Timestamp (0x10, Unix-epoch microseconds: media time 0 is pinned to the system clock at start), Timescale (0x08), and Video Config (0x0D, the avcC) on keyframes. |
 | `audio` | LOC-packaged Opus at 48 kHz stereo, one 20 ms frame per group (every audio frame is a random-access point). |
-| `timeline` | msf-01 §7 media timeline, announced in the catalog with `packaging: "mediatimeline"`. Each video group that went out adds a record `[mediaTimeMs, [group, 0], wallclockMs]`, and each new group of this track carries every retained record (up to 512) as one JSON document. Wall-clock times are the capture times as Unix-epoch milliseconds, counted from the `BroadcastClock` created when the media starts. |
+| `timeline` | msf-01 §7 media timeline, announced in the catalog with `packaging: "mediatimeline"`. Each video group that went out adds a record `[mediaTimeMs, [group, 0], wallclockMs]`, and each new group of this track carries every retained record (up to 512) as one JSON document. Every track is stamped in Unix-epoch microseconds, so a record's media time and wall-clock time are the same capture time. |
 
 The table describes what this publisher sends. Relay 0.14.17 preserved the declared track timescale
 and object timestamps in the tested media flow, but dropped the object-level Timescale and Video
@@ -206,7 +206,7 @@ order, its newest wall-clock time must be within 5 s of when it arrived, and at 
 must name a received keyframe's group and that keyframe's timestamp in milliseconds. The summary
 reports `timelineObjects`, `timelineEntries` (in the newest document) and `timelineMaxSkewMs`.
 Verified against `sjc.relay.mux.global` on 2026-10-14: 15 video groups in 30 s gave 15 timeline
-documents whose records all matched, with the newest wall-clock time at most 71 ms from arrival. A
+documents whose records all matched, with the newest wall-clock time at most 70 ms from arrival. A
 subscriber that joined 12 s in received one document with all seven records so far.
 
 Verified against `sjc.relay.mux.global` on 2026-09-11: the catalog, one video group per GOP with a

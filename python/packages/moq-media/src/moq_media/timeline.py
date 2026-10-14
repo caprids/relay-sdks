@@ -35,20 +35,20 @@ def _whole(value: object, name: str) -> int:
 
 
 def media_timeline_entry(
-    timestamp_us: int, group: int, *, object: int = 0, origin_epoch_us: int | None = None
+    timestamp_us: int, group: int, *, object: int = 0, wallclock_us: int | None = None
 ) -> MediaTimelineEntry:
     """Return the record for an object whose LOC timestamp on the broadcast timeline is ``timestamp_us``.
 
-    ``origin_epoch_us`` is the broadcast's origin as Unix-epoch microseconds (``BroadcastClock.origin_epoch_us``);
-    without it the wall-clock time is 0, as msf-01 says for unknown wall-clock time.
+    ``wallclock_us`` is when that media was captured, as Unix-epoch microseconds. It defaults to ``timestamp_us``,
+    since the broadcast timeline is anchored at the epoch; pass 0 for unknown, as msf-01 allows.
     """
     _whole(timestamp_us, "timestamp_us")
-    wallclock_us = 0 if origin_epoch_us is None else _whole(origin_epoch_us, "origin_epoch_us") + timestamp_us
+    wallclock = timestamp_us if wallclock_us is None else _whole(wallclock_us, "wallclock_us")
     return MediaTimelineEntry(
         media_time_ms=timestamp_us // 1000,
         group=_whole(group, "group"),
         object=_whole(object, "object"),
-        wallclock_ms=_whole(wallclock_us, "wall-clock time") // 1000,
+        wallclock_ms=wallclock // 1000,
     )
 
 
@@ -71,20 +71,15 @@ def build_media_timeline(entries: Iterable[MediaTimelineEntry]) -> bytes:
 class MediaTimeline:
     """The retained entries of one broadcast's media timeline, and the independent document they make.
 
-    ``origin_epoch_us`` is the broadcast's origin as Unix-epoch microseconds (``BroadcastClock.origin_epoch_us``);
-    without it every wall-clock time is 0. ``max_entries`` bounds the document: past it, the oldest entry is dropped.
-    The default 512 is about 18 KB, 17 minutes of two-second GOPs. A supervised publisher's next generation is a new
-    broadcast and starts a new timeline.
+    ``max_entries`` bounds the document: past it, the oldest entry is dropped. The default 512 is about 18 KB, 17
+    minutes of two-second GOPs. A supervised publisher's next generation is a new broadcast and starts a new timeline.
     """
 
-    __slots__ = ("_entries", "_origin_epoch_us")
+    __slots__ = ("_entries",)
 
-    def __init__(self, *, origin_epoch_us: int | None = None, max_entries: int = 512) -> None:
-        if origin_epoch_us is not None:
-            _whole(origin_epoch_us, "origin_epoch_us")
+    def __init__(self, *, max_entries: int = 512) -> None:
         if isinstance(max_entries, bool) or not isinstance(max_entries, int) or not 1 <= max_entries <= _SAFE_INTEGER:
             raise ValueError("max_entries must be a positive safe integer")
-        self._origin_epoch_us = origin_epoch_us
         self._entries: deque[MediaTimelineEntry] = deque(maxlen=max_entries)
 
     @property
@@ -97,13 +92,14 @@ class MediaTimeline:
         """The independent document of the retained entries; ``[]`` before the first."""
         return build_media_timeline(self._entries)
 
-    def add(self, timestamp_us: int, group: int, *, object: int = 0) -> bytes:
+    def add(self, timestamp_us: int, group: int, *, object: int = 0, wallclock_us: int | None = None) -> bytes:
         """Record the object at ``group`` and ``object`` whose LOC timestamp is ``timestamp_us``; return the document.
 
-        Call it once per group of the indexed track, for its first object, when that object was sent. A rejected
-        argument raises ``ValueError`` and leaves the timeline unchanged.
+        Call it once per group of the indexed track, for its first object, when that object was sent. ``wallclock_us``
+        is as for :func:`media_timeline_entry`: the timestamp itself by default. A rejected argument raises
+        ``ValueError`` and leaves the timeline unchanged.
         """
-        entry = media_timeline_entry(timestamp_us, group, object=object, origin_epoch_us=self._origin_epoch_us)
+        entry = media_timeline_entry(timestamp_us, group, object=object, wallclock_us=wallclock_us)
         self._entries.append(entry)
         return self.document
 
