@@ -27,6 +27,7 @@ class FakeContext {
     }),
   };
   sources: FakeNode[] = [];
+  currentTime = 0;
   readonly sampleRate: number;
   constructor(sampleRate = 48_000) {
     this.sampleRate = sampleRate;
@@ -146,8 +147,9 @@ it('switches microphones in the same context and replaces the context with a fre
 it('subtracts the capture latency of each microphone, asked again on every switch', async () => {
   const latencies: Record<string, number> = { laptop: 30_000, earbuds: 190_000 };
   const asked: (string | undefined)[] = [];
+  const context = new FakeContext();
   const capture = await captureMicrophone(clock(), stream('laptop'), {
-    context: asContext(new FakeContext()),
+    context: asContext(context),
     captureLatencyUs: (current) => {
       const name = (current as unknown as { name: string } | undefined)?.name;
       asked.push(name);
@@ -161,9 +163,15 @@ it('subtracts the capture latency of each microphone, asked again on every switc
   nowUs = 50_000;
   node.post(0);
   expect(blocks[0]?.timeline.timestampUs(0)).toBe(0);
+  expect(blocks[0]?.captureLatencyUs).toBe(30_000);
+  // Switched once the context has rendered 40 ms: a laptop block still queued keeps the laptop latency.
+  context.currentTime = 0.04;
   capture.useStream(stream('earbuds'));
   expect(blocks[0]?.timeline.captureLatencyUs).toBe(190_000);
   expect(blocks[0]?.timeline.timestampUs(200_000)).toBe(40_000);
+  node.post(960);
+  node.post(1920);
+  expect(blocks.slice(1).map((block) => block.captureLatencyUs)).toEqual([30_000, 190_000]);
   capture.useStream(undefined);
   expect(blocks[0]?.timeline.captureLatencyUs).toBe(0);
   expect(asked).toEqual(['laptop', 'earbuds', undefined]);

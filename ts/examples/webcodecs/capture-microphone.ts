@@ -79,8 +79,8 @@ export interface MicrophoneBlock {
   /** Maps this context's time onto the broadcast timeline. Each context has its own, so it changes with the context. */
   timeline: SourceTimeline;
   /**
-   * The capture latency of the microphone these samples came from: the timeline's when the block arrived. The
-   * timeline's value moves on at a device switch, while blocks captured before it may still be encoding.
+   * The capture latency of the microphone these samples came from, by the context frame each microphone was connected
+   * at. The timeline's value moves on at a device switch, while blocks captured before it may still be in flight.
    */
   captureLatencyUs: number;
 }
@@ -137,6 +137,8 @@ interface Leg {
   source: MediaStreamAudioSourceNode | undefined;
   renders: RenderClock;
   timeline: SourceTimeline;
+  /** Each microphone's capture latency, from the context frame it was connected at; oldest first. */
+  latencies: { fromFrame: number; latencyUs: number }[];
 }
 
 /**
@@ -161,7 +163,11 @@ export async function captureMicrophone(
   let leg: Leg | undefined;
 
   const connect = (target: Leg) => {
-    target.timeline.captureLatencyUs = latencyOf(current);
+    const latencyUs = latencyOf(current);
+    target.timeline.captureLatencyUs = latencyUs;
+    // Blocks rendered before this frame came from the previous microphone, and some may still be queued on the port.
+    const { currentTime = 0, sampleRate } = target.context;
+    target.latencies.push({ fromFrame: Math.ceil(currentTime * sampleRate), latencyUs });
     target.source?.disconnect();
     target.source = current ? target.context.createMediaStreamSource(current) : undefined;
     target.source?.connect(target.node);
@@ -184,6 +190,7 @@ export async function captureMicrophone(
       source: undefined,
       renders: createRenderClock(),
       timeline: clock.sourceTimeline(),
+      latencies: [],
     };
     node.port.onmessage = ({
       data,
@@ -193,12 +200,16 @@ export async function captureMicrophone(
       const best = opened.renders.best();
       // Re-anchors only when the best pair disagrees with the anchor by more than the tolerance.
       if (best) opened.timeline.calibrate(best.contextUs, best.atUs);
+      const { latencies } = opened;
+      while (latencies.length > 1 && (latencies[1] as (typeof latencies)[number]).fromFrame <= data.frame) {
+        latencies.shift();
+      }
       capture.onblock?.({
         samples: data.samples,
         sampleRate,
         contextUs: Math.round((data.frame * 1_000_000) / sampleRate),
         timeline: opened.timeline,
-        captureLatencyUs: opened.timeline.captureLatencyUs,
+        captureLatencyUs: latencies[0]?.latencyUs ?? opened.timeline.captureLatencyUs,
       });
     };
     // Outputs are silent; connecting one keeps every engine pulling the node.
