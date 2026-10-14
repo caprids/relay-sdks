@@ -100,15 +100,17 @@ object or the track declares, rather than assuming the relay rescaled to microse
 msf-01's Media Timeline track maps media time to group locations, for seeking and playlists: one
 record per video group. On this timeline media time already is wall-clock time, so a record's two
 times agree. Announce it with `mediaTimeline: {}` in `buildMsfCatalog` (it lists the video and audio
-tracks in `depends`), and on each new video group open a timeline group holding every retained
-record. The track is not published for you yet; see
+tracks in `depends`). `createMediaTimeline` keeps one broadcast's records, 512 by default, and
+returns the document to send each time a keyframe has opened a video group: write it as a new
+timeline group, and again whenever the relay subscribes. The
+[WebCodecs example](../../examples/webcodecs/README.md) does this; see
 [spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
 
 ```ts
-const entries: MediaTimelineEntry[] = [];
-// On each keyframe that opens video group `groupId`:
-entries.push(mediaTimelineEntry({ timestampUs, group: groupId }));
-await timelineTrack.write(buildMediaTimeline(entries)); // one object, one group
+const timeline = createMediaTimeline();
+// Once the keyframe that opened video group `groupId` is written:
+const document = timeline.add({ timestampUs, group: groupId });
+if (timelineTrack.hasDemand) await timelineTrack.write(document); // one object, one group
 const read = parseMediaTimeline(timelineObject.payload);
 ```
 

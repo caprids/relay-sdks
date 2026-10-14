@@ -625,7 +625,9 @@ demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and
 
 Both loops above exist ready-made in `mux_relay.media`, the media publishing policy the Video.js
 example runs on. `CatalogService(track, document)` re-sends a document on every relay subscription
-and retries a failed send while demand remains; `FrameWriter(track)` maps encoded frames onto groups
+and retries a failed send while demand remains; `DocumentService(track)` does the same for a
+document you replace with `update(document)`, such as a media timeline, and also sends each update
+while the relay is subscribed; `FrameWriter(track)` maps encoded frames onto groups
 (a keyframe opens a group and deltas append, or `grouping="frame"` for one group per frame), skips
 frames the relay has no subscription for instead of waiting on the deadline, and resumes at the
 next keyframe after any failure. Each `await writer.write(frame)` returns what became of the frame

@@ -87,7 +87,7 @@ async def test_duration_drains_before_classifying_failures(
             self.error: BaseException | None = None
             self.keyframe_requested = threading.Event()
 
-        def start(self) -> None:
+        def start(self, *_: Any) -> None:
             pass
 
         def stop(self) -> None:
@@ -128,7 +128,7 @@ async def test_duration_drains_before_classifying_failures(
     async def catalog(*_: Any) -> None:
         await asyncio.Future()
 
-    async def media(*args: Any) -> None:
+    async def media(*args: Any, **_: Any) -> None:
         lifetime: CancellationToken = args[-1]
         if not lifetime.cancelled:
             ready = asyncio.Event()
@@ -142,6 +142,7 @@ async def test_duration_drains_before_classifying_failures(
     monkeypatch.setattr(stream, "Producer", Producer)
     monkeypatch.setattr(stream, "connect_relay_publisher", connect)
     monkeypatch.setattr(stream, "serve_catalog", catalog)
+    monkeypatch.setattr(stream, "serve_timeline", catalog)
     monkeypatch.setattr(stream, "publish_live_media", media)
     monkeypatch.setattr(stream, "request_keyframes", catalog)
     monkeypatch.setenv("RELAY_TOKEN", "test")
@@ -186,7 +187,7 @@ async def test_deadline_on_one_track_does_not_hide_other_track_failure(
         for kind in ("video", "audio")
     }
 
-    async def publish(queue: stream.LiveQueue, *_: Any) -> None:
+    async def publish(queue: stream.LiveQueue, *_: Any, **__: Any) -> None:
         if queue.kind == "video":
             lifetime.throw_if_cancelled()
         raise problem

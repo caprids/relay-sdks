@@ -3,17 +3,19 @@
 Status: stage 1 implemented; stage 2 partly implemented in Python. The format packages
 (`@mux/moq-media`, `moq-media`), shared vectors, protocol pins, and Python example migration are
 present, with [behavior.md](behavior.md#media-helpers) as their contract. Of the "Media publishing"
-piece below, the catalog service and the frame writer exist as `mux_relay.media` (`CatalogService`,
-`FrameWriter`), with [behavior.md](behavior.md#media-publishing) as their contract and the Video.js
-example as their first caller; the `register_media` handle that would compose them with the catalog
-builder and `update()` of a served document remain proposals. Of the readers (stage 3), the
+piece below, the catalog service, a document service for replaceable documents, and the frame
+writer exist as `mux_relay.media` (`CatalogService`, `DocumentService`, `FrameWriter`), with
+[behavior.md](behavior.md#media-publishing) as their contract and the Video.js example as their
+first caller; the `register_media` handle that would compose them with the catalog builder remains
+a proposal. Of the readers (stage 3), the
 catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_catalog`
 ([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
 `--verify` logs its track list; the object-to-frame reader remains a proposal. The
 [shared timeline and playout clock](#shared-timeline-and-playout-clock) ship in both format
 packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), and so do the
-[Media Timeline track](#media-timeline-track)'s format helpers
-([issue #291](https://github.com/muxinc/relay-sdks/issues/291)). The WebCodecs example publishes
+[Media Timeline track](#media-timeline-track)'s format helpers and timeline accumulator
+([issues #291](https://github.com/muxinc/relay-sdks/issues/291) and
+[#292](https://github.com/muxinc/relay-sdks/issues/292)), which both examples publish. The WebCodecs example publishes
 audio on the shared timeline, measured live in browsers
 ([issue #288](https://github.com/muxinc/relay-sdks/issues/288)). Public names for the
 implemented stages are recorded in [vocabulary.md](vocabulary.md).
@@ -582,7 +584,7 @@ WebTransport session to the Relay, and its `getOutputTimestamp()` is seconds off
 
 [Issue #291](https://github.com/muxinc/relay-sdks/issues/291). Format helpers implemented in both
 format packages; [behavior.md](behavior.md#media-helpers) holds the testable rules. Publishing the
-track over a connection is not implemented yet.
+track: Python's `DocumentService` and both examples ([issue #292](https://github.com/muxinc/relay-sdks/issues/292)).
 
 msf-01's Media Timeline track (§7) is an optional track, announced in the catalog, whose records
 map media time and an MOQT location to wall-clock time. It is MSF's counterpart of HLS
@@ -676,9 +678,11 @@ to follow the system clock can be re-anchored at a new generation.
 
 ### Publishing the track
 
-Format helpers only for now. The rules a publisher follows, and which a later publishing helper
-will implement:
+The rules a publisher follows:
 
+- An entry is added only when a group's first object was sent: under keyframe grouping, a keyframe
+  that opened a group on the relay. A keyframe the relay had no subscription for, or that was stale
+  or interrupted, adds nothing, since its location would point at a group that does not exist.
 - msf-01 §7.3 requires the first object of every timeline group to be an independent document:
   every record accumulated and still accessible. Each new entry opens a new timeline group whose
   only object is the independent document of the retained entries. A viewer that joins at the
@@ -686,11 +690,23 @@ will implement:
   after the first are not used.
 - How many entries to retain is the publisher's choice: as far back as its viewers can still fetch,
   and well under the object size limit. One entry is about 35 bytes, so an hour of two-second
-  GOPs is about 65 KB.
+  GOPs is about 65 KB. The accumulator keeps 512 by default, about 18 KB or 17 minutes of
+  two-second GOPs, and drops the oldest.
+- The timeline is a state-shaped track whose document changes. Python's `DocumentService` sends the
+  latest document on every relay subscription, as the catalog service does, and on every new entry
+  while the relay is subscribed. Entries made without demand accumulate and go out with the next
+  subscription. TypeScript has no publishing module yet; the WebCodecs example does the same by hand.
 - A supervised publisher's next generation is a new broadcast with a new namespace, catalog,
-  broadcast clock and origin. Its timeline starts empty. The old entries point at locations in a
-  namespace the new catalog does not list, so they are not carried over. Wall-clock time is what
-  joins two generations, and both stamp their media with it directly.
+  broadcast clock and origin. It creates a new timeline and service, which start empty. The old
+  entries point at locations in a namespace the new catalog does not list, so they are not carried
+  over. Wall-clock time is what joins two generations, and both stamp their media with it directly.
+
+The [WebCodecs example](../ts/examples/webcodecs/README.md) and the Python
+[Video.js streaming example](../python/examples/videojs_stream/README.md) publish the track. The
+Mediabunny example does not: a file's media has no capture time to report. Against
+`sjc.relay.mux.global` (2026-10-14), every record the Python example's `--verify` viewer received
+named a received keyframe's group and timestamp, and a subscriber that joined 12 s in got all seven
+records so far in its first object.
 
 ### Reading
 

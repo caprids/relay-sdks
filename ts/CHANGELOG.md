@@ -73,7 +73,9 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   ([#291](https://github.com/muxinc/relay-sdks/issues/291)). `mediaTimelineEntry` turns a timeline timestamp and a group
   into a record, `buildMediaTimeline` and `parseMediaTimeline` write and read a timeline object, and `buildMsfCatalog`
   announces the track through `mediaTimeline` (`packaging` and `role` `mediatimeline`, `depends` on the video and audio
-  tracks by default). `parseMsfCatalog` returns `depends` and `mimetype`. Publishing the track is not wired up yet.
+  tracks by default). `parseMsfCatalog` returns `depends` and `mimetype`. `createMediaTimeline({ maxEntries })` keeps
+  one broadcast's records (512 by default, oldest dropped) and returns the document to send for each new entry, and the
+  WebCodecs example publishes the track ([#292](https://github.com/muxinc/relay-sdks/issues/292)).
 - `@mux/moq-media`: capture times on one epoch, and a Timescale-aware reader
   ([#290](https://github.com/muxinc/relay-sdks/issues/290)). Source timelines take a settable `captureLatencyUs`,
   subtracted from every timestamp, for the input delay no browser reports. `locTimestampUs` reads an object's LOC

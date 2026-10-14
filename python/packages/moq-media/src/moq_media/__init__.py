@@ -53,6 +53,7 @@ from .source import (
     encode_namespace_name,
 )
 from .timeline import (
+    MediaTimeline,
     MediaTimelineEntry,
     build_media_timeline,
     media_timeline_entry,
@@ -77,6 +78,7 @@ __all__ = [
     "BroadcastClock",
     "DataTrackInfo",
     "H264Config",
+    "MediaTimeline",
     "MediaTimelineEntry",
     "MediaTimelineTrackInfo",
     "MsfCatalog",

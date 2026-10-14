@@ -45,7 +45,12 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   group into a `MediaTimelineEntry`, `build_media_timeline` and `parse_media_timeline` write and read a timeline object,
   and `build_msf_catalog` announces the track through `media_timeline=MediaTimelineTrackInfo()` (`packaging` and `role`
   `mediatimeline`, `depends` on the video and audio tracks by default). `parse_msf_catalog` returns `depends` and
-  `mimetype`. Publishing the track is not wired up yet.
+  `mimetype`. `MediaTimeline(max_entries=512)` keeps one broadcast's records (oldest dropped) and returns the document
+  to send for each new entry ([#292](https://github.com/muxinc/relay-sdks/issues/292)).
+- `mux-relay`: `mux_relay.media.DocumentService` serves a state-shaped track whose document the application replaces,
+  such as the media timeline: the latest document on every relay subscription and on every `update()` while the relay
+  is subscribed ([#292](https://github.com/muxinc/relay-sdks/issues/292)). The Video.js streaming example publishes
+  the media timeline with it, and `--verify` checks the records against the video received.
 - `mux-moq-media`: capture times on one epoch, and a Timescale-aware reader
   ([#290](https://github.com/muxinc/relay-sdks/issues/290)). Source timelines take a settable `capture_latency_us`,
   subtracted from every timestamp, for the input delay no device reports. `loc_timestamp_us` reads an object's LOC

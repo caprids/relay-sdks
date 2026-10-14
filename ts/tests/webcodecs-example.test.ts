@@ -1,4 +1,10 @@
-import { createBroadcastClock, LOC_TIMESTAMP, LOC_VIDEO_CONFIG, type SourceTimeline } from '@mux/moq-media';
+import {
+  createBroadcastClock,
+  LOC_TIMESTAMP,
+  LOC_VIDEO_CONFIG,
+  parseMediaTimeline,
+  type SourceTimeline,
+} from '@mux/moq-media';
 import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@mux/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { MicrophoneCapture } from '../examples/webcodecs/capture-microphone.js';
@@ -288,6 +294,51 @@ it('publishes native encoder output and retained config in keyframe groups, then
   expect(session.publisher.close).not.toHaveBeenCalled();
 });
 
+it('publishes a media timeline entry for each keyframe group that went out', async () => {
+  const session = run();
+  const completion = expect(session.result).rejects.toThrow('Stopped');
+  await vi.advanceTimersByTimeAsync(2100);
+  const video = session.tracks.get('video')!;
+  const timeline = session.tracks.get('timeline')!;
+  const catalog = JSON.parse(new TextDecoder().decode(session.tracks.get('catalog')!.objects[0]![0]!.bytes));
+  expect(catalog.tracks.find((track: { name: string }) => track.name === 'timeline')).toMatchObject({
+    packaging: 'mediatimeline',
+    depends: ['video'],
+  });
+  // One independent document per entry, each in its own group.
+  expect(timeline.objects.map((group) => group.length)).toEqual([1, 1]);
+  const entries = parseMediaTimeline(timeline.objects[1]![0]!.bytes);
+  const keyframes = timestampsOf(video.objects).map((group) => Math.floor(Number(group[0]) / 1000));
+  expect(entries.map(({ group, object, mediaTimeMs }) => [group, object, mediaTimeMs])).toEqual([
+    [0, 0, keyframes[0]],
+    [1, 0, keyframes[1]],
+  ]);
+  // The broadcast timeline is Unix-epoch time (pinned at 0 here), so each record's two times agree.
+  for (const { mediaTimeMs, wallclockMs } of entries) expect(wallclockMs).toBe(mediaTimeMs);
+  timeline.demand(true); // a replacement subscription gets the latest document again
+  await vi.advanceTimersByTimeAsync(0);
+  expect(timeline.objects[2]![0]!.bytes).toEqual(timeline.objects[1]![0]!.bytes);
+  session.stop.abort(new Error('Stopped'));
+  await completion;
+});
+
+it('indexes no keyframe the relay had no subscription for', async () => {
+  const session = run({ initialDemand: false });
+  const completion = session.result.catch((error) => error);
+  try {
+    await vi.advanceTimersByTimeAsync(400);
+    expect(session.tracks.get('timeline')!.objects).toHaveLength(0);
+    session.tracks.get('video')!.demand(true);
+    await vi.advanceTimersByTimeAsync(34);
+    const timeline = session.tracks.get('timeline')!;
+    expect(timeline.objects).toHaveLength(1);
+    expect(parseMediaTimeline(timeline.objects[0]![0]!.bytes).map(({ group }) => group)).toEqual([0]);
+  } finally {
+    session.stop.abort(new Error('Stopped'));
+    await completion;
+  }
+});
+
 it('resets on a demand gap between frames and resumes with a keyframe', async () => {
   const session = run();
   const completion = expect(session.result).rejects.toThrow('Stopped');
@@ -304,7 +355,7 @@ it('resets on a demand gap between frames and resumes with a keyframe', async ()
   await completion;
 });
 
-it.each(['video', 'catalog'])('stops and cleans up on a %s write error', async (failTrack) => {
+it.each(['video', 'catalog', 'timeline'])('stops and cleans up on a %s write error', async (failTrack) => {
   const session = run({ failTrack });
   await expect(session.result).rejects.toThrow(`${failTrack} failed`);
   expect([...session.tracks.values()].every(({ writer }) => writer.closed)).toBe(true);

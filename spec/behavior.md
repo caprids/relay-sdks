@@ -1150,9 +1150,13 @@ to both languages.
   video or audio track of the same catalog, and the list must be non-empty with no duplicates.
   Names listed but withheld pending init data are left out, and the entry is withheld when none
   remains. The timeline's name defaults to `timeline` and joins the uniqueness check. The catalog
-  reader returns `depends` (string items only) and `mimetype` as declared. Cadence (one entry per
-  video group), retention and publishing are publisher rules in media-layer.md. Implemented in both
-  SDKs as format helpers only.
+  reader returns `depends` (string items only) and `mimetype` as declared. The timeline accumulator
+  (`createMediaTimeline` / `MediaTimeline`) holds one broadcast's entries, each built as the entry
+  helper builds it (wall-clock time defaulting to the timestamp), and keeps at most `maxEntries` / `max_entries` (a positive
+  safe integer, default 512), dropping the oldest. Each add returns the independent document of the
+  retained entries; before the first it is `[]`. A rejected entry leaves the timeline unchanged.
+  Retention is pinned by `vectors/media.json`. Cadence (one entry per video group that was sent)
+  and the publishing rules are in media-layer.md. Implemented in both SDKs.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below,
   implemented in Python; a `register_media` publishing handle and the object-to-frame reader are
@@ -1169,8 +1173,7 @@ not yet implemented in TypeScript.
   demand and again on every later relay subscription, including a replacement subscription (the
   repeated "demanded" value), so a viewer joining after a relay reconnect receives it. A viewer
   joining while one relay subscription lasts triggers no re-send and is served the relay's cached
-  copy. It does not
-  publish on change alone, and a replaceable document is not implemented. Not adopted: MSF's
+  copy. Its document is fixed. Not adopted: MSF's
   publish-on-change with a Joining FETCH from the relay cache. A plain SUBSCRIBE against the tested
   relay is live-edge only ([#26](https://github.com/muxinc/relay-sdks/issues/26)), re-sending is
   what the Video.js player relies on, and MSF-01 §6's one-object-per-stream sentence is treated as
@@ -1179,6 +1182,13 @@ not yet implemented in TypeScript.
   (default one second) for as long as demand remains, keeping only the current document; losing
   demand ends the retries until the next relay subscription. The service runs until cancelled or
   until the track ends, and raises the failure that ended the track when a write exposed it.
+- A document service serves a state-shaped track whose document the application replaces, such as
+  the media timeline. It sends the latest document, each time as a new group, on every relay
+  subscription as the catalog service does, and again on every update while the relay is
+  subscribed. It sends nothing before the first document. An update without relay demand only
+  replaces the document; an update made during a write is sent after it. Retries follow the
+  catalog's rule but always send the latest document. A retirement during a write ends the service
+  with that failure; the track ending otherwise ends it quietly.
 - A frame writer maps encoded frames onto one track's groups. Under keyframe grouping, the LOC
   mapping for video, a keyframe FINs the open group and opens a new one, and deltas append to it.
   Under frame grouping, for audio and any other independently decodable frames, every frame is its

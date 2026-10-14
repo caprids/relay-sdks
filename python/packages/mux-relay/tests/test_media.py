@@ -23,7 +23,7 @@ from mux_relay import (
     connect_relay_publisher,
     connect_relay_subscriber,
 )
-from mux_relay.media import CatalogService, FrameOutcome, FrameWriter
+from mux_relay.media import CatalogService, DocumentService, FrameOutcome, FrameWriter
 
 TIMESTAMP = 0x10
 
@@ -600,6 +600,162 @@ class TestCatalogService:
         finally:
             serving.cancel()
             await asyncio.gather(serving, return_exceptions=True)
+
+
+class TestDocumentService:
+    async def test_sends_nothing_before_the_first_document(self) -> None:
+        track = FakeTrackWriter()
+        service = DocumentService(track)
+        serving = asyncio.create_task(service.serve())
+        try:
+            await settle()
+            assert track.writes == [] and service.document is None
+
+            service.update(b"[1]")
+            await wait_for(lambda: track.writes == [b"[1]"])
+        finally:
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+
+    async def test_sends_each_update_and_the_latest_on_every_relay_subscription(self) -> None:
+        track = FakeTrackWriter()
+        service = DocumentService(track, b"[1]")
+        serving = asyncio.create_task(service.serve())
+        try:
+            await wait_for(lambda: track.writes == [b"[1]"])
+
+            service.update(b"[1,2]")
+            await wait_for(lambda: track.writes == [b"[1]", b"[1,2]"])
+
+            track.bind(True)  # a replacement relay subscription needs the latest document again
+            await wait_for(lambda: track.writes[2:] == [b"[1,2]"])
+            assert (service.sends, service.failures) == (3, 0)
+        finally:
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+
+    async def test_updates_without_a_subscription_only_replace_the_document(self) -> None:
+        track = FakeTrackWriter(demand=False)
+        service = DocumentService(track)
+        serving = asyncio.create_task(service.serve())
+        try:
+            service.update(b"[1]")
+            service.update(b"[1,2]")
+            await settle()
+            assert track.writes == []
+
+            track.bind(True)
+            await wait_for(lambda: track.writes == [b"[1,2]"])
+
+            track.bind(False)
+            service.update(b"[1,2,3]")
+            await settle()
+            assert track.writes == [b"[1,2]"]
+        finally:
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+
+    async def test_an_update_during_a_write_is_sent_after_it(self) -> None:
+        block = asyncio.Event()
+        written = asyncio.Event()
+
+        class Held(FakeTrackWriter):
+            async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
+                if not written.is_set():
+                    written.set()
+                    await block.wait()
+                await super().write(payload, properties=properties)
+
+        track = Held()
+        service = DocumentService(track, b"[1]")
+        serving = asyncio.create_task(service.serve())
+        try:
+            await written.wait()
+            service.update(b"[1,2]")
+            block.set()
+            await wait_for(lambda: track.writes == [b"[1]", b"[1,2]"])
+        finally:
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+
+    async def test_retries_a_transient_failure_with_the_latest_document(self) -> None:
+        failed = asyncio.Event()
+
+        class Noticed(FakeTrackWriter):
+            async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
+                failed.set()
+                await super().write(payload, properties=properties)
+
+        track = Noticed()
+        track.fail("write", timeout_error())
+        service = DocumentService(track, b"[1]", retry_delay=0.05)
+        serving = asyncio.create_task(service.serve())
+        try:
+            await failed.wait()
+            service.update(b"[1,2]")  # arrives during the retry pause
+            await wait_for(lambda: track.writes == [b"[1,2]"])
+            await settle()
+            assert track.writes == [b"[1,2]"]
+            assert (service.sends, service.failures) == (1, 1)
+        finally:
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+
+    async def test_lost_demand_ends_the_retries(self) -> None:
+        class Unsubscribed(FakeTrackWriter):
+            async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
+                self.has_demand = False  # the relay unsubscribed while the write failed
+                await super().write(payload, properties=properties)
+
+        track = Unsubscribed()
+        track.fail("write", timeout_error())
+        service = DocumentService(track, b"[1]", retry_delay=0)
+        serving = asyncio.create_task(service.serve())
+        try:
+            await wait_for(lambda: service.failures == 1)
+            await settle()
+            assert track.calls["write"] == 1
+        finally:
+            serving.cancel()
+            await asyncio.gather(serving, return_exceptions=True)
+
+    async def test_a_retired_track_raises_from_serve(self) -> None:
+        track = FakeTrackWriter()
+        error = closed_error()
+        track.fail("write", error)
+        service = DocumentService(track, b"[1]")
+
+        with pytest.raises(RelayError) as caught:
+            await asyncio.wait_for(service.serve(), 1)
+
+        assert caught.value is error
+
+    async def test_serve_returns_when_the_track_ends(self) -> None:
+        track = FakeTrackWriter()
+        service = DocumentService(track)
+        serving = asyncio.create_task(service.serve())
+        await settle()
+
+        track.end()
+
+        assert await asyncio.wait_for(serving, 1) is None
+        assert service.sends == 0
+
+    def test_arguments_are_checked_before_the_track_is_touched(self) -> None:
+        track = FakeTrackWriter()
+
+        with pytest.raises(TypeError):
+            DocumentService(track, "text")  # ty: ignore[invalid-argument-type]
+        with pytest.raises(TypeError):
+            DocumentService(track, retry_delay="1")  # ty: ignore[invalid-argument-type]
+        with pytest.raises(ValueError):
+            DocumentService(track, retry_delay=-1)
+
+        service = DocumentService(track)
+        with pytest.raises(ValueError, match="16 MiB"):
+            service.update(bytes(16 * 1024 * 1024 + 1))
+        assert service.document is None
+        assert track.calls == {"write": 0, "open": 0, "group-write": 0, "group-close": 0}
 
 
 # ---------------------------------------------------------------------------------------------------

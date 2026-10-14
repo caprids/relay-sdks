@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import itertools
 import math
 import os
 import sys
@@ -40,11 +41,15 @@ from moq_media import (
     AUDIO_TRACK,
     CATALOG_TRACK,
     LOC_VIDEO_CONFIG,
+    MEDIA_TIMELINE_TRACK,
     MICROSECONDS_PER_SECOND,
     TRACK_TIMESCALE_PROPERTIES,
     VIDEO_TRACK,
     AudioTrackInfo,
     H264Config,
+    MediaTimeline,
+    MediaTimelineEntry,
+    MediaTimelineTrackInfo,
     VideoTrackInfo,
     annexb_to_avcc,
     build_msf_catalog,
@@ -52,6 +57,7 @@ from moq_media import (
     compose_player_url,
     loc_properties,
     loc_timestamp_us,
+    parse_media_timeline,
     parse_msf_catalog,
 )
 from mux_relay import (
@@ -70,7 +76,7 @@ from mux_relay import (
     connect_relay_publisher,
     connect_supervised_subscriber,
 )
-from mux_relay.media import CatalogService, FrameOutcome, FrameWriter
+from mux_relay.media import CatalogService, DocumentService, FrameOutcome, FrameWriter
 
 Log = Callable[[str, dict[str, Any]], None]
 
@@ -79,6 +85,8 @@ OPUS_RATE = 48_000
 OPUS_FRAME_SAMPLES = 960  # 20 ms
 BOUNCE_RATES = (Fraction(7, 20), Fraction(1, 2))  # Wall-to-wall trips per second (x, y).
 CATALOG_RETRY_DELAY = 1.0  # seconds between failed attempts while demand remains
+TIMELINE_MAX_ENTRIES = 512  # media timeline entries retained: about 18 KB, 17 minutes of two-second GOPs
+TIMELINE_SKEW_LIMIT_MS = 5_000  # how far --verify lets the newest entry's wall-clock time sit from its arrival
 VERIFY_STARTUP_TIMEOUT = 10.0  # seconds the in-process viewer may wait for the announce and its subscribes
 
 
@@ -667,6 +675,9 @@ class Stats:
     max_lag_seconds: float = 0.0
     catalog_sends: int = 0
     catalog_failures: int = 0
+    timeline_entries: int = 0
+    timeline_sends: int = 0
+    timeline_failures: int = 0
     ended_tracks: dict[str, str] = field(default_factory=dict)
 
 
@@ -804,6 +815,21 @@ async def serve_catalog(catalog: CatalogService, stats: Stats, on_track_end: Tra
         stats.catalog_failures = catalog.failures
 
 
+async def serve_timeline(timeline: DocumentService, stats: Stats, on_track_end: TrackEndHandler) -> None:
+    """Run the SDK's document service for the media timeline, folding its end and counters in like the catalog's."""
+    try:
+        await timeline.serve()
+    except RelayError as error:
+        on_track_end(MEDIA_TIMELINE_TRACK, error)
+    finally:
+        stats.timeline_sends = timeline.sends
+        stats.timeline_failures = timeline.failures
+
+
+# Called with each video keyframe the frame writer sent and the group it opened: the media timeline's cadence.
+GroupHandler = Callable[[EncodedSample, int], None]
+
+
 def account(
     sample: EncodedSample, outcome: FrameOutcome, writer: FrameWriter[EncodedSample], stats: Stats, log: Log
 ) -> None:
@@ -850,8 +876,13 @@ async def publish_media(
     log: Log,
     on_track_end: TrackEndHandler,
     lifetime: CancellationToken,
+    on_group: GroupHandler | None = None,
 ) -> None:
-    """Feed one track's queue to its frame writer until the encoder is done, counting every sample once."""
+    """Feed one track's queue to its frame writer until the encoder is done, counting every sample once.
+
+    ``on_group`` hears of every keyframe that opened a group on the relay; skipped, stale and
+    interrupted keyframes opened nothing a viewer could seek to.
+    """
     track = VIDEO_TRACK if queue.kind == "video" else AUDIO_TRACK
     reported = False
 
@@ -872,6 +903,9 @@ async def publish_media(
             outcome = await writer.write(sample)
             account(sample, outcome, writer, stats, log)
             pending = None
+
+            if on_group is not None and outcome.kind == "sent" and sample.key and outcome.group_id is not None:
+                on_group(sample, outcome.group_id)
 
             if outcome.kind == "ended" and not reported:
                 # Every later sample is `ended` too; the track-end policy runs once.
@@ -908,6 +942,8 @@ async def publish_live_media(
     log: Log,
     on_track_end: TrackEndHandler,
     lifetime: CancellationToken,
+    timeline: DocumentService | None = None,
+    on_video_group: GroupHandler | None = None,
 ) -> None:
     """Each track gets its own task so an audio FIN cannot hold up the video timeline."""
 
@@ -915,6 +951,8 @@ async def publish_live_media(
         while True:
             await asyncio.sleep(1)
             stats.catalog_sends, stats.catalog_failures = catalog.sends, catalog.failures
+            if timeline is not None:
+                stats.timeline_sends, stats.timeline_failures = timeline.sends, timeline.failures
             log(
                 "media progress",
                 {
@@ -927,7 +965,17 @@ async def publish_live_media(
             )
 
     publishing = [
-        asyncio.create_task(publish_media(queues[kind], writer, stats, log, on_track_end, lifetime))
+        asyncio.create_task(
+            publish_media(
+                queues[kind],
+                writer,
+                stats,
+                log,
+                on_track_end,
+                lifetime,
+                on_group=on_video_group if kind == "video" else None,
+            )
+        )
         for kind, writer in writers.items()
     ]
     reporter = asyncio.create_task(report())
@@ -964,6 +1012,13 @@ class Verified:
     audio_objects: int = 0
     first_timestamp_us: int | None = None
     last_timestamp_us: int | None = None
+    keyframe_times_ms: dict[int, int] = field(default_factory=dict)
+    """Each video group's first-object timestamp, floored to milliseconds as a timeline entry states it."""
+    timeline_objects: int = 0
+    timeline: tuple[MediaTimelineEntry, ...] = ()
+    """The newest media timeline document received."""
+    timeline_max_skew_ms: int | None = None
+    """The largest distance between a document's newest wall-clock time and when it arrived."""
     problems: list[str] | None = None
 
 
@@ -1038,6 +1093,7 @@ async def verify(
 
         if obj.object_id == 0:
             result.video_keyframes += 1
+            result.keyframe_times_ms[obj.group_id] = timestamp // 1000
 
             # Relays drop odd-typed object properties they do not know, so the per-keyframe Video
             # Config usually does not survive the hop; the catalog's initDataList is the copy players use.
@@ -1052,6 +1108,30 @@ async def verify(
     def on_audio(obj: MoqtObject) -> None:
         if obj.status == "normal":
             result.audio_objects += 1
+
+    def on_timeline(obj: MoqtObject) -> None:
+        if obj.status != "normal":
+            return
+
+        arrived_ms = time.time_ns() // 1_000_000
+        result.timeline_objects += 1
+
+        try:
+            entries = parse_media_timeline(obj.payload)
+        except ValueError as error:
+            problems.append(f"timeline: {error}")
+            return
+
+        problems.extend(f"timeline: {problem}" for problem in timeline_problems(entries))
+
+        if entries:
+            skew = abs(arrived_ms - entries[-1].wallclock_ms)
+            result.timeline_max_skew_ms = max(skew, result.timeline_max_skew_ms or 0)
+
+            if skew > TIMELINE_SKEW_LIMIT_MS:
+                problems.append(f"timeline: newest wall-clock time {skew} ms from its arrival")
+
+        result.timeline = entries
 
     subscribed: set[str] = set()
     track_properties: dict[str, list[KeyValuePair]] = {}
@@ -1083,7 +1163,7 @@ async def verify(
 
         return restarted
 
-    tracks = [(CATALOG_TRACK, on_catalog), (VIDEO_TRACK, on_video)]
+    tracks = [(CATALOG_TRACK, on_catalog), (VIDEO_TRACK, on_video), (MEDIA_TIMELINE_TRACK, on_timeline)]
 
     if config.audio != "off":
         tracks.append((AUDIO_TRACK, on_audio))
@@ -1114,6 +1194,44 @@ async def verify(
         )
 
     return subscriber, result
+
+
+def timeline_problems(entries: Sequence[MediaTimelineEntry]) -> list[str]:
+    """What is wrong with one media timeline document on its own: its size, and its order."""
+    problems: list[str] = []
+
+    if len(entries) > TIMELINE_MAX_ENTRIES:
+        problems.append(f"{len(entries)} entries, more than the {TIMELINE_MAX_ENTRIES} retained")
+
+    for earlier, later in itertools.pairwise(entries):
+        if later.group <= earlier.group or later.media_time_ms < earlier.media_time_ms:
+            problems.append(f"entry for group {later.group} out of order after group {earlier.group}")
+            break
+
+    return problems
+
+
+def timeline_mismatches(verified: Verified) -> list[str]:
+    """Entries that disagree with the video the viewer received: an unseen group, or another media time."""
+    problems: list[str] = []
+    # The newest entry can go out just before its keyframe arrives; only a gap behind the viewer counts.
+    newest = max(verified.keyframe_times_ms, default=-1)
+
+    for entry in verified.timeline:
+        seen = verified.keyframe_times_ms.get(entry.group)
+
+        if seen is None and entry.group > newest:
+            continue
+
+        if seen is None:
+            problems.append(f"timeline: group {entry.group} has no video keyframe received")
+        elif entry.media_time_ms != seen or entry.object != 0:
+            problems.append(
+                f"timeline: group {entry.group} says {entry.media_time_ms} ms at object {entry.object}, "
+                f"its keyframe is {seen} ms"
+            )
+
+    return problems
 
 
 # ---------------------------------------------------------------------------------------------------
@@ -1187,7 +1305,11 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     )
     audio_info = AudioTrackInfo(bitrate=96_000) if producer.audio is not None else None
     document = build_msf_catalog(
-        config.namespace, video=video_info, audio=audio_info, generated_at_ms=int(time.time() * 1000)
+        config.namespace,
+        video=video_info,
+        audio=audio_info,
+        media_timeline=MediaTimelineTrackInfo(),
+        generated_at_ms=int(time.time() * 1000),
     )
     log(
         "catalog",
@@ -1198,6 +1320,9 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
         CATALOG_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5
     )
     video_track = publisher.register_track(VIDEO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+    timeline_track = publisher.register_track(
+        MEDIA_TIMELINE_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5
+    )
     audio_track = (
         publisher.register_track(AUDIO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
         if producer.audio is not None
@@ -1208,6 +1333,8 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
 
     # The SDK's media policy over the registered tracks; the queues' time policy rides in as `stale`.
     catalog = CatalogService(catalog_track, document, retry_delay=CATALOG_RETRY_DELAY)
+    # The timeline's document waits for the first video group; the service sends nothing until then.
+    timeline_service = DocumentService(timeline_track, retry_delay=CATALOG_RETRY_DELAY)
     writers: dict[str, FrameWriter[EncodedSample]] = {
         "video": FrameWriter(video_track, stale=stale_for(queues["video"])),
     }
@@ -1215,10 +1342,32 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     if audio_track is not None:
         writers["audio"] = FrameWriter(audio_track, grouping="frame", stale=stale_for(queues["audio"]))
 
+    timeline = MediaTimeline(max_entries=TIMELINE_MAX_ENTRIES)
+
+    def index_video_group(sample: EncodedSample, group_id: int) -> None:
+        # The entry's media time is the keyframe's LOC timestamp, which on the epoch timeline is its capture time too.
+        timestamp_us = loc_timestamp_us(sample.properties)
+        assert timestamp_us is not None, "every sample carries its LOC timestamp"
+        timeline_service.update(timeline.add(timestamp_us, group_id))
+        stats.timeline_entries += 1
+
     tasks = [
         asyncio.ensure_future(serve_catalog(catalog, stats, on_track_end)),
+        asyncio.ensure_future(serve_timeline(timeline_service, stats, on_track_end)),
         asyncio.ensure_future(request_keyframes(video_track, producer.keyframe_requested)),
-        asyncio.ensure_future(publish_live_media(queues, writers, catalog, stats, log, on_track_end, lifetime)),
+        asyncio.ensure_future(
+            publish_live_media(
+                queues,
+                writers,
+                catalog,
+                stats,
+                log,
+                on_track_end,
+                lifetime,
+                timeline=timeline_service,
+                on_video_group=index_video_group,
+            )
+        ),
     ]
     verifier: Any = None
     verified: Verified | None = None
@@ -1271,6 +1420,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
             )
 
         video_track.close()
+        timeline_track.close()
 
         if audio_track is not None:
             audio_track.close()
@@ -1316,6 +1466,9 @@ def summarize(stats: Stats) -> dict[str, Any]:
         "maxLagSeconds": round(stats.max_lag_seconds, 3),
         "catalogSends": stats.catalog_sends,
         "catalogFailures": stats.catalog_failures,
+        "timelineEntries": stats.timeline_entries,
+        "timelineSends": stats.timeline_sends,
+        "timelineFailures": stats.timeline_failures,
         "endedTracks": ",".join(stats.ended_tracks) or None,
     }
 
@@ -1326,6 +1479,10 @@ def report_verification(verified: Verified, log: Log) -> None:
         if verified.first_timestamp_us is not None and verified.last_timestamp_us is not None
         else 0.0
     )
+    problems = [*(verified.problems or ()), *timeline_mismatches(verified)]
+
+    if verified.video_keyframes and not verified.timeline_objects:
+        problems.append("timeline: no document received")
     log(
         "verify: summary",
         {
@@ -1337,7 +1494,10 @@ def report_verification(verified: Verified, log: Log) -> None:
             "note": "relays may strip the per-keyframe Video Config; the catalog carries the avcC",
             "audioObjects": verified.audio_objects,
             "spanSeconds": round(span, 2),
-            "problems": verified.problems or "none",
+            "timelineObjects": verified.timeline_objects,
+            "timelineEntries": len(verified.timeline),
+            "timelineMaxSkewMs": verified.timeline_max_skew_ms,
+            "problems": problems or "none",
         },
     )
 
