@@ -266,6 +266,8 @@ export function createFrameWriter<F extends Frame = Frame>(
         return { kind: 'dropped', groupId: opened.groupId };
       }
       group = opened;
+      // From here the open group itself says whether a demand change was recovered from.
+      keyOpening = false;
     }
 
     // No demand when the GOP started, or the group was lost: wait for the next keyframe.

@@ -681,6 +681,27 @@ class TestBacklog:
         assert await kinds(writer, [key(2, discontinuity=True)]) == ["sent"]
         assert not writer.keyframe_needed and calls == []
 
+    async def test_a_frame_dropped_mid_write_names_the_group_the_overflow_reset(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track, max_backlog=1)
+        gate.set()
+        assert (await writer.write(key(0))).kind == "sent"
+        gate.clear()
+        track.blocked.clear()
+
+        writing = asyncio.create_task(writer.write(delta(1)))
+        await track.blocked.wait()
+        waiting = asyncio.create_task(writer.write(delta(2)))
+        await settle()
+        recovery = asyncio.create_task(writer.write(key(3)))
+        await settle()
+        gate.set()
+
+        assert await writing == FrameOutcome("dropped", group_id=0)
+        assert (await waiting).kind == "dropped"
+        assert await recovery == FrameOutcome("sent", group_id=1)
+
     async def test_a_cancelled_or_repeated_close_still_fins_the_group(self) -> None:
         gate = asyncio.Event()
         track = FakeTrackWriter(block=gate)

@@ -170,6 +170,7 @@ class FrameWriter(Generic[F]):
         "_closed",
         "_closing",
         "_drop_epoch",
+        "_dropped_group",
         "_dropping",
         "_ended",
         "_finishing",
@@ -236,6 +237,8 @@ class FrameWriter(Generic[F]):
         self._closing: asyncio.Task[None] | None = None
         # A keyframe is being served and may still open a group: a demand change meanwhile is recovered from.
         self._key_opening = False
+        # The group the last overflow reset, for the outcome of the frame that was being written into it.
+        self._dropped_group: int | None = None
         self._drop_epoch = 0
         self._finishing: _GroupWriter | None = None
         self._keyframe_needed = grouping == "keyframe"
@@ -423,6 +426,7 @@ class FrameWriter(Generic[F]):
 
         self._drop_epoch += 1
         reset = self._reset_group(_BacklogDropped("the frame writer's backlog overflowed"))
+        self._dropped_group = reset
 
         if frame.key:
             # The arriving keyframe opens the next group; nothing needs asking for.
@@ -508,7 +512,7 @@ class FrameWriter(Generic[F]):
         except BaseException as error:
             if self._drop_epoch != epoch and not isinstance(error, asyncio.CancelledError):
                 # The backlog overflowed while this frame was in flight and its group was reset for it.
-                return FrameOutcome("dropped")
+                return FrameOutcome("dropped", group_id=self._dropped_group)
 
             # Whatever escapes (a cancelled write, a frame the SDK rejected as an argument, the
             # caller's own predicate raising) leaves the GOP in progress with a gap, or a group that
@@ -590,6 +594,8 @@ class FrameWriter(Generic[F]):
                 return FrameOutcome("dropped", group_id=group.group_id)
 
             self._group = group
+            # From here the open group itself says whether a demand change was recovered from.
+            self._key_opening = False
 
         if self._group is None:
             # No demand when the GOP started, or the group was lost: wait for the next keyframe.
