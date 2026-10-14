@@ -137,7 +137,7 @@ describe('backlog', () => {
     const waiting = [writer.write(delta()), writer.write(delta())];
     expect(writer.backlog).toBe(2);
     const overflowing = await writer.write(delta());
-    expect(overflowing).toEqual({ kind: 'dropped' });
+    expect(overflowing).toEqual({ kind: 'dropped', groupId: 0 });
     expect(kinds(await Promise.all(waiting))).toEqual(['dropped', 'dropped']);
     expect(await writing).toEqual({ kind: 'dropped', groupId: 0 });
     expect(track.groups[0]?.aborted).toBe(true);

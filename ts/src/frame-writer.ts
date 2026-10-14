@@ -159,7 +159,7 @@ export function createFrameWriter<F extends Frame = Frame>(
   let demand: AsyncIterableIterator<boolean> | undefined;
 
   const needKeyframe = () => {
-    if (!keyframes || keyframeNeeded) return;
+    if (!keyframes || keyframeNeeded || closing || ended) return;
     keyframeNeeded = true;
     try {
       onKeyframeNeeded?.();
@@ -276,6 +276,8 @@ export function createFrameWriter<F extends Frame = Frame>(
       return failed(error, target.groupId);
     }
     objects++;
+    // The transport took the object, but an overflow reset its group before this resumed: it will not arrive.
+    if (droppedUnder()) return { kind: 'dropped', groupId: target.groupId };
     return { kind: 'sent', groupId: target.groupId };
   };
 
@@ -361,10 +363,10 @@ export function createFrameWriter<F extends Frame = Frame>(
         // Deltas cannot be skipped: throw the backlog away with the group it was feeding, and restart at a keyframe.
         drops++;
         for (const dropped of waiting.splice(0)) dropped.resolve({ kind: 'dropped' });
-        resetGroup();
+        const reset = resetGroup();
         recovering = 'dropped';
         if (!frame.key) {
-          arriving = { kind: 'dropped' };
+          arriving = withGroup('dropped', reset);
           if (!keyframeNeeded) callbacks.push(needKeyframe);
         }
       } else {

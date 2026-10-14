@@ -629,7 +629,7 @@ track for another group. Start the next group at a random-access point. Local pa
 validation errors leave the group usable. `group.closed`, `group.groupId`, and `group.objectCount`
 report its state; the count includes only successfully accepted objects. Empty payloads may carry
 `status: 'end-of-group'` or `'end-of-track'`. Application queues and frame dropping remain the
-application's responsibility.
+application's responsibility at this level; the frame writer below handles both for encoded media.
 
 `track.hasDemand` reports whether the relay currently has an upstream subscription for the track,
 so a write would proceed at once. `track.closed` distinguishes a retired track from a track waiting
@@ -653,12 +653,40 @@ fans one upstream subscription out to every downstream viewer, so a second viewe
 round trip after the last viewer leaves, so the next viewer brings a new `true` and a re-send, and a
 viewer that resubscribes on the same connection within about 30 seconds can receive the relay's
 cached copy before the re-sent one. `true` does not prove anyone is watching. Write only state that
-is safe to serve from cache and to receive more than once, and do not use demand to decide whether
-to keep encoding. When the first viewer is on another relay, the publisher's relay subscribes once
+is safe to serve from cache and to receive more than once. Pausing an encoder while there is no
+demand is safe, because a frame written then reaches no viewer; resume at a keyframe, which a frame
+writer asks for through `keyframeNeeded`. When the first viewer is on another relay, the publisher's relay subscribes once
 to look up the track's info, cancels about 50 ms later, and subscribes again: `true`, `false`, `true`. Objects
 written during that first subscription reach no viewer, so do not rely on the first objects after
 demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and
 [a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay).
+
+Both loops exist ready-made in `@mux/relay/media`, the media publishing policy the
+[WebCodecs example](examples/webcodecs/README.md) runs on, and Python has as `mux_relay.media`.
+`createCatalogService(track, document)` re-sends a document on every relay subscription and retries
+a failed send while demand remains; `createDocumentService(track)` does the same for a document you
+replace with `update(document)`, such as a media timeline, and also sends each update while the
+relay is subscribed. `createFrameWriter(track)` maps encoded frames onto groups (a keyframe opens a
+group and deltas append, or `grouping: 'frame'` for one group per frame), skips frames the relay has
+no subscription for instead of waiting on the deadline, and resumes at the next keyframe after any
+failure. Its `write(frame)` resolves to what became of the frame (`'sent'`, `'skipped'`, `'stale'`,
+`'dropped'`, `'interrupted'` or `'ended'`) rather than rejecting, and may be called from a WebCodecs
+output callback without awaiting: frames are served in call order, and when more than `maxBacklog`
+wait behind the one being written the writer drops rather than queues. `writer.keyframeNeeded` and
+`onKeyframeNeeded` say when the next frame must be a keyframe, after a demand change, a failure, a
+stale frame or a drop, so an encoder can force one. `@mux/moq-media`'s `LocFrame` is a frame as it
+stands.
+
+```ts
+import { createFrameWriter } from '@mux/relay/media';
+
+let forceKeyframe = false;
+const writer = createFrameWriter(video, { onKeyframeNeeded: () => (forceKeyframe = true) });
+// VideoEncoder output callback:
+void writer.write(chunkToLocFrame(chunk, { videoConfig })).then((outcome) => {
+  if (outcome.kind === 'ended') stop(outcome.error);
+});
+```
 
 Custom transports with asynchronous sink writes or closes must honor the writable controller's
 abort signal to interrupt them and reset their underlying stream, as browser WebTransport does.
