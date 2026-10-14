@@ -28,6 +28,7 @@ class FakeGroupWriter:
         self.aborts: list[object] = []
         self.failure: BaseException | None = None
         """Like the real group writer: once an operation was cancelled, every later step raises that reason."""
+        self.aborted = asyncio.Event()
 
     @property
     def payloads(self) -> list[bytes]:
@@ -56,13 +57,20 @@ class FakeGroupWriter:
     def abort(self, reason: BaseException | None = None) -> None:
         self.aborts.append(reason)
 
+        if not self.finished and self.failure is None:
+            # Like the real group writer: a write in progress, and every later step, fails with the reason.
+            aborted = RelayError("Group was aborted", code="CLOSED", phase="writing")
+            self.failure = reason if reason is not None else aborted
+            self.aborted.set()
+
 
 class FakeTrackWriter:
     """Enough of ``RelayTrackWriter`` for ``mux_relay.media``: demand, closure, writes and groups.
 
-    ``fail(step, error, on=n)`` makes the n-th call of that step (counting from 0) raise ``error``;
-    ``retire=True`` also ends the track first, the way a closed connection does. ``block`` holds
-    every group write until the event is set, for tests where time has to pass inside a write.
+        ``fail(step, error, on=n)`` makes the n-th call of that step (counting from 0) raise ``error``;
+        ``retire=True`` also ends the track first, the way a closed connection does. ``block`` holds
+        every group write until the event is set, for tests where time has to pass inside a write; aborting
+    the group fails a held write with the abort's reason, as the SDK does.
     """
 
     def __init__(self, *, demand: bool = True, block: asyncio.Event | None = None) -> None:
@@ -102,16 +110,23 @@ class FakeTrackWriter:
         self.calls[step] += 1
         failure = self._failures.pop((step, index), None)
 
-        if step == "group-write" and self.block is not None:
+        if step == "group-write" and self.block is not None and group is not None:
             self.blocked.set()
+            released = asyncio.ensure_future(self.block.wait())
+            aborted = asyncio.ensure_future(group.aborted.wait())
 
             try:
-                await self.block.wait()
+                await asyncio.wait([released, aborted], return_when=asyncio.FIRST_COMPLETED)
             except BaseException as error:
-                if group is not None:
-                    group.failure = error
-
+                group.failure = error
                 raise
+            finally:
+                released.cancel()
+                aborted.cancel()
+
+            if group.failure is not None:
+                # Aborted while the write was held, as an overflowing frame writer does.
+                raise group.failure
 
         if failure is not None:
             error, retire = failure

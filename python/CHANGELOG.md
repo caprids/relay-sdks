@@ -51,6 +51,15 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   such as the media timeline: the latest document on every relay subscription and on every `update()` while the relay
   is subscribed ([#292](https://github.com/muxinc/relay-sdks/issues/292)). The Video.js streaming example publishes
   the media timeline with it, and `--verify` checks the records against the video received.
+- `mux-relay`: `mux_relay.media.FrameWriter` drops rather than queues, and says when it needs a keyframe
+  ([#263](https://github.com/muxinc/relay-sdks/issues/263)). Concurrent `write()` calls are now served one at a time in
+  call order, and the frames waiting are a backlog of at most `max_backlog` (default 8, or 25 with `grouping="frame"`;
+  `writer.backlog` counts them). A frame arriving at a full backlog drops the backlog and the group in progress under
+  keyframe grouping, and the oldest waiting frame under frame grouping; such frames report the new `dropped` outcome.
+  Every relay demand change now resets the open group before the next frame. `writer.keyframe_needed` and the
+  `on_keyframe_needed` callback say when the next frame must be a keyframe, so an encoder can force one. The writer
+  watches demand from its creation, so create it with an event loop running; `close()` reports waiting frames as
+  `dropped`. A caller that awaits each write sees no difference beyond the demand-change reset.
 - `mux-moq-media`: capture times on one epoch, and a Timescale-aware reader
   ([#290](https://github.com/muxinc/relay-sdks/issues/290)). Source timelines take a settable `capture_latency_us`,
   subtracted from every timestamp, for the input delay no device reports. `loc_timestamp_us` reads an object's LOC

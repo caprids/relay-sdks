@@ -3,6 +3,7 @@
 import asyncio
 import json
 import threading
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 from typing import Any, cast
 
@@ -107,6 +108,11 @@ async def test_duration_drains_before_classifying_failures(
 
         async def write(self, payload: bytes) -> None:
             events.append((self.name, payload.decode()))
+
+        async def demand_changes(self) -> AsyncIterator[bool]:
+            # The frame writer watches demand; this one never changes.
+            yield self.has_demand
+            await asyncio.Future()
 
         def close(self) -> None:
             events.append((self.name, "close"))
