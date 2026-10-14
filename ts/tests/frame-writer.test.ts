@@ -163,6 +163,32 @@ describe('keyframe grouping', () => {
     expect(track.groups[1]?.aborted).toBe(false);
   });
 
+  it('asks for a keyframe when demand arrives just after a keyframe was skipped for lack of it', async () => {
+    const track = slotTrack({ demand: false });
+    let arrive = false;
+    // The relay subscribes right after the writer reads "no demand" for the keyframe, before its outcome settles.
+    const racing: RelayTrackWriter = Object.create(track.writer, {
+      hasDemand: {
+        get() {
+          const value = track.writer.hasDemand;
+          if (arrive) {
+            arrive = false;
+            queueMicrotask(() => track.demand(true));
+          }
+          return value;
+        },
+      },
+    });
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(racing, { onKeyframeNeeded });
+    await settle();
+    arrive = true;
+    expect((await writer.write(key())).kind).toBe('skipped');
+    await settle();
+    expect(writer.keyframeNeeded).toBe(true);
+    expect(onKeyframeNeeded).toHaveBeenCalledTimes(1);
+  });
+
   it('reports the frame being written when demand changes as interrupted by the write slot', async () => {
     const track = slotTrack();
     const writer = createFrameWriter(track.writer);

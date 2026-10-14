@@ -637,6 +637,19 @@ class TestBacklog:
         assert second.cancelled()
         assert sent_stamps(track) == [[0]]
 
+    async def test_demand_arriving_as_a_keyframe_is_skipped_for_lack_of_it_asks_for_another(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter(demand=False)
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+        await settle()
+
+        skipped = asyncio.create_task(writer.write(key(0)))
+        await asyncio.sleep(0)
+        track.bind(True)
+        assert (await skipped).kind == "skipped"
+        await settle()
+        assert writer.keyframe_needed and calls == [True]
+
     async def test_a_keyframe_written_in_the_same_turn_as_a_demand_change_keeps_its_group(self) -> None:
         calls: list[bool] = []
         track = FakeTrackWriter()

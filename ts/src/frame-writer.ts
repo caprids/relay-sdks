@@ -146,6 +146,8 @@ export function createFrameWriter<F extends Frame = Frame>(
   const waiting: Pending<F>[] = [];
   let current: Pending<F> | undefined;
   let group: RelayGroupWriter | undefined;
+  /** A keyframe is being served and may still open a group: a demand change meanwhile is recovered from. */
+  let keyOpening = false;
   /** The previous group while a keyframe's write FINs it: an overflow resets it too. */
   let finishing: RelayGroupWriter | undefined;
   /** Why deltas are discarded until the next keyframe, when it is not a missing group. */
@@ -244,7 +246,11 @@ export function createFrameWriter<F extends Frame = Frame>(
         needKeyframe();
         return { kind: 'stale' };
       }
-      if (!track.hasDemand) return { kind: 'skipped' };
+      if (!track.hasDemand) {
+        // This keyframe opens nothing, so it cannot recover from a demand change still to be reported.
+        keyOpening = false;
+        return { kind: 'skipped' };
+      }
       let opened: RelayGroupWriter;
       try {
         opened = await track.openGroup();
@@ -332,6 +338,7 @@ export function createFrameWriter<F extends Frame = Frame>(
       group = undefined;
       if (!frame.key) needKeyframe();
     }
+    keyOpening = frame.key;
     try {
       return await intoGop(frame);
     } catch (error) {
@@ -340,6 +347,8 @@ export function createFrameWriter<F extends Frame = Frame>(
       resetGroup();
       needKeyframe();
       throw error;
+    } finally {
+      keyOpening = false;
     }
   };
 
@@ -420,7 +429,7 @@ export function createFrameWriter<F extends Frame = Frame>(
         // A new or replacement relay subscription, or its end. The write slot has already ended the open group, which
         // the next frame finds closed; the new subscription needs a keyframe. Unless it has one: the change closed every
         // group open at the time, so a group still open came after it, and a keyframe waiting or in progress opens one.
-        const recovered = (group && !group.closed) || current?.frame.key || waiting.some(({ frame }) => frame.key);
+        const recovered = (group && !group.closed) || keyOpening || waiting.some(({ frame }) => frame.key);
         if (!recovered) needKeyframe();
       }
     })().catch(() => {});

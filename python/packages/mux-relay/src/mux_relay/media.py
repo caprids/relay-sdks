@@ -179,13 +179,13 @@ class FrameWriter(Generic[F]):
         "_grouping",
         "_groups",
         "_idle",
+        "_key_opening",
         "_keyframe_needed",
         "_loop",
         "_max_backlog",
         "_objects",
         "_on_keyframe_needed",
         "_recovering",
-        "_serving",
         "_stale",
         "_track",
         "_watch",
@@ -234,7 +234,8 @@ class FrameWriter(Generic[F]):
         self._gap_turns: set[asyncio.Future[FrameOutcome | None]] = set()
         self._gap_next = False
         self._closing: asyncio.Task[None] | None = None
-        self._serving: F | None = None
+        # A keyframe is being served and may still open a group: a demand change meanwhile is recovered from.
+        self._key_opening = False
         self._drop_epoch = 0
         self._finishing: _GroupWriter | None = None
         self._keyframe_needed = grouping == "keyframe"
@@ -341,12 +342,9 @@ class FrameWriter(Generic[F]):
             self._idle.clear()
             gap, self._gap_next = self._gap_next, False
 
-        self._serving = frame
-
         try:
             return await self._take_turn(frame, gap=gap)
         finally:
-            self._serving = None
             self._next_turn()
 
     async def close(self) -> None:
@@ -470,7 +468,7 @@ class FrameWriter(Generic[F]):
             # came after it, and a keyframe waiting or in progress opens one.
             recovered = (
                 (self._group is not None and not self._group.closed)
-                or (self._serving is not None and self._serving.key)
+                or self._key_opening
                 or any(frame.key for frame, _ in self._backlog)
             )
 
@@ -493,7 +491,12 @@ class FrameWriter(Generic[F]):
         if self._grouping == "frame":
             return await self._write_own_group(frame)
 
-        return await self._write_into_gop(frame, gap)
+        self._key_opening = frame.key
+
+        try:
+            return await self._write_into_gop(frame, gap)
+        finally:
+            self._key_opening = False
 
     # ------------------------------------------------------------------ keyframe grouping
 
@@ -567,6 +570,8 @@ class FrameWriter(Generic[F]):
                 return FrameOutcome("stale")
 
             if not self._track.has_demand:
+                # This keyframe opens nothing, so it cannot recover from a demand change still to be reported.
+                self._key_opening = False
                 return FrameOutcome("skipped")
 
             try:
