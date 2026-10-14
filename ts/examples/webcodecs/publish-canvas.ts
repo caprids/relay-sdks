@@ -249,10 +249,12 @@ export async function publishCanvas(
               }
               if (frame.key) {
                 await group?.close();
-                group = await track.openGroup({ signal });
-                await group.write(frame.payload, { properties: frame.properties });
+                // Held locally: a demand change during the write may clear `group` before this resumes.
+                const opened = await track.openGroup({ signal });
+                group = opened;
+                await opened.write(frame.payload, { properties: frame.properties });
                 // The keyframe is out: the group is a place a viewer can seek to.
-                timelineDocument = mediaTimeline.add({ timestampUs, group: group.groupId });
+                timelineDocument = mediaTimeline.add({ timestampUs, group: opened.groupId });
                 sendTimeline();
                 return;
               }
