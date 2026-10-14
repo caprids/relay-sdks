@@ -413,8 +413,10 @@ the encoded media frame") and no draft has a separate field for it, but it has c
 - Audio is stamped at its corrected capture time, video at the time the frame reached the page,
   unless the application also subtracts a camera latency. The two are equally "capture time" only
   as far as both corrections are right.
-- A relay that drops objects by age, as draft-lcurley-moq-timestamp models, sees corrected audio as
-  that much older than it would otherwise: 30 ms for a laptop microphone, 190 ms for AirPods.
+- A relay or player that judges an object's age against its own wall clock sees corrected audio as
+  that much older: 30 ms for a laptop microphone, 190 ms for AirPods. draft-lcurley-moq-timestamp-01
+  §4.1 measures age against the newest object on the same track instead, where a constant
+  correction cancels out; only a change in the correction, at a device switch, moves it.
 - The label heuristic under-corrects AirPods in call mode (470–600 ms measured, below) by about
   280–410 ms. Only an application that can tell call mode apart can do better.
 
@@ -714,18 +716,21 @@ draft; until then, this repository's answer is its convention.
 - **`targetLatency` needs wall-clock time per frame.** msf-01 §5.2.8 defines it from the time a
   frame was encoded, in UTC. With an application-defined anchor, the only route to that time is
   the Media Timeline, at millisecond resolution and only at the indexed locations.
-- **Encoded or captured.** msf-01 §5.2.8 and §7.1.1 both say "encoded", though §7.1.1's sentence
-  carries no RFC 2119 keyword, so stamping capture time is an approximation to document, not a
-  violation. Lip sync, syncing across participants and `PROGRAM-DATE-TIME` all need capture time,
-  which is what this repository stamps and indexes. draft-nandakumar-moq-tempo-00 carries an
+- **Encoded or captured.** msf-01 §5.2.8 and §7.1.1 both define the wall-clock time as when the
+  media was encoded. Stamping capture time departs from that definition by the encoder's latency.
+  The sentence has no RFC 2119 keyword, but normative text needs none (RFC 8174 §2). Lip sync,
+  syncing across participants and `PROGRAM-DATE-TIME` all need capture time, which is what this
+  repository stamps and indexes. draft-nandakumar-moq-tempo-00 carries an
   explicit capture timestamp next to a playout delay.
 - **Two timescales.** msf-01 §5.2.21's catalog `timescale` and LOC's Timescale property (`0x08`)
   have no rule for how they relate or which wins. The readers here take the object's property,
   then the track's, and never the catalog's. LOC has no rule for object versus track precedence
   either.
-- **The drafts disagree on a missing Timescale.** LOC draft-04 §2.3.1.1 reads a Timestamp without
-  one as wall-clock microseconds since the epoch. draft-lcurley-moq-timestamp-01 reads it as no
-  timeline at all, and moq-relay follows that, replacing such a Timestamp with its own clock.
+- **A missing Timescale reads two ways.** LOC draft-04 §2.3.1.1 reads a Timestamp without one as
+  wall-clock microseconds since the epoch. draft-lcurley-moq-timestamp-01 §3 says such a track has
+  no timeline and falls back to arrival time for age decisions, though a receiver that implements
+  LOC may read it as LOC does. Neither tells a relay to overwrite the Timestamp; moq-relay's
+  restamping (below) is its own.
 - **The relay modifies properties.** MOQT-22 §8.4 says a relay must forward properties unmodified
   and cache them. moq-relay (read at moq-dev/moq 5152ec74) rescales `0x10`, writes its own `0x08`,
   restamps tracks without a Timescale, and drops properties it does not know, among them `0x0D`
