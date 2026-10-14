@@ -107,6 +107,22 @@ describe('keyframe grouping', () => {
     expect(onKeyframeNeeded).toHaveBeenCalledTimes(2);
   });
 
+  it('never writes into a retired group, whichever turn of a completing write the demand change lands on', async () => {
+    for (let turns = 0; turns < 12; turns++) {
+      const track = slotTrack();
+      const writer = createFrameWriter(track.writer);
+      await writer.write(key());
+      const writing = writer.write(delta());
+      await settle(turns);
+      track.demand(true);
+      await writing;
+      await settle();
+      const next = await writer.write(delta());
+      expect([turns, next.kind]).toEqual([turns, 'skipped']);
+      expect(await writer.write(key())).toMatchObject({ kind: 'sent' });
+    }
+  });
+
   it('reports the frame being written when demand changes as interrupted by the write slot', async () => {
     const track = slotTrack();
     const writer = createFrameWriter(track.writer);
@@ -148,6 +164,24 @@ describe('backlog', () => {
     expect(await writer.write(delta())).toEqual({ kind: 'dropped' });
     expect(await writer.write(key())).toEqual({ kind: 'sent', groupId: 1 });
     expect(await writer.write(delta())).toEqual({ kind: 'sent', groupId: 1 });
+  });
+
+  it('resets the previous group when the backlog overflows while a keyframe is FINning it', async () => {
+    const track = slotTrack();
+    const writer = createFrameWriter(track.writer, { maxBacklog: 1 });
+    await writer.write(key());
+    await writer.write(delta());
+    // Hold the FIN the next keyframe sends for group 0.
+    track.stallFin();
+    const finning = writer.write(key());
+    await settle();
+    const waiting = writer.write(delta());
+    const recovery = writer.write(key());
+    expect((await waiting).kind).toBe('dropped');
+    expect(track.groups[0]?.aborted).toBe(true);
+    expect((await finning).kind).toBe('dropped');
+    track.release();
+    expect(await recovery).toEqual({ kind: 'sent', groupId: 1 });
   });
 
   it('lets an overflowing keyframe open the next group, without asking for another', async () => {

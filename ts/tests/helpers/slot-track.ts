@@ -27,6 +27,8 @@ export function slotTrack(options: { demand?: boolean; writeTimeoutMs?: number }
   let stalled = false;
   /** Stream opens that wait for `release()`. */
   let stalledOpen = false;
+  /** FINs that wait for `release()`. */
+  let stalledFin = false;
   const held: (() => void)[] = [];
   let failNext: Error | undefined;
   let alias = 1;
@@ -44,6 +46,12 @@ export function slotTrack(options: { demand?: boolean; writeTimeoutMs?: number }
       groups.push(group);
       let rejectWrite: ((error: unknown) => void) | undefined;
       const fin = async () => {
+        if (stalledFin) {
+          await new Promise<void>((resolve, reject) => {
+            rejectWrite = reject;
+            held.push(resolve);
+          });
+        }
         if (!group.aborted) group.finished = true;
       };
       return {
@@ -88,10 +96,15 @@ export function slotTrack(options: { demand?: boolean; writeTimeoutMs?: number }
     stallOpen() {
       stalledOpen = true;
     },
-    /** Let held writes and opens through and stop holding. */
+    /** Hold every FIN until `release()`. */
+    stallFin() {
+      stalledFin = true;
+    },
+    /** Let held writes, opens and FINs through and stop holding. */
     release() {
       stalled = false;
       stalledOpen = false;
+      stalledFin = false;
       for (const resolve of held.splice(0)) resolve();
     },
     /** The next object write fails with this transport error. */

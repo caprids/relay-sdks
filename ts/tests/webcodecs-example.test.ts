@@ -375,13 +375,11 @@ it.each(['video', 'catalog', 'timeline'])('keeps publishing through %s write fai
   expect(TestEncoder.instance.close).toHaveBeenCalled();
 });
 
-it('stops and cleans up when a media track ends under it', async () => {
+it.each(['video', 'catalog'])('stops and cleans up when the %s track ends between frames', async (name) => {
   const session = run();
-  const completion = expect(session.result).rejects.toMatchObject({ code: 'CLOSED' });
+  const completion = expect(session.result).rejects.toThrow(`The ${name} track ended`);
   await vi.advanceTimersByTimeAsync(100);
-  session.tracks.get('video')!.writer.close();
-  // Capture stops with demand, so the encoder's next output is what finds the track ended.
-  TestEncoder.instance.encode(new TestFrame(canvas, { timestamp: 200_000 }), { keyFrame: true });
+  session.tracks.get(name)!.writer.close();
   await vi.advanceTimersByTimeAsync(0);
   await completion;
   expect([...session.tracks.values()].every(({ writer }) => writer.closed)).toBe(true);

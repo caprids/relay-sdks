@@ -140,6 +140,13 @@ export async function publishCanvas(
     const register = (track: string) => {
       const writer = publisher.registerTrack({ track, trackProperties: locTrackProperties() });
       tracks.push(writer);
+      // A track's demand changes end when the track does. Capture stops without demand, so no write would find out.
+      serving.push(
+        (async () => {
+          for await (const _demanded of writer.demandChanges()) if (signal.aborted) return;
+          if (!signal.aborted) fail(new Error(`The ${track} track ended`));
+        })().catch(rejected),
+      );
       return writer;
     };
     const catalogTrack = register(CATALOG_TRACK);

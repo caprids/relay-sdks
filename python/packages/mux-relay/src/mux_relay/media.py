@@ -116,6 +116,12 @@ def _never(frame: object) -> bool:
     return False
 
 
+def _settle(turn: asyncio.Future[FrameOutcome | None], outcome: FrameOutcome) -> None:
+    """Give a waiting frame its outcome, unless its caller was cancelled and the turn is already done."""
+    if not turn.done():
+        turn.set_result(outcome)
+
+
 F = TypeVar("F", bound=Frame)
 
 _DEFAULT_BACKLOG: dict[Grouping, int] = {"keyframe": 8, "frame": 25}
@@ -162,6 +168,7 @@ class FrameWriter(Generic[F]):
         "_drop_epoch",
         "_dropping",
         "_ended",
+        "_finishing",
         "_group",
         "_grouping",
         "_groups",
@@ -219,6 +226,7 @@ class FrameWriter(Generic[F]):
         self._dropping = False
         self._reset_pending = False
         self._drop_epoch = 0
+        self._finishing: _GroupWriter | None = None
         self._keyframe_needed = grouping == "keyframe"
         self._closed = False
         self._ended: RelayError | None = None
@@ -329,7 +337,7 @@ class FrameWriter(Generic[F]):
 
         while self._backlog:
             _, turn = self._backlog.popleft()
-            turn.set_result(FrameOutcome("dropped"))
+            _settle(turn, FrameOutcome("dropped"))
 
         if self._watch is not None:
             self._watch.cancel()
@@ -356,13 +364,13 @@ class FrameWriter(Generic[F]):
         """A frame arrived at a full backlog. Returns its outcome when it is dropped at once."""
         if self._grouping == "frame":
             _, turn = self._backlog.popleft()
-            turn.set_result(FrameOutcome("dropped"))
+            _settle(turn, FrameOutcome("dropped"))
             return None
 
         # The transport fell behind: everything behind it goes, and the GOP in progress with it.
         while self._backlog:
             _, turn = self._backlog.popleft()
-            turn.set_result(FrameOutcome("dropped"))
+            _settle(turn, FrameOutcome("dropped"))
 
         self._drop_epoch += 1
         reset = self._reset_group(_BacklogDropped("the frame writer's backlog overflowed"))
@@ -475,14 +483,15 @@ class FrameWriter(Generic[F]):
             previous = self._group.group_id if self._group is not None else None
             failure = await self._end_group()
 
+            if self._drop_epoch != epoch:
+                # An overflow reset the group during its FIN: whatever the FIN reports, that is the drop.
+                return FrameOutcome("dropped")
+
             if failure is not None and _retired(self._track, failure):
                 # The track ended under the FIN of the group before this keyframe: that is the
                 # retirement, with its own error, not a keyframe nobody wanted.
                 self._ended = failure
                 return FrameOutcome("ended", error=failure, group_id=previous)
-
-            if self._drop_epoch != epoch:
-                return FrameOutcome("dropped")
 
             if self._stale(frame):
                 # The FIN took long enough that this keyframe is too old to start a group with.
@@ -541,8 +550,10 @@ class FrameWriter(Generic[F]):
         return FrameOutcome("sent", group_id=group.group_id)
 
     def _reset_group(self, reason: BaseException | None = None) -> int | None:
-        """Abort the open group, if any, and say which one it was."""
-        group, self._group = self._group, None
+        """Abort the open group, or the one a keyframe's write is FINning, and say which one it was."""
+        group = self._group or self._finishing
+        self._group = None
+        self._finishing = None
 
         if group is None:
             return None
@@ -562,6 +573,9 @@ class FrameWriter(Generic[F]):
         if group is None:
             return None
 
+        # While the FIN is pending, an overflow can still reset the group.
+        self._finishing = group
+
         try:
             await group.close()
         except RelayError as error:
@@ -570,6 +584,9 @@ class FrameWriter(Generic[F]):
             # Cancelled mid-FIN: make sure the slot is free before the failure propagates.
             group.abort()
             raise
+        finally:
+            if self._finishing is group:
+                self._finishing = None
 
         return None
 

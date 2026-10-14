@@ -570,6 +570,48 @@ class TestBacklog:
         assert second.cancelled()
         assert sent_stamps(track) == [[0, 2]]
 
+    async def test_close_right_after_a_waiting_write_is_cancelled_still_closes(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        second = asyncio.create_task(writer.write(delta(1)))
+        await settle()
+
+        # Cancelling settles the waiting turn at once; close starts in this task, before the
+        # cancelled task's own handler runs, and the gate opens once close is waiting.
+        second.cancel()
+        asyncio.get_running_loop().call_soon(gate.set)
+        await writer.close()
+
+        assert (await first).kind == "sent"
+        assert second.cancelled()
+        assert track.groups[0].finished and writer.closed
+        assert track._watchers == [], "the demand watch ended with the writer"
+
+    async def test_an_overflow_resets_the_group_a_keyframe_is_finning(self) -> None:
+        fin = asyncio.Event()
+        track = FakeTrackWriter(block_close=fin)
+        writer: FrameWriter[Sample] = FrameWriter(track, max_backlog=1)
+
+        assert (await writer.write(key(0))).kind == "sent"
+        assert (await writer.write(delta(1))).kind == "sent"
+        finning = asyncio.create_task(writer.write(key(2)))
+        await track.blocked.wait()
+        waiting = asyncio.create_task(writer.write(delta(3)))
+        await settle()
+        recovery = asyncio.create_task(writer.write(key(4)))
+        await settle()
+
+        assert (await waiting).kind == "dropped"
+        assert track.groups[0].aborts, "the group whose FIN was pending is reset"
+        assert (await finning).kind == "dropped"
+        fin.set()
+        assert await recovery == FrameOutcome("sent", group_id=1)
+        assert sent_stamps(track) == [[0, 1], [4]]
+
     async def test_close_drops_the_backlog_after_the_frame_being_written(self) -> None:
         gate = asyncio.Event()
         track = FakeTrackWriter(block=gate)

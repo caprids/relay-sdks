@@ -69,14 +69,22 @@ class FakeTrackWriter:
 
         ``fail(step, error, on=n)`` makes the n-th call of that step (counting from 0) raise ``error``;
         ``retire=True`` also ends the track first, the way a closed connection does. ``block`` holds
-        every group write until the event is set, for tests where time has to pass inside a write; aborting
-    the group fails a held write with the abort's reason, as the SDK does.
+        every group write until the event is set, for tests where time has to pass inside a write, and
+    ``block_close`` every group FIN; aborting the group fails a held step with the abort's reason, as
+    the SDK does.
     """
 
-    def __init__(self, *, demand: bool = True, block: asyncio.Event | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        demand: bool = True,
+        block: asyncio.Event | None = None,
+        block_close: asyncio.Event | None = None,
+    ) -> None:
         self.has_demand = demand
         self.closed = False
         self.block = block
+        self.block_close = block_close
         self.writes: list[bytes] = []
         self.groups: list[FakeGroupWriter] = []
         self.blocked = asyncio.Event()
@@ -110,9 +118,11 @@ class FakeTrackWriter:
         self.calls[step] += 1
         failure = self._failures.pop((step, index), None)
 
-        if step == "group-write" and self.block is not None and group is not None:
+        gate = {"group-write": self.block, "group-close": self.block_close}.get(step)
+
+        if gate is not None and group is not None:
             self.blocked.set()
-            released = asyncio.ensure_future(self.block.wait())
+            released = asyncio.ensure_future(gate.wait())
             aborted = asyncio.ensure_future(group.aborted.wait())
 
             try:
