@@ -168,6 +168,7 @@ class FrameWriter(Generic[F]):
         "_backlog",
         "_busy",
         "_closed",
+        "_closing",
         "_drop_epoch",
         "_dropping",
         "_ended",
@@ -231,6 +232,7 @@ class FrameWriter(Generic[F]):
         # Frames that follow a cancelled one, which left a gap in the GOP: by their turn, or the next to arrive.
         self._gap_turns: set[asyncio.Future[FrameOutcome | None]] = set()
         self._gap_next = False
+        self._closing: asyncio.Task[None] | None = None
         self._drop_epoch = 0
         self._finishing: _GroupWriter | None = None
         self._keyframe_needed = grouping == "keyframe"
@@ -349,16 +351,20 @@ class FrameWriter(Generic[F]):
         was abandoned either way. Anything else propagates. The registered track stays the
         application's to close.
         """
-        if self._closed:
-            return
+        if self._closing is None:
+            self._closed = True
 
-        self._closed = True
+            while self._backlog:
+                _, turn = self._backlog.popleft()
+                self._gap_turns.discard(turn)
+                _settle(turn, FrameOutcome("dropped"))
 
-        while self._backlog:
-            _, turn = self._backlog.popleft()
-            self._gap_turns.discard(turn)
-            _settle(turn, FrameOutcome("dropped"))
+            # One cleanup for every caller, which a cancelled caller cannot cut short.
+            self._closing = self._loop.create_task(self._finish_closing())
 
+        await asyncio.shield(self._closing)
+
+    async def _finish_closing(self) -> None:
         if self._watch is not None:
             self._watch.cancel()
             await asyncio.wait([self._watch])

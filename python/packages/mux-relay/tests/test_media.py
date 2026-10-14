@@ -667,6 +667,27 @@ class TestBacklog:
         assert await kinds(writer, [key(2, discontinuity=True)]) == ["sent"]
         assert not writer.keyframe_needed and calls == []
 
+    async def test_a_cancelled_or_repeated_close_still_fins_the_group(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        closing = asyncio.create_task(writer.close())
+        await settle()
+        closing.cancel()
+        await asyncio.gather(closing, return_exceptions=True)
+
+        again = asyncio.create_task(writer.close())
+        await settle()
+        assert not again.done(), "a later close waits for the same cleanup"
+        gate.set()
+        await again
+
+        assert (await first).kind == "sent"
+        assert track.groups[0].finished
+
     async def test_close_right_after_a_waiting_write_is_cancelled_still_closes(self) -> None:
         gate = asyncio.Event()
         track = FakeTrackWriter(block=gate)

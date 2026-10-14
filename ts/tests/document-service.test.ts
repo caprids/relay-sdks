@@ -83,6 +83,23 @@ describe('catalog service', () => {
     await expect(serving).rejects.toMatchObject({ code: 'CLOSED' });
   });
 
+  it('stops at once when the track ends during a retry pause', async () => {
+    vi.useFakeTimers();
+    const track = slotTrack();
+    const catalog = createCatalogService(track.writer, bytes(1), { retryDelayMs: 3_600_000 });
+    track.failNextWrite(new Error('reset'));
+    let settled = false;
+    const serving = catalog.serve().finally(() => {
+      settled = true;
+    });
+    await settle();
+    expect(catalog.failures).toBe(1);
+    track.writer.close();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(settled).toBe(true);
+    await expect(serving).resolves.toBeUndefined();
+  });
+
   it('refuses a bad document or delay before touching the track', () => {
     const track = slotTrack();
     expect(() => createCatalogService(track.writer, 'catalog' as never)).toThrow(TypeError);

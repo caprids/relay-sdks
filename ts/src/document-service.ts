@@ -60,17 +60,21 @@ function retryDelay(options: CatalogServiceOptions): number {
   return delay;
 }
 
-function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+/** Wait `ms`, or less if `ended` settles first; reject with the signal's reason if it aborts. */
+function sleep(ms: number, signal: AbortSignal | undefined, ended: Promise<unknown>): Promise<void> {
   return new Promise((resolve, reject) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+      resolve();
+    };
     const abort = () => {
       clearTimeout(timer);
       reject(signal?.reason);
     };
-    const timer = setTimeout(() => {
-      signal?.removeEventListener('abort', abort);
-      resolve();
-    }, ms);
+    const timer = setTimeout(done, ms);
     signal?.addEventListener('abort', abort, { once: true });
+    void ended.then(done, done);
   });
 }
 
@@ -134,7 +138,8 @@ async function serveDocument(
         // Losing demand ends the retries; the next relay subscription makes the document due again.
         if (!track.hasDemand) continue;
         state.due = true;
-        await sleep(delayMs, signal);
+        // The track ending cuts the pause short: the loop then returns rather than wait out the delay.
+        await sleep(delayMs, signal, watching);
       }
     }
   } finally {
