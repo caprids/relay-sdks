@@ -1041,7 +1041,8 @@ to both languages.
   Timestamp (0x10) in microseconds, or nothing when the object has no Timestamp that is a
   nonnegative safe integer. It scales by the first Timescale that is a positive safe integer,
   looking at the object's Timescale (0x08), then the track properties' (as `SUBSCRIBE_OK` carries
-  them), then the catalog's `timescale`, and skipping any other value. The result is
+  them), and skipping any other value. It never reads the catalog's `timescale`: msf-01 §5.2.21
+  does not tie that field to the LOC Timestamp. The result is
   `round(value × 1,000,000 / timescale)`, ties upward. With no Timescale it is the value itself,
   LOC's wall-clock microseconds. A result past 2^53−1 reads as nothing. Pinned by `vectors/media.json`
   `locTimestamps`.

@@ -47,8 +47,8 @@ wait, show, or drop a video frame. With no audio it paces by wall clock. See
 [spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
 
 On the subscriber side, `loc_timestamp_us(obj.properties, track_properties=ok.track_properties)`
-reads an object's Timestamp in microseconds, applying whichever Timescale the object, the
-`SUBSCRIBE_OK` track properties, or the catalog (`catalog_timescale=`) declares.
+reads an object's Timestamp in microseconds, applying whichever Timescale the object or the
+`SUBSCRIBE_OK` track properties declare.
 
 msf-01's Media Timeline track holds one record per video group, mapping media time and the group's
 location to wall-clock time, for seeking and playlists. On the epoch timeline the two times are the

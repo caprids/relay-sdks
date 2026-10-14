@@ -1,5 +1,5 @@
 {
-  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 §7, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional wall-clock time that defaults to the timestamp (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers. locTimestamps (issue #290) read an object's LOC Timestamp in microseconds from its properties ([type, decimal value] pairs), optional track properties and an optional catalog timescale; timestampUs null means no usable Timestamp.",
+  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 §7, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional wall-clock time that defaults to the timestamp (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers. locTimestamps (issue #290) read an object's LOC Timestamp in microseconds from its properties ([type, decimal value] pairs) and optional track properties (never the catalog's timescale, which MSF does not tie to the LOC Timestamp); timestampUs null means no usable Timestamp.",
   "catalogs": [
     {
       "name": "h264-opus",
@@ -1477,34 +1477,6 @@
         ]
       ],
       "timestampUs": "1000000"
-    },
-    {
-      "name": "the track's timescale wins over the catalog's",
-      "properties": [
-        [
-          16,
-          "90000"
-        ]
-      ],
-      "trackProperties": [
-        [
-          8,
-          "90000"
-        ]
-      ],
-      "catalogTimescale": "1000",
-      "timestampUs": "1000000"
-    },
-    {
-      "name": "catalog timescale as the last resort",
-      "properties": [
-        [
-          16,
-          "1500"
-        ]
-      ],
-      "catalogTimescale": "1000",
-      "timestampUs": "1500000"
     },
     {
       "name": "ties round upward",

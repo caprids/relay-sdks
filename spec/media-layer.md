@@ -243,8 +243,10 @@ symmetric with `read_text` and `read_json`:
   Its timestamp part ships as `locTimestampUs` / `loc_timestamp_us`
   ([issue #290](https://github.com/muxinc/relay-sdks/issues/290)): an object's Timestamp in
   microseconds, scaled by the first Timescale it finds on the object, then in the track properties
-  (`SUBSCRIBE_OK`'s, as the relay sends them), then in the catalog. With none, the Timestamp already
-  is microseconds since the epoch (LOC §2.3.1.1). Reading `0x10` as raw microseconds works against
+  (`SUBSCRIBE_OK`'s, as the relay sends them). It does not read the catalog's `timescale`: msf-01
+  §5.2.21 never ties that field to the LOC Timestamp, and a catalog that set it for another purpose
+  would silently rescale a Timestamp LOC defines as microseconds. With no Timescale, the Timestamp
+  already is microseconds since the epoch (LOC §2.3.1.1). Reading `0x10` as raw microseconds works against
   moq-relay only because it rescales every timestamp to microseconds and declares Timescale
   1,000,000; a relay that passes the publisher's Timescale through needs the scaling.
 
@@ -279,8 +281,9 @@ them from one broadcast clock:
   player could reach wall-clock time only through the millisecond-resolution Media Timeline, which
   rules out honouring `targetLatency` per frame and leaves syncing between broadcasts undefined.
   The cost is that a publisher with a wrong system clock now produces wrong wall-clock times, and
-  that nothing in msf-01 signals which anchor a broadcast uses: a player that reads these
-  timestamps as wall-clock time relies on this convention.
+  that nothing on the wire signals which anchor a broadcast uses. The epoch anchor is a convention
+  between the SDKs and players that follow this document; a receiver that does not know it sees
+  only an application-defined anchor (LOC §2.3.1.2).
 - The catalog puts the video and audio entries in one render group: `renderGroup: 1` (msf-01
   §5.2.11, "tracks with the same group number SHOULD be rendered simultaneously"). That is
   msf-01's way to say tracks play together, and moq-rs catalogs already send it. There is no
@@ -301,7 +304,9 @@ What the relay does to timestamps is in
 keeps the publisher's timestamps, rescaled to microseconds. A track without one, or an object
 without a Timestamp, gets the relay's own clock instead. A received Timestamp cannot tell you which
 of these happened, so a player must not use relay-clock stamps to sync, and a publisher must declare
-the timescale on every media track. The format helpers do this by default.
+the timescale on every media track. The format helpers do this by default. None of these rewrites
+is permitted by MOQT-22 §8.4, which says a relay must forward properties unmodified; see
+[Spec gaps](#spec-gaps).
 
 ### Broadcast clock (publisher)
 
@@ -401,6 +406,17 @@ timeline is created and again whenever the input device changes; a change applie
 timestamp. The helpers ship no device table. An application that knows its devices sets the
 latency per device. The WebCodecs example estimates from the microphone's label: 190 ms for a
 Bluetooth headset (a label containing "AirPods" or "Bluetooth"), 30 ms otherwise.
+
+Folding the latency into the Timestamp is allowed (LOC draft-04 defines it only as the "Timestamp of
+the encoded media frame") and no draft has a separate field for it, but it has costs:
+
+- Audio is stamped at its corrected capture time, video at the time the frame reached the page,
+  unless the application also subtracts a camera latency. The two are equally "capture time" only
+  as far as both corrections are right.
+- A relay that drops objects by age, as draft-lcurley-moq-timestamp models, sees corrected audio as
+  that much older than it would otherwise: 30 ms for a laptop microphone, 190 ms for AirPods.
+- The label heuristic under-corrects AirPods in call mode (470–600 ms measured, below) by about
+  280–410 ms. Only an application that can tell call mode apart can do better.
 
 Measured with the [device latency lab](../tools/device-latency/README.md) on macOS 26.6 (MacBook
 Air, Chrome and Firefox, 2026-10-13; raw results on
@@ -601,7 +617,10 @@ nowhere else. That is what a seek needs, at one record per GOP, typically every 
 The entries' locations point into video, the first track in `depends`. Audio is one group per
 frame, 50 or more a second, and an entry for each would multiply the document for no gain: every
 track in the render group is stamped on the same broadcast timeline, so a player that has found the
-video location for a media time finds the audio for it by timestamp. msf-01 §7.2 still requires
+video location for a media time finds the audio for it by timestamp. A location cannot address
+audio anyway: it is a bare `[group, object]`, and audio's group numbers (one per frame) do not line
+up with video's (one per GOP). msf-01's example 5.6.10 gives each track its own timeline for that;
+a player here seeks audio by timestamp instead. msf-01 §7.2 still requires
 `depends` to list every track the timeline applies to, so audio is listed after video. An
 audio-only broadcast indexes its audio track at most once a second.
 
@@ -695,13 +714,23 @@ draft; until then, this repository's answer is its convention.
 - **`targetLatency` needs wall-clock time per frame.** msf-01 §5.2.8 defines it from the time a
   frame was encoded, in UTC. With an application-defined anchor, the only route to that time is
   the Media Timeline, at millisecond resolution and only at the indexed locations.
-- **Encoded or captured.** msf-01 §5.2.8 and §7.1.1 both say "encoded". Lip sync, syncing across
-  participants and `PROGRAM-DATE-TIME` all need capture time, which is what this repository
-  stamps and indexes. draft-nandakumar-moq-tempo-00 carries an explicit capture timestamp next to a
-  playout delay.
+- **Encoded or captured.** msf-01 §5.2.8 and §7.1.1 both say "encoded", though §7.1.1's sentence
+  carries no RFC 2119 keyword, so stamping capture time is an approximation to document, not a
+  violation. Lip sync, syncing across participants and `PROGRAM-DATE-TIME` all need capture time,
+  which is what this repository stamps and indexes. draft-nandakumar-moq-tempo-00 carries an
+  explicit capture timestamp next to a playout delay.
 - **Two timescales.** msf-01 §5.2.21's catalog `timescale` and LOC's Timescale property (`0x08`)
-  have no rule for how they relate or which wins. The readers here take the object's property
-  first, then the track's, then the catalog's, as the Video.js MoQ player does.
+  have no rule for how they relate or which wins. The readers here take the object's property,
+  then the track's, and never the catalog's. LOC has no rule for object versus track precedence
+  either.
+- **The drafts disagree on a missing Timescale.** LOC draft-04 §2.3.1.1 reads a Timestamp without
+  one as wall-clock microseconds since the epoch. draft-lcurley-moq-timestamp-01 reads it as no
+  timeline at all, and moq-relay follows that, replacing such a Timestamp with its own clock.
+- **The relay modifies properties.** MOQT-22 §8.4 says a relay must forward properties unmodified
+  and cache them. moq-relay (read at moq-dev/moq 5152ec74) rescales `0x10`, writes its own `0x08`,
+  restamps tracks without a Timescale, and drops properties it does not know, among them `0x0D`
+  and the publisher's other track properties in `SUBSCRIBE_OK`. That is a relay bug rather than a
+  draft gap, listed here because it is why the readers scale by whatever Timescale arrives.
 - **Capture latency has no field.** No draft has a place to declare it, so it is folded into the
   Timestamp (see [Capture latency](#capture-latency)).
 

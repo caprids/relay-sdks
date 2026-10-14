@@ -48,7 +48,6 @@ interface Vectors {
     name: string;
     properties: [number, string][];
     trackProperties?: [number, string][];
-    catalogTimescale?: string;
     timestampUs: string | null;
   }[];
   urls: { name: string; origin: string; namespace: string[]; token?: string; trackName?: string; url: string }[];
@@ -208,7 +207,6 @@ describe('shared media vectors', () => {
       expect(
         media.locTimestampUs(pairs(vector.properties), {
           ...(vector.trackProperties ? { trackProperties: pairs(vector.trackProperties) } : {}),
-          ...(vector.catalogTimescale !== undefined ? { catalogTimescale: Number(vector.catalogTimescale) } : {}),
         }),
       ).toBe(vector.timestampUs === null ? undefined : Number(vector.timestampUs)));
   }

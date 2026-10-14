@@ -455,7 +455,7 @@ names from the original examples; the mappings below are explicit.
 | Reader options | `ParseMsfCatalogOptions` | `parse_msf_catalog` keyword arguments |
 | LOC track properties | `locTrackProperties` | `loc_track_properties` |
 | LOC object properties from microseconds | `locProperties` / `LocPropertiesOptions` | `loc_properties` keyword arguments |
-| An object's LOC Timestamp in microseconds | `locTimestampUs(properties, { trackProperties?, catalogTimescale? })` (`LocTimestampOptions`) | `loc_timestamp_us(properties, *, track_properties=(), catalog_timescale=None)` |
+| An object's LOC Timestamp in microseconds | `locTimestampUs(properties, { trackProperties? })` (`LocTimestampOptions`) | `loc_timestamp_us(properties, *, track_properties=())` |
 | Compose source URL | `composeMoqSource` / `ComposeMoqSourceOptions` | `compose_player_url` keyword arguments |
 | Escape UTF-8 component | `encodeNameComponent` | `encode_name_component` |
 | Encode namespace plus track name | `encodeNamespaceName` | `encode_namespace_name` |

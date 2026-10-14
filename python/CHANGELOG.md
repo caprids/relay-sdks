@@ -49,7 +49,7 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 - `mux-moq-media`: capture times on one epoch, and a Timescale-aware reader
   ([#290](https://github.com/muxinc/relay-sdks/issues/290)). Source timelines take a settable `capture_latency_us`,
   subtracted from every timestamp, for the input delay no device reports. `loc_timestamp_us` reads an object's LOC
-  Timestamp in microseconds, applying the object's, the track's or the catalog's Timescale.
+  Timestamp in microseconds, applying the object's or the track's Timescale.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
   subscriber's SETUP now sends the MoQ Solicit option, so the relay advertises namespaces only on that request.

@@ -68,12 +68,13 @@ export function locProperties(timestampUs: number, options: LocPropertiesOptions
   return properties;
 }
 
-/** Options for {@link locTimestampUs}: where else the track's timescale may be declared. */
+/**
+ * Options for {@link locTimestampUs}: where else the track's timescale may be declared. The MSF catalog's `timescale`
+ * (msf-01 §5.2.21) is not one of them: MSF never ties it to the LOC Timestamp.
+ */
 export interface LocTimestampOptions {
   /** The track's properties, as `SUBSCRIBE_OK` carries them (`subscription.subscribed`'s `trackProperties`). */
   trackProperties?: readonly KeyValuePair[];
-  /** The catalog track entry's `timescale` (msf-01 §5.2.21). */
-  catalogTimescale?: number;
 }
 
 const usableTimescale = (value: unknown): value is number =>
@@ -88,7 +89,7 @@ function timescaleOf(properties: readonly KeyValuePair[] | undefined): number | 
 
 /**
  * An object's LOC Timestamp in microseconds, or `undefined` when it has none. Scales by the first usable Timescale on
- * the object, then in the track properties, then in the catalog, rounding ties upward. With none, the Timestamp is
+ * the object, then in the track properties, rounding ties upward. With none, the Timestamp is
  * already microseconds: LOC's wall-clock time since the Unix epoch.
  */
 export function locTimestampUs(
@@ -97,11 +98,7 @@ export function locTimestampUs(
 ): number | undefined {
   const value = properties.find((property) => property.type === LOC_TIMESTAMP)?.value;
   if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) return undefined;
-  const { catalogTimescale } = options;
-  const timescale =
-    timescaleOf(properties) ??
-    timescaleOf(options.trackProperties) ??
-    (usableTimescale(catalogTimescale) ? catalogTimescale : undefined);
+  const timescale = timescaleOf(properties) ?? timescaleOf(options.trackProperties);
   if (timescale === undefined || timescale === MICROSECONDS_PER_SECOND) return value;
   const scaled = Number((BigInt(value) * 2_000_000n + BigInt(timescale)) / (2n * BigInt(timescale)));
   return Number.isSafeInteger(scaled) ? scaled : undefined;

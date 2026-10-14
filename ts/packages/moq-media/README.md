@@ -95,7 +95,7 @@ if (decision.action === 'wait') setTimeout(retry, decision.waitUs / 1000);
 
 A subscriber reads an object's timestamp with `locTimestampUs(object.properties, { trackProperties })`,
 passing the track properties from `subscription.subscribed`. It applies whichever Timescale the
-object, the track or the catalog declares, rather than assuming the relay rescaled to microseconds.
+object or the track declares, rather than assuming the relay rescaled to microseconds.
 
 msf-01's Media Timeline track maps media time to group locations, for seeking and playlists: one
 record per video group. On this timeline media time already is wall-clock time, so a record's two

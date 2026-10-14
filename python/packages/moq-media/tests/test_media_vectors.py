@@ -221,11 +221,9 @@ def kv_pairs(raw: list[list[Any]]) -> list[KeyValuePair]:
 
 @pytest.mark.parametrize("vector", VECTORS["locTimestamps"], ids=lambda v: v["name"])
 def test_loc_timestamps(vector: dict[str, Any]) -> None:
-    catalog = vector.get("catalogTimescale")
     read = media.loc_timestamp_us(
         kv_pairs(vector["properties"]),
         track_properties=kv_pairs(vector.get("trackProperties", [])),
-        catalog_timescale=None if catalog is None else int(catalog),
     )
     expected = vector["timestampUs"]
     assert read == (None if expected is None else int(expected))

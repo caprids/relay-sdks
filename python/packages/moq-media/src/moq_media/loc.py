@@ -73,13 +73,13 @@ def loc_timestamp_us(
     properties: Iterable[KeyValuePair],
     *,
     track_properties: Iterable[KeyValuePair] = (),
-    catalog_timescale: int | None = None,
 ) -> int | None:
     """Return an object's LOC Timestamp in microseconds, or ``None`` when it has no usable one.
 
     The Timestamp is scaled by the first Timescale that is a positive safe integer: the object's, then the track's
-    (``track_properties``, as ``SUBSCRIBE_OK`` carries them), then the catalog's. With none, the Timestamp already is
-    wall-clock microseconds since the Unix epoch (LOC §2.3.1.1). Ties round upward; a result past 2^53 - 1 is ``None``.
+    (``track_properties``, as ``SUBSCRIBE_OK`` carries them). The MSF catalog's ``timescale`` is not consulted: MSF
+    never ties it to the LOC Timestamp. With none, the Timestamp already is wall-clock microseconds since the Unix
+    epoch (LOC §2.3.1.1). Ties round upward; a result past 2^53 - 1 is ``None``.
     """
     properties = list(properties)
     timestamp = next((p.value for p in properties if p.type == LOC_TIMESTAMP), None)
@@ -88,7 +88,6 @@ def loc_timestamp_us(
     candidates = [
         *(p.value for p in properties if p.type == LOC_TIMESCALE),
         *(p.value for p in track_properties if p.type == LOC_TIMESCALE),
-        catalog_timescale,
     ]
     timescale = next((t for t in map(_positive_timescale, candidates) if t is not None), None)
     if timescale is None:
