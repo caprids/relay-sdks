@@ -248,13 +248,13 @@ export async function publishCanvas(
       };
       // Encoders do not carry input timestamps through: Chromium's counts samples from its first input and ignores
       // gaps, Firefox's subtracts its lookahead. So the encoder gets one contiguous count, and each chunk is mapped
-      // back to context time through the block it started in, then onto the broadcast timeline.
-      let fed: { encoderUs: number; contextUs: number }[] = [];
+      // back to context time through the block it started in, then onto the broadcast timeline. The block also keeps
+      // the capture latency of the microphone it came from: a device switch must not restamp audio still encoding.
+      let fed: { encoderUs: number; contextUs: number; captureLatencyUs: number }[] = [];
       let framesFed = 0;
-      const contextUsOf = (encoderUs: number) => {
+      const blockOf = (encoderUs: number) => {
         while (fed.length > 1 && (fed[1] as (typeof fed)[number]).encoderUs <= encoderUs) fed.shift();
-        const from = fed[0];
-        return from && from.contextUs + (encoderUs - from.encoderUs);
+        return fed[0];
       };
       const encodeBlock = (block: MicrophoneBlock) => {
         if (signal.aborted) return;
@@ -272,8 +272,12 @@ export async function publishCanvas(
               output(chunk) {
                 if (signal.aborted) return;
                 try {
-                  const contextUs = contextUsOf(chunk.timestamp);
-                  if (contextUs !== undefined) writeAudio(chunk, timeline.timestampUs(contextUs));
+                  const from = blockOf(chunk.timestamp);
+                  if (from === undefined) return;
+                  const contextUs = from.contextUs + (chunk.timestamp - from.encoderUs);
+                  // timestampUs subtracts the latency current now; put back the difference from the block's own.
+                  const latencyShiftUs = timeline.captureLatencyUs - from.captureLatencyUs;
+                  writeAudio(chunk, timeline.timestampUs(contextUs) + latencyShiftUs);
                 } catch (error) {
                   fail(error);
                 }
@@ -284,7 +288,7 @@ export async function publishCanvas(
           // Encode every block, demand or not, so the encoder's count runs with the context's.
           if (audioEncoder.encodeQueueSize >= 25) throw new Error('The audio encoder cannot keep up');
           const encoderUs = Math.round((framesFed * 1_000_000) / block.sampleRate);
-          fed.push({ encoderUs, contextUs: block.contextUs });
+          fed.push({ encoderUs, contextUs: block.contextUs, captureLatencyUs: block.captureLatencyUs });
           framesFed += block.samples.length;
           const data = new AudioData({
             format: 'f32-planar',

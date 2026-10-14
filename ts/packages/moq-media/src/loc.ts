@@ -76,9 +76,14 @@ export interface LocTimestampOptions {
   catalogTimescale?: number;
 }
 
+const usableTimescale = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isSafeInteger(value) && value > 0;
+
 function timescaleOf(properties: readonly KeyValuePair[] | undefined): number | undefined {
-  const value = properties?.find((property) => property.type === LOC_TIMESCALE)?.value;
-  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  const value = properties?.find(
+    (property) => property.type === LOC_TIMESCALE && usableTimescale(property.value)
+  )?.value;
+  return value as number | undefined;
 }
 
 /**
@@ -96,9 +101,7 @@ export function locTimestampUs(
   const timescale =
     timescaleOf(properties) ??
     timescaleOf(options.trackProperties) ??
-    (catalogTimescale !== undefined && Number.isSafeInteger(catalogTimescale) && catalogTimescale > 0
-      ? catalogTimescale
-      : undefined);
+    (usableTimescale(catalogTimescale) ? catalogTimescale : undefined);
   if (timescale === undefined || timescale === MICROSECONDS_PER_SECOND) return value;
   const scaled = Number((BigInt(value) * 2_000_000n + BigInt(timescale)) / (2n * BigInt(timescale)));
   return Number.isSafeInteger(scaled) ? scaled : undefined;

@@ -1555,6 +1555,24 @@
       "timestampUs": "1000000"
     },
     {
+      "name": "an unusable timescale is skipped for a later usable one on the same object",
+      "properties": [
+        [
+          16,
+          "90000"
+        ],
+        [
+          8,
+          "0"
+        ],
+        [
+          8,
+          "90000"
+        ]
+      ],
+      "timestampUs": "1000000"
+    },
+    {
       "name": "no Timestamp",
       "properties": [
         [

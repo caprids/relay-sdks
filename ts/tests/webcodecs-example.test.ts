@@ -243,8 +243,14 @@ function testMicrophone() {
     async useContext() {},
     close() {},
   };
-  const deliver = (contextUs: number, on: SourceTimeline = timeline) =>
-    microphone.onblock?.({ samples: new Float32Array(960), sampleRate: 48_000, contextUs, timeline: on });
+  const deliver = (contextUs: number, on: SourceTimeline = timeline, captureLatencyUs = on.captureLatencyUs) =>
+    microphone.onblock?.({
+      samples: new Float32Array(960),
+      sampleRate: 48_000,
+      contextUs,
+      timeline: on,
+      captureLatencyUs,
+    });
   return { clock, timeline, microphone, deliver };
 }
 
@@ -474,6 +480,22 @@ it.each([
     expect(second?.close).toHaveBeenCalled();
   },
 );
+
+it('stamps audio with the capture latency of the microphone it came from, not the one switched to since', async () => {
+  const mic = testMicrophone();
+  const session = run({}, mic.microphone);
+  const completion = expect(session.result).rejects.toThrow('Stopped');
+  await vi.advanceTimersByTimeAsync(0);
+  mic.timeline.captureLatencyUs = 30_000;
+  mic.deliver(40_000);
+  // Captured on the 30 ms microphone, encoded after a switch to a 190 ms one.
+  mic.timeline.captureLatencyUs = 190_000;
+  mic.deliver(60_000, mic.timeline, 30_000);
+  await vi.advanceTimersByTimeAsync(0);
+  expect(timestampsOf(session.tracks.get('audio')!.objects)).toEqual([[15_000], [35_000]]);
+  session.stop.abort(new Error('Stopped'));
+  await completion;
+});
 
 it('encodes every block without audio demand, and sends nothing stamped before the epoch', async () => {
   const mic = testMicrophone();

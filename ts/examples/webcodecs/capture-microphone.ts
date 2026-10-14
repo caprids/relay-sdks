@@ -78,6 +78,11 @@ export interface MicrophoneBlock {
   contextUs: number;
   /** Maps this context's time onto the broadcast timeline. Each context has its own, so it changes with the context. */
   timeline: SourceTimeline;
+  /**
+   * The capture latency of the microphone these samples came from: the timeline's when the block arrived. The
+   * timeline's value moves on at a device switch, while blocks captured before it may still be encoding.
+   */
+  captureLatencyUs: number;
 }
 
 /** A microphone routed through an `AudioContext` and an `AudioWorklet`, timed on a broadcast clock. */
@@ -193,6 +198,7 @@ export async function captureMicrophone(
         sampleRate,
         contextUs: Math.round((data.frame * 1_000_000) / sampleRate),
         timeline: opened.timeline,
+        captureLatencyUs: opened.timeline.captureLatencyUs,
       });
     };
     // Outputs are silent; connecting one keeps every engine pulling the node.
