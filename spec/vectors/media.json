@@ -1,5 +1,5 @@
 {
-  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 §7, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional origin epoch (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers.",
+  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 §7, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional wall-clock time that defaults to the timestamp (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers. locTimestamps (issue #290) read an object's LOC Timestamp in microseconds from its properties ([type, decimal value] pairs) and optional track properties (never the catalog's timescale, which MSF does not tie to the LOC Timestamp); timestampUs null means no usable Timestamp.",
   "catalogs": [
     {
       "name": "h264-opus",
@@ -473,7 +473,7 @@
           }
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"renderGroup\":1,\"codec\":\"avc1.42C014\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room/live\",\"packaging\":\"mediatimeline\",\"isLive\":true,\"name\":\"timeline\",\"role\":\"mediatimeline\",\"mimetype\":\"application/json\",\"depends\":[\"video\"]},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-init\",\"name\":\"video\",\"role\":\"video\",\"renderGroup\":1,\"codec\":\"avc1.42C014\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room/live\",\"packaging\":\"mediatimeline\",\"isLive\":true,\"name\":\"timeline\",\"role\":\"mediatimeline\",\"mimetype\":\"application/json\",\"depends\":[\"video\",\"audio\"]},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}],\"initDataList\":[{\"id\":\"video-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
       "parsed": {
         "version": "draft-01",
         "isComplete": false,
@@ -516,7 +516,8 @@
             "role": "mediatimeline",
             "mimetype": "application/json",
             "depends": [
-              "video"
+              "video",
+              "audio"
             ]
           },
           {
@@ -661,7 +662,11 @@
           "codec": "avc1.42E01F"
         },
         "audio": {},
-        "mediaTimeline": {}
+        "mediaTimeline": {
+          "depends": [
+            "video"
+          ]
+        }
       },
       "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"}]}",
       "parsed": {
@@ -1412,6 +1417,190 @@
       ]
     }
   ],
+  "locTimestamps": [
+    {
+      "name": "microsecond timescale on the object",
+      "properties": [
+        [
+          16,
+          "1759924158381000"
+        ],
+        [
+          8,
+          "1000000"
+        ]
+      ],
+      "timestampUs": "1759924158381000"
+    },
+    {
+      "name": "no timescale anywhere: LOC wall-clock microseconds",
+      "properties": [
+        [
+          16,
+          "1759924158381000"
+        ]
+      ],
+      "timestampUs": "1759924158381000"
+    },
+    {
+      "name": "track timescale from SUBSCRIBE_OK",
+      "properties": [
+        [
+          16,
+          "123456"
+        ]
+      ],
+      "trackProperties": [
+        [
+          8,
+          "90000"
+        ]
+      ],
+      "timestampUs": "1371733"
+    },
+    {
+      "name": "the object's timescale wins over the track's",
+      "properties": [
+        [
+          16,
+          "48000"
+        ],
+        [
+          8,
+          "48000"
+        ]
+      ],
+      "trackProperties": [
+        [
+          8,
+          "90000"
+        ]
+      ],
+      "timestampUs": "1000000"
+    },
+    {
+      "name": "ties round upward",
+      "properties": [
+        [
+          16,
+          "1"
+        ],
+        [
+          8,
+          "2000000"
+        ]
+      ],
+      "timestampUs": "1"
+    },
+    {
+      "name": "below a tie rounds down",
+      "properties": [
+        [
+          16,
+          "1"
+        ],
+        [
+          8,
+          "3000000"
+        ]
+      ],
+      "timestampUs": "0"
+    },
+    {
+      "name": "a zero timescale is skipped",
+      "properties": [
+        [
+          16,
+          "90000"
+        ],
+        [
+          8,
+          "0"
+        ]
+      ],
+      "trackProperties": [
+        [
+          8,
+          "90000"
+        ]
+      ],
+      "timestampUs": "1000000"
+    },
+    {
+      "name": "an unusable timescale is skipped for a later usable one on the same object",
+      "properties": [
+        [
+          16,
+          "90000"
+        ],
+        [
+          8,
+          "0"
+        ],
+        [
+          8,
+          "90000"
+        ]
+      ],
+      "timestampUs": "1000000"
+    },
+    {
+      "name": "no Timestamp",
+      "properties": [
+        [
+          8,
+          "1000000"
+        ],
+        [
+          13,
+          "0142"
+        ]
+      ],
+      "timestampUs": null
+    },
+    {
+      "name": "the first Timestamp counts",
+      "properties": [
+        [
+          16,
+          "7"
+        ],
+        [
+          16,
+          "9"
+        ]
+      ],
+      "timestampUs": "7"
+    },
+    {
+      "name": "a result past 2^53-1 reads as nothing",
+      "properties": [
+        [
+          16,
+          "9007199254740991"
+        ],
+        [
+          8,
+          "1"
+        ]
+      ],
+      "timestampUs": null
+    },
+    {
+      "name": "largest safe result",
+      "properties": [
+        [
+          16,
+          "9007199254740991"
+        ],
+        [
+          8,
+          "1000000"
+        ]
+      ],
+      "timestampUs": "9007199254740991"
+    }
+  ],
   "urls": [
     {
       "name": "token",
@@ -1662,12 +1851,11 @@
   ],
   "timelineEntries": [
     {
-      "name": "msf-01 example's first record",
-      "timestampUs": "0",
+      "name": "msf-01 example's first record, on the epoch-anchored timeline",
+      "timestampUs": "1759924158381000",
       "group": "0",
-      "originEpochUs": "1759924158381000",
       "entry": [
-        0,
+        1759924158381,
         [
           0,
           0
@@ -1677,11 +1865,10 @@
     },
     {
       "name": "floors media time and wall-clock time",
-      "timestampUs": "2002999",
+      "timestampUs": "1759924160384999",
       "group": "1",
-      "originEpochUs": "1759924158381500",
       "entry": [
-        2002,
+        1759924160384,
         [
           1,
           0
@@ -1690,11 +1877,11 @@
       ]
     },
     {
-      "name": "explicit object",
+      "name": "explicit object and wall-clock time",
       "timestampUs": "33333",
       "group": "7",
       "object": "3",
-      "originEpochUs": "1000",
+      "wallclockUs": "34333",
       "entry": [
         33,
         [
@@ -1708,6 +1895,7 @@
       "name": "unknown wall-clock time is 0",
       "timestampUs": "4004000",
       "group": "2",
+      "wallclockUs": "0",
       "entry": [
         4004,
         [
@@ -1718,13 +1906,12 @@
       ]
     },
     {
-      "name": "largest safe sum",
-      "timestampUs": "1",
+      "name": "largest safe values",
+      "timestampUs": "9007199254740991",
       "group": "9007199254740991",
       "object": "9007199254740991",
-      "originEpochUs": "9007199254740990",
       "entry": [
-        0,
+        9007199254740,
         [
           9007199254740991,
           9007199254740991
@@ -1761,16 +1948,22 @@
       "object": "9007199254740992"
     },
     {
-      "name": "negative epoch",
+      "name": "negative wall-clock time",
       "timestampUs": "0",
       "group": "0",
-      "originEpochUs": "-1"
+      "wallclockUs": "-1"
     },
     {
-      "name": "unsafe wall-clock sum",
-      "timestampUs": "2",
+      "name": "unsafe wall-clock time",
+      "timestampUs": "0",
       "group": "0",
-      "originEpochUs": "9007199254740990"
+      "wallclockUs": "9007199254740992"
+    },
+    {
+      "name": "fractional wall-clock time",
+      "timestampUs": "0",
+      "group": "0",
+      "wallclockUs": "1.5"
     }
   ],
   "timelines": [

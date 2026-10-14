@@ -27,7 +27,7 @@ interface RawTimelineEntry {
   timestampUs: string;
   group: string;
   object?: string;
-  originEpochUs?: string;
+  wallclockUs?: string;
 }
 interface Vectors {
   catalogs: { name: string; input: RawCatalog; json: string; parsed: unknown }[];
@@ -43,6 +43,12 @@ interface Vectors {
     videoConfig?: string;
     audioConfig?: string;
     properties: [number, string][];
+  }[];
+  locTimestamps: {
+    name: string;
+    properties: [number, string][];
+    trackProperties?: [number, string][];
+    timestampUs: string | null;
   }[];
   urls: { name: string; origin: string; namespace: string[]; token?: string; trackName?: string; url: string }[];
   urlErrors: { origin: string; namespace: string[] }[];
@@ -101,7 +107,7 @@ const timelineEntry = (raw: RawTimelineEntry) =>
     timestampUs: Number(raw.timestampUs),
     group: Number(raw.group),
     ...(raw.object !== undefined ? { object: Number(raw.object) } : {}),
-    ...(raw.originEpochUs !== undefined ? { originEpochUs: Number(raw.originEpochUs) } : {}),
+    ...(raw.wallclockUs !== undefined ? { wallclockUs: Number(raw.wallclockUs) } : {}),
   });
 
 describe('shared media timeline vectors', () => {
@@ -135,9 +141,13 @@ describe('shared media timeline vectors', () => {
     expect(() => media.parseMediaTimeline(payload)).toThrow();
   });
   it('stamps entries from a broadcast clock', () => {
-    const clock = media.createBroadcastClock({ now: () => 0, originUs: 0, originEpochUs: 1_759_924_158_381_000 });
-    const timeline = media.mediaTimelineEntry({ timestampUs: 2_002_000, group: 1, originEpochUs: clock.originEpochUs });
-    expect(record(timeline)).toEqual([2002, [1, 0], 1_759_924_160_383]);
+    const clock = media.createBroadcastClock({
+      now: () => 2_002_000,
+      originUs: 0,
+      originEpochUs: 1_759_924_158_381_000,
+    });
+    const timeline = media.mediaTimelineEntry({ timestampUs: clock.now(), group: 1 });
+    expect(record(timeline)).toEqual([1_759_924_160_383, [1, 0], 1_759_924_160_383]);
   });
 });
 
@@ -189,6 +199,16 @@ describe('shared media vectors', () => {
       );
       expect(media.locTrackProperties(Number(vector.timescale ?? '1000000'))).toEqual([properties[1]]);
     });
+  }
+  const pairs = (raw: [number, string][]) =>
+    raw.map(([type, value]) => ({ type, value: type % 2 === 0 ? Number(value) : bytes(value) }));
+  for (const vector of vectors.locTimestamps) {
+    it(`LOC timestamp ${vector.name}`, () =>
+      expect(
+        media.locTimestampUs(pairs(vector.properties), {
+          ...(vector.trackProperties ? { trackProperties: pairs(vector.trackProperties) } : {}),
+        }),
+      ).toBe(vector.timestampUs === null ? undefined : Number(vector.timestampUs)));
   }
   for (const vector of vectors.urls) {
     it(`URL ${vector.name}`, () =>

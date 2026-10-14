@@ -9,6 +9,7 @@ from typing import Any, cast
 import pytest
 from videojs_stream import stream
 
+from moq_media import LOC_TIMESTAMP
 from mux_relay import CancellationToken, Cancelled
 
 
@@ -33,7 +34,7 @@ def test_cbr_payload_reaches_target_on_the_actual_test_pattern(width: int, heigh
     assert [i for i, sample in enumerate(samples) if sample.key] == [0, 60, 120]
     # The encoder attaches the LOC properties the SDK's frame writer sends: a timestamp on every
     # frame, and the decoder configuration on keyframes only.
-    assert all(any(p.type == stream.LOC_TIMESTAMP for p in sample.properties) for sample in samples)
+    assert all(any(p.type == LOC_TIMESTAMP for p in sample.properties) for sample in samples)
     assert [
         i for i, sample in enumerate(samples) if any(p.type == stream.LOC_VIDEO_CONFIG for p in sample.properties)
     ] == [

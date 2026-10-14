@@ -10,14 +10,14 @@ import {
   AUDIO_TRACK,
   CATALOG_TRACK,
   createPlayoutClock,
-  LOC_TIMESTAMP,
+  locTimestampUs,
   type MsfCatalogTrack,
   type PlayoutClock,
   type PlayoutClockOptions,
   parseMsfCatalog,
   VIDEO_TRACK,
 } from '@mux/moq-media';
-import type { MoqtObject, RelaySubscriber, RelaySubscription } from '@mux/relay';
+import type { KeyValuePair, MoqtObject, RelaySubscriber, RelaySubscription } from '@mux/relay';
 import { createRenderClock, type RenderClock } from '../../examples/webcodecs/render-clock.js';
 import { createOnsetDetector, type HeardBeep, type ShownFlash } from './measure.js';
 
@@ -80,11 +80,6 @@ export interface Player {
 }
 
 const BRIGHT = 160;
-
-function locTimestampUs(object: MoqtObject): number | undefined {
-  const value = object.properties.find((property) => property.type === LOC_TIMESTAMP)?.value;
-  return typeof value === 'number' ? value : undefined;
-}
 
 /** Start playing the broadcast at `namespace`. Resolves once the catalog has been read and both tracks subscribed. */
 export async function startPlayer(options: PlayerOptions): Promise<Player> {
@@ -290,11 +285,15 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     }
   }, 20);
 
+  // The relay's SUBSCRIBE_OK declares each track's timescale; an object's own Timescale, if any, takes precedence.
+  const trackProperties = new Map<string, KeyValuePair[]>();
+  const timestampOf = (track: string, object: MoqtObject) =>
+    locTimestampUs(object.properties, { trackProperties: trackProperties.get(track) ?? [] });
   for (const [track, onObject] of [
     [
       VIDEO_TRACK,
       (object: MoqtObject) => {
-        const timestampUs = locTimestampUs(object);
+        const timestampUs = timestampOf(VIDEO_TRACK, object);
         if (timestampUs === undefined) return;
         const key = object.objectId === 0;
         if (!key && !videoKeyed) return;
@@ -307,7 +306,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     [
       AUDIO_TRACK,
       (object: MoqtObject) => {
-        const timestampUs = locTimestampUs(object);
+        const timestampUs = timestampOf(AUDIO_TRACK, object);
         if (timestampUs === undefined || audioPaused) return;
         if (nextAudioUs !== undefined && Math.abs(timestampUs - nextAudioUs) > 5_000) {
           audioDecoder.reset();
@@ -323,6 +322,9 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       options.subscriber.subscribe(
         { namespace: [...options.namespace], track },
         {
+          onSubscribed(info) {
+            trackProperties.set(track, info.trackProperties);
+          },
           onObject(object) {
             if (object.status !== 'normal' || stopped) return;
             try {

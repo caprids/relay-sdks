@@ -76,7 +76,7 @@ An unrelated encoder or publishing error still fails the run even if it coincide
 | Track | Shape |
 | --- | --- |
 | `catalog` | One MSF `draft-01` catalog JSON per group, re-sent whenever the relay (re)subscribes; viewers who join while the relay stays subscribed get the relay's cached copy. Lists the `video` (and `audio`) tracks with `packaging: "loc"`, the `avc1.PPCCLL` codec string derived from the encoder's SPS, and the avcC decoder configuration inline in `initDataList`. |
-| `video` | LOC-packaged H.264 in AVCC form (length-prefixed NAL units, parameter sets out of band). One MOQT group per GOP: object 0 is the keyframe, later objects the P-frames. Object properties: Timestamp (0x10, microseconds), Timescale (0x08), and Video Config (0x0D, the avcC) on keyframes. |
+| `video` | LOC-packaged H.264 in AVCC form (length-prefixed NAL units, parameter sets out of band). One MOQT group per GOP: object 0 is the keyframe, later objects the P-frames. Object properties: Timestamp (0x10, Unix-epoch microseconds: media time 0 is pinned to the system clock at start), Timescale (0x08), and Video Config (0x0D, the avcC) on keyframes. |
 | `audio` | LOC-packaged Opus at 48 kHz stereo, one 20 ms frame per group (every audio frame is a random-access point). |
 
 The table describes what this publisher sends. Relay 0.14.17 preserved the declared track timescale

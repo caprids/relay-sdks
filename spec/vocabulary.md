@@ -455,6 +455,7 @@ names from the original examples; the mappings below are explicit.
 | Reader options | `ParseMsfCatalogOptions` | `parse_msf_catalog` keyword arguments |
 | LOC track properties | `locTrackProperties` | `loc_track_properties` |
 | LOC object properties from microseconds | `locProperties` / `LocPropertiesOptions` | `loc_properties` keyword arguments |
+| An object's LOC Timestamp in microseconds | `locTimestampUs(properties, { trackProperties? })` (`LocTimestampOptions`) | `loc_timestamp_us(properties, *, track_properties=())` |
 | Compose source URL | `composeMoqSource` / `ComposeMoqSourceOptions` | `compose_player_url` keyword arguments |
 | Escape UTF-8 component | `encodeNameComponent` | `encode_name_component` |
 | Encode namespace plus track name | `encodeNamespaceName` | `encode_namespace_name` |
@@ -504,11 +505,12 @@ uses classes, like `CatalogService` and `FrameWriter`.
 | Concept | TypeScript | Python |
 | --- | --- | --- |
 | The publisher's one clock for every track | `createBroadcastClock(options?)` → `BroadcastClock` (`BroadcastClockOptions`) | `BroadcastClock(now_us=None, origin_us=None, origin_epoch_us=None)` |
-| The broadcast's zero on the source clock | `clock.originUs` | `clock.origin_us` |
-| The broadcast's zero as Unix-epoch microseconds | `clock.originEpochUs` | `clock.origin_epoch_us` |
-| Microseconds since the broadcast started | `clock.now()` | `clock.now_us()` |
+| The origin on the source clock | `clock.originUs` | `clock.origin_us` |
+| The origin as Unix-epoch microseconds | `clock.originEpochUs` | `clock.origin_epoch_us` |
+| The timeline now: Unix-epoch microseconds | `clock.now()` | `clock.now_us()` |
 | Map a time on the clock's own source onto the timeline | `clock.fromSourceUs(t)` | `clock.from_source_us(t)` |
-| Map a clock with another origin and rate | `clock.sourceTimeline({ toleranceUs })` → `SourceTimeline` (`SourceTimelineOptions`) | `clock.source_timeline(tolerance_us=5_000)` → `SourceTimeline` |
+| Map a clock with another origin and rate | `clock.sourceTimeline({ toleranceUs, captureLatencyUs })` → `SourceTimeline` (`SourceTimelineOptions`) | `clock.source_timeline(tolerance_us=5_000, capture_latency_us=0)` → `SourceTimeline` |
+| A device's input delay, subtracted from each timestamp | `timeline.captureLatencyUs` (settable) | `timeline.capture_latency_us` (settable) |
 | A measured (source time, clock time) pair | `timeline.calibrate(s, atUs?)` → re-anchored | `timeline.calibrate(s, at_us=None)` → re-anchored |
 | Source time to timestamp; current anchor | `timeline.timestampUs(s)`; `timeline.anchorSourceUs` | `timeline.timestamp_us(s)`; `timeline.anchor_source_us` |
 | Anchor a sample counter | `clock.sampleTimeline(rate, { firstSampleUs })` → `SampleTimeline` (`SampleTimelineOptions`) | `clock.sample_timeline(rate, first_sample_us=None)` → `SampleTimeline` |
@@ -538,7 +540,7 @@ msf-01 §7's Media Timeline track, which maps a broadcast's media time to wall-c
 | Concept | TypeScript | Python |
 | --- | --- | --- |
 | One record: media time, location, wall-clock time | `MediaTimelineEntry { mediaTimeMs, group, object, wallclockMs }` | `MediaTimelineEntry(media_time_ms, group, object, wallclock_ms)` |
-| The record for a timeline timestamp | `mediaTimelineEntry({ timestampUs, group, object?, originEpochUs? })` (`MediaTimelineEntryInput`) | `media_timeline_entry(timestamp_us, group, *, object=0, origin_epoch_us=None)` |
+| The record for a timeline timestamp | `mediaTimelineEntry({ timestampUs, group, object?, wallclockUs? })` (`MediaTimelineEntryInput`) | `media_timeline_entry(timestamp_us, group, *, object=0, wallclock_us=None)` |
 | Build a timeline object's bytes | `buildMediaTimeline(entries)` | `build_media_timeline(entries)` |
 | Read a timeline object's payload | `parseMediaTimeline(payload)` | `parse_media_timeline(payload)` |
 | Announce the track in the catalog | `MediaTimelineTrackInfo { name?, depends? }`, `MsfCatalogInput.mediaTimeline` | `MediaTimelineTrackInfo(name=, depends=)`, `build_msf_catalog(media_timeline=)` |

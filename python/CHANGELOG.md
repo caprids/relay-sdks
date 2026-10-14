@@ -33,20 +33,23 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 - `mux-moq-media` (imported as `moq_media`): LOC and MSF format helpers. `build_msf_catalog` leaves `isComplete`
   out, since a live broadcast is not complete (msf-01 §5.1.3), and `build_msf_end_catalog` builds the §11.3 catalog
   that ends a broadcast: `isComplete: true` and no tracks ([#284](https://github.com/muxinc/relay-sdks/issues/284)).
-- `mux-moq-media`: one timeline per broadcast, and a playout clock for audio/video sync
-  ([#285](https://github.com/muxinc/relay-sdks/issues/285)). `BroadcastClock` stamps every track from one origin
-  (`from_source_us`, a calibrated `source_timeline` for a clock with its own origin and rate, and
-  `sample_timeline` for sample counters). `PlayoutClock` takes audio reports and answers
-  `due(timestamp_us)` with a `PlayoutDecision` to wait, show, or drop, falling back to wall-clock pacing without audio.
-  `build_msf_catalog` puts video and audio in one render group (`renderGroup: 1`, msf-01 §5.2.11), and
-  `parse_msf_catalog` returns `render_group`.
+- `mux-moq-media`: one timeline, and a playout clock for audio/video sync
+  ([#285](https://github.com/muxinc/relay-sdks/issues/285)). `BroadcastClock` stamps every track in microseconds since
+  the Unix epoch, so broadcasts line up with each other ([#290](https://github.com/muxinc/relay-sdks/issues/290))
+  (`from_source_us`, a calibrated `source_timeline` for a clock with its own origin and rate, and `sample_timeline` for
+  sample counters). `PlayoutClock` takes audio reports and answers `due(timestamp_us)` with a `PlayoutDecision` to wait,
+  show, or drop, falling back to wall-clock pacing without audio. `build_msf_catalog` puts video and audio in one render
+  group (`renderGroup: 1`, msf-01 §5.2.11), and `parse_msf_catalog` returns `render_group`.
 - `mux-moq-media`: format helpers for msf-01's Media Timeline track, which maps media time to wall-clock time
-  ([#291](https://github.com/muxinc/relay-sdks/issues/291)). `BroadcastClock` records its origin as Unix-epoch
-  microseconds (`origin_epoch_us`). `media_timeline_entry` turns a timeline timestamp and a group into a
-  `MediaTimelineEntry`, `build_media_timeline` and `parse_media_timeline` write and read a timeline object, and
-  `build_msf_catalog` announces the track through `media_timeline=MediaTimelineTrackInfo()` (`packaging` and `role`
-  `mediatimeline`, `depends` on the video track by default). `parse_msf_catalog` returns `depends` and `mimetype`.
-  Publishing the track is not wired up yet.
+  ([#291](https://github.com/muxinc/relay-sdks/issues/291)). `media_timeline_entry` turns a timeline timestamp and a
+  group into a `MediaTimelineEntry`, `build_media_timeline` and `parse_media_timeline` write and read a timeline object,
+  and `build_msf_catalog` announces the track through `media_timeline=MediaTimelineTrackInfo()` (`packaging` and `role`
+  `mediatimeline`, `depends` on the video and audio tracks by default). `parse_msf_catalog` returns `depends` and
+  `mimetype`. Publishing the track is not wired up yet.
+- `mux-moq-media`: capture times on one epoch, and a Timescale-aware reader
+  ([#290](https://github.com/muxinc/relay-sdks/issues/290)). Source timelines take a settable `capture_latency_us`,
+  subtracted from every timestamp, for the input delay no device reports. `loc_timestamp_us` reads an object's LOC
+  Timestamp in microseconds, applying the object's or the track's Timescale.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
   subscriber's SETUP now sends the MoQ Solicit option, so the relay advertises namespaces only on that request.

@@ -9,6 +9,7 @@ from typing import Any
 import pytest
 
 import moq_media as media
+from moq_core import KeyValuePair
 
 SPEC = Path(__file__).resolve().parents[4] / "spec"
 VECTORS = json.loads((SPEC / "vectors/media.json").read_text())
@@ -161,7 +162,7 @@ def timeline_entry(raw: dict[str, Any]) -> media.MediaTimelineEntry:
         decimal(raw["timestampUs"]),
         decimal(raw["group"]),
         object=decimal(raw.get("object", "0")),
-        origin_epoch_us=decimal(raw["originEpochUs"]) if "originEpochUs" in raw else None,
+        wallclock_us=decimal(raw["wallclockUs"]) if "wallclockUs" in raw else None,
     )
 
 
@@ -209,8 +210,23 @@ def test_timeline_read_rejects_non_utf8() -> None:
 
 def test_timeline_entry_from_a_broadcast_clock() -> None:
     clock = media.BroadcastClock(now_us=lambda: 0, origin_us=0, origin_epoch_us=1_759_924_158_381_000)
-    timeline = media.media_timeline_entry(2_002_000, 1, origin_epoch_us=clock.origin_epoch_us)
-    assert record(timeline) == [2002, [1, 0], 1_759_924_160_383]
+    timeline = media.media_timeline_entry(clock.from_source_us(2_002_000), 1)
+    assert record(timeline) == [1_759_924_160_383, [1, 0], 1_759_924_160_383]
+
+
+def kv_pairs(raw: list[list[Any]]) -> list[KeyValuePair]:
+    """The vectors' ``[type, decimal or hex]`` pairs: even types carry integers, odd types bytes."""
+    return [KeyValuePair(t, bytes.fromhex(v) if t % 2 else int(v)) for t, v in raw]
+
+
+@pytest.mark.parametrize("vector", VECTORS["locTimestamps"], ids=lambda v: v["name"])
+def test_loc_timestamps(vector: dict[str, Any]) -> None:
+    read = media.loc_timestamp_us(
+        kv_pairs(vector["properties"]),
+        track_properties=kv_pairs(vector.get("trackProperties", [])),
+    )
+    expected = vector["timestampUs"]
+    assert read == (None if expected is None else int(expected))
 
 
 @pytest.mark.parametrize("vector", VECTORS["loc"], ids=lambda v: v["name"])

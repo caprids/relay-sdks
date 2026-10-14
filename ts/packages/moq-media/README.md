@@ -46,9 +46,10 @@ group, and init data resolved from `initRef` to bytes. It rejects unsupported ve
 updates, ignores unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as
 declared.
 
-Every media track in one catalog shares one timeline: LOC timestamps in microseconds from one origin,
-with the timescale declared on each track. `createBroadcastClock()` fixes that origin on the
-`performance.now()` clock.
+Every media track shares one timeline: LOC timestamps are capture times in microseconds since the
+Unix epoch, with Timescale 1,000,000 declared on each track. `createBroadcastClock()` pins the
+`performance.now()` clock to `Date.now()` once and counts from there, so broadcasts from different
+publishers line up as closely as their system clocks do.
 
 The publisher path below works in Chromium, Firefox and Safari:
 
@@ -63,9 +64,11 @@ The publisher path below works in Chromium, Firefox and Safari:
   devices change, so switching microphones does not shift the timeline.
 - **Chromium alternative.** Where `MediaStreamTrackProcessor` exists, its timestamps count from the
   system's monotonic zero, so map them through an uncalibrated `sourceTimeline()`.
-- **Microphone latency.** No browser reports a microphone's own input latency. Bluetooth input
-  arrives late by an amount the timeline cannot see; see
-  [#290](https://github.com/muxinc/relay-sdks/issues/290).
+- **Microphone latency.** No browser reports a microphone's own input latency: about 30 ms for a
+  MacBook's built-in microphone and 190 ms for AirPods, measured on macOS. Set it as
+  `captureLatencyUs` on the source timeline, at creation or whenever the device changes, and it is
+  subtracted from every timestamp. See
+  [spec/media-layer.md](../../../spec/media-layer.md#capture-latency).
 
 On the player, `createPlayoutClock()` makes audio the master. Report what is audible with
 `reportAudio(mediaUs, atUs)`: the context time rendered now, less `baseLatency + outputLatency`
@@ -78,7 +81,7 @@ const clock = createBroadcastClock();
 const video = new VideoFrame(canvas, { timestamp: clock.now() });
 
 // AudioWorklet blocks carry their context time. `renderedUs` / `arrivedUs`: the best pair of the last second.
-const context = clock.sourceTimeline();
+const context = clock.sourceTimeline({ captureLatencyUs: 30_000 });
 context.calibrate(renderedUs, arrivedUs);
 const audioTimestampUs = context.timestampUs(blockContextUs);
 
@@ -90,17 +93,21 @@ const decision = playout.due(frame.timestamp);
 if (decision.action === 'wait') setTimeout(retry, decision.waitUs / 1000);
 ```
 
-The clock also records its origin as Unix-epoch microseconds, `clock.originEpochUs`, read once from
-`Date.now()`. That is what msf-01's Media Timeline track needs: one record per video group, mapping
-media time and the group's location to wall-clock time, for seeking, playlists, and lining up
-broadcasts. Announce it with `mediaTimeline: {}` in `buildMsfCatalog`, and on each new video group
-open a timeline group holding every retained record. The track is not published for you yet; see
+A subscriber reads an object's timestamp with `locTimestampUs(object.properties, { trackProperties })`,
+passing the track properties from `subscription.subscribed`. It applies whichever Timescale the
+object or the track declares, rather than assuming the relay rescaled to microseconds.
+
+msf-01's Media Timeline track maps media time to group locations, for seeking and playlists: one
+record per video group. On this timeline media time already is wall-clock time, so a record's two
+times agree. Announce it with `mediaTimeline: {}` in `buildMsfCatalog` (it lists the video and audio
+tracks in `depends`), and on each new video group open a timeline group holding every retained
+record. The track is not published for you yet; see
 [spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
 
 ```ts
 const entries: MediaTimelineEntry[] = [];
 // On each keyframe that opens video group `groupId`:
-entries.push(mediaTimelineEntry({ timestampUs, group: groupId, originEpochUs: clock.originEpochUs }));
+entries.push(mediaTimelineEntry({ timestampUs, group: groupId }));
 await timelineTrack.write(buildMediaTimeline(entries)); // one object, one group
 const read = parseMediaTimeline(timelineObject.payload);
 ```
