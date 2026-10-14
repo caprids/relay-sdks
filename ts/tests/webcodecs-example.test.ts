@@ -14,6 +14,7 @@ import { createSettlingGroups } from '../src/settling-groups.js';
 import { createWriteSlot } from '../src/write-slot.js';
 
 vi.mock('@mux/relay', async () => import('../src/index.js'));
+vi.mock('@mux/relay/media', async () => import('../src/media.js'));
 
 const description = Uint8Array.from(Buffer.from('0142c014ffe1000a6742c014da05067e784001000468ce3c80', 'hex'));
 const decoderConfig = { codec: 'avc1.42001f', codedWidth: 640, codedHeight: 360, description };
@@ -355,24 +356,66 @@ it('resets on a demand gap between frames and resumes with a keyframe', async ()
   await completion;
 });
 
-it.each(['video', 'catalog', 'timeline'])('stops and cleans up on a %s write error', async (failTrack) => {
+it.each(['video', 'catalog', 'timeline'])('keeps publishing through %s write failures', async (failTrack) => {
   const session = run({ failTrack });
-  await expect(session.result).rejects.toThrow(`${failTrack} failed`);
+  let settled = false;
+  const completion = session.result.finally(() => {
+    settled = true;
+  });
+  completion.catch(() => {});
+  // A failed group is an interruption the frame writer absorbs; the services retry while demand lasts.
+  await vi.advanceTimersByTimeAsync(2100);
+  expect(settled).toBe(false);
+  expect(TestEncoder.instance.state).toBe('configured');
+  const healthy = failTrack === 'video' ? 'catalog' : 'video';
+  expect(session.tracks.get(healthy)!.objects.length).toBeGreaterThan(0);
+  session.stop.abort(new Error('Stopped'));
+  await expect(completion).rejects.toThrow('Stopped');
   expect([...session.tracks.values()].every(({ writer }) => writer.closed)).toBe(true);
   expect(TestEncoder.instance.close).toHaveBeenCalled();
 });
 
-it('bounds a burst of encoder output and cancels a stalled write on overflow', async () => {
-  const encode = TestEncoder.prototype.encode;
-  vi.spyOn(TestEncoder.prototype, 'encode').mockImplementation(function (this: TestEncoder, frame, options) {
-    for (let i = 0; i < 9; i++) encode.call(this, frame, options);
-  });
-  const session = run({ stallVideo: true });
-  const completion = expect(session.result).rejects.toThrow('queue is full');
-  await vi.advanceTimersByTimeAsync(400);
+it('stops and cleans up when a media track ends under it', async () => {
+  const session = run();
+  const completion = expect(session.result).rejects.toMatchObject({ code: 'CLOSED' });
+  await vi.advanceTimersByTimeAsync(100);
+  session.tracks.get('video')!.writer.close();
+  // Capture stops with demand, so the encoder's next output is what finds the track ended.
+  TestEncoder.instance.encode(new TestFrame(canvas, { timestamp: 200_000 }), { keyFrame: true });
+  await vi.advanceTimersByTimeAsync(0);
   await completion;
-  expect(frames).toHaveLength(1);
   expect([...session.tracks.values()].every(({ writer }) => writer.closed)).toBe(true);
+  expect(TestEncoder.instance.close).toHaveBeenCalled();
+});
+
+it('drops a burst the stalled transport cannot take, asks for a keyframe, and keeps publishing', async () => {
+  const encode = TestEncoder.prototype.encode;
+  let calls = 0;
+  vi.spyOn(TestEncoder.prototype, 'encode').mockImplementation(function (this: TestEncoder, frame, options) {
+    // The second capture comes out as a burst of ten deltas while the first group's keyframe is stalled.
+    const burst = ++calls === 2 ? 10 : 1;
+    for (let i = 0; i < burst; i++) encode.call(this, frame, burst > 1 ? { keyFrame: false } : options);
+  });
+  const keyFrames: boolean[] = [];
+  const encodeSpy = vi.mocked(TestEncoder.prototype.encode);
+  const session = run({ stallVideo: true });
+  let settled = false;
+  const completion = session.result.finally(() => {
+    settled = true;
+  });
+  completion.catch(() => {});
+  await vi.advanceTimersByTimeAsync(400);
+  for (const [, options] of encodeSpy.mock.calls) keyFrames.push(Boolean(options?.keyFrame));
+  expect(settled).toBe(false);
+  // Eight deltas wait behind the stalled keyframe and the ninth overflows: the group and its backlog are dropped.
+  const video = session.tracks.get('video')!;
+  expect(video.aborted).toBe(1);
+  // The writer asked for a keyframe at once, instead of waiting out the 2 s interval.
+  expect(keyFrames.slice(0, 3)).toEqual([true, false, true]);
+  // Capture waits while frames are waiting, so a stall costs encoded frames, not an unbounded queue of them.
+  expect(frames.length).toBeLessThan(5);
+  session.stop.abort(new Error('Stopped'));
+  await expect(completion).rejects.toThrow('Stopped');
 });
 
 it('cancels a stalled video write and preserves the caller abort reason', async () => {
@@ -461,7 +504,8 @@ it('serves a replacement catalog subscription after its previous write is interr
     const catalog = session.tracks.get('catalog')!;
     options.stallCatalog = false;
     catalog.demand(true);
-    await vi.advanceTimersByTimeAsync(34);
+    // The interrupted write is retried with the catalog service's one-second pause.
+    await vi.advanceTimersByTimeAsync(1000);
     expect(TestEncoder.instance.state).toBe('configured');
     expect(catalog.objects[1]).toHaveLength(1);
   } finally {

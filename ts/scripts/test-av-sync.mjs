@@ -71,6 +71,7 @@ const server = await startModuleServer({
   },
   importMap: {
     '@mux/relay': '/sdk/index.js',
+    '@mux/relay/media': '/sdk/media.js',
     '@mux/moq-core': '/packages/moq-core/dist/index.js',
     '@mux/moq-media': '/packages/moq-media/dist/index.js',
   },
