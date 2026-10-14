@@ -149,12 +149,16 @@ describe('keyframe grouping', () => {
         },
       },
     });
-    const writer = createFrameWriter(late);
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(late, { onKeyframeNeeded });
     await writer.write(key());
     await new Promise((resolve) => setTimeout(resolve, 5));
     track.demand(true);
     expect(await writer.write(key())).toEqual({ kind: 'sent', groupId: 1 });
     await new Promise((resolve) => setTimeout(resolve, 5));
+    // The keyframe already recovered from the change the watcher reports late.
+    expect(writer.keyframeNeeded).toBe(false);
+    expect(onKeyframeNeeded).not.toHaveBeenCalled();
     expect(await writer.write(delta())).toEqual({ kind: 'sent', groupId: 1 });
     expect(track.groups[1]?.aborted).toBe(false);
   });

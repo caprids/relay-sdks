@@ -185,6 +185,7 @@ class FrameWriter(Generic[F]):
         "_objects",
         "_on_keyframe_needed",
         "_recovering",
+        "_serving",
         "_stale",
         "_track",
         "_watch",
@@ -233,6 +234,7 @@ class FrameWriter(Generic[F]):
         self._gap_turns: set[asyncio.Future[FrameOutcome | None]] = set()
         self._gap_next = False
         self._closing: asyncio.Task[None] | None = None
+        self._serving: F | None = None
         self._drop_epoch = 0
         self._finishing: _GroupWriter | None = None
         self._keyframe_needed = grouping == "keyframe"
@@ -339,9 +341,12 @@ class FrameWriter(Generic[F]):
             self._idle.clear()
             gap, self._gap_next = self._gap_next, False
 
+        self._serving = frame
+
         try:
             return await self._take_turn(frame, gap=gap)
         finally:
+            self._serving = None
             self._next_turn()
 
     async def close(self) -> None:
@@ -461,7 +466,16 @@ class FrameWriter(Generic[F]):
 
             # A new or replacement relay subscription, or its end. The write slot has already ended the
             # open group, which the next frame finds closed; a keyframe is needed for the new subscription.
-            self._need_keyframe()
+            # Unless it has one: the change closed every group open at the time, so a group still open
+            # came after it, and a keyframe waiting or in progress opens one.
+            recovered = (
+                (self._group is not None and not self._group.closed)
+                or (self._serving is not None and self._serving.key)
+                or any(frame.key for frame, _ in self._backlog)
+            )
+
+            if not recovered:
+                self._need_keyframe()
 
     # ------------------------------------------------------------------ one frame's turn
 

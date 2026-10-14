@@ -60,21 +60,27 @@ function retryDelay(options: CatalogServiceOptions): number {
   return delay;
 }
 
-/** Wait `ms`, or less if `ended` settles first; reject with the signal's reason if it aborts. */
-function sleep(ms: number, signal: AbortSignal | undefined, ended: Promise<unknown>): Promise<void> {
+/** Wait `ms`, or until `cut` is called; reject with the signal's reason if it aborts. */
+function sleep(
+  ms: number,
+  signal: AbortSignal | undefined,
+  onCut: (cut: (() => void) | undefined) => void,
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const done = () => {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
+      onCut(undefined);
       resolve();
     };
     const abort = () => {
       clearTimeout(timer);
+      onCut(undefined);
       reject(signal?.reason);
     };
     const timer = setTimeout(done, ms);
     signal?.addEventListener('abort', abort, { once: true });
-    void ended.then(done, done);
+    onCut(done);
   });
 }
 
@@ -88,6 +94,8 @@ async function serveDocument(
   signal?.throwIfAborted();
   const changes = track.demandChanges();
   let wake: (() => void) | undefined;
+  /** Ends a retry pause early: set only while one runs. */
+  let cutPause: (() => void) | undefined;
   let finished = false;
   const notify = () => {
     const woken = wake;
@@ -107,6 +115,7 @@ async function serveDocument(
     } finally {
       finished = true;
       notify();
+      cutPause?.();
     }
   })();
   watching.catch(() => {});
@@ -139,7 +148,9 @@ async function serveDocument(
         if (!track.hasDemand) continue;
         state.due = true;
         // The track ending cuts the pause short: the loop then returns rather than wait out the delay.
-        await sleep(delayMs, signal, watching);
+        await sleep(delayMs, signal, (cut) => {
+          cutPause = cut;
+        });
       }
     }
   } finally {

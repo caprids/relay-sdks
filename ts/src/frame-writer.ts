@@ -418,8 +418,10 @@ export function createFrameWriter<F extends Frame = Frame>(
           continue;
         }
         // A new or replacement relay subscription, or its end. The write slot has already ended the open group, which
-        // the next frame finds closed; the new subscription needs a keyframe.
-        needKeyframe();
+        // the next frame finds closed; the new subscription needs a keyframe. Unless it has one: the change closed every
+        // group open at the time, so a group still open came after it, and a keyframe waiting or in progress opens one.
+        const recovered = (group && !group.closed) || current?.frame.key || waiting.some(({ frame }) => frame.key);
+        if (!recovered) needKeyframe();
       }
     })().catch(() => {});
   }

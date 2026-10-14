@@ -648,6 +648,7 @@ class TestBacklog:
         await settle()
         assert await kinds(writer, [delta(2)]) == ["sent"], "the watch must not reset the replacement GOP"
         assert sent_stamps(track) == [[0], [1, 2]]
+        assert not writer.keyframe_needed and calls == [], "the keyframe already recovered from the change"
 
     async def test_a_write_in_the_same_turn_as_a_demand_change_skips_the_retired_group(self) -> None:
         track = FakeTrackWriter()
