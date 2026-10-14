@@ -1,12 +1,14 @@
 """The MSF Media Timeline track (msf-01 §7): records that map media time and a location to wall-clock time.
 
-See ``spec/media-layer.md``, "Media Timeline track". Format only: the publisher decides which groups get an entry,
-how many to retain, and when to send a document.
+See ``spec/media-layer.md``, "Media Timeline track". Format only: the publisher decides which groups get an entry and
+when to send a document. ``MediaTimeline`` holds the retained entries of one broadcast and builds the independent
+document each new timeline group carries.
 """
 
 from __future__ import annotations
 
 import json
+from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass
 
@@ -64,6 +66,46 @@ def build_media_timeline(entries: Iterable[MediaTimelineEntry]) -> bytes:
         for entry in entries
     ]
     return json.dumps(records, separators=(",", ":")).encode("utf-8")
+
+
+class MediaTimeline:
+    """The retained entries of one broadcast's media timeline, and the independent document they make.
+
+    ``origin_epoch_us`` is the broadcast's origin as Unix-epoch microseconds (``BroadcastClock.origin_epoch_us``);
+    without it every wall-clock time is 0. ``max_entries`` bounds the document: past it, the oldest entry is dropped.
+    The default 512 is about 18 KB, 17 minutes of two-second GOPs. A supervised publisher's next generation is a new
+    broadcast and starts a new timeline.
+    """
+
+    __slots__ = ("_entries", "_origin_epoch_us")
+
+    def __init__(self, *, origin_epoch_us: int | None = None, max_entries: int = 512) -> None:
+        if origin_epoch_us is not None:
+            _whole(origin_epoch_us, "origin_epoch_us")
+        if isinstance(max_entries, bool) or not isinstance(max_entries, int) or not 1 <= max_entries <= _SAFE_INTEGER:
+            raise ValueError("max_entries must be a positive safe integer")
+        self._origin_epoch_us = origin_epoch_us
+        self._entries: deque[MediaTimelineEntry] = deque(maxlen=max_entries)
+
+    @property
+    def entries(self) -> tuple[MediaTimelineEntry, ...]:
+        """The retained entries, oldest first."""
+        return tuple(self._entries)
+
+    @property
+    def document(self) -> bytes:
+        """The independent document of the retained entries; ``[]`` before the first."""
+        return build_media_timeline(self._entries)
+
+    def add(self, timestamp_us: int, group: int, *, object: int = 0) -> bytes:
+        """Record the object at ``group`` and ``object`` whose LOC timestamp is ``timestamp_us``; return the document.
+
+        Call it once per group of the indexed track, for its first object, when that object was sent. A rejected
+        argument raises ``ValueError`` and leaves the timeline unchanged.
+        """
+        entry = media_timeline_entry(timestamp_us, group, object=object, origin_epoch_us=self._origin_epoch_us)
+        self._entries.append(entry)
+        return self.document
 
 
 def parse_media_timeline(payload: bytes) -> tuple[MediaTimelineEntry, ...]:

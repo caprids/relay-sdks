@@ -88,6 +88,7 @@ PUBLIC_NAMES = [
 
 MEDIA_NAMES = [
     "CatalogService",
+    "DocumentService",
     "Frame",
     "FrameOutcome",
     "FrameOutcomeKind",

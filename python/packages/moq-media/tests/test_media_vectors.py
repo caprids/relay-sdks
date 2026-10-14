@@ -207,6 +207,44 @@ def test_timeline_read_rejects_non_utf8() -> None:
         media.parse_media_timeline(b'[[0,[0,0],0],"\xff"]')
 
 
+def media_timeline(raw: dict[str, Any]) -> media.MediaTimeline:
+    origin = decimal(raw["originEpochUs"]) if "originEpochUs" in raw else None
+    return media.MediaTimeline(origin_epoch_us=origin, max_entries=decimal(raw["maxEntries"]))
+
+
+@pytest.mark.parametrize("vector", VECTORS["timelineRetention"], ids=lambda v: v["name"])
+def test_timeline_retention(vector: dict[str, Any]) -> None:
+    timeline = media_timeline(vector)
+    document = timeline.document
+    for add in vector["adds"]:
+        document = timeline.add(
+            decimal(add["timestampUs"]), decimal(add["group"]), object=decimal(add.get("object", "0"))
+        )
+    assert document == timeline.document == vector["json"].encode("utf-8")
+    assert [record(read) for read in timeline.entries] == json.loads(vector["json"])
+
+
+@pytest.mark.parametrize("vector", VECTORS["timelineRetentionErrors"], ids=lambda v: v["name"])
+def test_timeline_retention_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        media_timeline(vector)
+
+
+def test_timeline_rejected_add_leaves_it_unchanged() -> None:
+    timeline = media.MediaTimeline(origin_epoch_us=1_000, max_entries=1)
+    timeline.add(0, 0)
+    with pytest.raises(ValueError):
+        timeline.add(-1, 1)
+    assert timeline.document == b"[[0,[0,0],1]]"
+
+
+def test_a_new_timeline_starts_empty() -> None:
+    # A supervised publisher's next generation is a new broadcast: it makes a new timeline, not a cleared one.
+    first = media.MediaTimeline(origin_epoch_us=1_000)
+    first.add(0, 0)
+    assert media.MediaTimeline(origin_epoch_us=2_000).document == b"[]"
+
+
 def test_timeline_entry_from_a_broadcast_clock() -> None:
     clock = media.BroadcastClock(now_us=lambda: 0, origin_us=0, origin_epoch_us=1_759_924_158_381_000)
     timeline = media.media_timeline_entry(2_002_000, 1, origin_epoch_us=clock.origin_epoch_us)

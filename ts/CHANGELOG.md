@@ -73,4 +73,6 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   microseconds (`originEpochUs`). `mediaTimelineEntry` turns a timeline timestamp and a group into a record,
   `buildMediaTimeline` and `parseMediaTimeline` write and read a timeline object, and `buildMsfCatalog` announces
   the track through `mediaTimeline` (`packaging` and `role` `mediatimeline`, `depends` on the video track by
-  default). `parseMsfCatalog` returns `depends` and `mimetype`. Publishing the track is not wired up yet.
+  default). `parseMsfCatalog` returns `depends` and `mimetype`. `createMediaTimeline({ originEpochUs, maxEntries })`
+  keeps one broadcast's records (512 by default, oldest dropped) and returns the document to send for each new entry,
+  and the WebCodecs example publishes the track ([#292](https://github.com/muxinc/relay-sdks/issues/292)).

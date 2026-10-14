@@ -144,6 +144,13 @@ publisher's next generation starts a new one. Relay-clock stamps on a track that
 timescale are not on it.
 _Avoid_: shared clock, media clock, wall clock (that is the local monotonic source), PTS base
 
+**Media timeline**:
+A broadcast's optional track that maps media time on the broadcast timeline, and the location of
+each video group's first object, to capture time as Unix-epoch time (msf-01's "wallclock"). It
+belongs to one catalog namespace, so a supervised publisher's next generation starts an empty one.
+_Avoid_: timeline (ambiguous with the broadcast timeline and the clock's source and sample
+timelines), program date time, wall clock track (wall clock is the local monotonic source)
+
 **Playout clock**:
 A player's position on one broadcast timeline, which video frames are scheduled against. Audio
 reports drive it while they arrive; otherwise it follows the local clock (wall pacing). It resets

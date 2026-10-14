@@ -90,7 +90,10 @@ when the encoder input queue is busy or two encoded chunks await transport, seri
 writes, and keeps an eight-chunk hard cap for bursts of internally buffered encoder output. It does
 not silently drop encoded deltas to relieve transport backpressure.
 Subscription changes reset video to the next keyframe and re-serve the catalog on replacement
-demand. Audio is encoded whether or not it has demand, and sent only with it; a frame stamped before
+demand. A `timeline` track (msf-01 §7, announced in the catalog) maps each video group to the capture
+time of its keyframe as Unix-epoch time: once a keyframe has opened a group, `createMediaTimeline` adds a
+record, and the document of every retained record goes out as a new group, and again on each new
+timeline subscription. A keyframe skipped for lack of demand adds nothing. Audio is encoded whether or not it has demand, and sent only with it; a frame stamped before
 the broadcast's origin is not sent. Other write errors, encoder errors, and cancellation close its
 tracks and encoders; the caller closes the connection and the microphone. There is no automatic
 reconnection or adaptive bitrate policy in this example. After the

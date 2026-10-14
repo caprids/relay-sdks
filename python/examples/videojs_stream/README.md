@@ -78,6 +78,7 @@ An unrelated encoder or publishing error still fails the run even if it coincide
 | `catalog` | One MSF `draft-01` catalog JSON per group, re-sent whenever the relay (re)subscribes; viewers who join while the relay stays subscribed get the relay's cached copy. Lists the `video` (and `audio`) tracks with `packaging: "loc"`, the `avc1.PPCCLL` codec string derived from the encoder's SPS, and the avcC decoder configuration inline in `initDataList`. |
 | `video` | LOC-packaged H.264 in AVCC form (length-prefixed NAL units, parameter sets out of band). One MOQT group per GOP: object 0 is the keyframe, later objects the P-frames. Object properties: Timestamp (0x10, microseconds), Timescale (0x08), and Video Config (0x0D, the avcC) on keyframes. |
 | `audio` | LOC-packaged Opus at 48 kHz stereo, one 20 ms frame per group (every audio frame is a random-access point). |
+| `timeline` | msf-01 §7 media timeline, announced in the catalog with `packaging: "mediatimeline"`. Each video group that went out adds a record `[mediaTimeMs, [group, 0], wallclockMs]`, and each new group of this track carries every retained record (up to 512) as one JSON document. Wall-clock times are the capture times as Unix-epoch milliseconds, counted from the `BroadcastClock` created when the media starts. |
 
 The table describes what this publisher sends. Relay 0.14.17 preserved the declared track timescale
 and object timestamps in the tested media flow, but dropped the object-level Timescale and Video
@@ -85,7 +86,7 @@ Config properties. The example retains those properties for consumers that suppo
 through this relay relies on the catalog's `initDataList` for decoder configuration. See
 [Relay property handling](../../../spec/behavior.md#relay-property-handling).
 
-All three tracks declare Timescale = 1,000,000 as a track property, matching the Video.js publisher.
+All four tracks declare Timescale = 1,000,000 as a track property, matching the Video.js publisher.
 Video is written only while the relay has a live subscription for the track. Each new upstream
 subscription, including one that replaces the relay's previous subscription, makes the encoder force
 its next frame to an IDR, so the subscription starts at a keyframe produced for it rather than
@@ -149,7 +150,8 @@ policy, and the option of switching viewers to a fresh generation-specific names
 
 The catalog is served by the SDK's `CatalogService`: one single-object write per relay
 subscription, retried after a one-second pause while demand remains, with only the current document
-kept. A clean finish (the `--duration` deadline, or a file without `--loop` running out) ends the
+kept. The `timeline` track is served the same way by `DocumentService`, which also sends each new
+document while the relay is subscribed. A clean finish (the `--duration` deadline, or a file without `--loop` running out) ends the
 broadcast as msf-01 §11.3 describes: the media tracks close, then the end-of-broadcast catalog
 (`isComplete: true`, no tracks) goes to current catalog viewers, then the catalog track closes. The
 deadline leaves the publisher connection open for that. A failure or Ctrl-C does not send it.
@@ -184,6 +186,7 @@ finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skip
 | `staleVideo`, `staleAudio` | Discarded because of buffer overflow, excessive age, or waiting for a recovery keyframe |
 | `maxLagSeconds` | Largest observed frame age relative to the producer clock |
 | `catalogSends`, `catalogFailures` | Catalog documents accepted, and retryable catalog write failures |
+| `timelineEntries`, `timelineSends`, `timelineFailures` | Media timeline records added (one per video group sent), documents accepted, and retryable write failures |
 | `endedTracks` | Present only when a track ended, listing which |
 
 `--verify` runs an in-process subscriber on the same tracks and prints what a player would see, which
@@ -197,6 +200,14 @@ bytes); a document it rejects is reported as a problem. With relay 0.14.17, expe
 `keyframesWithConfig=0`: its output omits the Video Config object property, so players configure
 their decoder from the avcC in the catalog's `initDataList`. This counter does not indicate a missing
 publisher configuration or a decoder failure; another relay may forward the property.
+
+The viewer also reads the `timeline` track. Each document must hold at most 512 records in group
+order, its newest wall-clock time must be within 5 s of when it arrived, and at the end every record
+must name a received keyframe's group and that keyframe's timestamp in milliseconds. The summary
+reports `timelineObjects`, `timelineEntries` (in the newest document) and `timelineMaxSkewMs`.
+Verified against `sjc.relay.mux.global` on 2026-10-14: 15 video groups in 30 s gave 15 timeline
+documents whose records all matched, with the newest wall-clock time at most 71 ms from arrival. A
+subscriber that joined 12 s in received one document with all seven records so far.
 
 Verified against `sjc.relay.mux.global` on 2026-09-11: the catalog, one video group per GOP with a
 keyframe at object 0, and 50 Opus objects per second all arrived at the in-process subscriber for

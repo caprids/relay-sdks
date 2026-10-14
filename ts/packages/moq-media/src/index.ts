@@ -53,8 +53,12 @@ export {
 export { type ComposeMoqSourceOptions, composeMoqSource, encodeNameComponent, encodeNamespaceName } from './source.js';
 export {
   buildMediaTimeline,
+  createMediaTimeline,
+  type MediaTimeline,
+  type MediaTimelineAddInput,
   type MediaTimelineEntry,
   type MediaTimelineEntryInput,
+  type MediaTimelineOptions,
   mediaTimelineEntry,
   parseMediaTimeline,
 } from './timeline.js';

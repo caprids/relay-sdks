@@ -1,8 +1,9 @@
-"""Media publishing policy over registered tracks: the catalog service and the frame writer.
+"""Media publishing policy over registered tracks: the catalog and document services and the frame writer.
 
 This is the part of stage 2 in ``spec/media-layer.md`` that the Video.js streaming example proved
 against the relay. A catalog is a state-shaped track whose document is re-sent on every relay
-subscription; a media track maps encoded frames onto groups (one GOP per group, or one frame per
+subscription, and a document service does the same for a document the application replaces, such as
+a media timeline; a media track maps encoded frames onto groups (one GOP per group, or one frame per
 group), skips the frames the relay has no subscription for, and resumes at the next keyframe after
 any failure. The module knows nothing about LOC or MSF: a frame carries its own object properties
 and the catalog is bytes. Encoding, pacing and time-based frame dropping stay with the application;
@@ -444,8 +445,118 @@ class CatalogService:
                     break
 
 
+class DocumentService:
+    """Serve a state-shaped track whose document the application replaces.
+
+    The latest document is sent as a new group on every relay subscription, as :class:`CatalogService`
+    does, and again on every :meth:`update` while the relay is subscribed. Nothing is sent until there
+    is a document. Updates made while the relay has no subscription only replace the document. A write
+    that fails while the track stays open is retried after ``retry_delay`` seconds with the latest
+    document, for as long as demand remains. A failure that ends the track ends the service.
+
+    The msf-01 media timeline is this shape: each new entry is a new independent document. One service
+    serves one broadcast; a supervised publisher's next generation registers a new track and a new
+    service.
+    """
+
+    __slots__ = ("_document", "_due", "_failures", "_retry_delay", "_sends", "_track", "_wake")
+
+    def __init__(self, track: _TrackWriter, document: bytes | None = None, *, retry_delay: float = 1.0) -> None:
+        # Arguments first, as everywhere in the SDK: a bad document never reaches the track.
+        self._document = None if document is None else payload_bytes(document)
+
+        if isinstance(retry_delay, bool) or not isinstance(retry_delay, int | float):
+            raise TypeError("retry_delay must be a number of seconds")
+
+        if retry_delay != retry_delay or retry_delay < 0:
+            raise ValueError("retry_delay must be zero or more seconds")
+
+        self._track = track
+        self._retry_delay = retry_delay
+        self._sends = 0
+        self._failures = 0
+        self._due = False
+        self._wake = asyncio.Event()
+
+    @property
+    def document(self) -> bytes | None:
+        """The latest document, or ``None`` before the first."""
+        return self._document
+
+    @property
+    def sends(self) -> int:
+        """Documents the transport accepted."""
+        return self._sends
+
+    @property
+    def failures(self) -> int:
+        """Writes that failed while the track stayed open, each followed by a retry or by lost demand."""
+        return self._failures
+
+    def update(self, document: bytes) -> None:
+        """Replace the document, and send it if the relay is subscribed. Returns at once."""
+        self._document = payload_bytes(document)
+        self._due = True
+        self._wake.set()
+
+    async def serve(self) -> None:
+        """Run until cancelled or the track ends.
+
+        Returns when the track ends without a write having failed. Raises the ``RelayError`` that
+        ended the track when a write exposed it, so a retired track cannot go unnoticed.
+        """
+        watching = asyncio.ensure_future(self._watch_demand())
+
+        try:
+            while True:
+                await self._wake.wait()
+                self._wake.clear()
+
+                if watching.done():
+                    # The track ended (or the demand iterator failed, which is raised here).
+                    watching.result()
+                    return
+
+                await self._send_due()
+        finally:
+            watching.cancel()
+            await asyncio.gather(watching, return_exceptions=True)
+
+    async def _watch_demand(self) -> None:
+        try:
+            async for demanded in self._track.demand_changes():
+                if demanded:
+                    self._due = True
+                    self._wake.set()
+        finally:
+            self._wake.set()
+
+    async def _send_due(self) -> None:
+        while self._due and self._document is not None and self._track.has_demand:
+            self._due = False
+            document = self._document
+
+            try:
+                await self._track.write(document)
+            except RelayError as error:
+                if _retired(self._track, error):
+                    raise
+
+                self._failures += 1
+
+                # Losing demand ends the retries; the next relay subscription makes the document due again.
+                if not self._track.has_demand:
+                    return
+
+                self._due = True
+                await asyncio.sleep(self._retry_delay)
+            else:
+                self._sends += 1
+
+
 __all__ = [
     "CatalogService",
+    "DocumentService",
     "Frame",
     "FrameOutcome",
     "FrameOutcomeKind",

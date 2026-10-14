@@ -1,7 +1,8 @@
 /**
  * The MSF Media Timeline track (msf-01 §7): records that map media time and a location to wall-clock time. See
- * spec/media-layer.md, "Media Timeline track". Format only: the publisher decides which groups get an entry, how many
- * to retain, and when to send a document.
+ * spec/media-layer.md, "Media Timeline track". Format only: the publisher decides which groups get an entry and when
+ * to send a document. {@link createMediaTimeline} holds the retained entries of one broadcast and builds the independent
+ * document each new timeline group carries.
  */
 
 /** One media timeline record, `[mediaTimeMs, [group, object], wallclockMs]` on the wire (msf-01 §7.1.1). */
@@ -59,6 +60,57 @@ export function buildMediaTimeline(entries: readonly MediaTimelineEntry[]): Uint
     whole(entry.wallclockMs, 'wallclockMs'),
   ]);
   return new TextEncoder().encode(JSON.stringify(records));
+}
+
+/** Options for {@link createMediaTimeline}. */
+export interface MediaTimelineOptions {
+  /**
+   * The broadcast's origin as Unix-epoch microseconds (`BroadcastClock.originEpochUs`). Without it every wall-clock
+   * time is 0.
+   */
+  originEpochUs?: number;
+  /** How many entries the document keeps; past it, the oldest is dropped. Default 512, about 18 KB. */
+  maxEntries?: number;
+}
+
+/** One object of the indexed track, for {@link MediaTimeline.add}. */
+export type MediaTimelineAddInput = Omit<MediaTimelineEntryInput, 'originEpochUs'>;
+
+/** The retained entries of one broadcast's media timeline, and the independent document they make. */
+export interface MediaTimeline {
+  /** The retained entries, oldest first. */
+  readonly entries: readonly MediaTimelineEntry[];
+  /** The independent document of the retained entries; `[]` before the first. */
+  readonly document: Uint8Array;
+  /**
+   * Record one object, once per group of the indexed track for its first object, when that object was sent; return
+   * the document. A rejected argument throws and leaves the timeline unchanged.
+   */
+  add(input: MediaTimelineAddInput): Uint8Array;
+}
+
+/**
+ * Hold one broadcast's media timeline entries, bounded by `maxEntries`. A supervised publisher's next generation is a
+ * new broadcast and starts a new timeline.
+ */
+export function createMediaTimeline(options: MediaTimelineOptions = {}): MediaTimeline {
+  const { originEpochUs, maxEntries = 512 } = options;
+  if (originEpochUs !== undefined) whole(originEpochUs, 'originEpochUs');
+  if (whole(maxEntries, 'maxEntries') < 1) throw new RangeError('maxEntries must be a positive safe integer');
+  const entries: MediaTimelineEntry[] = [];
+  return {
+    get entries() {
+      return entries.slice();
+    },
+    get document() {
+      return buildMediaTimeline(entries);
+    },
+    add(input) {
+      entries.push(mediaTimelineEntry({ ...input, ...(originEpochUs === undefined ? {} : { originEpochUs }) }));
+      if (entries.length > maxEntries) entries.shift();
+      return buildMediaTimeline(entries);
+    },
+  };
 }
 
 const count = (value: unknown): number | undefined =>

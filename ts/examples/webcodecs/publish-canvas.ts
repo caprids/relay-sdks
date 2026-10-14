@@ -7,8 +7,10 @@ import {
   CATALOG_TRACK,
   chunkToLocFrame,
   createBroadcastClock,
+  createMediaTimeline,
   locProperties,
   locTrackProperties,
+  MEDIA_TIMELINE_TRACK,
   type SourceTimeline,
   VIDEO_TRACK,
   type VideoTrackInfo,
@@ -50,7 +52,8 @@ export interface PublishCanvasOptions {
 /**
  * Publish a live canvas using WebCodecs directly: fixed-size AVC, 30 fps, a keyframe at least every 2 s. With a
  * microphone, also mono Opus in 20 ms frames, one group per frame. Video is stamped with `clock.now()` at capture and
- * audio through the microphone's calibrated timeline, so both share one broadcast timeline.
+ * audio through the microphone's calibrated timeline, so both share one broadcast timeline. A media timeline track maps
+ * each video group's keyframe to its capture time as Unix-epoch time (msf-01 §7).
  * The caller owns drawing/capture and the connection. Use a fresh publisher/namespace for each run.
  * Abort stops this example; encoder, configuration changes, queue overflow, and write errors are fatal.
  */
@@ -72,6 +75,7 @@ export async function publishCanvas(
   let catalogWriter: RelayTrackWriter | undefined;
   let videoWriter: RelayTrackWriter | undefined;
   let audioWriter: RelayTrackWriter | undefined;
+  let timelineWriter: RelayTrackWriter | undefined;
   let encoder: VideoEncoder | undefined;
   let audioEncoder: AudioEncoder | undefined;
   let audioTimeline: SourceTimeline | undefined;
@@ -81,7 +85,10 @@ export async function publishCanvas(
   let catalogBytes: Uint8Array | undefined;
   let catalogTask: Promise<void> | undefined;
   let demandTask: Promise<void> | undefined;
+  let timelineTask: Promise<void> | undefined;
+  let timelineDocument: Uint8Array | undefined;
   let writes = Promise.resolve();
+  let timelineWrites = Promise.resolve();
   let audioWrites = Promise.resolve();
   let pendingChunks = 0;
   let pendingAudio = 0;
@@ -94,6 +101,7 @@ export async function publishCanvas(
     catalogWriter?.close();
     videoWriter?.close();
     audioWriter?.close();
+    timelineWriter?.close();
   };
   signal.addEventListener('abort', shutdown, { once: true });
 
@@ -132,6 +140,13 @@ export async function publishCanvas(
     videoWriter = track;
     const audioTrack = audio && publisher.registerTrack({ track: AUDIO_TRACK, trackProperties: locTrackProperties() });
     audioWriter = audioTrack;
+    const timelineTrack = publisher.registerTrack({
+      track: MEDIA_TIMELINE_TRACK,
+      trackProperties: locTrackProperties(),
+    });
+    timelineWriter = timelineTrack;
+    // One entry per video group that opened on the relay, each new document a new group (spec/media-layer.md).
+    const timeline = createMediaTimeline({ originEpochUs: clock.originEpochUs });
 
     const serveCatalog = async (bytes: Uint8Array) => {
       for await (const demanded of catalog.demandChanges()) {
@@ -144,6 +159,27 @@ export async function publishCanvas(
         }
       }
     };
+    // The timeline is state-shaped like the catalog, but its document changes: send the latest on every relay
+    // subscription and on every new entry while subscribed. Python's mux_relay.media.DocumentService does the same.
+    const sendTimeline = () => {
+      const bytes = timelineDocument;
+      if (!bytes || !timelineTrack.hasDemand) return;
+      timelineWrites = timelineWrites
+        .then(async () => {
+          signal.throwIfAborted();
+          // A newer document queued its own send; this one is already out of date.
+          if (bytes !== timelineDocument || !timelineTrack.hasDemand) return;
+          await timelineTrack.write(bytes, { properties: locProperties(0), signal });
+        })
+        .catch((error: unknown) => {
+          // The next queued true event serves the replacement subscription.
+          if (signal.aborted || timelineTrack.closed || !isSubscriptionChange(error)) fail(error);
+        });
+    };
+    const serveTimeline = async () => {
+      for await (const demanded of timelineTrack.demandChanges()) if (demanded) sendTimeline();
+    };
+    timelineTask = serveTimeline().catch(fail);
     const watchDemand = async () => {
       let initial = true;
       for await (const demanded of track.demandChanges()) {
@@ -174,7 +210,12 @@ export async function publishCanvas(
               bitrate: config.bitrate,
               framerate: config.framerate,
             };
-            const nextCatalogBytes = buildMsfCatalog({ namespace, video: nextVideo, ...(audio ? { audio } : {}) });
+            const nextCatalogBytes = buildMsfCatalog({
+              namespace,
+              video: nextVideo,
+              ...(audio ? { audio } : {}),
+              mediaTimeline: {},
+            });
             if (
               catalogBytes &&
               (catalogBytes.length !== nextCatalogBytes.length ||
@@ -192,6 +233,7 @@ export async function publishCanvas(
           // Bound callback buffering: WebCodecs does not await an async output callback.
           if (pendingChunks >= 8) throw new Error('Encoded output queue is full; transport cannot keep up');
           const frame = chunkToLocFrame(chunk, { videoConfig: video.initData });
+          const timestampUs = chunk.timestamp;
           pendingChunks++;
           writes = writes
             .then(async () => {
@@ -209,6 +251,11 @@ export async function publishCanvas(
               if (frame.key) {
                 await group?.close();
                 group = await track.openGroup({ signal });
+                await group.write(frame.payload, { properties: frame.properties });
+                // The keyframe is out: the group is a place a viewer can seek to.
+                timelineDocument = timeline.add({ timestampUs, group: group.groupId });
+                sendTimeline();
+                return;
               }
               // Deltas cannot start a group after startup or a loss of demand.
               if (group) await group.write(frame.payload, { properties: frame.properties });
@@ -331,6 +378,6 @@ export async function publishCanvas(
     lifetime.abort(new Error('Canvas publishing finished'));
     shutdown();
     signal.removeEventListener('abort', shutdown);
-    await Promise.allSettled([writes, audioWrites, catalogTask, demandTask]);
+    await Promise.allSettled([writes, audioWrites, timelineWrites, catalogTask, demandTask, timelineTask]);
   }
 }

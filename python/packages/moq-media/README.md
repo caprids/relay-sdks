@@ -45,16 +45,17 @@ wait, show, or drop a video frame. With no audio it paces by wall clock. See
 The clock also records its origin as Unix-epoch microseconds, `clock.origin_epoch_us`, read once
 from `time.time_ns()`. That is what msf-01's Media Timeline track needs: one record per video group,
 mapping media time and the group's location to wall-clock time, for seeking, playlists, and lining
-up broadcasts. Announce it with `media_timeline=MediaTimelineTrackInfo()` in `build_msf_catalog`,
-and on each new video group open a timeline group holding every retained record. The track is not
-published for you yet; see
+up broadcasts. Announce it with `media_timeline=MediaTimelineTrackInfo()` in `build_msf_catalog`.
+`MediaTimeline` keeps one broadcast's records, 512 by default, and returns the document to send each
+time a keyframe has opened a video group; `mux_relay.media.DocumentService` sends it as a new
+timeline group, and again whenever the relay subscribes. See
 [spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
 
 ```python
-entries: list[MediaTimelineEntry] = []
-# On each keyframe that opens video group `group_id`:
-entries.append(media_timeline_entry(timestamp_us, group_id, origin_epoch_us=clock.origin_epoch_us))
-await timeline_track.write(build_media_timeline(entries))  # one object, one group
+timeline = MediaTimeline(origin_epoch_us=clock.origin_epoch_us)
+service = DocumentService(timeline_track)  # from mux_relay.media; run service.serve() as a task
+# Once the frame writer reports the keyframe that opened video group `group_id` as sent:
+service.update(timeline.add(timestamp_us, group_id))
 read = parse_media_timeline(timeline_object.payload)
 ```
 

@@ -1966,4 +1966,88 @@
       "json": "7"
     }
   ]
+,
+  "timelineRetention": [
+    {
+      "name": "empty before the first entry",
+      "maxEntries": "512",
+      "adds": [],
+      "json": "[]"
+    },
+    {
+      "name": "keeps every entry under the cap",
+      "maxEntries": "3",
+      "originEpochUs": "1759924158381000",
+      "adds": [
+        {
+          "timestampUs": "0",
+          "group": "0"
+        },
+        {
+          "timestampUs": "2002000",
+          "group": "1"
+        }
+      ],
+      "json": "[[0,[0,0],1759924158381],[2002,[1,0],1759924160383]]"
+    },
+    {
+      "name": "drops the oldest past the cap",
+      "maxEntries": "2",
+      "originEpochUs": "1759924158381000",
+      "adds": [
+        {
+          "timestampUs": "0",
+          "group": "0"
+        },
+        {
+          "timestampUs": "2002000",
+          "group": "1"
+        },
+        {
+          "timestampUs": "4004000",
+          "group": "2"
+        }
+      ],
+      "json": "[[2002,[1,0],1759924160383],[4004,[2,0],1759924162385]]"
+    },
+    {
+      "name": "one entry, unknown wall-clock time, explicit object",
+      "maxEntries": "1",
+      "adds": [
+        {
+          "timestampUs": "33333",
+          "group": "7",
+          "object": "3"
+        },
+        {
+          "timestampUs": "66666",
+          "group": "8"
+        }
+      ],
+      "json": "[[66,[8,0],0]]"
+    }
+  ],
+  "timelineRetentionErrors": [
+    {
+      "name": "zero entries",
+      "maxEntries": "0"
+    },
+    {
+      "name": "negative entries",
+      "maxEntries": "-1"
+    },
+    {
+      "name": "fractional entries",
+      "maxEntries": "1.5"
+    },
+    {
+      "name": "unsafe entries",
+      "maxEntries": "9007199254740992"
+    },
+    {
+      "name": "negative epoch",
+      "maxEntries": "1",
+      "originEpochUs": "-1"
+    }
+  ]
 }

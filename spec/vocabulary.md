@@ -544,12 +544,19 @@ msf-01 §7's Media Timeline track, which maps a broadcast's media time to wall-c
 | Announce the track in the catalog | `MediaTimelineTrackInfo { name?, depends? }`, `MsfCatalogInput.mediaTimeline` | `MediaTimelineTrackInfo(name=, depends=)`, `build_msf_catalog(media_timeline=)` |
 | Catalog fields as read | `MsfCatalogTrack.depends`, `.mimetype` | `MsfCatalogTrack.depends`, `.mimetype` |
 | Default track name | `MEDIA_TIMELINE_TRACK` (`timeline`) | `MEDIA_TIMELINE_TRACK` |
+| One broadcast's retained entries | `createMediaTimeline({ originEpochUs?, maxEntries? })` (`MediaTimelineOptions`) → `MediaTimeline` | `MediaTimeline(origin_epoch_us=None, max_entries=512)` |
+| Record a sent group's first object; the new document | `timeline.add({ timestampUs, group, object? })` (`MediaTimelineAddInput`) → bytes | `timeline.add(timestamp_us, group, object=0)` → bytes |
+| Retained entries; their document | `timeline.entries`; `timeline.document` | `timeline.entries`; `timeline.document` |
 
 "Wallclock" is msf-01's spelling for Unix-epoch time and appears only in the entry field that
 carries it. The clock's property says `Epoch`, because `CONTEXT.md` keeps "wall clock" for the local
 monotonic source. `depends` keeps msf-01's JSON name rather than Video.js's `dependencies`, like
-the reader's other fields. Not added: helpers for the §7.4 template, a stateful timeline that holds
-entries, and a reader for MSF_COMPRESSION payloads.
+the reader's other fields. `MediaTimeline` is the [glossary](../CONTEXT.md)'s media timeline:
+"timeline" alone also names the clock's source and sample timelines. It takes `originEpochUs`
+rather than a clock, as `mediaTimelineEntry` does, and has no `clear()`: a supervised publisher's
+next generation is a new broadcast with a new timeline
+([issue #292](https://github.com/muxinc/relay-sdks/issues/292)). Not added: helpers for the §7.4
+template, incremental documents, and a reader for MSF_COMPRESSION payloads.
 
 ## Media publishing: `FrameWriter`, `CatalogService`
 
@@ -564,6 +571,8 @@ language; `python/packages/mux-relay/tests/test_exports.py` pins the module's li
 | Serve a state-shaped track: send its document on every relay subscription | — (not yet implemented) | `CatalogService(track, document, retry_delay=1.0)` |
 | Run the service until cancelled or the track ends | — | `await service.serve()` |
 | Documents accepted, and failures that were retried | — | `service.sends`, `service.failures` |
+| Serve a state-shaped track whose document the application replaces | — | `DocumentService(track, document=None, retry_delay=1.0)`; `serve()`, `sends`, `failures` as above |
+| Replace the document and send it while the relay is subscribed; the latest | — | `service.update(document)`; `service.document` |
 | Map encoded frames onto a track's groups | — | `FrameWriter(track, grouping="keyframe", stale=None)`; `grouping="frame"` for one group per frame |
 | Send one frame if the relay wants it | — | `await writer.write(frame)` returns a `FrameOutcome` |
 | What became of a frame | — | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `interrupted`, `ended`), `error`, `group_id` |
@@ -585,5 +594,6 @@ Not adopted: `FramePublisher.publish()` ("publisher" is the connection role, and
 already rejected as the name of a step that does not send); `MediaTrackWriter.write_frame()`
 (redundant on a type named for frames); an events iterator for the catalog service (two counters
 answer what the example's `finished` line asks); exceptions for interrupted and ended frames (see
-above). The `register_media` handle, `update()` of a served document, and the readers in
+above); `update()` on `CatalogService` (its document is fixed, and the media timeline, which
+changes, gets `DocumentService` instead of a mode). The `register_media` handle and the readers in
 [media-layer.md](media-layer.md) remain proposals.

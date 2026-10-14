@@ -93,15 +93,17 @@ if (decision.action === 'wait') setTimeout(retry, decision.waitUs / 1000);
 The clock also records its origin as Unix-epoch microseconds, `clock.originEpochUs`, read once from
 `Date.now()`. That is what msf-01's Media Timeline track needs: one record per video group, mapping
 media time and the group's location to wall-clock time, for seeking, playlists, and lining up
-broadcasts. Announce it with `mediaTimeline: {}` in `buildMsfCatalog`, and on each new video group
-open a timeline group holding every retained record. The track is not published for you yet; see
+broadcasts. Announce it with `mediaTimeline: {}` in `buildMsfCatalog`. `createMediaTimeline` keeps
+one broadcast's records, 512 by default, and returns the document to send each time a keyframe has
+opened a video group: write it as a new timeline group, and again whenever the relay subscribes. The
+[WebCodecs example](../../examples/webcodecs/README.md) does this; see
 [spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
 
 ```ts
-const entries: MediaTimelineEntry[] = [];
-// On each keyframe that opens video group `groupId`:
-entries.push(mediaTimelineEntry({ timestampUs, group: groupId, originEpochUs: clock.originEpochUs }));
-await timelineTrack.write(buildMediaTimeline(entries)); // one object, one group
+const timeline = createMediaTimeline({ originEpochUs: clock.originEpochUs });
+// Once the keyframe that opened video group `groupId` is written:
+const document = timeline.add({ timestampUs, group: groupId });
+if (timelineTrack.hasDemand) await timelineTrack.write(document); // one object, one group
 const read = parseMediaTimeline(timelineObject.payload);
 ```
 

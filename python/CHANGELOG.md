@@ -46,7 +46,12 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `MediaTimelineEntry`, `build_media_timeline` and `parse_media_timeline` write and read a timeline object, and
   `build_msf_catalog` announces the track through `media_timeline=MediaTimelineTrackInfo()` (`packaging` and `role`
   `mediatimeline`, `depends` on the video track by default). `parse_msf_catalog` returns `depends` and `mimetype`.
-  Publishing the track is not wired up yet.
+  `MediaTimeline(origin_epoch_us=, max_entries=512)` keeps one broadcast's records (oldest dropped) and returns the
+  document to send for each new entry ([#292](https://github.com/muxinc/relay-sdks/issues/292)).
+- `mux-relay`: `mux_relay.media.DocumentService` serves a state-shaped track whose document the application replaces,
+  such as the media timeline: the latest document on every relay subscription and on every `update()` while the relay
+  is subscribed ([#292](https://github.com/muxinc/relay-sdks/issues/292)). The Video.js streaming example publishes
+  the media timeline with it, and `--verify` checks the records against the video received.
 - `mux-relay`: `RelaySubscriber.namespace_events(prefix, capacity=..., cancellation=...)` discovers which namespaces
   under a prefix are announced, as a bounded iterator of `NamespaceEvent`s (`announced` / `unannounced`). The
   subscriber's SETUP now sends the MoQ Solicit option, so the relay advertises namespaces only on that request.

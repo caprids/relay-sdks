@@ -22,6 +22,7 @@ interface RawCatalog {
   generatedAt?: string;
 }
 type TimelineRecord = [number, [number, number], number];
+type RawTimelineAdd = { timestampUs: string; group: string; object?: string };
 interface RawTimelineEntry {
   name: string;
   timestampUs: string;
@@ -53,6 +54,14 @@ interface Vectors {
   timelineErrors: { name: string; entries: TimelineRecord[] }[];
   timelineReads: { name: string; json: string; entries: TimelineRecord[] }[];
   timelineReadErrors: { name: string; json: string }[];
+  timelineRetention: {
+    name: string;
+    maxEntries: string;
+    originEpochUs?: string;
+    adds: RawTimelineAdd[];
+    json: string;
+  }[];
+  timelineRetentionErrors: { name: string; maxEntries: string; originEpochUs?: string }[];
 }
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/media.json', import.meta.url), 'utf8')) as Vectors;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -104,6 +113,12 @@ const timelineEntry = (raw: RawTimelineEntry) =>
     ...(raw.originEpochUs !== undefined ? { originEpochUs: Number(raw.originEpochUs) } : {}),
   });
 
+const mediaTimeline = (raw: { maxEntries: string; originEpochUs?: string }) =>
+  media.createMediaTimeline({
+    maxEntries: Number(raw.maxEntries),
+    ...(raw.originEpochUs !== undefined ? { originEpochUs: Number(raw.originEpochUs) } : {}),
+  });
+
 describe('shared media timeline vectors', () => {
   for (const vector of vectors.timelineEntries) {
     it(`entry ${vector.name}`, () => expect(record(timelineEntry(vector))).toEqual(vector.entry));
@@ -133,6 +148,37 @@ describe('shared media timeline vectors', () => {
   it('rejects a timeline payload that is not UTF-8', () => {
     const payload = new Uint8Array([...new TextEncoder().encode('[[0,[0,0],0],"'), 0xff, 0x22, 0x5d]);
     expect(() => media.parseMediaTimeline(payload)).toThrow();
+  });
+  for (const vector of vectors.timelineRetention) {
+    it(`retains ${vector.name}`, () => {
+      const timeline = mediaTimeline(vector);
+      let document = timeline.document;
+      for (const add of vector.adds) {
+        document = timeline.add({
+          timestampUs: Number(add.timestampUs),
+          group: Number(add.group),
+          ...(add.object !== undefined ? { object: Number(add.object) } : {}),
+        });
+      }
+      const expected = hex(new TextEncoder().encode(vector.json));
+      expect(hex(document)).toBe(expected);
+      expect(hex(timeline.document)).toBe(expected);
+      expect(timeline.entries.map(record)).toEqual(JSON.parse(vector.json));
+    });
+  }
+  for (const vector of vectors.timelineRetentionErrors) {
+    it(`rejects retention ${vector.name}`, () => expect(() => mediaTimeline(vector)).toThrow(RangeError));
+  }
+  it('leaves the timeline unchanged after a rejected entry', () => {
+    const timeline = media.createMediaTimeline({ originEpochUs: 1_000, maxEntries: 1 });
+    timeline.add({ timestampUs: 0, group: 0 });
+    expect(() => timeline.add({ timestampUs: -1, group: 1 })).toThrow(RangeError);
+    expect(new TextDecoder().decode(timeline.document)).toBe('[[0,[0,0],1]]');
+  });
+  it('starts each broadcast with an empty timeline', () => {
+    // A supervised publisher's next generation is a new broadcast: it makes a new timeline, not a cleared one.
+    media.createMediaTimeline({ originEpochUs: 1_000 }).add({ timestampUs: 0, group: 0 });
+    expect(new TextDecoder().decode(media.createMediaTimeline({ originEpochUs: 2_000 }).document)).toBe('[]');
   });
   it('stamps entries from a broadcast clock', () => {
     const clock = media.createBroadcastClock({ now: () => 0, originUs: 0, originEpochUs: 1_759_924_158_381_000 });
