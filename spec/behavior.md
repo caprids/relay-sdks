@@ -1198,8 +1198,8 @@ Implemented in both SDKs.
   behind the one being written are the writer's backlog, bounded by `maxBacklog` / `max_backlog` (a
   positive integer; default 8 under keyframe grouping, 25 under frame grouping). A caller that awaits
   every write never has a backlog. A waiting write that is cancelled (Python; a TypeScript promise
-  cannot be) leaves the backlog, and under keyframe grouping leaves a gap the same way a drop does:
-  the open group is reset before the next frame, and a keyframe is needed.
+  cannot be) leaves the backlog, and under keyframe grouping leaves a gap: the frame after it is
+  treated as following a discontinuity, and a keyframe is needed.
 - A frame that arrives at a full backlog means the transport has fallen behind, and the writer drops
   rather than queues. Under keyframe grouping every waiting frame is dropped and the open group is
   reset at once; the frame being written into it, if any, is dropped too. The arriving frame then
@@ -1207,10 +1207,10 @@ Implemented in both SDKs.
   until the next keyframe. Under frame grouping the oldest waiting frame is dropped and the arriving
   frame takes its place at the back.
 - A frame the relay has no subscription for when its turn comes is skipped at once; the writer never
-  waits on the write deadline, because an encoder loop cannot block. Every relay demand change after
-  the writer starts (a new or replacement subscription, its end, or a supervised track's move to
-  another generation) resets the open group before the next frame, so deltas are skipped until the
-  next keyframe; the open group is not replayed.
+  waits on the write deadline, because an encoder loop cannot block. A relay demand change (a new or
+  replacement subscription, or its end) ends the open group in the write slot at once; the writer
+  finds it ended at the next frame, even one written before it has seen the change, and skips deltas
+  until the next keyframe. The open group is not replayed.
 - Under keyframe grouping a writer says when it needs a keyframe (`keyframeNeeded` /
   `keyframe_needed`): from its start until a keyframe arrives, and again from each demand change,
   interruption, stale or discontinuous frame, or drop until the next keyframe arrives. A keyframe

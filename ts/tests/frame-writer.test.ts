@@ -1,6 +1,7 @@
 import type { LocFrame } from '@mux/moq-media';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
+import type { RelayTrackWriter } from '../src/index.js';
 import { createFrameWriter, type Frame, type FrameOutcome } from '../src/media.js';
 import { settle, slotTrack } from './helpers/slot-track.js';
 
@@ -133,6 +134,29 @@ describe('keyframe grouping', () => {
       expect([value, next.kind]).toEqual([value, 'skipped']);
       expect(writer.keyframeNeeded).toBe(true);
     }
+  });
+
+  it('keeps the group a keyframe written in the same turn as a demand change opens', async () => {
+    const track = slotTrack();
+    // Demand changes reach the writer's watcher a macrotask late, after the keyframe below has opened its group.
+    const late: RelayTrackWriter = Object.create(track.writer, {
+      demandChanges: {
+        value: async function* () {
+          for await (const value of track.writer.demandChanges()) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+            yield value;
+          }
+        },
+      },
+    });
+    const writer = createFrameWriter(late);
+    await writer.write(key());
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    track.demand(true);
+    expect(await writer.write(key())).toEqual({ kind: 'sent', groupId: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(await writer.write(delta())).toEqual({ kind: 'sent', groupId: 1 });
+    expect(track.groups[1]?.aborted).toBe(false);
   });
 
   it('reports the frame being written when demand changes as interrupted by the write slot', async () => {

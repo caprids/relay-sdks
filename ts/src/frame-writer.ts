@@ -148,8 +148,6 @@ export function createFrameWriter<F extends Frame = Frame>(
   let group: RelayGroupWriter | undefined;
   /** The previous group while a keyframe's write FINs it: an overflow resets it too. */
   let finishing: RelayGroupWriter | undefined;
-  /** A relay demand change arrived while a frame was in progress: reset the group before the next one. */
-  let resetBeforeNext = false;
   /** Why deltas are discarded until the next keyframe, when it is not a missing group. */
   let recovering: 'stale' | 'dropped' | undefined;
   /** Counts keyframe-grouping overflows, so the frame in progress can tell that its group was dropped under it. */
@@ -329,14 +327,10 @@ export function createFrameWriter<F extends Frame = Frame>(
     }
     if (!keyframes) return ownGroup(frame);
     if (group?.closed) {
-      // The write slot ended the group when relay demand changed, which can be before the demand watcher has run: the
-      // GOP in progress cannot continue.
+      // The write slot ended the group when relay demand changed (before the demand watcher may have run): the GOP in
+      // progress cannot continue. A keyframe here is the recovery.
       group = undefined;
-      needKeyframe();
-    }
-    if (resetBeforeNext) {
-      resetBeforeNext = false;
-      resetGroup();
+      if (!frame.key) needKeyframe();
     }
     try {
       return await intoGop(frame);
@@ -382,7 +376,6 @@ export function createFrameWriter<F extends Frame = Frame>(
         drops++;
         for (const dropped of waiting.splice(0)) dropped.resolve({ kind: 'dropped' });
         const reset = resetGroup();
-        resetBeforeNext = false;
         recovering = 'dropped';
         if (!frame.key) {
           arriving = withGroup('dropped', reset);
@@ -424,11 +417,8 @@ export function createFrameWriter<F extends Frame = Frame>(
           first = false;
           continue;
         }
-        // A new or replacement relay subscription, or its end, is served from the next group, which must start at a
-        // keyframe. Reset the open group now if no frame is in progress, before the next frame otherwise: the write slot
-        // interrupts a write still pending, but one that just completed leaves the retired group behind.
-        if (current) resetBeforeNext = true;
-        else resetGroup();
+        // A new or replacement relay subscription, or its end. The write slot has already ended the open group, which
+        // the next frame finds closed; the new subscription needs a keyframe.
         needKeyframe();
       }
     })().catch(() => {});

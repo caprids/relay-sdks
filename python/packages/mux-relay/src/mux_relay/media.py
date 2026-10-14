@@ -172,6 +172,8 @@ class FrameWriter(Generic[F]):
         "_dropping",
         "_ended",
         "_finishing",
+        "_gap_next",
+        "_gap_turns",
         "_group",
         "_grouping",
         "_groups",
@@ -182,7 +184,6 @@ class FrameWriter(Generic[F]):
         "_objects",
         "_on_keyframe_needed",
         "_recovering",
-        "_reset_pending",
         "_stale",
         "_track",
         "_watch",
@@ -227,7 +228,9 @@ class FrameWriter(Generic[F]):
         self._group: _GroupWriter | None = None
         self._recovering = False
         self._dropping = False
-        self._reset_pending = False
+        # Frames that follow a cancelled one, which left a gap in the GOP: by their turn, or the next to arrive.
+        self._gap_turns: set[asyncio.Future[FrameOutcome | None]] = set()
+        self._gap_next = False
         self._drop_epoch = 0
         self._finishing: _GroupWriter | None = None
         self._keyframe_needed = grouping == "keyframe"
@@ -300,11 +303,17 @@ class FrameWriter(Generic[F]):
             entry = (frame, turn)
             self._backlog.append(entry)
 
+            if self._gap_next:
+                self._gap_next = False
+                self._gap_turns.add(turn)
+
             try:
                 outcome = await turn
             except BaseException:
                 if turn.done() and not turn.cancelled() and turn.result() is None:
-                    # Cancelled after the turn was handed over: hand it on.
+                    # Cancelled after the turn was handed over: the frame after it follows a gap; hand it on.
+                    self._gap_turns.discard(turn)
+                    self._mark_gap(0)
                     self._next_turn()
                 else:
                     # Still waiting: leave the backlog. Frames compare by value, so find this entry by identity.
@@ -312,23 +321,24 @@ class FrameWriter(Generic[F]):
                         if waiting is entry:
                             del self._backlog[index]
 
-                            if self._grouping == "keyframe":
-                                # The GOP now has a gap: the frames after this one cannot join it.
-                                self._reset_pending = True
-                                self._need_keyframe()
-
+                            self._gap_turns.discard(turn)
+                            self._mark_gap(index)
                             break
 
                 raise
+
+            gap = turn in self._gap_turns
+            self._gap_turns.discard(turn)
 
             if outcome is not None:
                 return outcome
         else:
             self._busy = True
             self._idle.clear()
+            gap, self._gap_next = self._gap_next, False
 
         try:
-            return await self._take_turn(frame)
+            return await self._take_turn(frame, gap=gap)
         finally:
             self._next_turn()
 
@@ -346,6 +356,7 @@ class FrameWriter(Generic[F]):
 
         while self._backlog:
             _, turn = self._backlog.popleft()
+            self._gap_turns.discard(turn)
             _settle(turn, FrameOutcome("dropped"))
 
         if self._watch is not None:
@@ -357,10 +368,28 @@ class FrameWriter(Generic[F]):
 
     # ------------------------------------------------------------------ the backlog
 
+    def _mark_gap(self, index: int) -> None:
+        """A waiting frame was cancelled: the frame now at ``index`` (or the next to arrive) follows a gap."""
+        if self._grouping != "keyframe":
+            return
+
+        if index < len(self._backlog):
+            self._gap_turns.add(self._backlog[index][1])
+        else:
+            self._gap_next = True
+
+        self._need_keyframe()
+
     def _next_turn(self) -> None:
         """The frame being written is done: hand the turn to the oldest waiting frame."""
         while self._backlog:
             _, turn = self._backlog.popleft()
+
+            if turn.cancelled():
+                # Its caller was cancelled before the handler could leave the backlog: the gap is here.
+                self._gap_turns.discard(turn)
+                self._mark_gap(0)
+                continue
 
             if not turn.done():
                 turn.set_result(None)
@@ -373,12 +402,14 @@ class FrameWriter(Generic[F]):
         """A frame arrived at a full backlog. Returns its outcome when it is dropped at once."""
         if self._grouping == "frame":
             _, turn = self._backlog.popleft()
+            self._gap_turns.discard(turn)
             _settle(turn, FrameOutcome("dropped"))
             return None
 
         # The transport fell behind: everything behind it goes, and the GOP in progress with it.
         while self._backlog:
             _, turn = self._backlog.popleft()
+            self._gap_turns.discard(turn)
             _settle(turn, FrameOutcome("dropped"))
 
         self._drop_epoch += 1
@@ -422,13 +453,13 @@ class FrameWriter(Generic[F]):
                 first = False
                 continue
 
-            # A new or replacement relay subscription, or its end: the open group cannot continue.
-            self._reset_pending = True
+            # A new or replacement relay subscription, or its end. The write slot has already ended the
+            # open group, which the next frame finds closed; a keyframe is needed for the new subscription.
             self._need_keyframe()
 
     # ------------------------------------------------------------------ one frame's turn
 
-    async def _take_turn(self, frame: F) -> FrameOutcome:
+    async def _take_turn(self, frame: F, *, gap: bool = False) -> FrameOutcome:
         if self._ended is not None:
             return FrameOutcome("ended", error=self._ended)
 
@@ -442,15 +473,15 @@ class FrameWriter(Generic[F]):
         if self._grouping == "frame":
             return await self._write_own_group(frame)
 
-        return await self._write_into_gop(frame)
+        return await self._write_into_gop(frame, gap)
 
     # ------------------------------------------------------------------ keyframe grouping
 
-    async def _write_into_gop(self, frame: F) -> FrameOutcome:
+    async def _write_into_gop(self, frame: F, gap: bool) -> FrameOutcome:
         epoch = self._drop_epoch
 
         try:
-            return await self._map_into_gop(frame, epoch)
+            return await self._map_into_gop(frame, epoch, gap)
         except BaseException as error:
             if self._drop_epoch != epoch and not isinstance(error, asyncio.CancelledError):
                 # The backlog overflowed while this frame was in flight and its group was reset for it.
@@ -465,22 +496,20 @@ class FrameWriter(Generic[F]):
             self._need_keyframe()
             raise
 
-    async def _map_into_gop(self, frame: F, epoch: int) -> FrameOutcome:
+    async def _map_into_gop(self, frame: F, epoch: int, gap: bool) -> FrameOutcome:
         if self._group is not None and self._group.closed:
-            # The write slot ended the group when relay demand changed, which can be before the demand
-            # watch has run: the GOP in progress cannot continue.
+            # The write slot ended the group when relay demand changed (before the demand watch may
+            # have run): the GOP in progress cannot continue. A keyframe here is the recovery.
             self._group = None
-            self._need_keyframe()
 
-        if self._reset_pending:
-            # Relay demand changed since the last frame: the GOP in progress cannot continue.
-            self._reset_pending = False
-            self._reset_group()
+            if not frame.key:
+                self._need_keyframe()
 
         stale = self._stale(frame)
         reset: int | None = None
 
-        if stale or frame.discontinuity:
+        # A cancelled frame before this one is a discontinuity the caller did not flag.
+        if stale or frame.discontinuity or gap:
             # Whatever group is open depended on frames that will never be sent.
             reset = self._reset_group()
             self._recovering = True

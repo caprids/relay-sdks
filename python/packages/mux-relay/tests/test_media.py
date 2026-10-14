@@ -568,10 +568,86 @@ class TestBacklog:
         assert writer.keyframe_needed, "the deltas after the cancelled one have nothing to decode against"
         gate.set()
         assert (await first).kind == "sent"
-        assert (await third).kind == "skipped"
+        assert (await third).kind == "stale", "a cancelled frame is a discontinuity the caller did not flag"
         assert second.cancelled()
         assert sent_stamps(track) == [[0]]
         assert (await writer.write(key(3))).kind == "sent"
+
+    async def test_a_gap_from_a_cancelled_delta_starts_after_it_not_at_the_head_of_the_backlog(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        tasks = [asyncio.create_task(writer.write(frame)) for frame in (key(1), delta(2), delta(3))]
+        await settle()
+        tasks[1].cancel()
+        await settle()
+        gate.set()
+
+        assert (await first).kind == "sent"
+        assert [(await tasks[0]).kind, (await tasks[2]).kind] == ["sent", "stale"]
+        assert sent_stamps(track) == [[0], [1]], "delta 3 must not join keyframe 1's group without delta 2"
+
+    @pytest.mark.parametrize("turns", range(8))
+    async def test_a_delta_cancelled_around_its_turn_leaves_a_gap(self, turns: int) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        second = asyncio.create_task(writer.write(delta(1)))
+        third = asyncio.create_task(writer.write(delta(2)))
+        await settle()
+        gate.set()
+
+        # Cancel the second frame on a different loop turn each run: while it waits, as the turn passes
+        # over it before its handler runs, or once the turn is handed to it.
+        for _ in range(turns):
+            await asyncio.sleep(0)
+        second.cancel()
+
+        assert (await first).kind == "sent"
+        if second.cancelled() and len(track.groups[0].objects) == 1:
+            # It never reached the transport: the delta after it has nothing to decode against.
+            assert (await third).kind == "stale"
+            assert sent_stamps(track) == [[0]]
+
+    async def test_a_delta_cancelled_after_its_turn_was_handed_over_leaves_a_gap(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        second = asyncio.create_task(writer.write(delta(1)))
+        third = asyncio.create_task(writer.write(delta(2)))
+        await settle()
+        gate.set()
+
+        while writer.backlog == 2:
+            await asyncio.sleep(0)
+        # The second frame's turn is handed over, and its task has not run yet.
+        second.cancel()
+
+        assert (await first).kind == "sent"
+        assert (await third).kind == "stale"
+        assert second.cancelled()
+        assert sent_stamps(track) == [[0]]
+
+    async def test_a_keyframe_written_in_the_same_turn_as_a_demand_change_keeps_its_group(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+        assert await kinds(writer, [key(0)]) == ["sent"]
+
+        track.bind(True)  # no yield: the demand watch has not seen it yet
+        assert await kinds(writer, [key(1)]) == ["sent"]
+        await settle()
+        assert await kinds(writer, [delta(2)]) == ["sent"], "the watch must not reset the replacement GOP"
+        assert sent_stamps(track) == [[0], [1, 2]]
 
     async def test_a_write_in_the_same_turn_as_a_demand_change_skips_the_retired_group(self) -> None:
         track = FakeTrackWriter()
