@@ -24,10 +24,10 @@ try {
   if (!track || !config) throw new Error('Missing video track/config');
   const video = videoTrackFromDecoderConfig(config);
   const catalog = buildMsfCatalog({ namespace, video });
-  // Serve catalog on the catalog track whenever relay demand changes to true.
+  // Serve catalog with createCatalogService from @mux/relay/media.
   for await (const packet of new EncodedPacketSink(track).packets()) {
     const frame = packetToLocFrame(packet, video.initData ? { videoConfig: video.initData } : {});
-    // frame.key starts a group; frame.payload and frame.properties go to group.write().
+    // Hand frame to a frame writer from @mux/relay/media: frame.key starts a group, deltas join it.
   }
 } finally {
   input.dispose();
