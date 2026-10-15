@@ -90,6 +90,8 @@ export interface Player {
 }
 
 const BRIGHT = 160;
+/** How long every audio slot may be missed before the player accepts the added delay and re-anchors, in seconds. */
+const MAX_LATE_S = 1;
 /** How far beyond the jitter buffer's depth audio may be scheduled before the player re-anchors, in seconds. */
 const MAX_EXTRA_AHEAD_S = 0.1;
 
@@ -223,6 +225,8 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     scheduledFromS = Number.POSITIVE_INFINITY;
     scheduledUntilS = 0;
   };
+  // When audio began to miss every slot, on the context's clock.
+  let lateSinceS: number | undefined;
   const contextTimeOf = (mediaUs: number) => (anchor ? anchor.contextS + (mediaUs - anchor.mediaUs) / 1e6 : 0);
   const audioDecoder = new AudioDecoder({
     output(data) {
@@ -233,15 +237,23 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
         data.close();
         stats.audioFrames++;
         let startS = contextTimeOf(timestamp);
-        if (!anchor || startS > context.currentTime + jitterS + MAX_EXTRA_AHEAD_S) {
-          // First audio, after a resync or restart, or a schedule that has drifted ahead of the jitter buffer's depth
-          // (the context's clock stalled): (re)start the jitter buffer at this frame, so its depth stays what it was set
-          // to.
+        const late = anchor !== undefined && startS < context.currentTime + 0.005;
+        if (!late) lateSinceS = undefined;
+        else lateSinceS ??= context.currentTime;
+        if (
+          !anchor ||
+          startS > context.currentTime + jitterS + MAX_EXTRA_AHEAD_S ||
+          (lateSinceS !== undefined && context.currentTime - lateSinceS > MAX_LATE_S)
+        ) {
+          // First audio, after a resync or restart, a schedule that has drifted ahead of the jitter buffer's depth (the
+          // context's clock stalled), or every slot missed for a while (the delay grew for good, within the reader's
+          // budget): (re)start the jitter buffer at this frame, so its depth stays what it was set to.
+          lateSinceS = undefined;
           dropScheduledAudio();
           anchor = { mediaUs: timestamp, contextS: context.currentTime + jitterS };
           scheduledFromS = anchor.contextS;
           startS = anchor.contextS;
-        } else if (startS < context.currentTime + 0.005) {
+        } else if (late) {
           // Its slot has passed. Re-anchoring on it would add its lateness to every later frame (and, since audio
           // drives the playout clock, to the clock too); drop it and keep the schedule.
           stats.audioUnderruns++;
