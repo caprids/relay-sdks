@@ -864,8 +864,9 @@ There are no options for them: an application sets the publisher's values with t
 properties it already passes.
 
 - **The value.** Each group's value is fixed just before its stream opens, after any wait for
-  settling room. The publisher's is the property on the group's first object when present, and the
-  track property otherwise; on any later object the property is ignored. The subscriber's is the
+  settling room; for a group opened without its first object, the publisher's side is fixed when
+  that object is written. The publisher's is the property on the group's first object when present,
+  and the track property otherwise; on any later object the property is ignored. The subscriber's is the
   parameter on the relay subscription's SUBSCRIBE, as updated by any REQUEST_UPDATE so far. When
   both are non-zero the smaller applies, and otherwise the non-zero one; 0 means no timeout. A value
   above 2147483647 ms is clamped to that bound, and registration refuses neither 0 nor a clamped
@@ -880,9 +881,17 @@ properties it already passes.
   settling set like any other late failure and frees its place under the 64-group limit. The timer
   belongs to the group, so it keeps running through a relay subscription change or end and through
   the track's PUBLISH_DONE; only the connection's end stops it.
-- **The object timeout** counts from the application's write call (`write()`, or the group's
-  `write()`) to the moment the transport takes the object, so waiting for demand, for settling
-  room, for the stream and behind the group's earlier bytes all count. The age is checked again
+- **The object timeout** counts from the call that hands the object over (`write()`, `openGroup()`
+  / `open_group()` given the group's first object, or the group's `write()`) to the moment the
+  transport takes the object, so waiting for demand, for settling room, for the stream and behind
+  the group's earlier bytes all count. Section 5.2 starts the clock when the application provides
+  the object, so a bare `openGroup()` has none to time: only the write deadline bounds its wait for
+  demand, settling room and the stream. Opening a group with its first object (`payload`, with
+  optional `properties`) puts that wait on the object's clock, and its `0x02` property is known
+  before the stream opens. The call returns once the transport takes the object, with
+  `objectCount` / `object_count` at 1, or fails like a `write()` and returns no group
+  ([#306](https://github.com/muxinc/relay-sdks/issues/306)). Properties without a payload are a
+  TypeError. The age is checked again
   just before the object is handed over, as Section 5.2 requires. Until the group's value is fixed
   only the publisher's value times the wait; an object already older than the fixed value fails
   then, before any stream opens. When it expires the operation fails with `DELIVERY_TIMEOUT`
@@ -1228,8 +1237,12 @@ Implemented in both SDKs.
   touch the writer. The writer watches the track's demand from its creation until it closes or the
   track ends; in Python it is therefore created with an event loop running. Under frame grouping no
   keyframe is ever needed.
+- A frame that starts a group (a keyframe, or under frame grouping every frame) opens it as the
+  group's first object, so a [delivery timeout](#delivery-timeouts) counts the wait for settling
+  room and for the stream. When that open fails, no group came back, so the outcome names none.
 - Lateness is the application's. An optional `stale` predicate is consulted before a group is
-  opened and again before each write, since time passes inside those steps. A stale frame is
+  opened, again once a frame has opened its group (the frame went out with the open, and a stale
+  one has its group reset), and before each later write, since time passes inside those steps. A stale frame is
   dropped, an open group that depended on it is reset, and deltas are dropped until the next
   keyframe. A frame flagged as following a discontinuity resets the open group the same way.
 - A failure is one of two kinds. It ends the writer (a retirement, see `CONTEXT.md`) exactly when
@@ -1252,12 +1265,12 @@ Implemented in both SDKs.
   An explicit subgroup timeout replaces either default. It is a track property because moq-relay
   reads an object's `0x06` as a Timestamp, and because the relay ignores both sides' values only the
   publisher's own enforcement applies.
-  - No object timeout is set. A frame writer writes through a group, and once the group's stream is
-    open Chromium's WebTransport takes each object at once even during a stall (every write resolved
-    in under 1 ms through a 2 s blackout), while the group's wait for settling room in `openGroup()`
-    is not counted ([#306](https://github.com/muxinc/relay-sdks/issues/306)). Through the frame
-    writer it would never fire; a track's own `write()` does count its waits for demand and settling
-    room.
+  - No object timeout is set. The frame writer opens each group with its first frame, so an object
+    timeout would count the wait for settling room
+    ([#306](https://github.com/muxinc/relay-sdks/issues/306)), but once the group's stream is open
+    Chromium's WebTransport takes each object at once even during a stall (every write resolved in
+    under 1 ms through a 2 s blackout; [#309](https://github.com/muxinc/relay-sdks/issues/309)).
+    Whether the defaults should add one is [#310](https://github.com/muxinc/relay-sdks/issues/310).
   - Audio's value is measured, not derived from the target latency, which would let a whole stall's
     audio through late. Through a 2 s uplink blackout to sjc, with the subscriber on a clean path,
     it brought the player's audio lag after the stall from 2.44 s to 0.43 s (0.27 s before it),

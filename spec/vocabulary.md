@@ -36,7 +36,7 @@ without a row here is a bug.
 | Send one JSON object | `writer.writeJSON(value, options)` | `await writer.write_json(value, properties=...)` |
 | Read an object as UTF-8 text or JSON | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
 | SDK failure with a stable code and operation phase | `RelayError`, `RelayErrorCode`, `RelayErrorPhase` | `RelayError`, `RelayErrorCode`, `RelayErrorPhase` |
-| Send several objects in one group | `writer.openGroup()` returns `RelayGroupWriter` | `await writer.open_group()` returns `RelayGroupWriter` |
+| Send several objects in one group | `writer.openGroup()` returns `RelayGroupWriter`; `openGroup({ payload, properties })` opens it with object 0 | `await writer.open_group()` returns `RelayGroupWriter`; `open_group(payload, properties=...)` opens it with object 0 |
 | Does the relay currently want this track | `writer.hasDemand` | `writer.has_demand` |
 | Follow every change in relay demand | `writer.demandChanges()` | `writer.demand_changes()` |
 | The track ended and cannot be written again | `writer.closed` | `writer.closed` |
