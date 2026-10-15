@@ -103,9 +103,14 @@ describe('public vocabulary', () => {
 
 /** `@mux/relay/media`: the media publishing policy, which the root does not export (spec/vocabulary.md). */
 describe('media publishing vocabulary', () => {
-  it('exports factories for the frame writer and the two document-shaped services, and nothing else', async () => {
+  it('exports factories for the frame writer and the two document-shaped services, the track properties helper, and nothing else', async () => {
     const media = await import('../src/media.js');
-    expect(Object.keys(media).sort()).toEqual(['createCatalogService', 'createDocumentService', 'createFrameWriter']);
+    expect(Object.keys(media).sort()).toEqual([
+      'createCatalogService',
+      'createDocumentService',
+      'createFrameWriter',
+      'mediaTrackProperties',
+    ]);
     expect(relay).not.toHaveProperty('createFrameWriter');
   });
 
