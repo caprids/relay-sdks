@@ -608,6 +608,10 @@ class FrameWriter(Generic[F]):
 
                 return self._failed(error, group_id=None)
             except asyncio.CancelledError:
+                if opening.done() and not opening.cancelled() and opening.exception() is None:
+                    # The caller was cancelled as the open completed: the group holds the track's slot, so free it.
+                    opening.result().abort()
+
                 if self._drop_epoch != epoch and opening.cancelled() and not _cancelling():
                     # The overflow cancelled the opening, which reset the group: it has no writer to name.
                     return FrameOutcome("dropped")

@@ -125,6 +125,10 @@ describe('connectSupervisedPublisher', () => {
       phase: 'connection',
     });
     expect(writer.hasDemand).toBe(false);
+    // Arguments come before connection state: a bad one is a TypeError even between generations.
+    await expect(writer.write('not bytes' as never)).rejects.toBeInstanceOf(TypeError);
+    await expect(writer.openGroup({ properties: [{ type: 0x02, value: 50 }] })).rejects.toBeInstanceOf(TypeError);
+    await expect(writer.openGroup({ payload: 'not bytes' as never })).rejects.toBeInstanceOf(TypeError);
     gate.resolve();
     await until(() => publisher.status === 'live', 'live again');
     expect(connections[1]!.tracks.get('audio')!.writes).toEqual([]);

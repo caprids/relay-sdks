@@ -10,7 +10,7 @@ from typing import Any, cast
 
 import pytest
 from core_helpers.waiting import settle, wait_for
-from relay_helpers.fake_track_writer import FakeTrackWriter, changed_error, closed_error, timeout_error
+from relay_helpers.fake_track_writer import FakeGroupWriter, FakeTrackWriter, changed_error, closed_error, timeout_error
 from relay_helpers.relay_hub import create_relay_hub
 
 from moq_core import KeyValuePair, MoqtObject
@@ -437,6 +437,33 @@ class TestFrameGrouping:
             await writer.write(key(0))
 
         assert track.groups[0].aborts == [None] and track.groups[0].payloads == [b"key"]
+        assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
+
+    async def test_a_caller_cancelled_as_its_keyframe_finishes_opening_has_the_group_reset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The open completes, then the caller's cancellation lands before it resumes: the group must not keep the slot.
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track)
+        open_group = track.open_group
+        caller: asyncio.Task[FrameOutcome] | None = None
+
+        async def open_then_cancel_caller(
+            payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
+        ) -> FakeGroupWriter:
+            group = await open_group(payload, properties=properties)
+            assert caller is not None
+            asyncio.get_running_loop().call_soon(caller.cancel)
+            return group
+
+        monkeypatch.setattr(track, "open_group", open_then_cancel_caller)
+        caller = asyncio.create_task(writer.write(key(0)))
+
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        assert track.groups[0].aborts == [None]
+        monkeypatch.setattr(track, "open_group", open_group)
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
 
     async def test_task_cancellation_inside_a_write_resets_the_group_and_propagates(self) -> None:

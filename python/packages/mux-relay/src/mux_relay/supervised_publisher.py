@@ -248,9 +248,18 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         self, payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
     ) -> RelayGroupWriter:
         """Open a multi-object group on the live generation; see :meth:`RelayTrackWriter.open_group`."""
+        # Arguments before connection or slot state (spec/behavior.md, "Arguments").
+        data: bytes | None = None
+        object_properties: list[KeyValuePair] | None = None
+
+        if payload is not None:
+            data = payload_bytes(payload)
+            object_properties = object_property_pairs(properties)
+        elif properties is not None:
+            raise TypeError("Group properties belong to a first object: pass a payload with them")
 
         async def open_on(writer: RelayTrackWriter, generation: _Generation) -> RelayGroupWriter:
-            group = await writer.open_group(payload, properties=properties)
+            group = await writer.open_group(data, properties=object_properties)
             # The generation the group was opened on, read before the await: a disconnect clears the binding.
             # The group holds the generation open until it is closed or aborted.
             hold = generation.use()

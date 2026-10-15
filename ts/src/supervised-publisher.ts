@@ -32,7 +32,7 @@ import {
   type SupervisionBackoff,
   sleep,
 } from './supervision.js';
-import { namespaceFields, trackName, trackPropertyPairs } from './validation.js';
+import { namespaceFields, objectPropertyPairs, payloadBytes, trackName, trackPropertyPairs } from './validation.js';
 
 /** Options for `connectSupervisedPublisher`: the shared connection options, the root namespace and the policy. */
 export interface ConnectSupervisedPublisherOptions extends ConnectRelayOptions {
@@ -643,8 +643,14 @@ class SupervisedTrack {
         return track.#closed;
       },
       demandChanges: () => track.#demandChanges(),
-      openGroup: (options) =>
-        onLive(async (writer, generation) => {
+      openGroup: async (options) => {
+        // Arguments before connection or slot state (spec/behavior.md, "Arguments").
+        if (options?.payload !== undefined) {
+          payloadBytes(options.payload);
+          objectPropertyPairs(options.properties);
+        } else if (options?.properties !== undefined)
+          throw new TypeError('Group properties belong to a first object: pass a payload with them');
+        return onLive(async (writer, generation) => {
           const group = await writer.openGroup(options);
           // The generation the group was opened on, read before the await: a disconnect meanwhile clears the binding.
           // The group holds the generation open until it is closed or aborted.
@@ -667,8 +673,14 @@ class SupervisedTrack {
           if (group.closed) release();
           else signal?.addEventListener('abort', onAbort, { once: true });
           return supervisedGroup(group, () => track.#closed, generation, release);
-        }),
-      write: (payload, options?: WriteOptions) => onLive((writer) => writer.write(payload, options)),
+        });
+      },
+      write: async (payload, options?: WriteOptions) => {
+        // Arguments before connection or slot state (spec/behavior.md, "Arguments").
+        payloadBytes(payload);
+        objectPropertyPairs(options?.properties);
+        return onLive((writer) => writer.write(payload, options));
+      },
       writeText: (text, options?: WriteOptions) => onLive((writer) => writer.writeText(text, options)),
       writeJSON: (value, options?: WriteOptions) => onLive((writer) => writer.writeJSON(value, options)),
       close: () => {

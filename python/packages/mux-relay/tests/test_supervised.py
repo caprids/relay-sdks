@@ -17,7 +17,7 @@ from typing import Any, cast
 import pytest
 from relay_helpers.supervision_fakes import FakePublisher, FakeSubscriber, until
 
-from moq_core import MessageParameters, MoqtObject, SubgroupEnd
+from moq_core import KeyValuePair, MessageParameters, MoqtObject, SubgroupEnd
 from moq_core.errors import MoqtProtocolError
 from mux_relay import (
     CancellationToken,
@@ -149,6 +149,11 @@ async def test_a_write_between_generations_fails_with_reconnecting(cleanup: list
         await writer.write(b"\x09")
     assert (raised.value.code, raised.value.phase) == ("RECONNECTING", "connection")
     assert not writer.has_demand
+    # Arguments come before connection state: a bad one is a TypeError even between generations.
+    with pytest.raises(TypeError):
+        await writer.open_group(properties=[KeyValuePair(0x02, 50)])
+    with pytest.raises(TypeError):
+        await writer.open_group("not bytes")  # ty: ignore[invalid-argument-type]
     gated.gate.set()
     await until(lambda: publisher.status == "live", "live again")
     assert p.connections[1].tracks["audio"].writes == []
