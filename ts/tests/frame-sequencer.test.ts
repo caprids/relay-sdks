@@ -116,4 +116,35 @@ describe('createFrameSequencer', () => {
     sequencer.groupEnded(0);
     expect(sequencer.poll().frames.map((frame) => frame.groupId)).toEqual([1]);
   });
+
+  it('takes at most maxFrames, judging each when it is taken', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
+    sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 100_000 }]));
+    sequencer.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 120_000 }]));
+    sequencer.object(object(2, 0, [{ type: LOC_TIMESTAMP, value: 140_000 }]));
+    expect(sequencer.poll(1).frames.map((frame) => frame.groupId)).toEqual([0]);
+    now = 5_000_000;
+    clock.reportAudio(5_000_000);
+    sequencer.object(object(3, 0, [{ type: LOC_TIMESTAMP, value: 5_100_000 }]));
+    expect(sequencer.poll(1).frames.map((frame) => [frame.groupId, frame.discontinuity])).toEqual([[3, 'gap']]);
+    expect(sequencer.stats.late).toBe(2);
+    expect(() => sequencer.poll(0)).toThrow(RangeError);
+  });
+
+  it('bounds what it holds when nobody polls, resuming at a keyframe after a gap', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const sequencer = createFrameSequencer({ clock });
+    sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
+    expect(sequencer.poll().frames).toHaveLength(1);
+    for (let index = 1; index < 3000; index++) {
+      sequencer.object(object(Math.floor(index / 30), index % 30, [{ type: LOC_TIMESTAMP, value: index * 33_333 }]));
+    }
+    const { frames } = sequencer.poll();
+    expect(frames.length).toBeLessThanOrEqual(1100);
+    expect(frames[0]).toMatchObject({ key: true, discontinuity: 'gap' });
+    expect(sequencer.stats.late).toBeGreaterThan(1800);
+  });
 });

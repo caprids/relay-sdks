@@ -576,7 +576,7 @@ sequencer as an argument.
 | --- | --- | --- |
 | One track's ordering and deadlines | `createFrameSequencer({ clock, grouping?, trackProperties? })` → `FrameSequencer` (`FrameSequencerOptions`) | `FrameSequencer(clock, grouping="keyframe", track_properties=())` |
 | Feed it a subscription's events | `object(o)`, `groupEnded(id)`, `groupReset(id)`, `restart()`, `trackProperties` | `object(o)`, `group_ended(id)`, `group_reset(id)`, `restart()`, `track_properties` |
-| Take the ready frames and the next wait | `poll()` → `SequencerPoll { frames, waitUs }` | `poll()` → `SequencerPoll(frames, wait_us)` |
+| Take the ready frames and the next wait | `poll(maxFrames?)` → `SequencerPoll { frames, waitUs }` | `poll(max_frames=None)` → `SequencerPoll(frames, wait_us)` |
 | One frame in decode order | `SequencedFrame { groupId, objectId, timestampUs, key, payload, properties, discontinuity? }` | `SequencedFrame(group_id, object_id, timestamp_us, key, payload, properties, discontinuity)` |
 | Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
 | Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |

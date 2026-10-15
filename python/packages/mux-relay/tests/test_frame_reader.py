@@ -159,3 +159,31 @@ async def test_a_slow_reader_gets_fresh_audio_rather_than_a_backlog() -> None:
 def test_handlers_need_no_running_loop_until_an_event(name: str) -> None:
     reader = FrameReader(FrameSequencer(PlayoutClock()))
     assert getattr(reader, name)() is not None
+
+
+async def test_a_restart_drops_what_was_not_read_yet() -> None:
+    reader = FrameReader(FrameSequencer(PlayoutClock()))
+    handlers = reader.want_handlers()
+    assert handlers.on_object is not None and handlers.on_restarted is not None
+    for object_id in range(3):
+        handlers.on_object(obj(4, object_id, object_id * 33_333))
+    assert ids(await take(reader, 1)) == [(4, 0, None)]
+    handlers.on_restarted("stale", ("a",))
+    handlers.on_object(obj(0, 0, 1_000_000))
+    assert ids(await take(reader, 1)) == [(0, 0, "restart")]
+
+
+async def test_a_partly_read_burst_is_judged_when_read() -> None:
+    now = [0]
+    clock = PlayoutClock(now_us=lambda: now[0])
+    clock.report_audio(0)
+    reader = FrameReader(FrameSequencer(clock, grouping="frame"))
+    handlers = reader.subscription_handlers()
+    assert handlers.on_object is not None
+    handlers.on_object(obj(0, 0, 100_000))
+    handlers.on_object(obj(1, 0, 120_000))
+    assert ids(await take(reader, 1)) == [(0, 0, None)]
+    now[0] = 5_000_000
+    clock.report_audio(5_000_000)
+    handlers.on_object(obj(2, 0, 5_100_000))
+    assert ids(await take(reader, 1)) == [(2, 0, "gap")]

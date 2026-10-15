@@ -81,8 +81,11 @@ export interface FrameSequencer {
   groupReset(groupId: number): void;
   /** The subscription was replaced (a Restart or a Move): forget everything; group IDs start over. */
   restart(): void;
-  /** Take the frames that are ready, and when to poll again. */
-  poll(): SequencerPoll;
+  /**
+   * Take the frames that are ready, at most `maxFrames` (default all), and when to poll again. A reader that cannot
+   * take frames as they come polls one at a time, so each is judged late when it is taken.
+   */
+  poll(maxFrames?: number): SequencerPoll;
   /** Counters. */
   readonly stats: Readonly<FrameSequencerStats>;
 }
@@ -99,6 +102,8 @@ interface Group {
 const KEYFRAMES_KEPT = 8;
 /** While the clock is idle and frames are held, poll again after this long: the clock may have anchored meanwhile. */
 const IDLE_RECHECK_US = 50_000;
+/** At most this many frames are held, about 20 s of audio; beyond it everything held is dropped as a gap. */
+const MAX_HELD_FRAMES = 1024;
 
 /** Create a frame sequencer for one track. */
 export function createFrameSequencer(options: FrameSequencerOptions): FrameSequencer {
@@ -121,6 +126,9 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
   let newestLate: { groupId: number; group: Group } | undefined;
   const keyframes = new Map<number, number>();
+  // The most frames one poll may return.
+  let limit = Number.POSITIVE_INFINITY;
+  let sinceHeldCheck = 0;
 
   const frameOf = (object: MoqtObject, timestampUs: number): SequencedFrame => ({
     groupId: object.groupId,
@@ -216,6 +224,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       return lastDeliveredUs === undefined ? 0 : lastDeliveredUs + target - positionUs;
     };
     for (;;) {
+      if (out.length >= limit) return undefined;
       // A group that ended or was reset without its keyframe can never be delivered; only the next group's says a gap.
       const next = floor === undefined ? undefined : floor + 1;
       for (const [id, group] of groups) {
@@ -297,11 +306,11 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     const lateBefore = positionUs === undefined ? Number.NEGATIVE_INFINITY : positionUs - clock.lateDropUs;
     for (const id of [...groups.keys()].sort((a, b) => a - b)) {
       const group = groups.get(id) as Group;
-      groups.delete(id);
-      if (group.frames.size === 0) continue;
-      floor = id;
       for (const objectId of [...group.frames.keys()].sort((a, b) => a - b)) {
+        if (out.length >= limit) return;
         const frame = group.frames.get(objectId) as SequencedFrame;
+        group.frames.delete(objectId);
+        floor = id;
         if (frame.timestampUs < lateBefore) {
           stats.late++;
           newestLate = { groupId: id, group: { frames: new Map([[objectId, frame]]), ended: true, reset: false } };
@@ -311,13 +320,35 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         }
         deliver(frame, out);
       }
+      groups.delete(id);
     }
+  };
+
+  // Bound what is held when nobody polls: past the bound, everything held is dropped and the next frame is a gap.
+  const boundHeld = () => {
+    if (++sinceHeldCheck < 64) return;
+    sinceHeldCheck = 0;
+    let held = newestLate?.group.frames.size ?? 0;
+    let highest = newestLate?.groupId;
+    for (const [id, group] of groups) {
+      held += group.frames.size;
+      highest = highest === undefined ? id : Math.max(highest, id);
+    }
+    if (held <= MAX_HELD_FRAMES || highest === undefined) return;
+    stats.late += held;
+    stats.skippedGroups += groups.size;
+    groups.clear();
+    newestLate = undefined;
+    starvedAtUs = undefined;
+    cursor = undefined;
+    floor = Math.max(floor ?? highest, highest);
+    if (deliveredSinceRestart) pending ??= 'gap';
   };
 
   // Nothing within the budget for a whole target latency: deliver the newest late group or frame, and reset the
   // clock so it re-anchors there. A lasting increase in delay must not keep the player black or silent.
   const resyncWait = (out: SequencedFrame[]): number | undefined => {
-    if (starvedAtUs === undefined || !newestLate) return undefined;
+    if (starvedAtUs === undefined || !newestLate || out.length >= limit) return undefined;
     const positionUs = clock.position();
     if (positionUs === undefined) return undefined;
     const wait = starvedAtUs + clock.targetLatencyUs - positionUs;
@@ -394,6 +425,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       const group = groupOf(object.groupId);
       if (group.frames.has(object.objectId)) return;
       group.frames.set(object.objectId, frameOf(object, timestampUs));
+      boundHeld();
     },
     groupEnded,
     groupReset,
@@ -408,7 +440,11 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       pending = deliveredSinceRestart || pending !== undefined ? 'restart' : undefined;
       deliveredSinceRestart = false;
     },
-    poll() {
+    poll(maxFrames) {
+      if (maxFrames !== undefined && !(Number.isSafeInteger(maxFrames) && maxFrames > 0)) {
+        throw new RangeError('maxFrames must be a positive integer');
+      }
+      limit = maxFrames ?? Number.POSITIVE_INFINITY;
       const frames: SequencedFrame[] = [];
       let waitUs: number | undefined;
       if (keyframeGrouping) waitUs = pollKeyframes(frames);

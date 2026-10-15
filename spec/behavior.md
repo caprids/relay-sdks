@@ -1326,11 +1326,14 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
   over, and the next frame carries `restart`. A Move also brings the new subscription's track
   properties.
-- `poll()` returns the frames ready now and how long until a wait can end, or nothing when only a
-  new object can change it. While the clock is idle and frames are held, it asks to be polled again
-  after 50 ms, since the clock may anchor without any new object. The TypeScript reader polls after
-  every event and again when that time comes, and hands each frame to `onFrame`. The Python reader
-  is iterated and polls as it is read, so a slow reader gets fresh frames, not a backlog. Both treat
+- `poll()` returns the frames ready now, at most `maxFrames` / `max_frames` (a positive integer;
+  default all), and how long until a wait can end, or nothing when only a new object can change it.
+  Frames not taken stay held and are judged again at the next poll. While the clock is idle and
+  frames are held, it asks to be polled again after 50 ms, since the clock may anchor without any
+  new object. At most about 1,024 frames are held: past that, as when nothing polls, everything
+  held is dropped as late and the next frame carries `gap`. The TypeScript reader polls after every
+  event and again when that time comes, and hands each frame to `onFrame`. The Python reader is
+  iterated and takes one frame per read, so a slow reader gets fresh frames, not a backlog. Both treat
   each group as one subgroup, as the frame writer sends it. A want read through a reader keeps
   `drainMs` / `drain` at 0, the default: a drained old subscription's groups would arrive after the
   Move, indistinguishable from the new subscription's. Counters: delivered, late,

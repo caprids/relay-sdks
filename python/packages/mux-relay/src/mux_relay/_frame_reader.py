@@ -8,7 +8,6 @@ and the LOC format, so this package stays free of the format package. See the "M
 from __future__ import annotations
 
 import asyncio
-from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Generic, Protocol, TypeVar
 
@@ -44,7 +43,7 @@ class FrameReaderSequencer(Protocol[F_co]):
 
     def restart(self) -> None: ...
 
-    def poll(self) -> FrameReaderPoll[F_co]: ...
+    def poll(self, max_frames: int | None = None) -> FrameReaderPoll[F_co]: ...
 
 
 class FrameReader(Generic[F]):
@@ -60,8 +59,6 @@ class FrameReader(Generic[F]):
 
     def __init__(self, sequencer: FrameReaderSequencer[F]) -> None:
         self._sequencer = sequencer
-        # The frames of the latest poll not yet read.
-        self._ready: deque[F] = deque()
         self._changed: asyncio.Event | None = None
         self._closed = False
 
@@ -73,7 +70,6 @@ class FrameReader(Generic[F]):
     def close(self) -> None:
         """Stop delivering and drop frames not yet read. Later events are ignored."""
         self._closed = True
-        self._ready.clear()
         self._wake()
 
     def __aiter__(self) -> FrameReader[F]:
@@ -81,12 +77,10 @@ class FrameReader(Generic[F]):
 
     async def __anext__(self) -> F:
         while not self._closed:
-            if self._ready:
-                return self._ready.popleft()
-            result = self._sequencer.poll()
+            # One frame per read: whatever waits stays in the sequencer, judged late when it is taken.
+            result = self._sequencer.poll(1)
             if result.frames:
-                self._ready.extend(result.frames)
-                continue
+                return result.frames[0]
             changed = self._changed = self._changed or asyncio.Event()
             changed.clear()
             timeout = None if result.wait_us is None else result.wait_us / 1_000_000

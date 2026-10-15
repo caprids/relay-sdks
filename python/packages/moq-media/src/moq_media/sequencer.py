@@ -24,6 +24,8 @@ the clock), ``restart`` (the subscription was replaced: a want's Restart or Move
 _KEYFRAMES_KEPT = 8
 # While the clock is idle and frames are held, poll again after this long: the clock may have anchored meanwhile.
 _IDLE_RECHECK_US = 50_000
+# At most this many frames are held, about 20 s of audio; beyond it everything held is dropped as a gap.
+_MAX_HELD_FRAMES = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,6 +116,9 @@ class FrameSequencer:
         # The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
         self._newest_late: tuple[int, _Group] | None = None
         self._keyframes: dict[int, int] = {}
+        # The most frames one poll may return.
+        self._limit: float = math.inf
+        self._since_held_check = 0
 
     # --- events
 
@@ -144,6 +149,7 @@ class FrameSequencer:
         if obj.object_id in group.frames:
             return
         group.frames[obj.object_id] = self._frame_of(obj, timestamp)
+        self._bound_held()
 
     def group_ended(self, group_id: int) -> None:
         """A group's stream ended cleanly: no further objects of it will come."""
@@ -173,8 +179,16 @@ class FrameSequencer:
         self._pending = "restart" if self._delivered_since_restart or self._pending is not None else None
         self._delivered_since_restart = False
 
-    def poll(self) -> SequencerPoll:
-        """Take the frames that are ready, and when to poll again."""
+    def poll(self, max_frames: int | None = None) -> SequencerPoll:
+        """Take the frames that are ready, at most ``max_frames`` (default all), and when to poll again.
+
+        A reader that cannot take frames as they come polls one at a time, so each is judged late when it is taken.
+        """
+        if max_frames is not None and (
+            isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames < 1
+        ):
+            raise ValueError("max_frames must be a positive integer")
+        self._limit = math.inf if max_frames is None else max_frames
         out: list[SequencedFrame] = []
         wait = self._poll_keyframes(out) if self._keyframe_grouping else self._poll_frames(out)
         resync = self._resync(out)
@@ -270,6 +284,8 @@ class FrameSequencer:
             return 0 if self._last_delivered_us is None else self._last_delivered_us + target - position
 
         while True:
+            if len(out) >= self._limit:
+                return None
             cursor = self._cursor
             nxt = None if self._floor is None else self._floor + 1
             # A group that ended or was reset without its keyframe can never be delivered; only the next group's says
@@ -349,12 +365,12 @@ class FrameSequencer:
         position = self._clock.position_us()
         late_before = -math.inf if position is None else position - self._clock.late_drop_us
         for group_id in sorted(self._groups):
-            group = self._groups.pop(group_id)
-            if not group.frames:
-                continue
-            self._floor = group_id
+            group = self._groups[group_id]
             for object_id in sorted(group.frames):
-                frame = group.frames[object_id]
+                if len(out) >= self._limit:
+                    return None
+                frame = group.frames.pop(object_id)
+                self._floor = group_id
                 if frame.timestamp_us < late_before:
                     self.stats.late += 1
                     self._newest_late = (group_id, _Group({object_id: frame}, ended=True))
@@ -364,12 +380,39 @@ class FrameSequencer:
                         self._pending = "gap"
                     continue
                 self._deliver(frame, out)
+            del self._groups[group_id]
         return None
+
+    def _bound_held(self) -> None:
+        """Bound what is held when nobody polls: past the bound, everything held is dropped and the next frame is a
+        gap."""
+        self._since_held_check += 1
+        if self._since_held_check < 64:
+            return
+        self._since_held_check = 0
+        late = self._newest_late
+        held = len(late[1].frames) if late else 0
+        ids = [late[0]] if late else []
+        for group_id, group in self._groups.items():
+            held += len(group.frames)
+            ids.append(group_id)
+        if held <= _MAX_HELD_FRAMES or not ids:
+            return
+        self.stats.late += held
+        self.stats.skipped_groups += len(self._groups)
+        self._groups.clear()
+        self._newest_late = None
+        self._starved_at_us = None
+        self._cursor = None
+        highest = max(ids)
+        self._floor = highest if self._floor is None else max(self._floor, highest)
+        if self._delivered_since_restart and self._pending is None:
+            self._pending = "gap"
 
     def _resync(self, out: list[SequencedFrame]) -> float | None:
         """Nothing within the budget for a whole target latency: deliver the newest late group or frame, and reset
         the clock so it re-anchors there. A lasting increase in delay must not keep the player black or silent."""
-        if self._starved_at_us is None or self._newest_late is None:
+        if self._starved_at_us is None or self._newest_late is None or len(out) >= self._limit:
             return None
         position = self._clock.position_us()
         if position is None:

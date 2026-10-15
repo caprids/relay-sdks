@@ -114,3 +114,32 @@ def test_waits_on_a_gap_while_the_clock_is_idle_until_the_group_ends_checking_ba
 def test_rejects_an_unknown_grouping() -> None:
     with pytest.raises(ValueError):
         FrameSequencer(PlayoutClock(), grouping="gop")  # ty: ignore[invalid-argument-type]
+
+
+def test_takes_at_most_max_frames_judging_each_when_taken() -> None:
+    now = [0]
+    clock = PlayoutClock(now_us=lambda: now[0])
+    clock.report_audio(0)
+    sequencer = FrameSequencer(clock, grouping="frame")
+    for index in range(3):
+        sequencer.object(obj(index, 0, stamp(100_000 + index * 20_000)))
+    assert [f.group_id for f in sequencer.poll(1).frames] == [0]
+    now[0] = 5_000_000
+    clock.report_audio(5_000_000)
+    sequencer.object(obj(3, 0, stamp(5_100_000)))
+    assert [(f.group_id, f.discontinuity) for f in sequencer.poll(1).frames] == [(3, "gap")]
+    assert sequencer.stats.late == 2
+    with pytest.raises(ValueError):
+        sequencer.poll(0)
+
+
+def test_bounds_what_it_holds_when_nobody_polls() -> None:
+    sequencer = FrameSequencer(PlayoutClock(now_us=lambda: 0))
+    sequencer.object(obj(0, 0, stamp(0)))
+    assert len(sequencer.poll().frames) == 1
+    for index in range(1, 3000):
+        sequencer.object(obj(index // 30, index % 30, stamp(index * 33_333)))
+    frames = sequencer.poll().frames
+    assert len(frames) <= 1100
+    assert frames[0].key and frames[0].discontinuity == "gap"
+    assert sequencer.stats.late > 1800
