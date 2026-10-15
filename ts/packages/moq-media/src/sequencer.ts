@@ -493,7 +493,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       lastDeliveredUs = undefined;
       starve = undefined;
       newestLate = undefined;
-      pending = deliveredSinceRestart || pending !== undefined ? 'restart' : undefined;
+      // Always marked: the clock was reset, and whatever else plays on it must hear of that.
+      pending = 'restart';
       deliveredSinceRestart = false;
     },
     poll(maxFrames) {

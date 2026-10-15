@@ -307,6 +307,16 @@
         { "at": "100000", "poll": { "frames": [["0", "0", "restart"]], "waitUs": "50000" } },
         { "at": "100000", "stats": { "delivered": "2", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
+    },
+    {
+      "name": "a restart before anything was delivered still marks the next frame, since the clock was reset",
+      "steps": [
+        { "at": "0", "anchor": "5000000" },
+        { "at": "0", "restart": true },
+        { "at": "0", "object": ["0", "0", "0"] },
+        { "at": "0", "poll": { "frames": [["0", "0", "restart"]], "waitUs": "50000" } },
+        { "at": "0", "stats": { "delivered": "1", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
     }
   ]
 }

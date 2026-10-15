@@ -197,7 +197,8 @@ class FrameSequencer:
         self._last_delivered_us = None
         self._starve = None
         self._newest_late = None
-        self._pending = "restart" if self._delivered_since_restart or self._pending is not None else None
+        # Always marked: the clock was reset, and whatever else plays on it must hear of that.
+        self._pending = "restart"
         self._delivered_since_restart = False
 
     def poll(self, max_frames: int | None = None) -> SequencerPoll:

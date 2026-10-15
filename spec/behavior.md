@@ -1319,7 +1319,7 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   than the clock's `lateDropUs` behind the position is dropped, so a burst after a stall cannot
   build a lasting backlog in the player; one behind what was delivered is dropped too. Nothing waits.
 - The first frame after anything was skipped carries the discontinuity `gap`; a decoder resets
-  there, as at a keyframe it can start from. Nothing is marked before the first delivery.
+  there, as at a keyframe it can start from. No gap is marked before the first delivery.
 - Resync: once frames have arrived but none within the budget for one whole target latency of the
   position, with their lateness steady (within a quarter of the target latency of where it stood
   when the wait began, judged on every late object, held or arriving; a stall's growing lateness
