@@ -296,6 +296,7 @@ export async function runAvSyncScenario(options: ScenarioOptions): Promise<Scena
       const stats = snapshot();
       phases.push({ phase, startUs: performance.now() * 1000, ...(note ? { note } : {}), audio, stats });
       const { framesShown, framesDropped, lastVideoOffsetMs, audioFrames, reports, discontinuities } = stats;
+      const readers = JSON.parse(JSON.stringify(stats.readers));
       const audioAheadMs = playing.audioAheadMs();
       await options.report({
         phase,
@@ -306,6 +307,7 @@ export async function runAvSyncScenario(options: ScenarioOptions): Promise<Scena
         reports,
         discontinuities,
         audioAheadMs,
+        readers,
       });
     };
     const hold = async (ms: number) => {

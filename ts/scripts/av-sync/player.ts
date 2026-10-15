@@ -12,6 +12,7 @@ import {
   CATALOG_TRACK,
   createFrameSequencer,
   createPlayoutClock,
+  type FrameSequencerStats,
   type MsfCatalogTrack,
   type PlayoutClock,
   type PlayoutClockOptions,
@@ -65,6 +66,8 @@ export interface PlayerStats {
   lastVideoOffsetMs: number | undefined;
   /** Video frames that reset the decoder: a gap, a resync, or a restart. */
   discontinuities: number;
+  /** Each track's frame sequencer counters, cumulative. */
+  readers: Record<string, Readonly<FrameSequencerStats>>;
 }
 
 /** A running player. */
@@ -110,6 +113,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     modes: {},
     lastVideoOffsetMs: undefined,
     discontinuities: 0,
+    readers: {},
   };
   const subscriptions: RelaySubscription[] = [];
   let stopped = false;
@@ -210,9 +214,15 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
   let scheduledUntilS = 0;
   const pendingBeeps: { timestampUs: number; contextS: number }[] = [];
   let audioPaused = false;
-  let reanchorAudio = false;
   // Scheduled audio not yet played: a resync stops it, so the backlog it was anchored on does not keep playing.
   let scheduled: { source: AudioBufferSourceNode; endS: number }[] = [];
+  const dropScheduledAudio = () => {
+    for (const { source } of scheduled) source.stop();
+    scheduled = [];
+    pendingBeeps.length = 0;
+    scheduledFromS = Number.POSITIVE_INFINITY;
+    scheduledUntilS = 0;
+  };
   const contextTimeOf = (mediaUs: number) => (anchor ? anchor.contextS + (mediaUs - anchor.mediaUs) / 1e6 : 0);
   const audioDecoder = new AudioDecoder({
     output(data) {
@@ -223,14 +233,11 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
         data.close();
         stats.audioFrames++;
         let startS = contextTimeOf(timestamp);
-        if (!anchor || reanchorAudio || startS > context.currentTime + jitterS + MAX_EXTRA_AHEAD_S) {
-          // First audio, a resync or restart, or a schedule that has drifted ahead of the jitter buffer's depth (the
-          // context's clock stalled): (re)start the jitter buffer at this frame, so its depth stays what it was set to.
-          reanchorAudio = false;
-          for (const { source } of scheduled) source.stop();
-          scheduled = [];
-          pendingBeeps.length = 0;
-          scheduledUntilS = 0;
+        if (!anchor || startS > context.currentTime + jitterS + MAX_EXTRA_AHEAD_S) {
+          // First audio, after a resync or restart, or a schedule that has drifted ahead of the jitter buffer's depth
+          // (the context's clock stalled): (re)start the jitter buffer at this frame, so its depth stays what it was set
+          // to.
+          dropScheduledAudio();
           anchor = { mediaUs: timestamp, contextS: context.currentTime + jitterS };
           scheduledFromS = anchor.contextS;
           startS = anchor.contextS;
@@ -313,11 +320,13 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
 
   // Either track's resync or restart reset the shared clock: decoded video waiting for its time, and audio scheduled on
   // the old anchor, belong to the old clock. Neither reader need mark the other track's next frame, so both act here.
+  // Audio goes at once, so no report from the old schedule reaches the reset clock; the next audio anchors anew.
   const clockReset = () => {
     for (const { frame: waiting } of queue.splice(0)) waiting.close();
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
-    reanchorAudio = true;
+    dropScheduledAudio();
+    anchor = undefined;
   };
 
   // Each track is read through a frame reader: in decode order, with what is too late against the clock's target
@@ -359,7 +368,9 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       },
     ],
   ] as const) {
-    const reader = createFrameReader(createFrameSequencer({ clock, grouping }), {
+    const sequencer = createFrameSequencer({ clock, grouping });
+    stats.readers[track] = sequencer.stats;
+    const reader = createFrameReader(sequencer, {
       onFrame(frame) {
         if (stopped) return;
         try {
