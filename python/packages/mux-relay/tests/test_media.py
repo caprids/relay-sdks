@@ -12,6 +12,7 @@ import pytest
 from core_helpers.waiting import settle, wait_for
 from relay_helpers.fake_track_writer import FakeGroupWriter, FakeTrackWriter, changed_error, closed_error, timeout_error
 from relay_helpers.relay_hub import create_relay_hub
+from test_write_slot import Harness
 
 from moq_core import KeyValuePair, MoqtObject
 from moq_core.transport import SendStream
@@ -477,6 +478,29 @@ class TestFrameGrouping:
 
         assert track.groups[0].aborts == [None]
         monkeypatch.setattr(track, "open_group", open_group)
+        assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
+
+    @pytest.mark.parametrize("held", ["stream-open", "object-write"])
+    async def test_a_caller_cancelled_while_its_keyframe_opens_frees_the_real_write_slot(self, held: str) -> None:
+        # Cancelling the caller cancels the open it awaits: the operation resets its stream and frees the slot,
+        # including a stream that opens only after the cancellation.
+        h = Harness(open="hold") if held == "stream-open" else Harness(stall="write")
+        h.writer._bind(1)
+        writer: FrameWriter[Sample] = FrameWriter(h.writer)
+        caller = asyncio.create_task(writer.write(key(0)))
+        await wait_for(lambda: h.holding if held == "stream-open" else bool(h.opened) and h.opened[0].stalled)
+
+        caller.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        if held == "stream-open":
+            h._open = "ok"  # only the cancelled keyframe's open is held
+            h.release_open()
+            await settle()
+
+        assert len(h.opened[0].aborts) == 1
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
 
     async def test_task_cancellation_inside_a_write_resets_the_group_and_propagates(self) -> None:
