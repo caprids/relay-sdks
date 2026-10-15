@@ -278,9 +278,25 @@ describe('backlog', () => {
     const third = writer.write(key());
     expect((await second).kind).toBe('dropped');
     track.release();
-    expect(await first).toEqual({ kind: 'dropped', groupId: 0 });
+    // The keyframe's group was still opening, so it has no writer to name: the stream that opens late is reset unused.
+    expect(await first).toEqual({ kind: 'dropped' });
     expect(track.groups[0]?.aborted).toBe(true);
     expect(track.groups[0]?.objects).toEqual([]);
+    expect(await third).toEqual({ kind: 'sent', groupId: 1 });
+  });
+
+  it('drops a group whose keyframe the stalled transport was still taking when the backlog overflowed', async () => {
+    const track = slotTrack();
+    const writer = createFrameWriter(track.writer, { maxBacklog: 1 });
+    track.stall();
+    const first = writer.write(key());
+    const second = writer.write(delta());
+    await settle();
+    const third = writer.write(key());
+    expect((await second).kind).toBe('dropped');
+    expect(await first).toEqual({ kind: 'dropped' });
+    expect(track.groups[0]?.aborted).toBe(true);
+    track.release();
     expect(await third).toEqual({ kind: 'sent', groupId: 1 });
   });
 
@@ -411,6 +427,49 @@ describe('lateness and discontinuity', () => {
     expect((await writer.write(delta({ discontinuity: true }))).kind).toBe('stale');
     expect(onKeyframeNeeded).toHaveBeenCalledTimes(1);
   });
+
+  it('opens a keyframe group with the keyframe as object 0, carrying its properties', async () => {
+    const track = slotTrack();
+    const writer = createFrameWriter(track.writer);
+    const properties = [{ type: 0x02, value: 500 }];
+    expect(await writer.write(key({ properties }))).toEqual({ kind: 'sent', groupId: 0 });
+    expect(track.groups[0]?.objects).toEqual([expect.objectContaining({ properties })]);
+    expect(writer.objects).toBe(1);
+  });
+
+  it('checks staleness again once a keyframe has opened its group, resetting it', async () => {
+    let calls = 0;
+    const onKeyframeNeeded = vi.fn();
+    const track = slotTrack();
+    // A keyframe is checked on arrival, after the previous group's FIN, and once its own group has opened.
+    const writer = createFrameWriter(track.writer, { stale: () => ++calls === 3, onKeyframeNeeded });
+    expect(await writer.write(key())).toEqual({ kind: 'stale', groupId: 0 });
+    expect(track.groups[0]?.aborted).toBe(true);
+    expect(onKeyframeNeeded).toHaveBeenCalledTimes(1);
+    expect((await writer.write(delta())).kind).toBe('stale');
+    expect(await writer.write(key())).toEqual({ kind: 'sent', groupId: 1 });
+  });
+
+  it.each(['keyframe', 'frame'] as const)(
+    'reports a %s-grouped frame whose group waited out its delivery timeout as interrupted',
+    async (grouping) => {
+      vi.useFakeTimers();
+      const track = slotTrack({ trackTimeouts: { objectMs: 50 } });
+      const writer = createFrameWriter(track.writer, { grouping });
+      track.stallOpen();
+      const outcome = writer.write(key());
+      await vi.advanceTimersByTimeAsync(50);
+      expect(await outcome).toMatchObject({
+        kind: 'interrupted',
+        error: { code: 'DELIVERY_TIMEOUT', phase: 'opening-stream' },
+      });
+      expect(writer.keyframeNeeded).toBe(grouping === 'keyframe');
+      track.release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(track.groups[0]?.aborted).toBe(true);
+      expect(await writer.write(key())).toEqual({ kind: 'sent', groupId: 1 });
+    },
+  );
 
   it('checks staleness again once a frame-grouped stream has opened', async () => {
     let calls = 0;

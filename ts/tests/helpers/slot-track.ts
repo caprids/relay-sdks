@@ -1,4 +1,4 @@
-import { NO_DELIVERY_TIMEOUTS } from '../../src/delivery-timeouts.js';
+import { type DeliveryTimeouts, NO_DELIVERY_TIMEOUTS } from '../../src/delivery-timeouts.js';
 import type { PublishProperty } from '../../src/index.js';
 import { createSettlingGroups } from '../../src/settling-groups.js';
 import { createWriteSlot } from '../../src/write-slot.js';
@@ -21,7 +21,9 @@ export interface RecordedGroup {
  * A registered track over the real write slot, with an in-memory subgroup stream: the media publishing tests drive the
  * same demand, slot and interruption behaviour the publisher connection does.
  */
-export function slotTrack(options: { demand?: boolean; writeTimeoutMs?: number } = {}) {
+export function slotTrack(
+  options: { demand?: boolean; writeTimeoutMs?: number; trackTimeouts?: Partial<DeliveryTimeouts> } = {},
+) {
   const groups: RecordedGroup[] = [];
   /** Object writes that wait for `release()` before the stream takes them. */
   let stalled = false;
@@ -38,7 +40,7 @@ export function slotTrack(options: { demand?: boolean; writeTimeoutMs?: number }
     assertOpen() {},
     endTrack() {},
     writeTimeoutMs: options.writeTimeoutMs ?? 10_000,
-    trackTimeouts: NO_DELIVERY_TIMEOUTS,
+    trackTimeouts: { ...NO_DELIVERY_TIMEOUTS, ...options.trackTimeouts },
     subscriberTimeouts: () => NO_DELIVERY_TIMEOUTS,
     async openSubgroup(_alias, groupId) {
       if (stalledOpen) await new Promise<void>((resolve) => held.push(resolve));

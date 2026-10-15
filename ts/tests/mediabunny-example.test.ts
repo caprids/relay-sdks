@@ -117,7 +117,7 @@ function recordingPublisher(
           closed = true;
           end();
         },
-        async openGroup() {
+        async openGroup(options) {
           if (!writer.hasDemand) throw new Error('Opened a group without demand');
           const frames: { payload: ArrayBufferView; properties: readonly PublishProperty[]; timeMs: number }[] = [];
           groups.push(frames);
@@ -156,6 +156,15 @@ function recordingPublisher(
             writeText: unused,
             writeJSON: unused,
           };
+          if (options?.payload !== undefined) {
+            // As the SDK does: the first object goes with the open, and a failure resets the group and returns none.
+            try {
+              await group.write(options.payload, options.properties ? { properties: options.properties } : {});
+            } catch (error) {
+              group.abort();
+              throw error;
+            }
+          }
           return group;
         },
         async write(payload, options) {

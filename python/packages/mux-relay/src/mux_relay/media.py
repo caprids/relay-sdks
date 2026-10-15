@@ -100,7 +100,9 @@ class _TrackWriter(Protocol):
 
     async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None: ...
 
-    async def open_group(self) -> _GroupWriter: ...
+    async def open_group(
+        self, payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
+    ) -> _GroupWriter: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,6 +114,12 @@ class FrameOutcome:
     """The failure behind ``interrupted`` or ``ended``."""
     group_id: int | None = None
     """The group the frame was written to, or the one opened or reset on its behalf."""
+
+
+def _cancelling() -> bool:
+    """Whether the running task itself is being cancelled, as opposed to a task it awaits."""
+    task = asyncio.current_task()
+    return task is not None and task.cancelling() > 0
 
 
 def _retired(track: _TrackWriter, error: RelayError) -> bool:
@@ -193,6 +201,7 @@ class FrameWriter(Generic[F]):
         "_max_backlog",
         "_objects",
         "_on_keyframe_needed",
+        "_opening",
         "_recovering",
         "_stale",
         "_track",
@@ -248,6 +257,8 @@ class FrameWriter(Generic[F]):
         self._dropped_group: int | None = None
         self._drop_epoch = 0
         self._finishing: _GroupWriter | None = None
+        # The open_group a keyframe is opening its group with: an overflow cancels it, which resets the group.
+        self._opening: asyncio.Task[_GroupWriter] | None = None
         self._keyframe_needed = grouping == "keyframe"
         self._closed = False
         self._ended: RelayError | None = None
@@ -585,24 +596,48 @@ class FrameWriter(Generic[F]):
                 self._key_opening = False
                 return FrameOutcome("skipped")
 
+            # The keyframe opens its group as object 0, so its delivery timeout counts the wait for the stream (§5.2).
+            opening = self._loop.create_task(self._track.open_group(frame.payload, properties=frame.properties))
+            self._opening = opening
+
             try:
-                group = await self._track.open_group()
+                group = await opening
             except RelayError as error:
                 if self._drop_epoch != epoch:
                     return FrameOutcome("dropped")
 
                 return self._failed(error, group_id=None)
+            except asyncio.CancelledError:
+                if self._drop_epoch != epoch and opening.cancelled() and not _cancelling():
+                    # The overflow cancelled the opening, which reset the group: it has no writer to name.
+                    return FrameOutcome("dropped")
+
+                raise
+            finally:
+                if self._opening is opening:
+                    self._opening = None
 
             self._groups += 1
+            self._objects += 1
+            # From here the open group itself says whether a demand change was recovered from.
+            self._key_opening = False
 
             if self._drop_epoch != epoch:
-                # Opened for a frame the overflow dropped meanwhile; it never gets its keyframe.
+                # The overflow came as the open completed: the transport took the keyframe, but it will not arrive.
                 group.abort()
                 return FrameOutcome("dropped", group_id=group.group_id)
 
+            # Held before the predicate runs, so a predicate that raises still has the group reset.
             self._group = group
-            # From here the open group itself says whether a demand change was recovered from.
-            self._key_opening = False
+
+            if self._stale(frame):
+                # Opening the group took long enough that its keyframe is too old: a reset costs less than a late GOP.
+                self._recovering = True
+                reset = self._reset_group()
+                self._need_keyframe()
+                return FrameOutcome("stale", group_id=reset)
+
+            return FrameOutcome("sent", group_id=group.group_id)
 
         if self._group is None:
             # No demand when the GOP started, or the group was lost: wait for the next keyframe.
@@ -639,6 +674,9 @@ class FrameWriter(Generic[F]):
         group = self._group or self._finishing
         self._group = None
         self._finishing = None
+
+        if self._opening is not None:
+            self._opening.cancel()
 
         if group is None:
             return None
@@ -684,24 +722,24 @@ class FrameWriter(Generic[F]):
         if not self._track.has_demand:
             return FrameOutcome("skipped")
 
+        # The frame opens its group as object 0, so its delivery timeout counts the wait for the stream (§5.2).
         try:
-            group = await self._track.open_group()
+            group = await self._track.open_group(frame.payload, properties=frame.properties)
         except RelayError as error:
             return self._failed(error, group_id=None)
 
         self._groups += 1
+        self._objects += 1
 
         # From here on the group holds the track's write slot: whatever happens, including the
         # caller's own predicate raising, it is reset before this method is left.
         try:
             if self._stale(frame):
-                # Opening the stream took long enough that the frame is too old; a reset costs less
+                # Opening the group took long enough that the frame is too old; a reset costs less
                 # than a late frame.
                 group.abort()
                 return FrameOutcome("stale", group_id=group.group_id)
 
-            await group.write(frame.payload, properties=frame.properties)
-            self._objects += 1
             await group.close()
         except RelayError as error:
             group.abort()

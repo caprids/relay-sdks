@@ -134,10 +134,10 @@ class TestKeyframeGrouping:
 
         writer = FrameWriter(track, stale=answers(False, False, True))
 
-        # Fresh before and after the FIN, stale once the stream is open: the new group is reset and named.
+        # Fresh before and after the FIN, stale once the keyframe has opened its group: the group is reset and named.
         assert await writer.write(key(3)) == FrameOutcome("stale", group_id=1)
-        assert track.groups[1].aborts == [None] and track.groups[1].objects == []
-        assert (writer.groups, writer.objects) == (1, 0)
+        assert track.groups[1].aborts == [None] and track.groups[1].payloads == [b"key"]
+        assert (writer.groups, writer.objects) == (1, 1), "the keyframe went out with the open; the reset withdraws it"
 
     async def test_an_interrupted_group_write_resets_the_group_and_the_next_keyframe_opens_another(self) -> None:
         track = FakeTrackWriter()
@@ -172,7 +172,8 @@ class TestKeyframeGrouping:
         track.fail("group-write", error)
         writer: FrameWriter[Sample] = FrameWriter(track)
 
-        assert await writer.write(key(0)) == FrameOutcome("ended", error=error, group_id=0)
+        # The keyframe failed inside the open: no group writer came back to name.
+        assert await writer.write(key(0)) == FrameOutcome("ended", error=error)
         assert writer.ended is error and writer.closed
         assert await writer.write(key(1)) == FrameOutcome("ended", error=error)
         assert len(track.groups) == 1, "a retired writer never touches the track again"
@@ -216,7 +217,7 @@ class TestKeyframeGrouping:
         track.fail("group-write", error, retire=True)
         writer: FrameWriter[Sample] = FrameWriter(track)
 
-        assert await writer.write(key(0)) == FrameOutcome("ended", error=error, group_id=0)
+        assert await writer.write(key(0)) == FrameOutcome("ended", error=error)
         assert writer.ended is error
 
     async def test_a_transient_error_with_demand_gone_is_only_an_interruption(self) -> None:
@@ -291,7 +292,7 @@ class TestKeyframeGrouping:
         assert not track.groups[0].finished, "a cancelled group is abandoned, never FINned"
         await writer.close()
         assert track.groups[1].finished and writer.closed
-        assert (writer.groups, writer.objects) == (2, 2)
+        assert (writer.groups, writer.objects) == (1, 2), "the cancelled open returned no group"
 
     async def test_a_frame_the_sdk_rejects_resets_the_group_and_propagates(self) -> None:
         # An oversized payload or a bad property is a programming error the SDK raises before the
@@ -312,7 +313,7 @@ class TestKeyframeGrouping:
 
     @pytest.mark.parametrize("raising_call", [3, 4])
     async def test_a_stale_predicate_that_raises_resets_the_gop_in_progress(self, raising_call: int) -> None:
-        # Call 3 is the check after the keyframe's group opened: the group never gets its keyframe.
+        # Call 3 is the check after the keyframe opened its group with itself: the group is reset.
         # Call 4 is the next delta's first check: the group has its keyframe but would lose a delta.
         # Either way the next delta must not be sent into that group, and the slot must be free.
         calls = 0
@@ -338,7 +339,7 @@ class TestKeyframeGrouping:
         assert await kinds(writer, [delta(2)]) == ["skipped"], "never object 0 of a group without its keyframe"
         assert await kinds(writer, [key(3), delta(4)]) == ["sent", "sent"]
         assert track.groups[1].payloads == [b"key", b"delta"]
-        assert track.groups[0].payloads == ([] if raising_call == 3 else [b"key"])
+        assert track.groups[0].payloads == [b"key"]
 
     def test_grouping_is_checked_as_an_argument(self) -> None:
         with pytest.raises(TypeError):
@@ -374,8 +375,8 @@ class TestFrameGrouping:
         assert await writer.write(key(0)) == FrameOutcome("stale")
         assert track.groups == []
         assert await writer.write(key(1)) == FrameOutcome("stale", group_id=0)
-        assert track.groups[0].aborts == [None] and track.groups[0].objects == []
-        assert (writer.groups, writer.objects) == (1, 0), "the group was opened, nothing was accepted"
+        assert track.groups[0].aborts == [None] and track.groups[0].payloads == [b"key"]
+        assert (writer.groups, writer.objects) == (1, 1), "the frame went out with the open; the reset withdraws it"
 
     async def test_an_interrupted_frame_resets_its_group_and_the_next_frame_proceeds(self) -> None:
         track = FakeTrackWriter()
@@ -383,10 +384,11 @@ class TestFrameGrouping:
         track.fail("group-write", error)
         writer: FrameWriter[Sample] = FrameWriter(track, grouping="frame")
 
-        assert await writer.write(key(0)) == FrameOutcome("interrupted", error=error, group_id=0)
+        # The frame failed inside the open: the group was reset and no writer came back to name.
+        assert await writer.write(key(0)) == FrameOutcome("interrupted", error=error)
         assert track.groups[0].aborts == [None]
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
-        assert (writer.groups, writer.objects) == (2, 1), "both groups were opened; one object was accepted"
+        assert (writer.groups, writer.objects) == (1, 1), "one open returned a group, with one object"
 
     async def test_a_failed_fin_is_an_interruption(self) -> None:
         track = FakeTrackWriter()
@@ -434,7 +436,7 @@ class TestFrameGrouping:
         with pytest.raises(RuntimeError, match="clock"):
             await writer.write(key(0))
 
-        assert track.groups[0].aborts == [None] and track.groups[0].objects == []
+        assert track.groups[0].aborts == [None] and track.groups[0].payloads == [b"key"]
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
 
     async def test_task_cancellation_inside_a_write_resets_the_group_and_propagates(self) -> None:
@@ -452,7 +454,7 @@ class TestFrameGrouping:
 
         track.block = None
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1), "nothing of the cancelled group lingers"
-        assert (writer.groups, writer.objects) == (2, 1)
+        assert (writer.groups, writer.objects) == (1, 1)
 
 
 def kinds_of(outcomes: Sequence[FrameOutcome]) -> list[str]:
