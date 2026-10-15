@@ -459,6 +459,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         if (!newestLate.group.frames.has(object.objectId)) {
           newestLate.group.frames.set(object.objectId, frameOf(object, timestampUs));
           stats.late++;
+          const positionUs = clock.position();
+          if (positionUs !== undefined) noteLate(positionUs, positionUs - timestampUs);
           boundHeld();
         }
         return;

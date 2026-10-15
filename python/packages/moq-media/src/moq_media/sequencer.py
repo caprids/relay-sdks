@@ -141,6 +141,9 @@ class FrameSequencer:
             if obj.object_id not in late[1].frames:
                 late[1].frames[obj.object_id] = self._frame_of(obj, timestamp)
                 self.stats.late += 1
+                position = self._clock.position_us()
+                if position is not None:
+                    self._note_late(position, position - timestamp)
                 self._bound_held()
             return
         if self._behind(obj.group_id, obj.object_id):

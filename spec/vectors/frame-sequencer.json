@@ -267,6 +267,20 @@
         { "at": "0", "poll": { "frames": [["3", "0", "resync"]], "waitUs": "50000" } },
         { "at": "0", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
+    },
+    {
+      "name": "a resync candidate whose later objects grow later restarts the wait",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "5000000", "object": ["1", "0", "1000000"] },
+        { "at": "5000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "6000000", "object": ["1", "1", "1033333"] },
+        { "at": "6000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "7000000", "object": ["1", "2", "1066666"] },
+        { "at": "7000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "9000000", "poll": { "frames": [["1", "0", "resync"], ["1", "1"], ["1", "2"]], "waitUs": "50000" } },
+        { "at": "9000000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
     }
   ]
 }
