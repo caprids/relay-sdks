@@ -127,7 +127,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   let deliveredSinceRestart = false;
   let pending: FrameDiscontinuity | undefined;
   // Starving: something arrived but none of it was within the budget, since this position, and late by about this much.
-  let starve: { sinceUs: number; latenessUs: number; resets: number } | undefined;
+  // The wait is measured on the clock's local time, which never jumps; the position can, when the clock re-anchors.
+  let starve: { sinceUs: number; sinceLocalUs: number; latenessUs: number; resets: number } | undefined;
   // The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
   let newestLate: { groupId: number; group: Group } | undefined;
   const keyframes = new Map<number, number>();
@@ -174,7 +175,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // anchor the clock on frames that are about to be caught up with.
   const noteLate = (positionUs: number, latenessUs: number) => {
     if (starve === undefined || Math.abs(latenessUs - starve.latenessUs) > clock.targetLatencyUs / 4) {
-      starve = { sinceUs: positionUs, latenessUs, resets: clock.resets };
+      starve = { sinceUs: positionUs, sinceLocalUs: clock.localNow(), latenessUs, resets: clock.resets };
     }
   };
 
@@ -402,7 +403,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     if (starve === undefined || !newestLate || out.length >= limit) return undefined;
     const positionUs = clock.position();
     if (positionUs === undefined) return undefined;
-    const wait = starve.sinceUs + clock.targetLatencyUs - positionUs;
+    const wait = starve.sinceLocalUs + clock.targetLatencyUs - clock.localNow();
     if (wait > 0) return wait;
     const { groupId, group } = newestLate;
     newestLate = undefined;
@@ -445,10 +446,12 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // over.
   const revisit = () => {
     const positionUs = clock.position();
-    // The timeline changed: the clock was reset (and perhaps re-anchored), or re-anchored behind where the wait began.
+    // The timeline changed: the clock was reset, or re-anchored so that its position no longer moved with local time.
     if (
       starve !== undefined &&
-      (positionUs === undefined || starve.resets !== clock.resets || positionUs < starve.sinceUs)
+      (positionUs === undefined ||
+        starve.resets !== clock.resets ||
+        Math.abs(positionUs - starve.sinceUs - (clock.localNow() - starve.sinceLocalUs)) > clock.targetLatencyUs / 4)
     ) {
       starve = undefined;
     }

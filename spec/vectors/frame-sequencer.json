@@ -397,6 +397,19 @@
         { "at": "12010000", "poll": { "frames": [["1", "0", "resync"]], "waitUs": null } },
         { "at": "12010000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
+    },
+    {
+      "name": "an audio report that re-anchors forward restarts the candidate's wait rather than completing it",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "10000000", "object": ["1", "0", "0"] },
+        { "at": "10000000", "groupEnd": "1" },
+        { "at": "10000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "10010000", "report": "20000000" },
+        { "at": "10010000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "12010000", "poll": { "frames": [["1", "0", "resync"]], "waitUs": null } },
+        { "at": "12010000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
     }
   ]
 }

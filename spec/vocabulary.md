@@ -526,6 +526,7 @@ uses classes, like `CatalogService` and `FrameWriter`.
 | Report the interval between consecutive keyframes | `reportKeyframeInterval(intervalUs)` | `report_keyframe_interval(interval_us)` |
 | The late-drop threshold, read back | `lateDropUs` | `late_drop_us` |
 | How many times the clock was reset, so a frame reader sees the timeline change | `resets` | `resets` |
+| The clock's local time source now, which a frame reader measures its waits in | `localNow()` | `local_now_us()` |
 | Injected time source | `now: MicrosecondClock` | `now_us: Callable[[], int]` |
 
 "Playout", not "playback": the clock decides when to present, and does not play anything. Python's

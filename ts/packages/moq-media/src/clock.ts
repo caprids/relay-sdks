@@ -266,6 +266,8 @@ export interface PlayoutClock {
   reportKeyframeInterval(intervalUs: number): void;
   /** How many times `reset()` has been called: a frame reader sees from it that the timeline changed under it. */
   readonly resets: number;
+  /** The clock's local time source now, in microseconds: what a frame reader measures its waits in. */
+  localNow(): number;
   /**
    * Forget every anchor, at a Restart, a Move, a resync, or a new catalog: the next frame anchors wall pacing. The
    * keyframe intervals reported so far are kept.
@@ -351,6 +353,9 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
     },
     get resets() {
       return resets;
+    },
+    localNow() {
+      return source();
     },
     reset() {
       anchor = undefined;

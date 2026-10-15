@@ -330,6 +330,10 @@ class PlayoutClock:
         self._anchor = None
         self._resets += 1
 
+    def local_now_us(self) -> float:
+        """The clock's local time source now, in microseconds: what a frame reader measures its waits in."""
+        return self._source()
+
     @property
     def resets(self) -> int:
         """How many times ``reset()`` has been called: a frame reader sees from it that the timeline changed."""

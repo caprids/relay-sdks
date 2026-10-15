@@ -116,7 +116,9 @@ class FrameSequencer:
         self._pending: FrameDiscontinuity | None = None
         # Starving: something arrived but none of it was within the budget, since this position, and late by about
         # this much.
-        self._starve: tuple[float, float, int] | None = None
+        # The wait is measured on the clock's local time, which never jumps; the position can, when the clock
+        # re-anchors. (position, local time, lateness, resets) when it began.
+        self._starve: tuple[float, float, float, int] | None = None
         # The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
         self._newest_late: tuple[int, _Group] | None = None
         self._keyframes: dict[int, int] = {}
@@ -264,8 +266,8 @@ class FrameSequencer:
         a stall (lateness growing) or a backlog draining (shrinking) is not a lasting change in delay, and a resync on
         it would anchor the clock on frames that are about to be caught up with."""
         starve = self._starve
-        if starve is None or abs(lateness - starve[1]) > self._clock.target_latency_us / 4:
-            self._starve = (position, lateness, self._clock.resets)
+        if starve is None or abs(lateness - starve[2]) > self._clock.target_latency_us / 4:
+            self._starve = (position, self._clock.local_now_us(), lateness, self._clock.resets)
 
     def _pass_over(self, group_id: int) -> _Group | None:
         """Mark a group as not delivered whole, and everything up to it as behind."""
@@ -478,9 +480,13 @@ class FrameSequencer:
         timeline starts over."""
         position = self._clock.position_us()
         starve = self._starve
-        # The timeline changed: the clock was reset (and perhaps re-anchored), or re-anchored behind where the wait
-        # began.
-        if starve is not None and (position is None or starve[2] != self._clock.resets or position < starve[0]):
+        # The timeline changed: the clock was reset, or re-anchored so that its position no longer moved with local
+        # time.
+        if starve is not None and (
+            position is None
+            or starve[3] != self._clock.resets
+            or abs(position - starve[0] - (self._clock.local_now_us() - starve[1])) > self._clock.target_latency_us / 4
+        ):
             self._starve = None
         late = self._newest_late
         if late is None or not late[1].frames:
@@ -523,7 +529,7 @@ class FrameSequencer:
         position = self._clock.position_us()
         if position is None:
             return None
-        wait = self._starve[0] + self._clock.target_latency_us - position
+        wait = self._starve[1] + self._clock.target_latency_us - self._clock.local_now_us()
         if wait > 0:
             return wait
         group_id, group = self._newest_late
