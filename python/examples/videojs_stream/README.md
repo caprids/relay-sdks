@@ -37,7 +37,7 @@ Options:
 | --- | --- |
 | `--input FILE` | Transcode a media file (video scaled to `--width`/`--height`; its audio as Opus with `--audio auto`) |
 | `--loop` | Loop the input file |
-| `--width`, `--height`, `--fps`, `--bitrate`, `--gop` | Test-pattern size and encoder settings (defaults 640x360, 30 fps, 1.5 Mbit/s target, 2 s GOP) |
+| `--width`, `--height`, `--fps`, `--bitrate`, `--gop` | Test-pattern size and encoder settings (defaults 640x360, 30 fps, 1.5 Mbit/s target, 1 s GOP) |
 | `--rate-control abr\|cbr` | `abr` (default): content-dependent bitrate target; `cbr`: add filler to approach the requested video bitrate for bandwidth tests |
 | `--audio auto\|tone\|off` | `auto` (default): the file's audio, or wall-hit beeps for the pattern; `tone`: a 440 Hz sine; `off`: video only |
 | `--duration SECONDS` | Stop after a while (default: until Ctrl-C) |
@@ -104,7 +104,7 @@ encoding the next one, so pending thread callbacks cannot become another unbound
 
 | Buffer | Maximum queued frames | Maximum queued payload | Stale after |
 | --- | --- | --- | --- |
-| Video | 120 | 16 MiB | One GOP (`--gop`, default 2 seconds) |
+| Video | 120 | 16 MiB | One GOP (`--gop`, default 1 second) |
 | Audio | 100 | 1 MiB | 250 ms |
 
 The first limit reached triggers discard. These bounds cover queued payloads; the encoder and one

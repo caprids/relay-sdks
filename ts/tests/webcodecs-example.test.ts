@@ -267,7 +267,7 @@ const timestampsOf = (groups: { properties: readonly PublishProperty[] }[][]) =>
 it('publishes native encoder output and retained config in keyframe groups, then releases resources', async () => {
   const session = run();
   const completion = expect(session.result).rejects.toThrow('Stopped');
-  await vi.advanceTimersByTimeAsync(2100);
+  await vi.advanceTimersByTimeAsync(1100);
   const video = session.tracks.get('video')!;
   expect(video.objects.length).toBe(2);
   expect(video.finished).toBe(1);
@@ -298,7 +298,7 @@ it('publishes native encoder output and retained config in keyframe groups, then
 it('publishes a media timeline entry for each keyframe group that went out', async () => {
   const session = run();
   const completion = expect(session.result).rejects.toThrow('Stopped');
-  await vi.advanceTimersByTimeAsync(2100);
+  await vi.advanceTimersByTimeAsync(1100);
   const video = session.tracks.get('video')!;
   const timeline = session.tracks.get('timeline')!;
   const catalog = JSON.parse(new TextDecoder().decode(session.tracks.get('catalog')!.objects[0]![0]!.bytes));
@@ -364,7 +364,7 @@ it.each(['video', 'catalog', 'timeline'])('keeps publishing through %s write fai
   });
   completion.catch(() => {});
   // A failed group is an interruption the frame writer absorbs; the services retry while demand lasts.
-  await vi.advanceTimersByTimeAsync(2100);
+  await vi.advanceTimersByTimeAsync(1100);
   expect(settled).toBe(false);
   expect(TestEncoder.instance.state).toBe('configured');
   const healthy = failTrack === 'video' ? 'catalog' : 'video';
@@ -408,7 +408,7 @@ it('drops a burst the stalled transport cannot take, asks for a keyframe, and ke
   // Eight deltas wait behind the stalled keyframe and the ninth overflows: the group and its backlog are dropped.
   const video = session.tracks.get('video')!;
   expect(video.aborted).toBe(1);
-  // The writer asked for a keyframe at once, instead of waiting out the 2 s interval.
+  // The writer asked for a keyframe at once, instead of waiting out the 1 s interval.
   expect(keyFrames.slice(0, 3)).toEqual([true, false, true]);
   // Capture waits while frames are waiting, so a stall costs encoded frames, not an unbounded queue of them.
   expect(frames.length).toBeLessThan(5);
