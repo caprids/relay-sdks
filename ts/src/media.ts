@@ -1,9 +1,10 @@
 /**
- * `@mux/relay/media`: the media publishing policy over registered tracks (spec/behavior.md, "Media publishing"). A
- * frame writer maps encoded frames onto a track's groups; a catalog service and a document service serve state-shaped
- * tracks, and `mediaTrackProperties` gives a media track its default delivery timeout. They know no format: a frame
- * carries its own object properties and a document is bytes, so they pair with `@mux/moq-media`'s LOC and MSF helpers
- * without depending on them.
+ * `@mux/relay/media`: the media policy over registered tracks and subscriptions (spec/behavior.md, "Media publishing"
+ * and "Media subscribing"). A frame writer maps encoded frames onto a track's groups; a catalog service and a document
+ * service serve state-shaped tracks, and `mediaTrackProperties` gives a media track its default delivery timeout; a
+ * frame reader reads a subscription as frames in decode order. They know no format: a frame carries its own object
+ * properties, a document is bytes, and the reader drives a sequencer it is given, so they pair with `@mux/moq-media`'s
+ * LOC and MSF helpers and its `FrameSequencer` without depending on them.
  *
  * ```ts
  * import { createCatalogService, createFrameWriter, mediaTrackProperties } from '@mux/relay/media';
@@ -28,6 +29,12 @@ export {
   type DocumentServiceOptions,
   type ServeOptions,
 } from './document-service.js';
+export {
+  createFrameReader,
+  type FrameReader,
+  type FrameReaderOptions,
+  type FrameReaderSequencer,
+} from './frame-reader.js';
 export {
   createFrameWriter,
   type Frame,

@@ -85,7 +85,7 @@ OPUS_RATE = 48_000
 OPUS_FRAME_SAMPLES = 960  # 20 ms
 BOUNCE_RATES = (Fraction(7, 20), Fraction(1, 2))  # Wall-to-wall trips per second (x, y).
 CATALOG_RETRY_DELAY = 1.0  # seconds between failed attempts while demand remains
-TIMELINE_MAX_ENTRIES = 512  # media timeline entries retained: about 18 KB, 17 minutes of two-second GOPs
+TIMELINE_MAX_ENTRIES = 512  # media timeline entries retained: about 18 KB, 8.5 minutes of one-second GOPs
 TIMELINE_SKEW_LIMIT_MS = 5_000  # how far --verify lets the newest entry's wall-clock time sit from its arrival
 VERIFY_STARTUP_TIMEOUT = 10.0  # seconds the in-process viewer may wait for the announce and its subscribes
 
@@ -1600,7 +1600,7 @@ def parse_args(argv: list[str]) -> Config:
         default="abr",
         help="abr: content-dependent target (default); cbr: pad toward --bitrate for bandwidth tests",
     )
-    parser.add_argument("--gop", type=float, default=2.0, help="Keyframe interval in seconds (default 2)")
+    parser.add_argument("--gop", type=float, default=1.0, help="Keyframe interval in seconds (default 1)")
     parser.add_argument(
         "--audio",
         choices=["auto", "tone", "off"],

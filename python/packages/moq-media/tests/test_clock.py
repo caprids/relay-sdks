@@ -15,6 +15,7 @@ OPTION_NAMES = {
     "lateDropUs": "late_drop_us",
     "maxVideoDelayUs": "max_video_delay_us",
     "audioTimeoutUs": "audio_timeout_us",
+    "targetLatencyUs": "target_latency_us",
 }
 
 
@@ -147,6 +148,10 @@ def test_playout_clock_vectors(vector: dict[str, Any]) -> None:
             clock.stop_audio()
         if step.get("reset"):
             clock.reset()
+        if "keyframeInterval" in step:
+            clock.report_keyframe_interval(int(step["keyframeInterval"]))
+        if "targetLatency" in step:
+            assert clock.target_latency_us == int(step["targetLatency"])
         if "due" in step:
             assert clock.due(int(step["due"])) == decision(step["expect"])
         if "mode" in step:
@@ -154,6 +159,29 @@ def test_playout_clock_vectors(vector: dict[str, Any]) -> None:
         if "position" in step:
             expected = step["position"]
             assert clock.position_us() == (None if expected is None else int(expected))
+
+
+@pytest.mark.parametrize("vector", VECTORS["playoutErrors"], ids=lambda vector: vector["name"])
+def test_playout_clock_rejects(vector: dict[str, Any]) -> None:
+    options = {OPTION_NAMES[key]: int(value) for key, value in vector["options"].items()}
+    with pytest.raises(ValueError):
+        PlayoutClock(**options)  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize("vector", VECTORS["keyframeIntervalErrors"], ids=lambda vector: vector["name"])
+def test_playout_clock_rejects_keyframe_interval(vector: dict[str, Any]) -> None:
+    clock = PlayoutClock()
+    with pytest.raises(ValueError):
+        clock.report_keyframe_interval(int(vector["intervalUs"]))
+    assert clock.target_latency_us == 2_000_000
+
+
+def test_playout_clock_counts_its_resets() -> None:
+    clock = PlayoutClock(now_us=lambda: 0)
+    assert clock.resets == 0
+    clock.reset()
+    clock.reset()
+    assert clock.resets == 2
 
 
 class TestBroadcastClock:

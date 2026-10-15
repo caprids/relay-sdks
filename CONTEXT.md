@@ -180,9 +180,12 @@ _Avoid_: playback clock, master clock, sync clock, jitter buffer (the audio path
 The one latency budget a broadcast is played at: how far behind live a viewer plays. It defaults to
 twice the keyframe interval on both sides, and nothing carries it on the wire. The publisher derives
 video's default delivery timeout from it (the target latency less the keyframe interval, and at
-least one interval); the planned frame reader judges lateness against it
-([#303](https://github.com/muxinc/relay-sdks/issues/303)).
-_Avoid_: latency budget, delay, buffer depth, jitter buffer
+least one interval). On the player it is the playout clock's: by default twice the longest recent
+keyframe interval the frame reader sees, and how far behind the clock's position a frame may still
+be delivered for decoding. It is not msf-01's catalog `targetLatency`, which is end-to-end
+wall-clock time.
+_Avoid_: latency budget, delay, buffer depth, jitter buffer, max delay (that is the clock's lead
+before re-sync), deadline (that is one frame's)
 
 **Render clock**:
 When an `AudioContext` renders, on `performance.now()`'s clock: of the observations of a context time
@@ -190,6 +193,26 @@ and when it was seen over the last second, the one seen soonest. Capture calibra
 timeline from it, and a player subtracts the output delay from it to know what is audible. It is not
 `getOutputTimestamp()`, whose pair means the speaker in Chromium and the render shifted back in Firefox.
 _Avoid_: output timestamp, audio clock, context clock
+
+### Media subscribing internals
+
+**Frame reader**:
+The module that reads one subscribed track as frames in decode order: it feeds a subscription's or
+a want's events to a frame sequencer and polls it when a wait ends. The sequencer reorders groups,
+waits for what may still come, and drops what is too late. Neither buffers for smoothing.
+_Avoid_: jitter buffer (the audio path owns that), reorder buffer, frame source, player
+
+**Discontinuity** (reading):
+Why a frame the reader delivers is not the one decoded after the frame before it: a gap (frames
+were skipped), a resync, or a restart. A decoder resets there. On the writing side it is the frame's
+flag that frames before it were dropped.
+_Avoid_: break, seek, reset (that is the decoder's response)
+
+**Resync**:
+The reader's escape when nothing has arrived within the target latency for one whole target
+latency: it delivers the newest late keyframe group, or audio frame, and resets the playout clock to
+re-anchor there, accepting the added delay rather than staying black or silent.
+_Avoid_: re-anchor (the clock's own act), seek, catch-up
 
 ### Subscribing internals
 

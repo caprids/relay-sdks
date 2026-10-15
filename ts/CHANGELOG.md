@@ -23,6 +23,14 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   ([#302](https://github.com/muxinc/relay-sdks/issues/302)): 500 ms for audio, and for video the target latency less
   the keyframe interval, never less than one interval (one interval by default). Pass its result to `registerTrack`
   beside `locTrackProperties()`; video needs `keyframeIntervalUs`. The WebCodecs example uses it.
+- Reading frames in decode order within a latency budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)).
+  `@mux/moq-media`'s `createFrameSequencer({ clock, grouping })` orders one track's objects across group streams, waits
+  for a late group only while it can still matter, skips to the next keyframe past the deadline, drops late audio, and
+  marks each `gap`, `resync` or `restart` where a decoder resets. `@mux/relay/media`'s `createFrameReader(sequencer,
+  { onFrame })` is the subscription's or want's handlers that drive it. The playout clock holds the budget:
+  `targetLatencyUs`, by default twice the longest recent keyframe interval (`reportKeyframeInterval`), 2 s before one
+  is known; wall pacing now re-anchors on a late frame only beyond it, instead of beyond `maxVideoDelayUs`. Both
+  examples now force a keyframe at least every second.
 - `@mux/relay`: `subscriber.namespaceEvents({ prefix })` discovers which namespaces under a prefix are announced
   ([#259](https://github.com/muxinc/relay-sdks/issues/259)). The subscriber's SETUP now carries the SOLICIT option,
   so the relay advertises namespaces only when asked. A prefix overlapping one the connection already discovers is

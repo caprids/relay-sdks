@@ -16,6 +16,14 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   the keyframe interval, never less than one interval (one interval by default). Pass its result to `register_track`
   beside `loc_track_properties()`; video needs `keyframe_interval_us`. The Video.js streaming example uses it.
 - `mux-moq-core` (imported as `moq_core`): the transport-independent MOQT sessions the SDK is built on.
+- Reading frames in decode order within a latency budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)).
+  `moq_media.FrameSequencer(clock, grouping=)` orders one track's objects across group streams, waits for a late group
+  only while it can still matter, skips to the next keyframe past the deadline, drops late audio, and marks each `gap`,
+  `resync` or `restart` where a decoder resets. `mux_relay.media.FrameReader(sequencer)` drives it from a
+  subscription's or a want's handlers and is iterated for frames. The playout clock holds the budget:
+  `target_latency_us`, by default twice the longest recent keyframe interval (`report_keyframe_interval`), 2 s before
+  one is known; wall pacing now re-anchors on a late frame only beyond it, instead of beyond `max_video_delay_us`. The
+  Video.js streaming example's keyframe interval (`--gop`) now defaults to 1 s.
 - MOQT draft-22 by default ([#274](https://github.com/muxinc/relay-sdks/issues/274)): connections offer `moqt-22`,
   then `moqt-20` as a fallback, and speak whichever the relay selects. The drafts differ on the wire only in the
   LOCATION_FILTER parameter, which `moq_core` now encodes for the negotiated draft: its encoders and decoders that carry

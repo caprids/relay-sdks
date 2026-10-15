@@ -29,7 +29,7 @@ import {
 import type { MicrophoneBlock, MicrophoneCapture } from './capture-microphone.js';
 
 /** The longest stretch between video keyframes; the writer can ask for one sooner. */
-const KEYFRAME_INTERVAL_US = 2_000_000;
+const KEYFRAME_INTERVAL_US = 1_000_000;
 
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
@@ -59,7 +59,7 @@ export interface PublishCanvasOptions {
 }
 
 /**
- * Publish a live canvas using WebCodecs directly: fixed-size AVC, 30 fps, a keyframe at least every 2 s and whenever
+ * Publish a live canvas using WebCodecs directly: fixed-size AVC, 30 fps, a keyframe at least every second and whenever
  * the video track's frame writer needs one. With a microphone, also mono Opus in 20 ms frames, one group per frame.
  * Video is stamped with `clock.now()` at capture and audio through the microphone's calibrated timeline, so both share
  * one broadcast timeline. A media timeline track maps each video group's keyframe to its capture time as Unix-epoch
@@ -159,7 +159,7 @@ export async function publishCanvas(
     const audioTrack = audio && register(AUDIO_TRACK, mediaTrackProperties('audio'));
     const timelineTrack = register(MEDIA_TIMELINE_TRACK);
     // A keyframe opens each group, deltas join it. When the transport falls behind, the writer drops its backlog and
-    // asks for a keyframe; so does every new relay subscription, rather than wait out the 2 s interval.
+    // asks for a keyframe; so does every new relay subscription, rather than wait out the 1 s interval.
     const writer = createFrameWriter<LocFrame>(track, {
       onKeyframeNeeded: () => {
         forceKeyframe = true;

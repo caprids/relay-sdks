@@ -47,6 +47,13 @@ from .loc import (
     loc_timestamp_us,
     loc_track_properties,
 )
+from .sequencer import (
+    FrameDiscontinuity,
+    FrameSequencer,
+    FrameSequencerStats,
+    SequencedFrame,
+    SequencerPoll,
+)
 from .source import (
     compose_player_url,
     encode_name_component,
@@ -77,6 +84,9 @@ __all__ = [
     "AudioTrackInfo",
     "BroadcastClock",
     "DataTrackInfo",
+    "FrameDiscontinuity",
+    "FrameSequencer",
+    "FrameSequencerStats",
     "H264Config",
     "MediaTimeline",
     "MediaTimelineEntry",
@@ -88,6 +98,8 @@ __all__ = [
     "PlayoutDecision",
     "PlayoutMode",
     "SampleTimeline",
+    "SequencedFrame",
+    "SequencerPoll",
     "SourceTimeline",
     "VideoTrackInfo",
     "annexb_to_avcc",

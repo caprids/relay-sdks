@@ -11,7 +11,9 @@ as their first callers; the `register_media` handle that would compose them with
 a proposal. Of the readers (stage 3), the
 catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_catalog`
 ([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
-`--verify` logs its track list; the object-to-frame reader remains a proposal. The
+`--verify` logs its track list; the object-to-frame reader ships as the frame sequencer in both
+format packages and the frame reader in both product packages
+([issue #303](https://github.com/muxinc/relay-sdks/issues/303), [Frame reader](#frame-reader)). The
 [shared timeline and playout clock](#shared-timeline-and-playout-clock) ship in both format
 packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), and so do the
 [Media Timeline track](#media-timeline-track)'s format helpers and timeline accumulator
@@ -246,6 +248,8 @@ symmetric with `read_text` and `read_json`:
 - Parse a catalog object into track descriptions (the independent catalog form; delta updates can
   wait until a publisher in this repository emits them). Shipped as `parseMsfCatalog` /
   `parse_msf_catalog`; see [behavior.md](behavior.md#media-helpers).
+- Turn a track's objects into frames in decode order within a latency budget: the
+  [frame reader](#frame-reader) below.
 - Turn an object plus the track's received timescale into a frame: payload, timestamp in
   microseconds, keyframe flag from object ID 0, and any config property that survived the relay.
   Video.js's `toLocFrame` is the reference, including its acceptance of the draft-03 timestamp ID.
@@ -515,9 +519,10 @@ From `idle`, the first `due()` anchors wall pacing on that frame and returns `sh
 Re-sync with `maxVideoDelayUs`. In `audio` mode, a frame more than `maxVideoDelayUs` early is
 shown now and not held: video that far ahead of audio means the two tracks are not on one timeline,
 and freezing the picture would not fix that. The offset reports the gap. In `wall` mode, a frame
-more than `maxVideoDelayUs` early or late re-anchors the clock on itself and is shown. This covers
-a timeline jump and recovery after a network stall, which would otherwise make every later frame
-late. A late frame in `audio` mode is always judged against audio and dropped. If video is late
+more than `maxVideoDelayUs` early, or more than the target latency late, re-anchors the clock on
+itself and is shown. This covers a timeline jump and recovery after a network stall, which would
+otherwise make every later frame late. A frame reader never passes a frame that late, so behind one
+the late re-anchor happens only at its resync. A late frame in `audio` mode is always judged against audio and dropped. If video is late
 consistently, the audio path needs a deeper buffer, and the clock cannot add one.
 
 | Option | TypeScript | Python | Default | Why |
@@ -525,6 +530,7 @@ consistently, the audio path needs a deeper buffer, and the clock cannot add one
 | Late-drop threshold | `lateDropUs` | `late_drop_us` | 40,000 | A late frame makes audio effectively early; EBU R37 puts the audio-early limit at 40 ms |
 | Lead before re-sync | `maxVideoDelayUs` | `max_video_delay_us` | 1,000,000 | Above a deep audio jitter buffer plus output latency |
 | Audio silence before wall pacing | `audioTimeoutUs` | `audio_timeout_us` | 500,000 | Reports come every 10–20 ms; half a second without one is a stall or a mute |
+| Target latency | `targetLatencyUs` | `target_latency_us` | 2 × the longest of the last four reported keyframe intervals; 2,000,000 before any | Two GOPs: room to wait for a late group and still decode up to the next keyframe; see [Frame reader](#frame-reader) |
 | Time source | `now` | `now_us` | `performance.now()` µs / `time.monotonic_ns() // 1000` | Injected so tests are exact |
 
 The clock does not buffer, decode, or render frames, and it never changes how much audio is buffered.
@@ -586,6 +592,87 @@ buffer. Playwright's WebKit (Safari 26.4's engine, on Linux) runs the hub scenar
 (settled offsets 4–7 ms), but at full length it stops responding partway through. It cannot open a
 WebTransport session to the Relay, and its `getOutputTimestamp()` is seconds off. It is opt-in
 (`AV_SYNC_RUNS=webkit:hub`) and says nothing about Safari on macOS.
+
+### Frame reader
+
+[Issue #303](https://github.com/muxinc/relay-sdks/issues/303). Implemented in both SDKs;
+[behavior.md](behavior.md#media-subscribing) holds the testable rules.
+
+Each group travels on its own stream, and streams are not ordered relative to each other. After a
+2 s stall through the impairment proxy, the live A/V test's player, which fed every video object to
+one decoder in arrival order, crashed its decoder on `… g10/o0, g6/o1 … g6/o4, g9/o0, g9/o1,
+g10/o1`: the tail of group 6's stalled stream arrived after group 10's keyframe. Nothing was lost.
+The same stall left about 2.3 s of audio scheduled ahead, against about 0.14 s normally, because the
+player re-anchored its jitter buffer on the first late frame.
+
+The frame sequencer is the decision engine, a pure state machine in the format package like the
+playout clock: events in, frames out, and how long until a wait can end. The frame reader in the
+product package is the glue. It is a subscription's or a want's handlers, feeds every event to the
+sequencer, and polls again when the wait ends. The product package cannot import the format
+package, so the reader takes the sequencer as an argument.
+
+- **One budget.** Lateness is measured against the playout clock's position, the media time that
+  should be playing now. It advances in real time through a stall, so a burst that arrives after one
+  is already behind it. Nothing depends on the publisher's and viewer's system clocks agreeing. The
+  budget is the clock's `targetLatencyUs`, so all tracks of a broadcast and the clock's own late
+  re-anchor share one number.
+- **The default follows the stream.** The video sequencer reports the interval between the
+  keyframes of consecutive groups; the clock keeps the last four and takes twice the longest, so a
+  forced keyframe (`onKeyframeNeeded`) does not shrink the budget. Before two consecutive keyframes
+  have arrived it is 2 s, twice the examples' one-second keyframe interval. msf-01 has no catalog
+  field for keyframe spacing, and its `targetLatency` (§5.2.8) means end-to-end wall-clock latency,
+  so neither is read.
+- **Video waits only while it is worth it.** In-order frames go out at once. A gap, or a still-open
+  older group, holds newer frames until the last delivered frame's timestamp plus the target
+  latency, because the missing frame is later than that one. A group that has not been seen may
+  never come, since a failed group's ID is not reused, so the next keyframe waits for it only while
+  it is not yet due. Past the deadline the sequencer skips to the next keyframe within the budget and
+  marks a `gap`; the player resets its decoder there.
+- **Audio is not held.** No audio frame depends on another, so a frame more than the clock's
+  `lateDropUs` behind the position is dropped at once, and nothing waits for a missing one. A budget
+  of two GOPs for audio would keep almost all of a 2 s blackout's burst, and the player would
+  re-anchor on it and stay that far behind.
+- **Resync.** If frames keep arriving but none within the budget for one whole target latency,
+  and their lateness holds steady, the path delay has grown for good. Lateness that keeps growing
+  is a stall, and lateness that shrinks is its backlog draining; neither resyncs, because the frames
+  the clock would anchor on are about to be caught up with. The sequencer delivers the newest late keyframe group (or audio
+  frame), marks it `resync`, and resets the clock so it re-anchors there, rather than leave the
+  player black or silent.
+- **Resync forward.** A clock anchored on old frames, by a resync onto a delay that later
+  recovered, sees fresher frames arrive more than the target latency ahead of its position. That is
+  a resync too, forward, so the old delay does not become lasting latency. The player drops the
+  audio and video it had scheduled on the old anchor.
+- **Restart and Move.** A want's Restart or Move restarts the sequencer, since group IDs start over,
+  and marks the next frame `restart`.
+
+Measured live on 2026-10-15: the A/V test (`mise run ts:test:av-sync`) in Chromium 147 against
+`sjc.relay.mux.global`, through a UDP impairment proxy that, 4 s into playback, either blacked out
+both directions for 2 s or capped the uplink at 80 kbit/s (1 s queue) for 4 s. The publisher uses
+[#302](https://github.com/muxinc/relay-sdks/issues/302)'s default delivery timeouts. The player reads
+both tracks through frame readers, keeps a 150 ms audio jitter buffer, drops audio whose slot has
+passed instead of re-anchoring on it, and re-anchors at a resync, a restart, or a schedule more than
+100 ms beyond its depth. "Ahead" is the audio scheduled ahead of the context's time at each later
+phase boundary, the first about 6 s after the impairment:
+
+| Impairment | Before (the player decoding in arrival order) | With the frame reader, final round |
+| --- | --- | --- |
+| None | Passes; 130–185 ms ahead | 3 of 3 passed; 130–158 ms ahead |
+| 2 s blackout | 0 of 2: `EncodingError` from an old group's tail after a newer keyframe, or about 2.6 s ahead for the rest of the run | 3 of 3 passed; 120–170 ms ahead |
+| Uplink capped for 4 s | 0 of 2: `EncodingError`, or about 3.5 s ahead for the rest of the run | 3 of 3 passed; 126–197 ms ahead |
+
+Over the rounds before the final one, after the rebase onto #302: 14 of 15 unimpaired runs, 11 of 12
+blackouts and 11 of 11 capped runs passed. Unimpaired, the readers' counters stayed at zero skips and
+resyncs, with at most two audio frames dropped as late. The two failures were an unimpaired video
+stall of 3.2 s, before the player's last fixes and not seen again, and the WebCodecs example's own
+encoder-queue guard ("The audio encoder cannot keep up") tripping after one blackout.
+
+Getting here took three rules found in these runs: a resync only on a steady delay, a resync
+forward when the clock is behind what arrives, and the player's bounded jitter buffer.
+
+The publisher side of the same stall is [issue #302](https://github.com/muxinc/relay-sdks/issues/302)'s
+delivery timeouts. They derive from the same keyframe interval, about one interval for video, under
+the reader's two, so a publisher stops spending bandwidth on frames the reader would drop. Nothing
+links the two on the wire.
 
 ## Media Timeline track
 
@@ -696,9 +783,9 @@ The rules a publisher follows:
   relay's current group gets the whole history in one object. The incremental objects §7.3 allows
   after the first are not used.
 - How many entries to retain is the publisher's choice: as far back as its viewers can still fetch,
-  and well under the object size limit. One entry is about 35 bytes, so an hour of two-second
-  GOPs is about 65 KB. The accumulator keeps 512 by default, about 18 KB or 17 minutes of
-  two-second GOPs, and drops the oldest.
+  and well under the object size limit. One entry is about 35 bytes, so an hour of the examples'
+  one-second GOPs is about 126 KB. The accumulator keeps 512 by default, about 18 KB or 8.5 minutes
+  of one-second GOPs, and drops the oldest.
 - The timeline is a state-shaped track whose document changes. Python's `DocumentService` sends the
   latest document on every relay subscription, as the catalog service does, and on every new entry
   while the relay is subscribed. Entries made without demand accumulate and go out with the next

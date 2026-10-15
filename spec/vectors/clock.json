@@ -1,5 +1,5 @@
 {
-  "source": "Derived from spec/media-layer.md, Shared timeline and playout clock (issues #285 and #290); boundary cases follow its tables. epochOrigins follow its Media Timeline track section (issue #291): systemClockMs is the system clock (Date.now(), time.time_ns()) when the clock is created, and createdAt the source time then. Timeline vectors give originEpochUs, so their timestamps are Unix-epoch microseconds. A source timeline's captureLatencyUs is its initial capture latency, and a captureLatency step changes it; captureLatencyErrors must be rejected both at creation and when set",
+  "source": "Derived from spec/media-layer.md, Shared timeline and playout clock (issues #285 and #290); boundary cases follow its tables. epochOrigins follow its Media Timeline track section (issue #291): systemClockMs is the system clock (Date.now(), time.time_ns()) when the clock is created, and createdAt the source time then. Timeline vectors give originEpochUs, so their timestamps are Unix-epoch microseconds. A source timeline's captureLatencyUs is its initial capture latency, and a captureLatency step changes it; captureLatencyErrors must be rejected both at creation and when set. A playout targetLatency step reads the clock's target latency and a keyframeInterval step reports one keyframe interval; playoutErrors options and keyframeIntervalErrors must be rejected",
   "broadcast": [
     {
       "name": "the origin defaults to the source time at creation; a time before it still maps onto the epoch",
@@ -199,16 +199,18 @@
       ]
     },
     {
-      "name": "wall pacing re-anchors on a frame beyond the maximum video delay, early or late",
+      "name": "wall pacing re-anchors on a frame more than the maximum video delay early or the target latency late",
       "steps": [
         { "at": "0", "due": "0", "expect": { "action": "show", "offsetUs": "0" } },
         { "at": "0", "due": "1000000", "expect": { "action": "wait", "offsetUs": "1000000", "waitUs": "1000000" } },
         { "at": "0", "due": "1000001", "expect": { "action": "show", "offsetUs": "1000001" } },
         { "at": "10000", "mode": "wall", "position": "1010001" },
-        { "at": "2010001", "due": "1033334", "expect": { "action": "show", "offsetUs": "-1976668" } },
-        { "at": "2010001", "position": "1033334" },
-        { "at": "2010001", "due": "1000000", "expect": { "action": "show", "offsetUs": "-33334" } },
-        { "at": "2010001", "due": "900000", "expect": { "action": "drop", "offsetUs": "-133334" } }
+        { "at": "3010001", "due": "2010002", "expect": { "action": "drop", "offsetUs": "-2000000" } },
+        { "at": "3010001", "position": "4010002" },
+        { "at": "3010002", "due": "2010002", "expect": { "action": "show", "offsetUs": "-2000001" } },
+        { "at": "3010002", "position": "2010002" },
+        { "at": "3010002", "due": "1976669", "expect": { "action": "show", "offsetUs": "-33333" } },
+        { "at": "3010002", "due": "1876669", "expect": { "action": "drop", "offsetUs": "-133333" } }
       ]
     },
     {
@@ -235,7 +237,48 @@
         { "at": "1001", "due": "101002", "expect": { "action": "show", "offsetUs": "100001" } },
         { "at": "1001", "position": "101002" }
       ]
+    },
+    {
+      "name": "the target latency is twice the longest of the last four keyframe intervals, 2 s before any, and survives a reset",
+      "steps": [
+        { "at": "0", "targetLatency": "2000000" },
+        { "at": "0", "keyframeInterval": "1000000" },
+        { "at": "0", "keyframeInterval": "300000" },
+        { "at": "0", "targetLatency": "2000000" },
+        { "at": "0", "keyframeInterval": "1500000" },
+        { "at": "0", "targetLatency": "3000000" },
+        { "at": "0", "keyframeInterval": "500000" },
+        { "at": "0", "keyframeInterval": "500000" },
+        { "at": "0", "keyframeInterval": "500000" },
+        { "at": "0", "targetLatency": "3000000" },
+        { "at": "0", "keyframeInterval": "500000" },
+        { "at": "0", "targetLatency": "1000000" },
+        { "at": "0", "reset": true },
+        { "at": "0", "targetLatency": "1000000" },
+        { "at": "0", "due": "0", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "1100000", "due": "100000", "expect": { "action": "drop", "offsetUs": "-1000000" } },
+        { "at": "1100001", "due": "100000", "expect": { "action": "show", "offsetUs": "-1000001" } }
+      ]
+    },
+    {
+      "name": "an explicit target latency ignores keyframe intervals",
+      "options": { "targetLatencyUs": "500000" },
+      "steps": [
+        { "at": "0", "keyframeInterval": "2000000" },
+        { "at": "0", "targetLatency": "500000" },
+        { "at": "0", "due": "0", "expect": { "action": "show", "offsetUs": "0" } },
+        { "at": "600000", "due": "99999", "expect": { "action": "show", "offsetUs": "-500001" } },
+        { "at": "600000", "position": "99999" }
+      ]
     }
+  ],
+  "playoutErrors": [
+    { "name": "a zero target latency", "options": { "targetLatencyUs": "0" } },
+    { "name": "a negative target latency", "options": { "targetLatencyUs": "-1" } }
+  ],
+  "keyframeIntervalErrors": [
+    { "name": "zero", "intervalUs": "0" },
+    { "name": "negative", "intervalUs": "-1000" }
   ],
   "epochOrigins": [
     { "name": "the default origin is the system clock at creation", "createdAt": "5000000", "systemClockMs": "1759924158381", "originEpochUs": "1759924158381000" },

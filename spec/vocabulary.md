@@ -515,13 +515,18 @@ uses classes, like `CatalogService` and `FrameWriter`.
 | Source time to timestamp; current anchor | `timeline.timestampUs(s)`; `timeline.anchorSourceUs` | `timeline.timestamp_us(s)`; `timeline.anchor_source_us` |
 | Anchor a sample counter | `clock.sampleTimeline(rate, { firstSampleUs })` → `SampleTimeline` (`SampleTimelineOptions`) | `clock.sample_timeline(rate, first_sample_us=None)` → `SampleTimeline` |
 | Sample index to timestamp | `timeline.timestampUs(n)` | `timeline.timestamp_us(n)` |
-| The player's clock | `createPlayoutClock(options?)` → `PlayoutClock` (`PlayoutClockOptions`) | `PlayoutClock(now_us=None, late_drop_us=40_000, max_video_delay_us=1_000_000, audio_timeout_us=500_000)` |
+| The player's clock | `createPlayoutClock(options?)` → `PlayoutClock` (`PlayoutClockOptions`) | `PlayoutClock(now_us=None, late_drop_us=40_000, max_video_delay_us=1_000_000, audio_timeout_us=500_000, target_latency_us=None)` |
 | Audio with this timestamp is audible | `reportAudio(timestampUs, atUs?)` | `report_audio(timestamp_us, at_us=None)` |
 | Audio muted or ended | `stopAudio()` | `stop_audio()` |
 | When to show a video frame | `due(timestampUs)` → `PlayoutDecision` (`PlayoutWait` / `PlayoutShow` / `PlayoutDrop`) | `due(timestamp_us)` → `PlayoutDecision(action, offset_us, wait_us)` |
 | Decision kinds | `action: 'wait' \| 'show' \| 'drop'` | `PlayoutAction`: `"wait"`, `"show"`, `"drop"` |
 | What paces the clock | `mode`: `PlayoutMode` (`'idle'`, `'audio'`, `'wall'`) | `mode`: `PlayoutMode` |
 | Position now / forget anchors | `position()`, `reset()` | `position_us()`, `reset()` |
+| The broadcast's latency budget: the option, or twice the longest of the last four keyframe intervals | `targetLatencyUs` (option and property) | `target_latency_us` (option and property) |
+| Report the interval between consecutive keyframes | `reportKeyframeInterval(intervalUs)` | `report_keyframe_interval(interval_us)` |
+| The late-drop threshold, read back | `lateDropUs` | `late_drop_us` |
+| How many times the clock was reset, so a frame reader sees the timeline change | `resets` | `resets` |
+| The clock's local time source now, which a frame reader measures its waits in | `localNow()` | `local_now_us()` |
 | Injected time source | `now: MicrosecondClock` | `now_us: Callable[[], int]` |
 
 "Playout", not "playback": the clock decides when to present, and does not play anything. Python's
@@ -559,6 +564,36 @@ the reader's other fields. `MediaTimeline` is the [glossary](../CONTEXT.md)'s me
 next generation is a new broadcast with a new timeline
 ([issue #292](https://github.com/muxinc/relay-sdks/issues/292)). Not added: helpers for the §7.4
 template, incremental documents, and a reader for MSF_COMPRESSION payloads.
+
+## Media subscribing: `FrameSequencer`, `FrameReader`
+
+Reading a track as frames in decode order within the playout clock's target latency
+([issue #303](https://github.com/muxinc/relay-sdks/issues/303)); its contract is the "Media
+subscribing" section of [behavior.md](behavior.md#media-subscribing). The sequencer is format-aware
+and lives in `@mux/moq-media` and `moq_media`; the reader is transport glue and lives in
+`@mux/relay/media` and `mux_relay.media`, which do not depend on the format packages, so it takes the
+sequencer as an argument.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| One track's ordering and deadlines | `createFrameSequencer({ clock, grouping?, trackProperties? })` → `FrameSequencer` (`FrameSequencerOptions`) | `FrameSequencer(clock, grouping="keyframe", track_properties=())` |
+| Feed it a subscription's events | `object(o)`, `groupEnded(id)`, `groupReset(id)`, `restart()`, `trackProperties` | `object(o)`, `group_ended(id)`, `group_reset(id)`, `restart()`, `track_properties` |
+| Take the ready frames and the next wait | `poll(maxFrames?)` → `SequencerPoll { frames, waitUs }` | `poll(max_frames=None)` → `SequencerPoll(frames, wait_us)` |
+| One frame in decode order | `SequencedFrame { groupId, objectId, timestampUs, key, payload, properties, discontinuity? }` | `SequencedFrame(group_id, object_id, timestamp_us, key, payload, properties, discontinuity)` |
+| Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
+| Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
+| A subscription's or a want's handlers that read frames | `createFrameReader(sequencer, { onFrame })` → `FrameReader` (`FrameReaderOptions`); spread into `subscribe` or `want` handlers | `FrameReader(sequencer)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)`; `async for frame in reader` |
+| What a reader drives | `FrameReaderSequencer<F>` | `FrameReaderSequencer`, `FrameReaderPoll` (protocols) |
+| Stop reading | `reader.close()` | `reader.close()`, `reader.closed` |
+
+"Sequencer", not "reorderer" or "jitter buffer": it puts frames in decode order and decides what is
+too late, but holds nothing for smoothing, which the audio path's jitter buffer does. "Reader"
+pairs with the frame writer. "Target latency" follows msf-01's catalog field in name only: msf-01
+§5.2.8 measures end-to-end wall-clock latency, while this budget is how far behind the playout
+position a frame may still be delivered, so the catalog field is not read. Not adopted from
+[issue #303](https://github.com/muxinc/relay-sdks/issues/303): `targetLatencyMs` (every clock option
+is in microseconds); the reader taking the clock and grouping itself (the product package cannot
+import the format package).
 
 ## Media publishing: `FrameWriter`, `CatalogService`, `mediaTrackProperties`
 
@@ -624,5 +659,5 @@ already rejected as the name of a step that does not send); `MediaTrackWriter.wr
 (redundant on a type named for frames); an events iterator for the catalog service (two counters
 answer what the example's `finished` line asks); exceptions for interrupted and ended frames (see
 above); `update()` on `CatalogService` (its document is fixed, and the media timeline, which
-changes, gets `DocumentService` instead of a mode). The `register_media` handle and the readers in
-[media-layer.md](media-layer.md) remain proposals.
+changes, gets `DocumentService` instead of a mode). The `register_media` handle in
+[media-layer.md](media-layer.md) remains a proposal.

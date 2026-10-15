@@ -1,0 +1,218 @@
+import { readFileSync } from 'node:fs';
+import type { MoqtObject } from '@mux/moq-core';
+import { createFrameSequencer, createPlayoutClock, LOC_TIMESCALE, LOC_TIMESTAMP } from '@mux/moq-media';
+import { describe, expect, it } from 'vitest';
+
+type Step = {
+  at: string;
+  anchor?: string;
+  report?: string;
+  object?: [string, string, string | null];
+  groupEnd?: string;
+  groupReset?: string;
+  restart?: true;
+  clockReset?: true;
+  poll?: { frames: string[][]; waitUs: string | null };
+  stats?: Record<string, string>;
+  targetLatency?: string;
+};
+type Vectors = { sequences: { name: string; grouping?: 'keyframe' | 'frame'; steps: Step[] }[] };
+
+const vectors = JSON.parse(
+  readFileSync(new URL('../../spec/vectors/frame-sequencer.json', import.meta.url), 'utf8'),
+) as Vectors;
+
+const object = (groupId: number, objectId: number, properties: MoqtObject['properties']): MoqtObject => ({
+  groupId,
+  objectId,
+  subgroupId: 0,
+  status: 'normal',
+  properties,
+  payload: new Uint8Array([groupId, objectId]),
+});
+
+describe('spec/vectors/frame-sequencer.json', () => {
+  it.each(vectors.sequences)('frame sequencer: $name', ({ grouping, steps }) => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now });
+    const sequencer = createFrameSequencer({ clock, ...(grouping ? { grouping } : {}) });
+    for (const step of steps) {
+      now = Number(step.at);
+      if (step.report !== undefined) clock.reportAudio(Number(step.report));
+      if (step.anchor !== undefined) clock.due(Number(step.anchor));
+      if (step.object) {
+        const [group, id, timestamp] = step.object;
+        sequencer.object(
+          object(
+            Number(group),
+            Number(id),
+            timestamp === null ? [] : [{ type: LOC_TIMESTAMP, value: Number(timestamp) }],
+          ),
+        );
+      }
+      if (step.groupEnd !== undefined) sequencer.groupEnded(Number(step.groupEnd));
+      if (step.groupReset !== undefined) sequencer.groupReset(Number(step.groupReset));
+      if (step.restart) sequencer.restart();
+      if (step.clockReset) clock.reset();
+      if (step.poll) {
+        const { frames, waitUs } = sequencer.poll();
+        expect(
+          frames.map((frame) => [
+            String(frame.groupId),
+            String(frame.objectId),
+            ...(frame.discontinuity ? [frame.discontinuity] : []),
+          ]),
+        ).toEqual(step.poll.frames);
+        expect(waitUs).toBe(step.poll.waitUs === null ? undefined : Number(step.poll.waitUs));
+      }
+      if (step.stats) {
+        expect(sequencer.stats).toEqual(
+          Object.fromEntries(Object.entries(step.stats).map(([key, value]) => [key, Number(value)])),
+        );
+      }
+      if (step.targetLatency !== undefined) expect(clock.targetLatencyUs).toBe(Number(step.targetLatency));
+    }
+  });
+});
+
+describe('createFrameSequencer', () => {
+  it('reads timestamps through the track properties and passes the frame through', () => {
+    const sequencer = createFrameSequencer({ clock: createPlayoutClock({ now: () => 0 }) });
+    sequencer.trackProperties = [{ type: LOC_TIMESCALE, value: 1000 }];
+    sequencer.object(object(4, 0, [{ type: LOC_TIMESTAMP, value: 1500 }]));
+    expect(sequencer.poll().frames).toEqual([
+      {
+        groupId: 4,
+        objectId: 0,
+        timestampUs: 1_500_000,
+        key: true,
+        payload: new Uint8Array([4, 0]),
+        properties: [{ type: LOC_TIMESTAMP, value: 1500 }],
+      },
+    ]);
+  });
+
+  it('treats an end-of-group status object as the end of its group', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    clock.due(0);
+    const sequencer = createFrameSequencer({ clock });
+    sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
+    sequencer.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 1_000_000 }]));
+    expect(sequencer.poll().frames.map((frame) => frame.groupId)).toEqual([0]);
+    sequencer.object({ ...object(0, 1, []), status: 'end-of-group', payload: new Uint8Array() });
+    expect(sequencer.poll().frames.map((frame) => [frame.groupId, frame.discontinuity])).toEqual([[1, undefined]]);
+  });
+
+  it('ignores a repeated object', () => {
+    const sequencer = createFrameSequencer({ clock: createPlayoutClock({ now: () => 0 }), grouping: 'frame' });
+    sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
+    sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
+    expect(sequencer.poll().frames).toHaveLength(1);
+  });
+
+  it('waits on a gap while the clock is idle until the group ends, checking back for the clock to anchor', () => {
+    const sequencer = createFrameSequencer({ clock: createPlayoutClock({ now: () => 0 }) });
+    sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
+    sequencer.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 1_000_000 }]));
+    expect(sequencer.poll()).toEqual({ frames: [expect.objectContaining({ groupId: 0 })], waitUs: 50_000 });
+    sequencer.groupEnded(0);
+    expect(sequencer.poll().frames.map((frame) => frame.groupId)).toEqual([1]);
+  });
+
+  it('takes at most maxFrames, judging each when it is taken', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
+    sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 100_000 }]));
+    sequencer.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 120_000 }]));
+    sequencer.object(object(2, 0, [{ type: LOC_TIMESTAMP, value: 140_000 }]));
+    expect(sequencer.poll(1).frames.map((frame) => frame.groupId)).toEqual([0]);
+    now = 5_000_000;
+    clock.reportAudio(5_000_000);
+    sequencer.object(object(3, 0, [{ type: LOC_TIMESTAMP, value: 5_100_000 }]));
+    expect(sequencer.poll(1).frames.map((frame) => [frame.groupId, frame.discontinuity])).toEqual([[3, 'gap']]);
+    expect(sequencer.stats.late).toBe(2);
+    expect(() => sequencer.poll(0)).toThrow(RangeError);
+  });
+
+  it('bounds what it holds when nobody polls, resuming at a keyframe after a gap', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const sequencer = createFrameSequencer({ clock });
+    sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
+    expect(sequencer.poll().frames).toHaveLength(1);
+    for (let index = 1; index < 3000; index++) {
+      sequencer.object(object(Math.floor(index / 30), index % 30, [{ type: LOC_TIMESTAMP, value: index * 33_333 }]));
+    }
+    const { frames } = sequencer.poll();
+    expect(frames.length).toBeLessThanOrEqual(1100);
+    expect(frames[0]).toMatchObject({ key: true, discontinuity: 'gap' });
+    expect(sequencer.stats.late).toBeGreaterThan(1800);
+  });
+
+  it('bounds a resync candidate too', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now });
+    clock.due(0);
+    now = 5_000_000;
+    const sequencer = createFrameSequencer({ clock });
+    sequencer.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 1_000_000 }]));
+    expect(sequencer.poll().frames).toEqual([]);
+    for (let index = 1; index < 3000; index++) {
+      sequencer.object(object(1, index, [{ type: LOC_TIMESTAMP, value: 1_000_000 + index }]));
+    }
+    now = 7_000_000;
+    expect(sequencer.poll().frames.length).toBeLessThanOrEqual(1100);
+    expect(sequencer.stats.late).toBeLessThanOrEqual(3000);
+  });
+
+  it('takes keyframe intervals only from groups that can still be delivered', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const sequencer = createFrameSequencer({ clock });
+    for (let group = 10; group < 18; group++) {
+      sequencer.object(object(group, 0, [{ type: LOC_TIMESTAMP, value: group * 1_000_000 }]));
+      sequencer.groupEnded(group);
+    }
+    sequencer.poll();
+    for (let repeat = 0; repeat < 4; repeat++) {
+      sequencer.object(object(9, 0, [{ type: LOC_TIMESTAMP, value: 9_900_000 }]));
+    }
+    expect(clock.targetLatencyUs).toBe(2_000_000);
+  });
+
+  it('says when more is ready past maxFrames', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    clock.reportAudio(0);
+    const audio = createFrameSequencer({ clock, grouping: 'frame' });
+    audio.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 10_000 }]));
+    audio.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 30_000 }]));
+    expect(audio.poll(1).waitUs).toBe(0);
+    expect(audio.poll(1)).toMatchObject({ frames: [expect.objectContaining({ groupId: 1 })], waitUs: undefined });
+    const video = createFrameSequencer({ clock });
+    video.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 10_000 }]));
+    video.object(object(0, 1, [{ type: LOC_TIMESTAMP, value: 43_333 }]));
+    expect(video.poll(1).waitUs).toBe(0);
+  });
+
+  it('drops a group older than the one being delivered', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const sequencer = createFrameSequencer({ clock });
+    sequencer.object(object(10, 0, [{ type: LOC_TIMESTAMP, value: 10_000_000 }]));
+    sequencer.poll();
+    sequencer.object(object(9, 0, [{ type: LOC_TIMESTAMP, value: 9_900_000 }]));
+    expect(sequencer.stats.late).toBe(1);
+    expect(clock.targetLatencyUs).toBe(2_000_000);
+  });
+
+  it('ignores a repeated keyframe still held, even once its timestamp is no longer remembered', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const sequencer = createFrameSequencer({ clock });
+    const times = [0, 100_000, 1_100_000, 2_100_000, 3_100_000, 4_100_000, 5_100_000, 6_100_000, 7_100_000];
+    times.forEach((time, group) => {
+      sequencer.object(object(group, 0, [{ type: LOC_TIMESTAMP, value: time }]));
+    });
+    expect(clock.targetLatencyUs).toBe(2_000_000);
+    for (let repeat = 0; repeat < 4; repeat++) sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
+    expect(clock.targetLatencyUs).toBe(2_000_000);
+  });
+});

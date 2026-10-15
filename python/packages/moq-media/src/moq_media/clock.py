@@ -6,6 +6,7 @@ Neither clock touches a transport or an output device: both read an injected mon
 
 import math
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
@@ -17,6 +18,10 @@ PlayoutAction = Literal["wait", "show", "drop"]
 PlayoutMode = Literal["idle", "audio", "wall"]
 """What a playout clock is paced by."""
 _SAFE_INTEGER = 2**53 - 1
+# The target latency before any keyframe interval is known: twice a one-second keyframe interval.
+_DEFAULT_TARGET_LATENCY_US = 2_000_000
+# How many keyframe intervals the derived target latency looks back over.
+_KEYFRAME_INTERVALS_KEPT = 4
 
 
 def _monotonic_us() -> int:
@@ -205,6 +210,9 @@ class PlayoutClock:
     ``late_drop_us`` (default 40 ms, EBU R37's audio-early limit) is how late a frame may be shown;
     ``max_video_delay_us`` (default 1 s) is how far a frame may lead before the clock re-syncs;
     ``audio_timeout_us`` (default 500 ms) is how long audio may stay silent before wall-clock pacing takes over.
+    ``target_latency_us`` is how far behind the position a frame may still be delivered for decoding, and how late a
+    frame must be before wall pacing re-anchors on it; by default twice the longest of the last four keyframe
+    intervals reported, or 2 s before any is.
     ``now_us`` is the time source, ``time.monotonic_ns() // 1000`` by default.
     """
 
@@ -215,6 +223,7 @@ class PlayoutClock:
         late_drop_us: int = 40_000,
         max_video_delay_us: int = 1_000_000,
         audio_timeout_us: int = 500_000,
+        target_latency_us: int | None = None,
     ) -> None:
         if _finite(late_drop_us, "late_drop_us") < 0:
             raise ValueError("late_drop_us must not be negative")
@@ -222,11 +231,17 @@ class PlayoutClock:
             raise ValueError("max_video_delay_us must be positive")
         if _finite(audio_timeout_us, "audio_timeout_us") <= 0:
             raise ValueError("audio_timeout_us must be positive")
+        if target_latency_us is not None and _finite(target_latency_us, "target_latency_us") <= 0:
+            raise ValueError("target_latency_us must be positive")
         self._source = now_us or _monotonic_us
         self._late_drop_us = late_drop_us
         self._max_video_delay_us = max_video_delay_us
         self._audio_timeout_us = audio_timeout_us
         self._anchor: _Anchor | None = None
+        self._fixed_target_us = target_latency_us
+        # The latest keyframe intervals: the longest, so that a forced keyframe does not shrink the budget.
+        self._intervals: deque[float] = deque(maxlen=_KEYFRAME_INTERVALS_KEPT)
+        self._resets = 0
 
     def _mode_at(self, now: float) -> PlayoutMode:
         anchor = self._anchor
@@ -272,7 +287,7 @@ class PlayoutClock:
             return PlayoutDecision("show", 0)
         offset = timestamp_us - position
         offset_us = _round(offset)
-        if mode == "wall" and abs(offset) > self._max_video_delay_us:
+        if mode == "wall" and (offset > self._max_video_delay_us or offset < -self.target_latency_us):
             # A timeline jump or a stall: follow the video rather than drop or hold every later frame.
             self._anchor = _Anchor(timestamp_us, now)
             return PlayoutDecision("show", offset_us)
@@ -289,6 +304,37 @@ class PlayoutClock:
         """Return the timeline position now, or ``None`` while idle."""
         return self._position_at(self._source())
 
+    @property
+    def late_drop_us(self) -> int:
+        """How late a frame may be shown, in microseconds: the ``late_drop_us`` option."""
+        return self._late_drop_us
+
+    @property
+    def target_latency_us(self) -> float:
+        """The target latency now: the option, or twice the longest of the last four keyframe intervals reported."""
+        if self._fixed_target_us is not None:
+            return self._fixed_target_us
+        return 2 * max(self._intervals) if self._intervals else _DEFAULT_TARGET_LATENCY_US
+
+    def report_keyframe_interval(self, interval_us: float) -> None:
+        """Report the spacing between two consecutive keyframes on the timeline; a frame reader does this."""
+        if _finite(interval_us, "interval_us") <= 0:
+            raise ValueError("interval_us must be positive")
+        self._intervals.append(interval_us)
+
     def reset(self) -> None:
-        """Forget every anchor, at a Restart, a Move, or a new catalog: the next frame anchors wall pacing."""
+        """Forget every anchor, at a Restart, a Move, a resync, or a new catalog: the next frame anchors wall pacing.
+
+        The keyframe intervals reported so far are kept.
+        """
         self._anchor = None
+        self._resets += 1
+
+    def local_now_us(self) -> float:
+        """The clock's local time source now, in microseconds: what a frame reader measures its waits in."""
+        return self._source()
+
+    @property
+    def resets(self) -> int:
+        """How many times ``reset()`` has been called: a frame reader sees from it that the timeline changed."""
+        return self._resets

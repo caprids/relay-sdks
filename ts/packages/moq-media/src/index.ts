@@ -52,6 +52,15 @@ export {
   type ParseMsfCatalogOptions,
   parseMsfCatalog,
 } from './parse-catalog.js';
+export {
+  createFrameSequencer,
+  type FrameDiscontinuity,
+  type FrameSequencer,
+  type FrameSequencerOptions,
+  type FrameSequencerStats,
+  type SequencedFrame,
+  type SequencerPoll,
+} from './sequencer.js';
 export { type ComposeMoqSourceOptions, composeMoqSource, encodeNameComponent, encodeNamespaceName } from './source.js';
 export {
   buildMediaTimeline,

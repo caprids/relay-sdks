@@ -1,6 +1,7 @@
 /**
- * The A/V sync test's player: subscribes to one broadcast's catalog, video and audio, decodes both with WebCodecs,
- * plays audio through an AudioContext with a fixed jitter buffer, and schedules video with the playout clock. It
+ * The A/V sync test's player: subscribes to one broadcast's catalog, video and audio, reads both through frame readers
+ * (decode order, late frames dropped against the playout clock's target latency), decodes both with WebCodecs, plays
+ * audio through an AudioContext with a fixed jitter buffer, and schedules video with the playout clock. It
  * reports each flash frame it shows and each beep it plays, with times on `performance.now()`'s clock.
  *
  * It renders nothing: "shown" is the moment the renderer would draw. Audio really plays, through whatever output the
@@ -9,15 +10,18 @@
 import {
   AUDIO_TRACK,
   CATALOG_TRACK,
+  createFrameSequencer,
   createPlayoutClock,
-  locTimestampUs,
+  type FrameSequencerStats,
   type MsfCatalogTrack,
   type PlayoutClock,
   type PlayoutClockOptions,
   parseMsfCatalog,
+  type SequencedFrame,
   VIDEO_TRACK,
 } from '@mux/moq-media';
-import type { KeyValuePair, MoqtObject, RelaySubscriber, RelaySubscription } from '@mux/relay';
+import type { RelaySubscriber, RelaySubscription } from '@mux/relay';
+import { createFrameReader, type FrameReader } from '@mux/relay/media';
 import { createRenderClock, type RenderClock } from '../../examples/webcodecs/render-clock.js';
 import { createOnsetDetector, type HeardBeep, type ShownFlash } from './measure.js';
 
@@ -60,6 +64,10 @@ export interface PlayerStats {
   modes: Record<string, number>;
   /** The latest video decision's offset, in ms: positive is early. */
   lastVideoOffsetMs: number | undefined;
+  /** Video frames that reset the decoder: a gap, a resync, or a restart. */
+  discontinuities: number;
+  /** Each track's frame sequencer counters, cumulative. */
+  readers: Record<string, Readonly<FrameSequencerStats>>;
 }
 
 /** A running player. */
@@ -71,6 +79,8 @@ export interface Player {
   setOutputDelay(delayMs: number): void;
   /** Ignore incoming audio objects, as if the publisher went quiet; reports stop once the buffer drains. */
   setAudioPaused(paused: boolean): void;
+  /** How much audio is scheduled ahead of the context's current time, in ms: the jitter buffer plus any backlog. */
+  audioAheadMs(): number;
   /**
    * The longest gap between shown frames since the last call, counting a gap still open now, in ms; restarts the
    * count. A stall that outlasts a phase is counted in the phase it began in, and again in the next.
@@ -80,6 +90,10 @@ export interface Player {
 }
 
 const BRIGHT = 160;
+/** How long every audio slot may be missed before the player accepts the added delay and re-anchors, in seconds. */
+const MAX_LATE_S = 1;
+/** How far beyond the jitter buffer's depth audio may be scheduled before the player re-anchors, in seconds. */
+const MAX_EXTRA_AHEAD_S = 0.1;
 
 /** Start playing the broadcast at `namespace`. Resolves once the catalog has been read and both tracks subscribed. */
 export async function startPlayer(options: PlayerOptions): Promise<Player> {
@@ -100,6 +114,8 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     reports: 0,
     modes: {},
     lastVideoOffsetMs: undefined,
+    discontinuities: 0,
+    readers: {},
   };
   const subscriptions: RelaySubscription[] = [];
   let stopped = false;
@@ -186,12 +202,12 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     },
     error: fail,
   });
-  videoDecoder.configure({
+  const videoConfig: VideoDecoderConfig = {
     codec: videoTrack.codec,
     ...(videoTrack.initData ? { description: videoTrack.initData } : {}),
     optimizeForLatency: true,
-  });
-  let videoKeyed = false;
+  };
+  videoDecoder.configure(videoConfig);
 
   // --- Audio: decode, find beeps, schedule into the jitter buffer.
   const onsets = createOnsetDetector();
@@ -200,6 +216,17 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
   let scheduledUntilS = 0;
   const pendingBeeps: { timestampUs: number; contextS: number }[] = [];
   let audioPaused = false;
+  // Scheduled audio not yet played: a resync stops it, so the backlog it was anchored on does not keep playing.
+  let scheduled: { source: AudioBufferSourceNode; endS: number }[] = [];
+  const dropScheduledAudio = () => {
+    for (const { source } of scheduled) source.stop();
+    scheduled = [];
+    pendingBeeps.length = 0;
+    scheduledFromS = Number.POSITIVE_INFINITY;
+    scheduledUntilS = 0;
+  };
+  // When audio began to miss every slot, on the context's clock.
+  let lateSinceS: number | undefined;
   const contextTimeOf = (mediaUs: number) => (anchor ? anchor.contextS + (mediaUs - anchor.mediaUs) / 1e6 : 0);
   const audioDecoder = new AudioDecoder({
     output(data) {
@@ -210,18 +237,36 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
         data.close();
         stats.audioFrames++;
         let startS = contextTimeOf(timestamp);
-        if (!anchor || startS < context.currentTime + 0.005) {
-          // First audio, or audio that arrived too late to play: (re)start the jitter buffer at this frame.
-          if (anchor) stats.audioUnderruns++;
+        const late = anchor !== undefined && startS < context.currentTime + 0.005;
+        if (!late) lateSinceS = undefined;
+        else lateSinceS ??= context.currentTime;
+        if (
+          !anchor ||
+          startS > context.currentTime + jitterS + MAX_EXTRA_AHEAD_S ||
+          (lateSinceS !== undefined && context.currentTime - lateSinceS > MAX_LATE_S)
+        ) {
+          // First audio, after a resync or restart, a schedule that has drifted ahead of the jitter buffer's depth (the
+          // context's clock stalled), or every slot missed for a while (the delay grew for good, within the reader's
+          // budget): (re)start the jitter buffer at this frame, so its depth stays what it was set to.
+          lateSinceS = undefined;
+          dropScheduledAudio();
           anchor = { mediaUs: timestamp, contextS: context.currentTime + jitterS };
           scheduledFromS = anchor.contextS;
           startS = anchor.contextS;
+        } else if (late) {
+          // Its slot has passed. Re-anchoring on it would add its lateness to every later frame (and, since audio
+          // drives the playout clock, to the clock too); drop it and keep the schedule.
+          stats.audioUnderruns++;
+          return;
         }
         const buffer = new AudioBuffer({ length: samples.length, sampleRate, numberOfChannels: 1 });
         buffer.copyToChannel(samples, 0);
         const source = new AudioBufferSourceNode(context, { buffer });
         source.connect(delay);
         source.start(startS);
+        const endS = startS + samples.length / sampleRate;
+        scheduled = scheduled.filter((entry) => entry.endS > context.currentTime);
+        scheduled.push({ source, endS });
         scheduledUntilS = Math.max(scheduledUntilS, startS + samples.length / sampleRate);
         for (const onsetUs of onsets.push(samples, sampleRate, timestamp)) {
           pendingBeeps.push({ timestampUs: onsetUs, contextS: contextTimeOf(onsetUs) });
@@ -285,57 +330,88 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     }
   }, 20);
 
-  // The relay's SUBSCRIBE_OK declares each track's timescale; an object's own Timescale, if any, takes precedence.
-  const trackProperties = new Map<string, KeyValuePair[]>();
-  const timestampOf = (track: string, object: MoqtObject) =>
-    locTimestampUs(object.properties, { trackProperties: trackProperties.get(track) ?? [] });
-  for (const [track, onObject] of [
+  // Either track's resync or restart reset the shared clock: decoded video waiting for its time, and audio scheduled on
+  // the old anchor, belong to the old clock. Neither reader need mark the other track's next frame, so both act here.
+  // Audio goes at once, so no report from the old schedule reaches the reset clock; the next audio anchors anew.
+  // Both decoders are reset too: output still pending in either would land on the reset clock from the old timeline.
+  const clockReset = () => {
+    for (const { frame: waiting } of queue.splice(0)) waiting.close();
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    dropScheduledAudio();
+    anchor = undefined;
+    if (audioDecoder.state === 'configured') {
+      audioDecoder.reset();
+      audioDecoder.configure(audioConfig);
+    }
+    nextAudioUs = undefined;
+    if (videoDecoder.state === 'configured') {
+      videoDecoder.reset();
+      videoDecoder.configure(videoConfig);
+    }
+    videoNeedsKey = true;
+  };
+  // After a reset the video decoder starts again at a keyframe.
+  let videoNeedsKey = false;
+
+  // Each track is read through a frame reader: in decode order, with what is too late against the clock's target
+  // latency dropped. A discontinuity is where a decoder resets; the next video frame is a keyframe.
+  const readers: FrameReader[] = [];
+  for (const [track, grouping, onFrame] of [
     [
       VIDEO_TRACK,
-      (object: MoqtObject) => {
-        const timestampUs = timestampOf(VIDEO_TRACK, object);
-        if (timestampUs === undefined) return;
-        const key = object.objectId === 0;
-        if (!key && !videoKeyed) return;
-        videoKeyed = true;
+      'keyframe',
+      (frame: SequencedFrame) => {
+        if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') clockReset();
+        if (frame.discontinuity) {
+          stats.discontinuities++;
+          videoDecoder.reset();
+          videoDecoder.configure(videoConfig);
+        }
+        // An audio resync reset the decoder too; the deltas until the next keyframe cannot be decoded.
+        if (videoNeedsKey && !frame.key) return;
+        videoNeedsKey = false;
         videoDecoder.decode(
-          new EncodedVideoChunk({ type: key ? 'key' : 'delta', timestamp: timestampUs, data: object.payload }),
+          new EncodedVideoChunk({
+            type: frame.key ? 'key' : 'delta',
+            timestamp: frame.timestampUs,
+            data: frame.payload,
+          }),
         );
       },
     ],
     [
       AUDIO_TRACK,
-      (object: MoqtObject) => {
-        const timestampUs = timestampOf(AUDIO_TRACK, object);
-        if (timestampUs === undefined || audioPaused) return;
-        if (nextAudioUs !== undefined && Math.abs(timestampUs - nextAudioUs) > 5_000) {
+      'frame',
+      (frame: SequencedFrame) => {
+        // The clock was reset whether or not this audio is played.
+        if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') clockReset();
+        if (audioPaused) return;
+        if (nextAudioUs !== undefined && Math.abs(frame.timestampUs - nextAudioUs) > 5_000) {
           audioDecoder.reset();
           audioDecoder.configure(audioConfig);
         }
         // One Opus frame per object; 20 ms is the example's frame length.
-        nextAudioUs = timestampUs + 20_000;
-        audioDecoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: timestampUs, data: object.payload }));
+        nextAudioUs = frame.timestampUs + 20_000;
+        audioDecoder.decode(new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload }));
       },
     ],
   ] as const) {
+    const sequencer = createFrameSequencer({ clock, grouping });
+    stats.readers[track] = sequencer.stats;
+    const reader = createFrameReader(sequencer, {
+      onFrame(frame) {
+        if (stopped) return;
+        try {
+          onFrame(frame);
+        } catch (error) {
+          fail(error);
+        }
+      },
+    });
+    readers.push(reader);
     subscriptions.push(
-      options.subscriber.subscribe(
-        { namespace: [...options.namespace], track },
-        {
-          onSubscribed(info) {
-            trackProperties.set(track, info.trackProperties);
-          },
-          onObject(object) {
-            if (object.status !== 'normal' || stopped) return;
-            try {
-              onObject(object);
-            } catch (error) {
-              fail(error);
-            }
-          },
-          onError: fail,
-        },
-      ),
+      options.subscriber.subscribe({ namespace: [...options.namespace], track }, { ...reader, onError: fail }),
     );
   }
 
@@ -350,6 +426,9 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     setAudioPaused(paused) {
       audioPaused = paused;
     },
+    audioAheadMs() {
+      return Math.round(Math.max(0, scheduledUntilS - context.currentTime) * 1000);
+    },
     takeLongestGapMs() {
       const openGapMs = lastShownUs === undefined ? 0 : Math.round((performance.now() * 1000 - lastShownUs) / 1000);
       const longest = Math.max(stats.longestGapMs, openGapMs);
@@ -358,6 +437,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     },
     async stop() {
       stopped = true;
+      for (const reader of readers) reader.close();
       clearInterval(ticker);
       if (timer !== undefined) clearTimeout(timer);
       for (const subscription of subscriptions) subscription.cancel();
