@@ -647,22 +647,24 @@ package, so the reader takes the sequencer as an argument.
 
 Measured live on 2026-10-15: the A/V test (`mise run ts:test:av-sync`) in Chromium 147 against
 `sjc.relay.mux.global`, through a UDP impairment proxy that, 4 s into playback, either blacked out
-both directions for 2 s or capped the uplink at 80 kbit/s (1 s queue) for 4 s. The player reads both
-tracks through frame readers, keeps a 150 ms audio jitter buffer, drops audio whose slot has passed
-instead of re-anchoring on it, and re-anchors at a resync, a restart, or a schedule more than 100 ms
-beyond its depth. "Ahead" is the audio scheduled ahead of the context's time at the next phase
-boundary, about 6 s after the impairment:
+both directions for 2 s or capped the uplink at 80 kbit/s (1 s queue) for 4 s. The publisher uses
+[#302](https://github.com/muxinc/relay-sdks/issues/302)'s default delivery timeouts. The player reads
+both tracks through frame readers, keeps a 150 ms audio jitter buffer, drops audio whose slot has
+passed instead of re-anchoring on it, and re-anchors at a resync, a restart, or a schedule more than
+100 ms beyond its depth. "Ahead" is the audio scheduled ahead of the context's time at each later
+phase boundary, the first about 6 s after the impairment:
 
-| Impairment | Before (the player decoding in arrival order) | With the frame reader |
+| Impairment | Before (the player decoding in arrival order) | With the frame reader, final two rounds |
 | --- | --- | --- |
-| None | Passes; 130–185 ms ahead | 8 of 8 passed; 126–184 ms ahead |
-| 2 s blackout | 0 of 2: `EncodingError` from an old group's tail after a newer keyframe, or about 2.6 s ahead for the rest of the run | 12 of 12 passed over four rounds; 125–183 ms ahead |
-| Uplink capped for 4 s | 0 of 2: `EncodingError`, or about 3.5 s ahead for the rest of the run | 3 of 6 passed in the last two rounds; 130–232 ms ahead in every run |
+| None | Passes; 130–185 ms ahead | 6 of 7 passed; 124–172 ms ahead |
+| 2 s blackout | 0 of 2: `EncodingError` from an old group's tail after a newer keyframe, or about 2.6 s ahead for the rest of the run | 6 of 6 passed; 126–191 ms ahead |
+| Uplink capped for 4 s | 0 of 2: `EncodingError`, or about 3.5 s ahead for the rest of the run | 6 of 6 passed; 120–199 ms ahead |
 
-The failing capped runs failed the test's sync check for the phase the cap falls in: the cap starved
-it of every matched beep, or one event right after recovery was 160–215 ms off. Latency recovered in
-all of them. Getting there took three rules found in these runs: a resync only on a steady delay, a
-resync forward when the clock is behind what arrives, and the player's bounded jitter buffer.
+Unimpaired, the readers' counters stayed at zero skips and resyncs, with at most two audio frames
+dropped as late. The one unimpaired failure stalled video for 3.2 s and 2.6 s in two phases; it came
+before the player's last fix and was not seen again in four runs. Getting here took three rules
+found in these runs: a resync only on a steady delay, a resync forward when the clock is behind
+what arrives, and the player's bounded jitter buffer.
 
 The publisher side of the same stall is [issue #302](https://github.com/muxinc/relay-sdks/issues/302)'s
 delivery timeouts. They derive from the same keyframe interval, about one interval for video, under
