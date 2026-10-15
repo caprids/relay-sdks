@@ -321,13 +321,26 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
   // Either track's resync or restart reset the shared clock: decoded video waiting for its time, and audio scheduled on
   // the old anchor, belong to the old clock. Neither reader need mark the other track's next frame, so both act here.
   // Audio goes at once, so no report from the old schedule reaches the reset clock; the next audio anchors anew.
+  // Both decoders are reset too: output still pending in either would land on the reset clock from the old timeline.
   const clockReset = () => {
     for (const { frame: waiting } of queue.splice(0)) waiting.close();
     if (timer !== undefined) clearTimeout(timer);
     timer = undefined;
     dropScheduledAudio();
     anchor = undefined;
+    if (audioDecoder.state === 'configured') {
+      audioDecoder.reset();
+      audioDecoder.configure(audioConfig);
+    }
+    nextAudioUs = undefined;
+    if (videoDecoder.state === 'configured') {
+      videoDecoder.reset();
+      videoDecoder.configure(videoConfig);
+    }
+    videoNeedsKey = true;
   };
+  // After a reset the video decoder starts again at a keyframe.
+  let videoNeedsKey = false;
 
   // Each track is read through a frame reader: in decode order, with what is too late against the clock's target
   // latency dropped. A discontinuity is where a decoder resets; the next video frame is a keyframe.
@@ -343,6 +356,9 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
           videoDecoder.reset();
           videoDecoder.configure(videoConfig);
         }
+        // An audio resync reset the decoder too; the deltas until the next keyframe cannot be decoded.
+        if (videoNeedsKey && !frame.key) return;
+        videoNeedsKey = false;
         videoDecoder.decode(
           new EncodedVideoChunk({
             type: frame.key ? 'key' : 'delta',
