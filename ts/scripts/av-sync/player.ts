@@ -311,6 +311,15 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
     }
   }, 20);
 
+  // Either track's resync or restart reset the shared clock: decoded video waiting for its time, and audio scheduled on
+  // the old anchor, belong to the old clock. Neither reader need mark the other track's next frame, so both act here.
+  const clockReset = () => {
+    for (const { frame: waiting } of queue.splice(0)) waiting.close();
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    reanchorAudio = true;
+  };
+
   // Each track is read through a frame reader: in decode order, with what is too late against the clock's target
   // latency dropped. A discontinuity is where a decoder resets; the next video frame is a keyframe.
   const readers: FrameReader[] = [];
@@ -319,14 +328,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       VIDEO_TRACK,
       'keyframe',
       (frame: SequencedFrame) => {
-        if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') {
-          // The shared clock was reset: decoded frames waiting for their time, and audio scheduled on the old anchor,
-          // belong to the old clock. Audio re-anchors at its next frame, which its own reader may not mark.
-          for (const { frame: waiting } of queue.splice(0)) waiting.close();
-          if (timer !== undefined) clearTimeout(timer);
-          timer = undefined;
-          reanchorAudio = true;
-        }
+        if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') clockReset();
         if (frame.discontinuity) {
           stats.discontinuities++;
           videoDecoder.reset();
@@ -346,7 +348,7 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       'frame',
       (frame: SequencedFrame) => {
         if (audioPaused) return;
-        if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') reanchorAudio = true;
+        if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') clockReset();
         if (nextAudioUs !== undefined && Math.abs(frame.timestampUs - nextAudioUs) > 5_000) {
           audioDecoder.reset();
           audioDecoder.configure(audioConfig);
