@@ -82,7 +82,7 @@ export interface FrameSequencer {
   groupEnded(groupId: number): void;
   /** A group's stream was reset: its remaining objects will not come. */
   groupReset(groupId: number): void;
-  /** The subscription was replaced (a Restart or a Move): forget everything; group IDs start over. */
+  /** The subscription was replaced (a Restart or a Move): forget everything and reset the clock; group IDs start over. */
   restart(): void;
   /**
    * Take the frames that are ready, at most `maxFrames` (default all), and when to poll again. A reader that cannot
@@ -201,6 +201,11 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       newestLate = { groupId, group };
     }
     noteLate(positionUs, positionUs - timestampUs);
+    // Its later objects already held count too: a draining backlog's shrinking lateness shows in them.
+    for (const objectId of [...(group?.frames.keys() ?? [])].sort((a, b) => a - b)) {
+      const frame = group?.frames.get(objectId) as SequencedFrame;
+      if (frame.timestampUs > timestampUs) noteLate(positionUs, positionUs - frame.timestampUs);
+    }
   };
 
   const deliver = (frame: SequencedFrame, out: SequencedFrame[]) => {
@@ -479,6 +484,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     groupEnded,
     groupReset,
     restart() {
+      // The new subscription's timeline is not judged against the old one's anchor.
+      clock.reset();
       groups.clear();
       keyframes.clear();
       floor = undefined;

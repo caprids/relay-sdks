@@ -281,6 +281,32 @@
         { "at": "9000000", "poll": { "frames": [["1", "0", "resync"], ["1", "1"], ["1", "2"]], "waitUs": "50000" } },
         { "at": "9000000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
+    },
+    {
+      "name": "a resync candidate's buffered later objects count for steady lateness",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "5000000", "object": ["1", "0", "1000000"] },
+        { "at": "5000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "6000000", "object": ["2", "0", "2000000"] },
+        { "at": "6000000", "object": ["2", "1", "2900000"] },
+        { "at": "6000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "7000000", "poll": { "frames": [], "waitUs": "1000000" } },
+        { "at": "8000000", "poll": { "frames": [["2", "0", "resync"], ["2", "1"]], "waitUs": "50000" } },
+        { "at": "8000000", "stats": { "delivered": "2", "late": "1", "skippedGroups": "2", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
+      "name": "a restart resets an anchored clock, so the new timeline is not judged against the old",
+      "steps": [
+        { "at": "0", "anchor": "100000000" },
+        { "at": "0", "object": ["40", "0", "100000000"] },
+        { "at": "0", "poll": { "frames": [["40", "0"]], "waitUs": null } },
+        { "at": "100000", "restart": true },
+        { "at": "100000", "object": ["0", "0", "0"] },
+        { "at": "100000", "poll": { "frames": [["0", "0", "restart"]], "waitUs": "50000" } },
+        { "at": "100000", "stats": { "delivered": "2", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
     }
   ]
 }

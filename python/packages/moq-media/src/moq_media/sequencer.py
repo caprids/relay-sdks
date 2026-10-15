@@ -186,7 +186,10 @@ class FrameSequencer:
         self._bound_held()
 
     def restart(self) -> None:
-        """The subscription was replaced (a Restart or a Move): forget everything; group IDs start over."""
+        """The subscription was replaced (a Restart or a Move): forget everything and reset the clock; group IDs start
+        over."""
+        # The new subscription's timeline is not judged against the old one's anchor.
+        self._clock.reset()
         self._groups.clear()
         self._keyframes.clear()
         self._floor = None
@@ -280,6 +283,12 @@ class FrameSequencer:
         if group is not None and 0 in group.frames and (self._newest_late is None or group_id > self._newest_late[0]):
             self._newest_late = (group_id, group)
         self._note_late(position, position - timestamp)
+        # Its later objects already held count too: a draining backlog's shrinking lateness shows in them.
+        frames = group.frames if group is not None else {}
+        for object_id in sorted(frames):
+            frame = frames[object_id]
+            if frame.timestamp_us > timestamp:
+                self._note_late(position, position - frame.timestamp_us)
 
     def _deliver(self, frame: SequencedFrame, out: list[SequencedFrame]) -> None:
         if self._pending is not None:

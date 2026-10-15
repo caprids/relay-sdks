@@ -1322,8 +1322,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   there, as at a keyframe it can start from. Nothing is marked before the first delivery.
 - Resync: once frames have arrived but none within the budget for one whole target latency of the
   position, with their lateness steady (within a quarter of the target latency of where it stood
-  when the wait began; a stall's growing lateness and a draining backlog's shrinking one restart
-  the wait), the sequencer delivers the newest late group that still has its keyframe (or the newest
+  when the wait began, judged on every late object, held or arriving; a stall's growing lateness
+  and a draining backlog's shrinking one restart the wait), the sequencer delivers the newest late group that still has its keyframe (or the newest
   late frame), marks it `resync`, and resets the clock, which re-anchors on the next frame shown.
   That group keeps collecting its later objects and its end while it waits.
 - Resync forward: a keyframe that would open the next delivered group (or, under frame grouping, a
@@ -1333,7 +1333,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   frames before it in the same poll are returned first, with a wait of 0.
   A lasting increase in delay therefore costs one target latency, not a black or silent player.
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
-  over, and the next frame carries `restart`. A Move also brings the new subscription's track
+  over, the clock is reset so the new timeline is not judged against the old anchor, and the next
+  frame carries `restart`. A Move also brings the new subscription's track
   properties.
 - `poll()` returns the frames ready now, at most `maxFrames` / `max_frames` (a positive integer;
   default all), and how long until a wait can end: 0 when more is ready now, nothing when only a new
