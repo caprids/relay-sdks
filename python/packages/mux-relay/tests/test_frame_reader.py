@@ -140,6 +140,19 @@ async def test_releases_held_frames_once_the_clock_anchors_with_no_further_event
     assert ids(await asyncio.wait_for(pending, 1)) == [(1, 0, "gap")]
 
 
+async def test_notices_another_track_resetting_the_shared_clock_before_its_own_wait_ends() -> None:
+    clock = PlayoutClock(now_us=Clock())
+    clock.due(5_000_000)
+    reader = FrameReader(FrameSequencer(clock))
+    handlers = reader.subscription_handlers()
+    assert handlers.on_object is not None
+    handlers.on_object(obj(1, 0, 2_000_000))  # 3 s late: held as a resync candidate, with a 2 s wait
+    pending = asyncio.ensure_future(take(reader, 1))
+    await asyncio.sleep(0.01)  # the read is waiting on that wait
+    clock.reset()  # the other track resyncs; no further event reaches this reader
+    assert ids(await asyncio.wait_for(pending, 0.5)) == [(1, 0, None)]
+
+
 async def test_a_slow_reader_gets_fresh_audio_rather_than_a_backlog() -> None:
     now = [0]
     clock = PlayoutClock(now_us=lambda: now[0])

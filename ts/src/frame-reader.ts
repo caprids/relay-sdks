@@ -57,8 +57,12 @@ export interface FrameReader {
   close(): void;
 }
 
+/** Poll at least this often while a wait runs: another track may reset or re-anchor the shared clock meanwhile. */
+const CLOCK_RECHECK_US = 50_000;
+
 /**
- * Read a track as frames: feed the sequencer every event, poll it after each, and again when a wait it reports ends.
+ * Read a track as frames: feed the sequencer every event, poll it after each, and again when a wait it reports ends
+ * (at most 50 ms on, since another track may move a shared clock).
  * See spec/behavior.md, "Media subscribing".
  *
  * ```ts
@@ -102,7 +106,7 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
           }
         }
         if (waitUs === 0) again = true;
-        else if (!closed && waitUs !== undefined) timer = setTimeout(drain, waitUs / 1000);
+        else if (!closed && waitUs !== undefined) timer = setTimeout(drain, Math.min(waitUs, CLOCK_RECHECK_US) / 1000);
       } while (again && !closed);
     } finally {
       draining = false;

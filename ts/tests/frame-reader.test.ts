@@ -163,6 +163,17 @@ describe('createFrameReader', () => {
     ]);
   });
 
+  it('notices another track resetting the shared clock before its own wait ends', () => {
+    const { clock, frames, reader, advance } = setup();
+    clock.due(0);
+    advance(5_000_000);
+    reader.onObject(object(1, 0, 2_000_000)); // 3 s late: held as a resync candidate, with a 2 s wait
+    expect(frames).toEqual([]);
+    clock.reset(); // the other track resyncs; no further event reaches this reader
+    advance(100_000);
+    expect(ids(frames)).toEqual([[1, 0]]);
+  });
+
   it('stops delivering and cancels its pending poll when closed', () => {
     const { clock, frames, reader, advance } = setup();
     clock.due(0);

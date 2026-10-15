@@ -19,6 +19,9 @@ from .supervised_subscriber import RestartReason, WantHandlers, WantSwitchedInfo
 F = TypeVar("F")
 F_co = TypeVar("F_co", covariant=True)
 
+# Poll at least this often while a wait runs: another track may reset or re-anchor the shared clock meanwhile.
+_CLOCK_RECHECK_US = 50_000
+
 
 class FrameReaderPoll(Protocol[F_co]):
     """What a sequencer's ``poll()`` returns: the frames ready now, and when to poll again in microseconds."""
@@ -48,7 +51,8 @@ class FrameReaderSequencer(Protocol[F_co]):
 
 class FrameReader(Generic[F]):
     """Read a track as frames: feed the sequencer every event, and poll it as the application reads, or when a wait it
-    reports ends. Iterate it for the frames, in decode order; :meth:`close` ends the iteration.
+    reports ends (at most 50 ms on, since another track may move a shared clock). Iterate it for the frames, in decode
+    order; :meth:`close` ends the iteration.
 
     Pass :meth:`subscription_handlers` to ``RelaySubscriber.subscribe`` or :meth:`want_handlers` to
     ``SupervisedSubscriber.want``. Each group is one subgroup, as the frame writer sends it, so a subgroup's end is its
@@ -83,7 +87,7 @@ class FrameReader(Generic[F]):
                 return result.frames[0]
             changed = self._changed = self._changed or asyncio.Event()
             changed.clear()
-            timeout = None if result.wait_us is None else result.wait_us / 1_000_000
+            timeout = None if result.wait_us is None else min(result.wait_us, _CLOCK_RECHECK_US) / 1_000_000
             try:
                 await asyncio.wait_for(changed.wait(), timeout)
             except TimeoutError:
