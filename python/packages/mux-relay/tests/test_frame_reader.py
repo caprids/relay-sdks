@@ -64,7 +64,7 @@ async def test_polls_again_when_a_wait_ends() -> None:
     handlers = reader.subscription_handlers()
     assert handlers.on_object is not None
     handlers.on_object(obj(0, 0, 0))
-    handlers.on_object(obj(1, 0, 1_000_000))
+    handlers.on_object(obj(1, 0, 60_000))
     frames = await asyncio.wait_for(take(reader, 2), 1)
     assert ids(frames) == [(0, 0, None), (1, 0, "gap")]
 
@@ -132,10 +132,12 @@ async def test_releases_held_frames_once_the_clock_anchors_with_no_further_event
     handlers = reader.subscription_handlers()
     assert handlers.on_object is not None
     handlers.on_object(obj(0, 0, 0))
-    handlers.on_object(obj(1, 0, 1_000_000))
-    first = await take(reader, 1)
-    clock.due(first[0].timestamp_us)  # the player shows the first frame: the clock anchors
-    assert ids(await asyncio.wait_for(take(reader, 1), 1)) == [(1, 0, "gap")]
+    handlers.on_object(obj(1, 0, 60_000))
+    assert ids(await take(reader, 1)) == [(0, 0, None)]
+    pending = asyncio.ensure_future(take(reader, 1))
+    await asyncio.sleep(0.01)  # the read is waiting, with the clock still idle
+    clock.due(0)  # the player shows the first frame: the clock anchors, and no further event comes
+    assert ids(await asyncio.wait_for(pending, 1)) == [(1, 0, "gap")]
 
 
 async def test_a_slow_reader_gets_fresh_audio_rather_than_a_backlog() -> None:

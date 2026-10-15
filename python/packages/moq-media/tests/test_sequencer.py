@@ -143,3 +143,41 @@ def test_bounds_what_it_holds_when_nobody_polls() -> None:
     assert len(frames) <= 1100
     assert frames[0].key and frames[0].discontinuity == "gap"
     assert sequencer.stats.late > 1800
+
+
+def test_bounds_a_resync_candidate_too() -> None:
+    now = [0]
+    clock = PlayoutClock(now_us=lambda: now[0])
+    clock.due(0)
+    now[0] = 5_000_000
+    sequencer = FrameSequencer(clock)
+    sequencer.object(obj(1, 0, stamp(1_000_000)))
+    assert sequencer.poll().frames == []
+    for index in range(1, 3000):
+        sequencer.object(
+            MoqtObject(group_id=1, object_id=index, subgroup_id=0, properties=stamp(1_000_000 + index), payload=b"")
+        )
+    now[0] = 7_000_000
+    assert len(sequencer.poll().frames) <= 1100
+
+
+def test_terminal_events_do_not_accumulate_empty_groups() -> None:
+    sequencer = FrameSequencer(PlayoutClock(now_us=lambda: 0))
+    sequencer.object(obj(0, 0, stamp(0)))
+    sequencer.group_ended(0)
+    sequencer.poll()
+    for group in range(5, 5005):
+        sequencer.group_reset(group)
+    assert len(sequencer._groups) <= 1100
+
+
+def test_takes_keyframe_intervals_only_from_groups_that_can_still_be_delivered() -> None:
+    clock = PlayoutClock(now_us=lambda: 0)
+    sequencer = FrameSequencer(clock)
+    for group in range(10, 18):
+        sequencer.object(obj(group, 0, stamp(group * 1_000_000)))
+        sequencer.group_ended(group)
+    sequencer.poll()
+    for _ in range(4):
+        sequencer.object(obj(9, 0, stamp(9_900_000)))
+    assert clock.target_latency_us == 2_000_000

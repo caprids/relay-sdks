@@ -147,4 +147,33 @@ describe('createFrameSequencer', () => {
     expect(frames[0]).toMatchObject({ key: true, discontinuity: 'gap' });
     expect(sequencer.stats.late).toBeGreaterThan(1800);
   });
+
+  it('bounds a resync candidate too', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now });
+    clock.due(0);
+    now = 5_000_000;
+    const sequencer = createFrameSequencer({ clock });
+    sequencer.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 1_000_000 }]));
+    expect(sequencer.poll().frames).toEqual([]);
+    for (let index = 1; index < 3000; index++) {
+      sequencer.object(object(1, index, [{ type: LOC_TIMESTAMP, value: 1_000_000 + index }]));
+    }
+    now = 7_000_000;
+    expect(sequencer.poll().frames.length).toBeLessThanOrEqual(1100);
+  });
+
+  it('takes keyframe intervals only from groups that can still be delivered', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const sequencer = createFrameSequencer({ clock });
+    for (let group = 10; group < 18; group++) {
+      sequencer.object(object(group, 0, [{ type: LOC_TIMESTAMP, value: group * 1_000_000 }]));
+      sequencer.groupEnded(group);
+    }
+    sequencer.poll();
+    for (let repeat = 0; repeat < 4; repeat++) {
+      sequencer.object(object(9, 0, [{ type: LOC_TIMESTAMP, value: 9_900_000 }]));
+    }
+    expect(clock.targetLatencyUs).toBe(2_000_000);
+  });
 });

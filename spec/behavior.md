@@ -1294,7 +1294,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
 - Lateness is measured against the playout clock's position, which advances in real time through a
   stall. While the clock is idle nothing is late. The budget is the clock's target latency, one
   setting for every track of the broadcast; the sequencer reports the interval between the
-  keyframes of consecutive groups to the clock, so the default follows the stream.
+  keyframes of consecutive groups to the clock, so the default follows the stream. Only a keyframe
+  that can still be delivered reports one: an old duplicate does not move the budget.
 - A frame's timestamp is its LOC Timestamp, scaled by the object's Timescale, then the track
   properties from SUBSCRIBE_OK. An object without one is counted (`untimed`) and ignored. An
   end-of-group status object ends its group. A repeated object is ignored.
@@ -1308,7 +1309,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   idle until the group ends or is reset. The group is then passed over. A group whose stream ended with
   a hole, or was reset, is passed over at once. A group that ended after its last object was
   delivered is followed by the next group with no discontinuity. Any other group that ends or is
-  reset without its keyframe is discarded, since it can never be delivered.
+  reset without its keyframe is discarded, since it can never be delivered, and the end or reset of
+  a group that has not been seen is kept only for the next group.
 - When the next group ID has not been seen, the lowest group holding its keyframe waits while that
   keyframe is not yet due (its timestamp ahead of the position), since the missing group may still
   arrive or may never have been sent (a failed group's ID is not reused). Groups and objects behind
@@ -1322,6 +1324,10 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   position, the sequencer delivers the newest late group that still has its keyframe (or the newest
   late frame), marks it `resync`, and resets the clock, which re-anchors on the next frame shown.
   That group keeps collecting its later objects and its end while it waits.
+- Resync forward: a keyframe that would open the next delivered group (or, under frame grouping, a
+  frame) more than the target latency ahead of the position means the clock was anchored on a
+  backlog, as after a resync during a long stall. The sequencer resets the clock and marks that
+  frame `resync`, so the backlog does not become lasting latency.
   A lasting increase in delay therefore costs one target latency, not a black or silent player.
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
   over, and the next frame carries `restart`. A Move also brings the new subscription's track
@@ -1332,7 +1338,9 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   frames are held, it asks to be polled again after 50 ms, since the clock may anchor without any
   new object. At most about 1,024 frames are held: past that, as when nothing polls, everything
   held is dropped as late and the next frame carries `gap`. The TypeScript reader polls after every
-  event and again when that time comes, and hands each frame to `onFrame`. The Python reader is
+  event and again when that time comes, and hands each frame to `onFrame`; an event fed from within
+  `onFrame` is applied after the frame in hand, and a Restart or Move fed that way drops the rest of
+  the batch, which belongs to the replaced subscription. The Python reader is
   iterated and takes one frame per read, so a slow reader gets fresh frames, not a backlog. Both treat
   each group as one subgroup, as the frame writer sends it. A want read through a reader keeps
   `drainMs` / `drain` at 0, the default: a drained old subscription's groups would arrive after the

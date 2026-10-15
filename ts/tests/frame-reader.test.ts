@@ -110,6 +110,31 @@ describe('createFrameReader', () => {
     expect(frames[2]?.timestampUs).toBe(1000);
   });
 
+  it('ends the batch in hand when onFrame restarts the reader, and never interleaves batches', () => {
+    vi.useFakeTimers();
+    const clock = createPlayoutClock({ now: () => 0 });
+    clock.due(0);
+    const seen: SequencedFrame[] = [];
+    const reader = createFrameReader(createFrameSequencer({ clock }), {
+      onFrame(frame) {
+        seen.push(frame);
+        if (frame.groupId === 1 && frame.objectId === 0) {
+          reader.onRestarted();
+          reader.onObject(object(20, 0, 2_000_000));
+        }
+      },
+    });
+    reader.onObject(object(0, 0, 0));
+    reader.onObject(object(1, 0, 1_000_000));
+    reader.onObject(object(1, 1, 1_033_333));
+    reader.onSubgroupEnd({ groupId: 0 });
+    expect(ids(seen)).toEqual([
+      [0, 0],
+      [1, 0],
+      [20, 0, 'restart'],
+    ]);
+  });
+
   it('carries on after onFrame throws', () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const seen: number[] = [];

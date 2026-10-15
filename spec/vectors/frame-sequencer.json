@@ -201,6 +201,34 @@
         { "at": "0", "poll": { "frames": [["6", "0", "gap"]], "waitUs": "50000" } },
         { "at": "0", "stats": { "delivered": "2", "late": "0", "skippedGroups": "3", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
+    },
+    {
+      "name": "a keyframe more than the target latency ahead resyncs forward: the clock was anchored on a backlog",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "0", "object": ["0", "0", "0"] },
+        { "at": "0", "groupEnd": "0" },
+        { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": null } },
+        { "at": "100000", "object": ["5", "0", "2200001"] },
+        { "at": "100000", "poll": { "frames": [["5", "0", "resync"]], "waitUs": "50000" } },
+        { "at": "100000", "object": ["6", "0", "3200001"] },
+        { "at": "100000", "groupEnd": "5" },
+        { "at": "100000", "poll": { "frames": [["6", "0"]], "waitUs": "50000" } },
+        { "at": "100000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
+      "name": "an audio frame more than the target latency ahead resyncs forward",
+      "grouping": "frame",
+      "steps": [
+        { "at": "0", "report": "0" },
+        { "at": "0", "object": ["0", "0", "100000"] },
+        { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": null } },
+        { "at": "20000", "object": ["1", "0", "2100000"] },
+        { "at": "20000", "object": ["2", "0", "2120000"] },
+        { "at": "20000", "poll": { "frames": [["1", "0", "resync"], ["2", "0"]], "waitUs": null } },
+        { "at": "20000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
     }
   ]
 }

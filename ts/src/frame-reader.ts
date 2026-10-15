@@ -70,30 +70,53 @@ export interface FrameReader {
 export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options: FrameReaderOptions<F>): FrameReader {
   let timer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
+  // An onFrame that feeds the reader again (synchronously) must not interleave a second batch with the first, and a
+  // restart it causes ends the batch in hand: those frames belong to the replaced subscription.
+  let draining = false;
+  let again = false;
+  let generation = 0;
 
   const drain = () => {
     if (closed) return;
-    if (timer !== undefined) {
-      clearTimeout(timer);
-      timer = undefined;
+    if (draining) {
+      again = true;
+      return;
     }
-    const { frames, waitUs } = sequencer.poll();
-    for (const frame of frames) {
-      if (closed) return;
-      try {
-        options.onFrame(frame);
-      } catch (error) {
-        // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
-        console.error(new Error('onFrame threw; the frame reader carries on', { cause: error }));
-      }
+    draining = true;
+    try {
+      do {
+        again = false;
+        if (timer !== undefined) {
+          clearTimeout(timer);
+          timer = undefined;
+        }
+        const current = generation;
+        const { frames, waitUs } = sequencer.poll();
+        for (const frame of frames) {
+          if (closed || generation !== current) break;
+          try {
+            options.onFrame(frame);
+          } catch (error) {
+            // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+            console.error(new Error('onFrame threw; the frame reader carries on', { cause: error }));
+          }
+        }
+        if (!closed && waitUs !== undefined) timer = setTimeout(drain, waitUs / 1000);
+      } while (again && !closed);
+    } finally {
+      draining = false;
     }
-    if (!closed && waitUs !== undefined) timer = setTimeout(drain, waitUs / 1000);
   };
   const event = (apply: () => void) => {
     if (closed) return;
     apply();
     drain();
   };
+  const restart = (apply: () => void) =>
+    event(() => {
+      generation++;
+      apply();
+    });
 
   return {
     onSubscribed(info) {
@@ -109,10 +132,10 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
       event(() => sequencer.groupReset(groupId));
     },
     onRestarted() {
-      event(() => sequencer.restart());
+      restart(() => sequencer.restart());
     },
     onSwitched(info) {
-      event(() => {
+      restart(() => {
         sequencer.restart();
         sequencer.trackProperties = info.subscribed.trackProperties;
       });

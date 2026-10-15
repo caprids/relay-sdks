@@ -284,6 +284,11 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         lateGroup(groupId, positionUs as number);
         continue;
       }
+      if (positionUs !== undefined && keyframe.timestampUs - positionUs > target) {
+        // The clock is behind what arrives, anchored on a backlog: resync forward on this keyframe.
+        resyncForward();
+        return pollKeyframes(out);
+      }
       if (next !== undefined && groupId > next) {
         // An older group may still be on its way, or may never be sent (a failed group's ID is not reused). Wait only
         // while this keyframe is not yet due: until then, holding it costs no latency.
@@ -302,8 +307,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
 
   // Frame grouping: every frame stands alone; deliver in order at once, and drop what is late or behind.
   const pollFrames = (out: SequencedFrame[]) => {
-    const positionUs = clock.position();
-    const lateBefore = positionUs === undefined ? Number.NEGATIVE_INFINITY : positionUs - clock.lateDropUs;
+    let positionUs = clock.position();
+    let lateBefore = positionUs === undefined ? Number.NEGATIVE_INFINITY : positionUs - clock.lateDropUs;
     for (const id of [...groups.keys()].sort((a, b) => a - b)) {
       const group = groups.get(id) as Group;
       for (const objectId of [...group.frames.keys()].sort((a, b) => a - b)) {
@@ -311,6 +316,12 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         const frame = group.frames.get(objectId) as SequencedFrame;
         group.frames.delete(objectId);
         floor = id;
+        if (positionUs !== undefined && frame.timestampUs - positionUs > clock.targetLatencyUs) {
+          // The clock is behind what arrives, anchored on a backlog: resync forward on this frame.
+          resyncForward();
+          positionUs = undefined;
+          lateBefore = Number.NEGATIVE_INFINITY;
+        }
         if (frame.timestampUs < lateBefore) {
           stats.late++;
           newestLate = { groupId: id, group: { frames: new Map([[objectId, frame]]), ended: true, reset: false } };
@@ -334,7 +345,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       held += group.frames.size;
       highest = highest === undefined ? id : Math.max(highest, id);
     }
-    if (held <= MAX_HELD_FRAMES || highest === undefined) return;
+    if ((held <= MAX_HELD_FRAMES && groups.size <= MAX_HELD_FRAMES) || highest === undefined) return;
     stats.late += held;
     stats.skippedGroups += groups.size;
     groups.clear();
@@ -343,6 +354,16 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     cursor = undefined;
     floor = Math.max(floor ?? highest, highest);
     if (deliveredSinceRestart) pending ??= 'gap';
+  };
+
+  // A frame more than the target latency ahead of the position: the clock was anchored on a backlog (a resync during a
+  // long stall), and holding everything that far behind would make the backlog permanent.
+  const resyncForward = () => {
+    clock.reset();
+    stats.resyncs++;
+    pending = 'resync';
+    starvedAtUs = undefined;
+    newestLate = undefined;
   };
 
   // Nothing within the budget for a whole target latency: deliver the newest late group or frame, and reset the
@@ -376,14 +397,21 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     return pollKeyframes(out);
   };
 
-  const groupEnded = (groupId: number) => {
-    if (newestLate?.groupId === groupId) newestLate.group.ended = true;
-    else if (floor === undefined || groupId > floor) groupOf(groupId).ended = true;
+  // A group's stream is over. One with nothing in it is kept only when it is the next group, where it says a gap;
+  // anything else would only accumulate.
+  const groupOver = (groupId: number, how: 'ended' | 'reset') => {
+    if (newestLate?.groupId === groupId) {
+      newestLate.group[how] = true;
+      return;
+    }
+    if (floor !== undefined && groupId <= floor) return;
+    const group = groups.get(groupId);
+    if (group) group[how] = true;
+    else if (floor !== undefined && groupId === floor + 1) groupOf(groupId)[how] = true;
+    boundHeld();
   };
-  const groupReset = (groupId: number) => {
-    if (newestLate?.groupId === groupId) newestLate.group.reset = true;
-    else if (floor === undefined || groupId > floor) groupOf(groupId).reset = true;
-  };
+  const groupEnded = (groupId: number) => groupOver(groupId, 'ended');
+  const groupReset = (groupId: number) => groupOver(groupId, 'reset');
 
   const minWait = (a: number | undefined, b: number | undefined) =>
     a === undefined ? b : b === undefined ? a : Math.min(a, b);
@@ -409,12 +437,12 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         stats.untimed++;
         return;
       }
-      if (keyframeGrouping && object.objectId === 0) noteKeyframe(object.groupId, timestampUs);
       if (keyframeGrouping && newestLate?.groupId === object.groupId) {
         // The resync candidate keeps collecting its group: a resync delivers from its keyframe on.
         if (!newestLate.group.frames.has(object.objectId)) {
           newestLate.group.frames.set(object.objectId, frameOf(object, timestampUs));
           stats.late++;
+          boundHeld();
         }
         return;
       }
@@ -422,6 +450,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         stats.late++;
         return;
       }
+      // Only a keyframe that can still be delivered reports an interval: an old duplicate must not move the budget.
+      if (keyframeGrouping && object.objectId === 0) noteKeyframe(object.groupId, timestampUs);
       const group = groupOf(object.groupId);
       if (group.frames.has(object.objectId)) return;
       group.frames.set(object.objectId, frameOf(object, timestampUs));

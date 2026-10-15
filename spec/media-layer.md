@@ -636,6 +636,10 @@ package, so the reader takes the sequencer as an argument.
   the path delay has grown for good. The sequencer delivers the newest late keyframe group (or audio
   frame), marks it `resync`, and resets the clock so it re-anchors there, rather than leave the
   player black or silent.
+- **Resync forward.** A resync during a long stall, such as the uplink capped for 4 s, anchors the
+  clock on frames seconds old. When the backlog drains, fresher frames arrive more than the target
+  latency ahead of the position. That is a resync too, forward, so the backlog does not become
+  lasting latency. The player drops the audio and video it had scheduled on the old anchor.
 - **Restart and Move.** A want's Restart or Move restarts the sequencer, since group IDs start over,
   and marks the next frame `restart`.
 
