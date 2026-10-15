@@ -14,6 +14,8 @@ type Step = {
   mode?: string;
   position?: string | null;
   due?: string;
+  targetLatency?: string;
+  keyframeInterval?: string;
 };
 type Vectors = {
   broadcast: { name: string; createdAt: string; originEpochUs: string; originUs?: string; steps: Step[] }[];
@@ -48,6 +50,8 @@ type Vectors = {
     }[];
   }[];
   playout: { name: string; options?: Record<string, string>; steps: Step[] }[];
+  playoutErrors: { name: string; options: Record<string, string> }[];
+  keyframeIntervalErrors: { name: string; intervalUs: string }[];
   epochOrigins: {
     name: string;
     createdAt: string;
@@ -178,6 +182,8 @@ describe('spec/vectors/clock.json', () => {
       }
       if (step.stopAudio) clock.stopAudio();
       if (step.reset) clock.reset();
+      if (step.keyframeInterval !== undefined) clock.reportKeyframeInterval(Number(step.keyframeInterval));
+      if (step.targetLatency !== undefined) expect(clock.targetLatencyUs).toBe(Number(step.targetLatency));
       if (step.due !== undefined && typeof step.expect === 'object') {
         expect(clock.due(Number(step.due))).toEqual(decision(step.expect));
       }
@@ -186,6 +192,17 @@ describe('spec/vectors/clock.json', () => {
         expect(clock.position()).toBe(step.position === null ? undefined : Number(step.position));
       }
     }
+  });
+
+  it.each(vectors.playoutErrors)('playout clock rejects $name', ({ options }) => {
+    const parsed = Object.fromEntries(Object.entries(options).map(([key, value]) => [key, Number(value)]));
+    expect(() => createPlayoutClock(parsed)).toThrow(RangeError);
+  });
+
+  it.each(vectors.keyframeIntervalErrors)('playout clock rejects a $name keyframe interval', ({ intervalUs }) => {
+    const clock = createPlayoutClock();
+    expect(() => clock.reportKeyframeInterval(Number(intervalUs))).toThrow(RangeError);
+    expect(clock.targetLatencyUs).toBe(2_000_000);
   });
 });
 

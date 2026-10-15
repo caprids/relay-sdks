@@ -188,6 +188,11 @@ export function createBroadcastClock(options: BroadcastClockOptions = {}): Broad
   };
 }
 
+/** The target latency before any keyframe interval is known: twice a one-second keyframe interval. */
+const DEFAULT_TARGET_LATENCY_US = 2_000_000;
+/** How many keyframe intervals the derived target latency looks back over. */
+const KEYFRAME_INTERVALS_KEPT = 4;
+
 /** Options for {@link createPlayoutClock}. Durations are microseconds. */
 export interface PlayoutClockOptions {
   /** The time source, in microseconds. Defaults to `performance.now()`. */
@@ -196,6 +201,12 @@ export interface PlayoutClockOptions {
   lateDropUs?: number;
   /** The most a frame may lead the clock before the clock re-syncs. Default 1,000,000. */
   maxVideoDelayUs?: number;
+  /**
+   * The target latency: how far behind the position a frame may still be delivered for decoding, and how late a frame
+   * must be before wall pacing re-anchors on it. Default: twice the longest of the last four keyframe intervals
+   * reported, or 2,000,000 before any is.
+   */
+  targetLatencyUs?: number;
   /** Audio silent for longer than this hands pacing to the wall clock. Default 500,000. */
   audioTimeoutUs?: number;
 }
@@ -247,7 +258,16 @@ export interface PlayoutClock {
   due(timestampUs: number): PlayoutDecision;
   /** The timeline position now, or `undefined` while idle. */
   position(): number | undefined;
-  /** Forget every anchor, at a Restart, a Move, or a new catalog: the next frame anchors wall pacing. */
+  /** How late a frame may be shown, in microseconds: the `lateDropUs` option. */
+  readonly lateDropUs: number;
+  /** The target latency now: the option, or twice the longest of the last four keyframe intervals reported. */
+  readonly targetLatencyUs: number;
+  /** Report the spacing between two consecutive keyframes on the timeline; a frame reader does this. */
+  reportKeyframeInterval(intervalUs: number): void;
+  /**
+   * Forget every anchor, at a Restart, a Move, a resync, or a new catalog: the next frame anchors wall pacing. The
+   * keyframe intervals reported so far are kept.
+   */
   reset(): void;
 }
 
@@ -260,6 +280,13 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
   if (lateDropUs < 0) throw new RangeError('lateDropUs must not be negative');
   if (maxVideoDelayUs <= 0) throw new RangeError('maxVideoDelayUs must be positive');
   if (audioTimeoutUs <= 0) throw new RangeError('audioTimeoutUs must be positive');
+  const fixedTargetUs =
+    options.targetLatencyUs === undefined ? undefined : finite(options.targetLatencyUs, 'targetLatencyUs');
+  if (fixedTargetUs !== undefined && fixedTargetUs <= 0) throw new RangeError('targetLatencyUs must be positive');
+  // The latest keyframe intervals: the longest, so that a forced keyframe does not shrink the budget.
+  const intervals: number[] = [];
+  const targetLatency = () =>
+    fixedTargetUs ?? (intervals.length > 0 ? 2 * Math.max(...intervals) : DEFAULT_TARGET_LATENCY_US);
 
   // The timeline position `mediaUs` was current at local time `atUs`; it advances in real time from there.
   // An audio anchor also keeps when its report arrived: silence is measured from arrival, not from `atUs`.
@@ -295,7 +322,7 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
       }
       const offset = timestampUs - position;
       const offsetUs = Math.round(offset);
-      if (mode === 'wall' && Math.abs(offset) > maxVideoDelayUs) {
+      if (mode === 'wall' && (offset > maxVideoDelayUs || offset < -targetLatency())) {
         // A timeline jump or a stall: follow the video rather than drop or hold every later frame.
         anchor = { mediaUs: timestampUs, atUs: now };
         return { action: 'show', offsetUs };
@@ -308,6 +335,16 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
     },
     position() {
       return positionAt(source());
+    },
+    lateDropUs,
+    get targetLatencyUs() {
+      return targetLatency();
+    },
+    reportKeyframeInterval(intervalUs) {
+      const interval = finite(intervalUs, 'Keyframe interval');
+      if (interval <= 0) throw new RangeError('A keyframe interval must be positive');
+      intervals.push(interval);
+      if (intervals.length > KEYFRAME_INTERVALS_KEPT) intervals.shift();
     },
     reset() {
       anchor = undefined;
