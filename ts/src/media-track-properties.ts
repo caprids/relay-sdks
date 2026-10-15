@@ -11,7 +11,7 @@ export interface MediaTrackPropertiesOptions {
   keyframeIntervalUs?: number;
   /**
    * How far behind live a viewer plays (see `CONTEXT.md`); at least the keyframe interval. Default twice the keyframe
-   * interval, the default the planned frame reader takes too (#303). Audio ignores it.
+   * interval, the default the frame reader takes too (#303). Audio ignores it.
    */
   targetLatencyUs?: number;
   /** The subgroup timeout itself, replacing the default for either kind. */

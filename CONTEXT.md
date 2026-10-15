@@ -180,9 +180,12 @@ _Avoid_: playback clock, master clock, sync clock, jitter buffer (the audio path
 The one latency budget a broadcast is played at: how far behind live a viewer plays. It defaults to
 twice the keyframe interval on both sides, and nothing carries it on the wire. The publisher derives
 video's default delivery timeout from it (the target latency less the keyframe interval, and at
-least one interval); the planned frame reader judges lateness against it
-([#303](https://github.com/muxinc/relay-sdks/issues/303)).
-_Avoid_: latency budget, delay, buffer depth, jitter buffer
+least one interval). On the player it is the playout clock's: by default twice the longest recent
+keyframe interval the frame reader sees, and how far behind the clock's position a frame may still
+be delivered for decoding. It is not msf-01's catalog `targetLatency`, which is end-to-end
+wall-clock time.
+_Avoid_: latency budget, delay, buffer depth, jitter buffer, max delay (that is the clock's lead
+before re-sync), deadline (that is one frame's)
 
 **Render clock**:
 When an `AudioContext` renders, on `performance.now()`'s clock: of the observations of a context time
@@ -198,13 +201,6 @@ The module that reads one subscribed track as frames in decode order: it feeds a
 a want's events to a frame sequencer and polls it when a wait ends. The sequencer reorders groups,
 waits for what may still come, and drops what is too late. Neither buffers for smoothing.
 _Avoid_: jitter buffer (the audio path owns that), reorder buffer, frame source, player
-
-**Target latency**:
-How far behind the playout clock's position a frame may still be delivered for decoding: one
-setting per broadcast, held by the playout clock, by default twice the stream's longest recent
-keyframe interval. It is not msf-01's catalog `targetLatency`, which is end-to-end wall-clock time.
-_Avoid_: latency budget (fine in prose, not as a name), max delay (that is the clock's lead before
-re-sync), buffer length, deadline (that is one frame's)
 
 **Discontinuity** (reading):
 Why a frame the reader delivers is not the one decoded after the frame before it: a gap (frames
