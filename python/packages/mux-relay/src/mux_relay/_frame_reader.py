@@ -8,7 +8,6 @@ and the LOC format, so this package stays free of the format package. See the "M
 from __future__ import annotations
 
 import asyncio
-import logging
 from collections import deque
 from collections.abc import Callable, Sequence
 from typing import Generic, Protocol, TypeVar
@@ -17,8 +16,6 @@ from moq_core import KeyValuePair, MoqtObject, PublishDone, RequestError, Subgro
 
 from .connect import RelaySubscriptionHandlers
 from .supervised_subscriber import RestartReason, WantHandlers, WantSwitchedInfo
-
-_log = logging.getLogger("mux_relay.media")
 
 F = TypeVar("F")
 F_co = TypeVar("F_co", covariant=True)
@@ -51,19 +48,21 @@ class FrameReaderSequencer(Protocol[F_co]):
 
 
 class FrameReader(Generic[F]):
-    """Read a track as frames: feed the sequencer every event, poll it after each, and again when a wait it reports
-    ends. Iterate it for the frames, in decode order; :meth:`close` ends the iteration.
+    """Read a track as frames: feed the sequencer every event, and poll it as the application reads, or when a wait it
+    reports ends. Iterate it for the frames, in decode order; :meth:`close` ends the iteration.
 
     Pass :meth:`subscription_handlers` to ``RelaySubscriber.subscribe`` or :meth:`want_handlers` to
     ``SupervisedSubscriber.want``. Each group is one subgroup, as the frame writer sends it, so a subgroup's end is its
-    group's. The handlers must run on the event loop the reader is iterated on.
+    group's. A want read through a reader keeps ``drain`` at 0, the default: a drained old subscription's groups would
+    arrive after the Move, indistinguishable from the new one's. Frames wait in the sequencer until they are read, and
+    lateness is judged then, so a slow reader gets fresh frames rather than a backlog.
     """
 
     def __init__(self, sequencer: FrameReaderSequencer[F]) -> None:
         self._sequencer = sequencer
+        # The frames of the latest poll not yet read.
         self._ready: deque[F] = deque()
-        self._waiter: asyncio.Future[None] | None = None
-        self._timer: asyncio.TimerHandle | None = None
+        self._changed: asyncio.Event | None = None
         self._closed = False
 
     @property
@@ -72,27 +71,30 @@ class FrameReader(Generic[F]):
         return self._closed
 
     def close(self) -> None:
-        """Stop delivering, drop frames not yet read, and cancel the pending poll. Later events are ignored."""
+        """Stop delivering and drop frames not yet read. Later events are ignored."""
         self._closed = True
         self._ready.clear()
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
         self._wake()
 
     def __aiter__(self) -> FrameReader[F]:
         return self
 
     async def __anext__(self) -> F:
-        while not self._ready:
-            if self._closed:
-                raise StopAsyncIteration
-            self._waiter = asyncio.get_running_loop().create_future()
+        while not self._closed:
+            if self._ready:
+                return self._ready.popleft()
+            result = self._sequencer.poll()
+            if result.frames:
+                self._ready.extend(result.frames)
+                continue
+            changed = self._changed = self._changed or asyncio.Event()
+            changed.clear()
+            timeout = None if result.wait_us is None else result.wait_us / 1_000_000
             try:
-                await self._waiter
-            finally:
-                self._waiter = None
-        return self._ready.popleft()
+                await asyncio.wait_for(changed.wait(), timeout)
+            except TimeoutError:
+                pass
+        raise StopAsyncIteration
 
     # --- handlers
 
@@ -172,22 +174,8 @@ class FrameReader(Generic[F]):
         if self._closed:
             return
         apply()
-        self._drain()
-
-    def _drain(self) -> None:
-        if self._closed:
-            return
-        if self._timer is not None:
-            self._timer.cancel()
-            self._timer = None
-        result = self._sequencer.poll()
-        if result.frames:
-            self._ready.extend(result.frames)
-            self._wake()
-        if result.wait_us is not None:
-            self._timer = asyncio.get_running_loop().call_later(result.wait_us / 1_000_000, self._drain)
+        self._wake()
 
     def _wake(self) -> None:
-        waiter = self._waiter
-        if waiter is not None and not waiter.done():
-            waiter.set_result(None)
+        if self._changed is not None:
+            self._changed.set()

@@ -22,6 +22,8 @@ the clock), ``restart`` (the subscription was replaced: a want's Restart or Move
 
 # How many keyframe timestamps are kept to measure intervals between consecutive groups.
 _KEYFRAMES_KEPT = 8
+# While the clock is idle and frames are held, poll again after this long: the clock may have anchored meanwhile.
+_IDLE_RECHECK_US = 50_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,24 +130,35 @@ class FrameSequencer:
             return
         if self._keyframe_grouping and obj.object_id == 0:
             self._note_keyframe(obj.group_id, timestamp)
+        late = self._newest_late
+        if self._keyframe_grouping and late is not None and late[0] == obj.group_id:
+            # The resync candidate keeps collecting its group: a resync delivers from its keyframe on.
+            if obj.object_id not in late[1].frames:
+                late[1].frames[obj.object_id] = self._frame_of(obj, timestamp)
+                self.stats.late += 1
+            return
         if self._behind(obj.group_id, obj.object_id):
             self.stats.late += 1
             return
         group = self._group_of(obj.group_id)
         if obj.object_id in group.frames:
             return
-        group.frames[obj.object_id] = SequencedFrame(
-            obj.group_id, obj.object_id, timestamp, obj.object_id == 0, obj.payload, obj.properties
-        )
+        group.frames[obj.object_id] = self._frame_of(obj, timestamp)
 
     def group_ended(self, group_id: int) -> None:
         """A group's stream ended cleanly: no further objects of it will come."""
-        if self._floor is None or group_id > self._floor:
+        late = self._newest_late
+        if late is not None and late[0] == group_id:
+            late[1].ended = True
+        elif self._floor is None or group_id > self._floor:
             self._group_of(group_id).ended = True
 
     def group_reset(self, group_id: int) -> None:
         """A group's stream was reset: its remaining objects will not come."""
-        if self._floor is None or group_id > self._floor:
+        late = self._newest_late
+        if late is not None and late[0] == group_id:
+            late[1].reset = True
+        elif self._floor is None or group_id > self._floor:
             self._group_of(group_id).reset = True
 
     def restart(self) -> None:
@@ -167,9 +180,16 @@ class FrameSequencer:
         resync = self._resync(out)
         if wait is None or (resync is not None and resync < wait):
             wait = resync
+        # Held frames wait on deadlines that only exist once the clock has a position.
+        if wait is None and self._clock.position_us() is None and (self._groups or self._newest_late is not None):
+            wait = _IDLE_RECHECK_US
         return SequencerPoll(out, None if wait is None else max(1, math.ceil(wait)))
 
     # --- internals
+
+    @staticmethod
+    def _frame_of(obj: MoqtObject, timestamp: int) -> SequencedFrame:
+        return SequencedFrame(obj.group_id, obj.object_id, timestamp, obj.object_id == 0, obj.payload, obj.properties)
 
     def _group_of(self, group_id: int) -> _Group:
         group = self._groups.get(group_id)
@@ -251,6 +271,19 @@ class FrameSequencer:
 
         while True:
             cursor = self._cursor
+            nxt = None if self._floor is None else self._floor + 1
+            # A group that ended or was reset without its keyframe can never be delivered; only the next group's says
+            # a gap.
+            for gid in [
+                gid
+                for gid, group in self._groups.items()
+                if gid != nxt
+                and (cursor is None or gid != cursor[0])
+                and (group.ended or group.reset)
+                and 0 not in group.frames
+            ]:
+                del self._groups[gid]
+                self.stats.skipped_groups += 1
             if cursor is not None:
                 group = self._groups[cursor[0]]
                 frame = group.frames.get(cursor[1])
@@ -279,7 +312,6 @@ class FrameSequencer:
                 self._pass_over(cursor[0])
                 continue
 
-            nxt = None if self._floor is None else self._floor + 1
             started = None if nxt is None else self._groups.get(nxt)
             if nxt is not None and started is not None and 0 not in started.frames:
                 # The next group started without its keyframe, which may still come while its stream is open.

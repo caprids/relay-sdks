@@ -97,6 +97,8 @@ interface Group {
 
 /** How many keyframe timestamps are kept to measure intervals between consecutive groups. */
 const KEYFRAMES_KEPT = 8;
+/** While the clock is idle and frames are held, poll again after this long: the clock may have anchored meanwhile. */
+const IDLE_RECHECK_US = 50_000;
 
 /** Create a frame sequencer for one track. */
 export function createFrameSequencer(options: FrameSequencerOptions): FrameSequencer {
@@ -119,6 +121,15 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
   let newestLate: { groupId: number; group: Group } | undefined;
   const keyframes = new Map<number, number>();
+
+  const frameOf = (object: MoqtObject, timestampUs: number): SequencedFrame => ({
+    groupId: object.groupId,
+    objectId: object.objectId,
+    timestampUs,
+    key: object.objectId === 0,
+    payload: object.payload,
+    properties: object.properties,
+  });
 
   const groupOf = (groupId: number) => {
     let group = groups.get(groupId);
@@ -205,6 +216,14 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       return lastDeliveredUs === undefined ? 0 : lastDeliveredUs + target - positionUs;
     };
     for (;;) {
+      // A group that ended or was reset without its keyframe can never be delivered; only the next group's says a gap.
+      const next = floor === undefined ? undefined : floor + 1;
+      for (const [id, group] of groups) {
+        if (id !== next && id !== cursor?.groupId && (group.ended || group.reset) && !group.frames.has(0)) {
+          groups.delete(id);
+          stats.skippedGroups++;
+        }
+      }
       if (cursor) {
         const group = groups.get(cursor.groupId) as Group;
         const frame = group.frames.get(cursor.nextObjectId);
@@ -236,7 +255,6 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         continue;
       }
 
-      const next = floor === undefined ? undefined : floor + 1;
       const started = next === undefined ? undefined : groups.get(next);
       if (next !== undefined && started && !started.frames.has(0)) {
         // The next group started without its keyframe, which may still come while its stream is open.
@@ -328,8 +346,12 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   };
 
   const groupEnded = (groupId: number) => {
-    if (floor !== undefined && groupId <= floor) return;
-    groupOf(groupId).ended = true;
+    if (newestLate?.groupId === groupId) newestLate.group.ended = true;
+    else if (floor === undefined || groupId > floor) groupOf(groupId).ended = true;
+  };
+  const groupReset = (groupId: number) => {
+    if (newestLate?.groupId === groupId) newestLate.group.reset = true;
+    else if (floor === undefined || groupId > floor) groupOf(groupId).reset = true;
   };
 
   const minWait = (a: number | undefined, b: number | undefined) =>
@@ -357,26 +379,24 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         return;
       }
       if (keyframeGrouping && object.objectId === 0) noteKeyframe(object.groupId, timestampUs);
+      if (keyframeGrouping && newestLate?.groupId === object.groupId) {
+        // The resync candidate keeps collecting its group: a resync delivers from its keyframe on.
+        if (!newestLate.group.frames.has(object.objectId)) {
+          newestLate.group.frames.set(object.objectId, frameOf(object, timestampUs));
+          stats.late++;
+        }
+        return;
+      }
       if (behind(object.groupId, object.objectId)) {
         stats.late++;
         return;
       }
       const group = groupOf(object.groupId);
       if (group.frames.has(object.objectId)) return;
-      group.frames.set(object.objectId, {
-        groupId: object.groupId,
-        objectId: object.objectId,
-        timestampUs,
-        key: object.objectId === 0,
-        payload: object.payload,
-        properties: object.properties,
-      });
+      group.frames.set(object.objectId, frameOf(object, timestampUs));
     },
     groupEnded,
-    groupReset(groupId) {
-      if (floor !== undefined && groupId <= floor) return;
-      groupOf(groupId).reset = true;
-    },
+    groupReset,
     restart() {
       groups.clear();
       keyframes.clear();
@@ -394,6 +414,10 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       if (keyframeGrouping) waitUs = pollKeyframes(frames);
       else pollFrames(frames);
       waitUs = minWait(waitUs, resyncWait(frames));
+      // Held frames wait on deadlines that only exist once the clock has a position.
+      if (waitUs === undefined && clock.position() === undefined && (groups.size > 0 || newestLate)) {
+        waitUs = IDLE_RECHECK_US;
+      }
       return { frames, waitUs: waitUs === undefined ? undefined : Math.max(1, Math.ceil(waitUs)) };
     },
   };

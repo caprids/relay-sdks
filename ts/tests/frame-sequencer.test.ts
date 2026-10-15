@@ -108,11 +108,11 @@ describe('createFrameSequencer', () => {
     expect(sequencer.poll().frames).toHaveLength(1);
   });
 
-  it('waits on a gap while the clock is idle until the group ends', () => {
+  it('waits on a gap while the clock is idle until the group ends, checking back for the clock to anchor', () => {
     const sequencer = createFrameSequencer({ clock: createPlayoutClock({ now: () => 0 }) });
     sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
     sequencer.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 1_000_000 }]));
-    expect(sequencer.poll()).toEqual({ frames: [expect.objectContaining({ groupId: 0 })], waitUs: undefined });
+    expect(sequencer.poll()).toEqual({ frames: [expect.objectContaining({ groupId: 0 })], waitUs: 50_000 });
     sequencer.groupEnded(0);
     expect(sequencer.poll().frames.map((frame) => frame.groupId)).toEqual([1]);
   });

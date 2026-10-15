@@ -125,6 +125,19 @@ describe('createFrameReader', () => {
     expect(error).toHaveBeenCalledOnce();
   });
 
+  it('releases held frames once the clock anchors, with no further event', () => {
+    const { clock, frames, reader, advance } = setup();
+    reader.onObject(object(0, 0, 0));
+    reader.onObject(object(1, 0, 1_000_000));
+    expect(ids(frames)).toEqual([[0, 0]]);
+    clock.due(0); // the player shows the first frame: the clock anchors
+    advance(2_050_000);
+    expect(ids(frames)).toEqual([
+      [0, 0],
+      [1, 0, 'gap'],
+    ]);
+  });
+
   it('stops delivering and cancels its pending poll when closed', () => {
     const { clock, frames, reader, advance } = setup();
     clock.due(0);

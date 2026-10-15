@@ -101,12 +101,12 @@ def test_ignores_a_repeated_object() -> None:
     assert len(sequencer.poll().frames) == 1
 
 
-def test_waits_on_a_gap_while_the_clock_is_idle_until_the_group_ends() -> None:
+def test_waits_on_a_gap_while_the_clock_is_idle_until_the_group_ends_checking_back_for_the_clock() -> None:
     sequencer = FrameSequencer(PlayoutClock(now_us=lambda: 0))
     sequencer.object(obj(0, 0, stamp(0)))
     sequencer.object(obj(1, 0, stamp(1_000_000)))
     result = sequencer.poll()
-    assert [f.group_id for f in result.frames] == [0] and result.wait_us is None
+    assert [f.group_id for f in result.frames] == [0] and result.wait_us == 50_000
     sequencer.group_ended(0)
     assert [f.group_id for f in sequencer.poll().frames] == [1]
 

@@ -6,7 +6,7 @@
       "steps": [
         { "at": "0", "object": ["0", "0", "10000000"] },
         { "at": "0", "object": ["0", "9", null] },
-        { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": null } },
+        { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": "50000" } },
         { "at": "0", "anchor": "10000000" },
         { "at": "33333", "object": ["0", "1", "10033333"] },
         { "at": "33333", "object": ["0", "2", "10066666"] },
@@ -122,7 +122,7 @@
         { "at": "0", "object": ["2", "0", "1000000"] },
         { "at": "0", "object": ["1", "0", "500000"] },
         { "at": "0", "object": ["4", "0", "2400000"] },
-        { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": null } },
+        { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": "50000" } },
         { "at": "0", "stats": { "delivered": "1", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "1000000" }
       ]
     },
@@ -136,9 +136,9 @@
         { "at": "5000000", "poll": { "frames": [], "waitUs": "2000000" } },
         { "at": "6000000", "object": ["2", "0", "2000000"] },
         { "at": "6000000", "poll": { "frames": [], "waitUs": "1000000" } },
-        { "at": "7000000", "poll": { "frames": [["2", "0", "resync"]], "waitUs": null } },
+        { "at": "7000000", "poll": { "frames": [["2", "0", "resync"]], "waitUs": "50000" } },
         { "at": "7000000", "object": ["2", "1", "2033333"] },
-        { "at": "7000000", "poll": { "frames": [["2", "1"]], "waitUs": null } },
+        { "at": "7000000", "poll": { "frames": [["2", "1"]], "waitUs": "50000" } },
         { "at": "7000000", "stats": { "delivered": "2", "late": "3", "skippedGroups": "3", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
@@ -146,11 +146,11 @@
       "name": "a restart marks the next frame and group IDs start over",
       "steps": [
         { "at": "0", "object": ["40", "0", "0"] },
-        { "at": "0", "poll": { "frames": [["40", "0"]], "waitUs": null } },
+        { "at": "0", "poll": { "frames": [["40", "0"]], "waitUs": "50000" } },
         { "at": "0", "restart": true },
         { "at": "0", "object": ["3", "0", "50000"] },
         { "at": "0", "object": ["3", "1", "83333"] },
-        { "at": "0", "poll": { "frames": [["3", "0", "restart"], ["3", "1"]], "waitUs": null } },
+        { "at": "0", "poll": { "frames": [["3", "0", "restart"], ["3", "1"]], "waitUs": "50000" } },
         { "at": "0", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     },
@@ -166,6 +166,40 @@
         { "at": "3000000", "object": ["12", "0", "2500000"] },
         { "at": "3000000", "poll": { "frames": [["12", "0", "resync"]], "waitUs": null } },
         { "at": "3000000", "stats": { "delivered": "1", "late": "2", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
+      "name": "a resync candidate keeps collecting its group's later objects and its end",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "5000000", "object": ["1", "0", "1000000"] },
+        { "at": "5000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "5100000", "object": ["1", "1", "1033333"] },
+        { "at": "5100000", "poll": { "frames": [], "waitUs": "1900000" } },
+        { "at": "5200000", "groupEnd": "1" },
+        { "at": "5200000", "poll": { "frames": [], "waitUs": "1800000" } },
+        { "at": "7000000", "poll": { "frames": [["1", "0", "resync"], ["1", "1"]], "waitUs": null } },
+        { "at": "7000000", "object": ["2", "0", "2000000"] },
+        { "at": "7000000", "poll": { "frames": [["2", "0"]], "waitUs": "50000" } },
+        { "at": "7000000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
+      "name": "groups that end without a keyframe are swept, before and after the first delivery",
+      "steps": [
+        { "at": "0", "object": ["0", "1", "33333"] },
+        { "at": "0", "groupEnd": "0" },
+        { "at": "0", "object": ["1", "1", "1033333"] },
+        { "at": "0", "groupReset": "1" },
+        { "at": "0", "poll": { "frames": [], "waitUs": null } },
+        { "at": "0", "object": ["2", "0", "2000000"] },
+        { "at": "0", "groupEnd": "2" },
+        { "at": "0", "poll": { "frames": [["2", "0"]], "waitUs": null } },
+        { "at": "0", "object": ["5", "1", "5033333"] },
+        { "at": "0", "groupEnd": "5" },
+        { "at": "0", "object": ["6", "0", "6000000"] },
+        { "at": "0", "poll": { "frames": [["6", "0", "gap"]], "waitUs": "50000" } },
+        { "at": "0", "stats": { "delivered": "2", "late": "0", "skippedGroups": "3", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     }
   ]

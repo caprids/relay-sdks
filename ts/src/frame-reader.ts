@@ -37,7 +37,8 @@ export interface FrameReaderOptions<F> {
 /**
  * A subscription's or a want's handlers that read its track as frames in decode order. Pass it, or spread it with
  * handlers of your own, to `subscribe` or `want`. Each group is one subgroup, as the frame writer sends it, so a
- * subgroup's end is its group's.
+ * subgroup's end is its group's. A want read through a reader keeps `drainMs` at 0, the default: a drained old
+ * subscription's groups would arrive after the Move, indistinguishable from the new one's.
  */
 export interface FrameReader {
   /** Takes the track properties, which may declare the Timescale. */

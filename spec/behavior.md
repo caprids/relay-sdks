@@ -1307,7 +1307,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   timestamp plus the target latency (at once if nothing was delivered yet), and while the clock is
   idle until the group ends or is reset. The group is then passed over. A group whose stream ended with
   a hole, or was reset, is passed over at once. A group that ended after its last object was
-  delivered is followed by the next group with no discontinuity.
+  delivered is followed by the next group with no discontinuity. Any other group that ends or is
+  reset without its keyframe is discarded, since it can never be delivered.
 - When the next group ID has not been seen, the lowest group holding its keyframe waits while that
   keyframe is not yet due (its timestamp ahead of the position), since the missing group may still
   arrive or may never have been sent (a failed group's ID is not reused). Groups and objects behind
@@ -1320,13 +1321,19 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
 - Resync: once frames have arrived but none within the budget for one whole target latency of the
   position, the sequencer delivers the newest late group that still has its keyframe (or the newest
   late frame), marks it `resync`, and resets the clock, which re-anchors on the next frame shown.
+  That group keeps collecting its later objects and its end while it waits.
   A lasting increase in delay therefore costs one target latency, not a black or silent player.
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
   over, and the next frame carries `restart`. A Move also brings the new subscription's track
   properties.
 - `poll()` returns the frames ready now and how long until a wait can end, or nothing when only a
-  new object can change it. The reader polls after every event and again when that time comes; it
-  treats each group as one subgroup, as the frame writer sends it. Counters: delivered, late,
+  new object can change it. While the clock is idle and frames are held, it asks to be polled again
+  after 50 ms, since the clock may anchor without any new object. The TypeScript reader polls after
+  every event and again when that time comes, and hands each frame to `onFrame`. The Python reader
+  is iterated and polls as it is read, so a slow reader gets fresh frames, not a backlog. Both treat
+  each group as one subgroup, as the frame writer sends it. A want read through a reader keeps
+  `drainMs` / `drain` at 0, the default: a drained old subscription's groups would arrive after the
+  Move, indistinguishable from the new subscription's. Counters: delivered, late,
   skipped groups, resyncs, untimed. The decisions are pinned by `vectors/frame-sequencer.json`.
 
 ## Package boundaries

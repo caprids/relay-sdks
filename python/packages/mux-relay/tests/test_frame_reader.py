@@ -16,7 +16,7 @@ def obj(group: int, object_id: int, timestamp_us: int) -> MoqtObject:
         object_id=object_id,
         subgroup_id=0,
         properties=[KeyValuePair(LOC_TIMESTAMP, timestamp_us)],
-        payload=bytes([group, object_id]),
+        payload=bytes([group % 256, object_id % 256]),
     )
 
 
@@ -86,11 +86,13 @@ async def test_a_restart_and_a_move_start_over_and_reach_the_application() -> No
     )
     assert handlers.on_object is not None and handlers.on_restarted is not None and handlers.on_switched is not None
     handlers.on_object(obj(7, 0, 0))
+    frames = await take(reader, 1)
     handlers.on_restarted("stale", ("a",))
     handlers.on_object(obj(2, 0, 100))
+    frames += await take(reader, 1)
     handlers.on_switched(WantSwitchedInfo(("a",), "video", ("b",), "video", ok([KeyValuePair(LOC_TIMESCALE, 1000)])))
     handlers.on_object(obj(0, 0, 1))
-    frames = await take(reader, 3)
+    frames += await take(reader, 1)
     assert ids(frames) == [(7, 0, None), (2, 0, "restart"), (0, 0, "restart")]
     assert frames[2].timestamp_us == 1000
     assert seen == ["stale", "moved"]
@@ -122,7 +124,35 @@ async def test_close_ends_iteration_and_ignores_later_events() -> None:
     handlers.on_object(obj(0, 1, 33_333))
     assert ids(await asyncio.wait_for(pending, 1)) == [(0, 0, None)]
     assert reader.closed
-    assert reader._timer is None
+
+
+async def test_releases_held_frames_once_the_clock_anchors_with_no_further_event() -> None:
+    clock = PlayoutClock(now_us=Clock(), target_latency_us=50_000)
+    reader = FrameReader(FrameSequencer(clock))
+    handlers = reader.subscription_handlers()
+    assert handlers.on_object is not None
+    handlers.on_object(obj(0, 0, 0))
+    handlers.on_object(obj(1, 0, 1_000_000))
+    first = await take(reader, 1)
+    clock.due(first[0].timestamp_us)  # the player shows the first frame: the clock anchors
+    assert ids(await asyncio.wait_for(take(reader, 1), 1)) == [(1, 0, "gap")]
+
+
+async def test_a_slow_reader_gets_fresh_audio_rather_than_a_backlog() -> None:
+    now = [0]
+    clock = PlayoutClock(now_us=lambda: now[0])
+    clock.report_audio(0)
+    reader = FrameReader(FrameSequencer(clock, grouping="frame"))
+    handlers = reader.subscription_handlers()
+    assert handlers.on_object is not None
+    # On time as they arrive, while the application is not reading.
+    for index in range(100):
+        now[0] = index * 20_000
+        handlers.on_object(obj(index, 0, index * 20_000 + 100_000))
+    now[0] = 5_000_000
+    clock.report_audio(5_000_000)
+    handlers.on_object(obj(100, 0, 5_100_000))
+    assert ids(await take(reader, 1)) == [(100, 0, None)]
 
 
 @pytest.mark.parametrize("name", ["subscription_handlers", "want_handlers"])
