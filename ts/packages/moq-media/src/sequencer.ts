@@ -386,7 +386,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   const resyncForward = () => {
     clock.reset();
     stats.resyncs++;
-    pending = 'resync';
+    pending = pending === 'restart' ? 'restart' : 'resync';
     starve = undefined;
     newestLate = undefined;
   };
@@ -412,7 +412,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     groups.set(groupId, group);
     floor = groupId - 1;
     cursor = undefined;
-    pending = 'resync';
+    pending = pending === 'restart' ? 'restart' : 'resync';
     if (!keyframeGrouping) return pollFrames(out);
     // From the resynced keyframe on; the clock is idle, so nothing is late until it anchors again.
     cursor = { groupId, nextObjectId: 0 };

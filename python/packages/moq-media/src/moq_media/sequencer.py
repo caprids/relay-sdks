@@ -468,7 +468,7 @@ class FrameSequencer:
         during a long stall), and holding everything that far behind would make the backlog permanent."""
         self._clock.reset()
         self.stats.resyncs += 1
-        self._pending = "resync"
+        self._pending = "restart" if self._pending == "restart" else "resync"
         self._starve = None
         self._newest_late = None
 
@@ -494,7 +494,7 @@ class FrameSequencer:
             del self._groups[other]
         self._groups[group_id] = group
         self._floor = group_id - 1
-        self._pending = "resync"
+        self._pending = "restart" if self._pending == "restart" else "resync"
         if not self._keyframe_grouping:
             self._cursor = None
             return self._poll_frames(out)

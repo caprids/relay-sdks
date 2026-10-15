@@ -1334,7 +1334,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   A lasting increase in delay therefore costs one target latency, not a black or silent player.
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
   over, the clock is reset so the new timeline is not judged against the old anchor, and the next
-  frame carries `restart`. A Move also brings the new subscription's track
+  frame carries `restart`, even when nothing was delivered before and even when that frame comes
+  by a resync. A Move also brings the new subscription's track
   properties.
 - `poll()` returns the frames ready now, at most `maxFrames` / `max_frames` (a positive integer;
   default all), and how long until a wait can end: 0 when more is ready now, nothing when only a new
