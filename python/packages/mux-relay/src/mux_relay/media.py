@@ -862,7 +862,7 @@ class DocumentService:
                     watching.result()
                     return
 
-                await self._send_due()
+                await self._send_due(watching)
         finally:
             watching.cancel()
             await asyncio.gather(watching, return_exceptions=True)
@@ -876,7 +876,7 @@ class DocumentService:
         finally:
             self._wake.set()
 
-    async def _send_due(self) -> None:
+    async def _send_due(self, watching: asyncio.Future[None]) -> None:
         while self._due and self._document is not None and self._track.has_demand:
             self._due = False
             document = self._document
@@ -894,7 +894,13 @@ class DocumentService:
                     return
 
                 self._due = True
-                await asyncio.sleep(self._retry_delay)
+
+                # The track ending cuts the pause short: serve() then returns rather than wait out the
+                # delay. asyncio.wait detaches its callback from the watcher when the pause ends.
+                await asyncio.wait([watching], timeout=self._retry_delay)
+
+                if watching.done():
+                    return
             else:
                 self._sends += 1
 
