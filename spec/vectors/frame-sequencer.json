@@ -370,6 +370,33 @@
         { "at": "5500000", "poll": { "frames": [["1", "0"]], "waitUs": "50000" } },
         { "at": "5500000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
+    },
+    {
+      "name": "a backward re-anchor that leaves the candidate late restarts its wait on the new timeline",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "10000000", "object": ["1", "0", "0"] },
+        { "at": "10000000", "groupEnd": "1" },
+        { "at": "10000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "10000000", "report": "5000000" },
+        { "at": "10000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "12000000", "poll": { "frames": [["1", "0", "resync"]], "waitUs": null } },
+        { "at": "12000000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
+      "name": "a reset that re-anchors forward restarts the candidate's wait rather than completing it",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "10000000", "object": ["1", "0", "0"] },
+        { "at": "10000000", "groupEnd": "1" },
+        { "at": "10000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "10010000", "clockReset": true },
+        { "at": "10010000", "anchor": "20000000" },
+        { "at": "10010000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "12010000", "poll": { "frames": [["1", "0", "resync"]], "waitUs": null } },
+        { "at": "12010000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
     }
   ]
 }

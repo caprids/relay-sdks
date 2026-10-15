@@ -127,7 +127,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   let deliveredSinceRestart = false;
   let pending: FrameDiscontinuity | undefined;
   // Starving: something arrived but none of it was within the budget, since this position, and late by about this much.
-  let starve: { sinceUs: number; latenessUs: number } | undefined;
+  let starve: { sinceUs: number; latenessUs: number; resets: number } | undefined;
   // The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
   let newestLate: { groupId: number; group: Group } | undefined;
   const keyframes = new Map<number, number>();
@@ -174,7 +174,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // anchor the clock on frames that are about to be caught up with.
   const noteLate = (positionUs: number, latenessUs: number) => {
     if (starve === undefined || Math.abs(latenessUs - starve.latenessUs) > clock.targetLatencyUs / 4) {
-      starve = { sinceUs: positionUs, latenessUs };
+      starve = { sinceUs: positionUs, latenessUs, resets: clock.resets };
     }
   };
 
@@ -445,13 +445,27 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // over.
   const revisit = () => {
     const positionUs = clock.position();
-    if (starve !== undefined && (positionUs === undefined || positionUs < starve.sinceUs)) starve = undefined;
+    // The timeline changed: the clock was reset (and perhaps re-anchored), or re-anchored behind where the wait began.
+    if (
+      starve !== undefined &&
+      (positionUs === undefined || starve.resets !== clock.resets || positionUs < starve.sinceUs)
+    ) {
+      starve = undefined;
+    }
     if (!newestLate) return;
     const { groupId, group } = newestLate;
     const first = group.frames.get(keyframeGrouping ? 0 : Math.min(...group.frames.keys()));
     if (!first) return;
     const bound = keyframeGrouping ? clock.targetLatencyUs : clock.lateDropUs;
-    if (positionUs !== undefined && first.timestampUs < positionUs - bound) return;
+    if (positionUs !== undefined && first.timestampUs < positionUs - bound) {
+      // Still late on the new timeline: the wait starts over from here.
+      if (starve === undefined) {
+        for (const frame of [...group.frames.values()].sort((a, b) => a.objectId - b.objectId)) {
+          noteLate(positionUs, positionUs - frame.timestampUs);
+        }
+      }
+      return;
+    }
     newestLate = undefined;
     starve = undefined;
     // Counted as late when dropped; it is delivered after all.

@@ -1136,7 +1136,7 @@ to both languages.
   more than the target latency late. The target latency (`targetLatencyUs` / `target_latency_us`)
   is the option when given, a positive number; otherwise twice the longest of the last four
   keyframe intervals reported (`reportKeyframeInterval` / `report_keyframe_interval`, each positive),
-  and 2 s before any is. `reset()` keeps the reported intervals. Both clocks read an injected
+  and 2 s before any is. `reset()` keeps the reported intervals and counts itself in `resets`. Both clocks read an injected
   monotonic microsecond source and need no DOM or transport. The decisions are pinned by
   `vectors/clock.json`. Implemented in both SDKs.
 - The Media Timeline track (msf-01 §7; [media-layer.md](media-layer.md#media-timeline-track),

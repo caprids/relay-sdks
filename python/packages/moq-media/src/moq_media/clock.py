@@ -241,6 +241,7 @@ class PlayoutClock:
         self._fixed_target_us = target_latency_us
         # The latest keyframe intervals: the longest, so that a forced keyframe does not shrink the budget.
         self._intervals: deque[float] = deque(maxlen=_KEYFRAME_INTERVALS_KEPT)
+        self._resets = 0
 
     def _mode_at(self, now: float) -> PlayoutMode:
         anchor = self._anchor
@@ -327,3 +328,9 @@ class PlayoutClock:
         The keyframe intervals reported so far are kept.
         """
         self._anchor = None
+        self._resets += 1
+
+    @property
+    def resets(self) -> int:
+        """How many times ``reset()`` has been called: a frame reader sees from it that the timeline changed."""
+        return self._resets

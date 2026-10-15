@@ -264,6 +264,8 @@ export interface PlayoutClock {
   readonly targetLatencyUs: number;
   /** Report the spacing between two consecutive keyframes on the timeline; a frame reader does this. */
   reportKeyframeInterval(intervalUs: number): void;
+  /** How many times `reset()` has been called: a frame reader sees from it that the timeline changed under it. */
+  readonly resets: number;
   /**
    * Forget every anchor, at a Restart, a Move, a resync, or a new catalog: the next frame anchors wall pacing. The
    * keyframe intervals reported so far are kept.
@@ -285,6 +287,7 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
   if (fixedTargetUs !== undefined && fixedTargetUs <= 0) throw new RangeError('targetLatencyUs must be positive');
   // The latest keyframe intervals: the longest, so that a forced keyframe does not shrink the budget.
   const intervals: number[] = [];
+  let resets = 0;
   const targetLatency = () =>
     fixedTargetUs ?? (intervals.length > 0 ? 2 * Math.max(...intervals) : DEFAULT_TARGET_LATENCY_US);
 
@@ -346,8 +349,12 @@ export function createPlayoutClock(options: PlayoutClockOptions = {}): PlayoutCl
       intervals.push(interval);
       if (intervals.length > KEYFRAME_INTERVALS_KEPT) intervals.shift();
     },
+    get resets() {
+      return resets;
+    },
     reset() {
       anchor = undefined;
+      resets++;
     },
   };
 }

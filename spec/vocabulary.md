@@ -525,6 +525,7 @@ uses classes, like `CatalogService` and `FrameWriter`.
 | The broadcast's latency budget: the option, or twice the longest of the last four keyframe intervals | `targetLatencyUs` (option and property) | `target_latency_us` (option and property) |
 | Report the interval between consecutive keyframes | `reportKeyframeInterval(intervalUs)` | `report_keyframe_interval(interval_us)` |
 | The late-drop threshold, read back | `lateDropUs` | `late_drop_us` |
+| How many times the clock was reset, so a frame reader sees the timeline change | `resets` | `resets` |
 | Injected time source | `now: MicrosecondClock` | `now_us: Callable[[], int]` |
 
 "Playout", not "playback": the clock decides when to present, and does not play anything. Python's

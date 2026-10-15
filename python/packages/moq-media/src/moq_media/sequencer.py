@@ -116,7 +116,7 @@ class FrameSequencer:
         self._pending: FrameDiscontinuity | None = None
         # Starving: something arrived but none of it was within the budget, since this position, and late by about
         # this much.
-        self._starve: tuple[float, float] | None = None
+        self._starve: tuple[float, float, int] | None = None
         # The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
         self._newest_late: tuple[int, _Group] | None = None
         self._keyframes: dict[int, int] = {}
@@ -265,7 +265,7 @@ class FrameSequencer:
         it would anchor the clock on frames that are about to be caught up with."""
         starve = self._starve
         if starve is None or abs(lateness - starve[1]) > self._clock.target_latency_us / 4:
-            self._starve = (position, lateness)
+            self._starve = (position, lateness, self._clock.resets)
 
     def _pass_over(self, group_id: int) -> _Group | None:
         """Mark a group as not delivered whole, and everything up to it as behind."""
@@ -477,7 +477,10 @@ class FrameSequencer:
         with the clock idle, when nothing is late) goes back to normal delivery, and a wait measured on the old
         timeline starts over."""
         position = self._clock.position_us()
-        if self._starve is not None and (position is None or position < self._starve[0]):
+        starve = self._starve
+        # The timeline changed: the clock was reset (and perhaps re-anchored), or re-anchored behind where the wait
+        # began.
+        if starve is not None and (position is None or starve[2] != self._clock.resets or position < starve[0]):
             self._starve = None
         late = self._newest_late
         if late is None or not late[1].frames:
@@ -488,6 +491,10 @@ class FrameSequencer:
             return
         bound = self._clock.target_latency_us if self._keyframe_grouping else self._clock.late_drop_us
         if position is not None and first.timestamp_us < position - bound:
+            # Still late on the new timeline: the wait starts over from here.
+            if self._starve is None:
+                for object_id in sorted(group.frames):
+                    self._note_late(position, position - group.frames[object_id].timestamp_us)
             return
         self._newest_late = None
         self._starve = None
