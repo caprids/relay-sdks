@@ -76,7 +76,7 @@ from mux_relay import (
     connect_relay_publisher,
     connect_supervised_subscriber,
 )
-from mux_relay.media import CatalogService, DocumentService, FrameOutcome, FrameWriter
+from mux_relay.media import CatalogService, DocumentService, FrameOutcome, FrameWriter, media_track_properties
 
 Log = Callable[[str, dict[str, Any]], None]
 
@@ -1319,12 +1319,25 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     catalog_track = publisher.register_track(
         CATALOG_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5
     )
-    video_track = publisher.register_track(VIDEO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+    # Media tracks get the media tier's delivery timeouts, so a stall costs stale frames rather than lasting latency.
+    keyframe_interval_us = max(1, round(config.gop_seconds * 1_000_000))
+    video_track = publisher.register_track(
+        VIDEO_TRACK,
+        track_properties=[
+            *TRACK_TIMESCALE_PROPERTIES,
+            *media_track_properties("video", keyframe_interval_us=keyframe_interval_us),
+        ],
+        write_timeout=5,
+    )
     timeline_track = publisher.register_track(
         MEDIA_TIMELINE_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5
     )
     audio_track = (
-        publisher.register_track(AUDIO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+        publisher.register_track(
+            AUDIO_TRACK,
+            track_properties=[*TRACK_TIMESCALE_PROPERTIES, *media_track_properties("audio")],
+            write_timeout=5,
+        )
         if producer.audio is not None
         else None
     )
