@@ -654,17 +654,20 @@ passed instead of re-anchoring on it, and re-anchors at a resync, a restart, or 
 100 ms beyond its depth. "Ahead" is the audio scheduled ahead of the context's time at each later
 phase boundary, the first about 6 s after the impairment:
 
-| Impairment | Before (the player decoding in arrival order) | With the frame reader, final two rounds |
+| Impairment | Before (the player decoding in arrival order) | With the frame reader, final round |
 | --- | --- | --- |
-| None | Passes; 130–185 ms ahead | 6 of 7 passed; 124–172 ms ahead |
-| 2 s blackout | 0 of 2: `EncodingError` from an old group's tail after a newer keyframe, or about 2.6 s ahead for the rest of the run | 6 of 6 passed; 126–191 ms ahead |
-| Uplink capped for 4 s | 0 of 2: `EncodingError`, or about 3.5 s ahead for the rest of the run | 6 of 6 passed; 120–199 ms ahead |
+| None | Passes; 130–185 ms ahead | 3 of 3 passed; 130–158 ms ahead |
+| 2 s blackout | 0 of 2: `EncodingError` from an old group's tail after a newer keyframe, or about 2.6 s ahead for the rest of the run | 3 of 3 passed; 120–170 ms ahead |
+| Uplink capped for 4 s | 0 of 2: `EncodingError`, or about 3.5 s ahead for the rest of the run | 3 of 3 passed; 126–197 ms ahead |
 
-Unimpaired, the readers' counters stayed at zero skips and resyncs, with at most two audio frames
-dropped as late. The one unimpaired failure stalled video for 3.2 s and 2.6 s in two phases; it came
-before the player's last fix and was not seen again in four runs. Getting here took three rules
-found in these runs: a resync only on a steady delay, a resync forward when the clock is behind
-what arrives, and the player's bounded jitter buffer.
+Over the rounds before the final one, after the rebase onto #302: 14 of 15 unimpaired runs, 11 of 12
+blackouts and 11 of 11 capped runs passed. Unimpaired, the readers' counters stayed at zero skips and
+resyncs, with at most two audio frames dropped as late. The two failures were an unimpaired video
+stall of 3.2 s, before the player's last fixes and not seen again, and the WebCodecs example's own
+encoder-queue guard ("The audio encoder cannot keep up") tripping after one blackout.
+
+Getting here took three rules found in these runs: a resync only on a steady delay, a resync
+forward when the clock is behind what arrives, and the player's bounded jitter buffer.
 
 The publisher side of the same stall is [issue #302](https://github.com/muxinc/relay-sdks/issues/302)'s
 delivery timeouts. They derive from the same keyframe interval, about one interval for video, under
