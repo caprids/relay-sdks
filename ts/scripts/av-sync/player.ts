@@ -372,8 +372,9 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       AUDIO_TRACK,
       'frame',
       (frame: SequencedFrame) => {
-        if (audioPaused) return;
+        // The clock was reset whether or not this audio is played.
         if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') clockReset();
+        if (audioPaused) return;
         if (nextAudioUs !== undefined && Math.abs(frame.timestampUs - nextAudioUs) > 5_000) {
           audioDecoder.reset();
           audioDecoder.configure(audioConfig);
