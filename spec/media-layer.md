@@ -633,13 +633,15 @@ package, so the reader takes the sequencer as an argument.
   of two GOPs for audio would keep almost all of a 2 s blackout's burst, and the player would
   re-anchor on it and stay that far behind.
 - **Resync.** If frames keep arriving but none within the budget for one whole target latency,
-  the path delay has grown for good. The sequencer delivers the newest late keyframe group (or audio
+  and their lateness holds steady, the path delay has grown for good. Lateness that keeps growing
+  is a stall, and lateness that shrinks is its backlog draining; neither resyncs, because the frames
+  the clock would anchor on are about to be caught up with. The sequencer delivers the newest late keyframe group (or audio
   frame), marks it `resync`, and resets the clock so it re-anchors there, rather than leave the
   player black or silent.
-- **Resync forward.** A resync during a long stall, such as the uplink capped for 4 s, anchors the
-  clock on frames seconds old. When the backlog drains, fresher frames arrive more than the target
-  latency ahead of the position. That is a resync too, forward, so the backlog does not become
-  lasting latency. The player drops the audio and video it had scheduled on the old anchor.
+- **Resync forward.** A clock anchored on old frames, by a resync onto a delay that later
+  recovered, sees fresher frames arrive more than the target latency ahead of its position. That is
+  a resync too, forward, so the old delay does not become lasting latency. The player drops the
+  audio and video it had scheduled on the old anchor.
 - **Restart and Move.** A want's Restart or Move restarts the sequencer, since group IDs start over,
   and marks the next frame `restart`.
 

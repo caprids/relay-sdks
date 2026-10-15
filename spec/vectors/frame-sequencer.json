@@ -229,6 +229,44 @@
         { "at": "20000", "poll": { "frames": [["1", "0", "resync"], ["2", "0"]], "waitUs": null } },
         { "at": "20000", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
       ]
+    },
+    {
+      "name": "a stall's growing lateness and its draining backlog never resync; fresh audio plays on",
+      "grouping": "frame",
+      "steps": [
+        { "at": "0", "report": "0" },
+        { "at": "0", "object": ["0", "0", "100000"] },
+        { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": null } },
+        { "at": "1000000", "object": ["1", "0", "500000"] },
+        { "at": "1000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "1500000", "object": ["2", "0", "600000"] },
+        { "at": "1500000", "poll": { "frames": [], "waitUs": "1500000" } },
+        { "at": "2000000", "object": ["3", "0", "700000"] },
+        { "at": "2000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "2500000", "object": ["4", "0", "800000"] },
+        { "at": "2500000", "poll": { "frames": [], "waitUs": "1500000" } },
+        { "at": "3000000", "object": ["5", "0", "900000"] },
+        { "at": "3000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "3200000", "object": ["6", "0", "2000000"] },
+        { "at": "3200000", "object": ["7", "0", "3180000"] },
+        { "at": "3200000", "poll": { "frames": [["7", "0", "gap"]], "waitUs": null } },
+        { "at": "3200000", "stats": { "delivered": "2", "late": "6", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
+      "name": "a forward resync takes a poll of its own after the frames before it",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "0", "object": ["0", "0", "0"] },
+        { "at": "0", "poll": { "frames": [["0", "0"]], "waitUs": null } },
+        { "at": "0", "object": ["1", "0", "1000000"] },
+        { "at": "0", "groupEnd": "1" },
+        { "at": "0", "object": ["3", "0", "2500000"] },
+        { "at": "0", "groupEnd": "0" },
+        { "at": "0", "poll": { "frames": [["1", "0"]], "waitUs": "0" } },
+        { "at": "0", "poll": { "frames": [["3", "0", "resync"]], "waitUs": "50000" } },
+        { "at": "0", "stats": { "delivered": "3", "late": "0", "skippedGroups": "0", "resyncs": "1", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
     }
   ]
 }

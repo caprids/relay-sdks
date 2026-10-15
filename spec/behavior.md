@@ -1314,26 +1314,30 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
 - When the next group ID has not been seen, the lowest group holding its keyframe waits while that
   keyframe is not yet due (its timestamp ahead of the position), since the missing group may still
   arrive or may never have been sent (a failed group's ID is not reused). Groups and objects behind
-  what was delivered or passed over are dropped as late.
+  what was delivered or passed over, or below the group being delivered, are dropped as late.
 - Frame grouping (audio): every frame stands alone and goes out at once in group order. A frame more
   than the clock's `lateDropUs` behind the position is dropped, so a burst after a stall cannot
   build a lasting backlog in the player; one behind what was delivered is dropped too. Nothing waits.
 - The first frame after anything was skipped carries the discontinuity `gap`; a decoder resets
   there, as at a keyframe it can start from. Nothing is marked before the first delivery.
 - Resync: once frames have arrived but none within the budget for one whole target latency of the
-  position, the sequencer delivers the newest late group that still has its keyframe (or the newest
+  position, with their lateness steady (within a quarter of the target latency of where it stood
+  when the wait began; a stall's growing lateness and a draining backlog's shrinking one restart
+  the wait), the sequencer delivers the newest late group that still has its keyframe (or the newest
   late frame), marks it `resync`, and resets the clock, which re-anchors on the next frame shown.
   That group keeps collecting its later objects and its end while it waits.
 - Resync forward: a keyframe that would open the next delivered group (or, under frame grouping, a
   frame) more than the target latency ahead of the position means the clock was anchored on a
   backlog, as after a resync during a long stall. The sequencer resets the clock and marks that
-  frame `resync`, so the backlog does not become lasting latency.
+  frame `resync`, so the backlog does not become lasting latency. It does so in a poll of its own:
+  frames before it in the same poll are returned first, with a wait of 0.
   A lasting increase in delay therefore costs one target latency, not a black or silent player.
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
   over, and the next frame carries `restart`. A Move also brings the new subscription's track
   properties.
 - `poll()` returns the frames ready now, at most `maxFrames` / `max_frames` (a positive integer;
-  default all), and how long until a wait can end, or nothing when only a new object can change it.
+  default all), and how long until a wait can end: 0 when more is ready now, nothing when only a new
+  object can change it.
   Frames not taken stay held and are judged again at the next poll. While the clock is idle and
   frames are held, it asks to be polled again after 50 ms, since the clock may anchor without any
   new object. At most about 1,024 frames are held: past that, as when nothing polls, everything

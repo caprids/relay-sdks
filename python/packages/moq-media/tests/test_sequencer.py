@@ -159,6 +159,7 @@ def test_bounds_a_resync_candidate_too() -> None:
         )
     now[0] = 7_000_000
     assert len(sequencer.poll().frames) <= 1100
+    assert sequencer.stats.late <= 3000
 
 
 def test_terminal_events_do_not_accumulate_empty_groups() -> None:
@@ -180,4 +181,42 @@ def test_takes_keyframe_intervals_only_from_groups_that_can_still_be_delivered()
     sequencer.poll()
     for _ in range(4):
         sequencer.object(obj(9, 0, stamp(9_900_000)))
+    assert clock.target_latency_us == 2_000_000
+
+
+def test_says_when_more_is_ready_past_max_frames() -> None:
+    clock = PlayoutClock(now_us=lambda: 0)
+    clock.report_audio(0)
+    audio = FrameSequencer(clock, grouping="frame")
+    audio.object(obj(0, 0, stamp(10_000)))
+    audio.object(obj(1, 0, stamp(30_000)))
+    assert audio.poll(1).wait_us == 0
+    result = audio.poll(1)
+    assert [f.group_id for f in result.frames] == [1] and result.wait_us is None
+    video = FrameSequencer(clock)
+    video.object(obj(0, 0, stamp(10_000)))
+    video.object(obj(0, 1, stamp(43_333)))
+    assert video.poll(1).wait_us == 0
+
+
+def test_drops_a_group_older_than_the_one_being_delivered() -> None:
+    clock = PlayoutClock(now_us=lambda: 0)
+    sequencer = FrameSequencer(clock)
+    sequencer.object(obj(10, 0, stamp(10_000_000)))
+    sequencer.poll()
+    sequencer.object(obj(9, 0, stamp(9_900_000)))
+    assert sequencer.stats.late == 1
+    assert clock.target_latency_us == 2_000_000
+
+
+def test_ignores_a_repeated_keyframe_still_held_once_its_timestamp_is_forgotten() -> None:
+    clock = PlayoutClock(now_us=lambda: 0)
+    sequencer = FrameSequencer(clock)
+    for group, time in enumerate(
+        [0, 100_000, 1_100_000, 2_100_000, 3_100_000, 4_100_000, 5_100_000, 6_100_000, 7_100_000]
+    ):
+        sequencer.object(obj(group, 0, stamp(time)))
+    assert clock.target_latency_us == 2_000_000
+    for _ in range(4):
+        sequencer.object(obj(0, 0, stamp(0)))
     assert clock.target_latency_us == 2_000_000

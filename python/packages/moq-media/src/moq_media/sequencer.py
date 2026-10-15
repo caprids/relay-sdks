@@ -51,7 +51,8 @@ class SequencerPoll:
     frames: list[SequencedFrame]
     """The frames ready now, in decode order."""
     wait_us: int | None
-    """Poll again after this many microseconds, when a wait can end; ``None`` when only new objects can change it."""
+    """Poll again after this many microseconds, when a wait can end; 0 when more is ready now (past ``max_frames``, or a
+    resync that takes a poll of its own); ``None`` when only new objects can change it."""
 
 
 @dataclass(slots=True)
@@ -111,8 +112,9 @@ class FrameSequencer:
         self._last_delivered_us: int | None = None
         self._delivered_since_restart = False
         self._pending: FrameDiscontinuity | None = None
-        # Starving: something arrived but none of it was within the budget, since this position.
-        self._starved_at_us: float | None = None
+        # Starving: something arrived but none of it was within the budget, since this position, and late by about
+        # this much.
+        self._starve: tuple[float, float] | None = None
         # The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
         self._newest_late: tuple[int, _Group] | None = None
         self._keyframes: dict[int, int] = {}
@@ -144,12 +146,12 @@ class FrameSequencer:
         if self._behind(obj.group_id, obj.object_id):
             self.stats.late += 1
             return
-        # Only a keyframe that can still be delivered reports an interval: an old duplicate must not move the budget.
-        if self._keyframe_grouping and obj.object_id == 0:
-            self._note_keyframe(obj.group_id, timestamp)
         group = self._group_of(obj.group_id)
         if obj.object_id in group.frames:
             return
+        # Only a keyframe that can still be delivered reports an interval: an old duplicate must not move the budget.
+        if self._keyframe_grouping and obj.object_id == 0:
+            self._note_keyframe(obj.group_id, timestamp)
         group.frames[obj.object_id] = self._frame_of(obj, timestamp)
         self._bound_held()
 
@@ -187,7 +189,7 @@ class FrameSequencer:
         self._floor = None
         self._cursor = None
         self._last_delivered_us = None
-        self._starved_at_us = None
+        self._starve = None
         self._newest_late = None
         self._pending = "restart" if self._delivered_since_restart or self._pending is not None else None
         self._delivered_since_restart = False
@@ -210,7 +212,7 @@ class FrameSequencer:
         # Held frames wait on deadlines that only exist once the clock has a position.
         if wait is None and self._clock.position_us() is None and (self._groups or self._newest_late is not None):
             wait = _IDLE_RECHECK_US
-        return SequencerPoll(out, None if wait is None else max(1, math.ceil(wait)))
+        return SequencerPoll(out, None if wait is None else max(0, math.ceil(wait)))
 
     # --- internals
 
@@ -242,7 +244,17 @@ class FrameSequencer:
         if self._floor is not None and group_id <= self._floor:
             return True
         cursor = self._cursor
-        return cursor is not None and group_id == cursor[0] and object_id < cursor[1]
+        if cursor is None:
+            return False
+        return group_id < cursor[0] or (group_id == cursor[0] and object_id < cursor[1])
+
+    def _note_late(self, position: float, lateness: float) -> None:
+        """A late frame. Starving restarts whenever the lateness moves by more than a quarter of the target latency:
+        a stall (lateness growing) or a backlog draining (shrinking) is not a lasting change in delay, and a resync on
+        it would anchor the clock on frames that are about to be caught up with."""
+        starve = self._starve
+        if starve is None or abs(lateness - starve[1]) > self._clock.target_latency_us / 4:
+            self._starve = (position, lateness)
 
     def _pass_over(self, group_id: int) -> _Group | None:
         """Mark a group as not delivered whole, and everything up to it as behind."""
@@ -258,14 +270,13 @@ class FrameSequencer:
             self._pending = "gap"
         return group
 
-    def _late_group(self, group_id: int, position: float) -> None:
+    def _late_group(self, group_id: int, position: float, timestamp: int) -> None:
         group = self._pass_over(group_id)
         self.stats.late += len(group.frames) if group else 0
         # Only a group that still has its keyframe can be resynced on.
         if group is not None and 0 in group.frames and (self._newest_late is None or group_id > self._newest_late[0]):
             self._newest_late = (group_id, group)
-        if self._starved_at_us is None:
-            self._starved_at_us = position
+        self._note_late(position, position - timestamp)
 
     def _deliver(self, frame: SequencedFrame, out: list[SequencedFrame]) -> None:
         if self._pending is not None:
@@ -274,7 +285,7 @@ class FrameSequencer:
         out.append(frame)
         self._last_delivered_us = frame.timestamp_us
         self._delivered_since_restart = True
-        self._starved_at_us = None
+        self._starve = None
         self._newest_late = None
         self.stats.delivered += 1
 
@@ -298,7 +309,7 @@ class FrameSequencer:
 
         while True:
             if len(out) >= self._limit:
-                return None
+                return 0
             cursor = self._cursor
             nxt = None if self._floor is None else self._floor + 1
             # A group that ended or was reset without its keyframe can never be delivered; only the next group's says
@@ -318,7 +329,7 @@ class FrameSequencer:
                 frame = group.frames.get(cursor[1])
                 if frame is not None:
                     if frame.timestamp_us < late_before:
-                        self._late_group(cursor[0], position)  # ty: ignore[invalid-argument-type]
+                        self._late_group(cursor[0], position, frame.timestamp_us)  # ty: ignore[invalid-argument-type]
                         continue
                     del group.frames[cursor[1]]
                     cursor[1] += 1
@@ -359,10 +370,13 @@ class FrameSequencer:
                 return None
             keyframe = self._groups[group_id].frames[0]
             if keyframe.timestamp_us < late_before:
-                self._late_group(group_id, position)  # ty: ignore[invalid-argument-type]
+                self._late_group(group_id, position, keyframe.timestamp_us)  # ty: ignore[invalid-argument-type]
                 continue
             if position is not None and keyframe.timestamp_us - position > target:
-                # The clock is behind what arrives, anchored on a backlog: resync forward on this keyframe.
+                # The clock is behind what arrives, anchored on a backlog: resync forward on this keyframe, in a poll of
+                # its own so the frames before it are handled on the clock they were judged on.
+                if out:
+                    return 0
                 self._resync_forward()
                 return self._poll_keyframes(out)
             if nxt is not None and group_id > nxt:
@@ -377,7 +391,7 @@ class FrameSequencer:
                 self.stats.skipped_groups += 1
             self._cursor = [group_id, 0]
 
-    def _poll_frames(self, out: list[SequencedFrame]) -> None:
+    def _poll_frames(self, out: list[SequencedFrame]) -> float | None:
         """Frame grouping: every frame stands alone; deliver in order at once, and drop what is late or behind."""
         position = self._clock.position_us()
         late_before = -math.inf if position is None else position - self._clock.late_drop_us
@@ -385,19 +399,22 @@ class FrameSequencer:
             group = self._groups[group_id]
             for object_id in sorted(group.frames):
                 if len(out) >= self._limit:
-                    return None
-                frame = group.frames.pop(object_id)
-                self._floor = group_id
+                    return 0
+                frame = group.frames[object_id]
                 if position is not None and frame.timestamp_us - position > self._clock.target_latency_us:
-                    # The clock is behind what arrives, anchored on a backlog: resync forward on this frame.
+                    # The clock is behind what arrives, anchored on a backlog: resync forward on this frame, in a poll
+                    # of its own so the frames before it are handled on the clock they were judged on.
+                    if out:
+                        return 0
                     self._resync_forward()
                     position = None
                     late_before = -math.inf
-                if frame.timestamp_us < late_before:
+                del group.frames[object_id]
+                self._floor = group_id
+                if position is not None and frame.timestamp_us < late_before:
                     self.stats.late += 1
                     self._newest_late = (group_id, _Group({object_id: frame}, ended=True))
-                    if self._starved_at_us is None:
-                        self._starved_at_us = position
+                    self._note_late(position, position - frame.timestamp_us)
                     if self._delivered_since_restart and self._pending is None:
                         self._pending = "gap"
                     continue
@@ -413,18 +430,20 @@ class FrameSequencer:
             return
         self._since_held_check = 0
         late = self._newest_late
-        held = len(late[1].frames) if late else 0
+        candidate = len(late[1].frames) if late else 0
+        held = candidate
         ids = [late[0]] if late else []
         for group_id, group in self._groups.items():
             held += len(group.frames)
             ids.append(group_id)
         if (held <= _MAX_HELD_FRAMES and len(self._groups) <= _MAX_HELD_FRAMES) or not ids:
             return
-        self.stats.late += held
+        # The resync candidate's frames were counted as late when they arrived.
+        self.stats.late += held - candidate
         self.stats.skipped_groups += len(self._groups)
         self._groups.clear()
         self._newest_late = None
-        self._starved_at_us = None
+        self._starve = None
         self._cursor = None
         highest = max(ids)
         self._floor = highest if self._floor is None else max(self._floor, highest)
@@ -437,23 +456,23 @@ class FrameSequencer:
         self._clock.reset()
         self.stats.resyncs += 1
         self._pending = "resync"
-        self._starved_at_us = None
+        self._starve = None
         self._newest_late = None
 
     def _resync(self, out: list[SequencedFrame]) -> float | None:
         """Nothing within the budget for a whole target latency: deliver the newest late group or frame, and reset
         the clock so it re-anchors there. A lasting increase in delay must not keep the player black or silent."""
-        if self._starved_at_us is None or self._newest_late is None or len(out) >= self._limit:
+        if self._starve is None or self._newest_late is None or len(out) >= self._limit:
             return None
         position = self._clock.position_us()
         if position is None:
             return None
-        wait = self._starved_at_us + self._clock.target_latency_us - position
+        wait = self._starve[0] + self._clock.target_latency_us - position
         if wait > 0:
             return wait
         group_id, group = self._newest_late
         self._newest_late = None
-        self._starved_at_us = None
+        self._starve = None
         self._clock.reset()
         self.stats.resyncs += 1
         # Counted as late when dropped; it is delivered after all.
@@ -465,8 +484,7 @@ class FrameSequencer:
         self._pending = "resync"
         if not self._keyframe_grouping:
             self._cursor = None
-            self._poll_frames(out)
-            return None
+            return self._poll_frames(out)
         # From the resynced keyframe on; the clock is idle, so nothing is late until it anchors again.
         self._cursor = [group_id, 0]
         return self._poll_keyframes(out)

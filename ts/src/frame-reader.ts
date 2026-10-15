@@ -20,7 +20,7 @@ export interface FrameReaderSequencer<F> {
   poll(): {
     /** The frames ready now, in decode order. */
     frames: F[];
-    /** Poll again after this many microseconds; `undefined` when only new events can change it. */
+    /** Poll again after this many microseconds, 0 at once; `undefined` when only new events can change it. */
     waitUs: number | undefined;
   };
 }
@@ -101,7 +101,8 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
             console.error(new Error('onFrame threw; the frame reader carries on', { cause: error }));
           }
         }
-        if (!closed && waitUs !== undefined) timer = setTimeout(drain, waitUs / 1000);
+        if (waitUs === 0) again = true;
+        else if (!closed && waitUs !== undefined) timer = setTimeout(drain, waitUs / 1000);
       } while (again && !closed);
     } finally {
       draining = false;

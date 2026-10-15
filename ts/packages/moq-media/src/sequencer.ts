@@ -51,7 +51,10 @@ export interface FrameSequencerOptions {
 export interface SequencerPoll {
   /** The frames ready now, in decode order. */
   frames: SequencedFrame[];
-  /** Poll again after this many microseconds, when a wait can end; `undefined` when only new objects can change it. */
+  /**
+   * Poll again after this many microseconds, when a wait can end; 0 when more is ready now (past `maxFrames`, or a
+   * resync that takes a poll of its own); `undefined` when only new objects can change it.
+   */
   waitUs: number | undefined;
 }
 
@@ -121,8 +124,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   let lastDeliveredUs: number | undefined;
   let deliveredSinceRestart = false;
   let pending: FrameDiscontinuity | undefined;
-  // Starving: something arrived but none of it was within the budget, since this position.
-  let starvedAtUs: number | undefined;
+  // Starving: something arrived but none of it was within the budget, since this position, and late by about this much.
+  let starve: { sinceUs: number; latenessUs: number } | undefined;
   // The newest group (keyframe grouping) or frame (frame grouping) dropped as late: what a resync delivers.
   let newestLate: { groupId: number; group: Group } | undefined;
   const keyframes = new Map<number, number>();
@@ -160,7 +163,17 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
 
   const behind = (groupId: number, objectId: number) => {
     if (floor !== undefined && groupId <= floor) return true;
-    return cursor !== undefined && groupId === cursor.groupId && objectId < cursor.nextObjectId;
+    if (cursor === undefined) return false;
+    return groupId < cursor.groupId || (groupId === cursor.groupId && objectId < cursor.nextObjectId);
+  };
+
+  // A late frame. Starving restarts whenever the lateness moves by more than a quarter of the target latency: a stall
+  // (lateness growing) or a backlog draining (shrinking) is not a lasting change in delay, and a resync on it would
+  // anchor the clock on frames that are about to be caught up with.
+  const noteLate = (positionUs: number, latenessUs: number) => {
+    if (starve === undefined || Math.abs(latenessUs - starve.latenessUs) > clock.targetLatencyUs / 4) {
+      starve = { sinceUs: positionUs, latenessUs };
+    }
   };
 
   // Mark a group as not delivered whole, and everything up to it as behind.
@@ -180,14 +193,14 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     return group;
   };
 
-  const lateGroup = (groupId: number, positionUs: number) => {
+  const lateGroup = (groupId: number, positionUs: number, timestampUs: number) => {
     const group = passOver(groupId);
     stats.late += group?.frames.size ?? 0;
     // Only a group that still has its keyframe can be resynced on.
     if (group?.frames.has(0) && (newestLate === undefined || groupId > newestLate.groupId)) {
       newestLate = { groupId, group };
     }
-    starvedAtUs ??= positionUs;
+    noteLate(positionUs, positionUs - timestampUs);
   };
 
   const deliver = (frame: SequencedFrame, out: SequencedFrame[]) => {
@@ -196,7 +209,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     out.push(discontinuity ? { ...frame, discontinuity } : frame);
     lastDeliveredUs = frame.timestampUs;
     deliveredSinceRestart = true;
-    starvedAtUs = undefined;
+    starve = undefined;
     newestLate = undefined;
     stats.delivered++;
   };
@@ -224,7 +237,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       return lastDeliveredUs === undefined ? 0 : lastDeliveredUs + target - positionUs;
     };
     for (;;) {
-      if (out.length >= limit) return undefined;
+      if (out.length >= limit) return 0;
       // A group that ended or was reset without its keyframe can never be delivered; only the next group's says a gap.
       const next = floor === undefined ? undefined : floor + 1;
       for (const [id, group] of groups) {
@@ -238,7 +251,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         const frame = group.frames.get(cursor.nextObjectId);
         if (frame) {
           if (frame.timestampUs < lateBefore) {
-            lateGroup(cursor.groupId, positionUs as number);
+            lateGroup(cursor.groupId, positionUs as number, frame.timestampUs);
             continue;
           }
           group.frames.delete(cursor.nextObjectId);
@@ -281,11 +294,13 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       if (groupId === undefined) return undefined;
       const keyframe = (groups.get(groupId) as Group).frames.get(0) as SequencedFrame;
       if (keyframe.timestampUs < lateBefore) {
-        lateGroup(groupId, positionUs as number);
+        lateGroup(groupId, positionUs as number, keyframe.timestampUs);
         continue;
       }
       if (positionUs !== undefined && keyframe.timestampUs - positionUs > target) {
-        // The clock is behind what arrives, anchored on a backlog: resync forward on this keyframe.
+        // The clock is behind what arrives, anchored on a backlog: resync forward on this keyframe, in a poll of its own
+        // so the frames before it are handled on the clock they were judged on.
+        if (out.length > 0) return 0;
         resyncForward();
         return pollKeyframes(out);
       }
@@ -306,26 +321,28 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   };
 
   // Frame grouping: every frame stands alone; deliver in order at once, and drop what is late or behind.
-  const pollFrames = (out: SequencedFrame[]) => {
+  const pollFrames = (out: SequencedFrame[]): number | undefined => {
     let positionUs = clock.position();
     let lateBefore = positionUs === undefined ? Number.NEGATIVE_INFINITY : positionUs - clock.lateDropUs;
     for (const id of [...groups.keys()].sort((a, b) => a - b)) {
       const group = groups.get(id) as Group;
       for (const objectId of [...group.frames.keys()].sort((a, b) => a - b)) {
-        if (out.length >= limit) return;
+        if (out.length >= limit) return 0;
         const frame = group.frames.get(objectId) as SequencedFrame;
-        group.frames.delete(objectId);
-        floor = id;
         if (positionUs !== undefined && frame.timestampUs - positionUs > clock.targetLatencyUs) {
-          // The clock is behind what arrives, anchored on a backlog: resync forward on this frame.
+          // The clock is behind what arrives, anchored on a backlog: resync forward on this frame, in a poll of its
+          // own so the frames before it are handled on the clock they were judged on.
+          if (out.length > 0) return 0;
           resyncForward();
           positionUs = undefined;
           lateBefore = Number.NEGATIVE_INFINITY;
         }
-        if (frame.timestampUs < lateBefore) {
+        group.frames.delete(objectId);
+        floor = id;
+        if (positionUs !== undefined && frame.timestampUs < lateBefore) {
           stats.late++;
           newestLate = { groupId: id, group: { frames: new Map([[objectId, frame]]), ended: true, reset: false } };
-          starvedAtUs ??= positionUs;
+          noteLate(positionUs, positionUs - frame.timestampUs);
           if (deliveredSinceRestart) pending ??= 'gap';
           continue;
         }
@@ -333,24 +350,27 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       }
       groups.delete(id);
     }
+    return undefined;
   };
 
   // Bound what is held when nobody polls: past the bound, everything held is dropped and the next frame is a gap.
   const boundHeld = () => {
     if (++sinceHeldCheck < 64) return;
     sinceHeldCheck = 0;
-    let held = newestLate?.group.frames.size ?? 0;
+    const candidate = newestLate?.group.frames.size ?? 0;
+    let held = candidate;
     let highest = newestLate?.groupId;
     for (const [id, group] of groups) {
       held += group.frames.size;
       highest = highest === undefined ? id : Math.max(highest, id);
     }
     if ((held <= MAX_HELD_FRAMES && groups.size <= MAX_HELD_FRAMES) || highest === undefined) return;
-    stats.late += held;
+    // The resync candidate's frames were counted as late when they arrived.
+    stats.late += held - candidate;
     stats.skippedGroups += groups.size;
     groups.clear();
     newestLate = undefined;
-    starvedAtUs = undefined;
+    starve = undefined;
     cursor = undefined;
     floor = Math.max(floor ?? highest, highest);
     if (deliveredSinceRestart) pending ??= 'gap';
@@ -362,21 +382,21 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     clock.reset();
     stats.resyncs++;
     pending = 'resync';
-    starvedAtUs = undefined;
+    starve = undefined;
     newestLate = undefined;
   };
 
   // Nothing within the budget for a whole target latency: deliver the newest late group or frame, and reset the
   // clock so it re-anchors there. A lasting increase in delay must not keep the player black or silent.
   const resyncWait = (out: SequencedFrame[]): number | undefined => {
-    if (starvedAtUs === undefined || !newestLate || out.length >= limit) return undefined;
+    if (starve === undefined || !newestLate || out.length >= limit) return undefined;
     const positionUs = clock.position();
     if (positionUs === undefined) return undefined;
-    const wait = starvedAtUs + clock.targetLatencyUs - positionUs;
+    const wait = starve.sinceUs + clock.targetLatencyUs - positionUs;
     if (wait > 0) return wait;
     const { groupId, group } = newestLate;
     newestLate = undefined;
-    starvedAtUs = undefined;
+    starve = undefined;
     clock.reset();
     stats.resyncs++;
     // Counted as late when dropped; it is delivered after all.
@@ -388,10 +408,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     floor = groupId - 1;
     cursor = undefined;
     pending = 'resync';
-    if (!keyframeGrouping) {
-      pollFrames(out);
-      return undefined;
-    }
+    if (!keyframeGrouping) return pollFrames(out);
     // From the resynced keyframe on; the clock is idle, so nothing is late until it anchors again.
     cursor = { groupId, nextObjectId: 0 };
     return pollKeyframes(out);
@@ -450,10 +467,10 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         stats.late++;
         return;
       }
-      // Only a keyframe that can still be delivered reports an interval: an old duplicate must not move the budget.
-      if (keyframeGrouping && object.objectId === 0) noteKeyframe(object.groupId, timestampUs);
       const group = groupOf(object.groupId);
       if (group.frames.has(object.objectId)) return;
+      // Only a keyframe that can still be delivered reports an interval: an old duplicate must not move the budget.
+      if (keyframeGrouping && object.objectId === 0) noteKeyframe(object.groupId, timestampUs);
       group.frames.set(object.objectId, frameOf(object, timestampUs));
       boundHeld();
     },
@@ -465,7 +482,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       floor = undefined;
       cursor = undefined;
       lastDeliveredUs = undefined;
-      starvedAtUs = undefined;
+      starve = undefined;
       newestLate = undefined;
       pending = deliveredSinceRestart || pending !== undefined ? 'restart' : undefined;
       deliveredSinceRestart = false;
@@ -477,14 +494,13 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       limit = maxFrames ?? Number.POSITIVE_INFINITY;
       const frames: SequencedFrame[] = [];
       let waitUs: number | undefined;
-      if (keyframeGrouping) waitUs = pollKeyframes(frames);
-      else pollFrames(frames);
+      waitUs = keyframeGrouping ? pollKeyframes(frames) : pollFrames(frames);
       waitUs = minWait(waitUs, resyncWait(frames));
       // Held frames wait on deadlines that only exist once the clock has a position.
       if (waitUs === undefined && clock.position() === undefined && (groups.size > 0 || newestLate)) {
         waitUs = IDLE_RECHECK_US;
       }
-      return { frames, waitUs: waitUs === undefined ? undefined : Math.max(1, Math.ceil(waitUs)) };
+      return { frames, waitUs: waitUs === undefined ? undefined : Math.max(0, Math.ceil(waitUs)) };
     },
   };
 }

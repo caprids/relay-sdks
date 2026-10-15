@@ -161,6 +161,7 @@ describe('createFrameSequencer', () => {
     }
     now = 7_000_000;
     expect(sequencer.poll().frames.length).toBeLessThanOrEqual(1100);
+    expect(sequencer.stats.late).toBeLessThanOrEqual(3000);
   });
 
   it('takes keyframe intervals only from groups that can still be delivered', () => {
@@ -174,6 +175,42 @@ describe('createFrameSequencer', () => {
     for (let repeat = 0; repeat < 4; repeat++) {
       sequencer.object(object(9, 0, [{ type: LOC_TIMESTAMP, value: 9_900_000 }]));
     }
+    expect(clock.targetLatencyUs).toBe(2_000_000);
+  });
+
+  it('says when more is ready past maxFrames', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    clock.reportAudio(0);
+    const audio = createFrameSequencer({ clock, grouping: 'frame' });
+    audio.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 10_000 }]));
+    audio.object(object(1, 0, [{ type: LOC_TIMESTAMP, value: 30_000 }]));
+    expect(audio.poll(1).waitUs).toBe(0);
+    expect(audio.poll(1)).toMatchObject({ frames: [expect.objectContaining({ groupId: 1 })], waitUs: undefined });
+    const video = createFrameSequencer({ clock });
+    video.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 10_000 }]));
+    video.object(object(0, 1, [{ type: LOC_TIMESTAMP, value: 43_333 }]));
+    expect(video.poll(1).waitUs).toBe(0);
+  });
+
+  it('drops a group older than the one being delivered', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const sequencer = createFrameSequencer({ clock });
+    sequencer.object(object(10, 0, [{ type: LOC_TIMESTAMP, value: 10_000_000 }]));
+    sequencer.poll();
+    sequencer.object(object(9, 0, [{ type: LOC_TIMESTAMP, value: 9_900_000 }]));
+    expect(sequencer.stats.late).toBe(1);
+    expect(clock.targetLatencyUs).toBe(2_000_000);
+  });
+
+  it('ignores a repeated keyframe still held, even once its timestamp is no longer remembered', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const sequencer = createFrameSequencer({ clock });
+    const times = [0, 100_000, 1_100_000, 2_100_000, 3_100_000, 4_100_000, 5_100_000, 6_100_000, 7_100_000];
+    times.forEach((time, group) => {
+      sequencer.object(object(group, 0, [{ type: LOC_TIMESTAMP, value: time }]));
+    });
+    expect(clock.targetLatencyUs).toBe(2_000_000);
+    for (let repeat = 0; repeat < 4; repeat++) sequencer.object(object(0, 0, [{ type: LOC_TIMESTAMP, value: 0 }]));
     expect(clock.targetLatencyUs).toBe(2_000_000);
   });
 });
