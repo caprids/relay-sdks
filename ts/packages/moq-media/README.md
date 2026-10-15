@@ -115,7 +115,12 @@ const read = parseMediaTimeline(timelineObject.payload);
 ```
 
 Shared vectors live in `spec/vectors/media.json` and `spec/vectors/clock.json`. See `UPSTREAM.json` for Video.js provenance.
-Publishing handles and the object-to-frame reader are later stages of `spec/media-layer.md`.
+`createFrameSequencer({ clock })` turns one subscribed track's objects, which can arrive out of
+order across group streams, into frames in decode order, and drops what is too late against the
+playout clock; `@mux/relay/media`'s `createFrameReader` drives it from a subscription (see the
+[guide](../../GUIDE.md#subscribing-to-media)). The combined `register_media` publishing handle is
+still a proposal in `spec/media-layer.md`; `@mux/relay/media` ships the frame writer and catalog
+service it would compose.
 
 ```ts
 import { buildMsfCatalog, composeMoqSource, locProperties, locTrackProperties, parseMsfCatalog } from '@mux/moq-media';
