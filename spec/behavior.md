@@ -1348,10 +1348,10 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   Frames not taken stay held and are judged again at the next poll. While the clock is idle and
   frames are held, it asks to be polled again after 50 ms, since the clock may anchor without any
   new object. At most about 1,024 frames are held: past that, as when nothing polls, everything
-  held is dropped as late and the next frame carries `gap`. Both readers poll after every event
-  and again when that time comes, or after 50 ms if sooner: another track may reset or re-anchor a
-  shared clock meanwhile, which no event of this track's reports. The TypeScript reader hands each
-  frame to `onFrame`; an event fed from within
+  held is dropped as late and the next frame carries `gap`. The TypeScript reader polls after every
+  event, the Python reader while a read is pending; both poll again when that time comes, or after
+  50 ms if sooner: another track may reset or re-anchor a shared clock meanwhile, which no event of
+  this track's reports. The TypeScript reader hands each frame to `onFrame`; an event fed from within
   `onFrame` is applied after the frame in hand, and a Restart or Move fed that way drops the rest of
   the batch, which belongs to the replaced subscription. The Python reader is
   iterated and takes one frame per read, so a slow reader gets fresh frames, not a backlog. Both treat
