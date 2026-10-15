@@ -787,7 +787,16 @@ class RelayTrackWriter:
         including the wait for demand, raises ``DELIVERY_TIMEOUT``: the data is stale, so write fresh
         data rather than this object again.
         """
-        started = self._clock()
+        await self._write_from(self._clock(), payload, properties)
+
+    async def _write_from(
+        self, started: float, payload: bytes, properties: Sequence[KeyValuePair] | None = None
+    ) -> None:
+        """``write()`` for an object the application handed over at ``started`` on this writer's clock.
+
+        A wrapper that checks the arguments first (the supervised publisher) calls this, so its own work
+        counts toward the object's delivery timeout (draft-ietf-moq-transport-22 section 5.2).
+        """
         # Admit the arguments before consulting the track's single write slot: a payload or property
         # that cannot be converted must not leave the slot held, and a programming error is reported
         # the same way whatever the slot holds. `_begin` checks the slot.
@@ -820,8 +829,12 @@ class RelayTrackWriter:
         so only ``write_timeout`` bounds the wait; ``properties`` without ``payload`` is a TypeError.
         """
         # With a first object, its age counts from here, waits for demand, settling room and the stream included.
-        started = self._clock()
+        return await self._open_group_from(self._clock(), payload, properties)
 
+    async def _open_group_from(
+        self, started: float, payload: bytes | None = None, properties: Sequence[KeyValuePair] | None = None
+    ) -> RelayGroupWriter:
+        """``open_group()`` for a first object the application handed over at ``started`` on this writer's clock."""
         if payload is None:
             if properties is not None:
                 raise TypeError("Group properties belong to a first object: pass a payload with them")

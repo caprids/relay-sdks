@@ -12,6 +12,7 @@ import {
   SubscriptionConnectionClosedError,
   type SubscriptionEnd,
 } from '../../src/subscription.js';
+import { CALL_STARTED_AT, type CallStarted } from '../../src/write-slot.js';
 
 export function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -36,6 +37,8 @@ export interface FakeTrack {
   options: RegisterTrackOptions;
   writer: RelayTrackWriter;
   writes: Uint8Array[];
+  /** When each supervised write or openGroup said the application made its call, from its internal option. */
+  started: (number | undefined)[];
   /** Make the next write fail with this error instead of succeeding. */
   failNext?: unknown;
   setDemand(value: boolean): void;
@@ -83,6 +86,7 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
       const track: FakeTrack = {
         options,
         writes: [],
+        started: [],
         closed: false,
         resetGroups() {
           for (const reset of resets) reset();
@@ -125,7 +129,8 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
             };
             return iterator;
           },
-          async write(payload) {
+          async write(payload, writeOptions) {
+            track.started.push((writeOptions as CallStarted | undefined)?.[CALL_STARTED_AT]);
             if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
             if (track.failNext !== undefined) {
               const error = track.failNext;
@@ -141,6 +146,7 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
             await track.writer.writeText(JSON.stringify(value));
           },
           async openGroup(groupOptions?: { signal?: AbortSignal }) {
+            track.started.push((groupOptions as CallStarted | undefined)?.[CALL_STARTED_AT]);
             if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
             let closed = false;
             groupOptions?.signal?.addEventListener('abort', () => {

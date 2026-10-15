@@ -104,6 +104,28 @@ describe('connectSupervisedPublisher', () => {
     expect(writer.closed).toBe(false);
   });
 
+  it('times an object from the supervised call, so checking its arguments counts toward its clock', async () => {
+    const connections: FakePublisher[] = [];
+    const { publisher } = await start({
+      connect: async (options) => {
+        const fake = fakePublisher([...options.namespace]);
+        connections.push(fake);
+        return fake;
+      },
+    });
+    const writer = publisher.registerTrack({ track: 'video' });
+    await until(() => publisher.status === 'live', 'live');
+    const before = performance.now();
+    await writer.write(new Uint8Array([1]));
+    await writer.openGroup({ payload: new Uint8Array([2]) });
+    const started = connections[0]!.tracks.get('video')!.started;
+    expect(started).toHaveLength(2);
+    for (const at of started) {
+      expect(at).toBeGreaterThanOrEqual(before);
+      expect(at).toBeLessThanOrEqual(performance.now());
+    }
+  });
+
   it('fails a write between generations at once with RECONNECTING and replays nothing', async () => {
     const gate = deferred();
     let calls = 0;
@@ -129,6 +151,11 @@ describe('connectSupervisedPublisher', () => {
     await expect(writer.write('not bytes' as never)).rejects.toBeInstanceOf(TypeError);
     await expect(writer.openGroup({ properties: [{ type: 0x02, value: 50 }] })).rejects.toBeInstanceOf(TypeError);
     await expect(writer.openGroup({ payload: 'not bytes' as never })).rejects.toBeInstanceOf(TypeError);
+    // A view over a transferred buffer is still an ArrayBufferView, but it cannot be read: an argument error too.
+    const detached = new Uint8Array([1]);
+    structuredClone(detached.buffer, { transfer: [detached.buffer] });
+    await expect(writer.write(detached)).rejects.toBeInstanceOf(TypeError);
+    await expect(writer.openGroup({ payload: detached })).rejects.toBeInstanceOf(TypeError);
     gate.resolve();
     await until(() => publisher.status === 'live', 'live again');
     expect(connections[1]!.tracks.get('audio')!.writes).toEqual([]);

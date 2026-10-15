@@ -40,6 +40,8 @@ class FakeTrack:
         self.track_properties = track_properties
         self.write_timeout = write_timeout
         self.writes: list[bytes] = []
+        self.started: list[float] = []
+        """When each supervised write or open_group said the application made its call."""
         self.fail_next: BaseException | None = None
         self.closed = False
         self._demand = False
@@ -99,6 +101,18 @@ class _FakeWriter:
             error, self._track.fail_next = self._track.fail_next, None
             raise error
         self._track.writes.append(bytes(payload))
+
+    async def _write_from(
+        self, started: float, payload: bytes, properties: Sequence[KeyValuePair] | None = None
+    ) -> None:
+        self._track.started.append(started)
+        await self.write(payload, properties=properties)
+
+    async def _open_group_from(
+        self, started: float, payload: bytes | None = None, properties: Sequence[KeyValuePair] | None = None
+    ) -> FakeGroup:
+        self._track.started.append(started)
+        return await self.open_group(payload, properties=properties)
 
     async def open_group(
         self, payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None

@@ -120,7 +120,17 @@ interface Operation {
 }
 
 /** A monotonic clock for object ages. */
-const now = () => performance.now();
+export const now = () => performance.now();
+
+/**
+ * An internal option on `write()` and `openGroup()`: when, on {@link now}, the application made the call. A wrapper that
+ * checks the arguments before handing them on (the supervised publisher) passes it, so its own work counts toward the
+ * object's delivery timeout (§5.2: the clock starts when the application provides the object).
+ */
+export const CALL_STARTED_AT: unique symbol = Symbol('callStartedAt');
+
+/** Options carrying {@link CALL_STARTED_AT}. */
+export type CallStarted = { readonly [CALL_STARTED_AT]?: number };
 
 export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
   const {
@@ -447,8 +457,8 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await writer.write(encodeJSON(value), writeOptions);
     },
     async write(payload, writeOptions = {}) {
-      // The object's age counts from here (§5.2).
-      const startedAt = now();
+      // The object's age counts from here (§5.2), or from a wrapper's call.
+      const startedAt = (writeOptions as CallStarted)[CALL_STARTED_AT] ?? now();
       // Arguments before slot state: a bad payload is a programming error whatever the slot holds.
       const bytes = payloadBytes(payload);
       const properties = objectPropertyPairs(writeOptions.properties);
@@ -481,7 +491,7 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
     async openGroup(groupOptions = {}) {
       // With a first object, its age counts from here (§5.2), so the waits for demand, settling room
       // and the stream all count. Without one there is no object to time: only the write deadline applies.
-      const startedAt = now();
+      const startedAt = (groupOptions as CallStarted)[CALL_STARTED_AT] ?? now();
       const first =
         groupOptions.payload === undefined
           ? undefined
