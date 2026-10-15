@@ -136,11 +136,12 @@ for (const name of Object.keys(sdkExports)) {
   const own = name.startsWith('connect');
   assert.equal(nodeExports[name] === sdkExports[name], !own, `${name} ${own ? 'defaults the transport' : 'is shared'}`);
 }
-// The media entry point exports only the media publishing policy, which the root leaves out (#263).
+// The media entry point exports only the media policy, which the root leaves out (#263, #303).
 const mediaPolicy = await import('../dist/media.js');
 assert.deepEqual(Object.keys(mediaPolicy).sort(), [
   'createCatalogService',
   'createDocumentService',
+  'createFrameReader',
   'createFrameWriter',
   'mediaTrackProperties',
 ]);

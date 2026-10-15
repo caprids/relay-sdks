@@ -1,5 +1,5 @@
-"""Media publishing policy over registered tracks: the catalog and document services, the frame writer,
-and the track properties that give a media track its default delivery timeout.
+"""Media policy over registered tracks and subscriptions: the catalog and document services, the frame writer, the
+track properties that give a media track its default delivery timeout, and the frame reader.
 
 This is the part of stage 2 in ``spec/media-layer.md`` that the Video.js streaming example proved
 against the relay. A catalog is a state-shaped track whose document is re-sent on every relay
@@ -16,6 +16,10 @@ writer: the error code is ``CLOSED``, or the track reports ``closed`` afterwards
 an *interruption*: the group is reset, the track stays open, and publishing resumes at the next
 keyframe. The "Media publishing" section of ``spec/behavior.md`` is the contract these classes
 implement.
+
+On the subscribing side, :class:`FrameReader` reads a subscription or a want as frames in decode order. It drives a
+sequencer it is given (``moq_media.FrameSequencer``), which knows the format and the deadlines; the "Media
+subscribing" section of ``spec/behavior.md`` is its contract.
 """
 
 from __future__ import annotations
@@ -28,6 +32,7 @@ from typing import Generic, Literal, Protocol, TypeVar
 
 from moq_core import KeyValuePair, ObjectStatus
 
+from ._frame_reader import FrameReader, FrameReaderPoll, FrameReaderSequencer
 from ._validation import payload_bytes
 from ._write_slot import SUBGROUP_DELIVERY_TIMEOUT
 from .errors import RelayError
@@ -951,6 +956,9 @@ __all__ = [
     "Frame",
     "FrameOutcome",
     "FrameOutcomeKind",
+    "FrameReader",
+    "FrameReaderPoll",
+    "FrameReaderSequencer",
     "FrameWriter",
     "MediaKind",
     "media_track_properties",

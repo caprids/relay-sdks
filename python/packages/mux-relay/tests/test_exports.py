@@ -92,11 +92,14 @@ MEDIA_NAMES = [
     "Frame",
     "FrameOutcome",
     "FrameOutcomeKind",
+    "FrameReader",
+    "FrameReaderPoll",
+    "FrameReaderSequencer",
     "FrameWriter",
     "MediaKind",
     "media_track_properties",
 ]
-"""The public interface of ``mux_relay.media``, the media publishing policy; the root exports none of it."""
+"""The public interface of ``mux_relay.media``, the media policy; the root exports none of it."""
 
 QUIC_NAMES = ["connect_quic"]
 """The public interface of ``mux_relay.quic``, the aioquic native QUIC transport: its factory, kept out of the root."""
