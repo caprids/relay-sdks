@@ -467,10 +467,10 @@ class RelayGroupWriter:
 
     __slots__ = ("_complete", "_next_object_id", "_operation", "_pending", "_writer", "group_id")
 
-    def __init__(self, operation: _Operation, writer: SubgroupStream) -> None:
+    def __init__(self, operation: _Operation, writer: SubgroupStream, *, object_count: int = 0) -> None:
         self._operation = operation
         self._writer = writer
-        self._next_object_id = 0
+        self._next_object_id = object_count
         self._pending = False
         self._complete = False
         self.group_id = writer.group_id
@@ -802,17 +802,41 @@ class RelayTrackWriter:
         finally:
             operation.release()
 
-    async def open_group(self) -> RelayGroupWriter:
+    async def open_group(
+        self, payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
+    ) -> RelayGroupWriter:
         """Open a multi-object group: one stream carrying objects 0, 1, 2, ... until ``close()``.
 
-        Waits for relay demand and the stream open within ``write_timeout``. Only one write or group
-        may be pending per track. If the relay's subscription changes or ends while the group is
-        open, the group is reset and its writer raises; the track stays open, so start the next group
-        at the next random-access point.
+        Waits for relay demand, for room under the connection's settling-group limit and for the
+        stream within ``write_timeout``. Only one write or group may be pending per track. If the
+        relay's subscription changes or ends while the group is open, the group is reset and its
+        writer raises; the track stays open, so start the next group at the next random-access point.
+
+        With ``payload``, the group opens with it as object 0 and returns once the transport takes it
+        (``object_count`` is 1). Its delivery timeout counts from this call, so every wait before the
+        stream opens counts (draft-ietf-moq-transport-22 section 5.2), and a 0x02 or 0x06 property in
+        ``properties`` sets the group's delivery timeouts. If it expires this raises
+        ``DELIVERY_TIMEOUT`` and the group is reset. Without ``payload`` there is no object to time,
+        so only ``write_timeout`` bounds the wait; ``properties`` without ``payload`` is a TypeError.
         """
+        # With a first object, its age counts from here, waits for demand, settling room and the stream included.
+        started = self._clock()
+
+        if payload is None:
+            if properties is not None:
+                raise TypeError("Group properties belong to a first object: pass a payload with them")
+
+            operation = self._begin("group")
+            writer = await operation.run(lambda: self._open_stream(operation))
+            return RelayGroupWriter(operation, writer)
+
+        data = payload_bytes(payload)
+        object_properties = object_property_pairs(properties)
         operation = self._begin("group")
-        writer = await operation.run(lambda: self._open_stream(operation))
-        return RelayGroupWriter(operation, writer)
+        operation.start_object(started, object_properties)
+        # A failure cancels the operation, which resets any stream it opened: no writer is returned.
+        writer = await operation.run(lambda: self._open_with_first(operation, data, object_properties))
+        return RelayGroupWriter(operation, writer, object_count=1)
 
     # ------------------------------------------------------------------ steps
 
@@ -861,13 +885,20 @@ class RelayTrackWriter:
         operation.writer = writer
         return writer
 
-    async def _send(self, operation: _Operation, data: bytes, properties: list[KeyValuePair]) -> SubgroupStream:
+    async def _open_with_first(
+        self, operation: _Operation, data: bytes, properties: list[KeyValuePair]
+    ) -> SubgroupStream:
+        """Open the group's stream and hand its object 0 to the transport."""
         writer = await self._open_stream(operation)
         operation.phase = "writing"
         operation.check_object_age()
         await writer.write_object(object_id=0, properties=properties, payload=data)
         operation.object_taken()
         operation.check()
+        return writer
+
+    async def _send(self, operation: _Operation, data: bytes, properties: list[KeyValuePair]) -> SubgroupStream:
+        writer = await self._open_with_first(operation, data, properties)
         operation.phase = "closing"
         await writer.fin()
         operation.check()

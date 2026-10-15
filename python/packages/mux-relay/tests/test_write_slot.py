@@ -1229,6 +1229,76 @@ class TestObjectDeliveryTimeout:
         await h.writer.write(b"\x04")
         assert h.opened[1].group_id == 1
 
+    async def test_a_group_opened_with_its_first_object_returns_once_the_transport_takes_it_as_object_0(self) -> None:
+        h = Harness()
+        h.writer._bind(1)
+        group = await h.writer.open_group(b"\x01", properties=[object_timeout(500)])
+        assert group.object_count == 1
+        assert h.opened[0].objects == [
+            {"object_id": 0, "payload": b"\x01", "properties": [object_timeout(500)], "status": "normal"}
+        ]
+        await group.write(b"\x02")
+        await group.close()
+        assert [item["object_id"] for item in h.opened[0].objects] == [0, 1]
+
+    async def test_a_group_opened_with_its_first_object_counts_the_wait_for_settling_room(self) -> None:
+        # Without the first object, open_group() has nothing to time: only the write deadline bounds its wait.
+        shared = SettlingGroups(limit=1)
+        h = Harness(
+            acknowledge=False, settling_groups=shared, write_timeout=0.15, track_properties=[object_timeout(50)]
+        )
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")  # fills the connection's only settling slot
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        with pytest.raises(RelayError) as failure:
+            await h.writer.open_group(b"\x02")
+        assert 0.05 <= loop.time() - started_at < 0.15
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "opening-stream")
+        assert len(h.opened) == 1
+        with pytest.raises(RelayError) as bare:
+            await h.writer.open_group()
+        assert (bare.value.code, bare.value.phase) == ("WRITE_TIMEOUT", "opening-stream")
+
+    async def test_a_group_opened_with_its_first_object_counts_the_wait_for_demand(self) -> None:
+        h = Harness(track_properties=[object_timeout(50)])
+        with pytest.raises(RelayError) as failure:
+            await h.writer.open_group(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "waiting-for-demand")
+        assert h.opened == []
+        assert not h.writer.closed
+
+    async def test_the_first_objects_value_times_the_opening_wait_instead_of_the_tracks(self) -> None:
+        shared = SettlingGroups(limit=1)
+        h = Harness(acknowledge=False, settling_groups=shared, track_properties=[object_timeout(50)])
+        h.writer._bind(1)
+        await h.writer.write(b"\x01")
+        opening = await started(h.writer.open_group(b"\x02", properties=[object_timeout(300)]))
+        await settle(0.1)  # past the track's 50 ms
+        assert not opening.done()
+        h.opened[0].acknowledge()
+        group = await asyncio.wait_for(opening, 1)
+        assert group.object_count == 1
+        assert h.opened[1].aborts == []
+
+    async def test_a_first_object_the_transport_does_not_take_in_time_resets_the_group_and_returns_none(self) -> None:
+        h = Harness(stall="write", track_properties=[object_timeout(50)])
+        h.writer._bind(1)
+        with pytest.raises(RelayError) as failure:
+            await h.writer.open_group(b"\x01")
+        assert (failure.value.code, failure.value.phase) == ("DELIVERY_TIMEOUT", "writing")
+        assert delivery_reset(h.opened[0])
+        group = await h.writer.open_group(b"\x02")
+        assert group.group_id == 1
+
+    async def test_properties_without_a_first_object_are_refused_leaving_the_slot_free(self) -> None:
+        h = Harness()
+        h.writer._bind(1)
+        with pytest.raises(TypeError):
+            await h.writer.open_group(properties=[object_timeout(50)])
+        group = await h.writer.open_group()
+        assert group.object_count == 0
+
     async def test_the_first_objects_value_applies_to_the_whole_group_and_a_later_objects_is_ignored(self) -> None:
         clock = SteppingClock()
         h = Harness(clock=clock)

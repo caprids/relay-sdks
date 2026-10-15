@@ -1186,6 +1186,82 @@ describe('write slot: delivery timeouts (draft-22 §5.2)', () => {
     await rejected;
   });
 
+  it('opens a group with its first object as object 0, resolving once the transport takes it', async () => {
+    const { slot, writer, opened } = harness();
+    slot.bind(1);
+    const properties = [{ type: 0x02, value: 500 }];
+    const group = await writer.openGroup({ payload: bytes(1), properties });
+    expect(group.objectCount).toBe(1);
+    expect(opened[0]?.objects).toEqual([expect.objectContaining({ objectId: 0, properties, payload: bytes(1) })]);
+    await group.write(bytes(2));
+    await group.close();
+    expect(opened[0]?.objects.map((object) => object.objectId)).toEqual([0, 1]);
+  });
+
+  it('counts the wait for settling room against a group opened with its first object', async () => {
+    const { writer, opened } = settling({ trackTimeouts: { objectMs: 50 } });
+    for (let i = 0; i < SETTLING_GROUP_LIMIT; i++) await writer.write(bytes(1));
+    const rejected = expect(writer.openGroup({ payload: bytes(2) })).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'opening-stream',
+    });
+    await elapse(50);
+    await rejected;
+    expect(opened).toHaveLength(SETTLING_GROUP_LIMIT);
+    // The slot is free again: a bare group waits on, bounded only by the write deadline.
+    const bare = expect(writer.openGroup()).rejects.toMatchObject({ code: 'WRITE_TIMEOUT', phase: 'opening-stream' });
+    await elapse(999);
+    expect(opened).toHaveLength(SETTLING_GROUP_LIMIT);
+    await elapse(1);
+    await bare;
+  });
+
+  it('counts the wait for demand against a group opened with its first object', async () => {
+    const { writer, opened } = harness({ trackTimeouts: { objectMs: 50 } });
+    const rejected = expect(writer.openGroup({ payload: bytes(1) })).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'waiting-for-demand',
+    });
+    await elapse(50);
+    await rejected;
+    expect(opened).toEqual([]);
+    expect(writer.closed).toBe(false);
+  });
+
+  it("times the opening wait by the first object's 0x02 instead of the track's", async () => {
+    const { writer, opened, settlingGroups } = settling({ trackTimeouts: { objectMs: 50 } });
+    for (let i = 0; i < SETTLING_GROUP_LIMIT; i++) await writer.write(bytes(1));
+    const pending = writer.openGroup({ payload: bytes(2), properties: [{ type: 0x02, value: 200 }] });
+    await elapse(100);
+    opened[0]?.acknowledge();
+    const group = await pending;
+    expect(group.objectCount).toBe(1);
+    expect(opened[SETTLING_GROUP_LIMIT]?.aborts).toEqual([]);
+    expect(settlingGroups.size).toBe(SETTLING_GROUP_LIMIT - 1);
+  });
+
+  it('resets the stream when the first object misses its timeout in writing, returning no group', async () => {
+    const { slot, writer, opened } = harness({ stall: 'write', trackTimeouts: { objectMs: 50 } });
+    slot.bind(1);
+    const rejected = expect(writer.openGroup({ payload: bytes(1) })).rejects.toMatchObject({
+      code: 'DELIVERY_TIMEOUT',
+      phase: 'writing',
+    });
+    await elapse(50);
+    await rejected;
+    expect(opened[0]?.aborts).toEqual([resetWith(RESET_CODE.DELIVERY_TIMEOUT)]);
+    const next = await writer.openGroup({ payload: bytes(2) });
+    expect(next.groupId).toBe(1);
+  });
+
+  it('refuses properties without a first object, leaving the slot free', async () => {
+    const { slot, writer } = harness();
+    slot.bind(1);
+    await expect(writer.openGroup({ properties: [{ type: 0x02, value: 50 }] })).rejects.toBeInstanceOf(TypeError);
+    const group = await writer.openGroup();
+    expect(group.objectCount).toBe(0);
+  });
+
   it('checks the age again once the header write settles, even when the timer fires late', async () => {
     const { slot, writer, opened } = harness({ stall: 'header', trackTimeouts: { objectMs: 20 } });
     slot.bind(1);

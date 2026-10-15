@@ -244,11 +244,13 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         """Serialize JSON and write one object with the same semantics as ``write``."""
         await self.write(_encode_json(value), properties=properties)
 
-    async def open_group(self) -> RelayGroupWriter:
+    async def open_group(
+        self, payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
+    ) -> RelayGroupWriter:
         """Open a multi-object group on the live generation; see :meth:`RelayTrackWriter.open_group`."""
 
         async def open_on(writer: RelayTrackWriter, generation: _Generation) -> RelayGroupWriter:
-            group = await writer.open_group()
+            group = await writer.open_group(payload, properties=properties)
             # The generation the group was opened on, read before the await: a disconnect clears the binding.
             # The group holds the generation open until it is closed or aborted.
             hold = generation.use()

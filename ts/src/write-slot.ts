@@ -479,10 +479,38 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       }
     },
     async openGroup(groupOptions = {}) {
+      // With a first object, its age counts from here (§5.2), so the waits for demand, settling room
+      // and the stream all count. Without one there is no object to time: only the write deadline applies.
+      const startedAt = now();
+      const first =
+        groupOptions.payload === undefined
+          ? undefined
+          : { bytes: payloadBytes(groupOptions.payload), properties: objectPropertyPairs(groupOptions.properties) };
+      if (!first && groupOptions.properties !== undefined)
+        throw new TypeError('Group properties belong to a first object: pass a payload with them');
       assertWritable();
       const operation = begin('group', groupOptions.signal);
-      const subgroup = await run(operation, () => openStream(operation));
-      let objectCount = 0;
+      if (first) {
+        // Object 0's properties can set the group's publisher timeouts, before the stream opens.
+        operation.publisher = publisherTimeouts(first.properties, trackTimeouts);
+        operation.timeouts = effectiveTimeouts(operation.publisher, NO_DELIVERY_TIMEOUTS);
+        startObject(operation, startedAt);
+      }
+      // A failure here cancels the operation, which resets any stream it opened: no writer is returned.
+      const subgroup = await run(operation, async () => {
+        const opened = await openStream(operation);
+        if (!first) return opened;
+        operation.phase = 'writing';
+        checkObjectAge(operation);
+        await opened.writeObject(
+          { objectId: 0, properties: first.properties, payload: first.bytes },
+          { beforeWrite: () => checkObjectAge(operation) },
+        );
+        untimeObject(operation);
+        check(operation);
+        return opened;
+      });
+      let objectCount = first ? 1 : 0;
       let pending = false;
       let complete = false;
       const assertGroup = () => {

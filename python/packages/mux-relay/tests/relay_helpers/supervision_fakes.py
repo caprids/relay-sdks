@@ -100,7 +100,9 @@ class _FakeWriter:
             raise error
         self._track.writes.append(bytes(payload))
 
-    async def open_group(self) -> FakeGroup:
+    async def open_group(
+        self, payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
+    ) -> FakeGroup:
         if self._track.closed:
             raise RelayError("Published track is closed", code="CLOSED", phase="waiting-for-demand")
         return FakeGroup(self._track)
