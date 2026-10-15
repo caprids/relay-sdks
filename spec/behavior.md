@@ -1315,7 +1315,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   keyframe is not yet due (its timestamp ahead of the position), since the missing group may still
   arrive or may never have been sent (a failed group's ID is not reused). Groups and objects behind
   what was delivered or passed over, or below the group being delivered, are dropped as late.
-- Frame grouping (audio): every frame stands alone and goes out at once in group order. A frame more
+- Frame grouping (audio): every frame stands alone and goes out at once in group order; one whose
+  group ID skips past the last delivered one carries `gap`. A frame more
   than the clock's `lateDropUs` behind the position is dropped, so a burst after a stall cannot
   build a lasting backlog in the player; one behind what was delivered is dropped too. Nothing waits.
 - The first frame after anything was skipped carries the discontinuity `gap`; a decoder resets

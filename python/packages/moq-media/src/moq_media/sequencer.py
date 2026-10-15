@@ -110,6 +110,8 @@ class FrameSequencer:
         # The group being delivered and its next object, under keyframe grouping.
         self._cursor: list[int] | None = None
         self._last_delivered_us: int | None = None
+        # Under frame grouping, the group of the last delivered frame.
+        self._last_delivered_group: int | None = None
         self._delivered_since_restart = False
         self._pending: FrameDiscontinuity | None = None
         # Starving: something arrived but none of it was within the budget, since this position, and late by about
@@ -195,6 +197,7 @@ class FrameSequencer:
         self._floor = None
         self._cursor = None
         self._last_delivered_us = None
+        self._last_delivered_group = None
         self._starve = None
         self._newest_late = None
         # Always marked: the clock was reset, and whatever else plays on it must hear of that.
@@ -431,6 +434,11 @@ class FrameSequencer:
                     if self._delivered_since_restart and self._pending is None:
                         self._pending = "gap"
                     continue
+                # A group ID skipped since the last delivered frame is a frame that never came, or was reset.
+                last = self._last_delivered_group
+                if self._delivered_since_restart and last is not None and group_id > last + 1 and self._pending is None:
+                    self._pending = "gap"
+                self._last_delivered_group = group_id
                 self._deliver(frame, out)
             del self._groups[group_id]
         return None

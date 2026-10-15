@@ -122,6 +122,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // The group being delivered and its next object, under keyframe grouping.
   let cursor: { groupId: number; nextObjectId: number } | undefined;
   let lastDeliveredUs: number | undefined;
+  // Under frame grouping, the group of the last delivered frame.
+  let lastDeliveredGroup: number | undefined;
   let deliveredSinceRestart = false;
   let pending: FrameDiscontinuity | undefined;
   // Starving: something arrived but none of it was within the budget, since this position, and late by about this much.
@@ -351,6 +353,9 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
           if (deliveredSinceRestart) pending ??= 'gap';
           continue;
         }
+        // A group ID skipped since the last delivered frame is a frame that never came, or was reset.
+        if (deliveredSinceRestart && lastDeliveredGroup !== undefined && id > lastDeliveredGroup + 1) pending ??= 'gap';
+        lastDeliveredGroup = id;
         deliver(frame, out);
       }
       groups.delete(id);
@@ -491,6 +496,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       floor = undefined;
       cursor = undefined;
       lastDeliveredUs = undefined;
+      lastDeliveredGroup = undefined;
       starve = undefined;
       newestLate = undefined;
       // Always marked: the clock was reset, and whatever else plays on it must hear of that.
