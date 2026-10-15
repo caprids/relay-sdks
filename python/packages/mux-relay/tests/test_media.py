@@ -6,12 +6,13 @@ writer, plus end-to-end checks over the relay hub. Rows follow the "Media publis
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from core_helpers.waiting import settle, wait_for
-from relay_helpers.fake_track_writer import FakeTrackWriter, changed_error, closed_error, timeout_error
+from relay_helpers.fake_track_writer import FakeGroupWriter, FakeTrackWriter, changed_error, closed_error, timeout_error
 from relay_helpers.relay_hub import create_relay_hub
+from test_write_slot import Harness
 
 from moq_core import KeyValuePair, MoqtObject
 from moq_core.transport import SendStream
@@ -134,10 +135,10 @@ class TestKeyframeGrouping:
 
         writer = FrameWriter(track, stale=answers(False, False, True))
 
-        # Fresh before and after the FIN, stale once the stream is open: the new group is reset and named.
+        # Fresh before and after the FIN, stale once the keyframe has opened its group: the group is reset and named.
         assert await writer.write(key(3)) == FrameOutcome("stale", group_id=1)
-        assert track.groups[1].aborts == [None] and track.groups[1].objects == []
-        assert (writer.groups, writer.objects) == (1, 0)
+        assert track.groups[1].aborts == [None] and track.groups[1].payloads == [b"key"]
+        assert (writer.groups, writer.objects) == (1, 1), "the keyframe went out with the open; the reset withdraws it"
 
     async def test_an_interrupted_group_write_resets_the_group_and_the_next_keyframe_opens_another(self) -> None:
         track = FakeTrackWriter()
@@ -172,7 +173,8 @@ class TestKeyframeGrouping:
         track.fail("group-write", error)
         writer: FrameWriter[Sample] = FrameWriter(track)
 
-        assert await writer.write(key(0)) == FrameOutcome("ended", error=error, group_id=0)
+        # The keyframe failed inside the open: no group writer came back to name.
+        assert await writer.write(key(0)) == FrameOutcome("ended", error=error)
         assert writer.ended is error and writer.closed
         assert await writer.write(key(1)) == FrameOutcome("ended", error=error)
         assert len(track.groups) == 1, "a retired writer never touches the track again"
@@ -216,7 +218,7 @@ class TestKeyframeGrouping:
         track.fail("group-write", error, retire=True)
         writer: FrameWriter[Sample] = FrameWriter(track)
 
-        assert await writer.write(key(0)) == FrameOutcome("ended", error=error, group_id=0)
+        assert await writer.write(key(0)) == FrameOutcome("ended", error=error)
         assert writer.ended is error
 
     async def test_a_transient_error_with_demand_gone_is_only_an_interruption(self) -> None:
@@ -291,7 +293,7 @@ class TestKeyframeGrouping:
         assert not track.groups[0].finished, "a cancelled group is abandoned, never FINned"
         await writer.close()
         assert track.groups[1].finished and writer.closed
-        assert (writer.groups, writer.objects) == (2, 2)
+        assert (writer.groups, writer.objects) == (1, 2), "the cancelled open returned no group"
 
     async def test_a_frame_the_sdk_rejects_resets_the_group_and_propagates(self) -> None:
         # An oversized payload or a bad property is a programming error the SDK raises before the
@@ -312,7 +314,7 @@ class TestKeyframeGrouping:
 
     @pytest.mark.parametrize("raising_call", [3, 4])
     async def test_a_stale_predicate_that_raises_resets_the_gop_in_progress(self, raising_call: int) -> None:
-        # Call 3 is the check after the keyframe's group opened: the group never gets its keyframe.
+        # Call 3 is the check after the keyframe opened its group with itself: the group is reset.
         # Call 4 is the next delta's first check: the group has its keyframe but would lose a delta.
         # Either way the next delta must not be sent into that group, and the slot must be free.
         calls = 0
@@ -338,7 +340,7 @@ class TestKeyframeGrouping:
         assert await kinds(writer, [delta(2)]) == ["skipped"], "never object 0 of a group without its keyframe"
         assert await kinds(writer, [key(3), delta(4)]) == ["sent", "sent"]
         assert track.groups[1].payloads == [b"key", b"delta"]
-        assert track.groups[0].payloads == ([] if raising_call == 3 else [b"key"])
+        assert track.groups[0].payloads == [b"key"]
 
     def test_grouping_is_checked_as_an_argument(self) -> None:
         with pytest.raises(TypeError):
@@ -374,8 +376,8 @@ class TestFrameGrouping:
         assert await writer.write(key(0)) == FrameOutcome("stale")
         assert track.groups == []
         assert await writer.write(key(1)) == FrameOutcome("stale", group_id=0)
-        assert track.groups[0].aborts == [None] and track.groups[0].objects == []
-        assert (writer.groups, writer.objects) == (1, 0), "the group was opened, nothing was accepted"
+        assert track.groups[0].aborts == [None] and track.groups[0].payloads == [b"key"]
+        assert (writer.groups, writer.objects) == (1, 1), "the frame went out with the open; the reset withdraws it"
 
     async def test_an_interrupted_frame_resets_its_group_and_the_next_frame_proceeds(self) -> None:
         track = FakeTrackWriter()
@@ -383,10 +385,11 @@ class TestFrameGrouping:
         track.fail("group-write", error)
         writer: FrameWriter[Sample] = FrameWriter(track, grouping="frame")
 
-        assert await writer.write(key(0)) == FrameOutcome("interrupted", error=error, group_id=0)
+        # The frame failed inside the open: the group was reset and no writer came back to name.
+        assert await writer.write(key(0)) == FrameOutcome("interrupted", error=error)
         assert track.groups[0].aborts == [None]
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
-        assert (writer.groups, writer.objects) == (2, 1), "both groups were opened; one object was accepted"
+        assert (writer.groups, writer.objects) == (1, 1), "one open returned a group, with one object"
 
     async def test_a_failed_fin_is_an_interruption(self) -> None:
         track = FakeTrackWriter()
@@ -434,7 +437,70 @@ class TestFrameGrouping:
         with pytest.raises(RuntimeError, match="clock"):
             await writer.write(key(0))
 
-        assert track.groups[0].aborts == [None] and track.groups[0].objects == []
+        assert track.groups[0].aborts == [None] and track.groups[0].payloads == [b"key"]
+        assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
+
+    @pytest.mark.parametrize("grouping", ["keyframe", "frame"])
+    async def test_a_frame_with_no_payload_is_refused_instead_of_opening_an_empty_group(
+        self, grouping: Literal["keyframe", "frame"]
+    ) -> None:
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track, grouping=grouping)
+
+        with pytest.raises(TypeError):
+            await writer.write(Sample(None, True, (), False, 0))  # ty: ignore[invalid-argument-type]
+
+        assert track.groups == [] and writer.objects == 0
+        assert await writer.write(key(1)) == FrameOutcome("sent", group_id=0)
+
+    async def test_a_caller_cancelled_as_its_keyframe_finishes_opening_has_the_group_reset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The open completes, then the caller's cancellation lands before it resumes: the group must not keep the slot.
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track)
+        open_group = track.open_group
+        caller: asyncio.Task[FrameOutcome] | None = None
+
+        async def open_then_cancel_caller(
+            payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
+        ) -> FakeGroupWriter:
+            group = await open_group(payload, properties=properties)
+            assert caller is not None
+            asyncio.get_running_loop().call_soon(caller.cancel)
+            return group
+
+        monkeypatch.setattr(track, "open_group", open_then_cancel_caller)
+        caller = asyncio.create_task(writer.write(key(0)))
+
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        assert track.groups[0].aborts == [None]
+        monkeypatch.setattr(track, "open_group", open_group)
+        assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
+
+    @pytest.mark.parametrize("held", ["stream-open", "object-write"])
+    async def test_a_caller_cancelled_while_its_keyframe_opens_frees_the_real_write_slot(self, held: str) -> None:
+        # Cancelling the caller cancels the open it awaits: the operation resets its stream and frees the slot,
+        # including a stream that opens only after the cancellation.
+        h = Harness(open="hold") if held == "stream-open" else Harness(stall="write")
+        h.writer._bind(1)
+        writer: FrameWriter[Sample] = FrameWriter(h.writer)
+        caller = asyncio.create_task(writer.write(key(0)))
+        await wait_for(lambda: h.holding if held == "stream-open" else bool(h.opened) and h.opened[0].stalled)
+
+        caller.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await caller
+
+        if held == "stream-open":
+            h._open = "ok"  # only the cancelled keyframe's open is held
+            h.release_open()
+            await settle()
+
+        assert len(h.opened[0].aborts) == 1
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
 
     async def test_task_cancellation_inside_a_write_resets_the_group_and_propagates(self) -> None:
@@ -452,7 +518,7 @@ class TestFrameGrouping:
 
         track.block = None
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1), "nothing of the cancelled group lingers"
-        assert (writer.groups, writer.objects) == (2, 1)
+        assert (writer.groups, writer.objects) == (1, 1)
 
 
 def kinds_of(outcomes: Sequence[FrameOutcome]) -> list[str]:

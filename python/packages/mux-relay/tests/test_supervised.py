@@ -17,7 +17,7 @@ from typing import Any, cast
 import pytest
 from relay_helpers.supervision_fakes import FakePublisher, FakeSubscriber, until
 
-from moq_core import MessageParameters, MoqtObject, SubgroupEnd
+from moq_core import KeyValuePair, MessageParameters, MoqtObject, SubgroupEnd
 from moq_core.errors import MoqtProtocolError
 from mux_relay import (
     CancellationToken,
@@ -30,6 +30,7 @@ from mux_relay import (
     SupervisionBackoff,
     WantHandlers,
     WantSwitchedInfo,
+    supervised_publisher,
 )
 from mux_relay._supervision import RESUBSCRIBE_BACKOFF, _Backoff, backoff_delay, new_generation, wait_any
 from mux_relay.supervised_publisher import _supervise_relay_publisher
@@ -137,6 +138,28 @@ async def test_reconnects_as_a_newer_generation_and_rebinds_the_writer(cleanup: 
     assert not writer.closed
 
 
+async def test_times_an_object_from_the_supervised_call_so_checking_its_arguments_counts(
+    cleanup: list[Callable[[], object]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publisher, p = await start_publisher(cleanup)
+    writer = publisher.register_track("video")
+    loop = asyncio.get_running_loop()
+    checked_at: list[float] = []
+    check = supervised_publisher.object_property_pairs
+
+    def slow_check(properties: object) -> list[KeyValuePair]:
+        time.sleep(0.02)  # a large property list takes this long to check
+        checked_at.append(loop.time())
+        return check(properties)
+
+    monkeypatch.setattr(supervised_publisher, "object_property_pairs", slow_check)
+    await writer.write(b"\x01")
+    await writer.open_group(b"\x02")
+    started = p.connections[0].tracks["video"].started
+    assert len(started) == 2
+    assert all(at - start >= 0.02 for start, at in zip(started, checked_at, strict=True))
+
+
 async def test_a_write_between_generations_fails_with_reconnecting(cleanup: list[Callable[[], object]]) -> None:
     gated = Publishers()
     gated.gate = asyncio.Event()
@@ -149,6 +172,11 @@ async def test_a_write_between_generations_fails_with_reconnecting(cleanup: list
         await writer.write(b"\x09")
     assert (raised.value.code, raised.value.phase) == ("RECONNECTING", "connection")
     assert not writer.has_demand
+    # Arguments come before connection state: a bad one is a TypeError even between generations.
+    with pytest.raises(TypeError):
+        await writer.open_group(properties=[KeyValuePair(0x02, 50)])
+    with pytest.raises(TypeError):
+        await writer.open_group("not bytes")  # ty: ignore[invalid-argument-type]
     gated.gate.set()
     await until(lambda: publisher.status == "live", "live again")
     assert p.connections[1].tracks["audio"].writes == []

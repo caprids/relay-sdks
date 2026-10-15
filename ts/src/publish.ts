@@ -127,8 +127,23 @@ export interface RelayTrackWriter {
    * every relay subscription. Values are per relay subscription, never per downstream viewer.
    */
   demandChanges(): AsyncIterableIterator<boolean>;
-  /** Hold the track's single write slot until the group closes or aborts. */
-  openGroup(options?: { signal?: AbortSignal }): Promise<RelayGroupWriter>;
+  /**
+   * Open a group and hold the track's single write slot until it closes or aborts. Waits for relay
+   * demand, for room under the connection's settling-group limit and for the stream, within
+   * writeTimeoutMs.
+   *
+   * With `payload`, the group opens with it as object 0 and resolves once the transport takes it
+   * (`objectCount` is 1). Its delivery timeout counts from this call, so every wait before the stream
+   * opens counts (draft-22 §5.2), and a `0x02` or `0x06` property in `properties` sets the group's
+   * delivery timeouts. If it expires the call fails with `DELIVERY_TIMEOUT` and the group is reset.
+   * Without `payload` there is no object to time, so only writeTimeoutMs bounds the wait; `properties`
+   * without `payload` is a TypeError.
+   */
+  openGroup(options?: {
+    payload?: ArrayBufferView;
+    properties?: readonly PublishProperty[];
+    signal?: AbortSignal;
+  }): Promise<RelayGroupWriter>;
   /**
    * Send one independent object/group. Waits for relay demand (see hasDemand). Resolves when the
    * transport accepts the complete group, not when a downstream viewer acknowledges it.

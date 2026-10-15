@@ -32,7 +32,8 @@ import {
   type SupervisionBackoff,
   sleep,
 } from './supervision.js';
-import { namespaceFields, trackName, trackPropertyPairs } from './validation.js';
+import { namespaceFields, objectPropertyPairs, payloadBytes, trackName, trackPropertyPairs } from './validation.js';
+import { CALL_STARTED_AT, type CallStarted, now } from './write-slot.js';
 
 /** Options for `connectSupervisedPublisher`: the shared connection options, the root namespace and the policy. */
 export interface ConnectSupervisedPublisherOptions extends ConnectRelayOptions {
@@ -643,13 +644,25 @@ class SupervisedTrack {
         return track.#closed;
       },
       demandChanges: () => track.#demandChanges(),
-      openGroup: (options) =>
-        onLive(async (writer, generation) => {
-          const group = await writer.openGroup(options);
+      openGroup: async (options) => {
+        // The first object's clock starts at this call, so checking its arguments here counts (§5.2).
+        const startedAt = now();
+        // Arguments before connection or slot state (spec/behavior.md, "Arguments"), and the checked copies are what
+        // the live writer gets: the caller's own objects are read once.
+        const signal = options?.signal;
+        let opening: Parameters<RelayTrackWriter['openGroup']>[0] & CallStarted = { [CALL_STARTED_AT]: startedAt };
+        if (options?.payload !== undefined) {
+          opening = { ...opening, payload: payloadBytes(options.payload) };
+          if (options.properties !== undefined)
+            opening = { ...opening, properties: objectPropertyPairs(options.properties) };
+        } else if (options?.properties !== undefined)
+          throw new TypeError('Group properties belong to a first object: pass a payload with them');
+        if (signal !== undefined) opening = { ...opening, signal };
+        return onLive(async (writer, generation) => {
+          const group = await writer.openGroup(opening);
           // The generation the group was opened on, read before the await: a disconnect meanwhile clears the binding.
           // The group holds the generation open until it is closed or aborted.
           const hold = use(generation);
-          const signal = options?.signal;
           const onAbort = () => {
             if (group.closed) release();
           };
@@ -667,8 +680,20 @@ class SupervisedTrack {
           if (group.closed) release();
           else signal?.addEventListener('abort', onAbort, { once: true });
           return supervisedGroup(group, () => track.#closed, generation, release);
-        }),
-      write: (payload, options?: WriteOptions) => onLive((writer) => writer.write(payload, options)),
+        });
+      },
+      write: async (payload, options?: WriteOptions) => {
+        // The object's clock starts at this call, so checking its arguments here counts (§5.2).
+        const startedAt = now();
+        // Arguments before connection or slot state (spec/behavior.md, "Arguments"), and the checked copies are what
+        // the live writer gets: the caller's own objects are read once.
+        const bytes = payloadBytes(payload);
+        let writing: WriteOptions & CallStarted = { [CALL_STARTED_AT]: startedAt };
+        if (options?.properties !== undefined)
+          writing = { ...writing, properties: objectPropertyPairs(options.properties) };
+        if (options?.signal !== undefined) writing = { ...writing, signal: options.signal };
+        return onLive((writer) => writer.write(bytes, writing));
+      },
       writeText: (text, options?: WriteOptions) => onLive((writer) => writer.writeText(text, options)),
       writeJSON: (value, options?: WriteOptions) => onLive((writer) => writer.writeJSON(value, options)),
       close: () => {

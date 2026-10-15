@@ -147,7 +147,8 @@ class TestCounting:
         video.fail("group-write", changed_error())
         stats, ended = await drive(video_samples(3), video=video)
 
-        assert (stats.video_groups, stats.video_objects, stats.skipped_video, stats.dropped_video) == (1, 0, 3, 0)
+        # The keyframe failed inside its group's open, so no group came back to count.
+        assert (stats.video_groups, stats.video_objects, stats.skipped_video, stats.dropped_video) == (0, 0, 3, 0)
         assert ended == []
 
     async def test_a_terminal_group_write_failure_counts_its_own_sample_as_dropped(self) -> None:
@@ -156,7 +157,7 @@ class TestCounting:
         video.fail("group-write", closed)
         stats, ended = await drive(video_samples(3), video=video)
 
-        assert (stats.video_groups, stats.video_objects, stats.skipped_video, stats.dropped_video) == (1, 0, 0, 3)
+        assert (stats.video_groups, stats.video_objects, stats.skipped_video, stats.dropped_video) == (0, 0, 0, 3)
         assert ended == [("video", closed)]
 
     async def test_stale_samples_are_counted_as_stale(self) -> None:

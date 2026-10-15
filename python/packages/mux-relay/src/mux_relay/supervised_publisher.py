@@ -232,9 +232,12 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         Raises ``RECONNECTING`` at once while no generation is up, and when the connection's end
         interrupts the write, never ``CLOSED``. Nothing is replayed onto the next generation.
         """
+        # The object's clock starts at this call, so checking its arguments here counts (section 5.2). The SDK's
+        # writers time with the event loop's clock.
+        started = asyncio.get_running_loop().time()
         data = payload_bytes(payload)
         object_properties = object_property_pairs(properties)
-        await self._on_live(lambda writer, _: writer.write(data, properties=object_properties))
+        await self._on_live(lambda writer, _: writer._write_from(started, data, object_properties))
 
     async def write_text(self, text: str, *, properties: Sequence[KeyValuePair] | None = None) -> None:
         """Encode UTF-8 text and write one object with the same semantics as ``write``."""
@@ -244,11 +247,24 @@ class _SupervisedTrackWriter(RelayTrackWriter):
         """Serialize JSON and write one object with the same semantics as ``write``."""
         await self.write(_encode_json(value), properties=properties)
 
-    async def open_group(self) -> RelayGroupWriter:
+    async def open_group(
+        self, payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
+    ) -> RelayGroupWriter:
         """Open a multi-object group on the live generation; see :meth:`RelayTrackWriter.open_group`."""
+        # The first object's clock starts at this call, so checking its arguments here counts (section 5.2).
+        started = asyncio.get_running_loop().time()
+        # Arguments before connection or slot state (spec/behavior.md, "Arguments").
+        data: bytes | None = None
+        object_properties: list[KeyValuePair] | None = None
+
+        if payload is not None:
+            data = payload_bytes(payload)
+            object_properties = object_property_pairs(properties)
+        elif properties is not None:
+            raise TypeError("Group properties belong to a first object: pass a payload with them")
 
         async def open_on(writer: RelayTrackWriter, generation: _Generation) -> RelayGroupWriter:
-            group = await writer.open_group()
+            group = await writer._open_group_from(started, data, object_properties)
             # The generation the group was opened on, read before the await: a disconnect clears the binding.
             # The group holds the generation open until it is closed or aborted.
             hold = generation.use()

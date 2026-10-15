@@ -604,7 +604,9 @@ surrogates become replacement characters). Raw byte `write()` and subscriptions 
 
 For media, use `openGroup()` to put multiple objects on one stream. Each object gets the next ID,
 starting at 0; `group.close()` sends the group's FIN. This amortizes stream creation and completion
-across a group, such as a video GOP, instead of waiting for a FIN for every frame.
+across a group, such as a video GOP, instead of waiting for a FIN for every frame. Pass the first
+object to `openGroup({ payload, properties })` to send it as object 0: its delivery timeout then
+counts the wait for the stream, which a bare `openGroup()` has no object to charge.
 
 ```ts
 const video = publisher.registerTrack({ track: 'video', writeTimeoutMs: 10_000 });

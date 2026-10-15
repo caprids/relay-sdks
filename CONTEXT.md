@@ -43,7 +43,8 @@ _Avoid_: in-flight group, draining stream, unacked group
 
 **Delivery timeout**:
 The draft's bound on how long a group stays deliverable: the subgroup timeout runs from the FIN to
-its acknowledgment, the object timeout caps an object's age when it reaches the transport. Its value
+its acknowledgment, the object timeout caps an object's age, counted from when the application hands
+it over, when it reaches the transport. Its value
 is the smaller non-zero of the publisher's (the track property, or the group's first object) and the
 subscriber's; expiry resets the stream.
 _Avoid_: write deadline (the SDK's own bound on one operation), write timeout, TTL, max age

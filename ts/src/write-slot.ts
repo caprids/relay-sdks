@@ -120,7 +120,17 @@ interface Operation {
 }
 
 /** A monotonic clock for object ages. */
-const now = () => performance.now();
+export const now = () => performance.now();
+
+/**
+ * An internal option on `write()` and `openGroup()`: when, on {@link now}, the application made the call. A wrapper that
+ * checks the arguments before handing them on (the supervised publisher) passes it, so its own work counts toward the
+ * object's delivery timeout (§5.2: the clock starts when the application provides the object).
+ */
+export const CALL_STARTED_AT: unique symbol = Symbol('callStartedAt');
+
+/** Options carrying {@link CALL_STARTED_AT}. */
+export type CallStarted = { readonly [CALL_STARTED_AT]?: number };
 
 export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
   const {
@@ -447,8 +457,8 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       await writer.write(encodeJSON(value), writeOptions);
     },
     async write(payload, writeOptions = {}) {
-      // The object's age counts from here (§5.2).
-      const startedAt = now();
+      // The object's age counts from here (§5.2), or from a wrapper's call.
+      const startedAt = (writeOptions as CallStarted)[CALL_STARTED_AT] ?? now();
       // Arguments before slot state: a bad payload is a programming error whatever the slot holds.
       const bytes = payloadBytes(payload);
       const properties = objectPropertyPairs(writeOptions.properties);
@@ -479,10 +489,38 @@ export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
       }
     },
     async openGroup(groupOptions = {}) {
+      // With a first object, its age counts from here (§5.2), so the waits for demand, settling room
+      // and the stream all count. Without one there is no object to time: only the write deadline applies.
+      const startedAt = (groupOptions as CallStarted)[CALL_STARTED_AT] ?? now();
+      const first =
+        groupOptions.payload === undefined
+          ? undefined
+          : { bytes: payloadBytes(groupOptions.payload), properties: objectPropertyPairs(groupOptions.properties) };
+      if (!first && groupOptions.properties !== undefined)
+        throw new TypeError('Group properties belong to a first object: pass a payload with them');
       assertWritable();
       const operation = begin('group', groupOptions.signal);
-      const subgroup = await run(operation, () => openStream(operation));
-      let objectCount = 0;
+      if (first) {
+        // Object 0's properties can set the group's publisher timeouts, before the stream opens.
+        operation.publisher = publisherTimeouts(first.properties, trackTimeouts);
+        operation.timeouts = effectiveTimeouts(operation.publisher, NO_DELIVERY_TIMEOUTS);
+        startObject(operation, startedAt);
+      }
+      // A failure here cancels the operation, which resets any stream it opened: no writer is returned.
+      const subgroup = await run(operation, async () => {
+        const opened = await openStream(operation);
+        if (!first) return opened;
+        operation.phase = 'writing';
+        checkObjectAge(operation);
+        await opened.writeObject(
+          { objectId: 0, properties: first.properties, payload: first.bytes },
+          { beforeWrite: () => checkObjectAge(operation) },
+        );
+        untimeObject(operation);
+        check(operation);
+        return opened;
+      });
+      let objectCount = first ? 1 : 0;
       let pending = false;
       let complete = false;
       const assertGroup = () => {

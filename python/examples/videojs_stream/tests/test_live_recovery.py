@@ -162,9 +162,10 @@ async def test_age_drop_resets_open_gop_and_skips_fresh_delta_until_keyframe() -
         queue.put_nowait(None)
         gate.set()
         await asyncio.wait_for(task, 1)
+        # The keyframe was still opening its group when it aged, so the check after the open resets that group.
         assert video.groups[0].aborts == [None]
         assert timestamps(video, 1) == [20_030_000]
-        assert stats.stale_video == 2
+        assert stats.stale_video == 3
         assert stats.max_lag_seconds >= 19
     finally:
         task.cancel()
@@ -224,7 +225,7 @@ async def test_cancelling_independent_writers_accounts_for_inflight_and_queued_s
         discard_queue(queue, stats)
     assert (stats.discarded_video, stats.discarded_audio) == (2, 2)
     assert audio.groups[0].aborts == [None]
-    assert stats.video_groups == 1, "the group the cancelled keyframe opened is still counted"
+    assert stats.video_groups == 0, "the cancelled keyframe's open returned no group"
 
 
 async def test_stopping_producer_joins_handoff_and_flushes_both_eofs(monkeypatch: pytest.MonkeyPatch) -> None:

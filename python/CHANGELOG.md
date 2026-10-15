@@ -15,6 +15,10 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   ([#302](https://github.com/muxinc/relay-sdks/issues/302)): 500 ms for audio, and for video the target latency less
   the keyframe interval, never less than one interval (one interval by default). Pass its result to `register_track`
   beside `loc_track_properties()`; video needs `keyframe_interval_us`. The Video.js streaming example uses it.
+- `open_group(payload, properties=...)` opens a group with its first object, so that object's delivery timeout counts
+  the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306)); a bare
+  `open_group()` has no object to time. The frame writer opens every group this way, so a frame whose open fails
+  reports no `group_id`, and `groups` counts only opens that returned a group.
 - `mux-moq-core` (imported as `moq_core`): the transport-independent MOQT sessions the SDK is built on.
 - Reading frames in decode order within a latency budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)).
   `moq_media.FrameSequencer(clock, grouping=)` orders one track's objects across group streams, waits for a late group

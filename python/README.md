@@ -575,6 +575,8 @@ their writer closes.
 For media, a track needs more than one object per group: LOC/MSF maps one GOP to one MOQT group
 whose object 0 is the keyframe. `open_group()` waits for relay demand like `write()`, then returns a
 `RelayGroupWriter` that appends objects with increasing IDs and FINs the group on `close()`.
+Pass the keyframe to `open_group()` itself to send it as object 0: its delivery timeout then counts
+the wait for the stream, which a bare `open_group()` has no object to charge.
 Opening the group, each `group.write()`, and `group.close()` get a separate `write_timeout`
 deadline. Time between calls does not count toward a deadline. A timeout resets that group and
 raises `WRITE_TIMEOUT`; the track stays open for a new group at the next keyframe:
@@ -592,8 +594,7 @@ from moq_media import loc_properties, loc_track_properties
 video = publisher.register_track("video", track_properties=loc_track_properties())
 
 if video.has_demand:  # the relay currently has an upstream subscription for the track
-    group = await video.open_group()
-    await group.write(keyframe_bytes, properties=loc_properties(timestamp_us, video_config=avcc))
+    group = await video.open_group(keyframe_bytes, properties=loc_properties(timestamp_us, video_config=avcc))
     await group.write(delta_bytes, properties=loc_properties(next_timestamp_us))
     await group.close()
 ```

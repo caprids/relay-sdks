@@ -185,10 +185,21 @@ class FakeTrackWriter:
         await self._step("write", None)
         self.writes.append(payload)
 
-    async def open_group(self) -> FakeGroupWriter:
+    async def open_group(
+        self, payload: bytes | None = None, *, properties: Sequence[KeyValuePair] | None = None
+    ) -> FakeGroupWriter:
         await self._step("open", None)
         group = FakeGroupWriter(self, len(self.groups))
         self.groups.append(group)
+
+        if payload is not None:
+            # Like the SDK: the first object goes with the open, and a failure resets the group and returns none.
+            try:
+                await group.write(payload, properties=properties)
+            except BaseException:
+                group.abort()
+                raise
+
         return group
 
 

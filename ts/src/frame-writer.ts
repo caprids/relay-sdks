@@ -150,6 +150,8 @@ export function createFrameWriter<F extends Frame = Frame>(
   let keyOpening = false;
   /** The previous group while a keyframe's write FINs it: an overflow resets it too. */
   let finishing: RelayGroupWriter | undefined;
+  /** Aborts the group a keyframe is opening with itself: an overflow resets it like an open group. */
+  let opening: AbortController | undefined;
   /** Why deltas are discarded until the next keyframe, when it is not a missing group. */
   let recovering: 'stale' | 'dropped' | undefined;
   /** Counts keyframe-grouping overflows, so the frame in progress can tell that its group was dropped under it. */
@@ -178,6 +180,7 @@ export function createFrameWriter<F extends Frame = Frame>(
     const reset = group ?? finishing;
     group = undefined;
     finishing = undefined;
+    opening?.abort();
     reset?.abort();
     return reset?.groupId;
   };
@@ -209,6 +212,12 @@ export function createFrameWriter<F extends Frame = Frame>(
     }
     needKeyframe();
     return { kind: 'interrupted', error, ...(groupId === undefined ? {} : { groupId }) };
+  };
+
+  /** A frame as the first object of the group it opens. A missing payload would open a bare group and send nothing. */
+  const firstObject = (frame: F) => {
+    if (frame.payload == null) throw new TypeError('frame.payload must be an ArrayBufferView');
+    return frame.properties ? { payload: frame.payload, properties: frame.properties } : { payload: frame.payload };
   };
 
   const withGroup = (kind: FrameOutcomeKind, groupId: number | undefined): FrameOutcome =>
@@ -251,23 +260,38 @@ export function createFrameWriter<F extends Frame = Frame>(
         keyOpening = false;
         return { kind: 'skipped' };
       }
+      // The keyframe opens its group as object 0, so its delivery timeout counts the wait for the stream (§5.2).
       let opened: RelayGroupWriter;
+      const controller = new AbortController();
+      opening = controller;
       try {
-        opened = await track.openGroup();
+        opened = await track.openGroup({ ...firstObject(frame), signal: controller.signal });
       } catch (error) {
         if (droppedUnder()) return { kind: 'dropped' };
         if (error instanceof RelayError) return failed(error, undefined);
         throw error;
+      } finally {
+        if (opening === controller) opening = undefined;
       }
       groups++;
+      objects++;
+      // From here the open group itself says whether a demand change was recovered from.
+      keyOpening = false;
       if (droppedUnder()) {
-        // The backlog overflowed while the stream opened: the group never held a frame.
+        // The backlog overflowed while the group opened: the transport took the keyframe, but it will not arrive.
         opened.abort();
         return { kind: 'dropped', groupId: opened.groupId };
       }
+      // Held before the predicate runs, so a predicate that throws still has the group reset.
       group = opened;
-      // From here the open group itself says whether a demand change was recovered from.
-      keyOpening = false;
+      if (stale(frame)) {
+        // Opening the group took long enough that its keyframe is too old: a reset costs less than a late GOP.
+        recovering = 'stale';
+        const groupId = resetGroup();
+        needKeyframe();
+        return withGroup('stale', groupId);
+      }
+      return { kind: 'sent', groupId: opened.groupId };
     }
 
     // No demand when the GOP started, or the group was lost: wait for the next keyframe.
@@ -298,23 +322,23 @@ export function createFrameWriter<F extends Frame = Frame>(
   const ownGroup = async (frame: F): Promise<FrameOutcome> => {
     if (stale(frame)) return { kind: 'stale' };
     if (!track.hasDemand) return { kind: 'skipped' };
+    // The frame opens its group as object 0, so its delivery timeout counts the wait for the stream (§5.2).
     let opened: RelayGroupWriter;
     try {
-      opened = await track.openGroup();
+      opened = await track.openGroup(firstObject(frame));
     } catch (error) {
       if (error instanceof RelayError) return failed(error, undefined);
       throw error;
     }
     groups++;
+    objects++;
     // From here on the group holds the track's write slot: whatever happens, it is reset before this returns.
     try {
       if (stale(frame)) {
-        // Opening the stream took long enough that the frame is too old; a reset costs less than a late frame.
+        // Opening the group took long enough that the frame is too old; a reset costs less than a late frame.
         opened.abort();
         return { kind: 'stale', groupId: opened.groupId };
       }
-      await opened.write(frame.payload, frame.properties ? { properties: frame.properties } : {});
-      objects++;
       await opened.close();
     } catch (error) {
       opened.abort();

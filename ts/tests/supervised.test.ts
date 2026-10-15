@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
 import type { ConnectRelayPublisherOptions } from '../src/publish.js';
 import { SubscriptionConnectionClosedError } from '../src/subscription.js';
@@ -104,6 +104,42 @@ describe('connectSupervisedPublisher', () => {
     expect(writer.closed).toBe(false);
   });
 
+  it('times an object from the supervised call, so checking its arguments counts toward its clock', async () => {
+    const connections: FakePublisher[] = [];
+    const { publisher } = await start({
+      connect: async (options) => {
+        const fake = fakePublisher([...options.namespace]);
+        connections.push(fake);
+        return fake;
+      },
+    });
+    const writer = publisher.registerTrack({ track: 'video' });
+    await until(() => publisher.status === 'live', 'live');
+    // Checking the arguments takes 50 ms on a stepped clock, and reading the property rewrites the payload: the
+    // object's clock must start before the check, and what is sent is what was checked, read once.
+    let clock = 1_000;
+    vi.spyOn(performance, 'now').mockImplementation(() => clock);
+    const payload = new Uint8Array([1]);
+    let reads = 0;
+    const property = {
+      type: 0x10,
+      get value() {
+        reads++;
+        clock += 50;
+        payload[0] = 2;
+        return 7;
+      },
+    };
+    await writer.write(payload, { properties: [property] });
+    payload[0] = 1;
+    await writer.openGroup({ payload, properties: [property] });
+    vi.mocked(performance.now).mockRestore();
+    const track = connections[0]!.tracks.get('video')!;
+    expect(track.started).toEqual([1_000, 1_050]);
+    expect(reads).toBe(2);
+    expect(track.writes).toEqual([new Uint8Array([1]), new Uint8Array([1])]);
+  });
+
   it('fails a write between generations at once with RECONNECTING and replays nothing', async () => {
     const gate = deferred();
     let calls = 0;
@@ -125,6 +161,15 @@ describe('connectSupervisedPublisher', () => {
       phase: 'connection',
     });
     expect(writer.hasDemand).toBe(false);
+    // Arguments come before connection state: a bad one is a TypeError even between generations.
+    await expect(writer.write('not bytes' as never)).rejects.toBeInstanceOf(TypeError);
+    await expect(writer.openGroup({ properties: [{ type: 0x02, value: 50 }] })).rejects.toBeInstanceOf(TypeError);
+    await expect(writer.openGroup({ payload: 'not bytes' as never })).rejects.toBeInstanceOf(TypeError);
+    // A view over a transferred buffer is still an ArrayBufferView, but it cannot be read: an argument error too.
+    const detached = new Uint8Array([1]);
+    structuredClone(detached.buffer, { transfer: [detached.buffer] });
+    await expect(writer.write(detached)).rejects.toBeInstanceOf(TypeError);
+    await expect(writer.openGroup({ payload: detached })).rejects.toBeInstanceOf(TypeError);
     gate.resolve();
     await until(() => publisher.status === 'live', 'live again');
     expect(connections[1]!.tracks.get('audio')!.writes).toEqual([]);
