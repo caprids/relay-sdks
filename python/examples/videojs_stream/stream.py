@@ -76,7 +76,7 @@ from mux_relay import (
     connect_relay_publisher,
     connect_supervised_subscriber,
 )
-from mux_relay.media import CatalogService, DocumentService, FrameOutcome, FrameWriter
+from mux_relay.media import CatalogService, DocumentService, FrameOutcome, FrameWriter, media_track_properties
 
 Log = Callable[[str, dict[str, Any]], None]
 
@@ -212,6 +212,26 @@ class LiveQueue(asyncio.Queue[EncodedSample | None]):
 # ---------------------------------------------------------------------------------------------------
 
 
+def keyframe_interval_frames(fps: Fraction | int, gop_seconds: float) -> int:
+    """The encoder's GOP in frames: ``gop_seconds`` rounded to whole frames, at least one."""
+    return max(1, round(fps * Fraction(gop_seconds)))
+
+
+def input_frame_rate(path: Path, fallback: Fraction) -> Fraction:
+    """A media file's average video frame rate, exactly as it declares it, or ``fallback`` when it declares none.
+
+    A variable-rate file's GOP still counts frames, so its keyframe interval is the average one.
+    """
+    with av.open(str(path)) as container:
+        rate = container.streams.video[0].average_rate if container.streams.video else None
+    return Fraction(rate) if rate else fallback
+
+
+def keyframe_interval_us(fps: Fraction | int, gop_seconds: float) -> int:
+    """The encoder's actual keyframe interval in microseconds, after rounding the GOP to whole frames."""
+    return round(keyframe_interval_frames(fps, gop_seconds) * 1_000_000 / fps)
+
+
 class VideoEncoder:
     """libx264 configured for LOC: no B-frames, fixed GOP, parameter sets out of band (avcC).
 
@@ -219,15 +239,19 @@ class VideoEncoder:
     """
 
     def __init__(
-        self, width: int, height: int, fps: int, bitrate: int, gop_seconds: float, rate_control: str = "abr"
+        self, width: int, height: int, fps: Fraction | int, bitrate: int, gop_seconds: float, rate_control: str = "abr"
     ) -> None:
-        keyint = max(1, round(fps * gop_seconds))
+        fps = Fraction(fps)
+        keyint = keyframe_interval_frames(fps, gop_seconds)
+        self.fps = fps
+        # The interval the encoder actually produces, which the video track's delivery timeout follows.
+        self.keyframe_interval_us = keyframe_interval_us(fps, gop_seconds)
         context = av.CodecContext.create("libx264", "w")
         context.width = width
         context.height = height
         context.pix_fmt = "yuv420p"
         context.time_base = MICROSECOND
-        context.framerate = Fraction(fps, 1)
+        context.framerate = fps
         context.bit_rate = bitrate
         context.options = {
             "preset": "veryfast",
@@ -498,8 +522,10 @@ class Producer:
         self._stop = threading.Event()
         # Set from the event loop by request_keyframes when a relay subscription starts.
         self.keyframe_requested = threading.Event()
+        # A file plays at its own frame rate, so the GOP is counted in its frames, not --fps's.
+        fps = Fraction(config.fps) if config.input is None else input_frame_rate(config.input, Fraction(config.fps))
         self.video = VideoEncoder(
-            config.width, config.height, config.fps, config.bitrate, config.gop_seconds, config.rate_control
+            config.width, config.height, fps, config.bitrate, config.gop_seconds, config.rate_control
         )
         self.audio: AudioEncoder | None = None
         self.error: BaseException | None = None
@@ -1299,7 +1325,7 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
         codec=producer.video.codec,
         width=config.width,
         height=config.height,
-        framerate=config.fps,
+        framerate=float(producer.video.fps),
         bitrate=config.bitrate,
         init_data=producer.video.avcc,
     )
@@ -1319,12 +1345,25 @@ async def run(config: Config, stats: Stats, log: Log) -> None:
     catalog_track = publisher.register_track(
         CATALOG_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5
     )
-    video_track = publisher.register_track(VIDEO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+    # Media tracks get the media tier's delivery timeouts, so a stall costs stale frames rather than lasting latency.
+    # The interval is the encoder's own, after rounding the GOP to whole frames.
+    video_track = publisher.register_track(
+        VIDEO_TRACK,
+        track_properties=[
+            *TRACK_TIMESCALE_PROPERTIES,
+            *media_track_properties("video", keyframe_interval_us=producer.video.keyframe_interval_us),
+        ],
+        write_timeout=5,
+    )
     timeline_track = publisher.register_track(
         MEDIA_TIMELINE_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5
     )
     audio_track = (
-        publisher.register_track(AUDIO_TRACK, track_properties=TRACK_TIMESCALE_PROPERTIES, write_timeout=5)
+        publisher.register_track(
+            AUDIO_TRACK,
+            track_properties=[*TRACK_TIMESCALE_PROPERTIES, *media_track_properties("audio")],
+            write_timeout=5,
+        )
         if producer.audio is not None
         else None
     )

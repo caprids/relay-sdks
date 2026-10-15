@@ -560,7 +560,7 @@ next generation is a new broadcast with a new timeline
 ([issue #292](https://github.com/muxinc/relay-sdks/issues/292)). Not added: helpers for the §7.4
 template, incremental documents, and a reader for MSF_COMPRESSION payloads.
 
-## Media publishing: `FrameWriter`, `CatalogService`
+## Media publishing: `FrameWriter`, `CatalogService`, `mediaTrackProperties`
 
 The media publishing policy the Video.js example proved, lifted into each product package
 ([issue #84](https://github.com/muxinc/relay-sdks/issues/84) for Python as `mux_relay.media`,
@@ -585,6 +585,7 @@ TypeScript package's export test. TypeScript uses factories that return interfac
 | Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8, or 25 under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
 | The next frame sent must be a keyframe; told on each entry | `writer.keyframeNeeded`; `onKeyframeNeeded()` | `writer.keyframe_needed`; `on_keyframe_needed()` |
 | FIN the open group and refuse further frames | `await writer.close()` | `await writer.close()` |
+| A media track's default delivery timeout, as track properties | `mediaTrackProperties(kind, { keyframeIntervalUs, targetLatencyUs, subgroupTimeoutUs })` (`MediaKind`: `'audio'`, `'video'`; `MediaTrackPropertiesOptions`) | `media_track_properties(kind, *, keyframe_interval_us=None, target_latency_us=None, subgroup_timeout_us=None)` (`MediaKind`) |
 | The writer ended, and how | `writer.closed`, `writer.ended` | `writer.closed`, `writer.ended` |
 | Groups opened and objects accepted | `writer.groups`, `writer.objects` | `writer.groups`, `writer.objects` |
 
@@ -607,6 +608,16 @@ and `push()` (the frame writer already is that concept, and `write` is the SDK's
 sending); `sink.hasDemand` (the track has it, and its `demandChanges()`); `sink.attach(writer)` (a
 supervised publisher's writers outlive its generations, and a move to a new one is a demand change);
 `maxQueue` (the bound is the backlog's).
+
+`mediaTrackProperties` says what it returns, like `locTrackProperties`, and what it is for: the
+media tier's part of a media track's properties. "Target latency" is the reader's name for the same
+budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)), so one setting reads the same on
+both sides. Not adopted: a `timescale` option returning the LOC Timescale too (the product package
+does not depend on `@mux/moq-media`, so the caller adds `locTrackProperties()`); an option on
+`registerTrack` (it knows nothing about media); an option on the frame writer (it receives a track
+already registered, and an object-level `0x06` reaches viewers as a Timestamp); `deliveryTimeoutMs`
+(media durations are microseconds, and the budget is what the application knows); an object
+timeout (see behavior.md).
 
 Not adopted: `FramePublisher.publish()` ("publisher" is the connection role, and `publish()` was
 already rejected as the name of a step that does not send); `MediaTrackWriter.write_frame()`

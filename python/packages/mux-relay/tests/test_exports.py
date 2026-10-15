@@ -93,6 +93,8 @@ MEDIA_NAMES = [
     "FrameOutcome",
     "FrameOutcomeKind",
     "FrameWriter",
+    "MediaKind",
+    "media_track_properties",
 ]
 """The public interface of ``mux_relay.media``, the media publishing policy; the root exports none of it."""
 

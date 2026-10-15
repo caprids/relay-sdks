@@ -142,6 +142,7 @@ assert.deepEqual(Object.keys(mediaPolicy).sort(), [
   'createCatalogService',
   'createDocumentService',
   'createFrameWriter',
+  'mediaTrackProperties',
 ]);
 // Its declarations stand without the optional adapter installed.
 const nodeDeclarations = (await readFile(resolve(root, 'dist/node.d.ts'), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');

@@ -10,6 +10,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 
 - `mux-relay`: `connect_relay_publisher` and `connect_relay_subscriber` over native QUIC through aioquic,
   and the `mux_relay.media` frame writer and catalog service.
+- `mux_relay.media.media_track_properties("audio" | "video", ...)` gives a media track a default subgroup delivery
+  timeout, so a stall costs stale frames instead of lasting latency
+  ([#302](https://github.com/muxinc/relay-sdks/issues/302)): 500 ms for audio, and for video the target latency less
+  the keyframe interval, never less than one interval (one interval by default). Pass its result to `register_track`
+  beside `loc_track_properties()`; video needs `keyframe_interval_us`. The Video.js streaming example uses it.
 - `mux-moq-core` (imported as `moq_core`): the transport-independent MOQT sessions the SDK is built on.
 - MOQT draft-22 by default ([#274](https://github.com/muxinc/relay-sdks/issues/274)): connections offer `moqt-22`,
   then `moqt-20` as a fallback, and speak whichever the relay selects. The drafts differ on the wire only in the

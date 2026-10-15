@@ -1,4 +1,5 @@
-"""Media publishing policy over registered tracks: the catalog and document services and the frame writer.
+"""Media publishing policy over registered tracks: the catalog and document services, the frame writer,
+and the track properties that give a media track its default delivery timeout.
 
 This is the part of stage 2 in ``spec/media-layer.md`` that the Video.js streaming example proved
 against the relay. A catalog is a state-shaped track whose document is re-sent on every relay
@@ -28,6 +29,7 @@ from typing import Generic, Literal, Protocol, TypeVar
 from moq_core import KeyValuePair, ObjectStatus
 
 from ._validation import payload_bytes
+from ._write_slot import SUBGROUP_DELIVERY_TIMEOUT
 from .errors import RelayError
 
 FrameOutcomeKind = Literal["sent", "skipped", "stale", "dropped", "interrupted", "ended"]
@@ -871,6 +873,78 @@ class DocumentService:
                 self._sends += 1
 
 
+MediaKind = Literal["audio", "video"]
+"""What a media track carries, which decides its default delivery timeout."""
+
+_AUDIO_SUBGROUP_TIMEOUT_US = 500_000
+"""Audio's default subgroup timeout: measured under a 2 s uplink stall to sjc (issue #302)."""
+
+_MAX_TIMEOUT_US = 2_147_483_647_000
+"""The largest value whose whole milliseconds the TypeScript SDK's timers hold, the bound in both SDKs."""
+
+
+def media_track_properties(
+    kind: MediaKind,
+    *,
+    keyframe_interval_us: int | None = None,
+    target_latency_us: int | None = None,
+    subgroup_timeout_us: int | None = None,
+) -> list[KeyValuePair]:
+    """The track properties that give a media track its default delivery timeout.
+
+    Pass them to ``register_track`` with the track's format properties, so a stall costs stale
+    frames rather than lasting latency::
+
+        video = publisher.register_track(
+            "video",
+            track_properties=[
+                *loc_track_properties(),
+                *media_track_properties("video", keyframe_interval_us=1_000_000),
+            ],
+        )
+
+    The result is one SUBGROUP_DELIVERY_TIMEOUT (0x06) in whole milliseconds, rounded up: 500 ms for
+    audio, and for video the target latency less the keyframe interval, but never less than the
+    interval. Every argument is a positive integer number of microseconds. ``keyframe_interval_us``
+    is required for video; ``target_latency_us`` (see ``CONTEXT.md``) defaults to twice it and may
+    not be smaller; audio ignores both. ``subgroup_timeout_us`` replaces the default for either kind.
+    No object timeout is set, in either SDK: through a frame writer it would never fire in a browser,
+    because a group's wait for settling room is not counted and, once its stream is open, the
+    browser's transport takes each object at once even during a stall.
+    """
+    if not isinstance(kind, str):
+        raise TypeError("kind must be 'audio' or 'video'")
+    if kind not in ("audio", "video"):
+        raise ValueError("kind must be 'audio' or 'video'")
+    _check_microseconds(keyframe_interval_us, "keyframe_interval_us")
+    _check_microseconds(target_latency_us, "target_latency_us")
+    _check_microseconds(subgroup_timeout_us, "subgroup_timeout_us")
+    if kind == "video" and keyframe_interval_us is None:
+        raise TypeError("keyframe_interval_us is required for video")
+    if keyframe_interval_us is not None and target_latency_us is not None and target_latency_us < keyframe_interval_us:
+        raise ValueError("target_latency_us must be at least keyframe_interval_us")
+
+    if subgroup_timeout_us is not None:
+        timeout_us = subgroup_timeout_us
+    elif kind == "audio":
+        timeout_us = _AUDIO_SUBGROUP_TIMEOUT_US
+    else:
+        assert keyframe_interval_us is not None
+        target = 2 * keyframe_interval_us if target_latency_us is None else target_latency_us
+        timeout_us = max(keyframe_interval_us, target - keyframe_interval_us)
+    return [KeyValuePair(SUBGROUP_DELIVERY_TIMEOUT, -(-timeout_us // 1000))]
+
+
+def _check_microseconds(value: object, name: str) -> None:
+    """Accept ``None`` or a positive integer of microseconds whose whole milliseconds fit the timer bound."""
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an integer number of microseconds")
+    if not 0 < value <= _MAX_TIMEOUT_US:
+        raise ValueError(f"{name} must be a positive integer of at most {_MAX_TIMEOUT_US} microseconds")
+
+
 __all__ = [
     "CatalogService",
     "DocumentService",
@@ -878,4 +952,6 @@ __all__ = [
     "FrameOutcome",
     "FrameOutcomeKind",
     "FrameWriter",
+    "MediaKind",
+    "media_track_properties",
 ]

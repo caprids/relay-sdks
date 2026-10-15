@@ -16,7 +16,7 @@ import {
   type VideoTrackInfo,
   videoTrackFromDecoderConfig,
 } from '@mux/moq-media';
-import type { RelayPublisher, RelayTrackWriter } from '@mux/relay';
+import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@mux/relay';
 import {
   type CatalogService,
   createCatalogService,
@@ -24,8 +24,12 @@ import {
   createFrameWriter,
   type FrameOutcome,
   type FrameWriter,
+  mediaTrackProperties,
 } from '@mux/relay/media';
 import type { MicrophoneBlock, MicrophoneCapture } from './capture-microphone.js';
+
+/** The longest stretch between video keyframes; the writer can ask for one sooner. */
+const KEYFRAME_INTERVAL_US = 2_000_000;
 
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
@@ -137,8 +141,8 @@ export async function publishCanvas(
       // Opus needs no description, so the catalog entry is known before the first chunk.
       audio = { ...audioTrackFromDecoderConfig(audioConfig), bitrate: audioConfig.bitrate };
     }
-    const register = (track: string) => {
-      const writer = publisher.registerTrack({ track, trackProperties: locTrackProperties() });
+    const register = (track: string, media: PublishProperty[] = []) => {
+      const writer = publisher.registerTrack({ track, trackProperties: [...locTrackProperties(), ...media] });
       tracks.push(writer);
       // A track's demand changes end when the track does. Capture stops without demand, so no write would find out.
       serving.push(
@@ -150,8 +154,9 @@ export async function publishCanvas(
       return writer;
     };
     const catalogTrack = register(CATALOG_TRACK);
-    const track = register(VIDEO_TRACK);
-    const audioTrack = audio && register(AUDIO_TRACK);
+    // Media tracks get the media tier's delivery timeouts, so a stall costs stale frames rather than lasting latency.
+    const track = register(VIDEO_TRACK, mediaTrackProperties('video', { keyframeIntervalUs: KEYFRAME_INTERVAL_US }));
+    const audioTrack = audio && register(AUDIO_TRACK, mediaTrackProperties('audio'));
     const timelineTrack = register(MEDIA_TIMELINE_TRACK);
     // A keyframe opens each group, deltas join it. When the transport falls behind, the writer drops its backlog and
     // asks for a keyframe; so does every new relay subscription, rather than wait out the 2 s interval.
@@ -298,7 +303,7 @@ export async function publishCanvas(
       // Skipping raw capture preserves every encoded delta already waiting in the writer.
       if ((!video || track.hasDemand) && encoder.encodeQueueSize < 2 && writer.backlog === 0) {
         const timestamp = clock.now();
-        const keyFrame = forceKeyframe || timestamp - lastKeyframeUs >= 2_000_000;
+        const keyFrame = forceKeyframe || timestamp - lastKeyframeUs >= KEYFRAME_INTERVAL_US;
         const frame = new VideoFrame(canvas, { timestamp });
         try {
           if (keyFrame) {
