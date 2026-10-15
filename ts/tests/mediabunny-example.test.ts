@@ -64,6 +64,8 @@ function recordingPublisher(
   controls: {
     /** The error the video write with this zero-based index throws, if any. */
     videoWriteError?: (index: number) => Error | undefined;
+    /** Called when the example closes the video track. */
+    onVideoClose?: () => void;
     /** Awaited before every video write. */
     beforeVideoWrite?: () => Promise<void>;
     catalogWrite?: () => Promise<void>;
@@ -107,6 +109,7 @@ function recordingPublisher(
           await ended;
         },
         close() {
+          if (track === 'video' && !closed) controls.onVideoClose?.();
           closed = true;
           end();
         },
@@ -348,6 +351,13 @@ it('does not end the broadcast when the video track ends under the last FIN', as
     },
   });
   await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('The video track ended');
+  expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
+});
+
+it('does not end the broadcast when the catalog track ends while its service stops', async () => {
+  // As when the caller closes the publisher at EOF: the SDK closes every track at once.
+  const { publisher, tracks } = recordingPublisher({ onVideoClose: () => tracks.get('catalog')!.writer.close() });
+  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('The catalog track ended');
   expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
 });
 

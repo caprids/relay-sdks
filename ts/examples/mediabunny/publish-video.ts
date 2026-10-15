@@ -131,6 +131,8 @@ export async function publishVideoFile(
     serving.abort(fileRanOut);
     await catalogServed;
     signal.throwIfAborted();
+    // The stopped service no longer watches the track: without this, a track closed meanwhile would pass for no demand.
+    if (catalogTrack.closed) throw new Error('The catalog track ended');
     if (catalogTrack.hasDemand) await catalogTrack.write(buildMsfEndCatalog({ generatedAt: Date.now() }), { signal });
     catalogTrack.close();
   } catch (error) {
