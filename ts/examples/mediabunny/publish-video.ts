@@ -28,6 +28,18 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
   });
 }
 
+/**
+ * A track ends on its own only with its publisher connection, and `publisher.closed` then aborts the run with the
+ * reason. Wait for that rather than report a less specific error first.
+ */
+function connectionEnded(signal: AbortSignal): Promise<never> {
+  return new Promise((_, reject) => {
+    const abort = () => reject(signal.reason);
+    if (signal.aborted) abort();
+    else signal.addEventListener('abort', abort, { once: true });
+  });
+}
+
 /** Wait until the relay subscribes to `track`. */
 async function demanded(track: RelayTrackWriter, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
@@ -40,8 +52,7 @@ async function demanded(track: RelayTrackWriter, signal: AbortSignal): Promise<v
   } finally {
     signal.removeEventListener('abort', abort);
   }
-  signal.throwIfAborted();
-  throw new Error('The video track ended before the relay subscribed');
+  return connectionEnded(signal);
 }
 
 /**
@@ -97,7 +108,8 @@ export async function publishVideoFile(
     const catalog = createCatalogService(catalogTrack, buildMsfCatalog({ namespace, video }));
     // Only stopping it at EOF is expected: a failure that lands meanwhile still fails the run.
     catalogServed = catalog.serve({ signal: AbortSignal.any([signal, serving.signal]) }).then(
-      () => fail(new Error('The catalog track ended')),
+      // The track ended with the connection, which reports why.
+      () => {},
       (error: unknown) => {
         if (error !== fileRanOut) fail(error);
       },
@@ -126,13 +138,13 @@ export async function publishVideoFile(
     // Without demand nobody is listening.
     await writer.close();
     // The frame writer's close swallows a failed FIN; a track that ended under it is not the end of the broadcast.
-    if (videoTrack.closed) throw new Error('The video track ended');
+    if (videoTrack.closed) await connectionEnded(signal);
     videoTrack.close();
     serving.abort(fileRanOut);
     await catalogServed;
     signal.throwIfAborted();
     // The stopped service no longer watches the track: without this, a track closed meanwhile would pass for no demand.
-    if (catalogTrack.closed) throw new Error('The catalog track ended');
+    if (catalogTrack.closed) await connectionEnded(signal);
     if (catalogTrack.hasDemand) await catalogTrack.write(buildMsfEndCatalog({ generatedAt: Date.now() }), { signal });
     catalogTrack.close();
   } catch (error) {

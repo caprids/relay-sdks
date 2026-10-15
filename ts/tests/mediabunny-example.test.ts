@@ -82,13 +82,17 @@ function recordingPublisher(
     }
   >();
   let videoWrites = 0;
+  let closeConnection = (_error: RelayError) => {};
+  const connectionClosed = new Promise<{ error: RelayError }>((resolve) => {
+    closeConnection = (error) => resolve({ error });
+  });
   const unused = async () => {
     throw new Error('Unused text/JSON method');
   };
   const publisher: RelayPublisher = {
     announced: Promise.resolve(),
     expiresAt: undefined,
-    closed: new Promise(() => {}),
+    closed: connectionClosed,
     close: async () => {},
     registerTrack({ track }) {
       let end = () => {};
@@ -186,8 +190,15 @@ function recordingPublisher(
       return writer;
     },
   };
-  return { publisher, tracks };
+  /** The connection ends: its tracks close at once, and `closed` reports the error a little later, as in the SDK. */
+  const endConnection = (error: RelayError, tracksToClose = [...tracks.keys()]) => {
+    for (const name of tracksToClose) tracks.get(name)?.writer.close();
+    setTimeout(() => closeConnection(error), 20);
+  };
+  return { publisher, tracks, endConnection };
 }
+
+const goaway = () => new RelayError('CLOSED', 'Relay sent GOAWAY', 'connection');
 
 const catalogDocuments = (tracks: ReturnType<typeof recordingPublisher>['tracks']) =>
   tracks.get('catalog')!.groups.map((group) => JSON.parse(new TextDecoder().decode(group[0]!.payload)));
@@ -344,20 +355,36 @@ it('reports a catalog failure that lands while the last group FINs', async () =>
 });
 
 it('does not end the broadcast when the video track ends under the last FIN', async () => {
-  const { publisher, tracks } = recordingPublisher({
+  const { publisher, tracks, endConnection } = recordingPublisher({
     videoEnd: () => {
-      tracks.get('video')!.writer.close();
+      endConnection(goaway(), ['video']);
       throw new RelayError('CLOSED', 'Video track ended', 'closing');
     },
   });
-  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('The video track ended');
+  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('Relay sent GOAWAY');
   expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
 });
 
 it('does not end the broadcast when the catalog track ends while its service stops', async () => {
   // As when the caller closes the publisher at EOF: the SDK closes every track at once.
-  const { publisher, tracks } = recordingPublisher({ onVideoClose: () => tracks.get('catalog')!.writer.close() });
-  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('The catalog track ended');
+  const { publisher, tracks, endConnection } = recordingPublisher({
+    onVideoClose: () => endConnection(goaway(), ['catalog']),
+  });
+  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('Relay sent GOAWAY');
+  expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
+});
+
+it('reports the connection error when the catalog track ends with its connection', async () => {
+  let ended = false;
+  const { publisher, tracks, endConnection } = recordingPublisher({
+    // The idle catalog track closes first; the connection reports why only once its transport has shut down.
+    beforeVideoWrite: async () => {
+      if (ended) return;
+      ended = true;
+      endConnection(goaway(), ['catalog']);
+    },
+  });
+  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('Relay sent GOAWAY');
   expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
 });
 
