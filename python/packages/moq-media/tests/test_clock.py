@@ -176,6 +176,14 @@ def test_playout_clock_rejects_keyframe_interval(vector: dict[str, Any]) -> None
     assert clock.target_latency_us == 2_000_000
 
 
+def test_playout_clock_counts_its_resets() -> None:
+    clock = PlayoutClock(now_us=lambda: 0)
+    assert clock.resets == 0
+    clock.reset()
+    clock.reset()
+    assert clock.resets == 2
+
+
 class TestBroadcastClock:
     def test_reads_the_monotonic_clock_by_default(self) -> None:
         before = time.monotonic_ns() // 1000

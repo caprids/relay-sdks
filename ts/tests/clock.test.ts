@@ -199,6 +199,14 @@ describe('spec/vectors/clock.json', () => {
     expect(() => createPlayoutClock(parsed)).toThrow(RangeError);
   });
 
+  it('counts its resets', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    expect(clock.resets).toBe(0);
+    clock.reset();
+    clock.reset();
+    expect(clock.resets).toBe(2);
+  });
+
   it.each(vectors.keyframeIntervalErrors)('playout clock rejects a $name keyframe interval', ({ intervalUs }) => {
     const clock = createPlayoutClock();
     expect(() => clock.reportKeyframeInterval(Number(intervalUs))).toThrow(RangeError);
