@@ -62,8 +62,8 @@ writes the end-of-broadcast catalog (`buildMsfEndCatalog`: `isComplete: true`, n
 the catalog track. A failure of that last write fails the run. A failed or aborted run never sends
 the end-of-broadcast catalog.
 
-A track that ends under the example (closed, or its connection gone) fails the run, as does a catalog
-failure that is not a `RelayError`. Abort closes the tracks, cancels pacing, and immediately disposes
+A track ends on its own only with its publisher connection, and that fails the run with the error
+`publisher.closed` reports. So does a catalog failure that is not a `RelayError`. Abort closes the tracks, cancels pacing, and immediately disposes
 the file input, including during metadata and packet reads. It does not close the caller's
 connection.
 

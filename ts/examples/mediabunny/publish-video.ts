@@ -127,7 +127,8 @@ export async function publishVideoFile(
       await wait(startedAt + decodeTimeMs - performance.now(), signal);
       const frame = packetToLocFrame(packet, video.initData ? { videoConfig: video.initData } : {});
       const outcome = await writer.write(frame);
-      if (outcome.kind === 'ended') throw outcome.error;
+      // The video track ended with the connection: that is fatal, and the connection says why.
+      if (outcome.kind === 'ended') await connectionEnded(signal);
       // PTS can run backwards for B-frames. Pace decode order by durations; preserve PTS in LOC.
       decodeTimeMs += packet.duration * 1000;
     }
