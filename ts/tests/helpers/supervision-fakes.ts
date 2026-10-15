@@ -145,9 +145,12 @@ export function fakePublisher(namespace: string[], expiresAt?: Date): FakePublis
           async writeJSON(value) {
             await track.writer.writeText(JSON.stringify(value));
           },
-          async openGroup(groupOptions?: { signal?: AbortSignal }) {
+          async openGroup(groupOptions?: { payload?: ArrayBufferView; signal?: AbortSignal }) {
             track.started.push((groupOptions as CallStarted | undefined)?.[CALL_STARTED_AT]);
             if (track.closed) throw new RelayError('CLOSED', 'Published track is closed', 'waiting-for-demand');
+            // As the SDK does: a first object goes with the open.
+            const first = groupOptions?.payload;
+            if (first) track.writes.push(new Uint8Array(first.buffer, first.byteOffset, first.byteLength).slice());
             let closed = false;
             groupOptions?.signal?.addEventListener('abort', () => {
               closed = true;
