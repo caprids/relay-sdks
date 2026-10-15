@@ -729,65 +729,30 @@ class CatalogService:
     A failure that ends the track ends the service.
     """
 
-    __slots__ = ("_document", "_failures", "_retry_delay", "_sends", "_track")
+    __slots__ = ("_service",)
 
     def __init__(self, track: _TrackWriter, document: bytes, *, retry_delay: float = 1.0) -> None:
-        # Arguments first, as everywhere in the SDK: a bad document never reaches the track.
-        self._document = payload_bytes(document)
-
-        if isinstance(retry_delay, bool) or not isinstance(retry_delay, int | float):
-            raise TypeError("retry_delay must be a number of seconds")
-
-        if retry_delay != retry_delay or retry_delay < 0:
-            raise ValueError("retry_delay must be zero or more seconds")
-
-        self._track = track
-        self._retry_delay = retry_delay
-        self._sends = 0
-        self._failures = 0
+        # The document service's loop with a document that never changes, as in the TypeScript SDK.
+        self._service = DocumentService(track, payload_bytes(document), retry_delay=retry_delay)
 
     @property
     def sends(self) -> int:
         """Documents the transport accepted."""
-        return self._sends
+        return self._service.sends
 
     @property
     def failures(self) -> int:
         """Writes that failed while the track stayed open, each followed by a retry or by lost demand."""
-        return self._failures
+        return self._service.failures
 
     async def serve(self) -> None:
         """Run until cancelled or the track ends.
 
-        Returns when the track ends without a write having failed. Raises the ``RelayError`` that
-        ended the track when a write exposed it, so a retired catalog cannot go unnoticed.
+        Returns when the track ends without a write having failed, even during a retry pause. Raises
+        the ``RelayError`` that ended the track when a write exposed it, so a retired catalog cannot
+        go unnoticed.
         """
-        async for demanded in self._track.demand_changes():
-            if not demanded:
-                continue
-
-            while True:
-                try:
-                    await self._track.write(self._document)
-                except RelayError as error:
-                    if _retired(self._track, error):
-                        raise
-
-                    self._failures += 1
-
-                    # The document must eventually arrive even if the relay keeps its subscription.
-                    # Pause between attempts; losing demand returns to the demand iterator, and a
-                    # cancelled task ends the pause.
-                    if not self._track.has_demand:
-                        break
-
-                    await asyncio.sleep(self._retry_delay)
-
-                    if not self._track.has_demand:
-                        break
-                else:
-                    self._sends += 1
-                    break
+        await self._service.serve()
 
 
 class DocumentService:
@@ -847,8 +812,9 @@ class DocumentService:
     async def serve(self) -> None:
         """Run until cancelled or the track ends.
 
-        Returns when the track ends without a write having failed. Raises the ``RelayError`` that
-        ended the track when a write exposed it, so a retired track cannot go unnoticed.
+        Returns when the track ends without a write having failed, even during a retry pause. Raises
+        the ``RelayError`` that ended the track when a write exposed it, so a retired track cannot go
+        unnoticed.
         """
         watching = asyncio.ensure_future(self._watch_demand())
 
@@ -862,7 +828,7 @@ class DocumentService:
                     watching.result()
                     return
 
-                await self._send_due()
+                await self._send_due(watching)
         finally:
             watching.cancel()
             await asyncio.gather(watching, return_exceptions=True)
@@ -876,7 +842,7 @@ class DocumentService:
         finally:
             self._wake.set()
 
-    async def _send_due(self) -> None:
+    async def _send_due(self, watching: asyncio.Future[None]) -> None:
         while self._due and self._document is not None and self._track.has_demand:
             self._due = False
             document = self._document
@@ -894,7 +860,13 @@ class DocumentService:
                     return
 
                 self._due = True
-                await asyncio.sleep(self._retry_delay)
+
+                # The track ending cuts the pause short: serve() then returns rather than wait out the
+                # delay. asyncio.wait detaches its callback from the watcher when the pause ends.
+                await asyncio.wait([watching], timeout=self._retry_delay)
+
+                if watching.done():
+                    return
             else:
                 self._sends += 1
 

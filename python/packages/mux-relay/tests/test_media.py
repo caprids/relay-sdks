@@ -1007,6 +1007,27 @@ class TestCatalogService:
         assert track.writes == [] and service.failures == 1
         assert track.calls["write"] == 1
 
+    async def test_serve_returns_at_once_when_the_track_ends_during_a_retry_pause(self) -> None:
+        failed = asyncio.Event()
+
+        class Noticed(FakeTrackWriter):
+            async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
+                failed.set()
+                await super().write(payload, properties=properties)
+
+        track = Noticed()
+        track.fail("write", timeout_error())
+        service = CatalogService(track, b"{}", retry_delay=3600)
+        serving = asyncio.create_task(service.serve())
+        await failed.wait()
+        await settle()
+
+        track.end()
+
+        assert await asyncio.wait_for(serving, 1) is None
+        assert (service.sends, service.failures) == (0, 1)
+        assert track._watchers == [], "the demand iterator is closed"
+
     async def test_a_retired_catalog_track_raises_from_serve(self) -> None:
         track = FakeTrackWriter()
         error = closed_error()
@@ -1183,6 +1204,42 @@ class TestDocumentService:
         finally:
             serving.cancel()
             await asyncio.gather(serving, return_exceptions=True)
+
+    @pytest.mark.parametrize("stop", ["track_end", "cancel", "no_demand"])
+    async def test_the_retry_pause_ends_on_the_track_ending_cancellation_or_lost_demand(self, stop: str) -> None:
+        failed = asyncio.Event()
+
+        class Noticed(FakeTrackWriter):
+            async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
+                failed.set()
+                await super().write(payload, properties=properties)
+
+        track = Noticed()
+        track.fail("write", timeout_error())
+        service = DocumentService(track, b"[1]", retry_delay=3600 if stop != "no_demand" else 0.05)
+        serving = asyncio.create_task(service.serve())
+        await failed.wait()
+        await settle()
+
+        if stop == "track_end":
+            track.end()  # serve() returns at once, not after the hour-long pause
+            assert await asyncio.wait_for(serving, 1) is None
+        elif stop == "cancel":
+            serving.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await serving
+        else:
+            track.has_demand = False  # the relay unsubscribed during the pause
+            await asyncio.sleep(0.1)
+            assert not serving.done()
+            track.bind(True)  # the next relay subscription makes the document due again
+            await wait_for(lambda: track.writes == [b"[1]"])
+            track.end()
+            await asyncio.wait_for(serving, 1)
+
+        assert service.failures == 1
+        assert track.calls["write"] == (2 if stop == "no_demand" else 1)
+        assert track._watchers == [], "the demand iterator is closed"
 
     async def test_a_retired_track_raises_from_serve(self) -> None:
         track = FakeTrackWriter()
