@@ -1,5 +1,11 @@
 import { readFileSync } from 'node:fs';
-import type { PublishProperty, RelayGroupWriter, RelayPublisher, RelayTrackWriter } from '@mux/relay';
+import {
+  type PublishProperty,
+  RelayError,
+  type RelayGroupWriter,
+  type RelayPublisher,
+  type RelayTrackWriter,
+} from '@mux/relay';
 import { Input } from 'mediabunny';
 import { afterEach, expect, it, vi } from 'vitest';
 import { publishVideoFile } from '../examples/mediabunny/publish-video.js';
@@ -52,7 +58,10 @@ function stalledFile(available: number) {
 
 function recordingPublisher(
   controls: {
-    failVideo?: boolean;
+    /** The error the video write with this zero-based index throws, if any. */
+    videoWriteError?: (index: number) => Error | undefined;
+    /** Awaited before every video write. */
+    beforeVideoWrite?: () => Promise<void>;
     catalogWrite?: () => Promise<void>;
     videoEnd?: () => void;
     videoDemand?: () => boolean;
@@ -66,6 +75,7 @@ function recordingPublisher(
       groups: { payload: ArrayBufferView; properties: readonly PublishProperty[]; timeMs: number }[][];
     }
   >();
+  let videoWrites = 0;
   const unused = async () => {
     throw new Error('Unused text/JSON method');
   };
@@ -107,11 +117,21 @@ function recordingPublisher(
               return frames.length;
             },
             get closed() {
+              // As the SDK's write slot does: losing relay demand ends the open group.
+              if (!writer.hasDemand) groupClosed = true;
               return groupClosed;
             },
             async write(payload, options) {
-              if (controls.failVideo && track === 'video') throw new Error('Video write failed');
-              if (closed || groupClosed) throw new Error('Writer closed');
+              if (track === 'video') {
+                await controls.beforeVideoWrite?.();
+                const error = controls.videoWriteError?.(videoWrites++);
+                if (error) {
+                  groupClosed = true;
+                  if (error instanceof RelayError && error.code === 'CLOSED') writer.close();
+                  throw error;
+                }
+              }
+              if (closed || group.closed) throw new Error('Writer closed');
               frames.push({ payload, properties: options?.properties ?? [], timeMs: performance.now() });
               if (track === 'video') controls.onVideoWrite?.();
             },
@@ -129,12 +149,24 @@ function recordingPublisher(
         },
         async write(payload, options) {
           if (track === 'catalog' && controls.catalogWrite) {
-            await Promise.race([
-              controls.catalogWrite(),
-              ended.then(() => {
-                throw new Error('Catalog write cancelled by track close');
-              }),
-            ]);
+            const signal = options?.signal;
+            signal?.throwIfAborted();
+            let cancel = () => {};
+            const cancelled = new Promise<never>((_, reject) => {
+              cancel = () => reject(signal?.reason);
+            });
+            signal?.addEventListener('abort', cancel, { once: true });
+            try {
+              await Promise.race([
+                controls.catalogWrite(),
+                cancelled,
+                ended.then(() => {
+                  throw new Error('Catalog write cancelled by track close');
+                }),
+              ]);
+            } finally {
+              signal?.removeEventListener('abort', cancel);
+            }
           }
           const group = await writer.openGroup();
           await group.write(payload, options);
@@ -167,6 +199,13 @@ it('publishes the file in keyframe groups and ends the broadcast at EOF', async 
   expect(catalog).not.toHaveProperty('isComplete');
   expect(end).toEqual({ version: 'draft-01', generatedAt: expect.any(Number), isComplete: true, tracks: [] });
   expect(videoClosedAtCatalogWrite).toEqual([false, true]);
+  // Catalog objects carry no LOC properties, as in the WebCodecs and Python examples.
+  expect(
+    tracks
+      .get('catalog')!
+      .groups.flat()
+      .map((object) => object.properties),
+  ).toEqual([[], []]);
   expect(Number.isInteger(catalog.tracks[0].bitrate)).toBe(true);
   expect(catalog.tracks[0].bitrate).toBeGreaterThan(0);
   expect(catalog.tracks[0].framerate).toBeGreaterThan(0);
@@ -179,9 +218,11 @@ it('publishes the file in keyframe groups and ends the broadcast at EOF', async 
   expect([...tracks.values()].every(({ writer }) => writer.closed)).toBe(true);
 });
 
-it('stops on a write failure and closes both tracks', async () => {
-  const { publisher, tracks } = recordingPublisher({ failVideo: true });
-  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('Video write failed');
+it('stops when the video track ends under a write and closes both tracks', async () => {
+  const { publisher, tracks } = recordingPublisher({
+    videoWriteError: () => new RelayError('CLOSED', 'Video track ended', 'writing'),
+  });
+  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('Video track ended');
   expect([...tracks.values()].every(({ writer }) => writer.closed)).toBe(true);
   // A failure is not the end of the broadcast.
   expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
@@ -199,24 +240,70 @@ it('cancels a pacing wait and closes both tracks', async () => {
   }
 });
 
-it('drains a catalog write that is still pending when video reaches EOF', async () => {
+it('resumes at the next keyframe after a write interrupts a group', async () => {
+  const { publisher, tracks } = recordingPublisher({
+    videoWriteError: (index) =>
+      index === 1 ? new RelayError('WRITE_TIMEOUT', 'Write timed out', 'writing') : undefined,
+  });
+  await publishVideoFile(file, publisher, ['demo']);
+  // The delta that failed is lost with the rest of its group; the next keyframe opens a fresh one.
+  expect(tracks.get('video')!.groups.map((group) => group.length)).toEqual([1, 2]);
+  expect(catalogDocuments(tracks).at(-1)).toHaveProperty('isComplete', true);
+});
+
+it('retries a catalog write that fails while the track stays open', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'performance'] });
+  let attempts = 0;
+  const failed = deferred();
+  const retried = deferred();
+  const { publisher, tracks } = recordingPublisher({
+    catalogWrite: async () => {
+      attempts++;
+      if (attempts === 1) {
+        failed.resolve();
+        throw new RelayError('WRITE_TIMEOUT', 'Catalog write timed out', 'writing');
+      }
+      retried.resolve();
+    },
+    // Hold the file until the catalog service's one-second retry pause is over.
+    beforeVideoWrite: () => retried.promise,
+  });
+  const completion = expect(publishVideoFile(file, publisher, ['demo'])).resolves.toBeUndefined();
+  await failed.promise;
+  await vi.runAllTimersAsync();
+  await completion;
+  expect(attempts).toBe(3);
+  const [live, end] = catalogDocuments(tracks);
+  expect(live).toHaveProperty('tracks');
+  expect(live).not.toHaveProperty('isComplete');
+  expect(end).toHaveProperty('isComplete', true);
+});
+
+it('cancels a live catalog write still pending at EOF and sends the end-of-broadcast catalog', async () => {
   const catalog = deferred();
-  const videoEnd = deferred();
-  const { publisher, tracks } = recordingPublisher({ catalogWrite: () => catalog.promise, videoEnd: videoEnd.resolve });
+  const endStarted = deferred();
+  let writes = 0;
+  const { publisher, tracks } = recordingPublisher({
+    catalogWrite: () => {
+      if (++writes === 2) endStarted.resolve();
+      return catalog.promise;
+    },
+  });
   const result = publishVideoFile(file, publisher, ['demo']);
   const completion = expect(result).resolves.toBeUndefined();
   try {
-    await videoEnd.promise;
-    expect(tracks.get('catalog')!.writer.closed).toBe(false);
+    // The live catalog write is still pending when the end-of-broadcast catalog starts.
+    await endStarted.promise;
+    expect(tracks.get('video')!.writer.closed).toBe(true);
   } finally {
     catalog.resolve();
     await completion;
   }
-  expect(tracks.get('catalog')!.groups.map((group) => group.length)).toEqual([1, 1]);
+  expect(catalogDocuments(tracks)).toEqual([expect.objectContaining({ isComplete: true })]);
   expect([...tracks.values()].every(({ writer }) => writer.closed)).toBe(true);
 });
 
-it('reports a genuine catalog failure during the EOF drain', async () => {
+it('reports a failure of the end-of-broadcast catalog', async () => {
   const catalog = deferred();
   const videoEnd = deferred();
   const { publisher, tracks } = recordingPublisher({ catalogWrite: () => catalog.promise, videoEnd: videoEnd.resolve });
