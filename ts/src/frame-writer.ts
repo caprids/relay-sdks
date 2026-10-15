@@ -214,9 +214,11 @@ export function createFrameWriter<F extends Frame = Frame>(
     return { kind: 'interrupted', error, ...(groupId === undefined ? {} : { groupId }) };
   };
 
-  /** A frame as the first object of the group it opens. */
-  const firstObject = (frame: F) =>
-    frame.properties ? { payload: frame.payload, properties: frame.properties } : { payload: frame.payload };
+  /** A frame as the first object of the group it opens. A missing payload would open a bare group and send nothing. */
+  const firstObject = (frame: F) => {
+    if (frame.payload == null) throw new TypeError('frame.payload must be an ArrayBufferView');
+    return frame.properties ? { payload: frame.payload, properties: frame.properties } : { payload: frame.payload };
+  };
 
   const withGroup = (kind: FrameOutcomeKind, groupId: number | undefined): FrameOutcome =>
     groupId === undefined ? { kind } : { kind, groupId };

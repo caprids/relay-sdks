@@ -6,7 +6,7 @@ writer, plus end-to-end checks over the relay hub. Rows follow the "Media publis
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import pytest
 from core_helpers.waiting import settle, wait_for
@@ -438,6 +438,19 @@ class TestFrameGrouping:
 
         assert track.groups[0].aborts == [None] and track.groups[0].payloads == [b"key"]
         assert await writer.write(key(1)) == FrameOutcome("sent", group_id=1)
+
+    @pytest.mark.parametrize("grouping", ["keyframe", "frame"])
+    async def test_a_frame_with_no_payload_is_refused_instead_of_opening_an_empty_group(
+        self, grouping: Literal["keyframe", "frame"]
+    ) -> None:
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track, grouping=grouping)
+
+        with pytest.raises(TypeError):
+            await writer.write(Sample(None, True, (), False, 0))  # ty: ignore[invalid-argument-type]
+
+        assert track.groups == [] and writer.objects == 0
+        assert await writer.write(key(1)) == FrameOutcome("sent", group_id=0)
 
     async def test_a_caller_cancelled_as_its_keyframe_finishes_opening_has_the_group_reset(
         self, monkeypatch: pytest.MonkeyPatch

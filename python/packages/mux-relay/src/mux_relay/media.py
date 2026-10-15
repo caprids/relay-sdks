@@ -116,6 +116,14 @@ class FrameOutcome:
     """The group the frame was written to, or the one opened or reset on its behalf."""
 
 
+def _first_payload(frame: Frame) -> bytes:
+    """A frame's payload as its group's first object; ``None`` would open a bare group and send nothing."""
+    if frame.payload is None:
+        raise TypeError("frame.payload must be bytes-like")
+
+    return frame.payload
+
+
 def _cancelling() -> bool:
     """Whether the running task itself is being cancelled, as opposed to a task it awaits."""
     task = asyncio.current_task()
@@ -597,7 +605,8 @@ class FrameWriter(Generic[F]):
                 return FrameOutcome("skipped")
 
             # The keyframe opens its group as object 0, so its delivery timeout counts the wait for the stream (§5.2).
-            opening = self._loop.create_task(self._track.open_group(frame.payload, properties=frame.properties))
+            payload = _first_payload(frame)
+            opening = self._loop.create_task(self._track.open_group(payload, properties=frame.properties))
             self._opening = opening
 
             try:
@@ -728,7 +737,7 @@ class FrameWriter(Generic[F]):
 
         # The frame opens its group as object 0, so its delivery timeout counts the wait for the stream (§5.2).
         try:
-            group = await self._track.open_group(frame.payload, properties=frame.properties)
+            group = await self._track.open_group(_first_payload(frame), properties=frame.properties)
         except RelayError as error:
             return self._failed(error, group_id=None)
 

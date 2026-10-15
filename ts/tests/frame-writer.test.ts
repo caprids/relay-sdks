@@ -384,6 +384,18 @@ describe('failures', () => {
     expect((await writer.write(delta())).kind).toBe('skipped');
   });
 
+  it.each(['keyframe', 'frame'] as const)(
+    'rejects a %s-grouped frame with no payload instead of opening an empty group',
+    async (grouping) => {
+      const track = slotTrack();
+      const writer = createFrameWriter(track.writer, { grouping });
+      await expect(writer.write({ key: true } as never)).rejects.toThrow(TypeError);
+      expect(track.groups).toEqual([]);
+      expect(writer.objects).toBe(0);
+      expect(await writer.write(key())).toMatchObject({ kind: 'sent', groupId: 0 });
+    },
+  );
+
   it('reports a throwing callback and carries on', async () => {
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const track = slotTrack();
