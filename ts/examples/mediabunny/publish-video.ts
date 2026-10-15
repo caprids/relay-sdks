@@ -63,6 +63,7 @@ export async function publishVideoFile(
   void publisher.closed.then(({ error }) => fail(error ?? new Error('Publisher closed')));
   // Stops the catalog service at EOF, before the end-of-broadcast catalog, as well as on abort.
   const serving = new AbortController();
+  const fileRanOut = new Error('The file ran out');
   const tracks: RelayTrackWriter[] = [];
   let writer: FrameWriter<LocFrame> | undefined;
   let catalogServed: Promise<void> | undefined;
@@ -94,12 +95,11 @@ export async function publishVideoFile(
 
     // The catalog goes out on every relay subscription; a write that fails while the track stays open is retried.
     const catalog = createCatalogService(catalogTrack, buildMsfCatalog({ namespace, video }));
+    // Only stopping it at EOF is expected: a failure that lands meanwhile still fails the run.
     catalogServed = catalog.serve({ signal: AbortSignal.any([signal, serving.signal]) }).then(
-      () => {
-        if (!signal.aborted && !serving.signal.aborted) fail(new Error('The catalog track ended'));
-      },
+      () => fail(new Error('The catalog track ended')),
       (error: unknown) => {
-        if (!signal.aborted && !serving.signal.aborted) fail(error);
+        if (error !== fileRanOut) fail(error);
       },
     );
     // A keyframe opens each group and deltas join it. Without relay demand a frame is skipped at once, so pacing goes
@@ -125,8 +125,10 @@ export async function publishVideoFile(
     // Track Ended), stop serving the live catalog, then tell current viewers with the end-of-broadcast catalog.
     // Without demand nobody is listening.
     await writer.close();
+    // The frame writer's close swallows a failed FIN; a track that ended under it is not the end of the broadcast.
+    if (videoTrack.closed) throw new Error('The video track ended');
     videoTrack.close();
-    serving.abort(new Error('The file ran out'));
+    serving.abort(fileRanOut);
     await catalogServed;
     signal.throwIfAborted();
     if (catalogTrack.hasDemand) await catalogTrack.write(buildMsfEndCatalog({ generatedAt: Date.now() }), { signal });

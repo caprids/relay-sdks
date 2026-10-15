@@ -17,6 +17,10 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+async function later(microtasks: number) {
+  for (let i = 0; i < microtasks; i++) await Promise.resolve();
+}
+
 function deferred() {
   let resolve = () => {};
   let reject = (_reason: Error) => {};
@@ -304,14 +308,47 @@ it('cancels a live catalog write still pending at EOF and sends the end-of-broad
 });
 
 it('reports a failure of the end-of-broadcast catalog', async () => {
-  const catalog = deferred();
-  const videoEnd = deferred();
-  const { publisher, tracks } = recordingPublisher({ catalogWrite: () => catalog.promise, videoEnd: videoEnd.resolve });
-  const completion = expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('Catalog failed');
-  await videoEnd.promise;
-  catalog.reject(new Error('Catalog failed'));
+  const end = deferred();
+  const endStarted = deferred();
+  let writes = 0;
+  const { publisher, tracks } = recordingPublisher({
+    catalogWrite: async () => {
+      if (++writes < 2) return;
+      endStarted.resolve();
+      return end.promise;
+    },
+  });
+  const completion = expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('End catalog failed');
+  await endStarted.promise;
+  end.reject(new Error('End catalog failed'));
   await completion;
+  expect(writes).toBe(2);
   expect([...tracks.values()].every(({ writer }) => writer.closed)).toBe(true);
+});
+
+it('reports a catalog failure that lands while the last group FINs', async () => {
+  const catalog = deferred();
+  let writes = 0;
+  const { publisher, tracks } = recordingPublisher({
+    // Only the live catalog write fails; the end-of-broadcast catalog would go through.
+    catalogWrite: () => (++writes === 1 ? catalog.promise : Promise.resolve()),
+    // Timed so that the catalog service has rejected with the failure but its handler runs only after the example
+    // stopped the service at EOF. Later, the stop cancels the write first; sooner, the failure lands before the stop.
+    videoEnd: () => void later(1).then(() => catalog.reject(new Error('Catalog failed'))),
+  });
+  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('Catalog failed');
+  expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
+});
+
+it('does not end the broadcast when the video track ends under the last FIN', async () => {
+  const { publisher, tracks } = recordingPublisher({
+    videoEnd: () => {
+      tracks.get('video')!.writer.close();
+      throw new RelayError('CLOSED', 'Video track ended', 'closing');
+    },
+  });
+  await expect(publishVideoFile(file, publisher, ['demo'])).rejects.toThrow('The video track ended');
+  expect(catalogDocuments(tracks).some((document) => 'isComplete' in document)).toBe(false);
 });
 
 it.each(['metadata', 'packet'] as const)('cancels a stalled %s read by disposing the input', async (phase) => {
