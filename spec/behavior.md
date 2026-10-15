@@ -1132,9 +1132,13 @@ to both languages.
   and after `audioTimeoutUs` (500 ms) without a report arriving (measured from arrival, not
   from the report's `atUs`). `due` answers `wait` (early by at most
   `maxVideoDelayUs`, 1 s), `show` (late by at most `lateDropUs`, 40 ms), or `drop`. A frame further
-  ahead is shown at once. Wall pacing re-anchors on a frame more than `maxVideoDelayUs` off either
-  way. Both clocks read an injected monotonic microsecond source and need no DOM or transport. The
-  decisions are pinned by `vectors/clock.json`. Implemented in both SDKs.
+  ahead is shown at once. Wall pacing re-anchors on a frame more than `maxVideoDelayUs` early or
+  more than the target latency late. The target latency (`targetLatencyUs` / `target_latency_us`)
+  is the option when given, a positive number; otherwise twice the longest of the last four
+  keyframe intervals reported (`reportKeyframeInterval` / `report_keyframe_interval`, each positive),
+  and 2 s before any is. `reset()` keeps the reported intervals. Both clocks read an injected
+  monotonic microsecond source and need no DOM or transport. The decisions are pinned by
+  `vectors/clock.json`. Implemented in both SDKs.
 - The Media Timeline track (msf-01 §7; [media-layer.md](media-layer.md#media-timeline-track),
   issue #291). The broadcast clock's `originEpochUs` / `origin_epoch_us` is the origin as integer
   Unix-epoch microseconds: as given, or else read once at creation as the system clock
@@ -1161,9 +1165,9 @@ to both languages.
   Retention is pinned by `vectors/media.json`. Cadence (one entry per video group that was sent)
   and the publishing rules are in media-layer.md. Implemented in both SDKs.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
-  serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below,
-  implemented in both SDKs; a `register_media` publishing handle and the object-to-frame reader are
-  not implemented.
+  serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below, and
+  reading frames in decode order within a latency budget is [Media subscribing](#media-subscribing),
+  both implemented in both SDKs; a `register_media` publishing handle is not implemented.
 
 ## Media publishing
 
@@ -1277,12 +1281,63 @@ Implemented in both SDKs.
   writer FINs the open group, reports every waiting frame as dropped, and refuses further frames
   with `CLOSED`; the registered track stays the application's to close.
 
+## Media subscribing
+
+A track's objects arrive in any order across group streams: after a stall, an older group's stream
+can finish after newer groups have started ([issue #303](https://github.com/muxinc/relay-sdks/issues/303)).
+The raw subscription delivers them as they arrive. A frame sequencer (`createFrameSequencer` /
+`FrameSequencer`, in the format packages) turns one track's objects into frames in decode order and
+drops what is too late against the broadcast's playout clock. A frame reader (`createFrameReader` /
+`FrameReader`, in `@mux/relay/media` and `mux_relay.media`) is a subscription's or a want's handlers
+that drive a sequencer and poll it when a wait ends; it knows no format. Implemented in both SDKs.
+
+- Lateness is measured against the playout clock's position, which advances in real time through a
+  stall. While the clock is idle nothing is late. The budget is the clock's target latency, one
+  setting for every track of the broadcast; the sequencer reports the interval between the
+  keyframes of consecutive groups to the clock, so the default follows the stream.
+- A frame's timestamp is its LOC Timestamp, scaled by the object's Timescale, then the track
+  properties from SUBSCRIBE_OK. An object without one is counted (`untimed`) and ignored. An
+  end-of-group status object ends its group. A repeated object is ignored.
+- Keyframe grouping (video): frames go out in order, group by group and object by object, as soon
+  as they are next; in-order delivery adds no delay. A frame more than the target latency behind the
+  position is past its deadline: its group is abandoned, and so is any group whose keyframe is.
+- When the next frame is missing (a gap inside the group being delivered, a still-open group whose
+  next frame has not arrived, or the next group's object 0), later frames wait only while a newer
+  group's keyframe is waiting, and only until the position passes the last delivered frame's
+  timestamp plus the target latency (at once if nothing was delivered yet), and while the clock is
+  idle until the group ends or is reset. The group is then passed over. A group whose stream ended with
+  a hole, or was reset, is passed over at once. A group that ended after its last object was
+  delivered is followed by the next group with no discontinuity.
+- When the next group ID has not been seen, the lowest group holding its keyframe waits while that
+  keyframe is not yet due (its timestamp ahead of the position), since the missing group may still
+  arrive or may never have been sent (a failed group's ID is not reused). Groups and objects behind
+  what was delivered or passed over are dropped as late.
+- Frame grouping (audio): every frame stands alone and goes out at once in group order. A frame more
+  than the clock's `lateDropUs` behind the position is dropped, so a burst after a stall cannot
+  build a lasting backlog in the player; one behind what was delivered is dropped too. Nothing waits.
+- The first frame after anything was skipped carries the discontinuity `gap`; a decoder resets
+  there, as at a keyframe it can start from. Nothing is marked before the first delivery.
+- Resync: once frames have arrived but none within the budget for one whole target latency of the
+  position, the sequencer delivers the newest late group that still has its keyframe (or the newest
+  late frame), marks it `resync`, and resets the clock, which re-anchors on the next frame shown.
+  A lasting increase in delay therefore costs one target latency, not a black or silent player.
+- A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
+  over, and the next frame carries `restart`. A Move also brings the new subscription's track
+  properties.
+- `poll()` returns the frames ready now and how long until a wait can end, or nothing when only a
+  new object can change it. The reader polls after every event and again when that time comes; it
+  treats each group as one subgroup, as the frame writer sends it. Counters: delivered, late,
+  skipped groups, resyncs, untimed. The decisions are pinned by `vectors/frame-sequencer.json`.
+
 ## Package boundaries
 
 - The optional TypeScript Mediabunny adapter depends on the media format package and declares
   Mediabunny as a peer. Neither the core, format package, nor product SDK depends on the adapter.
 - The generic media format package depends only on the core, imports no product or transport
   library, and owns no encoder. The core imports nothing from the media package.
+- The product package does not depend on the media format package either. Its media policy pairs
+  with it structurally: a frame carries its own properties, and the frame reader drives a sequencer
+  it is given.
 
 - Each language has a product package that owns the Relay API and the authentication convention,
   and a generic MOQT core package that is protocol-only.

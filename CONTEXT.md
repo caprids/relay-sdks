@@ -191,6 +191,33 @@ timeline from it, and a player subtracts the output delay from it to know what i
 `getOutputTimestamp()`, whose pair means the speaker in Chromium and the render shifted back in Firefox.
 _Avoid_: output timestamp, audio clock, context clock
 
+### Media subscribing internals
+
+**Frame reader**:
+The module that reads one subscribed track as frames in decode order: it feeds a subscription's or
+a want's events to a frame sequencer and polls it when a wait ends. The sequencer reorders groups,
+waits for what may still come, and drops what is too late. Neither buffers for smoothing.
+_Avoid_: jitter buffer (the audio path owns that), reorder buffer, frame source, player
+
+**Target latency**:
+How far behind the playout clock's position a frame may still be delivered for decoding: one
+setting per broadcast, held by the playout clock, by default twice the stream's longest recent
+keyframe interval. It is not msf-01's catalog `targetLatency`, which is end-to-end wall-clock time.
+_Avoid_: latency budget (fine in prose, not as a name), max delay (that is the clock's lead before
+re-sync), buffer length, deadline (that is one frame's)
+
+**Discontinuity** (reading):
+Why a frame the reader delivers is not the one decoded after the frame before it: a gap (frames
+were skipped), a resync, or a restart. A decoder resets there. On the writing side it is the frame's
+flag that frames before it were dropped.
+_Avoid_: break, seek, reset (that is the decoder's response)
+
+**Resync**:
+The reader's escape when nothing has arrived within the target latency for one whole target
+latency: it delivers the newest late keyframe group, or audio frame, and resets the playout clock to
+re-anchor there, accepting the added delay rather than staying black or silent.
+_Avoid_: re-anchor (the clock's own act), seek, catch-up
+
 ### Subscribing internals
 
 **Subscription**:
