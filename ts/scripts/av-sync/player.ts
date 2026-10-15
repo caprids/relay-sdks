@@ -320,8 +320,12 @@ export async function startPlayer(options: PlayerOptions): Promise<Player> {
       'keyframe',
       (frame: SequencedFrame) => {
         if (frame.discontinuity === 'resync' || frame.discontinuity === 'restart') {
-          // Decoded frames waiting for their time were anchored on the old clock.
+          // The shared clock was reset: decoded frames waiting for their time, and audio scheduled on the old anchor,
+          // belong to the old clock. Audio re-anchors at its next frame, which its own reader may not mark.
           for (const { frame: waiting } of queue.splice(0)) waiting.close();
+          if (timer !== undefined) clearTimeout(timer);
+          timer = undefined;
+          reanchorAudio = true;
         }
         if (frame.discontinuity) {
           stats.discontinuities++;
