@@ -176,6 +176,14 @@ reports drive it while they arrive; otherwise it follows the local clock (wall p
 wherever the decoders reset.
 _Avoid_: playback clock, master clock, sync clock, jitter buffer (the audio path owns that)
 
+**Target latency**:
+The one latency budget a broadcast is played at: how far behind live a viewer plays. It defaults to
+twice the keyframe interval on both sides, and nothing carries it on the wire. The publisher derives
+video's default delivery timeout from it (the target latency less the keyframe interval, and at
+least one interval); the planned frame reader judges lateness against it
+([#303](https://github.com/muxinc/relay-sdks/issues/303)).
+_Avoid_: latency budget, delay, buffer depth, jitter buffer
+
 **Render clock**:
 When an `AudioContext` renders, on `performance.now()`'s clock: of the observations of a context time
 and when it was seen over the last second, the one seen soonest. Capture calibrates its source

@@ -168,6 +168,7 @@ connection state, because it depends on the connection's registry.
 | Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. | not a string; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
 | Deadline | A number in (0, 2147483647] milliseconds in TypeScript, (0, 2147483.647] seconds in Python: the largest delay a JavaScript timer holds, and the same bound in both SDKs. The connection, request and write deadlines share one check. | not a number, including a boolean | zero, negative, NaN, infinite, or above the bound | `connectTimeoutMs` / `connect_timeout` on both connect calls; `requestTimeoutMs` / `request_timeout`; `writeTimeoutMs` / `write_timeout` on `registerTrack` / `register_track` |
 | Track registration | A track name not yet registered on this publisher connection, including after its writer closed. Checked after the track name, properties and deadline, and after connection state. | | a name already registered | `registerTrack` / `register_track` |
+| Media track timing | A media kind, `'audio'` or `'video'`; every duration a positive integer number of microseconds (a safe integer in TypeScript, an `int` other than a boolean in Python) of at most 2147483647000, the deadline bound in whole milliseconds. Video needs a keyframe interval, and a target latency is at least the keyframe interval. | a kind that is not a string; video without a keyframe interval; a duration that is not a number (TypeScript) or not an `int`, including a boolean and any float (Python) | another kind; a target latency below the keyframe interval; a duration that is zero, negative or above the bound, and in TypeScript also fractional, NaN or infinite | `mediaTrackProperties` / `media_track_properties` |
 | Object status | `normal`, `end-of-group` or `end-of-track`; defaults to `normal`. | not a string | any other string | `write`, `writeText`, `writeJSON` on a group writer |
 | Event capacity | A positive integer (a safe integer in TypeScript); defaults to 64. | not a number, including a boolean | zero, negative, fractional, NaN, or infinite | `subscribeEvents` / `subscribe_events`, `namespaceEvents` / `namespace_events` |
 | Payload | A byte sequence: any `ArrayBufferView` in TypeScript; any object supporting the buffer protocol in Python (`bytes`, `bytearray`, `memoryview`, ...). Copied once. At most `limits.maxObjectPayloadBytes`. | a string, an `ArrayBuffer`, a list of integers, anything else | longer than the object payload limit | `write`, `writeText`, `writeJSON` on a track or group writer |
@@ -906,6 +907,8 @@ properties it already passes.
   group a subgroup timeout equal to its first object's timestamp. Applications must not send a
   timestamp as `0x06`; LOC Timestamp is `0x10`. Evidence:
   [issue #167](https://github.com/muxinc/relay-sdks/issues/167).
+- **Defaults** belong to the media tier, not the write slot: `registerTrack` sets none, and
+  [media publishing](#media-publishing) gives media tracks a subgroup timeout.
 
 Implemented in both SDKs.
 
@@ -1235,6 +1238,39 @@ Implemented in both SDKs.
   an interruption during it is absorbed, because the previous group's delivered objects stand and
   the new group opens regardless. A group the writer resets for a drop is not a failure. Demand
   alone never decides: no demand is also what a track nobody subscribes to looks like.
+- A media track gets a default [delivery timeout](#delivery-timeouts) from
+  `mediaTrackProperties(kind, options)` / `media_track_properties(kind, ...)`, whose track
+  properties go to `registerTrack` / `register_track` beside the format's own (for LOC,
+  `locTrackProperties()`): a stall then costs stale frames, not lasting latency. They hold one
+  SUBGROUP_DELIVERY_TIMEOUT, in whole milliseconds rounded up from microseconds. Audio's is 500 ms.
+  Video's is the [target latency](../CONTEXT.md) less the keyframe interval, and never less than the
+  interval; the target latency defaults to twice the interval, so video's default is one interval.
+  An explicit subgroup timeout replaces either default. It is a track property because moq-relay
+  reads an object's `0x06` as a Timestamp, and because the relay ignores both sides' values only the
+  publisher's own enforcement applies.
+  - No object timeout is set. A frame writer writes through a group, and once the group's stream is
+    open Chromium's WebTransport takes each object at once even during a stall (every write resolved
+    in under 1 ms through a 2 s blackout), while the group's wait for settling room in `openGroup()`
+    is not counted ([#306](https://github.com/muxinc/relay-sdks/issues/306)). Through the frame
+    writer it would never fire; a track's own `write()` does count its waits for demand and settling
+    room.
+  - Audio's value is measured, not derived from the target latency, which would let a whole stall's
+    audio through late. Through a 2 s uplink blackout to sjc, with the subscriber on a clean path,
+    it brought the player's audio lag after the stall from 2.44 s to 0.43 s (0.27 s before it),
+    and under a 4 s 80 kbit/s uplink cap from 4.6 s to 1.6–1.7 s. Without it, audio's 50 groups a
+    second fill the 64-group settling limit during a stall, so both tracks' groups wait up to about
+    1 s to open ([#302](https://github.com/muxinc/relay-sdks/issues/302)).
+    The timer starts when a frame's FIN is handed over, so the audio from a stall's last 500 ms
+    survives and arrives late: after an uplink stall the player's lag can rise by up to about the
+    audio timeout. With the WebCodecs example's defaults, three 2 s uplink blackouts raised it by
+    214, 168 and 511 ms (2170 ms without), so the live bar is a rise below the audio timeout plus
+    100 ms, not a fixed jitter allowance.
+  - A subgroup timeout resets a settling group the writer has moved past. It reports nothing to the
+    writer and raises no keyframe-needed, since the open group decodes without it. Under keyframe
+    grouping the open group has no timer until its FIN, at the next keyframe, so its objects can
+    wait out a stall in the transport; dropping late video is then the reader's.
+  - A downlink stall is outside the publisher's reach: the relay keeps a stalled viewer's backlog
+    whatever these values are.
 - Every frame gets exactly one outcome: sent, skipped, stale, dropped, interrupted or ended. The
   writer returns it rather than raising, so a caller keeps counters without catching per frame, and
   the group the frame was written to or that was reset on its behalf travels with it. Closing the
