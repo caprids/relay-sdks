@@ -1007,6 +1007,27 @@ class TestCatalogService:
         assert track.writes == [] and service.failures == 1
         assert track.calls["write"] == 1
 
+    async def test_serve_returns_at_once_when_the_track_ends_during_a_retry_pause(self) -> None:
+        failed = asyncio.Event()
+
+        class Noticed(FakeTrackWriter):
+            async def write(self, payload: bytes, *, properties: Sequence[KeyValuePair] | None = None) -> None:
+                failed.set()
+                await super().write(payload, properties=properties)
+
+        track = Noticed()
+        track.fail("write", timeout_error())
+        service = CatalogService(track, b"{}", retry_delay=3600)
+        serving = asyncio.create_task(service.serve())
+        await failed.wait()
+        await settle()
+
+        track.end()
+
+        assert await asyncio.wait_for(serving, 1) is None
+        assert (service.sends, service.failures) == (0, 1)
+        assert track._watchers == [], "the demand iterator is closed"
+
     async def test_a_retired_catalog_track_raises_from_serve(self) -> None:
         track = FakeTrackWriter()
         error = closed_error()
