@@ -109,9 +109,27 @@ migration
 **Frame writer**:
 The module that maps one track's encoded frames onto its groups, one frame at a time: under
 keyframe grouping a keyframe opens a group and deltas append to it, under frame grouping every
-frame is its own group. It skips frames the relay has no subscription for and resumes at the next
-keyframe after any failure. It holds no queue and knows no format.
-_Avoid_: frame publisher, media writer, GOP mapper, track publisher
+frame is its own group. It skips frames the relay has no subscription for, resumes at the next
+keyframe after any failure, and says when it needs one. It knows no format.
+_Avoid_: frame publisher, media writer, GOP mapper, track publisher, sink, media sink
+
+**Backlog**:
+The frames handed to a frame writer that the transport has not taken yet, in arrival order and
+bounded. An encoder whose output it cannot await fills it; one that awaits each write never does.
+_Avoid_: queue (unqualified), buffer, pending writes
+
+**Drop**:
+A frame the frame writer discarded because its backlog overflowed: under keyframe grouping the
+whole backlog and the open group go, under frame grouping the oldest frame. Unlike a stale frame,
+it says the transport fell behind, not that the frame was late against the application's clock.
+_Avoid_: stale (that is the application's lateness), skip (that is no demand), overflow (the cause)
+
+**Keyframe needed**:
+The frame writer's state while the next frame it can send must be a keyframe: from the start, and
+again after new or replacement demand, a generation move, an interruption, a stale or
+discontinuous frame, or a drop. Entering it is the signal for an encoder to force one rather than
+wait out its keyframe interval.
+_Avoid_: keyframe request (the relay's NEW_GROUP_REQUEST is a different thing), PLI, refresh
 
 **Catalog service**:
 The module that serves a state-shaped track: it sends the track's document on every relay

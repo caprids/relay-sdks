@@ -4,9 +4,10 @@ Status: stage 1 implemented; stage 2 partly implemented in Python. The format pa
 (`@mux/moq-media`, `moq-media`), shared vectors, protocol pins, and Python example migration are
 present, with [behavior.md](behavior.md#media-helpers) as their contract. Of the "Media publishing"
 piece below, the catalog service, a document service for replaceable documents, and the frame
-writer exist as `mux_relay.media` (`CatalogService`, `DocumentService`, `FrameWriter`), with
-[behavior.md](behavior.md#media-publishing) as their contract and the Video.js example as their
-first caller; the `register_media` handle that would compose them with the catalog builder remains
+writer exist in both product packages (`mux_relay.media`; `@mux/relay/media` as
+`createCatalogService`, `createDocumentService`, `createFrameWriter`), with
+[behavior.md](behavior.md#media-publishing) as their contract and the Video.js and WebCodecs examples
+as their first callers; the `register_media` handle that would compose them with the catalog builder remains
 a proposal. Of the readers (stage 3), the
 catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_catalog`
 ([issue #164](https://github.com/muxinc/relay-sdks/issues/164)), and the Python example's
@@ -220,10 +221,12 @@ staleness policy:
   The track's current init data rides keyframes as Video Config or Audio Config, for consumers
   that receive odd-typed properties, and the catalog stays the copy players rely on.
 - Calls on one writer are serialized in arrival order, so a callback-driven encoder can call it
-  without tracking a pending write. Backpressure is bounded in whole groups: when more than a
-  small number of groups (Video.js uses three) are still queued at a group boundary, the oldest
-  are reset and publishing resumes with the boundary keyframe. Whether to discard a frame because
-  it is late against a clock stays with the application.
+  without tracking a pending write. Backpressure is bounded in frames, not groups: Video.js's three
+  queued groups are seconds of video, too much for live. When the backlog is full, keyframe grouping
+  drops it with the open group and resumes at the next keyframe, and frame grouping drops the oldest
+  frame; the writer says when it needs a keyframe so the encoder can force one
+  ([issue #263](https://github.com/muxinc/relay-sdks/issues/263)). Whether to discard a frame
+  because it is late against a clock stays with the application.
 - Counters mirror Video.js's track publisher: groups opened and finished, objects and bytes
   written, frames skipped for no demand, frames skipped awaiting a keyframe, groups dropped. The
   example's `finished` line would read them instead of keeping its own.
@@ -822,9 +825,10 @@ change is checked without a browser, and each step deletes example code.
 - A subscription that arrives mid-GOP. The example waits for the next keyframe. Video.js retains
   the open group and replays it from object 0 so the viewer decodes at once. Replay is better for
   viewers and costs one GOP of memory per track; it can be a later option on the frame writer.
-- Queue semantics on the frame writer: whether `write_frame` resolves when the transport accepted
-  the frame, as `write()` does, or when the writer queued it, with backpressure read from the
-  counters. The browser sample needs the second; the Python example is written for the first.
+- Queue semantics on the frame writer: settled by
+  [issue #263](https://github.com/muxinc/relay-sdks/issues/263). `write` resolves with the frame's
+  outcome once the transport accepted it, as `write()` does, and may be called without awaiting;
+  the frames waiting meanwhile are a bounded backlog that drops rather than queues.
 - Codec scope at the start. H.264 is what the example needs and what the relay has been tested
   with. HEVC (`hvcC`), AV1 (`av1C`), and AAC (AudioSpecificConfig) records are the same shape of
   helper and can follow demand.

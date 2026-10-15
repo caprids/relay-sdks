@@ -9,6 +9,7 @@ import type {
   RelayTrackWriter,
 } from '../src/index.js';
 import * as relay from '../src/index.js';
+import type { DocumentService, FrameOutcomeKind, FrameWriter, FrameWriterOptions } from '../src/media.js';
 
 /**
  * The public vocabulary in spec/vocabulary.md. Each literal below must name every key of its type
@@ -97,5 +98,53 @@ describe('public vocabulary', () => {
     expect(shared).not.toHaveProperty('requestTimeoutMs');
     expect(publisher).not.toHaveProperty('requestTimeoutMs');
     expect(subscriber).not.toHaveProperty('namespace');
+  });
+});
+
+/** `@mux/relay/media`: the media publishing policy, which the root does not export (spec/vocabulary.md). */
+describe('media publishing vocabulary', () => {
+  it('exports factories for the frame writer and the two document-shaped services, and nothing else', async () => {
+    const media = await import('../src/media.js');
+    expect(Object.keys(media).sort()).toEqual(['createCatalogService', 'createDocumentService', 'createFrameWriter']);
+    expect(relay).not.toHaveProperty('createFrameWriter');
+  });
+
+  it('names the frame writer after frames, its backlog, and the keyframe it needs', () => {
+    const writer = {
+      write: true,
+      close: true,
+      closed: true,
+      ended: true,
+      groups: true,
+      objects: true,
+      backlog: true,
+      keyframeNeeded: true,
+    } satisfies Record<keyof FrameWriter, true>;
+    const options = {
+      grouping: true,
+      stale: true,
+      maxBacklog: true,
+      onKeyframeNeeded: true,
+    } satisfies Record<keyof FrameWriterOptions, true>;
+    const kinds = {
+      sent: true,
+      skipped: true,
+      stale: true,
+      dropped: true,
+      interrupted: true,
+      ended: true,
+    } satisfies Record<FrameOutcomeKind, true>;
+    const document = {
+      serve: true,
+      sends: true,
+      failures: true,
+      update: true,
+      document: true,
+    } satisfies Record<keyof DocumentService, true>;
+    expect(writer).not.toHaveProperty('push');
+    expect(writer).not.toHaveProperty('attach');
+    expect(options).not.toHaveProperty('maxQueue');
+    expect(Object.keys(kinds)).toHaveLength(6);
+    expect(document).toHaveProperty('update');
   });
 });

@@ -616,8 +616,9 @@ fans one upstream subscription out to every downstream viewer, so a second viewe
 round trip after the last viewer leaves, so the next viewer brings a new `True` and a re-send, and a
 viewer that resubscribes on the same connection within about 30 seconds can receive the relay's
 cached copy before the re-sent one. `True` does not prove anyone is watching. Write only state that
-is safe to serve from cache and to receive more than once, and do not use demand to decide whether
-to keep encoding. When the first viewer is on another relay, the publisher's relay subscribes once
+is safe to serve from cache and to receive more than once. Pausing an encoder while there is no
+demand is safe, because a frame written then reaches no viewer; resume at a keyframe, which a
+`FrameWriter` asks for through `keyframe_needed`. When the first viewer is on another relay, the publisher's relay subscribes once
 to look up the track's info, cancels about 50 ms later, and subscribes again: `True`, `False`, `True`. Objects
 written during that first subscription reach no viewer, so do not rely on the first objects after
 demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and
@@ -631,7 +632,12 @@ while the relay is subscribed; `FrameWriter(track)` maps encoded frames onto gro
 (a keyframe opens a group and deltas append, or `grouping="frame"` for one group per frame), skips
 frames the relay has no subscription for instead of waiting on the deadline, and resumes at the
 next keyframe after any failure. Each `await writer.write(frame)` returns what became of the frame
-(`sent`, `skipped`, `stale`, `interrupted` or `ended`) rather than raising, and a frame is anything
+(`sent`, `skipped`, `stale`, `dropped`, `interrupted` or `ended`) rather than raising. Writes from
+several tasks are served in call order, and when more than `max_backlog` frames wait behind the
+one being written the writer drops rather than queues: the waiting frames and the group in
+progress under keyframe grouping, the oldest waiting frame under `grouping="frame"`.
+`writer.keyframe_needed` and `on_keyframe_needed=` say when the next frame must be a keyframe, after
+a demand change, a failure, a stale frame or a drop, so an encoder can force one. A frame is anything
 with `payload`, `key`, `properties` and `discontinuity` attributes, so your own encoded-sample type
 qualifies once it carries its LOC properties. Pacing and time-based frame dropping stay yours; pass
 a `stale` predicate to have the writer drop what went stale while a write blocked. The contract is

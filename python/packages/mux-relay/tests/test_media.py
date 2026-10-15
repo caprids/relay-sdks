@@ -455,6 +455,471 @@ class TestFrameGrouping:
         assert (writer.groups, writer.objects) == (2, 1)
 
 
+def kinds_of(outcomes: Sequence[FrameOutcome]) -> list[str]:
+    return [outcome.kind for outcome in outcomes]
+
+
+def sent_stamps(track: FakeTrackWriter) -> list[list[int]]:
+    """Each group's objects by their timestamp property, to see which frames went out and in what order."""
+    return [[int(properties[0].value) for _, properties in group.objects] for group in track.groups]
+
+
+class TestBacklog:
+    async def test_writes_made_without_awaiting_are_served_one_at_a_time_in_call_order(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        tasks = [asyncio.create_task(writer.write(frame)) for frame in [key(0), delta(1), delta(2), key(3)]]
+        await track.blocked.wait()
+        await settle()
+
+        assert writer.backlog == 3, "the keyframe is being written; three frames wait behind it"
+        assert track.calls["group-write"] == 1, "nothing overtakes the write in progress"
+
+        gate.set()
+        outcomes = await asyncio.gather(*tasks)
+
+        assert kinds_of(outcomes) == ["sent"] * 4
+        assert sent_stamps(track) == [[0, 1, 2], [3]]
+        assert writer.backlog == 0
+
+    async def test_a_keyframe_grouping_overflow_drops_the_backlog_and_the_gop_in_progress(self) -> None:
+        track = FakeTrackWriter()
+        needed: list[bool] = []
+        writer: FrameWriter[Sample] = FrameWriter(track, max_backlog=2, on_keyframe_needed=lambda: needed.append(True))
+        assert await kinds(writer, [key(0)]) == ["sent"]
+        track.block = asyncio.Event()
+
+        in_flight = asyncio.create_task(writer.write(delta(1)))
+        await track.blocked.wait()
+        waiting = [asyncio.create_task(writer.write(frame)) for frame in [delta(2), delta(3)]]
+        await settle()
+        assert writer.backlog == 2 and not writer.keyframe_needed
+
+        overflowing = await writer.write(delta(4))
+
+        assert overflowing == FrameOutcome("dropped", group_id=0), "dropped at once, naming the reset group"
+        assert [await task for task in waiting] == [FrameOutcome("dropped")] * 2
+        assert (await asyncio.wait_for(in_flight, 1)).kind == "dropped", "the frame being written went with its group"
+        assert len(track.groups[0].aborts) == 1 and track.groups[0].aborts[0] is not None
+        assert writer.ended is None and not writer.closed, "a drop is not a failure"
+        assert writer.keyframe_needed and needed == [True]
+
+        track.block = None
+        assert await kinds(writer, [delta(5)]) == ["dropped"], "deltas after a drop wait for the next keyframe"
+        assert await kinds(writer, [key(6), delta(7)]) == ["sent", "sent"]
+        assert sent_stamps(track) == [[0], [6, 7]]
+        assert not writer.keyframe_needed and needed == [True]
+
+    async def test_a_keyframe_arriving_at_a_full_backlog_opens_the_next_group(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        needed: list[bool] = []
+        writer: FrameWriter[Sample] = FrameWriter(track, max_backlog=1, on_keyframe_needed=lambda: needed.append(True))
+
+        in_flight = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        waiting = asyncio.create_task(writer.write(delta(1)))
+        await settle()
+        track.block = None  # the next group's writes go straight through
+
+        arriving = await writer.write(key(2))
+
+        assert arriving == FrameOutcome("sent", group_id=1)
+        assert (await waiting).kind == "dropped" and (await in_flight).kind == "dropped"
+        assert needed == [] and not writer.keyframe_needed, "nothing to ask for: the keyframe is in hand"
+        assert sent_stamps(track) == [[], [2]]
+
+    async def test_a_frame_grouping_overflow_drops_the_oldest_waiting_frame(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track, grouping="frame", max_backlog=2)
+
+        tasks = [asyncio.create_task(writer.write(delta(0)))]
+        await track.blocked.wait()
+
+        for timestamp in (1, 2, 3):
+            tasks.append(asyncio.create_task(writer.write(delta(timestamp))))
+            await settle()
+
+        assert writer.backlog == 2
+        gate.set()
+
+        assert kinds_of(await asyncio.gather(*tasks)) == ["sent", "dropped", "sent", "sent"]
+        assert sent_stamps(track) == [[0], [2], [3]]
+        assert track.groups[0].aborts == [], "the frame being written is not touched"
+
+    async def test_a_cancelled_waiting_write_leaves_the_backlog_and_a_gap_in_the_gop(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        second = asyncio.create_task(writer.write(delta(1)))
+        third = asyncio.create_task(writer.write(delta(2)))
+        await settle()
+
+        second.cancel()
+        await settle()
+
+        assert writer.backlog == 1
+        assert writer.keyframe_needed, "the deltas after the cancelled one have nothing to decode against"
+        gate.set()
+        assert (await first).kind == "sent"
+        assert (await third).kind == "stale", "a cancelled frame is a discontinuity the caller did not flag"
+        assert second.cancelled()
+        assert sent_stamps(track) == [[0]]
+        assert (await writer.write(key(3))).kind == "sent"
+
+    async def test_a_gap_from_a_cancelled_delta_starts_after_it_not_at_the_head_of_the_backlog(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        tasks = [asyncio.create_task(writer.write(frame)) for frame in (key(1), delta(2), delta(3))]
+        await settle()
+        tasks[1].cancel()
+        await settle()
+        gate.set()
+
+        assert (await first).kind == "sent"
+        assert [(await tasks[0]).kind, (await tasks[2]).kind] == ["sent", "stale"]
+        assert sent_stamps(track) == [[0], [1]], "delta 3 must not join keyframe 1's group without delta 2"
+
+    @pytest.mark.parametrize("turns", range(8))
+    async def test_a_delta_cancelled_around_its_turn_leaves_a_gap(self, turns: int) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        second = asyncio.create_task(writer.write(delta(1)))
+        third = asyncio.create_task(writer.write(delta(2)))
+        await settle()
+        gate.set()
+
+        # Cancel the second frame on a different loop turn each run: while it waits, as the turn passes
+        # over it before its handler runs, or once the turn is handed to it.
+        for _ in range(turns):
+            await asyncio.sleep(0)
+        second.cancel()
+
+        assert (await first).kind == "sent"
+        if second.cancelled() and len(track.groups[0].objects) == 1:
+            # It never reached the transport: the delta after it has nothing to decode against.
+            assert (await third).kind == "stale"
+            assert sent_stamps(track) == [[0]]
+
+    async def test_a_delta_cancelled_after_its_turn_was_handed_over_leaves_a_gap(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        second = asyncio.create_task(writer.write(delta(1)))
+        third = asyncio.create_task(writer.write(delta(2)))
+        await settle()
+        gate.set()
+
+        while writer.backlog == 2:
+            await asyncio.sleep(0)
+        # The second frame's turn is handed over, and its task has not run yet.
+        second.cancel()
+
+        assert (await first).kind == "sent"
+        assert (await third).kind == "stale"
+        assert second.cancelled()
+        assert sent_stamps(track) == [[0]]
+
+    async def test_demand_arriving_as_a_keyframe_is_skipped_for_lack_of_it_asks_for_another(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter(demand=False)
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+        await settle()
+
+        skipped = asyncio.create_task(writer.write(key(0)))
+        await asyncio.sleep(0)
+        track.bind(True)
+        assert (await skipped).kind == "skipped"
+        await settle()
+        assert writer.keyframe_needed and calls == [True]
+
+    async def test_a_keyframe_written_in_the_same_turn_as_a_demand_change_keeps_its_group(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+        assert await kinds(writer, [key(0)]) == ["sent"]
+
+        track.bind(True)  # no yield: the demand watch has not seen it yet
+        assert await kinds(writer, [key(1)]) == ["sent"]
+        await settle()
+        assert await kinds(writer, [delta(2)]) == ["sent"], "the watch must not reset the replacement GOP"
+        assert sent_stamps(track) == [[0], [1, 2]]
+        assert not writer.keyframe_needed and calls == [], "the keyframe already recovered from the change"
+
+    async def test_a_write_in_the_same_turn_as_a_demand_change_skips_the_retired_group(self) -> None:
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track)
+        assert await kinds(writer, [key(0)]) == ["sent"]
+
+        track.bind(True)  # no yield: the demand watch has not seen it yet
+        assert await kinds(writer, [delta(1)]) == ["skipped"]
+        assert writer.keyframe_needed
+
+    async def test_a_discontinuous_keyframe_is_the_recovery_and_asks_for_nothing(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+        assert await kinds(writer, [key(0), delta(1)]) == ["sent", "sent"]
+
+        assert await kinds(writer, [key(2, discontinuity=True)]) == ["sent"]
+        assert not writer.keyframe_needed and calls == []
+
+    async def test_a_frame_dropped_mid_write_names_the_group_the_overflow_reset(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track, max_backlog=1)
+        gate.set()
+        assert (await writer.write(key(0))).kind == "sent"
+        gate.clear()
+        track.blocked.clear()
+
+        writing = asyncio.create_task(writer.write(delta(1)))
+        await track.blocked.wait()
+        waiting = asyncio.create_task(writer.write(delta(2)))
+        await settle()
+        recovery = asyncio.create_task(writer.write(key(3)))
+        await settle()
+        gate.set()
+
+        assert await writing == FrameOutcome("dropped", group_id=0)
+        assert (await waiting).kind == "dropped"
+        assert await recovery == FrameOutcome("sent", group_id=1)
+
+    async def test_a_cancelled_or_repeated_close_still_fins_the_group(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        closing = asyncio.create_task(writer.close())
+        await settle()
+        closing.cancel()
+        await asyncio.gather(closing, return_exceptions=True)
+
+        again = asyncio.create_task(writer.close())
+        await settle()
+        assert not again.done(), "a later close waits for the same cleanup"
+        gate.set()
+        await again
+
+        assert (await first).kind == "sent"
+        assert track.groups[0].finished
+
+    async def test_close_right_after_a_waiting_write_is_cancelled_still_closes(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        second = asyncio.create_task(writer.write(delta(1)))
+        await settle()
+
+        # Cancelling settles the waiting turn at once; close starts in this task, before the
+        # cancelled task's own handler runs, and the gate opens once close is waiting.
+        second.cancel()
+        asyncio.get_running_loop().call_soon(gate.set)
+        await writer.close()
+
+        assert (await first).kind == "sent"
+        assert second.cancelled()
+        assert track.groups[0].finished and writer.closed
+        assert track._watchers == [], "the demand watch ended with the writer"
+
+    async def test_an_overflow_resets_the_group_a_keyframe_is_finning(self) -> None:
+        fin = asyncio.Event()
+        track = FakeTrackWriter(block_close=fin)
+        writer: FrameWriter[Sample] = FrameWriter(track, max_backlog=1)
+
+        assert (await writer.write(key(0))).kind == "sent"
+        assert (await writer.write(delta(1))).kind == "sent"
+        finning = asyncio.create_task(writer.write(key(2)))
+        await track.blocked.wait()
+        waiting = asyncio.create_task(writer.write(delta(3)))
+        await settle()
+        recovery = asyncio.create_task(writer.write(key(4)))
+        await settle()
+
+        assert (await waiting).kind == "dropped"
+        assert track.groups[0].aborts, "the group whose FIN was pending is reset"
+        assert (await finning).kind == "dropped"
+        fin.set()
+        assert await recovery == FrameOutcome("sent", group_id=1)
+        assert sent_stamps(track) == [[0, 1], [4]]
+
+    async def test_close_drops_the_backlog_after_the_frame_being_written(self) -> None:
+        gate = asyncio.Event()
+        track = FakeTrackWriter(block=gate)
+        writer: FrameWriter[Sample] = FrameWriter(track)
+
+        first = asyncio.create_task(writer.write(key(0)))
+        await track.blocked.wait()
+        waiting = [asyncio.create_task(writer.write(delta(t))) for t in (1, 2)]
+        await settle()
+
+        closing = asyncio.create_task(writer.close())
+        await settle()
+
+        assert [await task for task in waiting] == [FrameOutcome("dropped")] * 2
+        assert not closing.done(), "the frame in progress finishes first"
+        gate.set()
+        await closing
+
+        assert (await first).kind == "sent"
+        assert track.groups[0].finished and writer.closed
+        assert track._watchers == [], "the demand watch ended with the writer"
+
+    @pytest.mark.parametrize(
+        ("value", "error"),
+        [(0, ValueError), (-1, ValueError), ("8", TypeError), (True, TypeError), (2.0, TypeError)],
+    )
+    def test_max_backlog_is_checked_as_an_argument(self, value: object, error: type[Exception]) -> None:
+        async def create() -> None:
+            FrameWriter(FakeTrackWriter(), max_backlog=value)  # ty: ignore[invalid-argument-type]
+
+        with pytest.raises(error, match="max_backlog"):
+            asyncio.run(create())
+
+    def test_on_keyframe_needed_must_be_callable(self) -> None:
+        async def create() -> None:
+            FrameWriter(FakeTrackWriter(), on_keyframe_needed=3)  # ty: ignore[invalid-argument-type]
+
+        with pytest.raises(TypeError, match="on_keyframe_needed"):
+            asyncio.run(create())
+
+    def test_a_writer_needs_a_running_event_loop(self) -> None:
+        with pytest.raises(RuntimeError, match="event loop"):
+            FrameWriter(FakeTrackWriter())
+
+    async def test_the_default_bounds_follow_the_grouping(self) -> None:
+        # Eight frames behind a video write, twenty-five behind an audio one, and then the next one drops.
+        for grouping, bound in (("keyframe", 8), ("frame", 25)):
+            gate = asyncio.Event()
+            track = FakeTrackWriter(block=gate)
+            writer: FrameWriter[Sample] = FrameWriter(track, grouping=grouping)
+            tasks = [asyncio.create_task(writer.write(key(t))) for t in range(bound + 1)]
+            await track.blocked.wait()
+            await settle()
+            assert writer.backlog == bound
+
+            tasks.append(asyncio.create_task(writer.write(key(bound + 1))))
+            await settle()
+            gate.set()
+            assert "dropped" in kinds_of(await asyncio.gather(*tasks))
+            await writer.close()
+
+
+class TestKeyframeNeeded:
+    async def test_needed_from_the_start_until_a_keyframe_arrives_without_a_call_at_creation(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter(demand=False)
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+
+        assert writer.keyframe_needed and calls == []
+        assert await kinds(writer, [delta(0)]) == ["skipped"]
+        assert writer.keyframe_needed
+        assert await kinds(writer, [key(1)]) == ["skipped"], "no demand, but the keyframe arrived all the same"
+        assert not writer.keyframe_needed and calls == []
+
+    async def test_every_relay_demand_change_resets_the_gop_and_asks_for_a_keyframe(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter()
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+        assert await kinds(writer, [key(0), delta(1)]) == ["sent", "sent"]
+
+        track.bind(True)  # the relay replaced its subscription
+        await wait_for(lambda: writer.keyframe_needed)
+
+        assert calls == [True]
+        assert await kinds(writer, [delta(2)]) == ["skipped"], "the old GOP cannot continue on the new subscription"
+        assert track.groups[0].closed and not track.groups[0].finished, "the slot ended it, not a FIN"
+        assert await kinds(writer, [key(3), delta(4)]) == ["sent", "sent"]
+        assert sent_stamps(track) == [[0, 1], [3, 4]]
+
+        track.bind(False)
+        await wait_for(lambda: writer.keyframe_needed)
+        track.bind(True)
+        await settle()
+        assert calls == [True, True], "one call per entry into the state, not per change"
+
+    async def test_an_interruption_a_stale_frame_and_a_discontinuity_each_ask_for_a_keyframe(self) -> None:
+        calls: list[int] = []
+        track = FakeTrackWriter()
+        track.fail("group-write", changed_error(), on=1)
+        writer = FrameWriter(track, stale=late(3), on_keyframe_needed=lambda: calls.append(len(track.groups)))
+
+        assert await kinds(writer, [key(0), delta(1)]) == ["sent", "interrupted"]
+        assert writer.keyframe_needed and len(calls) == 1
+        assert await kinds(writer, [key(2), key(3)]) == ["sent", "stale"]
+        assert writer.keyframe_needed and len(calls) == 2
+        assert await kinds(writer, [key(4), delta(5, discontinuity=True)]) == ["sent", "stale"]
+        assert writer.keyframe_needed and len(calls) == 3
+
+    async def test_a_retirement_asks_for_nothing(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter()
+        track.fail("group-write", closed_error(), on=1)
+        writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=lambda: calls.append(True))
+
+        assert await kinds(writer, [key(0), delta(1)]) == ["sent", "ended"]
+        assert calls == []
+
+    async def test_a_callback_that_raises_is_reported_to_the_loop_and_the_writer_carries_on(self) -> None:
+        loop = asyncio.get_running_loop()
+        reported: list[dict[str, Any]] = []
+        loop.set_exception_handler(lambda _, context: reported.append(context))
+
+        def broken() -> None:
+            raise RuntimeError("the encoder is gone")
+
+        try:
+            track = FakeTrackWriter()
+            writer: FrameWriter[Sample] = FrameWriter(track, on_keyframe_needed=broken)
+            assert await kinds(writer, [key(0)]) == ["sent"]
+
+            track.bind(True)
+            await wait_for(lambda: reported)
+
+            assert isinstance(reported[0]["exception"], RuntimeError)
+            assert writer.keyframe_needed and not writer.closed
+            assert await kinds(writer, [key(1)]) == ["sent"]
+        finally:
+            loop.set_exception_handler(None)
+
+    async def test_frame_grouping_never_needs_a_keyframe(self) -> None:
+        calls: list[bool] = []
+        track = FakeTrackWriter()
+        track.fail("group-write", changed_error())
+        writer: FrameWriter[Sample] = FrameWriter(
+            track, grouping="frame", on_keyframe_needed=lambda: calls.append(True)
+        )
+
+        assert not writer.keyframe_needed
+        assert await kinds(writer, [delta(0)]) == ["interrupted"]
+        track.bind(True)
+        await settle()
+        assert not writer.keyframe_needed and calls == []
+        assert track._watchers == [], "nothing watches demand for independent frames"
+
+
 class TestCatalogService:
     async def test_sends_the_document_on_current_demand_and_on_every_later_relay_subscription(self) -> None:
         track = FakeTrackWriter()

@@ -10,6 +10,13 @@ timeline. It uses only `@mux/relay`, `@mux/moq-media`, and browser APIs. Copy th
 browser application whose bundler resolves those workspace packages. Run in a secure context with
 WebCodecs, AVC encoding, and WebTransport support.
 
+The encoders' output goes through `@mux/relay/media`: a frame writer per media track maps chunks
+onto groups (a group per keyframe for video, per frame for audio), and a catalog service and a
+document service serve the catalog and the media timeline on every relay subscription. The output
+callbacks never await a write. When the transport falls behind, the video writer drops its backlog
+and asks for a keyframe, which the capture loop forces on the next frame; it does the same for every
+new relay subscription. Only a track that ends stops the example.
+
 ```ts
 import { composeMoqSource, createBroadcastClock } from '@mux/moq-media';
 import { connectRelayPublisher } from '@mux/relay';

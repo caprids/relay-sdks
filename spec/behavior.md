@@ -1159,15 +1159,15 @@ to both languages.
   and the publishing rules are in media-layer.md. Implemented in both SDKs.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below,
-  implemented in Python; a `register_media` publishing handle and the object-to-frame reader are
+  implemented in both SDKs; a `register_media` publishing handle and the object-to-frame reader are
   not implemented.
 
 ## Media publishing
 
-The media publishing policy lives in the product package (`mux_relay.media`) over registered
-tracks: one tier above the write slot, one below the proposed `register_media` handle. It knows no
-format. A frame carries its own object properties and a catalog is bytes. Implemented in Python;
-not yet implemented in TypeScript.
+The media publishing policy lives in the product package (`@mux/relay/media`, `mux_relay.media`)
+over registered tracks: one tier above the write slot, one below the proposed `register_media`
+handle. It knows no format. A frame carries its own object properties and a catalog is bytes.
+Implemented in both SDKs.
 
 - A catalog is a state-shaped track. The catalog service sends its document on the current relay
   demand and again on every later relay subscription, including a replacement subscription (the
@@ -1193,28 +1193,53 @@ not yet implemented in TypeScript.
   mapping for video, a keyframe FINs the open group and opens a new one, and deltas append to it.
   Under frame grouping, for audio and any other independently decodable frames, every frame is its
   own single-object group. Object properties are sent as the frame supplies them.
-- A frame the relay has no subscription for is skipped at once; the writer never waits on the write
-  deadline, because an encoder loop cannot block. When demand returns mid-GOP, deltas are skipped
-  until the next keyframe; the open group is not replayed.
+- Writes on one writer are served one at a time, in the order they were called, so an encoder whose
+  output callback cannot await may call `write` without waiting for the previous one. Frames waiting
+  behind the one being written are the writer's backlog, bounded by `maxBacklog` / `max_backlog` (a
+  positive integer; default 8 under keyframe grouping, 25 under frame grouping). A caller that awaits
+  every write never has a backlog. A waiting write that is cancelled (Python; a TypeScript promise
+  cannot be) leaves the backlog, and under keyframe grouping leaves a gap: the frame after it is
+  treated as following a discontinuity, and a keyframe is needed.
+- A frame that arrives at a full backlog means the transport has fallen behind, and the writer drops
+  rather than queues. Under keyframe grouping every waiting frame is dropped and the open group is
+  reset at once; the frame being written into it, if any, is dropped too. The arriving frame then
+  opens the next group if it is a keyframe, and is dropped otherwise, as is every delta after it
+  until the next keyframe. Under frame grouping the oldest waiting frame is dropped and the arriving
+  frame takes its place at the back.
+- A frame the relay has no subscription for when its turn comes is skipped at once; the writer never
+  waits on the write deadline, because an encoder loop cannot block. A relay demand change (a new or
+  replacement subscription, or its end) ends the open group in the write slot at once; the writer
+  finds it ended at the next frame, even one written before it has seen the change, and skips deltas
+  until the next keyframe. The open group is not replayed.
+- Under keyframe grouping a writer says when it needs a keyframe (`keyframeNeeded` /
+  `keyframe_needed`): from its start until a keyframe arrives, and again from each demand change,
+  interruption, stale or discontinuous frame, or drop until the next keyframe arrives. A keyframe
+  arrives when `write` is called with it, whether or not it is later sent. The optional
+  `onKeyframeNeeded` / `on_keyframe_needed` callback runs synchronously on every entry into that
+  state after the start, so an encoder can force a keyframe instead of waiting out its interval; an
+  exception from it is reported (`console.error`; the asyncio loop's exception handler) and does not
+  touch the writer. The writer watches the track's demand from its creation until it closes or the
+  track ends; in Python it is therefore created with an event loop running. Under frame grouping no
+  keyframe is ever needed.
 - Lateness is the application's. An optional `stale` predicate is consulted before a group is
   opened and again before each write, since time passes inside those steps. A stale frame is
   dropped, an open group that depended on it is reset, and deltas are dropped until the next
   keyframe. A frame flagged as following a discontinuity resets the open group the same way.
 - A failure is one of two kinds. It ends the writer (a retirement, see `CONTEXT.md`) exactly when
   the error code is `CLOSED` or the track reports `closed` afterwards, and likewise when the track
-  is already closed as a frame arrives; that frame and every later one are reported as ended, with
-  the error, and nothing further touches the track. Any other failure (an interruption) resets the
-  group, leaves the track open, and reports the frame as interrupted with its error; the next
+  is already closed as a frame's turn comes; that frame and every later one are reported as ended,
+  with the error, and nothing further touches the track. Any other failure (an interruption) resets
+  the group, leaves the track open, and reports the frame as interrupted with its error; the next
   keyframe, or the next independent frame, opens a new group. The FIN of the previous group that a
   keyframe triggers is part of that keyframe's write: a retirement during it ends the writer, while
   an interruption during it is absorbed, because the previous group's delivered objects stand and
-  the new group opens regardless. Demand alone never decides: no demand is also what a track nobody
-  subscribes to looks like.
-- Every frame gets exactly one outcome: sent, skipped, stale, interrupted or ended. The writer
-  returns it rather than raising, so a caller keeps counters without catching per frame, and the
-  group the frame was written to or that was reset on its behalf travels with it. Closing the writer
-  FINs the open group and refuses further frames with `CLOSED`; the registered track stays the
-  application's to close.
+  the new group opens regardless. A group the writer resets for a drop is not a failure. Demand
+  alone never decides: no demand is also what a track nobody subscribes to looks like.
+- Every frame gets exactly one outcome: sent, skipped, stale, dropped, interrupted or ended. The
+  writer returns it rather than raising, so a caller keeps counters without catching per frame, and
+  the group the frame was written to or that was reset on its behalf travels with it. Closing the
+  writer FINs the open group, reports every waiting frame as dropped, and refuses further frames
+  with `CLOSED`; the registered track stays the application's to close.
 
 ## Package boundaries
 
