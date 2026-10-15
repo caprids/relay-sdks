@@ -60,6 +60,8 @@ def test_frame_sequencer_vectors(vector: dict[str, Any]) -> None:
             sequencer.group_reset(int(step["groupReset"]))
         if step.get("restart"):
             sequencer.restart()
+        if step.get("clockReset"):
+            clock.reset()
         if "poll" in step:
             result = sequencer.poll()
             frames = [

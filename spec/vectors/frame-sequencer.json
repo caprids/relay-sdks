@@ -1,5 +1,5 @@
 {
-  "source": "Derived from spec/behavior.md, Media subscribing (issue #303). Each sequence drives one frame sequencer over a playout clock with default options whose time source reads the step's at. A step may anchor the clock (due(anchor) from idle), report audio, deliver an object [group, object, timestamp] with the timestamp as its LOC Timestamp property and no Timescale (null: no timestamp), end or reset a group, restart, poll (the frames as [group, object, discontinuity?] and waitUs, null when undefined), and check stats and the clock's target latency. Objects are normal status with an empty payload. grouping defaults to keyframe",
+  "source": "Derived from spec/behavior.md, Media subscribing (issue #303). Each sequence drives one frame sequencer over a playout clock with default options whose time source reads the step's at. A step may anchor the clock (due(anchor) from idle), report audio, reset the clock as another track would (clockReset), deliver an object [group, object, timestamp] with the timestamp as its LOC Timestamp property and no Timescale (null: no timestamp), end or reset a group, restart, poll (the frames as [group, object, discontinuity?] and waitUs, null when undefined), and check stats and the clock's target latency. Objects are normal status with an empty payload. grouping defaults to keyframe",
   "sequences": [
     {
       "name": "in order: frames go out at once, with nothing to wait for",
@@ -346,6 +346,29 @@
         { "at": "0", "object": ["5", "0", "100000"] },
         { "at": "0", "poll": { "frames": [["5", "0", "gap"]], "waitUs": null } },
         { "at": "0", "stats": { "delivered": "4", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
+      "name": "a resync candidate back within budget after another track re-anchors the clock is delivered at once",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "5000000", "object": ["1", "0", "2000000"] },
+        { "at": "5000000", "object": ["1", "1", "2033333"] },
+        { "at": "5000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "7000000", "report": "1000000" },
+        { "at": "7000000", "poll": { "frames": [["1", "0"], ["1", "1"]], "waitUs": null } },
+        { "at": "7000000", "stats": { "delivered": "2", "late": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
+      "name": "a resync candidate is delivered once another track leaves the clock idle",
+      "steps": [
+        { "at": "0", "anchor": "0" },
+        { "at": "5000000", "object": ["1", "0", "2000000"] },
+        { "at": "5000000", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "5500000", "clockReset": true },
+        { "at": "5500000", "poll": { "frames": [["1", "0"]], "waitUs": "50000" } },
+        { "at": "5500000", "stats": { "delivered": "1", "late": "0", "skippedGroups": "1", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
       ]
     }
   ]

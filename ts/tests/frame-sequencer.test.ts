@@ -11,6 +11,7 @@ type Step = {
   groupEnd?: string;
   groupReset?: string;
   restart?: true;
+  clockReset?: true;
   poll?: { frames: string[][]; waitUs: string | null };
   stats?: Record<string, string>;
   targetLatency?: string;
@@ -52,6 +53,7 @@ describe('spec/vectors/frame-sequencer.json', () => {
       if (step.groupEnd !== undefined) sequencer.groupEnded(Number(step.groupEnd));
       if (step.groupReset !== undefined) sequencer.groupReset(Number(step.groupReset));
       if (step.restart) sequencer.restart();
+      if (step.clockReset) clock.reset();
       if (step.poll) {
         const { frames, waitUs } = sequencer.poll();
         expect(

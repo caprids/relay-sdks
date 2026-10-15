@@ -1326,7 +1326,9 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   when the wait began, judged on every late object, held or arriving; a stall's growing lateness
   and a draining backlog's shrinking one restart the wait), the sequencer delivers the newest late group that still has its keyframe (or the newest
   late frame), marks it `resync`, and resets the clock, which re-anchors on the next frame shown.
-  That group keeps collecting its later objects and its end while it waits.
+  That group keeps collecting its later objects and its end while it waits. If another track resets
+  or re-anchors the shared clock meanwhile, a candidate back within the budget (or facing an idle
+  clock) is delivered normally instead, and a wait measured on the old timeline starts over.
 - Resync forward: a keyframe that would open the next delivered group (or, under frame grouping, a
   frame) more than the target latency ahead of the position means the clock was anchored on a
   backlog, as after a resync during a long stall. The sequencer resets the clock and marks that

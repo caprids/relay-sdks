@@ -440,6 +440,30 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   const groupEnded = (groupId: number) => groupOver(groupId, 'ended');
   const groupReset = (groupId: number) => groupOver(groupId, 'reset');
 
+  // Another track can reset or re-anchor the shared clock. A resync candidate back within the budget then (or with
+  // the clock idle, when nothing is late) goes back to normal delivery, and a wait measured on the old timeline starts
+  // over.
+  const revisit = () => {
+    const positionUs = clock.position();
+    if (starve !== undefined && (positionUs === undefined || positionUs < starve.sinceUs)) starve = undefined;
+    if (!newestLate) return;
+    const { groupId, group } = newestLate;
+    const first = group.frames.get(keyframeGrouping ? 0 : Math.min(...group.frames.keys()));
+    if (!first) return;
+    const bound = keyframeGrouping ? clock.targetLatencyUs : clock.lateDropUs;
+    if (positionUs !== undefined && first.timestampUs < positionUs - bound) return;
+    newestLate = undefined;
+    starve = undefined;
+    // Counted as late when dropped; it is delivered after all.
+    stats.late -= group.frames.size;
+    for (const id of [...groups.keys()]) {
+      if (id < groupId) groups.delete(id);
+    }
+    groups.set(groupId, group);
+    floor = groupId - 1;
+    cursor = undefined;
+  };
+
   const minWait = (a: number | undefined, b: number | undefined) =>
     a === undefined ? b : b === undefined ? a : Math.min(a, b);
 
@@ -509,6 +533,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       }
       limit = maxFrames ?? Number.POSITIVE_INFINITY;
       const frames: SequencedFrame[] = [];
+      revisit();
       let waitUs: number | undefined;
       waitUs = keyframeGrouping ? pollKeyframes(frames) : pollFrames(frames);
       waitUs = minWait(waitUs, resyncWait(frames));

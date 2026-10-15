@@ -215,6 +215,7 @@ class FrameSequencer:
             raise ValueError("max_frames must be a positive integer")
         self._limit = math.inf if max_frames is None else max_frames
         out: list[SequencedFrame] = []
+        self._revisit()
         wait = self._poll_keyframes(out) if self._keyframe_grouping else self._poll_frames(out)
         resync = self._resync(out)
         if wait is None or (resync is not None and resync < wait):
@@ -470,6 +471,33 @@ class FrameSequencer:
         self._floor = highest if self._floor is None else max(self._floor, highest)
         if self._delivered_since_restart and self._pending is None:
             self._pending = "gap"
+
+    def _revisit(self) -> None:
+        """Another track can reset or re-anchor the shared clock. A resync candidate back within the budget then (or
+        with the clock idle, when nothing is late) goes back to normal delivery, and a wait measured on the old
+        timeline starts over."""
+        position = self._clock.position_us()
+        if self._starve is not None and (position is None or position < self._starve[0]):
+            self._starve = None
+        late = self._newest_late
+        if late is None or not late[1].frames:
+            return
+        group_id, group = late
+        first = group.frames.get(0) if self._keyframe_grouping else group.frames[min(group.frames)]
+        if first is None:
+            return
+        bound = self._clock.target_latency_us if self._keyframe_grouping else self._clock.late_drop_us
+        if position is not None and first.timestamp_us < position - bound:
+            return
+        self._newest_late = None
+        self._starve = None
+        # Counted as late when dropped; it is delivered after all.
+        self.stats.late -= len(group.frames)
+        for other in [other for other in self._groups if other < group_id]:
+            del self._groups[other]
+        self._groups[group_id] = group
+        self._floor = group_id - 1
+        self._cursor = None
 
     def _resync_forward(self) -> None:
         """A frame more than the target latency ahead of the position: the clock was anchored on a backlog (a resync
