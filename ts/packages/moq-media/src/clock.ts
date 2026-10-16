@@ -190,6 +190,12 @@ export function createBroadcastClock(options: BroadcastClockOptions = {}): Broad
 
 /** The target latency before any keyframe interval is known: twice a one-second keyframe interval. */
 const DEFAULT_TARGET_LATENCY_US = 2_000_000;
+/**
+ * The target latency for a broadcast with no video: pass it as `targetLatencyUs`, since the 2 s default waits for
+ * keyframe intervals an audio-only track never reports. It covers the audio player's 400 ms jitter-buffer ceiling plus
+ * a wired output delay, and a frame sequencer resyncs after half a second of nothing on time instead of two.
+ */
+export const AUDIO_ONLY_TARGET_LATENCY_US = 500_000;
 /** How many keyframe intervals the derived target latency looks back over. */
 const KEYFRAME_INTERVALS_KEPT = 4;
 

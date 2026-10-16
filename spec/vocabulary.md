@@ -587,13 +587,53 @@ sequencer as an argument.
 | Stop reading | `reader.close()` | `reader.close()`, `reader.closed` |
 
 "Sequencer", not "reorderer" or "jitter buffer": it puts frames in decode order and decides what is
-too late, but holds nothing for smoothing, which the audio path's jitter buffer does. "Reader"
+too late, but holds nothing for smoothing, which the audio player's jitter buffer does. "Reader"
 pairs with the frame writer. "Target latency" follows msf-01's catalog field in name only: msf-01
 §5.2.8 measures end-to-end wall-clock latency, while this budget is how far behind the playout
 position a frame may still be delivered, so the catalog field is not read. Not adopted from
 [issue #303](https://github.com/muxinc/relay-sdks/issues/303): `targetLatencyMs` (every clock option
 is in microseconds); the reader taking the clock and grouping itself (the product package cannot
 import the format package).
+
+## Audio playout: `createAudioPlayer`, `AudioPlayerInput`
+
+A headless player for decoded audio: WebCodecs decoding, an adaptive jitter buffer in an
+`AudioWorklet`, a mix, and reports to the playout clock
+([issue #314](https://github.com/muxinc/relay-sdks/issues/314)); its design is in
+[media-layer.md](media-layer.md#audio-player). TypeScript only, in `@mux/moq-media`: a Python bot has
+no output device. It takes frames, not a subscription, so a frame reader's `onFrame` feeds it and
+the format package still does not depend on the product package.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| One player per `AudioContext` | `await createAudioPlayer({ context })` → `AudioPlayer` (`AudioPlayerOptions`) | — |
+| The mix, which the application routes | `player.output` (the context's own gain node type) | — |
+| Delay after the output that the context does not report | `player.outputDelayUs` (settable) | — |
+| One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
+| Hand it a frame in decode order | `input.push(frame)` (`AudioPlayerFrame`: `timestampUs`, `payload`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
+| Drop received audio in a timeline range | `input.cut({ fromUs?, untilUs? })` (`AudioCutRange`); `cut()` drops everything held | — |
+| Per-input gain; stop | `input.gain`; `input.remove()`, `input.removed`; `player.close()` | — |
+| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, cutUs, reports }` | — |
+| What the player needs of Web Audio | `AudioPlayerContext`, `AudioPlayerNode`, `AudioPlayerGainNode` | — |
+| A catalog audio track's decoder config | `audioDecoderConfigFromTrack(track)` | — |
+| An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | — |
+| The target latency for a broadcast with no video | `AUDIO_ONLY_TARGET_LATENCY_US` (500,000) | — |
+| Play a node where Chromium's echo canceller hears it | `await createEchoCancellationLoopback(context, node, { sinkId, timeoutMs })` → `EchoCancellationLoopback { setSinkId, close }` (`EchoCancellationContext`, `EchoCancellationLoopbackOptions`) | — |
+| When a context renders, on `performance.now()`'s clock | `createRenderClock({ windowUs })` → `RenderClock { observe, best, renderedAtUs }` (`RenderClockOptions`, `RenderObservation`) | — |
+
+"Input", not the issue's "source": `composeMoqSource`, `MoqTrackSource` and the clock's source
+timeline already use "source", and a mixer's inputs are what this is. "Jitter buffer" is the
+[glossary](../CONTEXT.md)'s name for what the audio path holds for smoothing, which the frame
+reader does not; its options and counters say `jitterTarget` so they do not read as the clock's
+target latency. "Cut", not "flush" or "interrupt": it names a timeline range dropped
+([issue #320](https://github.com/muxinc/relay-sdks/issues/320)'s interruption is one use), and
+`flush` reads as WebCodecs' "finish pending work". "Loopback" is the word
+[media-layer.md](media-layer.md#playout-clock-player) already uses for the WebRTC path. The render
+clock moved here from the WebCodecs example, which still re-exports it. Not adopted from
+issue #314: `addSource(frameReader, …)` (the format package cannot take a frame reader), a player
+method for the loopback (it is a function over any node, so the v10 renderer can use it too), and a
+`createPlayoutClock({ audioOnly: true })` preset or an automatic audio-only default (the clock is
+pinned by shared vectors in both SDKs; the constant changes nothing for Python).
 
 ## Media publishing: `FrameWriter`, `CatalogService`, `mediaTrackProperties`
 

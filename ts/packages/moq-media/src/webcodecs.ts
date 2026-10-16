@@ -2,6 +2,7 @@
 import type { AudioTrackInfo, VideoTrackInfo } from './catalog.js';
 import { avcCodecString } from './h264.js';
 import { type LocPropertiesOptions, locProperties } from './loc.js';
+import type { MsfCatalogTrack } from './parse-catalog.js';
 
 function copyDescription(description: AllowSharedBufferSource | undefined): Uint8Array | undefined {
   if (!description || description.byteLength === 0) return undefined;
@@ -42,6 +43,24 @@ export function audioTrackFromDecoderConfig(config: AudioDecoderConfig): AudioTr
     samplerate: 48000,
     channelConfig: String(config.numberOfChannels),
     ...(initData ? { initData } : {}),
+  };
+}
+
+/**
+ * The decoder config for a catalog's audio track: its codec, sample rate (default 48 kHz) and channel count (default
+ * 2), and its init data as the description.
+ */
+export function audioDecoderConfigFromTrack(track: MsfCatalogTrack): AudioDecoderConfig {
+  if (!track.codec) throw new Error(`Track ${track.name} declares no codec`);
+  const channels = track.channelConfig === undefined ? 2 : Number(track.channelConfig);
+  if (!Number.isSafeInteger(channels) || channels < 1) {
+    throw new Error(`Track ${track.name} declares channels ${track.channelConfig} that are not a channel count`);
+  }
+  return {
+    codec: track.codec,
+    sampleRate: track.samplerate ?? 48_000,
+    numberOfChannels: channels,
+    ...(track.initData ? { description: track.initData } : {}),
   };
 }
 

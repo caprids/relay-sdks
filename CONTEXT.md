@@ -175,7 +175,7 @@ timelines), program date time, wall clock track (wall clock is the local monoton
 A player's position on one broadcast timeline, which video frames are scheduled against. Audio
 reports drive it while they arrive; otherwise it follows the local clock (wall pacing). It resets
 wherever the decoders reset.
-_Avoid_: playback clock, master clock, sync clock, jitter buffer (the audio path owns that)
+_Avoid_: playback clock, master clock, sync clock, jitter buffer (the audio player owns that)
 
 **Target latency**:
 The one latency budget a broadcast is played at: how far behind live a viewer plays. It defaults to
@@ -183,7 +183,8 @@ twice the keyframe interval on both sides, and nothing carries it on the wire. T
 video's default delivery timeout from it (the target latency less the keyframe interval, and at
 least one interval). On the player it is the playout clock's: by default twice the longest recent
 keyframe interval the frame reader sees, and how far behind the clock's position a frame may still
-be delivered for decoding. It is not msf-01's catalog `targetLatency`, which is end-to-end
+be delivered for decoding. A broadcast with no video has no keyframe interval, so an audio-only
+player sets it: 500 ms by default. It is not msf-01's catalog `targetLatency`, which is end-to-end
 wall-clock time.
 _Avoid_: latency budget, delay, buffer depth, jitter buffer, max delay (that is the clock's lead
 before re-sync), deadline (that is one frame's)
@@ -201,7 +202,21 @@ _Avoid_: output timestamp, audio clock, context clock
 The module that reads one subscribed track as frames in decode order: it feeds a subscription's or
 a want's events to a frame sequencer and polls it when a wait ends. The sequencer reorders groups,
 waits for what may still come, and drops what is too late. Neither buffers for smoothing.
-_Avoid_: jitter buffer (the audio path owns that), reorder buffer, frame source, player
+_Avoid_: jitter buffer (the audio player owns that), reorder buffer, frame source, player
+
+**Jitter buffer**:
+The decoded audio an audio player input holds before playing it, so that frames arriving unevenly
+play evenly. It fills to a target before playing, grows the target after an underrun, shrinks it
+while playback is smooth, and trims audio it never needed. It stays under the target latency, less
+the output delay. The frame reader holds nothing for smoothing; this is the only buffer that does.
+_Avoid_: playout buffer, ring (that is its storage), target latency (that is the clock's budget),
+reorder buffer
+
+**Cut**:
+Dropping an audio player input's received audio in a timeline range, held or still decoding, and
+frames that arrive later from before its end: what a listener does when a talker is interrupted.
+_Avoid_: flush (that drops everything, at a resync or restart), interrupt (that is the talker's
+act), barge-in
 
 **Discontinuity** (reading):
 Why a frame the reader delivers is not the one decoded after the frame before it: a gap (frames

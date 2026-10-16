@@ -1,4 +1,18 @@
 export {
+  type AudioCutRange,
+  type AudioInputOptions,
+  type AudioInputStats,
+  type AudioPlayer,
+  type AudioPlayerContext,
+  type AudioPlayerFrame,
+  type AudioPlayerGainNode,
+  type AudioPlayerInput,
+  type AudioPlayerNode,
+  type AudioPlayerOptions,
+  createAudioPlayer,
+  opusPacketDurationUs,
+} from './audio-player.js';
+export {
   type AudioTrackInfo,
   buildMsfCatalog,
   buildMsfEndCatalog,
@@ -10,6 +24,7 @@ export {
   type VideoTrackInfo,
 } from './catalog.js';
 export {
+  AUDIO_ONLY_TARGET_LATENCY_US,
   type BroadcastClock,
   type BroadcastClockOptions,
   createBroadcastClock,
@@ -27,6 +42,12 @@ export {
   type SourceTimeline,
   type SourceTimelineOptions,
 } from './clock.js';
+export {
+  createEchoCancellationLoopback,
+  type EchoCancellationContext,
+  type EchoCancellationLoopback,
+  type EchoCancellationLoopbackOptions,
+} from './echo-loopback.js';
 export { avcCodecString } from './h264.js';
 export {
   AUDIO_TRACK,
@@ -53,6 +74,12 @@ export {
   parseMsfCatalog,
 } from './parse-catalog.js';
 export {
+  createRenderClock,
+  type RenderClock,
+  type RenderClockOptions,
+  type RenderObservation,
+} from './render-clock.js';
+export {
   createFrameSequencer,
   type FrameDiscontinuity,
   type FrameSequencer,
@@ -73,6 +100,7 @@ export {
   parseMediaTimeline,
 } from './timeline.js';
 export {
+  audioDecoderConfigFromTrack,
   audioTrackFromDecoderConfig,
   type ChunkToLocFrameOptions,
   chunkToLocFrame,

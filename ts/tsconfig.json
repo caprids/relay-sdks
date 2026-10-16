@@ -13,6 +13,7 @@
     "packages/relay-quic/src/**/*.ts",
     "examples/mediabunny/**/*.ts",
     "examples/webcodecs/**/*.ts",
-    "scripts/av-sync/**/*.ts"
+    "scripts/av-sync/**/*.ts",
+    "scripts/audio-player/**/*.ts"
   ]
 }
