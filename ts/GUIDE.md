@@ -710,6 +710,56 @@ become LOC payloads without a muxer or media engine. For existing media files, t
 [Mediabunny adapter](packages/moq-mediabunny/README.md) maps demuxed packets; see the
 [file publishing example](examples/mediabunny/README.md).
 
+## Subscribing to media
+
+A player reads the same tracks back. Read the catalog first: `parseMsfCatalog` from
+[@mux/moq-media](packages/moq-media/README.md) lists the tracks and their decoder configurations.
+After a stall, a track's objects can arrive out of order across group streams, and a raw
+subscription delivers them as they arrive. `createFrameSequencer({ clock })` from `@mux/moq-media`
+turns one track's objects into frames in decode order and drops what is too late against the
+broadcast's playout clock. Pass `grouping: 'frame'` for audio, where every group is one
+independently decodable frame. `createFrameReader(sequencer, { onFrame })` from `@mux/relay/media`
+returns a subscription's handlers that drive the sequencer. It feeds the sequencer each event,
+calls `onFrame` synchronously with each ready frame in decode order, and polls again when a wait
+the sequencer reports ends. Spread it into `subscribe`, or into a supervised `want`, beside your own
+`onError`. It handles a want's `onRestarted` and `onSwitched` too; keep the want's `drainMs` at 0,
+the default. `reader.close()` stops delivery; cancel the subscription as well.
+
+```ts
+import { createFrameSequencer, createPlayoutClock } from '@mux/moq-media';
+import { createFrameReader } from '@mux/relay/media';
+
+const clock = createPlayoutClock(); // one per broadcast, shared by its tracks
+const video = createFrameReader(createFrameSequencer({ clock }), {
+  onFrame(frame) {
+    if (frame.discontinuity) resetVideoDecoder(); // 'gap', 'resync' or 'restart'
+    videoDecoder.decode(
+      new EncodedVideoChunk({ type: frame.key ? 'key' : 'delta', timestamp: frame.timestampUs, data: frame.payload }),
+    );
+  },
+});
+const audio = createFrameReader(createFrameSequencer({ clock, grouping: 'frame' }), { onFrame: decodeAudio });
+subscriber.subscribe({ namespace, track: 'video' }, { ...video, onError });
+subscriber.subscribe({ namespace, track: 'audio' }, { ...audio, onError });
+```
+
+A frame's `timestampUs` is its LOC timestamp on the broadcast timeline, scaled by whichever
+Timescale the object or the track declares. The clock's target latency is the lateness budget for
+every track: by default twice the longest of the last four keyframe intervals the sequencer
+reports, or 2 s before any. Under keyframe grouping, a frame more than that behind the clock's
+position is dropped with its group, and delivery resumes at a later keyframe. Under frame grouping,
+a frame later than the clock's `lateDropUs` (40 ms by default) is dropped. The first frame after a
+skip, a resync or a restart carries `discontinuity`: reset the decoder there. `sequencer.stats`
+counts delivered, late and untimed frames, skipped groups, and resyncs.
+
+The reader paces decoding, not display. Audio is the master: report what is audible with
+`clock.reportAudio(timestampUs, atUs)`, and before showing each decoded video frame ask
+`clock.due(frame.timestamp)` whether to `wait` (for `waitUs`), `show`, or `drop` it. Until audio is
+reported or `due` is first asked, the clock is idle and nothing is late; with no audio it paces by
+wall clock. The [@mux/moq-media README](packages/moq-media/README.md) shows how to compute the
+audible timestamp. See [media subscribing](../spec/behavior.md#media-subscribing) for the
+sequencer's contract.
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:
@@ -748,7 +798,8 @@ operation's phase, so the code alone does not rule out partial delivery.
 
 No code or phase promises safe replay. Account for previous attempts, data freshness, and your
 application's deduplication policy. Successful writes mean transport acceptance, not viewer
-acknowledgment. The SDK does not automatically retry or reconnect. `UNAUTHORIZED` is the one code that
+acknowledgment. A plain connection does not automatically retry or reconnect; the
+[supervisors](#stay-connected-supervised-connections) reconnect, but never replay a write. `UNAUTHORIZED` is the one code that
 says the relay refused the credentials: the relay closed the session with MOQT session termination
 code `UNAUTHORIZED` (0x2; `MALFORMED_AUTH_TOKEN` 0x16 and `EXPIRED_AUTH_TOKEN` 0x18 map to it too).
 In phase `connecting` the relay refused to connect; in phase `connection` it ended a live session
@@ -800,13 +851,16 @@ become a separately maintained protocol fork. See `packages/moq-core/UPSTREAM.js
 
 ## Initial scope
 
-This slice supports one connection, arbitrary reliable-stream track subscriptions, subscription
-updates and cancellation, plus data-only publication on a dedicated connection. The borrowed generic interface also exposes FETCH and TRACK_STATUS.
+This slice supports reliable-stream track subscriptions, subscription updates and cancellation,
+[namespace discovery](#discover-namespaces), and publication on a dedicated connection: data, or
+encoded media through `@mux/relay/media`. The [supervisors](#stay-connected-supervised-connections)
+add reconnection, resubscription and token rotation on a live session. The borrowed generic
+interface also exposes FETCH and TRACK_STATUS.
 The SDK offers `moqt-22`, then `moqt-20` as a fallback, and speaks whichever the relay selects.
 
-Automatic reconnection, token refresh on a live session, datagram reception, discovery of
-tracks within a namespace, and a Video.js adapter are not implemented yet. A GOAWAY ends the connection with an error; subscriptions still awaiting their first response end with it (`subscribed` rejects with `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `onError`;
-callers can open a replacement. A custom `createTransport`
+Datagram reception, discovery of tracks within a namespace, and a Video.js adapter are
+not implemented yet. On a plain connection, a GOAWAY ends the connection with an error; subscriptions still awaiting their first response end with it (`subscribed` rejects with `SubscriptionConnectionClosedError`, `ended` resolves `terminated`), never through `onError`;
+callers can open a replacement, which a supervisor does for them. A custom `createTransport`
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
 A factory whose transport carries MOQT directly on QUIC, not a WebTransport session, returns
 `framing: 'native-quic'`, and the core then sends the endpoint's path, token and authority in SETUP.

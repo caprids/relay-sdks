@@ -1,6 +1,6 @@
 # Media layer proposal: LOC packaging and MSF catalogs
 
-Status: stage 1 implemented; stage 2 partly implemented in Python. The format packages
+Status: stage 1 implemented; stage 2 partly implemented in both SDKs. The format packages
 (`@mux/moq-media`, `moq-media`), shared vectors, protocol pins, and Python example migration are
 present, with [behavior.md](behavior.md#media-helpers) as their contract. Of the "Media publishing"
 piece below, the catalog service, a document service for replaceable documents, and the frame
@@ -45,8 +45,12 @@ no Mediabunny dependency. The adapter retains compatibility re-exports of the co
 
 TypeScript consumes supplied AVC configuration and four-byte-length packets; Annex B splitting,
 SPS/PPS reconstruction, and conversion remain Python-only for the PyAV example. Config mappers
-currently support AVC and Opus. Grouping, catalog serving, demand, and pacing remain TypeScript
-example code; this does not implement the stage 2 publishing handle.
+currently support AVC and Opus. Grouping, demand, backlog bounding and catalog serving are SDK
+code in `@mux/relay/media` (`createFrameWriter`, `createCatalogService`, `createDocumentService`),
+which both TypeScript examples call. Pacing remains example code: the WebCodecs example skips
+capture while the encoder is busy, the frame writer has a backlog, or video has no demand, and the
+Mediabunny example paces file packets in real time. The stage 2 `register_media` handle that would
+compose these is not implemented.
 
 ## What a media publisher has to know today
 

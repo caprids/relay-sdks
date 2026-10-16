@@ -67,8 +67,9 @@ RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:tes
 ```
 
 `RELAY_RUNTIME=node` or `RELAY_RUNTIME=chromium` runs only that runtime. The task builds
-`@mux/relay-quic`'s native addon first, with the Rust toolchain it brings, until prebuilt binaries
-ship ([#195](https://github.com/muxinc/relay-sdks/issues/195)).
+`@mux/relay-quic`'s native addon from source first, with the Rust toolchain it brings: the
+workspace never installs the [prebuilt platform packages](ts/packages/relay-quic/README.md#prebuilt-binaries),
+which are added only when packing.
 
 Each runtime gets its own fresh namespace and prints its own `PASS` or `FAIL` line, tagged with
 `runtime`. A final `summary` line follows. `DIVERGED` means the scenario passed on one runtime and

@@ -96,9 +96,11 @@ Encoded output order and presentation timestamps are preserved.
 The example requests length-prefixed AVC (`avc: { format: 'avc' }`) with a fixed encoder
 configuration. A changed decoder configuration stops the example; start a fresh publisher/session
 to change it. It requests keyframes at least every two seconds of active capture. It skips capture
-when the encoder input queue is busy or two encoded chunks await transport, serializes output
-writes, and keeps an eight-chunk hard cap for bursts of internally buffered encoder output. It does
-not silently drop encoded deltas to relieve transport backpressure.
+while two frames wait in the encoder or any encoded chunk waits in the frame writer's backlog.
+Encoder output goes straight to `createFrameWriter`, which serves writes in call order. When more
+than eight chunks wait behind the one being written, as in a burst of internally buffered encoder
+output, the writer drops them with the open group rather than queue deltas without bound, and
+resumes at the next keyframe, asking the encoder for one.
 Subscription changes reset video to the next keyframe and re-serve the catalog on replacement
 demand. A `timeline` track (msf-01 §7, announced in the catalog) maps each video group to the capture
 time of its keyframe: once a keyframe has opened a group, `createMediaTimeline` adds a record, and the
@@ -114,8 +116,11 @@ reconnects; see [publisher recovery](../../../spec/publisher-recovery.md).
 For your own encoder callback, import `videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`,
 and `chunkToLocFrame` from `@mux/moq-media`. `chunkToLocFrame` accepts native video or audio chunks,
 copies the encoded payload without changing its bytes, preserves microsecond timestamps, and adds
-LOC properties. Retain decoder configuration across callbacks; await/serialize group writes and
-bound callback buffering, as this example does. The helper itself performs no I/O or grouping.
+LOC properties. Retain decoder configuration across callbacks, and hand each frame to a
+`createFrameWriter` from `@mux/relay/media`, as this example does: it groups frames, skips them
+without demand, bounds the backlog, and says when the next frame must be a keyframe. See the
+[guide](../../GUIDE.md#multi-object-groups-and-relay-demand). The helper itself performs no I/O or
+grouping.
 
 For publishing an existing MP4, use the optional [Mediabunny file example](../mediabunny/README.md)
 to demux encoded packets before passing them to the same media/transport layers.
