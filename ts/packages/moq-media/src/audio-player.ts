@@ -491,7 +491,11 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       if (removed || opened !== epoch || retiring !== retired) return;
       retiring = undefined;
       resampler.reset();
-      for (const frame of waiting.splice(0)) send(frame);
+      // An error on the way, or a callback that removes the input or replaces the timeline, ends the replay.
+      for (const frame of waiting.splice(0)) {
+        if (removed || opened !== epoch) break;
+        send(frame);
+      }
     };
     try {
       retired.flush().then(drained, drained);
@@ -501,6 +505,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   };
   // Decode a frame, unless a retiring decoder is still finishing: then it waits for the next decoder.
   const send = (frame: { timestampUs: number; payload: Uint8Array; jumps: boolean }) => {
+    if (removed) return;
     if (frame.jumps && decoder) retireDecoder(decoder);
     if (retiring) {
       waiting.push({ ...frame, jumps: frame.jumps && waiting.length > 0 });

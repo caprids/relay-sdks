@@ -140,6 +140,8 @@ const packet = (marker: number) => new Uint8Array([OPUS_20MS, marker]);
 class FakeDecoder {
   static instances: FakeDecoder[] = [];
   static hold = false;
+  /** A marker whose frame `decode()` throws on. */
+  static failOn: number | undefined;
   state = 'unconfigured';
   config: AudioDecoderConfig | undefined;
   nextUs: number | undefined;
@@ -155,6 +157,7 @@ class FakeDecoder {
   }
   decode(chunk: { timestamp: number; data: Uint8Array }) {
     if (this.state !== 'configured') throw new Error('Not configured');
+    if (chunk.data[1] === FakeDecoder.failOn) throw new DOMException('Bad packet', 'EncodingError');
     const timestamp = this.nextUs ?? chunk.timestamp;
     this.nextUs = timestamp + FRAME_US;
     const value = (chunk.data[1] ?? 0) / 100;
@@ -209,6 +212,7 @@ beforeEach(() => {
   lagUs = 0;
   FakeDecoder.instances = [];
   FakeDecoder.hold = false;
+  FakeDecoder.failOn = undefined;
   vi.stubGlobal('AudioWorkletNode', FakeWorkletNode);
   vi.stubGlobal('AudioDecoder', FakeDecoder);
   vi.stubGlobal('EncodedAudioChunk', FakeChunk);
@@ -325,6 +329,21 @@ describe('createAudioPlayer', () => {
     expect(FakeDecoder.instances).toHaveLength(2);
     expect(markers(context.render(160).get(nodeOf(context)) ?? [])).toEqual([1, 2, 3, 5, 6]);
     expect(input.stats.concealedUs).toBe(20_000);
+  });
+
+  it('stops replaying frames that waited for a new decoder when an error callback removes the input', async () => {
+    const { player } = await setUp();
+    const input = player.addInput({ onError: () => input.remove() });
+    FakeDecoder.hold = true;
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    // Frames 5 to 7 wait for the next decoder, which throws on frame 5.
+    FakeDecoder.failOn = 5;
+    for (let index = 5; index <= 7; index++) input.push(frameAt(index, index === 5 ? 'gap' : undefined));
+    await settle();
+    expect(input.removed).toBe(true);
+    expect(input.stats).toMatchObject({ errors: 1, decoded: 3 });
+    expect(FakeDecoder.instances).toHaveLength(2);
+    expect(FakeDecoder.instances.every((decoder) => decoder.state === 'closed')).toBe(true);
   });
 
   it('drops what a replaced decoder still holds at a resync', async () => {
@@ -490,6 +509,35 @@ describe('createAudioPlayer', () => {
     input.push(frameAt(7));
     input.push(frameAt(8));
     expect(markers(context.render(160).get(nodeOf(context)) ?? [])).toEqual([1, 2, 3, 4, 7, 8]);
+    expect(input.stats).toMatchObject({ concealedUs: 0, cutUs: 40_000 });
+  });
+
+  it('fills only the part of a hole outside a cut with silence', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    input.push(frameAt(1));
+    // Frames 2 and 3 are cut before they arrive, and frame 4 never comes: its 20 ms are silence.
+    input.cut({ fromUs: frameAt(2).timestampUs, untilUs: frameAt(4).timestampUs });
+    input.push(frameAt(5));
+    input.push(frameAt(6));
+    await settle();
+    const played = context.render(100).get(nodeOf(context)) ?? [];
+    expect(markers(played)).toEqual([1, 5, 6]);
+    expect(input.stats.concealedUs).toBe(20_000);
+    const start = played.findIndex((sample) => sample !== 0);
+    expect(Math.round((played[start + 2 * FRAME_SAMPLES] as number) * 100)).toBe(5);
+  });
+
+  it('joins on after each of two cuts made while their audio was still decoding', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    FakeDecoder.hold = true;
+    for (let index = 1; index <= 6; index++) input.push(frameAt(index));
+    input.cut({ fromUs: frameAt(2).timestampUs, untilUs: frameAt(3).timestampUs });
+    input.cut({ fromUs: frameAt(5).timestampUs, untilUs: frameAt(6).timestampUs });
+    FakeDecoder.instances[0]?.release();
+    FakeDecoder.hold = false;
+    expect(markers(context.render(100).get(nodeOf(context)) ?? [])).toEqual([1, 3, 4, 6]);
     expect(input.stats).toMatchObject({ concealedUs: 0, cutUs: 40_000 });
   });
 

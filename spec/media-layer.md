@@ -737,7 +737,7 @@ behavior is pinned by shared vectors in both SDKs.
 buffer holds, output still in the decoder, and, up to `untilUs`, frames that arrive later. The
 first audio from the cut's start on is joined on without silence for the range cut out; audio from
 before the cut's start that was still decoding can land first and plays as usual, and a frame lost
-after the cut's end is still filled with silence. With no range it drops
+outside the range is still filled with silence. With no range it drops
 everything held. Nothing in the protocol carries an interruption yet; issue #320 proposes one.
 
 **Echo cancellation.** Chromium's echo canceller takes only audio that WebRTC plays as its

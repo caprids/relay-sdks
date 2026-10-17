@@ -97,10 +97,11 @@ function audioPlayerWorklet(name: string): void {
     concealed = 0;
     cut = 0;
     /**
-     * The latest cut, until audio from its start on arrives: that audio joins without silence for the range cut out.
-     * Audio still decoding from before the cut's start can land first, and leaves it pending.
+     * Cuts that no audio from their start on has arrived after yet, disjoint and in order. The hole before that audio
+     * is the range cut out where it falls in a cut, and joins without silence there. Audio still decoding from before
+     * a cut's start can land first, and leaves it pending.
      */
-    pendingCut: { fromUs: number; untilUs: number } | undefined;
+    pendingCuts: { fromUs: number; untilUs: number }[] = [];
 
     constructor(options: { processorOptions: AudioPlayerProcessorOptions }) {
       super();
@@ -172,20 +173,21 @@ function audioPlayerWorklet(name: string): void {
         }
         this.dry = undefined;
       }
-      const cut = this.pendingCut;
-      if (cut && timestampUs >= cut.fromUs) this.pendingCut = undefined;
-      if (this.buffered > 0) {
-        const expectedUs = this.timestampAt(this.written);
-        const gap = Math.round(((timestampUs - expectedUs) * sampleRate) / 1_000_000);
-        // A hole reaching into a cut is the range cut out: the audio after it joins on.
-        const joins = cut !== undefined && timestampUs >= cut.fromUs && expectedUs < cut.untilUs;
+      const expectedUs = this.buffered > 0 ? this.timestampAt(this.written) : undefined;
+      // The cuts this audio is past: the part of the hole before it that they cover was cut out, not lost.
+      let cutOutUs = 0;
+      this.pendingCuts = this.pendingCuts.filter((cut) => {
+        if (cut.fromUs > timestampUs) return true;
+        if (expectedUs !== undefined) {
+          cutOutUs += Math.max(0, Math.min(timestampUs, cut.untilUs) - Math.max(expectedUs, cut.fromUs));
+        }
+        return false;
+      });
+      if (expectedUs !== undefined) {
         // A frame that never came, inside held audio: silence keeps the rest on time.
-        if (
-          !joins &&
-          timestampUs - expectedUs > TOLERANCE_US &&
-          gap <= MAX_CONCEAL &&
-          this.buffered + gap + frames <= CAPACITY
-        ) {
+        const lostUs = timestampUs - expectedUs - cutOutUs;
+        const gap = Math.round((lostUs * sampleRate) / 1_000_000);
+        if (lostUs > TOLERANCE_US && gap <= MAX_CONCEAL && this.buffered + gap + frames <= CAPACITY) {
           this.write(() => undefined, gap);
           this.concealed += gap;
         }
@@ -197,7 +199,7 @@ function audioPlayerWorklet(name: string): void {
 
     /** Drop everything held, and any cut still pending: what comes next starts a new timeline. */
     flush() {
-      this.pendingCut = undefined;
+      this.pendingCuts = [];
       this.dropTo(this.written, false);
     }
 
@@ -224,13 +226,18 @@ function audioPlayerWorklet(name: string): void {
 
     /** Remove held samples whose timestamps fall in [fromUs, untilUs). */
     cutRange(fromUs: number | null, untilUs: number | null) {
-      // Audio still decoding lands after the cut, held audio or not: never fill the range with silence. A cut still
-      // pending widens to cover both.
-      const pending = this.pendingCut;
-      this.pendingCut = {
-        fromUs: Math.min(pending?.fromUs ?? Number.POSITIVE_INFINITY, fromUs ?? Number.NEGATIVE_INFINITY),
-        untilUs: Math.max(pending?.untilUs ?? Number.NEGATIVE_INFINITY, untilUs ?? Number.POSITIVE_INFINITY),
-      };
+      // Audio still decoding lands after the cut, held audio or not: never fill the range with silence. Overlapping
+      // cuts merge, so no part of a hole counts twice.
+      const cuts = [
+        ...this.pendingCuts,
+        { fromUs: fromUs ?? Number.NEGATIVE_INFINITY, untilUs: untilUs ?? Number.POSITIVE_INFINITY },
+      ].sort((a, b) => (a.fromUs < b.fromUs ? -1 : a.fromUs > b.fromUs ? 1 : 0));
+      this.pendingCuts = [];
+      for (const cut of cuts) {
+        const last = this.pendingCuts[this.pendingCuts.length - 1];
+        if (last && cut.fromUs <= last.untilUs) last.untilUs = Math.max(last.untilUs, cut.untilUs);
+        else this.pendingCuts.push({ ...cut });
+      }
       if (this.buffered === 0) return;
 
       const start = fromUs === null ? this.read : this.indexOf(fromUs);
