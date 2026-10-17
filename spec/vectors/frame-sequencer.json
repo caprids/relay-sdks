@@ -369,6 +369,19 @@
       ]
     },
     {
+      "name": "a late audio frame delivered after a clock reset keeps the later frames of its group already held",
+      "grouping": "frame",
+      "steps": [
+        { "at": "0", "report": "1000000" },
+        { "at": "0", "object": ["0", "0", "900000"] },
+        { "at": "0", "poll": { "frames": [], "waitUs": "2000000" } },
+        { "at": "0", "object": ["0", "1", "920000"] },
+        { "at": "0", "clockReset": true },
+        { "at": "0", "poll": { "frames": [["0", "0"], ["0", "1"]], "waitUs": null } },
+        { "at": "0", "stats": { "delivered": "2", "late": "0", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
       "name": "a resync candidate back within budget after another track re-anchors the clock is delivered at once",
       "steps": [
         { "at": "0", "anchor": "0" },

@@ -521,7 +521,12 @@ class FrameSequencer:
         self.stats.late -= len(group.frames)
         for other in [other for other in self._groups if other < group_id]:
             del self._groups[other]
-        self._groups[group_id] = group
+        # Under frame grouping the group's later objects may be held already: keep them beside the candidate.
+        held = self._groups.get(group_id)
+        if held is not None:
+            held.frames.update(group.frames)
+        else:
+            self._groups[group_id] = group
         self._floor = group_id - 1
         self._cursor = None
 
@@ -554,7 +559,12 @@ class FrameSequencer:
         self.stats.late -= len(group.frames)
         for other in [other for other in self._groups if other < group_id]:
             del self._groups[other]
-        self._groups[group_id] = group
+        # Under frame grouping the group's later objects may be held already: keep them beside the candidate.
+        held = self._groups.get(group_id)
+        if held is not None:
+            held.frames.update(group.frames)
+        else:
+            self._groups[group_id] = group
         self._floor = group_id - 1
         self._pending = "restart" if self._pending == "restart" else "resync"
         if not self._keyframe_grouping:

@@ -426,7 +426,10 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     for (const id of [...groups.keys()]) {
       if (id < groupId) groups.delete(id);
     }
-    groups.set(groupId, group);
+    // Under frame grouping the group's later objects may be held already: keep them beside the candidate.
+    const held = groups.get(groupId);
+    if (held) for (const [objectId, frame] of group.frames) held.frames.set(objectId, frame);
+    else groups.set(groupId, group);
     floor = groupId - 1;
     cursor = undefined;
     pending = pending === 'restart' ? 'restart' : 'resync';
@@ -487,7 +490,10 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     for (const id of [...groups.keys()]) {
       if (id < groupId) groups.delete(id);
     }
-    groups.set(groupId, group);
+    // Under frame grouping the group's later objects may be held already: keep them beside the candidate.
+    const held = groups.get(groupId);
+    if (held) for (const [objectId, frame] of group.frames) held.frames.set(objectId, frame);
+    else groups.set(groupId, group);
     floor = groupId - 1;
     cursor = undefined;
   };
