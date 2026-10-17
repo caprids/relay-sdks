@@ -44,20 +44,39 @@ export interface AudioListener {
 
 function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[]) {
   return new Promise<{ tracks: MsfCatalogTrack[]; subscription: RelaySubscription }>((resolve, reject) => {
-    const subscription = subscriber.subscribe(
+    let subscription: RelaySubscription | undefined;
+    // The first catalog object, or the first error, decides; later ones change nothing.
+    let outcome: { tracks: MsfCatalogTrack[] } | { error: unknown; ended: boolean } | undefined;
+    // An object may arrive before subscribe() returns, so the outcome waits until the subscription is in hand.
+    const settle = () => {
+      if (!outcome || !subscription) return;
+      if ('tracks' in outcome) resolve({ tracks: outcome.tracks, subscription });
+      else {
+        // An error ends the subscription; a catalog that does not parse leaves it open.
+        if (!outcome.ended) subscription.cancel();
+        reject(outcome.error);
+      }
+    };
+    subscription = subscriber.subscribe(
       { namespace: [...namespace], track: CATALOG_TRACK },
       {
         onObject(object) {
-          if (object.status !== 'normal') return;
+          if (outcome || object.status !== 'normal') return;
           try {
-            resolve({ tracks: parseMsfCatalog(object.payload, { catalogNamespace: namespace }).tracks, subscription });
+            outcome = { tracks: parseMsfCatalog(object.payload, { catalogNamespace: namespace }).tracks };
           } catch (error) {
-            reject(error);
+            outcome = { error, ended: false };
           }
+          settle();
         },
-        onError: reject,
+        onError(error) {
+          if (outcome) return;
+          outcome = { error, ended: true };
+          settle();
+        },
       },
     );
+    settle();
   });
 }
 
@@ -73,44 +92,59 @@ export async function listenAudio(
 ): Promise<AudioListener> {
   const ownsContext = !options.context;
   const context = options.context ?? new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
-  const { tracks, subscription: catalog } = await readCatalog(subscriber, namespace);
-  const track = tracks.find((candidate) => candidate.name === AUDIO_TRACK);
-  if (!track) {
-    catalog.cancel();
-    throw new Error(`The catalog at ${namespace.join('/')} lists no ${AUDIO_TRACK} track`);
+  // What setup has created so far, released in reverse order if a later step fails.
+  const release: (() => void | Promise<void>)[] = [];
+  if (ownsContext) release.push(() => context.close());
+  try {
+    const { tracks, subscription: catalog } = await readCatalog(subscriber, namespace);
+    release.push(() => catalog.cancel());
+    const track = tracks.find((candidate) => candidate.name === AUDIO_TRACK);
+    if (!track) throw new Error(`The catalog at ${namespace.join('/')} lists no ${AUDIO_TRACK} track`);
+
+    const player = await createAudioPlayer({ context });
+    release.push(() => player.close());
+    let loopback: EchoCancellationLoopback | undefined;
+    if (options.echoCancellation) {
+      loopback = await createEchoCancellationLoopback(context, player.output);
+      release.push(() => loopback?.close());
+    } else player.output.connect(context.destination);
+
+    const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
+    const input = player.addInput({
+      clock,
+      decoderConfig: audioDecoderConfigFromTrack(track),
+      ...(options.onError ? { onError: options.onError } : {}),
+    });
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
+    const reader = createFrameReader(sequencer, { onFrame: input.push });
+    release.push(() => reader.close());
+    const audio = subscriber.subscribe(
+      { namespace: [...namespace], track: AUDIO_TRACK },
+      { ...reader, onError: (error) => options.onError?.(error) },
+    );
+
+    return {
+      context,
+      player,
+      input,
+      clock,
+      sequencer,
+      async stop() {
+        reader.close();
+        audio.cancel();
+        catalog.cancel();
+        loopback?.close();
+        player.close();
+        if (ownsContext) await context.close();
+      },
+    };
+  } catch (error) {
+    // A failure while cleaning up must not hide the one that stopped the setup.
+    for (const undo of release.reverse()) {
+      try {
+        await undo();
+      } catch {}
+    }
+    throw error;
   }
-
-  const player = await createAudioPlayer({ context });
-  let loopback: EchoCancellationLoopback | undefined;
-  if (options.echoCancellation) loopback = await createEchoCancellationLoopback(context, player.output);
-  else player.output.connect(context.destination);
-
-  const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
-  const input = player.addInput({
-    clock,
-    decoderConfig: audioDecoderConfigFromTrack(track),
-    ...(options.onError ? { onError: options.onError } : {}),
-  });
-  const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
-  const reader = createFrameReader(sequencer, { onFrame: input.push });
-  const audio = subscriber.subscribe(
-    { namespace: [...namespace], track: AUDIO_TRACK },
-    { ...reader, onError: (error) => options.onError?.(error) },
-  );
-
-  return {
-    context,
-    player,
-    input,
-    clock,
-    sequencer,
-    async stop() {
-      reader.close();
-      audio.cancel();
-      catalog.cancel();
-      loopback?.close();
-      player.close();
-      if (ownsContext) await context.close();
-    },
-  };
 }
