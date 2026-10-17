@@ -757,11 +757,29 @@ taken over.
     cancels the pending one. A move before the current subscription is accepted replaces it at
     once, since there is nothing to overlap. The connection's end takes both subscriptions, and
     the want restarts with `connection`.
+- **Catch-up** (TypeScript only). `catchUp(key)` replaces the want's accepted subscription at once,
+  break-before-make: it cancels it, which makes the relay drop what it still holds queued for it,
+  and subscribes again with the want's options, so a want with no location filter starts at the
+  newest group. `onRestarted` reports `catch-up`. The replacement opens without delay when the
+  cancelled subscription had progressed (delivered an object from a later group than its first),
+  and otherwise after the retry backoff, so a link too slow for the track cannot make it spin. It
+  is ignored for an unknown key and while no subscription is accepted; during a move it ends both
+  subscriptions, and the replacement is made for whatever the want asks for then. It exists
+  because moq-relay drops nothing for a late subscriber, whatever delivery timeout the subscriber
+  sends ([relay-interop.md](relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)).
+  A frame reader's `onCatchUp` is its usual caller ([media subscribing](#media-subscribing)).
+  Measured on 2026-10-17 against a local moq-relay 0.17.5, with a 3 s outage on a 600 kbit/s link
+  carrying a 400 kbit/s audio track (`ts/scripts/probe-catch-up.mjs`, two runs each): without
+  catch-up, the listener got 401 and 407 of 1,200 frames: once delivery resumed (about 5 s after
+  the link came back, as QUIC recovered), it got a few frames a second, about 800 ms late, to the end
+  of the run 8 s later. With `catchUpAfterUs` 300 ms and a late-drop limit of 100 ms, one catch-up
+  followed the resumption, the listener got 796 and 801 of 1,200 frames, and latency was back at
+  21 ms within a second.
 - Handlers receive the current subscription's objects, subgroup endings and resets, and its
   `PUBLISH_DONE`. `onSubscribed` receives the namespace the subscription was made on: the
   generation's, when following one. `onRestarted({ reason, namespace })` runs when an accepted
   subscription ends and will be replaced, before any object of the replacement. Its reason is
-  `publisher-done`, `stale`, `generation`, `connection` or `terminated`. `generation` remains for
+  `publisher-done`, `stale`, `generation`, `connection` or `terminated`, or in TypeScript `catch-up`. `generation` remains for
   a withdrawal with none newer announced. Decoders drop state that assumed continuity there, and at
   `onSwitched`. Rejections before acceptance, the announce race included, never reach
   a handler unless they are surfaced.
@@ -925,7 +943,14 @@ properties it already passes.
   object, its bytes cannot be timed out. In TypeScript the transport has taken an object when its
   stream write resolves, so an object queued behind stream flow control is still timed; in Python,
   when the stream write returns, once aioquic has transmitted the bytes.
-- **On moq-relay 0.15.8 and 0.17.0** neither value has any effect beyond the publisher. The relay
+- **On moq-relay 0.15.8, 0.17.0 and 0.17.5** neither value has any effect beyond the publisher.
+  A subscriber's values are sent on SUBSCRIBE as `parameters.objectDeliveryTimeout` /
+  `subgroupDeliveryTimeout` (`object_delivery_timeout` / `subgroup_delivery_timeout`) and the relay
+  drops nothing for them: measured on 0.17.5, a listener with a 100 ms timeout behind a link too
+  slow for the track received every group, up to 11 s late
+  ([relay-interop.md](relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)). A
+  late listener's remedies are the sequencer's late drop and catch-up
+  ([media subscribing](#media-subscribing)). The relay
   never sends either parameter upstream: its SUBSCRIBE carries only `0x10`, `0x20`, `0x21`, `0x22`
   and `0x23`, plus `0x35` only to opt out of properties, which the relay never does
   ([subscribe.rs](https://github.com/moq-dev/moq/blob/cd59d15b07c2c2c8a5bfa8a2e82b3bbc24e82a76/rs/moq-net/src/ietf/subscribe.rs#L187-L199)), its REQUEST_UPDATE only `0x10`, `0x20` and `0x21`,
@@ -1379,7 +1404,34 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   object ID skips within the last delivered group, or that opens a newer group past its object 0,
   carries `gap`. A frame more than the clock's `lateDropUs` behind the position is dropped, so a
   burst after a stall cannot build a lasting backlog in the player; one behind what was delivered
-  (an earlier group, or an earlier object of the same group) is dropped too. Nothing waits.
+  (an earlier group, or an earlier object of the same group) is dropped too. Nothing waits
+  unless a reorder window is set (below).
+- Per-track delivery policy (TypeScript only; Python keeps the defaults). Three sequencer options
+  tune one track without touching the clock its other tracks share; each default leaves the
+  behaviour above unchanged:
+  - `lateDropUs`, frame grouping only: the late-drop limit for this track instead of the clock's.
+    `Infinity` drops nothing as late, for a reader that wants every frame (speech-to-text).
+  - `reorderWindowUs`, frame grouping only (default 0): a frame whose group ID is more than one past
+    the last group delivered or dropped waits, with every newer one, for the missing group, until
+    the window has passed since that frame's group arrived (on the clock's local time). A missing
+    group that arrives in time goes out in order with no `gap`; after the window the waiting frames
+    go out with `gap`. A group that ended or was reset with nothing in it releases the wait at once.
+    A frame that turns late while it waits is dropped as late. For a reader that wants every frame
+    of a talker, the window should be at least the publisher's delivery timeout (audio's default is
+    500 ms): a group the publisher's transport is still resending can arrive that long after the
+    group that follows it, and the relay delivers it however late.
+  - `catchUpAfterUs`: when frames keep arriving late with none delivered, from the first one
+    dropped as late to the latest one at least this long apart (on the clock's local time), the
+    next poll returns `catchUp: true`, once, until a frame is delivered again. A restart does not
+    re-arm it, so a replacement that is late from its first frame resyncs rather than catches up
+    again. The TypeScript reader calls `onCatchUp`, whose owner replaces the subscription at the
+    live edge (a want's [catch-up](#supervised-subscriber)). Set it below the target latency, or a
+    resync re-anchors on the late frames first.
+- A delivered frame whose group ID is more than one past the previous delivered frame's carries
+  `missingGroups` (TypeScript only): the inclusive range of group IDs of which nothing was
+  delivered, whether never received, reset, or dropped as late or behind. It is the gap report an
+  application acts on; nothing in the SDK fetches the missing groups. A trailing loss is reported
+  only with the next delivered frame, and never across a restart, where group IDs start over.
 - The first frame after anything was skipped carries the discontinuity `gap`; a decoder resets
   there, as at a keyframe it can start from. No gap is marked before the first delivery.
 - Resync: once frames have arrived but none within the budget for one whole target latency of the

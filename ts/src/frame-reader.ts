@@ -22,6 +22,8 @@ export interface FrameReaderSequencer<F> {
     frames: F[];
     /** Poll again after this many microseconds, 0 at once; `undefined` when only new events can change it. */
     waitUs: number | undefined;
+    /** The sequencer asks for the subscription to be replaced at the live edge: see `onCatchUp`. */
+    catchUp?: boolean;
   };
 }
 
@@ -32,6 +34,13 @@ export interface FrameReaderOptions<F> {
    * carries on.
    */
   onFrame(frame: F): void;
+  /**
+   * The sequencer signalled a catch-up (`@mux/moq-media`'s `catchUpAfterUs`): frames keep arriving too late to use.
+   * Replace the subscription at the live edge, which drops what the relay still holds queued for it: a supervised
+   * subscriber's `catchUp(key)` does, and its `onRestarted` restarts this reader. Called synchronously, after the
+   * frames of the same poll; an exception from it goes to `console.error`.
+   */
+  onCatchUp?(): void;
 }
 
 /**
@@ -95,7 +104,7 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
           timer = undefined;
         }
         const current = generation;
-        const { frames, waitUs } = sequencer.poll();
+        const { frames, waitUs, catchUp } = sequencer.poll();
         for (const frame of frames) {
           if (closed || generation !== current) break;
           try {
@@ -103,6 +112,14 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
           } catch (error) {
             // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
             console.error(new Error('onFrame threw; the frame reader carries on', { cause: error }));
+          }
+        }
+        if (catchUp && !closed && generation === current) {
+          try {
+            options.onCatchUp?.();
+          } catch (error) {
+            // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+            console.error(new Error('onCatchUp threw; the frame reader carries on', { cause: error }));
           }
         }
         if (waitUs === 0) again = true;

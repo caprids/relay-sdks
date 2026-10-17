@@ -216,3 +216,572 @@ describe('createFrameSequencer', () => {
     expect(clock.targetLatencyUs).toBe(2_000_000);
   });
 });
+
+// The clock is anchored at local time 0 on timestamp 0, so its position is the local time `now` throughout.
+const harness = (options: Partial<Parameters<typeof createFrameSequencer>[0]> = {}) => {
+  const state = { now: 0 };
+  const clock = createPlayoutClock({ now: () => state.now });
+  clock.due(0);
+  const sequencer = createFrameSequencer({ clock, ...options });
+  const put = (groupId: number, timestampUs: number, objectId = 0) =>
+    sequencer.object(object(groupId, objectId, [{ type: LOC_TIMESTAMP, value: timestampUs }]));
+  const groupIds = (frames: { groupId: number }[]) => frames.map((frame) => frame.groupId);
+  return { state, clock, sequencer, put, groupIds };
+};
+
+describe('createFrameSequencer: lateDropUs', () => {
+  it('judges lateness by the clock when the option is not set', () => {
+    const { state, clock, sequencer, put, groupIds } = harness({ grouping: 'frame' });
+    expect(clock.lateDropUs).toBe(40_000);
+    state.now = 1_000_000;
+    put(0, 900_000);
+    put(1, 980_000);
+    expect(groupIds(sequencer.poll().frames)).toEqual([1]);
+    expect(sequencer.stats.late).toBe(1);
+  });
+
+  it("overrides the clock's limit for this sequencer, to drop sooner or keep longer", () => {
+    const strict = harness({ grouping: 'frame', lateDropUs: 10_000 });
+    strict.state.now = 1_000_000;
+    strict.put(0, 980_000);
+    expect(strict.sequencer.poll().frames).toEqual([]);
+    expect(strict.sequencer.stats.late).toBe(1);
+
+    const lenient = harness({ grouping: 'frame', lateDropUs: 200_000 });
+    lenient.state.now = 1_000_000;
+    lenient.put(0, 850_000);
+    lenient.put(1, 700_000);
+    expect(lenient.groupIds(lenient.sequencer.poll().frames)).toEqual([0]);
+    expect(lenient.sequencer.stats.late).toBe(1);
+    // The clock itself is untouched.
+    expect(lenient.clock.lateDropUs).toBe(40_000);
+  });
+
+  it('accepts zero: only a frame at or ahead of the position is delivered', () => {
+    const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', lateDropUs: 0 });
+    state.now = 1_000_000;
+    put(0, 999_999);
+    put(1, 1_000_000);
+    expect(groupIds(sequencer.poll().frames)).toEqual([1]);
+  });
+
+  it('never drops a frame as late with Infinity', () => {
+    const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', lateDropUs: Number.POSITIVE_INFINITY });
+    state.now = 60_000_000;
+    put(0, 0);
+    put(1, 1_000);
+    const { frames } = sequencer.poll();
+    expect(groupIds(frames)).toEqual([0, 1]);
+    expect(sequencer.stats.late).toBe(0);
+  });
+
+  it('refuses a negative or NaN limit', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    expect(() => createFrameSequencer({ clock, grouping: 'frame', lateDropUs: -1 })).toThrow(RangeError);
+    expect(() => createFrameSequencer({ clock, grouping: 'frame', lateDropUs: Number.NaN })).toThrow();
+    expect(() => createFrameSequencer({ clock, grouping: 'frame', lateDropUs: Number.NEGATIVE_INFINITY })).toThrow(
+      RangeError,
+    );
+  });
+
+  it('refuses it with keyframe grouping, the default or named', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    expect(() => createFrameSequencer({ clock, lateDropUs: 10_000 })).toThrow(RangeError);
+    expect(() => createFrameSequencer({ clock, grouping: 'keyframe', lateDropUs: Number.POSITIVE_INFINITY })).toThrow(
+      RangeError,
+    );
+  });
+});
+
+describe('createFrameSequencer: reorderWindowUs', () => {
+  it('refuses a negative, NaN or infinite window', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    expect(() => createFrameSequencer({ clock, grouping: 'frame', reorderWindowUs: -1 })).toThrow(RangeError);
+    expect(() => createFrameSequencer({ clock, grouping: 'frame', reorderWindowUs: Number.NaN })).toThrow();
+    expect(() => createFrameSequencer({ clock, grouping: 'frame', reorderWindowUs: Number.POSITIVE_INFINITY })).toThrow(
+      RangeError,
+    );
+  });
+
+  it('refuses a window above zero with keyframe grouping, and allows zero', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    expect(() => createFrameSequencer({ clock, reorderWindowUs: 1 })).toThrow(RangeError);
+    expect(() => createFrameSequencer({ clock, grouping: 'keyframe', reorderWindowUs: 100_000 })).toThrow(RangeError);
+    expect(() => createFrameSequencer({ clock, reorderWindowUs: 0 })).not.toThrow();
+    expect(() => createFrameSequencer({ clock, grouping: 'frame', reorderWindowUs: 0 })).not.toThrow();
+  });
+
+  it('keeps today’s behaviour by default: a later group goes out at once and an earlier one that follows is behind', () => {
+    const { state, sequencer, put, groupIds } = harness({ grouping: 'frame' });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    expect(groupIds(sequencer.poll().frames)).toEqual([0]);
+    put(2, 1_100_000);
+    const { frames, waitUs } = sequencer.poll();
+    expect(frames).toEqual([
+      expect.objectContaining({ groupId: 2, discontinuity: 'gap', missingGroups: { firstGroupId: 1, lastGroupId: 1 } }),
+    ]);
+    expect(waitUs).toBeUndefined();
+    put(1, 1_050_000);
+    expect(sequencer.poll().frames).toEqual([]);
+    expect(sequencer.stats.late).toBe(1);
+    expect(sequencer.stats.delivered).toBe(2);
+  });
+
+  it('holds a frame for the missing group and delivers both in order, with no gap, when it arrives in time', () => {
+    const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    expect(groupIds(sequencer.poll().frames)).toEqual([0]);
+    state.now = 1_010_000;
+    put(2, 1_500_000);
+    put(3, 1_520_000);
+    expect(sequencer.poll()).toEqual({ frames: [], waitUs: 100_000 });
+    state.now = 1_060_000;
+    put(1, 1_400_000);
+    const { frames } = sequencer.poll();
+    expect(groupIds(frames)).toEqual([1, 2, 3]);
+    for (const frame of frames) {
+      expect(frame.discontinuity).toBeUndefined();
+      expect(frame.missingGroups).toBeUndefined();
+    }
+    expect(sequencer.stats).toMatchObject({ delivered: 4, late: 0 });
+  });
+
+  it('reports the wait that remains while it holds, counted from when the held group arrived', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.poll();
+    state.now = 1_010_000;
+    put(2, 1_500_000);
+    expect(sequencer.poll().waitUs).toBe(100_000);
+    state.now = 1_040_000;
+    expect(sequencer.poll()).toEqual({ frames: [], waitUs: 70_000 });
+    // A later frame of the same group, or a newer group, does not move the end of the wait.
+    put(2, 1_510_000, 1);
+    put(3, 1_520_000);
+    state.now = 1_100_000;
+    expect(sequencer.poll()).toEqual({ frames: [], waitUs: 10_000 });
+  });
+
+  it('delivers the held frames as a gap when the window ends, naming the groups that never came', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.poll();
+    state.now = 1_010_000;
+    put(3, 1_500_000);
+    put(5, 1_520_000);
+    expect(sequencer.poll().waitUs).toBe(100_000);
+    state.now = 1_109_999;
+    expect(sequencer.poll()).toEqual({ frames: [], waitUs: 1 });
+    state.now = 1_110_000;
+    const { frames, waitUs } = sequencer.poll();
+    expect(frames.map((frame) => [frame.groupId, frame.discontinuity, frame.missingGroups])).toEqual([
+      [3, 'gap', { firstGroupId: 1, lastGroupId: 2 }],
+      [5, 'gap', { firstGroupId: 4, lastGroupId: 4 }],
+    ]);
+    expect(waitUs).toBeUndefined();
+    // What arrives for the missing groups now is behind.
+    put(1, 1_400_000);
+    put(4, 1_400_000);
+    expect(sequencer.poll().frames).toEqual([]);
+    expect(sequencer.stats.late).toBe(2);
+  });
+
+  it('does not hold the frame that follows the last delivered group', () => {
+    const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
+    state.now = 1_000_000;
+    put(7, 1_000_000);
+    put(8, 1_020_000);
+    // The first group has no earlier one to wait for.
+    expect(groupIds(sequencer.poll().frames)).toEqual([7, 8]);
+    put(9, 1_040_000);
+    expect(sequencer.poll()).toMatchObject({ waitUs: undefined });
+  });
+
+  it('ends the wait at once when the group missing ended or was reset with nothing in it', () => {
+    for (const end of ['groupEnded', 'groupReset'] as const) {
+      const { state, sequencer, put } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
+      state.now = 1_000_000;
+      put(0, 1_000_000);
+      sequencer.poll();
+      state.now = 1_010_000;
+      put(2, 1_500_000);
+      expect(sequencer.poll()).toEqual({ frames: [], waitUs: 100_000 });
+      sequencer[end](1);
+      const { frames } = sequencer.poll();
+      // The group is lost, which the frame says; but it did not wait for the window.
+      expect(frames).toEqual([
+        expect.objectContaining({
+          groupId: 2,
+          discontinuity: 'gap',
+          missingGroups: { firstGroupId: 1, lastGroupId: 1 },
+        }),
+      ]);
+    }
+  });
+
+  it('ends the wait for an empty group reset before the later one arrives', () => {
+    const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.poll();
+    sequencer.groupReset(1);
+    put(2, 1_500_000);
+    expect(groupIds(sequencer.poll().frames)).toEqual([2]);
+  });
+
+  it('keeps waiting when a group that ended is not the one next in line', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.poll();
+    put(3, 1_500_000);
+    sequencer.groupEnded(2);
+    expect(sequencer.poll().frames).toEqual([]);
+  });
+
+  it('drops a held frame that is late by the time its wait ends', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame', reorderWindowUs: 500_000 });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.poll();
+    state.now = 1_010_000;
+    put(2, 1_050_000);
+    expect(sequencer.poll()).toEqual({ frames: [], waitUs: 500_000 });
+    state.now = 1_510_000;
+    expect(sequencer.poll().frames).toEqual([]);
+    expect(sequencer.stats.late).toBe(1);
+    put(3, 1_520_000);
+    const { frames } = sequencer.poll();
+    expect(frames).toEqual([
+      expect.objectContaining({ groupId: 3, discontinuity: 'gap', missingGroups: { firstGroupId: 1, lastGroupId: 2 } }),
+    ]);
+  });
+
+  it('judges a held frame against the lateDropUs of the sequencer', () => {
+    const { state, sequencer, put, groupIds } = harness({
+      grouping: 'frame',
+      reorderWindowUs: 100_000,
+      lateDropUs: Number.POSITIVE_INFINITY,
+    });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.poll();
+    state.now = 1_010_000;
+    put(2, 1_050_000);
+    sequencer.poll();
+    state.now = 5_000_000;
+    expect(groupIds(sequencer.poll().frames)).toEqual([2]);
+    expect(sequencer.stats.late).toBe(0);
+  });
+
+  it('starts over after a restart: the first group is not held', () => {
+    const { state, clock, sequencer, put, groupIds } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.poll();
+    put(2, 1_500_000);
+    expect(sequencer.poll().frames).toEqual([]);
+    sequencer.restart();
+    clock.due(1_000_000);
+    put(40, 1_000_000);
+    expect(sequencer.poll().frames).toEqual([expect.objectContaining({ groupId: 40, discontinuity: 'restart' })]);
+    expect(groupIds(sequencer.poll().frames)).toEqual([]);
+  });
+});
+
+describe('createFrameSequencer: catchUpAfterUs', () => {
+  it('refuses a value that is not positive and finite', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    expect(() => createFrameSequencer({ clock, catchUpAfterUs: 0 })).toThrow(RangeError);
+    expect(() => createFrameSequencer({ clock, catchUpAfterUs: -5 })).toThrow(RangeError);
+    expect(() => createFrameSequencer({ clock, catchUpAfterUs: Number.POSITIVE_INFINITY })).toThrow(RangeError);
+    expect(() => createFrameSequencer({ clock, catchUpAfterUs: Number.NaN })).toThrow();
+    expect(() => createFrameSequencer({ clock, catchUpAfterUs: 1 })).not.toThrow();
+    expect(() => createFrameSequencer({ clock, grouping: 'frame', catchUpAfterUs: 200_000 })).not.toThrow();
+  });
+
+  it('signals a catch-up once frames have kept arriving late for that long with none delivered', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    put(0, 0);
+    expect(sequencer.poll().frames).toHaveLength(1);
+    state.now = 1_000_000;
+    put(1, 100_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    state.now = 1_100_000;
+    put(2, 200_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    state.now = 1_199_999;
+    put(3, 300_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    state.now = 1_200_000;
+    put(4, 400_000);
+    const poll = sequencer.poll();
+    expect(poll).toMatchObject({ frames: [], catchUp: true });
+    expect(sequencer.stats.late).toBe(4);
+  });
+
+  it('signals it once, until a frame is delivered', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    put(0, 0);
+    sequencer.poll();
+    for (const at of [1_000_000, 1_250_000]) {
+      state.now = at;
+      put(Math.floor(at / 1000), at - 900_000);
+      expect(sequencer.poll().catchUp).toBe(at === 1_250_000 ? true : undefined);
+    }
+    state.now = 1_400_000;
+    put(2000, 500_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    state.now = 2_000_000;
+    put(3000, 1_000_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+  });
+
+  it('is armed again by a delivery', () => {
+    const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    put(0, 0);
+    sequencer.poll();
+    state.now = 1_000_000;
+    put(1, 100_000);
+    sequencer.poll();
+    state.now = 1_300_000;
+    put(2, 200_000);
+    expect(sequencer.poll().catchUp).toBe(true);
+    // A frame on time: the backlog is gone.
+    put(3, 1_300_000);
+    const delivered = sequencer.poll();
+    expect(groupIds(delivered.frames)).toEqual([3]);
+    expect(delivered.catchUp).toBeUndefined();
+    // Lateness counts from its start again, not from the earlier one.
+    state.now = 2_000_000;
+    put(4, 1_000_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    state.now = 2_300_000;
+    put(5, 1_100_000);
+    expect(sequencer.poll().catchUp).toBe(true);
+  });
+
+  it('does not count lateness that began before a delivery', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    put(0, 0);
+    sequencer.poll();
+    state.now = 1_000_000;
+    put(1, 100_000);
+    sequencer.poll();
+    state.now = 1_150_000;
+    put(2, 1_150_000);
+    expect(sequencer.poll().frames).toHaveLength(1);
+    state.now = 1_300_000;
+    put(3, 200_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+  });
+
+  it('does not signal for one late frame followed by silence', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    put(0, 0);
+    sequencer.poll();
+    state.now = 1_000_000;
+    put(1, 100_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    for (const at of [1_300_000, 3_000_000, 60_000_000]) {
+      state.now = at;
+      expect(sequencer.poll().catchUp).toBeUndefined();
+    }
+  });
+
+  it('is never signalled when the option is not set', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame' });
+    put(0, 0);
+    sequencer.poll();
+    for (let step = 1; step <= 10; step++) {
+      state.now = step * 100_000;
+      put(step, 0);
+      expect(sequencer.poll().catchUp).toBeUndefined();
+    }
+  });
+
+  it('is never signalled when no frame is late, as with a limit of Infinity', () => {
+    const { state, sequencer, put } = harness({
+      grouping: 'frame',
+      catchUpAfterUs: 100_000,
+      lateDropUs: Number.POSITIVE_INFINITY,
+    });
+    put(0, 0);
+    sequencer.poll();
+    for (let step = 1; step <= 10; step++) {
+      state.now = step * 100_000;
+      put(step, 0);
+      expect(sequencer.poll().catchUp).toBeUndefined();
+    }
+  });
+
+  it('forgets the lateness seen before a restart', () => {
+    const { state, clock, sequencer, put } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    put(0, 0);
+    sequencer.poll();
+    state.now = 1_000_000;
+    put(1, 100_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    sequencer.restart();
+    state.now = 1_150_000;
+    clock.due(1_150_000);
+    state.now = 1_250_000;
+    put(2, 0);
+    const poll = sequencer.poll();
+    expect(poll.frames).toEqual([]);
+    expect(poll.catchUp).toBeUndefined();
+    expect(sequencer.stats.late).toBe(2);
+  });
+
+  it('signals a catch-up again after a restart once a frame has been delivered on the new subscription', () => {
+    const { state, clock, sequencer, put } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    put(0, 0);
+    sequencer.poll();
+    state.now = 1_000_000;
+    put(1, 100_000);
+    sequencer.poll();
+    state.now = 1_300_000;
+    put(2, 200_000);
+    expect(sequencer.poll().catchUp).toBe(true);
+    sequencer.restart();
+    clock.due(1_300_000);
+    put(0, 1_300_000);
+    expect(sequencer.poll().frames).toHaveLength(1);
+    state.now = 2_000_000;
+    put(1, 0);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    state.now = 2_200_000;
+    put(2, 0);
+    expect(sequencer.poll().catchUp).toBe(true);
+  });
+
+  // By design: a replacement that is late from its first frame does not catch up again until something is delivered
+  // (a resync, at worst), so a link too slow for the track cannot make the subscription spin.
+  it('does not signal again after a restart until a frame is delivered', () => {
+    const { state, clock, sequencer, put } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    put(0, 0);
+    sequencer.poll();
+    state.now = 1_000_000;
+    put(1, 100_000);
+    sequencer.poll();
+    state.now = 1_300_000;
+    put(2, 200_000);
+    expect(sequencer.poll().catchUp).toBe(true);
+    sequencer.restart();
+    clock.due(1_300_000);
+    state.now = 2_000_000;
+    put(0, 0);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    state.now = 2_200_000;
+    put(1, 0);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+  });
+});
+
+describe('createFrameSequencer: missingGroups', () => {
+  it('is absent while group IDs follow one another', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame' });
+    state.now = 1_000;
+    put(5, 1_000);
+    put(6, 1_010);
+    put(7, 1_020);
+    const { frames } = sequencer.poll();
+    expect(frames).toHaveLength(3);
+    for (const frame of frames) expect('missingGroups' in frame).toBe(false);
+  });
+
+  it('names the group IDs skipped under frame grouping, inclusive', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame' });
+    state.now = 1_000;
+    put(5, 1_000);
+    put(6, 1_010);
+    put(9, 1_020);
+    put(10, 1_030);
+    const { frames } = sequencer.poll();
+    expect(frames.map((frame) => [frame.groupId, frame.missingGroups])).toEqual([
+      [5, undefined],
+      [6, undefined],
+      [9, { firstGroupId: 7, lastGroupId: 8 }],
+      [10, undefined],
+    ]);
+    expect(frames[2]?.discontinuity).toBe('gap');
+  });
+
+  it('includes a group dropped as late between two delivered', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame' });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    put(1, 500_000);
+    put(2, 1_000_000);
+    const { frames } = sequencer.poll();
+    expect(frames.map((frame) => [frame.groupId, frame.missingGroups])).toEqual([
+      [0, undefined],
+      [2, { firstGroupId: 1, lastGroupId: 1 }],
+    ]);
+  });
+
+  it('is not set for a gap that the frames within one group make', () => {
+    const { state, sequencer, put } = harness({ grouping: 'frame' });
+    state.now = 1_000;
+    put(3, 1_000, 0);
+    put(3, 1_010, 5);
+    const { frames } = sequencer.poll();
+    expect(frames).toHaveLength(2);
+    expect(frames[1]?.missingGroups).toBeUndefined();
+  });
+
+  it('is absent on the first frame after a restart, and counts again from it', () => {
+    const { state, clock, sequencer, put } = harness({ grouping: 'frame' });
+    state.now = 1_000;
+    put(100, 1_000);
+    expect(sequencer.poll().frames).toHaveLength(1);
+    sequencer.restart();
+    clock.due(1_000);
+    put(3, 1_000);
+    put(4, 1_010);
+    put(8, 1_020);
+    const { frames } = sequencer.poll();
+    expect(frames.map((frame) => [frame.groupId, frame.discontinuity, frame.missingGroups])).toEqual([
+      [3, 'restart', undefined],
+      [4, undefined, undefined],
+      [8, 'gap', { firstGroupId: 5, lastGroupId: 7 }],
+    ]);
+  });
+
+  it('names the groups skipped under keyframe grouping too', () => {
+    const { state, sequencer, put } = harness();
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.groupEnded(0);
+    expect(sequencer.poll().frames.map((frame) => frame.missingGroups)).toEqual([undefined]);
+    put(1, 1_100_000);
+    sequencer.groupEnded(1);
+    const second = sequencer.poll().frames;
+    // Groups 2 and 3 never come; the later group goes out once the wait for them ends.
+    state.now = 3_200_000;
+    put(4, 3_200_000);
+    const third = sequencer.poll().frames;
+    expect([...second, ...third].map((frame) => [frame.groupId, frame.discontinuity, frame.missingGroups])).toEqual([
+      [1, undefined, undefined],
+      [4, 'gap', { firstGroupId: 2, lastGroupId: 3 }],
+    ]);
+  });
+
+  it('is absent on the first keyframe-grouped frame after a restart', () => {
+    const { state, clock, sequencer, put } = harness();
+    state.now = 1_000_000;
+    put(7, 1_000_000);
+    sequencer.groupEnded(7);
+    sequencer.poll();
+    sequencer.restart();
+    clock.due(1_000_000);
+    put(2, 1_000_000);
+    const { frames } = sequencer.poll();
+    expect(frames).toEqual([expect.objectContaining({ groupId: 2, discontinuity: 'restart' })]);
+    expect(frames[0]?.missingGroups).toBeUndefined();
+  });
+});

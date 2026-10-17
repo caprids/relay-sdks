@@ -118,7 +118,9 @@ Shared vectors live in `spec/vectors/media.json` and `spec/vectors/clock.json`. 
 `createFrameSequencer({ clock })` turns one subscribed track's objects, which can arrive out of
 order across group streams, into frames in decode order, and drops what is too late against the
 playout clock; `@mux/relay/media`'s `createFrameReader` drives it from a subscription (see the
-[guide](../../GUIDE.md#subscribing-to-media)). The combined `register_media` publishing handle is
+[guide](../../GUIDE.md#subscribing-to-media)). Per track, `lateDropUs`, `reorderWindowUs` and
+`catchUpAfterUs` tune audio delivery for a listener or for speech-to-text, and `missingGroups` on a
+frame names the groups skipped before it (see [voice delivery](../../GUIDE.md#voice-delivery-per-direction)). The combined `register_media` publishing handle is
 still a proposal in `spec/media-layer.md`; `@mux/relay/media` ships the frame writer and catalog
 service it would compose.
 

@@ -63,6 +63,7 @@ without a row here is a bug.
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
+| Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | not yet (TypeScript only) |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
 | A want moved make-before-break (a newer generation, or another track or parameters) | `until` and `drainMs` on `WantOptions`; `onSwitched(info)` with `WantSwitchedInfo` (`from`, `to`, each a `WantTarget` of `namespace` and `track`; `subscribed`) | `until=` and `drain=` (seconds) on `want`; `on_switched(info)` with `WantSwitchedInfo` (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`) |
 | Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()` |
@@ -581,7 +582,10 @@ sequencer as an argument.
 | One track's ordering and deadlines | `createFrameSequencer({ clock, grouping?, trackProperties? })` → `FrameSequencer` (`FrameSequencerOptions`) | `FrameSequencer(clock, grouping="keyframe", track_properties=())` |
 | Feed it a subscription's events | `object(o)`, `groupEnded(id)`, `groupReset(id)`, `restart()`, `trackProperties` | `object(o)`, `group_ended(id)`, `group_reset(id)`, `restart()`, `track_properties` |
 | Take the ready frames and the next wait | `poll(maxFrames?)` → `SequencerPoll { frames, waitUs }` | `poll(max_frames=None)` → `SequencerPoll(frames, wait_us)` |
-| One frame in decode order | `SequencedFrame { groupId, objectId, timestampUs, key, payload, properties, discontinuity? }` | `SequencedFrame(group_id, object_id, timestamp_us, key, payload, properties, discontinuity)` |
+| One frame in decode order | `SequencedFrame { groupId, objectId, timestampUs, key, payload, properties, discontinuity?, missingGroups? }` | `SequencedFrame(group_id, object_id, timestamp_us, key, payload, properties, discontinuity)` |
+| Groups of which nothing was delivered before this frame | `missingGroups`: `MissingGroups { firstGroupId, lastGroupId }`, inclusive | not yet (TypeScript only) |
+| One track's delivery policy | `lateDropUs`, `reorderWindowUs`, `catchUpAfterUs` on `FrameSequencerOptions` | not yet (TypeScript only) |
+| The sequencer asks for its subscription to be replaced | `SequencerPoll.catchUp`; the reader's `onCatchUp()` on `FrameReaderOptions` | not yet (TypeScript only) |
 | Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
 | Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
 | A subscription's or a want's handlers that read frames | `createFrameReader(sequencer, { onFrame })` → `FrameReader` (`FrameReaderOptions`); spread into `subscribe` or `want` handlers | `FrameReader(sequencer)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)`; `async for frame in reader` |
@@ -596,6 +600,14 @@ position a frame may still be delivered, so the catalog field is not read. Not a
 [issue #303](https://github.com/muxinc/relay-sdks/issues/303): `targetLatencyMs` (every clock option
 is in microseconds); the reader taking the clock and grouping itself (the product package cannot
 import the format package).
+
+"Catch-up", not "skip", "flush" or "resync": a resync re-anchors the clock on late frames and keeps
+the delay, while a catch-up replaces the subscription so the delay goes away. It is a want's restart
+(CONTEXT.md) the application asks for, so it reports through `onRestarted`. "Reorder window", not
+"jitter buffer" (the audio path's smoothing) or "deadline" (one frame's): it is how long newer frames
+wait for an earlier group. `lateDropUs` on the sequencer keeps the clock option's name because it is
+the same limit, for one track. `missingGroups` names groups, not frames, because a group ID is what
+a relay can be asked about.
 
 ## Audio playout: `createAudioPlayer`, `AudioPlayerInput`
 

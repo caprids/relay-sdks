@@ -8,7 +8,7 @@ import {
 } from '@mux/moq-media';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import type { RelaySubscriptionHandlers, WantHandlers } from '../src/index.js';
-import { createFrameReader } from '../src/media.js';
+import { createFrameReader, type FrameReader, type FrameReaderSequencer } from '../src/media.js';
 
 const object = (groupId: number, objectId: number, timestampUs: number): MoqtObject => ({
   groupId,
@@ -184,5 +184,119 @@ describe('createFrameReader', () => {
     reader.onSubgroupEnd({ groupId: 0 });
     expect(ids(frames)).toEqual([[0, 0]]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+});
+
+describe('createFrameReader: onCatchUp', () => {
+  /** A sequencer that returns the polls it is given, one per call, then empty ones. */
+  const scripted = (polls: { frames: number[]; catchUp?: boolean }[]): FrameReaderSequencer<number> => {
+    const queue = [...polls];
+    return {
+      trackProperties: [],
+      object() {},
+      groupEnded() {},
+      groupReset() {},
+      restart() {},
+      poll() {
+        const next = queue.shift();
+        return { frames: next?.frames ?? [], waitUs: undefined, ...(next?.catchUp ? { catchUp: true } : {}) };
+      },
+    };
+  };
+
+  it('is called after the frames of the poll that signalled it', () => {
+    const calls: string[] = [];
+    const reader = createFrameReader(scripted([{ frames: [1, 2], catchUp: true }]), {
+      onFrame: (frame) => calls.push(`frame ${frame}`),
+      onCatchUp: () => calls.push('catch-up'),
+    });
+    reader.onObject(object(0, 0, 0));
+    expect(calls).toEqual(['frame 1', 'frame 2', 'catch-up']);
+  });
+
+  it('is called for a poll with no frames', () => {
+    const onCatchUp = vi.fn();
+    const reader = createFrameReader(scripted([{ frames: [], catchUp: true }]), { onFrame() {}, onCatchUp });
+    reader.onObject(object(0, 0, 0));
+    expect(onCatchUp).toHaveBeenCalledOnce();
+  });
+
+  it('is called once per signal, not on polls that do not carry one', () => {
+    const onCatchUp = vi.fn();
+    const reader = createFrameReader(scripted([{ frames: [1] }, { frames: [2], catchUp: true }, { frames: [3] }]), {
+      onFrame() {},
+      onCatchUp,
+    });
+    reader.onObject(object(0, 0, 0));
+    expect(onCatchUp).not.toHaveBeenCalled();
+    reader.onObject(object(0, 1, 0));
+    expect(onCatchUp).toHaveBeenCalledOnce();
+    reader.onObject(object(0, 2, 0));
+    expect(onCatchUp).toHaveBeenCalledOnce();
+  });
+
+  it('is optional: a signal without a handler changes nothing', () => {
+    const seen: number[] = [];
+    const reader = createFrameReader(scripted([{ frames: [1], catchUp: true }, { frames: [2] }]), {
+      onFrame: (frame) => seen.push(frame),
+    });
+    reader.onObject(object(0, 0, 0));
+    reader.onObject(object(0, 1, 0));
+    expect(seen).toEqual([1, 2]);
+  });
+
+  it('reports a throw to console.error and carries on delivering', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const seen: number[] = [];
+    const cause = new Error('resubscribe failed');
+    const reader = createFrameReader(scripted([{ frames: [1], catchUp: true }, { frames: [2] }]), {
+      onFrame: (frame) => seen.push(frame),
+      onCatchUp() {
+        throw cause;
+      },
+    });
+    reader.onObject(object(0, 0, 0));
+    expect(error).toHaveBeenCalledOnce();
+    const reported = error.mock.calls[0]?.[0] as Error;
+    expect(reported.message).toContain('onCatchUp threw');
+    expect(reported.cause).toBe(cause);
+    reader.onObject(object(0, 1, 0));
+    expect(seen).toEqual([1, 2]);
+  });
+
+  it('is not called once the reader was closed, or restarted from onFrame, in the same poll', () => {
+    const closing = vi.fn();
+    const closer: FrameReader = createFrameReader(scripted([{ frames: [1], catchUp: true }]), {
+      onFrame: () => closer.close(),
+      onCatchUp: closing,
+    });
+    closer.onObject(object(0, 0, 0));
+    expect(closing).not.toHaveBeenCalled();
+
+    const restarting = vi.fn();
+    const restarter: FrameReader = createFrameReader(scripted([{ frames: [1], catchUp: true }]), {
+      onFrame: () => restarter.onRestarted(),
+      onCatchUp: restarting,
+    });
+    restarter.onObject(object(0, 0, 0));
+    expect(restarting).not.toHaveBeenCalled();
+  });
+
+  it('is called by a real sequencer that signals it, on the poll after the late frame', () => {
+    vi.useFakeTimers();
+    let nowUs = 0;
+    const clock = createPlayoutClock({ now: () => nowUs });
+    clock.due(0);
+    const onCatchUp = vi.fn();
+    const reader = createFrameReader(createFrameSequencer({ clock, grouping: 'frame', catchUpAfterUs: 200_000 }), {
+      onFrame() {},
+      onCatchUp,
+    });
+    reader.onObject(object(0, 0, 0));
+    for (const [step, at] of [1_000_000, 1_100_000, 1_200_000].entries()) {
+      nowUs = at;
+      reader.onObject(object(step + 1, 0, step * 100_000));
+    }
+    expect(onCatchUp).toHaveBeenCalledOnce();
   });
 });
