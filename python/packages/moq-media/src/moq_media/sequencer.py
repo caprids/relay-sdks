@@ -110,8 +110,9 @@ class FrameSequencer:
         # The group being delivered and its next object, under keyframe grouping.
         self._cursor: list[int] | None = None
         self._last_delivered_us: int | None = None
-        # Under frame grouping, the group of the last delivered frame.
+        # Under frame grouping, the group and object of the last delivered frame.
         self._last_delivered_group: int | None = None
+        self._last_delivered_object = 0
         self._delivered_since_restart = False
         self._pending: FrameDiscontinuity | None = None
         # Starving: something arrived but none of it was within the budget, since this position, and late by about
@@ -411,7 +412,11 @@ class FrameSequencer:
             self._cursor = [group_id, 0]
 
     def _poll_frames(self, out: list[SequencedFrame]) -> float | None:
-        """Frame grouping: every frame stands alone; deliver in order at once, and drop what is late or behind."""
+        """Frame grouping: every frame stands alone; deliver in order at once, and drop what is late or behind.
+
+        A group may hold several frames, one per object, as a subgroup writer sends them: the position taken is a
+        (group, object) pair, so the group's later objects are still ahead of it while its earlier ones are behind.
+        """
         position = self._clock.position_us()
         late_before = -math.inf if position is None else position - self._clock.late_drop_us
         for group_id in sorted(self._groups):
@@ -429,7 +434,8 @@ class FrameSequencer:
                     position = None
                     late_before = -math.inf
                 del group.frames[object_id]
-                self._floor = group_id
+                self._floor = group_id - 1
+                self._cursor = [group_id, object_id + 1]
                 if position is not None and frame.timestamp_us < late_before:
                     self.stats.late += 1
                     self._newest_late = (group_id, _Group({object_id: frame}, ended=True))
@@ -437,11 +443,18 @@ class FrameSequencer:
                     if self._delivered_since_restart and self._pending is None:
                         self._pending = "gap"
                     continue
-                # A group ID skipped since the last delivered frame is a frame that never came, or was reset.
+                # A group ID or an object ID skipped since the last delivered frame is a frame that never came, or was
+                # reset.
                 last = self._last_delivered_group
-                if self._delivered_since_restart and last is not None and group_id > last + 1 and self._pending is None:
-                    self._pending = "gap"
+                if self._delivered_since_restart and last is not None and self._pending is None:
+                    if group_id == last:
+                        skipped = object_id > self._last_delivered_object + 1
+                    else:
+                        skipped = group_id > last + 1 or object_id > 0
+                    if skipped:
+                        self._pending = "gap"
                 self._last_delivered_group = group_id
+                self._last_delivered_object = object_id
                 self._deliver(frame, out)
             del self._groups[group_id]
         return None

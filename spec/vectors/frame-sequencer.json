@@ -349,6 +349,26 @@
       ]
     },
     {
+      "name": "audio frames several to a group go out in object order; a skipped object is a gap and an earlier one is behind",
+      "grouping": "frame",
+      "steps": [
+        { "at": "0", "object": ["0", "0", "0"] },
+        { "at": "0", "object": ["0", "1", "20000"] },
+        { "at": "0", "poll": { "frames": [["0", "0"], ["0", "1"]], "waitUs": null } },
+        { "at": "0", "object": ["0", "2", "40000"] },
+        { "at": "0", "poll": { "frames": [["0", "2"]], "waitUs": null } },
+        { "at": "0", "object": ["1", "0", "60000"] },
+        { "at": "0", "object": ["1", "2", "100000"] },
+        { "at": "0", "poll": { "frames": [["1", "0"], ["1", "2", "gap"]], "waitUs": null } },
+        { "at": "0", "object": ["1", "1", "80000"] },
+        { "at": "0", "poll": { "frames": [], "waitUs": null } },
+        { "at": "0", "object": ["2", "1", "140000"] },
+        { "at": "0", "object": ["2", "2", "160000"] },
+        { "at": "0", "poll": { "frames": [["2", "1", "gap"], ["2", "2"]], "waitUs": null } },
+        { "at": "0", "stats": { "delivered": "7", "late": "1", "skippedGroups": "0", "resyncs": "0", "untimed": "0" }, "targetLatency": "2000000" }
+      ]
+    },
+    {
       "name": "a resync candidate back within budget after another track re-anchors the clock is delivered at once",
       "steps": [
         { "at": "0", "anchor": "0" },
