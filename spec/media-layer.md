@@ -694,9 +694,12 @@ defaults to Opus at 48 kHz. Decoders count output timestamps on from their first
 [Playout clock](#playout-clock-player)), so the input resets its decoder wherever a frame does not
 start where the previous one ended: at a `gap`, a `resync` or a `restart`, and at any jump of more
 than 1 ms. For Opus the previous frame's length is read from its TOC byte (RFC 6716 §3.1), so the
-check does not wait for decoder output. A frame that starts before the previous one ended is behind
-it and is dropped as late. A `resync` or `restart` also flushes what the buffer holds, which belongs
-to the replaced timeline. A context at another rate than the decoder's gets linearly resampled
+check does not wait for decoder output. At a `gap` or a jump the old decoder is flushed, not closed:
+a frame reader can deliver frames and the gap after them in one poll, before any of them is decoded,
+so the old decoder first outputs what it was given, and the frames after the gap wait for the new
+decoder until it has. A frame that starts before the previous one ended is behind it and is dropped
+as late. A `resync` or `restart` closes the decoder, drops its pending output, and flushes what the
+buffer holds, all of which belongs to the replaced timeline. A context at another rate than the decoder's gets linearly resampled
 audio.
 
 **Jitter buffer.** A ring in the worklet, in the context's frames, starting from the numbers

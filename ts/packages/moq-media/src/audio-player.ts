@@ -399,7 +399,11 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   const resampler = createResampler(channels);
   let removed = false;
   let decoder: AudioDecoder | undefined;
-  // Bumped wherever output still in the decoder belongs to audio that was dropped.
+  // A decoder replaced at a gap or a timestamp jump. It outputs what it was given before the next decoder starts, so
+  // audio decoded but not yet output still plays, in order; frames that arrive meanwhile wait.
+  let retiring: AudioDecoder | undefined;
+  let waiting: { timestampUs: number; payload: Uint8Array; jumps: boolean }[] = [];
+  // Bumped wherever output still in a decoder belongs to audio that was dropped.
   let epoch = 0;
   // Where the next frame should start, and the end of the newest frame decoded: anything earlier arrived late.
   let expectedUs: number | undefined;
@@ -417,13 +421,16 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     else node.port.postMessage(command);
   };
 
-  const closeDecoder = () => {
-    if (decoder && decoder.state !== 'closed') decoder.close();
+  const closeDecoders = () => {
+    for (const each of [decoder, retiring]) if (each && each.state !== 'closed') each.close();
     decoder = undefined;
+    retiring = undefined;
+    waiting = [];
   };
+  // Drop what the decoders still hold: it belongs to audio that was dropped, or to a decoder that failed.
   const resetDecoder = () => {
     if (decoder) stats.decoderResets++;
-    closeDecoder();
+    closeDecoders();
     epoch++;
     pendingCuts = [];
     resampler.reset();
@@ -464,13 +471,51 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       error(error) {
         if (opened !== epoch || removed) return;
         stats.errors++;
-        resetDecoder();
+        // A retiring decoder that fails ends its flush, and the next decoder starts.
+        if (created === decoder) resetDecoder();
         options.onError?.(error);
       },
     });
     created.configure(decoderConfig);
     decoder = created;
     return created;
+  };
+  // Replace the decoder, as decoders count samples from their first input; let it finish what it was given first.
+  const retireDecoder = (retired: AudioDecoder) => {
+    stats.decoderResets++;
+    decoder = undefined;
+    retiring = retired;
+    const opened = epoch;
+    const drained = () => {
+      if (retired.state !== 'closed') retired.close();
+      if (removed || opened !== epoch || retiring !== retired) return;
+      retiring = undefined;
+      resampler.reset();
+      for (const frame of waiting.splice(0)) send(frame);
+    };
+    try {
+      retired.flush().then(drained, drained);
+    } catch {
+      drained();
+    }
+  };
+  // Decode a frame, unless a retiring decoder is still finishing: then it waits for the next decoder.
+  const send = (frame: { timestampUs: number; payload: Uint8Array; jumps: boolean }) => {
+    if (frame.jumps && decoder) retireDecoder(decoder);
+    if (retiring) {
+      waiting.push({ ...frame, jumps: frame.jumps && waiting.length > 0 });
+      return;
+    }
+    try {
+      (decoder ?? openDecoder()).decode(
+        new EncodedAudioChunk({ type: 'key', timestamp: frame.timestampUs, data: frame.payload })
+      );
+      stats.decoded++;
+    } catch (error) {
+      stats.errors++;
+      resetDecoder();
+      options.onError?.(error);
+    }
   };
 
   const flush = () => {
@@ -519,25 +564,14 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
         stats.late++;
         return;
       }
-      // Decoders count samples from their first input: reset wherever this frame does not follow the last.
-      if (
-        (discontinuity || (expectedUs !== undefined && Math.abs(timestampUs - expectedUs) > TIMESTAMP_TOLERANCE_US)) &&
-        decoder
-      )
-        resetDecoder();
+      // Decoders count samples from their first input: a new one starts wherever this frame does not follow the last.
+      const jumps =
+        discontinuity !== undefined ||
+        (expectedUs !== undefined && Math.abs(timestampUs - expectedUs) > TIMESTAMP_TOLERANCE_US);
       const frameUs = (decoderConfig.codec === 'opus' ? opusPacketDurationUs(payload) : undefined) ?? lastDurationUs;
       expectedUs = frameUs === undefined ? undefined : timestampUs + frameUs;
       lastSentUs = timestampUs;
-      try {
-        (decoder ?? openDecoder()).decode(
-          new EncodedAudioChunk({ type: 'key', timestamp: timestampUs, data: payload })
-        );
-        stats.decoded++;
-      } catch (error) {
-        stats.errors++;
-        resetDecoder();
-        options.onError?.(error);
-      }
+      send({ timestampUs, payload, jumps });
     },
     cut(range = {}) {
       if (removed) return;
@@ -548,7 +582,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       }
       if (untilUs !== undefined) cutUntilUs = Math.max(cutUntilUs ?? untilUs, untilUs);
       // Output still in the decoder reaches the worklet after the cut does: it is checked against the cut on its way.
-      if (decoder && lastSentUs !== undefined) {
+      if ((decoder || retiring) && lastSentUs !== undefined) {
         pendingCuts.push({
           fromUs: fromUs ?? Number.NEGATIVE_INFINITY,
           untilUs: untilUs ?? Number.POSITIVE_INFINITY,
@@ -573,7 +607,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     remove() {
       if (removed) return;
       removed = true;
-      closeDecoder();
+      closeDecoders();
       post({ type: 'stop' });
       node.port.onmessage = null;
       node.port.close();

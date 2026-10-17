@@ -178,6 +178,16 @@ class FakeDecoder {
   release() {
     for (const output of this.held.splice(0)) output();
   }
+  /** Like a real decoder's: everything it holds is output, a task later, and then the promise resolves. */
+  flush() {
+    if (this.state !== 'configured') return Promise.reject(new DOMException('Not configured', 'InvalidStateError'));
+    return new Promise<void>((resolve) =>
+      setTimeout(() => {
+        this.release();
+        resolve();
+      }),
+    );
+  }
   close() {
     this.state = 'closed';
   }
@@ -221,6 +231,8 @@ async function setUp(options: { sampleRate?: number } = {}) {
   return { context, clock, player };
 }
 
+/** Let a decoder replaced at a gap or a timestamp jump finish, so the next one starts. */
+const settle = () => new Promise<void>((resolve) => setTimeout(resolve));
 const nodeOf = (context: FakeContext, index = 0) => context.nodes[index] as FakeWorkletNode;
 /** The distinct non-silent markers in an output, in order. */
 const markers = (samples: number[]) => {
@@ -285,6 +297,7 @@ describe('createAudioPlayer', () => {
     for (const index of [1, 2, 4, 3, 5, 6]) reader.onObject(object(index));
     reader.close();
     expect(sequencer.stats.late).toBe(1);
+    await settle();
     const played = context.render(160).get(nodeOf(context)) ?? [];
     expect(markers(played)).toEqual([1, 2, 4, 5, 6]);
     // Frame 3's 20 ms are silence, so frame 4 still starts 40 ms after frame 2.
@@ -297,6 +310,40 @@ describe('createAudioPlayer', () => {
     expect(input.stats.decoderResets).toBe(1);
   });
 
+  it('lets a decoder replaced at a gap output what it still holds, then decodes on in order', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    // One poll of a frame reader: frames 1 to 3, then frame 5 after a gap, before the decoder has output anything.
+    FakeDecoder.hold = true;
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    input.push(frameAt(5, 'gap'));
+    input.push(frameAt(6));
+    FakeDecoder.hold = false;
+    await settle();
+    for (const decoder of FakeDecoder.instances) decoder.release();
+    expect(input.stats).toMatchObject({ decoded: 5, decoderResets: 1 });
+    expect(FakeDecoder.instances).toHaveLength(2);
+    expect(markers(context.render(160).get(nodeOf(context)) ?? [])).toEqual([1, 2, 3, 5, 6]);
+    expect(input.stats.concealedUs).toBe(20_000);
+  });
+
+  it('drops what a replaced decoder still holds at a resync', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    FakeDecoder.hold = true;
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    input.push(frameAt(5, 'gap'));
+    FakeDecoder.hold = false;
+    input.push(frameAt(511, 'resync'));
+    input.push(frameAt(512));
+    input.push(frameAt(513));
+    await settle();
+    for (const decoder of FakeDecoder.instances) decoder.release();
+    // Frames 1 to 3 and 5 belong to the replaced timeline: only the new one plays.
+    expect(markers(context.render(100).get(nodeOf(context)) ?? [])).toEqual([11, 12, 13]);
+    expect(input.stats).toMatchObject({ decoded: 6, decoderResets: 1 });
+  });
+
   it('drops a frame behind what it already decoded, and resets the decoder at a timestamp jump', async () => {
     const { player } = await setUp();
     const input = player.addInput();
@@ -307,6 +354,7 @@ describe('createAudioPlayer', () => {
     // Chromium's decoder would stamp frame 5 as frame 3: a fresh decoder stamps it from its input.
     input.push(frameAt(5));
     expect(input.stats.decoderResets).toBe(1);
+    await settle();
     expect(FakeDecoder.instances).toHaveLength(2);
     expect(FakeDecoder.instances[1]?.nextUs).toBe(frameAt(6).timestampUs);
   });
@@ -423,6 +471,7 @@ describe('createAudioPlayer', () => {
     input.cut({ untilUs: frameAt(10).timestampUs });
     context.render(100);
     for (let index = 10; index <= 13; index++) input.push(frameAt(index));
+    await settle();
     expect(markers(context.render(80).get(nodeOf(context)) ?? [])).toEqual([10, 11, 12, 13]);
     expect(input.stats).toMatchObject({ underruns: 0, jitterTargetUs: 60_000 });
   });
