@@ -2,7 +2,8 @@
 
 A Relay connection runs over a **transport adapter** (see `CONTEXT.md`): the browser's native
 `WebTransport`, the Python aioquic native QUIC client, the `@mux/relay-quic`
-native QUIC adapter for Node, and the in-memory pairs the tests use. This document states what every adapter must do
+native QUIC adapter for Node, the `@mux/relay-websocket` QMux-over-WebSocket adapter for browsers and
+Node, and the in-memory pairs the tests use. This document states what every adapter must do
 for the SDK core to behave as `behavior.md` says. Until now that was only the TypeScript
 `MoqtTransport` interface plus behaviour the core relied on without writing it down.
 
@@ -16,16 +17,26 @@ nothing in them. It only narrows what an adapter exposes at the seam the core de
 - [RFC 9000] (QUIC streams, RESET_STREAM, STOP_SENDING, MAX_STREAMS, acknowledgement)
 - [RFC 7301] (ALPN)
 - [draft-ietf-webtrans-http3] and the [W3C WebTransport] API, for a WebTransport session
+- [draft-ietf-quic-qmux] (QUIC streams over a reliable byte stream), [draft-lcurley-qmux-websocket]
+  (its WebSocket binding, which moq-relay serves) and [RFC 6455] (WebSocket), for QMux over WebSocket
 
 Every rule cites the upstream section it narrows. If a rule seems to conflict with one of these
 specifications, the specification wins and the rule is a bug in this document. TA-27 is the one
 exception: on native QUIC it follows moq-relay's stream error codes, which differ from draft-22.
+
+QMux over WebSocket has QUIC's stream semantics (STREAM, RESET_STREAM, STOP_SENDING, MAX_STREAMS and
+flow control, as QMux frames) but no QUIC underneath: every stream shares one TCP connection, so a lost
+packet holds up every stream behind it (head-of-line blocking), and nothing is acknowledged above TCP.
+Where this document names a QUIC frame, it means the QMux frame of the same name on a WebSocket.
 
 [draft-ietf-moq-transport-22]: https://datatracker.ietf.org/doc/draft-ietf-moq-transport/22/
 [RFC 9000]: https://www.rfc-editor.org/rfc/rfc9000
 [RFC 7301]: https://www.rfc-editor.org/rfc/rfc7301
 [draft-ietf-webtrans-http3]: https://datatracker.ietf.org/doc/draft-ietf-webtrans-http3/
 [W3C WebTransport]: https://www.w3.org/TR/webtransport/
+[draft-ietf-quic-qmux]: https://datatracker.ietf.org/doc/draft-ietf-quic-qmux/
+[draft-lcurley-qmux-websocket]: https://github.com/moq-dev/moq/blob/main/drafts/draft-lcurley-qmux-websocket.md
+[RFC 6455]: https://www.rfc-editor.org/rfc/rfc6455
 
 ## Conventions
 
@@ -65,7 +76,7 @@ The seam is the factory a connection calls and the transport it returns.
 | --- | --- |
 | `createTransport(url, protocols)` | `RelayTransportFactory`. Called once per connection with the endpoint URL (the token already in its `jwt` query parameter) and the MOQT protocol identifiers to offer, in preference order. Returns `{ transport, ready, framing }`. |
 | `ready` | Resolves once the transport can open streams and a protocol was selected; a rejection fails the connect call. |
-| `framing` | `'webtransport'` or `'native-quic'`: what the transport carries. Optional, default `'webtransport'`. |
+| `framing` | `'webtransport'`, `'native-quic'` or `'websocket'`: what the transport carries. Optional, default `'webtransport'`. The core reads it once `ready` has resolved. |
 | `transport.protocol` | The protocol identifier the peer selected (TA-8). A browser's `WebTransport` has it. |
 | `transport.incomingUnidirectionalStreams` | `ReadableStream` of the peer's unidirectional streams, each a `ReadableStream<Uint8Array>`. |
 | `transport.incomingBidirectionalStreams` | `ReadableStream` of the peer's bidirectional streams, each `{ readable, writable }`. |
@@ -85,12 +96,15 @@ The same holds for a bidirectional stream's two halves.
 
 **TA-1.** The adapter MUST declare its framing in the factory result: `'webtransport'` when the
 transport carries a WebTransport session, `'native-quic'` when it carries MOQT directly on a QUIC
-connection. An adapter that declares nothing is a WebTransport session.
+connection, `'websocket'` when it carries MOQT on QMux over a WebSocket. An adapter that declares
+nothing is a WebTransport session.
 **Why:** the framing decides what CLIENT_SETUP contains (TA-5, TA-6).
 
 **TA-2.** On a WebTransport session the adapter MUST send the extended CONNECT to the URL exactly
 as it was given, path and query included, so the token reaches the relay in the `jwt` query
-parameter (draft-22 §6.2.1; draft-ietf-webtrans-http3 §3).
+parameter (draft-22 §6.2.1; draft-ietf-webtrans-http3 §3). Over WebSocket it MUST send the opening
+handshake (RFC 6455 §4.1) to the same URL with the scheme `wss:` in place of `https:`, path and query
+unchanged: moq-relay reads the path and the token from the upgrade request, as it does from a CONNECT.
 
 **TA-3.** On native QUIC the adapter MUST connect to the URL's host and port (443 when the URL gives
 none), with the host as the TLS server name (draft-22 §6.1.2, §6.2.2). It MUST NOT send the URL's
@@ -106,27 +120,33 @@ from a `moqt` one by changing the scheme, so they name the same server.
 
 **TA-5.** The adapter MUST offer exactly the factory's `protocols`, in the order given: as
 `WT-Available-Protocols` on a WebTransport session (draft-ietf-webtrans-http3 §3.3), as the ALPN
-list on native QUIC (RFC 7301 §3.1). On native QUIC it MUST NOT add `h3` or any other ALPN, even
-though draft-22 §6.1.2 lets a client offer `h3` beside its MOQT ALPNs.
+list on native QUIC (RFC 7301 §3.1), and over WebSocket as `Sec-WebSocket-Protocol`, each protocol
+prefixed with the QMux wire format that carries it, `qmux-01.<protocol>` (draft-lcurley-qmux-websocket,
+"Subprotocol Negotiation"). On native QUIC it MUST NOT add `h3` or any other ALPN, even
+though draft-22 §6.1.2 lets a client offer `h3` beside its MOQT ALPNs. Over WebSocket it MUST NOT add
+a bare wire format (`qmux-01`, `qmux-00`, `webtransport`).
 **Why:** the SDK speaks one MOQT version. A fallback to `h3` would turn a native QUIC adapter into
-a WebTransport session it cannot run.
+a WebTransport session it cannot run, and a bare wire format lets moq-relay pick moq-lite in SETUP.
+moq-relay pairs `moqt-18` and newer only with `qmux-01` (`QMUX01_ONLY_ALPNS` in
+`rs/moq-relay/src/websocket.rs`), and fails the upgrade with 400 when nothing offered is its own.
 
 **TA-6.** On native QUIC the core, not the adapter, sends the AUTHORITY setup option (the URL's
 authority) and the PATH setup option (the URL's path-abempty, then `?` and the query when present,
-the resolved `jwt` included) in CLIENT_SETUP. On a WebTransport session it MUST NOT send either
-(draft-22 §9.1.1, §9.1.2).
+the resolved `jwt` included) in CLIENT_SETUP. On a WebTransport session, and over WebSocket, it MUST
+NOT send either (draft-22 §9.1.1, §9.1.2): the request URL carries them.
 The cases, from the URL and token to the exact option values, are in
 `vectors/setup-options.json`.
 
 **TA-7.** The adapter MUST NOT resolve `ready` until the peer has explicitly selected one of the
 offered protocols: the negotiated ALPN on native QUIC, the `WT-Protocol` response header on a
-WebTransport session. A peer that selects nothing, or selects an identifier that was not offered,
+WebTransport session, the `Sec-WebSocket-Protocol` response header over WebSocket. A peer that selects nothing, or selects an identifier that was not offered,
 MUST make `ready` reject with a session error (TA-22). The adapter MUST NOT assume a default
 protocol.
 **Why:** the relay's default when a client selects nothing is moq-lite, which the SDK does not
 speak. A silent default fails late, as an obscure SETUP error, instead of at `ready`.
 
-**TA-8.** Once `ready` resolves, `transport.protocol` MUST be the selected identifier.
+**TA-8.** Once `ready` resolves, `transport.protocol` MUST be the selected identifier: over WebSocket,
+the MOQT protocol without its `qmux-01.` prefix.
 **Why:** `protocol` is a required, read-only member of `MoqtTransport`, and the core fails the
 connection unless it equals `MOQT_PROTOCOL_ID` (#203). That check backs up TA-7; it does not
 replace it.
@@ -135,11 +155,12 @@ replace it.
 
 **TA-9.** `closed` MUST resolve, with `{ closeCode, reason }`, when the session ends by an
 application close from either end: a local `close()`, or the peer's application CONNECTION_CLOSE
-(native QUIC, frame type 0x1d, RFC 9000 §19.19) or CLOSE_WEBTRANSPORT_SESSION capsule
-(draft-ietf-webtrans-http3 §6), whatever its code. It MUST reject, with a session error (TA-22),
-when the session ends any other way: a QUIC-layer CONNECTION_CLOSE (frame type 0x1c, a transport
-error such as FLOW_CONTROL_ERROR, RFC 9000 §20.1) from either end, connection loss, idle timeout,
-a stateless reset, or a failed handshake or dial. `closed` MAY reject at the same time as `ready`.
+(native QUIC, frame type 0x1d, RFC 9000 §19.19; over WebSocket the QMux frame of that type) or
+CLOSE_WEBTRANSPORT_SESSION capsule (draft-ietf-webtrans-http3 §6), whatever its code. It MUST
+reject, with a session error (TA-22), when the session ends any other way: a QUIC-layer
+CONNECTION_CLOSE (frame type 0x1c, a transport error such as FLOW_CONTROL_ERROR, RFC 9000 §20.1)
+from either end, connection loss, idle timeout, a stateless reset, a WebSocket that closes or drops
+without a QMux close, or a failed handshake or dial. `closed` MAY reject at the same time as `ready`.
 **Why:** the core treats a resolution as a clean end and a rejection as a failure
 (`#handleClosed`), and after SETUP it reports no error for a resolution. A transport failure that
 resolved `closed` would read as an orderly shutdown. The core attaches its rejection handler as
@@ -240,7 +261,10 @@ A peer's RESET_STREAM or STOP_SENDING code from `0x52E4A40FA8DB` to `0x52E5AC983
 before TA-19, TA-20 and TA-22 report it: *c* − `0x52E4A40FA8DB` = *s* gives *s* − floor(*s* / 0x1F),
 and a GREASE slot (*s* mod 0x1F = 0x1E) carries no code and MUST be reported as `null`. A code
 outside that range MUST be reported as it arrived. Session close codes (TA-9, TA-10, TA-24) MUST NOT
-be mapped. This rule does not apply to a WebTransport session, whose runtime maps codes itself.
+be mapped. This rule does not apply to a WebTransport session, whose runtime maps codes itself, nor
+over WebSocket, where QMux carries stream codes as they are: moq-relay's QMux sessions do not map
+them (`SendStream::reset` in qmux 0.5.2, which moq-relay 0.17.5 uses), and a forwarded subgroup reset
+reaches a WebSocket subscriber as code 1 (measured on a local 0.17.5, 2026-10-17).
 **Why:** `streamErrorCode` must mean the same thing in both framings, and the relay must be able to
 read the codes the core sends. moq-relay reaches raw QUIC through web-transport-moq, whose stream
 wrappers map every reset and stop code through `error_to_http3` and `error_from_http3` (moq-relay
@@ -307,7 +331,7 @@ The contract has two sides. Against an adapter that follows the rules above, the
 - attaches a handler to `closed` as soon as the factory returns, so TA-9's rejection alongside
   `ready` is never unhandled;
 - sends PATH and AUTHORITY only on native QUIC (TA-6), and fails the connection with
-  `TRANSPORT_ERROR`, closing the transport, when `framing` is neither value TA-1 allows;
+  `TRANSPORT_ERROR`, closing the transport, when `framing` is none of the values TA-1 allows;
 - checks `protocol` after `ready` and, unless it is one it offered (`moqt-22` or `moqt-20`), fails the connection with
   `TRANSPORT_ERROR` in phase `connecting`, naming the protocol received (or "none"), closes the
   transport and never sends CLIENT_SETUP (TA-7, TA-8);
@@ -365,6 +389,29 @@ adapters MUST NOT copy them.
   `new WebTransportError({ message, streamErrorCode: 256 }).streamErrorCode` is 255, and the
   conformance suite's peer sees 255 for a reset or stop sent with 256, 65536 or 2³²−1.
 
+### QMux over WebSocket (`@mux/relay-websocket`)
+
+The adapter wraps `@moq/qmux` 0.3.3 (ADR 0005). It meets every other rule; the conformance suite
+runs it in Node, Chromium, Firefox and WebKit (`conformance/targets/websocket.js`).
+
+- **No acknowledgement (TA-15, and TA-16 while close waits).** QMux runs over TCP and acknowledges
+  nothing an application can see, so a send stream's close resolves once its FIN is handed to the
+  WebSocket, not once the peer has it. A settling group's wait therefore ends at hand-over, and
+  `publisher.close()` drains nothing a closing socket can still lose. This is the binding, not the
+  library: no QMux-over-WebSocket adapter can meet TA-15.
+- **A reset behind a blocked write (TA-16).** The pending write and `writer.closed` reject at once,
+  so the write slot is free at once, but the RESET_STREAM goes out only once `@moq/qmux` has finished
+  the write it already started, when the peer next grants credit.
+- **A peer reset behind an unread chunk (TA-19).** `@moq/qmux` reports a peer RESET_STREAM only to a
+  read. The adapter keeps one read outstanding, so a reset lands without a read pending unless a chunk
+  the application has not read is already waiting; then the next read delivers that chunk and the
+  one after rejects. RFC 9000 §3.2 lets the chunk be discarded; here it is delivered.
+- **Long close reasons (TA-10).** A reason is cut to 1024 UTF-8 bytes, on a character boundary:
+  `@moq/qmux` refuses to close at all when the close frame would not fit one QMux record. `closed`
+  resolves with the reason as sent. The core's own reasons are far shorter.
+- **Stream credit (TA-21).** A create waits for MAX_STREAMS credit instead of rejecting. moq-relay
+  grants far more streams than the core uses at once, so the wait is not seen against the relay.
+
 ## Test doubles
 
 The in-memory transport pair (`ts/packages/moq-core/src/tests/helpers/transport-pair.ts`) is a test
@@ -395,7 +442,7 @@ stream halves and QUIC plumbing (#232). How the rules map:
 
 | Rule | Python |
 | --- | --- |
-| TA-1 | `ConnectingTransport.framing`, `"webtransport"` when a factory leaves it out. `connect_quic`, the default factory, declares `"native-quic"`. Any other value fails the connection with `TRANSPORT_ERROR`, closing the transport. |
+| TA-1 | `ConnectingTransport.framing`, `"webtransport"` when a factory leaves it out. `connect_quic`, the default factory, declares `"native-quic"`. `"websocket"` sends what `"webtransport"` does, though the package ships no WebSocket adapter. Any other value fails the connection with `TRANSPORT_ERROR`, closing the transport. |
 | TA-3, TA-4 | Native QUIC: `connect_quic` takes the `https:` URL, dials its host and port (443 by default) with the host as the server name, and reads nothing else from it. |
 | TA-5 | The ALPN list is exactly `protocols`, with no `h3`. |
 | TA-6 | `open_relay_session` sends PATH and AUTHORITY through moq_core's `setup_options` on native QUIC only (`test_setup_options.py`, against `vectors/setup-options.json`). |
@@ -424,6 +471,10 @@ every target:
   reset, stop, close at either layer, withhold acknowledgement and limit stream credit
 - `@mux/relay-quic` in Node, in `pnpm test:conformance:node`, against the same accepting end in its
   native QUIC mode (`--framing native-quic`)
+- `@mux/relay-websocket` in Node, in `pnpm test:conformance:websocket`, and in Chromium, Firefox and
+  WebKit, in `pnpm test:conformance:websocket:browsers`, against a Node accepting end for QMux over
+  WebSocket (`ts/scripts/websocket-peer.js`, `@moq/qmux` over `ws`) that speaks the Python one's
+  protocol
 
 A pytest port (`python/packages/mux-relay/tests/test_transport_conformance.py`, #230) runs the same cases
 against `moq_core.transport.MoqtTransport`, spelled as the [Python mapping](#python-mapping-informative) says,

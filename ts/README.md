@@ -10,6 +10,10 @@ Payloads are bytes the SDK does not interpret; no player, media catalog, or Vide
 - Node 24+: import from `@mux/relay/node`, which connects over native QUIC through
   `@mux/relay-quic` ([Node](#node)). Other runtimes must pass a compatible `createTransport`
   factory.
+- Where UDP is blocked, or the browser has no usable WebTransport (Safari): pass
+  [`@mux/relay-websocket`](packages/relay-websocket/README.md)'s `withWebSocketFallback()` or
+  `createWebSocketTransport()` as `createTransport` to connect over QMux over WebSocket on TCP 443
+  ([networks without UDP](GUIDE.md#networks-without-udp-qmux-over-websocket)).
 - A Relay endpoint and a short-lived Relay JWT authorized for the namespace you use. The SDK
   consumes tokens; it does not issue them.
 

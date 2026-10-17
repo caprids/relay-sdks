@@ -585,16 +585,22 @@ In Chromium it was +5 ms (median; p5 −1, p95 16). In Firefox it was −48 ms (
 which would stamp audio that much early. With players reporting from `getOutputTimestamp()`, Firefox
 played audio 33–36 ms late; Chromium's settled offsets stayed within ±17 ms.
 
-Firefox cannot run against the Relay: its WebTransport (148) offers no protocols and has no
-`protocol` attribute, and the SDK refuses a session that negotiates none
-([transport-adapter.md](transport-adapter.md), TA-7). Firefox also needs an audio server: without
+Firefox 148 cannot run against the Relay over WebTransport: its WebTransport offers no protocols and
+has no `protocol` attribute, and the SDK refuses a session that negotiates none
+([transport-adapter.md](transport-adapter.md), TA-7). Firefox 155 (stable 2026-09-01) added both, so
+current Firefox should reach the Relay over WebTransport; that is not yet re-tested against the
+relay. Over QMux over WebSocket (`@mux/relay-websocket`), Firefox 148 and Playwright's WebKit both
+passed the live data scenario against a local moq-relay 0.17.5 on 2026-10-17
+([QMux over WebSocket](relay-interop.md#qmux-over-websocket)); the A/V sync run has not been repeated
+over WebSocket. Firefox also needs an audio server: without
 one, its `AudioContext` stays suspended. Its H.264 `VideoEncoder` (148, Linux) holds about 41 frames,
 1.4 s, even with `latencyMode: 'realtime'`, while VP8, VP9 and AV1 return each frame within
 milliseconds. So its video arrives that much after its audio. The playout clock keeps audio the
 master and would drop video that late, so the Firefox run gives the player a 1.6 s audio jitter
 buffer. Playwright's WebKit (Safari 26.4's engine, on Linux) runs the hub scenario with short phases
 (settled offsets 4–7 ms), but at full length it stops responding partway through. It cannot open a
-WebTransport session to the Relay, and its `getOutputTimestamp()` is seconds off. It is opt-in
+WebTransport session to the Relay (it can reach it over WebSocket, above), and its
+`getOutputTimestamp()` is seconds off. It is opt-in
 (`AV_SYNC_RUNS=webkit:hub`) and says nothing about Safari on macOS.
 
 ### Frame reader

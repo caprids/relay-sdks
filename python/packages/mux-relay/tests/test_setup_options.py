@@ -101,7 +101,7 @@ class TestClientSetup:
 
         assert (path, authority) == (vector["path"], vector["authority"])
 
-    @pytest.mark.parametrize("framing", ["webtransport", "native-quic"])
+    @pytest.mark.parametrize("framing", ["webtransport", "native-quic", "websocket"])
     async def test_ta4_hands_every_framing_the_https_url_with_the_token_in_its_jwt_parameter(
         self, role: str, framing: str
     ) -> None:

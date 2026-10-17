@@ -15,6 +15,9 @@ importers:
       '@biomejs/biome':
         specifier: 2.5.13
         version: 2.5.13
+      '@moq/qmux':
+        specifier: 0.3.3
+        version: 0.3.3
       '@mux/moq-media':
         specifier: workspace:*
         version: link:packages/moq-media
@@ -24,9 +27,15 @@ importers:
       '@mux/relay-quic':
         specifier: workspace:*
         version: link:packages/relay-quic
+      '@mux/relay-websocket':
+        specifier: workspace:*
+        version: link:packages/relay-websocket
       '@types/node':
         specifier: 24.12.2
         version: 24.12.2
+      '@types/ws':
+        specifier: 8.18.2
+        version: 8.18.2
       mediabunny:
         specifier: 1.58.1
         version: 1.58.1
@@ -42,6 +51,9 @@ importers:
       vitest:
         specifier: 4.1.10
         version: 4.1.10(@types/node@24.12.2)(vite@8.2.2(@types/node@24.12.2)(yaml@2.9.1))
+      ws:
+        specifier: 8.22.0
+        version: 8.22.0
 
   packages/moq-core: {}
 
@@ -73,6 +85,15 @@ importers:
       '@types/node':
         specifier: 24.12.2
         version: 24.12.2
+
+  packages/relay-websocket:
+    dependencies:
+      '@moq/qmux':
+        specifier: 0.3.3
+        version: 0.3.3
+      '@mux/moq-core':
+        specifier: workspace:*
+        version: link:../moq-core
 
 packages:
 
@@ -290,6 +311,12 @@ packages:
 
   '@jridgewell/sourcemap-codec@1.6.0':
     resolution: {integrity: sha512-T7jf+5zgsZHwNJ4lvQ7/aezbyk0nNX+zJVWpmHA7VYsEx7a7qr5Rg5IbtJFqkgze5Y2sruq1RUY8Q837Od7iFw==}
+
+  '@moq/qmux@0.3.3':
+    resolution: {integrity: sha512-Ez1GCVwpyNGB0eWvhKIXOjXrfRlMdmO0lpJ7gqInZFzsOsYTyML0WRgh24Itczp9Kev0CXsUA/K+XrGs1dRKUA==}
+
+  '@moq/web-socket-stream@0.1.1':
+    resolution: {integrity: sha512-VKi/GE/CLqmbEZlgNbBLbAFk2pQTxT+KUD2DjCSoxqZxbS3KBe5BBZ0m3fila4fEGyll2JT5MmgEyVr4zkZEVA==}
 
   '@napi-rs/cli@3.10.5':
     resolution: {integrity: sha512-GF4WXmLLQk3uQvkPuLCOSH50DN4GUKZw1zHlMDh4rRF5TWpfOj3a8DkZ2PWCTwpPDMD4ex05sAjrCEwNdukEjg==}
@@ -856,6 +883,9 @@ packages:
   '@types/unist@3.0.3':
     resolution: {integrity: sha512-ko/gIFJRv177XgZsZcBwnqJN5x/Gien8qNOn0D5bQU/zAzVf9Zt3BlcUiLqhV9y4ARk0GbT3tnUiPNgnTXzc/Q==}
 
+  '@types/ws@8.18.2':
+    resolution: {integrity: sha512-67MQl+fpWKVTT1NYdnmo3U4sc/xPo/zQBncVnI74qmQa0z/b+1g6iYqNmGCPbxO+zz2aklb08a0oHfegiVd0/w==}
+
   '@vitest/expect@4.1.10':
     resolution: {integrity: sha512-YsCn+qAk1GWjQOWFEsEcL2gNQ0zmVmQu3T03qP6UyjhtmdtwtbuI+DASn/7iQB3HGTXkdBwGddzxPlmiql5vlA==}
 
@@ -1309,6 +1339,18 @@ packages:
     engines: {node: '>=8'}
     hasBin: true
 
+  ws@8.22.0:
+    resolution: {integrity: sha512-Ydggc987+RO0AnWtZ/7Wq9FtNvcrL1b/RO0ud9mWjUPgDrsAAwQSF51sm2hm1XofbU/4jkpGEsLFsZZxU+1DOg==}
+    engines: {node: '>=10.0.0'}
+    peerDependencies:
+      bufferutil: ^4.0.1
+      utf-8-validate: '>=5.0.2'
+    peerDependenciesMeta:
+      bufferutil:
+        optional: true
+      utf-8-validate:
+        optional: true
+
   yaml@2.9.1:
     resolution: {integrity: sha512-3NxN8+78OdzbT7C/WjGsyfPAtJaN3FNDsWxv7Y7mcDsT/oOmgW8BpyQQFFBnvZE3j9Y2Sdz1ULFLezL7Eb2yFw==}
     engines: {node: '>= 14.6'}
@@ -1511,6 +1553,12 @@ snapshots:
       '@types/node': 24.12.2
 
   '@jridgewell/sourcemap-codec@1.6.0': {}
+
+  '@moq/qmux@0.3.3':
+    dependencies:
+      '@moq/web-socket-stream': 0.1.1
+
+  '@moq/web-socket-stream@0.1.1': {}
 
   '@napi-rs/cli@3.10.5(@emnapi/core@1.11.2)(@emnapi/runtime@1.11.2)(@types/node@24.12.2)':
     dependencies:
@@ -1940,6 +1988,10 @@ snapshots:
 
   '@types/unist@3.0.3': {}
 
+  '@types/ws@8.18.2':
+    dependencies:
+      '@types/node': 24.12.2
+
   '@vitest/expect@4.1.10':
     dependencies:
       '@standard-schema/spec': 1.1.0
@@ -2281,5 +2333,7 @@ snapshots:
     dependencies:
       siginfo: 2.0.0
       stackback: 0.0.2
+
+  ws@8.22.0: {}
 
   yaml@2.9.1: {}

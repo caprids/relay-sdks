@@ -1,7 +1,7 @@
 # Changelog
 
 The TypeScript packages release together at one version: `@mux/relay`, `@mux/moq-core`, `@mux/moq-media`,
-`@mux/moq-mediabunny`, `@mux/relay-quic` and its platform packages. Before 1.0, a minor version can break the API;
+`@mux/moq-mediabunny`, `@mux/relay-quic` and its platform packages, and `@mux/relay-websocket`. Before 1.0, a minor version can break the API;
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
@@ -11,6 +11,13 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 
 - `@mux/relay`: `connectRelayPublisher` and `connectRelaySubscriber` for browsers over WebTransport, and
   `@mux/relay/node` for Node 24+ over native QUIC.
+- `@mux/relay-websocket`: a transport adapter for QMux over WebSocket, the relay's TCP 443 path for networks that
+  block UDP and browsers without a usable WebTransport ([#321](https://github.com/muxinc/relay-sdks/issues/321)).
+  Pass `createWebSocketTransport()` as `createTransport` to always use it, or `withWebSocketFallback()` to dial
+  WebTransport first and WebSocket when that handshake fails or takes longer than `handshakeTimeoutMs` (4 s). Nothing
+  falls back unless you pass one. Over WebSocket a refused token is `TRANSPORT_ERROR`, not `UNAUTHORIZED`, and every
+  stream shares one TCP connection. `RelayTransportFactory`'s `framing` takes `'websocket'`, which sends the same
+  SETUP as `'webtransport'`.
 - `@mux/relay/media`: the media publishing policy Python has as `mux_relay.media`
   ([#263](https://github.com/muxinc/relay-sdks/issues/263)). `createFrameWriter(track, options)` maps encoded frames
   onto groups (a group per keyframe, or per frame) and can be called from a WebCodecs output callback without

@@ -9,6 +9,9 @@
 /** The MOQT protocol identifier the cases offer by default. */
 export const MOQT_PROTOCOL = 'moqt-22';
 
+/** The QMux wire format a WebSocket adapter offers each MOQT protocol on (TA-5): `qmux-01.moqt-22`. */
+const QMUX_WIRE_FORMAT = 'qmux-01';
+
 /** How long a case may wait for something that must happen promptly. */
 const PROMPTLY_MS = 2_000;
 /** How long a case watches for something that must not happen. */
@@ -270,8 +273,8 @@ export const cases = [
       const result = ctx.dial();
       const framing = result.framing ?? 'webtransport';
       check(
-        result.framing === undefined || result.framing === 'webtransport' || result.framing === 'native-quic',
-        `framing must be 'webtransport' or 'native-quic', got ${describe(result.framing)}`,
+        result.framing === undefined || ['webtransport', 'native-quic', 'websocket'].includes(result.framing),
+        `framing must be 'webtransport', 'native-quic' or 'websocket', got ${describe(result.framing)}`,
       );
       equal(framing, ctx.target.framing, 'framing');
       await resolves(result.ready, 'ready');
@@ -281,6 +284,16 @@ export const cases = [
     rule: 'TA-2',
     name: 'TA-2 sends the CONNECT to the URL as given, path and query included',
     needs: ['webtransport'],
+    async run(ctx) {
+      const path = '/conformance/ta-2/x%2Fy?jwt=header.payload.signature&other=1';
+      await open(ctx, { path });
+      equal((await ctx.peer.observed()).path, path, 'the path the peer saw');
+    },
+  },
+  {
+    rule: 'TA-2',
+    name: 'TA-2 sends the WebSocket upgrade to the URL as given, path and query included',
+    needs: ['websocket'],
     async run(ctx) {
       const path = '/conformance/ta-2/x%2Fy?jwt=header.payload.signature&other=1';
       await open(ctx, { path });
@@ -315,7 +328,10 @@ export const cases = [
     async run(ctx) {
       const protocols = [MOQT_PROTOCOL, 'moqt-conformance-b', 'moqt-conformance-a'];
       await open(ctx, { protocols });
-      equal((await ctx.peer.observed()).protocols, protocols, 'the protocols the peer saw offered');
+      // Over WebSocket each protocol is a subprotocol on the QMux wire format that carries it.
+      const offered =
+        ctx.target.framing === 'websocket' ? protocols.map((protocol) => `${QMUX_WIRE_FORMAT}.${protocol}`) : protocols;
+      equal((await ctx.peer.observed()).protocols, offered, 'the protocols the peer saw offered');
     },
   },
   {

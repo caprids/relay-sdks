@@ -11,6 +11,7 @@
     "packages/moq-media/src/**/*.ts",
     "packages/moq-mediabunny/src/**/*.ts",
     "packages/relay-quic/src/**/*.ts",
+    "packages/relay-websocket/src/**/*.ts",
     "examples/mediabunny/**/*.ts",
     "examples/webcodecs/**/*.ts",
     "scripts/av-sync/**/*.ts"

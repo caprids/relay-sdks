@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
@@ -8,9 +10,14 @@ import { startModuleServer } from './module-server.js';
 import { summarizeRuns } from './relay-runs.js';
 
 // The launchers for the live-relay scenario in relay-scenario.js. It runs once per runtime, each with a fresh
-// namespace: in Node over @mux/relay-quic's native QUIC, then in a headless Chromium page over WebTransport.
-// RELAY_RUNTIME=node or RELAY_RUNTIME=chromium runs only one. Each runtime's outcome is reported, redacted, and
-// folded into a summary that calls out a scenario passing on one runtime and failing on the other.
+// namespace: in Node over @mux/relay-quic's native QUIC, in a headless Chromium page over WebTransport, then both again
+// over @mux/relay-websocket's QMux over WebSocket (#321). RELAY_RUNTIME names the runtimes to run, comma-separated:
+// those four (node, chromium, node-websocket, chromium-websocket), plus webkit-websocket and firefox-websocket, and
+// chromium-fallback, Chromium through withWebSocketFallback. Each runtime's outcome is reported, redacted, and folded
+// into a summary that calls out a scenario passing on one runtime and failing on the other.
+//
+// Over WebSocket, Node trusts a local relay's certificate only through NODE_EXTRA_CA_CERTS, and the browsers ignore
+// certificate errors when RELAY_CERTIFICATE_HASH or RELAY_CA_FILE says the relay is a local one.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const readEndpoint = (name, fallback) => {
@@ -29,9 +36,23 @@ const certificateHash = process.env.RELAY_CERTIFICATE_HASH;
 if (certificateHash) assert.match(certificateHash, /^[0-9a-f]{64}$/i);
 // Node can also trust a CA file; the browser cannot, so the hash wins when both are set.
 const caFile = process.env.RELAY_CA_FILE;
-const launchers = { node: runInNode, chromium: runInChromium };
-const runtimes = process.env.RELAY_RUNTIME ? [process.env.RELAY_RUNTIME] : Object.keys(launchers);
-assert(Object.hasOwn(launchers, runtimes[0]), 'RELAY_RUNTIME must be node or chromium, or unset for both');
+const launchers = {
+  node: runInNode,
+  chromium: (options) => runInBrowser('chromium', 'webtransport', options),
+  'node-websocket': runInNodeOverWebSocket,
+  'chromium-websocket': (options) => runInBrowser('chromium', 'websocket', options),
+  'webkit-websocket': (options) => runInBrowser('webkit', 'websocket', options),
+  'firefox-websocket': (options) => runInBrowser('firefox', 'websocket', options),
+  'chromium-fallback': (options) => runInBrowser('chromium', 'fallback', options),
+};
+const runtimes = process.env.RELAY_RUNTIME
+  ? process.env.RELAY_RUNTIME.split(',').filter(Boolean)
+  : ['node', 'chromium', 'node-websocket', 'chromium-websocket'];
+for (const runtime of runtimes) {
+  assert(Object.hasOwn(launchers, runtime), `RELAY_RUNTIME names ${runtime}; expected ${Object.keys(launchers)}`);
+}
+// A local relay's self-signed certificate, which a browser's WebSocket can only be told to ignore.
+const localRelay = Boolean(certificateHash || caFile);
 if (!token && !anonymous) {
   const raw = process.stdin.isRaw ?? false;
   const input = createInterface({ input: process.stdin, terminal: false });
@@ -99,30 +120,70 @@ async function runInNode({ namespace, reportPhase }) {
   return runRelayScenario({ endpoint, subEndpoint, token, namespace, createTransport, report: reportPhase });
 }
 
-/** The scenario in a headless Chromium page, over WebTransport: the built modules are served to it on localhost. */
-async function runInChromium({ namespace, reportPhase }) {
-  const { chromium } = await import('playwright');
+/** The scenario in this process, over QMux over WebSocket. */
+async function runInNodeOverWebSocket({ namespace, reportPhase }) {
+  const [{ createWebSocketTransport }, { runRelayScenario }] = await Promise.all([
+    import('@mux/relay-websocket'),
+    import('./relay-scenario.js'),
+  ]);
+  const createTransport = createWebSocketTransport();
+  return runRelayScenario({ endpoint, subEndpoint, token, namespace, createTransport, report: reportPhase });
+}
+
+/** The directory a package's entry point is in, through pnpm's symlinks. */
+function packageDirectory(specifier, from) {
+  return dirname(realpathSync(createRequire(from).resolve(specifier)));
+}
+
+/**
+ * The scenario in a headless browser page: over WebTransport, over QMux over WebSocket, or through the fallback from
+ * one to the other (`transport`). The built modules are served to it on localhost.
+ */
+async function runInBrowser(name, transport, { namespace, reportPhase }) {
+  const playwright = await import('playwright');
+  const qmux = packageDirectory('@moq/qmux', resolve(root, 'packages/relay-websocket/package.json'));
   // The built SDK, the built core, the runtime-neutral scenario, and the example policy it shares with
-  // the mux-global demo, at the paths the scenario's relative imports expect.
+  // the mux-global demo, at the paths the scenario's relative imports expect; the WebSocket adapter beside them.
   const modules = {
     '/sdk/': resolve(root, 'dist'),
     '/core/': resolve(root, 'packages/moq-core/dist'),
     '/scripts/': resolve(root, 'scripts'),
     '/examples/shared/': resolve(root, 'examples/shared'),
+    '/websocket/': resolve(root, 'packages/relay-websocket/dist'),
+    '/qmux/': qmux,
+    '/web-socket-stream/': packageDirectory('@moq/web-socket-stream', resolve(qmux, 'package.json')),
   };
   const server = await startModuleServer({
     modules,
-    importMap: { '@mux/relay': '/sdk/index.js', '@mux/moq-core': '/core/index.js' },
+    importMap: {
+      '@mux/relay': '/sdk/index.js',
+      '@mux/moq-core': '/core/index.js',
+      '@mux/relay-websocket': '/websocket/index.js',
+      '@moq/qmux': '/qmux/index.js',
+      '@moq/web-socket-stream': '/web-socket-stream/index.js',
+    },
   });
   let browser;
   try {
-    browser = await chromium.launch({ headless: true });
-    const page = await browser.newPage();
+    browser = await playwright[name].launch({ headless: true });
+    const context = await browser.newContext({ ignoreHTTPSErrors: transport !== 'webtransport' && localRelay });
+    const page = await context.newPage();
     await page.exposeFunction('reportPhase', reportPhase);
     await page.goto(`http://127.0.0.1:${server.address().port}/`);
     return await page.evaluate(
-      async ({ endpoint, subEndpoint, token, namespace, certificateHash }) => {
+      async ({ endpoint, subEndpoint, token, namespace, certificateHash, transport }) => {
         const { runRelayScenario } = await import('/scripts/relay-scenario.js');
+        const report = window.reportPhase;
+        if (transport !== 'webtransport') {
+          const { createWebSocketTransport, withWebSocketFallback } = await import('@mux/relay-websocket');
+          const createTransport =
+            transport === 'websocket'
+              ? createWebSocketTransport()
+              : withWebSocketFallback({
+                  onFallback: (reason) => void report({ phase: 'fallback', reason: String(reason) }),
+                });
+          return runRelayScenario({ endpoint, subEndpoint, token, namespace, createTransport, report });
+        }
         if (typeof WebTransport === 'undefined') throw new Error('This browser does not provide WebTransport');
         const createTransport = certificateHash
           ? (url, protocols) => {
@@ -143,7 +204,7 @@ async function runInChromium({ namespace, reportPhase }) {
           report: window.reportPhase,
         });
       },
-      { endpoint, subEndpoint, token, namespace, certificateHash },
+      { endpoint, subEndpoint, token, namespace, certificateHash, transport },
     );
   } finally {
     await browser?.close();

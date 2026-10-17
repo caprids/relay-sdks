@@ -13,8 +13,14 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
 | `targets/chromium.js` | The browser's native `WebTransport` as a target, run in a page. Its peer is the Python accepting end. |
 | `targets/relay-quic.js` | `@mux/relay-quic`, the Node adapter over native QUIC, as a target. Its peer is the Python accepting end with `--framing native-quic`. |
 | `targets/relay-quic-lifetime.js` | The child Node process behind that target's TA-25 and TA-26 checks, and its check that a cancelled dial (TA-11) lets the process exit. |
+| `targets/websocket.js` | `@mux/relay-websocket`, QMux over WebSocket (#321), as a target. Runtime-neutral: the same target runs in Node and in a browser page. Its peer is the Node accepting end, `scripts/websocket-peer.js`. |
+| `targets/websocket-lifetime.js` | The child Node process behind the WebSocket target's TA-25, TA-26 and cancelled-dial checks in Node. |
+| `targets/lifetime.js` | Runs a lifetime child and checks how it ended, for both Node adapters. |
 | `targets/remote-peer.js` | The peer methods as requests to the Python accepting end, for both targets that use it. |
 | `relay-quic.conformance.js` | The suite against `@mux/relay-quic` under vitest, plus its trust checks (`ca`, an untrusted certificate, bad options). |
+| `websocket.conformance.js` | The suite against `@mux/relay-websocket` in Node under vitest, plus `withWebSocketFallback` where Node has no WebTransport. `vitest.websocket.config.js` makes the peer's certificate first, so Node trusts it from the start. |
+| `../scripts/test-conformance-websocket.mjs` | The browser launcher for the WebSocket target: Chromium, Firefox and WebKit through Playwright. |
+| `../scripts/websocket-peer.js` | The accepting end for QMux over WebSocket: `@moq/qmux`'s accepting role over `ws`, over TLS, speaking the Python accepting end's JSON lines. |
 | `../scripts/test-conformance.mjs` | The Chromium launcher: it starts the accepting end, serves the suite to a Playwright page, runs it and prints the results. |
 | `../scripts/conformance-peer.js` | Starts the Python accepting end for either launcher. |
 | `python/…/relay_helpers/conformance_peer.py` | The scriptable accepting end: aioquic, out of process, driven over JSON lines. |
@@ -27,6 +33,11 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
   end. It needs the Python workspace (`mise run python:install`) and Playwright's Chromium
   (`pnpm exec playwright install chromium`). It takes about 15 s. `CONFORMANCE_GREP=TA-15` runs only the cases whose
   name contains the text. CI runs it as the TypeScript workflow's `conformance` job.
+- `pnpm test:conformance:websocket` (`mise run ts:test:conformance:websocket`) runs it in Node against
+  `@mux/relay-websocket` and the Node accepting end. It needs only Node and `openssl`, and takes about 15 s.
+  `pnpm test:conformance:websocket:browsers` runs it in Chromium, Firefox and WebKit (`BROWSERS=chromium,webkit` picks;
+  `CONFORMANCE_GREP` works as above), with Playwright's browsers installed; the pages ignore the peer's self-signed
+  certificate, which a page cannot pin for a WebSocket. CI runs both as the `conformance-websocket` job.
 - `pnpm test:conformance:node` (`mise run ts:test:conformance:node`) runs it in Node against `@mux/relay-quic` and the
   Python accepting end in its native QUIC mode. It builds the native addon first, with the Rust toolchain the mise
   task pins, and needs the Python workspace. After the build it takes about 25 s, most of it the TA-9 connection-loss
@@ -42,7 +53,7 @@ A target is a plain object:
 | Member | Meaning |
 | --- | --- |
 | `name` | Shown in the test names. |
-| `framing` | `'webtransport'` or `'native-quic'`: what TA-1 expects the factory to declare. |
+| `framing` | `'webtransport'`, `'native-quic'` or `'websocket'`: what TA-1 expects the factory to declare. |
 | `capabilities` | What the target's peer and runtime can do, listed below. A case that `needs` one the target lacks is skipped. |
 | `gaps` | For each missing capability, the reason the skip reports. |
 | `expectations` | Keyed by case name: `{ skip: '<reason>' }` where a rule does not apply, or `{ fails: '<reason>' }` where the target is known not to meet it. A `fails` reason cites a Known deviation in the spec, or the issue that closes the gap. |
@@ -58,7 +69,7 @@ A target is a plain object:
 
 | Capability | Meaning |
 | --- | --- |
-| `webtransport`, `native-quic` | The target's framing. |
+| `webtransport`, `native-quic`, `websocket` | The target's framing. |
 | `selectProtocol` | The peer can select no protocol, or one that was not offered (TA-7). |
 | `holdHandshake` | The peer can hold the handshake until `releaseHandshake()` (TA-7, TA-11). |
 | `refuseHandshake` | The peer can refuse the session (TA-9). |
@@ -149,6 +160,23 @@ methods:
   `reset` and `stop` put the code on the wire as given, up to 2⁶²−1, and `wireCode` reports the dialer's code as it
   arrived.
 - `close()` is an application CONNECTION_CLOSE (0x1d), and `closed()` reports the dialer's.
+
+## The WebSocket accepting end
+
+`scripts/websocket-peer.js` takes the same requests as the Python accepting end, over the same JSON lines, for QMux
+over WebSocket. `scripts/conformance-peer.js` starts it for `framing: 'websocket'`, with a fresh self-signed certificate
+unless `WEBSOCKET_PEER_CERTIFICATE` and `WEBSOCKET_PEER_KEY` name one. It listens on `::`, which takes IPv4 too.
+
+- `select` picks the first subprotocol offered, none (`Sec-WebSocket-Protocol` absent), or `qmux-01.moqt-unoffered`;
+  `observedDial` reports the upgrade's path and query and the subprotocols offered, as sent (`qmux-01.moqt-22`).
+- `hold` holds every upgrade until `releaseHandshake()`; `refuse` answers the upgrade with 401.
+- `maxStreams` is the dialer's MAX_STREAMS of each kind. Credit returns as the peer accepts streams.
+- `pause()` stops reading the TCP connection, so flow control and TCP hold the dialer; nothing is acknowledged either
+  way, since QMux has no acknowledgement.
+- `quicClose()` sends a QMux CONNECTION_CLOSE (0x1c) and closes the WebSocket; `loseConnection()` destroys the TCP
+  connection with no close of either kind.
+- It shares `@moq/qmux` with the adapter, so it checks the wrapper against the contract, not the library against
+  moq-relay. The live scenario (`pnpm test:relay` over WebSocket) does that.
 
 ## Adding a target
 

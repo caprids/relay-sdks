@@ -5,7 +5,7 @@ all its packages. [ADR 0003](adr/0003-hand-cut-lockstep-releases.md) records why
 
 | Train | Packages | Tag | Workflow |
 | --- | --- | --- | --- |
-| TypeScript | `@mux/relay`, `@mux/moq-core`, `@mux/moq-media`, `@mux/moq-mediabunny`, `@mux/relay-quic` and its 7 platform packages | `ts/v<x.y.z>` | `release-ts.yml` |
+| TypeScript | `@mux/relay`, `@mux/moq-core`, `@mux/moq-media`, `@mux/moq-mediabunny`, `@mux/relay-quic` and its 7 platform packages, `@mux/relay-websocket` | `ts/v<x.y.z>` | `release-ts.yml` |
 | Python | `mux-relay`, `mux-moq-core`, `mux-moq-media` | `python/v<x.y.z>` | `release-python.yml` |
 
 ## Cut a release

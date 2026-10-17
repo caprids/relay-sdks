@@ -29,9 +29,9 @@
     }
   },
   "scripts": {
-    "build": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && tsc -p tsconfig.build.json",
-    "test": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && vitest run",
-    "typecheck": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && tsc --noEmit -p tsconfig.json",
+    "build": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && pnpm --filter @mux/relay-websocket build && tsc -p tsconfig.build.json",
+    "test": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && pnpm --filter @mux/relay-websocket build && vitest run",
+    "typecheck": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && pnpm --filter @mux/relay-websocket build && tsc --noEmit -p tsconfig.json",
     "lint": "biome check --error-on-warnings .",
     "fix": "biome check --write .",
     "format": "biome format --write .",
@@ -43,7 +43,9 @@
     "test:av-sync": "pnpm build && node scripts/test-av-sync.mjs",
     "test:conformance": "pnpm build && node scripts/test-conformance.mjs",
     "example:mux-global": "pnpm build && pnpm --filter @mux/relay-quic build:native && node examples/mux-global/run.mjs",
-    "test:conformance:node": "pnpm build && pnpm --filter @mux/relay-quic build:native && vitest run --config conformance/vitest.relay-quic.config.js"
+    "test:conformance:node": "pnpm build && pnpm --filter @mux/relay-quic build:native && vitest run --config conformance/vitest.relay-quic.config.js",
+    "test:conformance:websocket": "pnpm build && vitest run --config conformance/vitest.websocket.config.js",
+    "test:conformance:websocket:browsers": "pnpm build && node scripts/test-conformance-websocket.mjs"
   },
   "dependencies": {
     "@mux/moq-core": "workspace:*"
@@ -58,15 +60,19 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
+    "@moq/qmux": "0.3.3",
     "@mux/moq-media": "workspace:*",
     "@mux/moq-mediabunny": "workspace:*",
     "@mux/relay-quic": "workspace:*",
+    "@mux/relay-websocket": "workspace:*",
     "@types/node": "24.12.2",
+    "@types/ws": "8.18.2",
     "mediabunny": "1.58.1",
     "playwright": "1.59.1",
     "typedoc": "0.28.20",
     "typescript": "6.0.2",
-    "vitest": "4.1.10"
+    "vitest": "4.1.10",
+    "ws": "8.22.0"
   },
   "engines": {
     "node": ">=24"

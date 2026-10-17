@@ -20,6 +20,9 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `open_group()` has no object to time. The frame writer opens every group this way, so a frame whose open fails
   reports no `group_id`, and `groups` counts only opens that returned a group.
 - `mux-moq-core` (imported as `moq_core`): the transport-independent MOQT sessions the SDK is built on.
+- `ConnectingTransport.framing` accepts `"websocket"`, a factory carrying MOQT on QMux over WebSocket, which sends the
+  same SETUP as `"webtransport"` ([#321](https://github.com/muxinc/relay-sdks/issues/321)). The package ships no such
+  factory.
 - Reading frames in decode order within a latency budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)).
   `moq_media.FrameSequencer(clock, grouping=)` orders one track's objects across group streams, waits for a late group
   only while it can still matter, skips to the next keyframe past the deadline, drops late audio, and marks each `gap`,

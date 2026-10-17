@@ -33,6 +33,28 @@ against that file.
 - The browser transport may end a silent connection after about 5 s while data is outstanding.
   The SDK reports it as `TRANSPORT_ERROR` in phase `connection` and cannot tell it apart from other
   losses. See [browser transport limits](../ts/GUIDE.md#browser-transport-limits).
+
+### Transport fallback
+
+- The connection's transport is the application's choice, through the transport factory. The
+  default stays the browser's WebTransport (TypeScript) or native QUIC (Python, and `@mux/relay/node`):
+  the SDK never falls back to another transport by itself.
+- The TypeScript SDK's opt-in `@mux/relay-websocket` package carries MOQT on QMux over a WebSocket,
+  TCP to the same host and port as the endpoint (`https:` becomes `wss:`), for networks that block
+  UDP and browsers without a usable WebTransport. `createWebSocketTransport()` always dials it.
+- `withWebSocketFallback()` dials WebTransport first, and QMux over WebSocket when that handshake
+  fails or has not completed within `handshakeTimeoutMs` (default 4 s, about when Chromium itself gives
+  up on a silent handshake). The two dials run one after the other, never at once, and the abandoned
+  WebTransport dial is closed. Where the runtime has no WebTransport that can negotiate protocols, it
+  dials WebSocket at once. Each connection, a supervisor's reconnects and rotations included, decides
+  afresh; nothing is remembered between connections. A WebTransport session that comes up and is
+  then refused (for example over its credentials) is not retried over WebSocket.
+- Both transports run the same session; the differences are the relay's and TCP's
+  ([QMux over WebSocket](relay-interop.md#qmux-over-websocket)): streams share one TCP connection, so
+  a lost packet holds up every stream (head-of-line blocking); datagrams are unavailable; a
+  credentials refusal arrives as a failed WebSocket handshake, reported as `TRANSPORT_ERROR` in phase
+  `connecting`, not `UNAUTHORIZED`; and a send stream's close resolves once its FIN reaches the socket,
+  not the relay ([transport adapter](transport-adapter.md#known-deviations)).
 - The application can give the SDK a cancellation primitive, such as an abort signal or a
   cancellation token, that governs the connection's entire lifetime rather than only setup.
 - Every connection exposes a way to observe its closure and the error that caused it, if any.
@@ -1387,6 +1409,9 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   and a generic MOQT core package that is protocol-only.
 - The core has no runtime dependencies, no knowledge of Relay, and no player, UI, or media engine
   imports. It works over an abstract transport that the product package supplies.
+- Transport adapters are separate packages the application passes in, and the product package
+  depends on none of them. The TypeScript WebSocket adapter is the only package with a third-party
+  runtime dependency, `@moq/qmux` at an exact version (ADR 0005).
 - Each language enforces this mechanically in its check task.
 
 ## Tooling conventions
@@ -1428,8 +1453,11 @@ and subscribes on the same random namespace, then asserts:
    report records how long the move took.
 8. All connections close cleanly once the test closes them.
 
-Adding an assertion here means adding it to every SDK's smoke test.
-See [relay interoperability](relay-interop.md#reproduce-against-a-local-relay) for a local moq-relay 0.17.0 test.
+Adding an assertion here means adding it to every SDK's smoke test. The TypeScript test runs the
+same scenario over each transport it ships: native QUIC in Node, WebTransport in Chromium, and QMux
+over WebSocket in Node and Chromium, with WebKit, Firefox and the WebTransport-to-WebSocket fallback
+on request (`RELAY_RUNTIME`).
+See [relay interoperability](relay-interop.md#reproduce-against-a-local-relay) for a local moq-relay test.
 
 ## Not yet specified
 
