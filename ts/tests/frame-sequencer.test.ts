@@ -423,6 +423,28 @@ describe('createFrameSequencer: reorderWindowUs', () => {
     }
   });
 
+  it('remembers a missing group that ended before the group in front of it arrived', () => {
+    const { state, sequencer, put, groupIds } = harness({
+      grouping: 'frame',
+      reorderWindowUs: 2_000_000,
+      lateDropUs: Number.POSITIVE_INFINITY,
+    });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    expect(groupIds(sequencer.poll().frames)).toEqual([0]);
+    state.now = 1_060_000;
+    put(3, 1_060_000);
+    expect(sequencer.poll().frames).toEqual([]);
+    // Group 2 is over while group 1 is still missing: when 1 comes, 3 does not wait out the window for 2.
+    sequencer.groupReset(2);
+    expect(sequencer.poll().frames).toEqual([]);
+    state.now = 1_070_000;
+    put(1, 1_020_000);
+    const { frames } = sequencer.poll();
+    expect(groupIds(frames)).toEqual([1, 3]);
+    expect(frames[1]).toMatchObject({ discontinuity: 'gap', missingGroups: { firstGroupId: 2, lastGroupId: 2 } });
+  });
+
   it('ends the wait for an empty group reset before the later one arrives', () => {
     const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
     state.now = 1_000_000;
@@ -591,6 +613,23 @@ describe('createFrameSequencer: catchUpAfterUs', () => {
       state.now = at;
       expect(sequencer.poll().catchUp).toBeUndefined();
     }
+  });
+
+  it('does not count a late frame judged again when another track moves the shared clock', () => {
+    const { state, clock, sequencer, put } = harness({ grouping: 'frame', catchUpAfterUs: 200_000 });
+    state.now = 1_000_000;
+    put(0, 1_000_000);
+    sequencer.poll();
+    state.now = 1_100_000;
+    put(1, 900_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    expect(sequencer.stats.late).toBe(1);
+    // Audio on another track re-anchors the clock far ahead: the held candidate is judged late again, with no arrival.
+    state.now = 1_500_000;
+    clock.reportAudio(5_000_000);
+    expect(sequencer.poll().catchUp).toBeUndefined();
+    state.now = 2_000_000;
+    expect(sequencer.poll().catchUp).toBeUndefined();
   });
 
   it('is never signalled when the option is not set', () => {

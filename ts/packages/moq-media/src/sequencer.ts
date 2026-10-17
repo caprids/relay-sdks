@@ -234,11 +234,16 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // (lateness growing) or a backlog draining (shrinking) is not a lasting change in delay, and a resync on it would
   // anchor the clock on frames that are about to be caught up with.
   const noteLate = (positionUs: number, latenessUs: number) => {
-    lateLatestUs = clock.localNow();
-    lateSinceUs ??= lateLatestUs;
     if (starve === undefined || Math.abs(latenessUs - starve.latenessUs) > clock.targetLatencyUs / 4) {
       starve = { sinceUs: positionUs, sinceLocalUs: clock.localNow(), latenessUs, resets: clock.resets };
     }
+  };
+
+  // A frame judged late as it is taken, for catch-up. Not when a held candidate is judged again on a changed clock: a
+  // catch-up follows late arrivals, not a re-anchor.
+  const lateArrived = () => {
+    lateLatestUs = clock.localNow();
+    lateSinceUs ??= lateLatestUs;
   };
 
   // Mark a group as not delivered whole, and everything up to it as behind.
@@ -266,6 +271,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       newestLate = { groupId, group };
     }
     noteLate(positionUs, positionUs - timestampUs);
+    lateArrived();
     // Its later objects already held count too: a draining backlog's shrinking lateness shows in them.
     for (const objectId of [...(group?.frames.keys() ?? [])].sort((a, b) => a - b)) {
       const frame = group?.frames.get(objectId) as SequencedFrame;
@@ -410,10 +416,13 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     for (const id of [...groups.keys()].sort((a, b) => a - b)) {
       const group = groups.get(id) as Group;
       if (reorderWindowUs > 0 && floor !== undefined) {
-        // A group that ended or was reset with nothing in it brings nothing: the next one need not wait for it.
+        // A group that ended or was reset with nothing in it brings nothing: the next one need not wait for it. One
+        // further on is kept until the groups before it are settled.
         if (group.frames.size === 0 && (group.ended || group.reset)) {
-          groups.delete(id);
-          if (id === floor + 1) floor = id;
+          if (id <= floor + 1) {
+            groups.delete(id);
+            floor = Math.max(floor, id);
+          }
           continue;
         }
         // An earlier group is missing: this one, and every newer one, waits for it until the window from its arrival
@@ -441,6 +450,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
           stats.late++;
           newestLate = { groupId: id, group: { frames: new Map([[objectId, frame]]), ended: true, reset: false } };
           noteLate(positionUs, positionUs - frame.timestampUs);
+          lateArrived();
           if (deliveredSinceRestart) pending ??= 'gap';
           continue;
         }
@@ -535,7 +545,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     if (floor !== undefined && groupId <= floor) return;
     const group = groups.get(groupId);
     if (group) group[how] = true;
-    else if (floor !== undefined && groupId === floor + 1) groupOf(groupId)[how] = true;
+    // Under a reorder window, any missing group's end is kept: it releases the frames waiting for that group.
+    else if (floor !== undefined && (groupId === floor + 1 || reorderWindowUs > 0)) groupOf(groupId)[how] = true;
     boundHeld();
   };
   const groupEnded = (groupId: number) => groupOver(groupId, 'ended');
@@ -614,7 +625,10 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
           newestLate.group.frames.set(object.objectId, frameOf(object, timestampUs));
           stats.late++;
           const positionUs = clock.position();
-          if (positionUs !== undefined) noteLate(positionUs, positionUs - timestampUs);
+          if (positionUs !== undefined) {
+            noteLate(positionUs, positionUs - timestampUs);
+            lateArrived();
+          }
           boundHeld();
         }
         return;
