@@ -463,6 +463,48 @@ describe('createAudioPlayer', () => {
     expect(input.stats.decoderResets).toBe(1);
   });
 
+  it('joins the audio after a cut when audio from before the cut lands first, with nothing held', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    // Nothing is held yet: frames 1 to 3 are still decoding when frames 2 and 3 are cut.
+    FakeDecoder.hold = true;
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    input.cut({ fromUs: frameAt(2).timestampUs, untilUs: frameAt(4).timestampUs });
+    FakeDecoder.instances[0]?.release();
+    FakeDecoder.hold = false;
+    for (let index = 4; index <= 6; index++) input.push(frameAt(index));
+    expect(markers(context.render(100).get(nodeOf(context)) ?? [])).toEqual([1, 4, 5, 6]);
+    expect(input.stats).toMatchObject({ concealedUs: 0, cutUs: 40_000 });
+  });
+
+  it('joins the audio after a cut when audio from before the cut lands first, with audio held', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    // Frame 4 is still decoding when a cut from frame 5 to frame 7 begins after it.
+    FakeDecoder.hold = true;
+    for (let index = 4; index <= 6; index++) input.push(frameAt(index));
+    input.cut({ fromUs: frameAt(5).timestampUs, untilUs: frameAt(7).timestampUs });
+    FakeDecoder.instances[0]?.release();
+    FakeDecoder.hold = false;
+    input.push(frameAt(7));
+    input.push(frameAt(8));
+    expect(markers(context.render(160).get(nodeOf(context)) ?? [])).toEqual([1, 2, 3, 4, 7, 8]);
+    expect(input.stats).toMatchObject({ concealedUs: 0, cutUs: 40_000 });
+  });
+
+  it('still fills a frame lost after a cut inside held audio with silence', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    for (let index = 1; index <= 6; index++) input.push(frameAt(index));
+    input.cut({ fromUs: frameAt(2).timestampUs, untilUs: frameAt(4).timestampUs });
+    // Frame 7 never comes: frame 8 is not the audio after the cut, so the hole is silence.
+    input.push(frameAt(8));
+    await settle();
+    expect(markers(context.render(160).get(nodeOf(context)) ?? [])).toEqual([1, 4, 5, 6, 8]);
+    expect(input.stats).toMatchObject({ concealedUs: 20_000, cutUs: 40_000 });
+  });
+
   it('does not count refilling after a cut that empties the buffer as an underrun', async () => {
     const { context, player } = await setUp();
     const input = player.addInput();

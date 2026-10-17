@@ -96,8 +96,11 @@ function audioPlayerWorklet(name: string): void {
     trimmed = 0;
     concealed = 0;
     cut = 0;
-    /** A cut since the last audio: what follows it joins without silence for the range cut out. */
-    justCut = false;
+    /**
+     * The latest cut, until audio from its start on arrives: that audio joins without silence for the range cut out.
+     * Audio still decoding from before the cut's start can land first, and leaves it pending.
+     */
+    pendingCut: { fromUs: number; untilUs: number } | undefined;
 
     constructor(options: { processorOptions: AudioPlayerProcessorOptions }) {
       super();
@@ -115,7 +118,7 @@ function audioPlayerWorklet(name: string): void {
 
     command(command: AudioPlayerProcessorCommand) {
       if (command.type === 'pcm') this.push(command.timestampUs, command.planes);
-      else if (command.type === 'flush') this.dropTo(this.written, false);
+      else if (command.type === 'flush') this.flush();
       else if (command.type === 'cut') this.cutRange(command.fromUs, command.untilUs);
       else if (command.type === 'ceiling') {
         this.maxTarget = Math.max(this.minTarget, command.maxTargetFrames);
@@ -169,19 +172,33 @@ function audioPlayerWorklet(name: string): void {
         }
         this.dry = undefined;
       }
-      if (this.buffered > 0 && !this.justCut) {
+      const cut = this.pendingCut;
+      if (cut && timestampUs >= cut.fromUs) this.pendingCut = undefined;
+      if (this.buffered > 0) {
         const expectedUs = this.timestampAt(this.written);
         const gap = Math.round(((timestampUs - expectedUs) * sampleRate) / 1_000_000);
+        // A hole reaching into a cut is the range cut out: the audio after it joins on.
+        const joins = cut !== undefined && timestampUs >= cut.fromUs && expectedUs < cut.untilUs;
         // A frame that never came, inside held audio: silence keeps the rest on time.
-        if (timestampUs - expectedUs > TOLERANCE_US && gap <= MAX_CONCEAL && this.buffered + gap + frames <= CAPACITY) {
+        if (
+          !joins &&
+          timestampUs - expectedUs > TOLERANCE_US &&
+          gap <= MAX_CONCEAL &&
+          this.buffered + gap + frames <= CAPACITY
+        ) {
           this.write(() => undefined, gap);
           this.concealed += gap;
         }
       }
-      this.justCut = false;
       if (this.buffered + frames > CAPACITY) this.dropTo(this.written, true);
       this.segments.push({ start: this.written, timestampUs });
       this.write((channel) => planes[channel] ?? planes[0], frames);
+    }
+
+    /** Drop everything held, and any cut still pending: what comes next starts a new timeline. */
+    flush() {
+      this.pendingCut = undefined;
+      this.dropTo(this.written, false);
     }
 
     /** Drop held samples before `index`: as trimmed (latency shed) or as a flush. */
@@ -207,12 +224,17 @@ function audioPlayerWorklet(name: string): void {
 
     /** Remove held samples whose timestamps fall in [fromUs, untilUs). */
     cutRange(fromUs: number | null, untilUs: number | null) {
+      // Audio still decoding lands after the cut, held audio or not: never fill the range with silence. A cut still
+      // pending widens to cover both.
+      const pending = this.pendingCut;
+      this.pendingCut = {
+        fromUs: Math.min(pending?.fromUs ?? Number.POSITIVE_INFINITY, fromUs ?? Number.NEGATIVE_INFINITY),
+        untilUs: Math.max(pending?.untilUs ?? Number.NEGATIVE_INFINITY, untilUs ?? Number.POSITIVE_INFINITY),
+      };
       if (this.buffered === 0) return;
 
       const start = fromUs === null ? this.read : this.indexOf(fromUs);
       const end = untilUs === null ? this.written : this.indexOf(untilUs);
-      // Audio still decoding lands after the cut either way: never fill the range with silence.
-      this.justCut = true;
       if (end <= start) return;
       const count = end - start;
       this.cut += count;
