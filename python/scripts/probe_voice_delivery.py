@@ -26,7 +26,9 @@ Point ``RELAY_SUB_URL`` at a link impairer such as moq-shaper to make the subscr
 
 Environment: as ``scripts/test_relay.py`` (``RELAY_TOKEN`` or a hidden prompt, ``RELAY_URL``,
 ``RELAY_SUB_URL`` for the subscriber's relay, defaulting to ``RELAY_URL``, ``RELAY_NAMESPACE_PREFIX``,
-and ``RELAY_ANONYMOUS=1`` with ``RELAY_CA_FILE`` for a local relay), plus these knobs:
+and ``RELAY_ANONYMOUS=1`` with ``RELAY_CA_FILE`` for a local relay), except that ``RELAY_URL`` is
+required: the probe pushes a backlog and fetches through the relay, so it never falls back to the
+production endpoint the smoke test defaults to. Then these knobs:
 
 - ``VOICE_RUN_S``: seconds of publishing (default 14).
 - ``VOICE_PAYLOAD``: payload bytes per object, at least 8 (default 160).
@@ -59,7 +61,6 @@ from moq_core.control_messages import RequestError
 from moq_core.object_stream import FetchStreamEntry
 from moq_core.session import FetchHandlers, FetchReset, MoqtSubscribeOptions
 from mux_relay import (
-    DEFAULT_ENDPOINT,
     CancellationToken,
     MessageParameters,
     MoqtObject,
@@ -400,7 +401,10 @@ async def _sleep(lifetime: CancellationToken, seconds: float, publish_task: asyn
 
 
 def main() -> int:
-    endpoint = read_endpoint("RELAY_URL", DEFAULT_ENDPOINT)
+    # Never a default: this probe loads the relay it is pointed at, so it must be named on purpose.
+    if not os.environ.get("RELAY_URL"):
+        raise SystemExit("Set RELAY_URL to the relay to probe; this probe has no default endpoint")
+    endpoint = read_endpoint("RELAY_URL", "")
     sub_endpoint = read_endpoint("RELAY_SUB_URL", endpoint)
     token = read_token()
     prefix = [field for field in os.environ.get("RELAY_NAMESPACE_PREFIX", "relay-sdk-smoke").split("/") if field]

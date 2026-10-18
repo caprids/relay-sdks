@@ -765,8 +765,12 @@ taken over.
   and otherwise after the retry backoff, so a link too slow for the track cannot make it spin. It
   is ignored for an unknown key and while no subscription is accepted; during a move it ends both
   subscriptions, and the replacement is made for whatever the want asks for then. It exists
-  because moq-relay drops nothing for a late subscriber, whatever delivery timeout the subscriber
-  sends ([relay-interop.md](relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)).
+  because moq-relay 0.17.5 (measured) and 0.17.7 (read in source) drop nothing for a late
+  subscriber, whatever delivery timeout the subscriber sends
+  ([relay-interop.md](relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)). It
+  is meant to work with a relay that honours that timeout too
+  ([moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881)): such a relay drops the late
+  groups itself, and a catch-up then clears only what still arrives late.
   A frame reader's `onCatchUp` is its usual caller ([media subscribing](#media-subscribing)).
   Measured on 2026-10-17 against a local moq-relay 0.17.5, with a 3 s outage on a 600 kbit/s link
   carrying a 400 kbit/s audio track (`ts/scripts/probe-catch-up.mjs`, two runs each): without
@@ -943,7 +947,8 @@ properties it already passes.
   object, its bytes cannot be timed out. In TypeScript the transport has taken an object when its
   stream write resolves, so an object queued behind stream flow control is still timed; in Python,
   when the stream write returns, once aioquic has transmitted the bytes.
-- **On moq-relay 0.15.8, 0.17.0 and 0.17.5** neither value has any effect beyond the publisher.
+- **On moq-relay 0.15.8, 0.17.0 and 0.17.5** (and 0.17.7, read in source) neither value has any
+  effect beyond the publisher.
   A subscriber's values are sent on SUBSCRIBE as `parameters.objectDeliveryTimeout` /
   `subgroupDeliveryTimeout` (`object_delivery_timeout` / `subgroup_delivery_timeout`) and the relay
   drops nothing for them: measured on 0.17.5, a listener with a 100 ms timeout behind a link too
@@ -1419,7 +1424,9 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
     A frame that turns late while it waits is dropped as late. For a reader that wants every frame
     of a talker, the window should be at least the publisher's delivery timeout (audio's default is
     500 ms): a group the publisher's transport is still resending can arrive that long after the
-    group that follows it, and the relay delivers it however late.
+    group that follows it, and moq-relay 0.17.5 delivers it however late. With a relay that
+    honours a subscriber's delivery timeout, the agent's subscription sends none, or one at least
+    as long as the window.
   - `catchUpAfterUs`: when frames keep arriving late with none delivered, from the first one
     dropped as late to the latest one at least this long apart (on the clock's local time), the
     next poll returns `catchUp: true`, once, until a frame is delivered again. A restart does not

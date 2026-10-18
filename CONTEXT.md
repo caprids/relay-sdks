@@ -242,7 +242,9 @@ _Avoid_: re-anchor (the clock's own act), seek, catch-up
 Replacing a subscription that keeps delivering too late to use with a new one at the live edge,
 which makes the relay drop the backlog it holds for it. The sequencer asks for it once frames have
 kept arriving late for its `catchUpAfterUs`; a want does it as a restart. Unlike a resync, the delay
-goes away instead of being accepted. It exists because moq-relay drops nothing for a late subscriber.
+goes away instead of being accepted. It exists because moq-relay 0.17.5 (measured) and 0.17.7 (read
+in source) drop nothing for a late subscriber; with a relay that honours the subscriber's delivery
+timeout it still clears what that relay sends late.
 _Avoid_: resync (that keeps the delay), skip, flush, fast-forward
 
 **Reorder window**:

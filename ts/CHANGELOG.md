@@ -67,8 +67,9 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   kept arriving late that long. `createFrameReader`'s `onCatchUp` receives it, and the supervised subscriber's new
   `catchUp(key)` replaces the want's subscription at the live edge, which drops the relay's backlog; `onRestarted`
   reports the new reason `'catch-up'`. A delivered frame after skipped groups carries `missingGroups`
-  (`MissingGroups`: `firstGroupId`, `lastGroupId`). moq-relay 0.17.5 ignores a subscriber's delivery timeout, so
-  these are how a subscriber bounds its delay ([spec/relay-interop.md](../spec/relay-interop.md)). TypeScript only.
+  (`MissingGroups`: `firstGroupId`, `lastGroupId`). moq-relay 0.17.5 and 0.17.7 ignore a subscriber's delivery timeout,
+  so on those releases these are how a subscriber bounds its delay; they work with a relay that honours it too
+  ([spec/relay-interop.md](../spec/relay-interop.md)). TypeScript only.
 - `@mux/relay`: `subscriber.namespaceEvents({ prefix })` discovers which namespaces under a prefix are announced
   ([#259](https://github.com/muxinc/relay-sdks/issues/259)). The subscriber's SETUP now carries the SOLICIT option,
   so the relay advertises namespaces only when asked. A prefix overlapping one the connection already discovers is

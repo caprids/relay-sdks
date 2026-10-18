@@ -894,10 +894,14 @@ plays its microphone track this way.
 ### Voice: delivery per direction
 
 Voice wants different things in each direction, and each track's sequencer takes its own policy
-without touching the clock its other tracks share. moq-relay delivers every group however late,
-whatever delivery timeout a subscriber sends, and FETCH answers without timestamps
+without touching the clock its other tracks share. moq-relay 0.17.5 (measured) and 0.17.7 (read in
+source) deliver every group however late, whatever delivery timeout a subscriber sends, and answer
+FETCH without timestamps
 ([relay-interop.md](../spec/relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)),
-so both policies live in the subscriber.
+so on those releases both policies live in the subscriber. The options are meant to work with and
+without a relay that honours the subscriber's delivery timeout
+([moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881)): there the relay drops what is
+late, and the subscriber's options handle whatever still arrives late or out of order.
 
 **To a listener** (an agent's or a caller's voice to a person): low, steady latency, where a gap
 beats a stall. Drop audio late against the playout target, and catch up when it keeps arriving
@@ -905,8 +909,8 @@ late: `catchUpAfterUs` makes the sequencer ask for it, and a supervised subscrib
 replaces the subscription at the live edge, which drops the relay's backlog. The want's
 `onRestarted` (reason `'catch-up'`) restarts the reader. Keep `catchUpAfterUs` below the clock's
 target latency, or a resync re-anchors on the late audio first. The subscriber's own delivery
-timeout can go on the SUBSCRIBE as well, for a relay that honours it
-([moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881)); moq-relay 0.17.5 ignores it.
+timeout goes on the SUBSCRIBE as well, for a relay that honours it; moq-relay 0.17.5 and 0.17.7
+ignore it.
 
 ```ts
 const voice = createFrameReader(
