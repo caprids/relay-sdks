@@ -94,8 +94,9 @@ def jwt_expiry(token: str) -> datetime | None:
         return None
 
 
-Framing: TypeAlias = Literal["webtransport", "native-quic"]
-"""What a transport carries: a WebTransport session, or MOQT directly on a QUIC connection (TA-1)."""
+Framing: TypeAlias = Literal["webtransport", "native-quic", "websocket"]
+"""What a transport carries: a WebTransport session, MOQT directly on a QUIC connection, or QMux over a
+WebSocket (TA-1). A WebSocket carries the path and token in its upgrade request, as a WebTransport session does."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,12 +302,13 @@ def _endpoint_setup_options(framing: object, url: str) -> list[KeyValuePair]:
     WebTransport session neither may be sent (draft-22 §9.1.2, §9.1.1). ``url`` is the endpoint
     as ``_parse_endpoint`` normalized it, so its path is never empty and it has no fragment.
     """
-    if framing == "webtransport":
+    if framing in ("webtransport", "websocket"):
         return []
 
     if framing != "native-quic":
         raise RelayError(
-            f"create_transport returned an unknown framing {framing!r}; expected 'webtransport' or 'native-quic'",
+            f"create_transport returned an unknown framing {framing!r}; "
+            "expected 'webtransport', 'native-quic' or 'websocket'",
             code="TRANSPORT_ERROR",
             phase="connecting",
         )

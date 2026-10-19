@@ -40,9 +40,10 @@ export type RelayTransportFactory = (
    * What the transport carries. `'webtransport'` (the default) is a WebTransport session, whose
    * CONNECT request carries the URL. `'native-quic'` is MOQT directly on a QUIC connection: the
    * adapter dials only the URL's host and port, and the core sends the path, query and authority
-   * in SETUP.
+   * in SETUP. `'websocket'` is QMux over a WebSocket (`@mux/relay-websocket`), whose upgrade
+   * request carries the URL as a CONNECT does. Read once `ready` has resolved.
    */
-  framing?: 'webtransport' | 'native-quic';
+  framing?: 'webtransport' | 'native-quic' | 'websocket';
 };
 
 /**
@@ -147,15 +148,15 @@ const utf8 = new TextEncoder();
 /**
  * The setup options the endpoint URL needs in CLIENT_SETUP for a framing (TA-6). On native QUIC,
  * PATH (the path-abempty and `?query`, the resolved jwt included) and AUTHORITY take the place of
- * the CONNECT request a WebTransport session sends; on a WebTransport session neither may be sent
- * (draft-22 §9.1.2, §9.1.1).
+ * the CONNECT request a WebTransport session sends; on a WebTransport session, or a WebSocket whose
+ * upgrade request carries the URL as a CONNECT does, neither may be sent (draft-22 §9.1.2, §9.1.1).
  */
 function endpointSetupOptions(framing: unknown, url: URL): KeyValuePair[] {
-  if (framing === undefined || framing === 'webtransport') return [];
+  if (framing === undefined || framing === 'webtransport' || framing === 'websocket') return [];
   if (framing !== 'native-quic')
     throw new RelayError(
       'TRANSPORT_ERROR',
-      `createTransport returned an unknown framing ${JSON.stringify(framing)}; expected 'webtransport' or 'native-quic'`,
+      `createTransport returned an unknown framing ${JSON.stringify(framing)}; expected 'webtransport', 'native-quic' or 'websocket'`,
       'connecting',
     );
   // URL.search is empty for both an absent and an empty query, but `?` with nothing after it is a

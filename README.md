@@ -26,7 +26,7 @@ mise install              # node, pnpm, python, uv
 mise run check            # every SDK
 mise run ts:check
 mise run python:check
-mise run ts:test:relay    # opt-in live smoke test in Node and Chromium; needs RELAY_TOKEN or a hidden prompt
+mise run ts:test:relay    # opt-in live smoke test in Node and Chromium, over QUIC and WebSocket; needs RELAY_TOKEN or a hidden prompt
 mise run python:test:relay
 ```
 
@@ -51,9 +51,10 @@ nothing.
 
 ### TypeScript live Relay smoke test
 
-This opt-in test publishes and subscribes against a real relay, running the same scenario twice:
-first in Node over [`@mux/relay-quic`](ts/packages/relay-quic/README.md)'s native QUIC, then in
-headless Chromium over WebTransport. It is excluded from `pnpm check` and needs a token authorized
+This opt-in test publishes and subscribes against a real relay, running the same scenario four
+times: in Node over [`@mux/relay-quic`](ts/packages/relay-quic/README.md)'s native QUIC, in
+headless Chromium over WebTransport, then in both over
+[`@mux/relay-websocket`](ts/packages/relay-websocket/README.md)'s QMux over WebSocket. It is excluded from `pnpm check` and needs a token authorized
 for both operations. The token can be supplied through
 hidden stdin input or the `RELAY_TOKEN` environment variable; it is never written to a file.
 
@@ -66,7 +67,10 @@ mise exec -- pnpm --dir ts exec playwright install chromium   # once
 RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:test:relay
 ```
 
-`RELAY_RUNTIME=node` or `RELAY_RUNTIME=chromium` runs only that runtime. The task builds
+`RELAY_RUNTIME` picks the runtimes, comma-separated: `node`, `chromium`, `node-websocket` and
+`chromium-websocket` (the default four), and on request `webkit-websocket`, `firefox-websocket`
+(each needs `playwright install webkit` or `firefox`) and `chromium-fallback`, Chromium through
+`withWebSocketFallback`. The task builds
 `@mux/relay-quic`'s native addon from source first, with the Rust toolchain it brings: the
 workspace never installs the [prebuilt platform packages](ts/packages/relay-quic/README.md#prebuilt-binaries),
 which are added only when packing.

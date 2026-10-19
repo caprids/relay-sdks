@@ -8,6 +8,7 @@ const core = JSON.parse(await readFile(resolve(root, 'packages/moq-core/package.
 const media = JSON.parse(await readFile(resolve(root, 'packages/moq-media/package.json'), 'utf8'));
 const adapter = JSON.parse(await readFile(resolve(root, 'packages/moq-mediabunny/package.json'), 'utf8'));
 const quic = JSON.parse(await readFile(resolve(root, 'packages/relay-quic/package.json'), 'utf8'));
+const websocket = JSON.parse(await readFile(resolve(root, 'packages/relay-websocket/package.json'), 'utf8'));
 const sdk = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'));
 
 assert.deepEqual(core.dependencies ?? {}, {}, 'Generic MoQ core must have no runtime dependencies');
@@ -25,6 +26,13 @@ assert.deepEqual(Object.keys(adapter.peerDependencies), ['mediabunny']);
 // The Node transport adapter is the only package with native code and Node built-ins (#194). It builds on the
 // generic core alone, and nothing runtime-agnostic depends on it.
 assert.deepEqual(quic.dependencies, { [core.name]: 'workspace:*' }, 'The native QUIC adapter depends only on the core');
+// The WebSocket adapter (#321) is the only package with a third-party runtime dependency: @moq/qmux, at an exact version,
+// wrapped to the transport adapter contract. The SDK never imports it; the application passes its factory.
+assert.deepEqual(
+  websocket.dependencies,
+  { '@moq/qmux': '0.3.3', [core.name]: 'workspace:*' },
+  'The WebSocket adapter depends on the core and an exact @moq/qmux only',
+);
 // `@mux/relay/node` loads the adapter when it is installed (#196): an optional peer, never a dependency.
 assert.deepEqual(sdk.peerDependencies, { [quic.name]: 'workspace:*' }, 'The SDK takes only the adapter as a peer');
 assert.deepEqual(sdk.peerDependenciesMeta, { [quic.name]: { optional: true } }, 'The adapter is an optional peer');
@@ -63,7 +71,7 @@ assert.deepEqual(
 
 // Every package releases at one version, under one licence, publicly (#216, ADR 0003). scripts/release.mjs sets the
 // version; the registry rejects a scoped package published without public access.
-const published = [sdk, core, media, adapter, quic];
+const published = [sdk, core, media, adapter, quic, websocket];
 for (const suffix of platformDirs) {
   published.push(JSON.parse(await readFile(resolve(quicRoot, 'npm', suffix, 'package.json'), 'utf8')));
 }
@@ -75,11 +83,11 @@ for (const manifest of published) {
   assert.equal(manifest.repository?.url, sdk.repository.url, `${manifest.name} names the repository`);
 }
 
-async function inspect(directory, permittedPackage, { nodeBuiltins = false, extra = {} } = {}) {
+async function inspect(directory, permittedPackage, { nodeBuiltins = false, extra = {}, packages = [] } = {}) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = resolve(directory, entry.name);
     if (entry.isDirectory()) {
-      await inspect(path, permittedPackage, { nodeBuiltins, extra });
+      await inspect(path, permittedPackage, { nodeBuiltins, extra, packages });
     } else if (entry.name.endsWith('.js')) {
       // Block comments go first: a doc comment's code example is not an import.
       const text = (await readFile(path, 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
@@ -89,6 +97,7 @@ async function inspect(directory, permittedPackage, { nodeBuiltins = false, extr
           (specifier.startsWith('.') && !specifier.endsWith('.node')) ||
             specifier === permittedPackage ||
             specifier === extra[path] ||
+            packages.includes(specifier) ||
             (nodeBuiltins && specifier.startsWith('node:')),
           `Unexpected runtime import in ${path}: ${specifier}`,
         );
@@ -103,6 +112,7 @@ await inspect(resolve(root, 'packages/moq-media/dist'), core.name);
 await inspect(resolve(root, 'dist'), core.name, { extra: { [resolve(root, 'dist/node.js')]: quic.name } });
 await inspect(resolve(root, 'packages/moq-mediabunny/dist'), media.name);
 await inspect(resolve(root, 'packages/relay-quic/dist'), core.name, { nodeBuiltins: true });
+await inspect(resolve(root, 'packages/relay-websocket/dist'), core.name, { packages: ['@moq/qmux'] });
 const mediaExports = await import('../packages/moq-media/dist/index.js');
 for (const name of [
   'buildMsfCatalog',
@@ -155,5 +165,6 @@ for (const name of ['ConnectRelayOptions', 'ConnectRelaySubscriberOptions', 'Con
 }
 console.log(
   'Built SDK and media formats import only the generic core; core has no runtime package imports; ' +
-    'only the native QUIC adapter uses Node built-ins, and only @mux/relay/node loads it.',
+    'only the native QUIC adapter uses Node built-ins, and only @mux/relay/node loads it; ' +
+    'only the WebSocket adapter takes a third-party dependency.',
 );

@@ -622,6 +622,39 @@ The Python SDK's aioquic transport behaves differently: it survives outages unti
 timeout (10 s from moq-relay 0.17.0, 30 s before), waits out the full connect deadline, and sends
 1200-byte Initials.
 
+## QMux over WebSocket
+
+Both fleets serve MOQT over QMux over WebSocket on TCP 443, beside QUIC on UDP 443, through
+moq-relay's `[web]` listener (`--web-https-listen`, with `--web-ws` on by default;
+`rs/moq-relay/src/websocket.rs`). The TypeScript SDK reaches it through `@mux/relay-websocket`
+([behavior](behavior.md#transport-fallback)). What differs from QUIC, measured on 2026-10-17 against a
+local moq-relay 0.17.5 (the production version) built from tag `moq-relay-v0.17.5`, with QUIC and the
+WebSocket listener on the same port, unless a row says it is read from the source:
+
+| Behaviour | QUIC (WebTransport, native QUIC) | QMux over WebSocket |
+| --- | --- | --- |
+| Version negotiation | ALPN / `WT-Available-Protocols`: `moqt-22`, `moqt-20` | `Sec-WebSocket-Protocol`: `qmux-01.moqt-22`, `qmux-01.moqt-20`. The relay pairs `moqt-18` and newer only with `qmux-01` (`QMUX01_ONLY_ALPNS`); an offer with none of its own, a bare `moqt-22` included, fails the upgrade with 400. A bare `qmux-01` or `webtransport` would let it pick moq-lite in SETUP, so the SDK never offers one. |
+| Path and token | WebTransport: the CONNECT URL. Native QUIC: PATH in SETUP | The upgrade request's path and query, as on WebTransport (the relay's `Binding::Uri`); no PATH or AUTHORITY in SETUP |
+| A refused token at connect | the session is closed with code 0x2 `unauthorized`, which the SDK reports as `UNAUTHORIZED` in phase `connecting` | the relay asks its auth source before it upgrades, and answers a refusal with HTTP 401 (`serve_ws`). A WebSocket client sees only a failed handshake, so the SDK reports `TRANSPORT_ERROR` in phase `connecting`: a token that is bad and a relay that is unreachable look the same. Measured with an `--auth-url` server refusing everything but one token: a bad and an empty token each failed in about 0.1 s with `TRANSPORT_ERROR`, and the auth server logged the refusal with `"transport":"websocket"` |
+| A grant's expiry on a live session | closed with 0x2 `unauthorized`: `UNAUTHORIZED` in phase `connection` | the same: a QMux application close with 0x2, `UNAUTHORIZED` in phase `connection`, about 3 s after a grant that expired 3 s on (publisher and subscriber, Node) |
+| A publisher's process is killed | silent until the relay's QUIC idle timeout: viewers get done(0) `internal error` 13.0–13.1 s later (6 of 6) | the kernel closes the TCP connection, and viewers get done(0) `internal error` 10–17 ms later (3 of 3) |
+| A publisher's process is stopped (SIGSTOP) | the same 13 s (3 of 3) | the kernel still acknowledges TCP, so only the relay's WebSocket keep-alive notices (a ping every 5 s, 30 s without a frame): done(0) 29.96 s later (3 of 3) |
+| Subgroup reset codes | native QUIC: in the HTTP/3 encoding ([subgroup resets](#subgroup-resets), TA-27) | as they are: a forwarded reset arrives as code 1, whichever transport the publisher used (3 of 3, publisher over WebSocket and over native QUIC); QMux does not map codes (qmux 0.5.2) |
+| Stream multiplexing | independent QUIC streams | one TCP connection: a lost packet holds up every stream behind it (head-of-line blocking); a send stream's close resolves at hand-over to the socket (TA-15) |
+| Datagrams | negotiated by QUIC | unavailable to the SDK: QMux can carry them, but the adapter offers none |
+
+The crash rows had the subscriber on WebSocket in every run; only the publisher's transport changed.
+A dial that falls back to WebSocket costs the time the WebTransport attempt took: in Chromium 147
+against the local relay, a connect took 8–14 ms over WebTransport, 48–60 ms straight over WebSocket,
+64–72 ms through `withWebSocketFallback` when UDP to the port was rejected (ICMP port unreachable),
+and 4.05–4.08 s when it was silently dropped, the default `handshakeTimeoutMs` plus the WebSocket
+connect (3 of 3 each, UDP filtered with nftables on the relay host).
+
+The live scenario ([behavior](behavior.md#live-smoke-test)) passed over WebSocket in Node 24,
+Chromium 147, Firefox 148 and Playwright's WebKit (Safari 26.4's engine, on Linux), and through the
+fallback in Chromium, against the same relay. That says nothing about Safari on macOS or iOS, and the
+fleets themselves could not be reached from where this was measured.
+
 ## Reproduce against a local relay
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium
@@ -686,3 +719,27 @@ was measured against local 0.15.x images; to reproduce it, use those tags.
 smoke test's Node run over native QUIC. That Node run uses `RELAY_CA_FILE` as its `ca` only when no
 hash is set, and only with a CA-signed leaf: the self-signed certificate above is not accepted as its
 own trust anchor. These are smoke-test options; normal SDK TLS verification remains unchanged.
+
+### Over WebSocket
+
+The recipe above publishes only the relay's UDP port, so it reaches QUIC alone. To run the WebSocket
+runtimes as well, add the relay's WebSocket listener on the same port and publish its TCP side:
+`-p 127.0.0.1:4443:4443/tcp` beside the UDP mapping, and
+`--web-https-listen '[::]:4443' --web-https-cert /tls/cert.pem --web-https-key /tls/key.pem` beside
+the other flags (those of 0.17.x). Then trust the certificate in Node, which reads extra roots only
+as it starts, and pick the runtimes:
+
+```sh
+export NODE_EXTRA_CA_CERTS="$interop_dir/cert.pem"
+RELAY_RUNTIME=node-websocket,chromium-websocket,webkit-websocket,firefox-websocket,chromium-fallback \
+  mise run ts:test:relay
+unset NODE_EXTRA_CA_CERTS
+```
+
+The browsers ignore certificate errors on their WebSockets whenever `RELAY_CERTIFICATE_HASH` or
+`RELAY_CA_FILE` is set, since a page cannot pin a WebSocket's certificate. `chromium-fallback` dials
+WebTransport without the hash, so against this relay its WebTransport handshake fails and it falls
+back; each fallback is reported as a `fallback` phase. WebKit and Firefox need Playwright's builds
+(`pnpm exec playwright install webkit firefox`). The table in
+[QMux over WebSocket](#qmux-over-websocket) was measured this way with a moq-relay 0.17.5 binary
+built from source rather than the image.

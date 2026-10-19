@@ -231,7 +231,8 @@ listener, viewer
 An implementation of the transport seam a connection runs over: create and accept streams, close,
 observe closure (the core's `MoqtTransport`). The aioquic native QUIC client (`mux_relay.quic`) is the
 Python product's only adapter (ADR 0004); in TypeScript a runtime's native `WebTransport` is the default
-adapter, and runtimes without one take an adapter the caller supplies. The tests supply in-memory pairs and
+adapter, and runtimes without one take an adapter the caller supplies: `@mux/relay-quic` or
+`@mux/relay-websocket`. The tests supply in-memory pairs and
 loopback accepting ends, a WebTransport one among them.
 _Avoid_: polyfill (an adapter satisfies the SDK's seam, not the W3C `WebTransport` API), transport
 layer, transport implementation, WebTransport (the protocol, not the adapter), connection (a Relay
@@ -248,6 +249,14 @@ MOQT carried inside a WebTransport session over HTTP/3, with the version negotia
 `WT-Available-Protocols` and the path in the URL. Browsers always use this; the Python SDK dials none,
 and keeps one only as the accepting end its tests run a browser against.
 _Avoid_: WebTransport connection, H3 transport
+
+**QMux over WebSocket**:
+MOQT carried on QMux (QUIC's streams and flow control over one reliable byte stream) inside a WebSocket,
+over TCP, with the subprotocol `qmux-01.<MOQT version>` and the path and token in the upgrade URL. The
+TypeScript SDK's opt-in `@mux/relay-websocket` adapter speaks it, for networks that block UDP and
+browsers without a usable `WebTransport` (ADR 0005). Its streams share one TCP connection.
+_Avoid_: WebSocket polyfill (the relay's own name for it; the adapter polyfills nothing), TCP fallback
+(the fallback is a policy, `withWebSocketFallback`, not the transport), WebSocket transport (unqualified)
 
 **Dialing end**:
 The end of a transport that opens the connection. The SDK is always the dialing end, whether it runs

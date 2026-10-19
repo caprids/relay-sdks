@@ -14,7 +14,7 @@ interface SetupOptionsVector {
   name: string;
   url: string;
   token?: string;
-  framing?: 'webtransport' | 'native-quic';
+  framing?: 'webtransport' | 'native-quic' | 'websocket';
   path: string | null;
   authority: string | null;
 }
@@ -82,7 +82,7 @@ describe.each(Object.keys(roles) as (keyof typeof roles)[])('%s CLIENT_SETUP (TA
   });
 
   it('hands every framing the https URL with the token in its jwt query parameter (TA-4)', async () => {
-    for (const framing of ['webtransport', 'native-quic'] as const) {
+    for (const framing of ['webtransport', 'native-quic', 'websocket'] as const) {
       const setup = await clientSetup(role, {
         name: framing,
         url: 'https://relay.example.com/moq',

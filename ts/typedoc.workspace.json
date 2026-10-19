@@ -2,7 +2,14 @@
   "$schema": "https://typedoc.org/schema.json",
   "name": "Relay TypeScript SDK",
   "entryPointStrategy": "packages",
-  "entryPoints": [".", "packages/moq-core", "packages/moq-media", "packages/moq-mediabunny", "packages/relay-quic"],
+  "entryPoints": [
+    ".",
+    "packages/moq-core",
+    "packages/moq-media",
+    "packages/moq-mediabunny",
+    "packages/relay-quic",
+    "packages/relay-websocket"
+  ],
   "packageOptions": {
     "excludePrivate": true,
     "excludeInternal": true,

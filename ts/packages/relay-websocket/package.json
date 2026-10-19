@@ -1,0 +1,36 @@
+{
+  "name": "@mux/relay-websocket",
+  "version": "0.0.0",
+  "description": "QMux-over-WebSocket transport adapter for the Relay SDK, for networks and browsers without WebTransport",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "directory": "ts/packages/relay-websocket"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "files": [
+    "dist",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@moq/qmux": "0.3.3",
+    "@mux/moq-core": "workspace:*"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

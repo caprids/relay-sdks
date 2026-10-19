@@ -18,6 +18,14 @@
       "authority": null
     },
     {
+      "name": "QMux over WebSocket sends neither option: the upgrade request carries the URL",
+      "url": "https://relay.example.com/moq?keep=1",
+      "token": "abc",
+      "framing": "websocket",
+      "path": null,
+      "authority": null
+    },
+    {
       "name": "native QUIC carries the endpoint path and the token from getToken",
       "url": "https://relay.example.com/moq",
       "token": "abc",

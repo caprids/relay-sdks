@@ -339,6 +339,9 @@ These figures were measured in Chromium 147 (2026-09); other browsers are untest
 The QUIC-level causes, and how the Python SDK differs, are recorded in
 [browser QUIC limits](../spec/relay-interop.md#browser-quic-limits).
 
+On a network that blocks UDP, none of this applies because nothing connects; see
+[networks without UDP](#networks-without-udp-qmux-over-websocket) for the WebSocket transport.
+
 A browser publisher that must survive outages longer than about 5 s, or heavy burst loss, has to
 open a new connection and register its tracks again; see
 [publisher recovery](../spec/publisher-recovery.md). Subscriptions on the old connection are not
@@ -351,6 +354,55 @@ single string is a `TypeError`, not a one-field namespace. The 32-field protocol
 non-empty strings. Both rules apply to publishing and subscribing alike, and are checked before the
 token provider, the transport factory, or any connection state is consulted; see the Arguments table
 in [behavior.md](../spec/behavior.md#arguments).
+
+## Networks without UDP: QMux over WebSocket
+
+WebTransport and native QUIC both need UDP. On a network that blocks it, and in a browser without a
+WebTransport that can negotiate protocols (Safari before WebTransport, Firefox before 155), the relay
+is still reachable over TCP 443: both fleets serve MOQT on QMux over a WebSocket there. The optional
+[`@mux/relay-websocket`](packages/relay-websocket/README.md) package is that transport. Nothing
+changes unless you pass it, as `createTransport`:
+
+```ts
+import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
+import { createWebSocketTransport, withWebSocketFallback } from '@mux/relay-websocket';
+
+// WebTransport first; WebSocket when its handshake fails or takes longer than 4 s.
+const subscriber = await connectRelaySubscriber({ url, getToken, createTransport: withWebSocketFallback() });
+
+// Or always WebSocket, in a browser or in Node.
+const publisher = await connectRelayPublisher({ url, getToken, namespace, createTransport: createWebSocketTransport() });
+```
+
+The endpoint URL stays the `https://` one; the adapter dials `wss://` to the same host and port, with
+the path and token in the upgrade request. `withWebSocketFallback({ handshakeTimeoutMs, onFallback })`
+sets how long the WebTransport handshake may take (default 4000 ms, about when Chromium gives up on a
+silent one) and tells you when a connection fell back. Where the runtime has no usable WebTransport it
+dials WebSocket at once. It runs the two dials one after the other and decides afresh for every
+connection, a supervisor's reconnects included, so on a network that silently drops UDP every connect
+waits out the timeout first; where UDP is refused, the fallback costs a few milliseconds. Keep
+`connectTimeoutMs` well above the handshake timeout.
+
+What changes over WebSocket:
+
+- **Head-of-line blocking.** Every stream shares one TCP connection, so a lost packet holds up every
+  track behind it until TCP retransmits it. Groups on separate streams no longer escape each other's
+  loss.
+- **No datagrams.** Datagram reception is not implemented on any transport yet; over WebSocket there
+  is none to add.
+- **A refused token is a `TRANSPORT_ERROR`.** The relay checks the token before it accepts the
+  WebSocket and answers a refusal with HTTP 401, which no WebSocket API exposes. A bad token and an
+  unreachable relay both fail with `TRANSPORT_ERROR` in phase `connecting`. A token that expires on a
+  live connection is still `UNAUTHORIZED`.
+- **Crash detection.** A publisher whose process dies is noticed at once (the TCP connection closes);
+  one that hangs without closing is noticed only by the relay's keep-alive, after about 30 s, where
+  QUIC notices either after its idle timeout.
+- **Settling groups.** A group's close resolves once its FIN is handed to the socket, not once the
+  relay has it, so `publisher.close()` cannot prove the last groups arrived.
+
+Measurements and the relay's side are in
+[QMux over WebSocket](../spec/relay-interop.md#qmux-over-websocket); the adapter's own deviations from
+the transport contract are in [transport adapter](../spec/transport-adapter.md#known-deviations).
 
 ## Consume asynchronously
 
@@ -838,6 +890,10 @@ try {
 - The `ts/` root package, `@mux/relay`, owns the Relay product API and authentication convention.
 - `packages/moq-core` is an independently buildable, Apache-2.0 generic protocol package. It uses
   standard streams, has no runtime dependencies, and imports no player, UI, or media engine.
+- `packages/relay-quic` and `packages/relay-websocket` are transport adapters the application passes
+  as `createTransport`; `@mux/relay` depends on neither. The WebSocket adapter is the one package with
+  a third-party runtime dependency, `@moq/qmux` at an exact version
+  ([ADR 0005](../docs/adr/0005-websocket-adapter-wraps-moq-qmux.md)).
 - `subscriber.trackSource` exposes the generic `MoqTrackSource` contract for future player
   integrations: track requests in protocol terms (with the core's `onOk`/`onDone` handler names) and
   closure observation, with no track listing and no operation to close the shared connection.
@@ -864,6 +920,8 @@ callers can open a replacement, which a supervisor does for them. A custom `crea
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
 A factory whose transport carries MOQT directly on QUIC, not a WebTransport session, returns
 `framing: 'native-quic'`, and the core then sends the endpoint's path, token and authority in SETUP.
+`@mux/relay-websocket`'s factories return `framing: 'websocket'`, which sends neither, as on
+WebTransport; see [networks without UDP](#networks-without-udp-qmux-over-websocket).
 
 ## Development
 
