@@ -37,7 +37,7 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
   `@mux/relay-websocket` and the Node accepting end. It needs only Node and `openssl`, and takes about 15 s.
   `pnpm test:conformance:websocket:browsers` runs it in Chromium, Firefox and WebKit (`BROWSERS=chromium,webkit` picks;
   `CONFORMANCE_GREP` works as above), with Playwright's browsers installed; the pages ignore the peer's self-signed
-  certificate, which a page cannot pin for a WebSocket. CI does not run them yet (#321).
+  certificate, which a page cannot pin for a WebSocket. CI runs both as the `conformance-websocket` job.
 - `pnpm test:conformance:node` (`mise run ts:test:conformance:node`) runs it in Node against `@mux/relay-quic` and the
   Python accepting end in its native QUIC mode. It builds the native addon first, with the Rust toolchain the mise
   task pins, and needs the Python workspace. After the build it takes about 25 s, most of it the TA-9 connection-loss
