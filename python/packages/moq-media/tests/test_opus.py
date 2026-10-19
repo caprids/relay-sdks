@@ -67,6 +67,18 @@ class TestOpusEncoder:
 
         assert [packet.timestamp_us for packet in packets] == [ORIGIN_US + 1_000_000, ORIGIN_US + 1_020_000]
 
+    @pytest.mark.parametrize("pcm", [b"", b"\x00"], ids=["empty", "partial sample"])
+    def test_a_call_that_takes_no_audio_starts_no_run(self, pcm: bytes) -> None:
+        encoder = OpusEncoder()
+        try:
+            encoder.encode(pcm, timestamp_us=ORIGIN_US)
+        except ValueError:
+            pass
+
+        assert encoder.next_timestamp_us is None
+        packets = encoder.encode(tone(0.02), timestamp_us=ORIGIN_US + 20_000)
+        assert [packet.timestamp_us for packet in packets] == [ORIGIN_US + 20_000]
+
     def test_refuses_a_timestamp_inside_a_run(self) -> None:
         encoder = OpusEncoder()
         encoder.encode(tone(0.02), timestamp_us=ORIGIN_US)

@@ -107,11 +107,11 @@ class OpusEncoder:
         count, or a PyAV ``AudioFrame`` of any format, rate and layout, the same throughout a run.
         ``timestamp_us`` is required to start a run and refused within one.
         """
+        # Check everything before touching state: a call that raises, or carries no audio, starts no run.
         if self._origin_us is None:
             if timestamp_us is None:
                 raise ValueError("timestamp_us is required to start a run")
             _integer(timestamp_us, "timestamp_us")
-            self._origin_us = timestamp_us
         elif timestamp_us is not None:
             raise ValueError("timestamp_us starts a run; flush() the current one first")
 
@@ -119,7 +119,6 @@ class OpusEncoder:
             frame = pcm
             if not frame.samples:
                 return []
-            self._input_seconds += Fraction(frame.samples, frame.sample_rate)
         else:
             data = memoryview(pcm).cast("B")
             stride = _SAMPLE_BYTES * self.input_channels
@@ -128,10 +127,14 @@ class OpusEncoder:
             if not data:
                 return []
             frame = _frame(bytes(data), self.input_channels, self.input_rate)
-            self._input_seconds += Fraction(len(data) // stride, self.input_rate)
+        resampled = self._resampler.resample(frame)
+
+        if self._origin_us is None:
+            self._origin_us = timestamp_us
+        self._input_seconds += Fraction(frame.samples, frame.sample_rate)
         self._input = (frame.format.name, frame.layout.name, frame.sample_rate)
-        for resampled in self._resampler.resample(frame):
-            self._take(resampled)
+        for out in resampled:
+            self._take(out)
         return self._encode_pending()
 
     def flush(self) -> list[OpusPacket]:
