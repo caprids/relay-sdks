@@ -1,5 +1,5 @@
 import { resolveObjectURL } from 'node:buffer';
-import { buildMsfCatalog } from '@mux/moq-media';
+import { buildInterrupt, buildMsfCatalog, INTERRUPT_TRACK } from '@mux/moq-media';
 import type { RelaySubscriber } from '@mux/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { listenAudio } from '../examples/webcodecs/listen-audio.js';
@@ -178,4 +178,56 @@ it('leaves a supplied context open when stopped', async () => {
   const listener = await listening;
   await listener.stop();
   expect(context.close).not.toHaveBeenCalled();
+});
+
+const interruptCatalog = () => buildMsfCatalog({ namespace: NAMESPACE, audio: {}, data: [{ name: INTERRUPT_TRACK }] });
+
+/** Deliver one object on the subscription to `track`. */
+function deliver(fake: ReturnType<typeof fakeSubscriber>, track: string, payload: Uint8Array) {
+  const subscription = fake.subscriptions.find(({ request }) => request.track === track);
+  subscription?.handlers.onObject?.({ status: 'normal', payload } as unknown as Parameters<
+    NonNullable<Handlers['onObject']>
+  >[0]);
+}
+
+it('subscribes to the interrupt track only when the catalog lists it', async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  fake.deliverCatalog(interruptCatalog());
+  const listener = await listening;
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', INTERRUPT_TRACK]);
+  await listener.stop();
+  expect(fake.subscriptions[2]?.cancel).toHaveBeenCalledTimes(1);
+});
+
+it('cuts the audio an interrupt for the audio track names, and ignores one for another track', async () => {
+  const fake = fakeSubscriber();
+  const onInterrupt = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onInterrupt });
+  fake.deliverCatalog(interruptCatalog());
+  const listener = await listening;
+  const cut = vi.spyOn(listener.input, 'cut');
+
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ track: 'other', untilUs: 1_000 }));
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ fromUs: 500, untilUs: 2_000 }));
+
+  expect(cut).toHaveBeenCalledTimes(1);
+  expect(cut).toHaveBeenCalledWith({ track: 'audio', fromUs: 500, untilUs: 2_000 });
+  expect(onInterrupt).toHaveBeenCalledWith({ track: 'audio', fromUs: 500, untilUs: 2_000 });
+  await listener.stop();
+});
+
+it('reports an interrupt that does not parse and cuts nothing', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(interruptCatalog());
+  const listener = await listening;
+  const cut = vi.spyOn(listener.input, 'cut');
+
+  deliver(fake, INTERRUPT_TRACK, new TextEncoder().encode('{"track":"audio"}'));
+
+  expect(cut).not.toHaveBeenCalled();
+  expect(onError).toHaveBeenCalledTimes(1);
+  await listener.stop();
 });

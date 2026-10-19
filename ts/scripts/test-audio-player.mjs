@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { startModuleServer } from './module-server.js';
 
 // The live audio player test (issue #314): scripts/audio-player/scenario.ts publishes the WebCodecs example's
-// microphone and plays it back through the audio-only listener example, in headless Chromium. AUDIO_PLAYER_RUNS
+// microphone and plays it back through the audio-only listener example, in headless Chromium, then interrupts it
+// over the interrupt track (issue #320). AUDIO_PLAYER_RUNS
 // lists the transports, default "hub" (the in-memory relay hub inside the page); "relay" is the production Relay
 // (RELAY_URL, RELAY_TOKEN, RELAY_NAMESPACE_PREFIX). AUDIO_PLAYER_SECONDS sets the steady phase's length.
 
@@ -39,7 +40,7 @@ const server = await startModuleServer({
 const { chromium } = await import('playwright');
 
 // What a pass needs: steady playback with the clock driven by audio, no underrun, the buffer near its target, and
-// audio flowing again after the cut.
+// audio flowing again after the cut, which an interrupt sent on the interrupt track triggered.
 const verdict = ({ phases }) => {
   const steady = phases.find((phase) => phase.phase === 'steady');
   const cut = phases.find((phase) => phase.phase === 'cut');
@@ -49,6 +50,7 @@ const verdict = ({ phases }) => {
     steady.underruns === 0 &&
     (steady.modes.audio ?? 0) >= ticks * 0.95 &&
     steady.bufferedMs.p95 <= steady.jitterTargetMs * 2 + 60 &&
+    typeof cut.interruptMs === 'number' &&
     cut.cutMs > 0 &&
     cut.decoded > 0 &&
     (cut.modes.audio ?? 0) > 0

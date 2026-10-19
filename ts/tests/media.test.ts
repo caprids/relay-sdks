@@ -68,6 +68,15 @@ interface Vectors {
   }[];
   timelineRetentionErrors: { name: string; maxEntries: string }[];
   opusPacketDurations: { name: string; packet: string; durationUs: string | null }[];
+  interrupts: { name: string; input: RawInterrupt; json: string }[];
+  interruptErrors: { name: string; input: RawInterrupt }[];
+  interruptReads: { name: string; json: string; parsed: RawInterrupt & { track: string } }[];
+  interruptReadErrors: { name: string; json: string }[];
+}
+interface RawInterrupt {
+  track?: string | null;
+  fromUs?: string;
+  untilUs: string;
 }
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/media.json', import.meta.url), 'utf8')) as Vectors;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -254,6 +263,28 @@ describe('shared media vectors', () => {
         }),
       ).toBe(vector.timestampUs === null ? undefined : Number(vector.timestampUs)));
   }
+  const interrupt = (raw: RawInterrupt) => ({
+    ...(raw.track === undefined ? {} : { track: raw.track as string }) /* null in an error vector */,
+    ...(raw.fromUs === undefined ? {} : { fromUs: Number(raw.fromUs) }),
+    untilUs: Number(raw.untilUs),
+  });
+  const utf8 = (text: string) => new TextEncoder().encode(text);
+  for (const vector of vectors.interrupts) {
+    it(`interrupt ${vector.name}`, () =>
+      expect(new TextDecoder().decode(media.buildInterrupt(interrupt(vector.input)))).toBe(vector.json));
+  }
+  for (const vector of vectors.interruptErrors) {
+    it(`rejects interrupt ${vector.name}`, () =>
+      expect(() => media.buildInterrupt(interrupt(vector.input))).toThrow(RangeError));
+  }
+  for (const vector of vectors.interruptReads) {
+    it(`reads interrupt ${vector.name}`, () =>
+      expect(media.parseInterrupt(utf8(vector.json))).toEqual(interrupt(vector.parsed)));
+  }
+  for (const vector of vectors.interruptReadErrors) {
+    it(`rejects interrupt payload ${vector.name}`, () =>
+      expect(() => media.parseInterrupt(utf8(vector.json))).toThrow());
+  }
   for (const vector of vectors.opusPacketDurations) {
     it(`Opus packet duration ${vector.name}`, () =>
       expect(media.opusPacketDurationUs(bytes(vector.packet))).toBe(
@@ -310,6 +341,7 @@ it('pins every media constant', () => {
       video: media.VIDEO_TRACK,
       audio: media.AUDIO_TRACK,
       mediaTimeline: media.MEDIA_TIMELINE_TRACK,
+      interrupt: media.INTERRUPT_TRACK,
     },
     properties: {
       timestamp: media.LOC_TIMESTAMP,

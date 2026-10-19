@@ -92,8 +92,8 @@ export interface AudioCutRange {
   /** Drop from this timestamp on. Default: from the oldest audio held. */
   fromUs?: number;
   /**
-   * Drop before this timestamp. Default: through the newest audio held. Frames that arrive later with an earlier
-   * timestamp are dropped too.
+   * Drop before this timestamp. Default: through the newest audio held. With it, frames that arrive later inside the
+   * range are dropped too, until a `restart`; a `resync` keeps the cut.
    */
   untilUs?: number;
 }
@@ -173,6 +173,8 @@ export interface AudioPlayer<Output extends AudioPlayerGainNode = AudioPlayerGai
 const DEFAULT_DECODER_CONFIG: AudioDecoderConfig = { codec: 'opus', sampleRate: 48_000, numberOfChannels: 2 };
 /** Decoded timestamps closer than this to the expected one are contiguous. */
 const TIMESTAMP_TOLERANCE_US = 1_000;
+/** Bounded cuts an input keeps checking arriving frames against; older ones are forgotten. */
+const MAX_ARRIVAL_CUTS = 16;
 /** Room kept under the clock's target latency for the frame in flight and the decoder. */
 const BUDGET_MARGIN_US = 40_000;
 
@@ -408,8 +410,9 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   // Where the next frame should start, and the end of the newest frame decoded: anything earlier arrived late.
   let expectedUs: number | undefined;
   let lastDurationUs: number | undefined;
-  // Frames arriving with timestamps before this are inside a cut.
-  let cutUntilUs: number | undefined;
+  // Frames arriving inside one of these ranges are inside a cut. A resync keeps them, since a talker's interrupted audio
+  // can still arrive behind it; a restart clears them.
+  let arrivalCuts: { fromUs: number; untilUs: number }[] = [];
   // Cuts that output still in the decoder may fall in: frames up to `throughUs` had been sent to it.
   let pendingCuts: { fromUs: number; untilUs: number; throughUs: number }[] = [];
   let lastSentUs: number | undefined;
@@ -560,12 +563,10 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     push(frame) {
       if (removed) return;
       const { timestampUs, payload, discontinuity } = frame;
-      if (discontinuity === 'resync' || discontinuity === 'restart') {
-        flush();
-        cutUntilUs = undefined;
-      }
+      if (discontinuity === 'resync' || discontinuity === 'restart') flush();
+      if (discontinuity === 'restart') arrivalCuts = [];
       const behind = expectedUs !== undefined && timestampUs < expectedUs - TIMESTAMP_TOLERANCE_US;
-      if (behind || (cutUntilUs !== undefined && timestampUs < cutUntilUs)) {
+      if (behind || arrivalCuts.some((cut) => timestampUs >= cut.fromUs && timestampUs < cut.untilUs)) {
         stats.late++;
         return;
       }
@@ -585,7 +586,13 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
         flush();
         return;
       }
-      if (untilUs !== undefined) cutUntilUs = Math.max(cutUntilUs ?? untilUs, untilUs);
+      if (untilUs !== undefined) {
+        // Cuts from the oldest audio held fold into one; bounded ones are kept, the newest MAX_ARRIVAL_CUTS of them.
+        const start = fromUs ?? Number.NEGATIVE_INFINITY;
+        const open = arrivalCuts.find((cut) => cut.fromUs === Number.NEGATIVE_INFINITY);
+        if (open && start === Number.NEGATIVE_INFINITY) open.untilUs = Math.max(open.untilUs, untilUs);
+        else arrivalCuts = [...arrivalCuts, { fromUs: start, untilUs }].slice(-MAX_ARRIVAL_CUTS);
+      }
       // Output still in the decoder reaches the worklet after the cut does: it is checked against the cut on its way.
       if ((decoder || retiring) && lastSentUs !== undefined) {
         pendingCuts.push({

@@ -34,6 +34,7 @@ from .h264 import (
     iter_annexb_nal_units,
     nal_unit_type,
 )
+from .interrupt import INTERRUPT_TRACK, Interrupt, build_interrupt, parse_interrupt
 from .loc import (
     AUDIO_TRACK,
     CATALOG_TRACK,
@@ -74,6 +75,7 @@ from .timeline import (
 __all__ = [
     "AUDIO_TRACK",
     "CATALOG_TRACK",
+    "INTERRUPT_TRACK",
     "LOC_AUDIO_CONFIG",
     "LOC_DOCUMENT",
     "LOC_TIMESCALE",
@@ -94,6 +96,7 @@ __all__ = [
     "FrameSequencer",
     "FrameSequencerStats",
     "H264Config",
+    "Interrupt",
     "MediaTimeline",
     "MediaTimelineEntry",
     "MediaTimelineTrackInfo",
@@ -111,6 +114,7 @@ __all__ = [
     "annexb_to_avcc",
     "avc_codec_string",
     "build_avcc",
+    "build_interrupt",
     "build_media_timeline",
     "build_msf_catalog",
     "build_msf_end_catalog",
@@ -125,6 +129,7 @@ __all__ = [
     "media_timeline_entry",
     "nal_unit_type",
     "opus_packet_duration_us",
+    "parse_interrupt",
     "parse_media_timeline",
     "parse_msf_catalog",
 ]

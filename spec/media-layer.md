@@ -15,7 +15,9 @@ catalog reader ships in both format packages as `parseMsfCatalog` / `parse_msf_c
 format packages and the frame reader in both product packages
 ([issue #303](https://github.com/muxinc/relay-sdks/issues/303), [Frame reader](#frame-reader)). The
 [shared timeline and playout clock](#shared-timeline-and-playout-clock) ship in both format
-packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), and so do the
+packages ([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), the
+[interrupt track](#interrupt-track)'s format helpers ship in both
+([issue #320](https://github.com/muxinc/relay-sdks/issues/320)), and so do the
 [Media Timeline track](#media-timeline-track)'s format helpers and timeline accumulator
 ([issues #291](https://github.com/muxinc/relay-sdks/issues/291) and
 [#292](https://github.com/muxinc/relay-sdks/issues/292)), which both examples publish. The WebCodecs example publishes
@@ -705,7 +707,8 @@ a frame reader can deliver frames and the gap after them in one poll, before any
 so the old decoder first outputs what it was given, and the frames after the gap wait for the new
 decoder until it has. A frame that starts before the previous one ended is behind it and is dropped
 as late. A `resync` or `restart` closes the decoder, drops its pending output, and flushes what the
-buffer holds, all of which belongs to the replaced timeline. A context at another rate than the decoder's gets linearly resampled
+buffer holds, all of which belongs to the replaced timeline. A `restart` also forgets earlier cuts;
+a `resync` keeps them, because audio a talker interrupted can still arrive behind one. A context at another rate than the decoder's gets linearly resampled
 audio.
 
 **Jitter buffer.** A ring in the worklet, in the context's frames, starting from the numbers
@@ -740,11 +743,13 @@ the application passes, rather than a clock preset or an automatic default, beca
 behavior is pinned by shared vectors in both SDKs.
 
 **Cut.** `input.cut({ fromUs, untilUs })` drops received audio in a timeline range: what the
-buffer holds, output still in the decoder, and, up to `untilUs`, frames that arrive later. The
+buffer holds, output still in the decoder, and, when the range has an `untilUs`, frames that arrive
+later inside it, until a `restart`. The
 first audio from the cut's start on is joined on without silence for the range cut out; audio from
 before the cut's start that was still decoding can land first and plays as usual, and a frame lost
 outside the range is still filled with silence. With no range it drops
-everything held. Nothing in the protocol carries an interruption yet; issue #320 proposes one.
+everything held. A talker's interrupt, read from the [interrupt track](#interrupt-track), is a cut
+range as it is.
 
 **Echo cancellation.** Chromium's echo canceller takes only audio that WebRTC plays as its
 reference. `createEchoCancellationLoopback(context, player.output)` sends the output through two
@@ -765,6 +770,62 @@ latency. Medians [p95]:
 
 In both runs the target shrank from 60 to 50 ms during the steady phase, playback resumed after the
 cut with no underrun, and the frame sequencer resynced nothing.
+
+## Interrupt track
+
+[Issue #320](https://github.com/muxinc/relay-sdks/issues/320). A talker that stops mid-utterance, a
+voice bot the user talks over, has already sent audio its listeners hold in their jitter buffers and
+have in flight. Stopping its writes does not stop that audio. The interrupt track tells listeners to
+drop it.
+
+**The track.** A data track in the broadcast's namespace, named `interrupt` by default
+(`INTERRUPT_TRACK`), listed in the catalog by name with no role, so a listener subscribes only to a
+talker that can interrupt. Each interrupt is one object in a group of its own, its payload compact
+UTF-8 JSON (`buildInterrupt` / `build_interrupt`):
+
+```json
+{"track":"audio","fromUs":1760000000000000,"untilUs":1760000000300000}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `track` | The audio track in the same namespace whose audio to drop. Required, a non-empty string. |
+| `fromUs` | Optional. Drop from this timestamp on, on the broadcast timeline. Absent: from the oldest audio the listener holds. |
+| `untilUs` | Required. Drop before this timestamp: the end of the last audio the talker sent. |
+
+Timestamps are non-negative safe integers in microseconds on the broadcast timeline the audio is
+stamped on, and `fromUs`, when present, is before `untilUs`. A reader (`parseInterrupt` /
+`parse_interrupt`) refuses a payload that breaks those rules and ignores fields it does not know, so
+later versions can add some.
+
+**The talker** sends an interrupt when it stops before the end of what it has sent, with `untilUs`
+the end of the last audio frame it wrote: for a Python talker on `OpusEncoder`, the last packet's
+`timestamp_us` plus its `duration_us`. It drops any audio it has encoded and not sent, and starts
+its next audio at or after `untilUs`. On a live clock that comes on its own. It leaves `fromUs` out
+to drop everything the listener has not played yet, which is what barge-in wants: the talker cannot
+know how far behind each listener plays. With `fromUs` set, a talker can let a listener finish
+audio up to a point, such as the end of a word.
+
+**The listener** applies an interrupt for an audio track it plays as a cut,
+`input.cut(interrupt)`: it drops what the buffer holds and what is still decoding in the range,
+and frames that arrive later inside the range, which covers audio still in flight on the audio
+track when the interrupt overtakes it. Audio from before a `fromUs` still plays, wherever it is. The listener ignores an interrupt for a track it does
+not play and reports one that does not parse.
+
+**No sequence number.** A cut can only drop audio before its `untilUs`, and the talker's next audio
+starts at or after it, so an interrupt that arrives late, twice, or out of order with a newer one
+drops nothing it should not. Group IDs give the order anyway. For the same reason a listener that
+joins and is handed the track's latest object (a relay cache) drops only audio older than what it
+will play. Nothing about an interrupt needs the relay to deliver it before the audio it cuts.
+
+**What it does not do.** Detecting that the user is talking (VAD, turn detection) is the talker's
+business, as is cancelling whatever produced the audio. The convention cuts audio only: a
+transcript of the cut audio is the transcript track's to retract (issue #320's fourth part).
+
+Measured live on 2026-10-19 with `mise run ts:test:audio-player`, which now sends its cut as an
+interrupt (everything held and the next 300 ms of the timeline) from the publisher page to the
+listener: the listener applied it 0.4 ms after the write through the in-memory hub, and 50.7 ms after
+it through the Relay (`sjc`). It cut 60 ms and 39 ms of held audio, and playback resumed with no underrun.
 
 ## Media Timeline track
 

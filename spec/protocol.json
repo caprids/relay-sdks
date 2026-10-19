@@ -41,7 +41,8 @@
       "catalog": "catalog",
       "video": "video",
       "audio": "audio",
-      "mediaTimeline": "timeline"
+      "mediaTimeline": "timeline",
+      "interrupt": "interrupt"
     },
     "properties": {
       "timestamp": 16,

@@ -482,6 +482,48 @@ describe('createAudioPlayer', () => {
     expect(input.stats.decoderResets).toBe(1);
   });
 
+  it('keeps a cut through a resync, so interrupted audio arriving behind it stays dropped', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    context.render(20);
+    input.cut({ untilUs: frameAt(50).timestampUs });
+    // A resync to a frame from before the cut's end: the sequencer delivers it, the cut still drops it.
+    input.push(frameAt(10, 'resync'));
+    input.push(frameAt(11));
+    input.push(frameAt(50));
+    input.push(frameAt(51));
+    input.push(frameAt(52));
+    expect(input.stats.late).toBe(2);
+    await settle();
+    expect(markers(context.render(100).get(nodeOf(context)) ?? [])).toEqual([50, 51, 52]);
+  });
+
+  it('plays frames that arrive later from before a cut range, and drops those inside it', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    input.push(frameAt(1));
+    // The talker keeps frames 2 and 3 (the end of a word) and drops 4 and 5, before any of them has arrived.
+    input.cut({ fromUs: frameAt(4).timestampUs, untilUs: frameAt(6).timestampUs });
+    for (let index = 2; index <= 7; index++) input.push(frameAt(index));
+    expect(input.stats.late).toBe(2);
+    // Frame 6 does not follow frame 3, so it waits for a new decoder.
+    await settle();
+    expect(markers(context.render(140).get(nodeOf(context)) ?? [])).toEqual([1, 2, 3, 6, 7]);
+  });
+
+  it('clears its cuts at a restart', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    input.push(frameAt(20));
+    input.cut({ untilUs: frameAt(30).timestampUs });
+    input.push(frameAt(1, 'restart'));
+    input.push(frameAt(2));
+    input.push(frameAt(3));
+    expect(input.stats.late).toBe(0);
+    expect(markers(context.render(60).get(nodeOf(context)) ?? [])).toEqual([1, 2, 3]);
+  });
+
   it('joins the audio after a cut when audio from before the cut lands first, with nothing held', async () => {
     const { context, player } = await setUp();
     const input = player.addInput();

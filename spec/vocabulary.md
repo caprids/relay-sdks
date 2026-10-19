@@ -613,7 +613,7 @@ the format package still does not depend on the product package.
 | Delay after the output that the context does not report | `player.outputDelayUs` (settable) | — |
 | One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
 | Hand it a frame in decode order | `input.push(frame)` (`AudioPlayerFrame`: `timestampUs`, `payload`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
-| Drop received audio in a timeline range | `input.cut({ fromUs?, untilUs? })` (`AudioCutRange`); `cut()` drops everything held | — |
+| Drop received audio in a timeline range | `input.cut({ fromUs?, untilUs? })` (`AudioCutRange`, which a parsed `Interrupt` is); `cut()` drops everything held | — |
 | Per-input gain; stop | `input.gain`; `input.remove()`, `input.removed`; `player.close()` | — |
 | Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, cutUs, reports }` | — |
 | What the player needs of Web Audio | `AudioPlayerContext`, `AudioPlayerNode`, `AudioPlayerGainNode` | — |
@@ -636,6 +636,32 @@ issue #314: `addSource(frameReader, …)` (the format package cannot take a fram
 method for the loopback (it is a function over any node, so the v10 renderer can use it too), and a
 `createPlayoutClock({ audioOnly: true })` preset or an automatic audio-only default (the clock is
 pinned by shared vectors in both SDKs; the constant changes nothing for Python).
+
+## Interrupts: `INTERRUPT_TRACK`, `buildInterrupt`, `parseInterrupt`
+
+The talker's side of a cut ([issue #320](https://github.com/muxinc/relay-sdks/issues/320)): one
+message on a data track that tells listeners to drop audio they already hold. Its design is in
+[media-layer.md](media-layer.md#interrupt-track). Both format packages.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| The interrupt track's default name | `INTERRUPT_TRACK` (`'interrupt'`) | `INTERRUPT_TRACK` (`"interrupt"`) |
+| One interrupt | `Interrupt { track, fromUs?, untilUs }`, an `AudioCutRange` as it is | `Interrupt(track=, until_us=, from_us=None)` |
+| Build an interrupt object's payload | `buildInterrupt({ track?, fromUs?, untilUs })` (`InterruptInput`) | `build_interrupt(*, until_us, from_us=None, track=AUDIO_TRACK)` |
+| Read one | `parseInterrupt(payload)` | `parse_interrupt(payload)` |
+| List the track in the WebCodecs example's catalog | `publishCanvas(..., { data: [{ name: INTERRUPT_TRACK }] })` (example code) | — |
+| Hear about an applied interrupt in the example's listener | `listenAudio(..., { onInterrupt })` (example code) | — |
+
+"Interrupt" is the talker's act, as the [glossary](../CONTEXT.md)'s entry for a cut already said;
+the listener's response stays `cut`. It is not the frame writer's "interruption" (a failure that
+resets a group) or its `'interrupted'` outcome, which concern a publisher's own writes. Not adopted:
+"flush" (issue #320's word, which reads as WebCodecs' "finish pending work" and as the player's
+drop-everything), "barge-in" (one cause, the user talking over a bot, not the message), and a
+`seq` field (an interrupt only drops audio before its `untilUs`, so order does not matter; see
+media-layer.md). The JSON fields are `fromUs` and `untilUs` in both languages, the names
+`AudioCutRange` already uses, so a TypeScript listener passes a parsed interrupt to `cut` unchanged.
+No player method takes interrupts: an input does not know its track's name, and the one line that
+matches them belongs to the listener.
 
 ## Opus encoding: `OpusEncoder`, `OpusDecoder`
 

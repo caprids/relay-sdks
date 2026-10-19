@@ -214,9 +214,17 @@ reorder buffer
 
 **Cut**:
 Dropping an audio player input's received audio in a timeline range, held or still decoding, and
-frames that arrive later from before its end: what a listener does when a talker is interrupted.
+frames that arrive later inside it: what a listener does when a talker is interrupted.
 _Avoid_: flush (that drops everything, at a resync or restart), interrupt (that is the talker's
 act), barge-in
+
+**Interrupt**:
+A talker's message, on the interrupt track, that its listeners drop the audio it already sent from a
+point on: what a bot sends when the user talks over it. The listener's response is a cut. It carries
+the end of the last audio sent, and the talker's next audio starts there or later, so an interrupt
+that arrives late or twice drops nothing it should not.
+_Avoid_: flush, barge-in (the cause, not the message), interruption (that is the frame writer's
+failure), stop
 
 **Discontinuity** (reading):
 Why a frame the reader delivers is not the one decoded after the frame before it: a gap (frames

@@ -2308,5 +2308,197 @@
       "packet": "fb",
       "durationUs": null
     }
+  ],
+  "interrupts": [
+    {
+      "name": "until only, default track",
+      "input": {
+        "untilUs": "1760000000000000"
+      },
+      "json": "{\"track\":\"audio\",\"untilUs\":1760000000000000}"
+    },
+    {
+      "name": "a range on a named track",
+      "input": {
+        "track": "bot-voice",
+        "fromUs": "1760000000000000",
+        "untilUs": "1760000000300000"
+      },
+      "json": "{\"track\":\"bot-voice\",\"fromUs\":1760000000000000,\"untilUs\":1760000000300000}"
+    },
+    {
+      "name": "zero until",
+      "input": {
+        "untilUs": "0"
+      },
+      "json": "{\"track\":\"audio\",\"untilUs\":0}"
+    },
+    {
+      "name": "largest safe until",
+      "input": {
+        "untilUs": "9007199254740991"
+      },
+      "json": "{\"track\":\"audio\",\"untilUs\":9007199254740991}"
+    },
+    {
+      "name": "non-ASCII track stays UTF-8",
+      "input": {
+        "track": "voz-é",
+        "untilUs": "1"
+      },
+      "json": "{\"track\":\"voz-é\",\"untilUs\":1}"
+    }
+  ],
+  "interruptErrors": [
+    {
+      "name": "negative until",
+      "input": {
+        "untilUs": "-1"
+      }
+    },
+    {
+      "name": "unsafe until",
+      "input": {
+        "untilUs": "9007199254740992"
+      }
+    },
+    {
+      "name": "fractional until",
+      "input": {
+        "untilUs": "1.5"
+      }
+    },
+    {
+      "name": "from equal to until",
+      "input": {
+        "fromUs": "5",
+        "untilUs": "5"
+      }
+    },
+    {
+      "name": "from after until",
+      "input": {
+        "fromUs": "6",
+        "untilUs": "5"
+      }
+    },
+    {
+      "name": "negative from",
+      "input": {
+        "fromUs": "-1",
+        "untilUs": "5"
+      }
+    },
+    {
+      "name": "empty track",
+      "input": {
+        "track": "",
+        "untilUs": "5"
+      }
+    },
+    {
+      "name": "null track",
+      "input": {
+        "track": null,
+        "untilUs": "5"
+      }
+    }
+  ],
+  "interruptReads": [
+    {
+      "name": "until only",
+      "json": "{\"track\":\"audio\",\"untilUs\":1760000000000000}",
+      "parsed": {
+        "track": "audio",
+        "untilUs": "1760000000000000"
+      }
+    },
+    {
+      "name": "a range",
+      "json": "{\"track\":\"audio\",\"fromUs\":1000,\"untilUs\":2000}",
+      "parsed": {
+        "track": "audio",
+        "fromUs": "1000",
+        "untilUs": "2000"
+      }
+    },
+    {
+      "name": "unknown fields ignored, any order",
+      "json": "{\"untilUs\":2000,\"reason\":\"barge-in\",\"track\":\"voice\",\"seq\":7}",
+      "parsed": {
+        "track": "voice",
+        "untilUs": "2000"
+      }
+    },
+    {
+      "name": "integral exponent reads as an integer",
+      "json": "{\"track\":\"audio\",\"untilUs\":2e3}",
+      "parsed": {
+        "track": "audio",
+        "untilUs": "2000"
+      }
+    }
+  ],
+  "interruptReadErrors": [
+    {
+      "name": "not JSON",
+      "json": "interrupt"
+    },
+    {
+      "name": "an array",
+      "json": "[{\"track\":\"audio\",\"untilUs\":1}]"
+    },
+    {
+      "name": "null",
+      "json": "null"
+    },
+    {
+      "name": "missing until",
+      "json": "{\"track\":\"audio\"}"
+    },
+    {
+      "name": "missing track",
+      "json": "{\"untilUs\":1}"
+    },
+    {
+      "name": "empty track",
+      "json": "{\"track\":\"\",\"untilUs\":1}"
+    },
+    {
+      "name": "track not a string",
+      "json": "{\"track\":1,\"untilUs\":1}"
+    },
+    {
+      "name": "lone surrogate in track",
+      "json": "{\"track\":\"\\ud800\",\"untilUs\":1}"
+    },
+    {
+      "name": "until as a string",
+      "json": "{\"track\":\"audio\",\"untilUs\":\"1\"}"
+    },
+    {
+      "name": "fractional until",
+      "json": "{\"track\":\"audio\",\"untilUs\":1.5}"
+    },
+    {
+      "name": "negative until",
+      "json": "{\"track\":\"audio\",\"untilUs\":-1}"
+    },
+    {
+      "name": "unsafe until",
+      "json": "{\"track\":\"audio\",\"untilUs\":9007199254740992}"
+    },
+    {
+      "name": "until true",
+      "json": "{\"track\":\"audio\",\"untilUs\":true}"
+    },
+    {
+      "name": "null from",
+      "json": "{\"track\":\"audio\",\"fromUs\":null,\"untilUs\":5}"
+    },
+    {
+      "name": "from not before until",
+      "json": "{\"track\":\"audio\",\"fromUs\":5,\"untilUs\":5}"
+    }
   ]
 }

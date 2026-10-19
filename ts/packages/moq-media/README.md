@@ -144,7 +144,9 @@ decoderConfig })` decodes the frames it is pushed with WebCodecs (`audioDecoderC
 the config from a catalog track), holds them in an adaptive jitter buffer in an `AudioWorklet`
 (60 ms to start, 40–400 ms), reports what is audible to the broadcast's playout clock, and plays
 through its own gain into `player.output`, the one mix the application routes. `input.cut({ fromUs,
-untilUs })` drops received audio in a timeline range. `createEchoCancellationLoopback(context,
+untilUs })` drops received audio in a timeline range; an `Interrupt` read with `parseInterrupt`
+from a talker's interrupt track (`INTERRUPT_TRACK`) is one, so `input.cut(parseInterrupt(object.payload))`
+applies it, and `buildInterrupt({ untilUs })` writes one. `createEchoCancellationLoopback(context,
 node)` plays a node through a local WebRTC loopback so Chromium's echo canceller hears it.
 `createRenderClock` times an `AudioContext`'s renders on `performance.now()`'s clock, for capture
 and playout alike. Give an audio-only broadcast's clock `AUDIO_ONLY_TARGET_LATENCY_US` (500 ms): the

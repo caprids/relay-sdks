@@ -34,6 +34,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   counts the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306));
   a bare `openGroup()` has no object to time. The frame writer opens every group this way, so a frame whose open
   fails reports no `groupId`, and `groups` counts only opens that returned a group.
+- `@mux/moq-media`: interrupts ([#320](https://github.com/muxinc/relay-sdks/issues/320)). `buildInterrupt` and
+  `parseInterrupt` write and read the interrupt track's messages (`INTERRUPT_TRACK`, `'interrupt'`), which tell a
+  listener to drop audio a talker already sent; a parsed `Interrupt` is an `AudioCutRange`, so
+  `input.cut(interrupt)` applies it. The WebCodecs example's `listenAudio` applies them when the catalog lists the
+  track, and `publishCanvas` takes `data` tracks to list.
 - `@mux/moq-media`: a headless audio player ([#314](https://github.com/muxinc/relay-sdks/issues/314)).
   `createAudioPlayer({ context })` mixes any number of inputs into one `output` node; each
   `player.addInput({ clock, decoderConfig })` decodes with WebCodecs, resets its decoder at discontinuities, holds

@@ -853,8 +853,26 @@ and under the clock's target latency less the output delay. `input.stats` has th
 buffer depth and target, the frames dropped as late, and what was trimmed, concealed with silence or
 cut. The decoder resets at every discontinuity and timestamp jump, and a `resync` or `restart`
 flushes the buffer. `input.cut({ fromUs, untilUs })` drops received audio in a timeline range, held
-or arriving later, as when a talker is interrupted. See
-[spec/media-layer.md](../spec/media-layer.md#audio-player) for the rules and why.
+or arriving later, as when a talker is interrupted. A talker that can stop mid-utterance, such as a
+voice bot, lists an `interrupt` data track in its catalog and writes an interrupt there when it does;
+apply each one to the input that plays its track:
+
+```ts
+import { INTERRUPT_TRACK, parseInterrupt } from '@mux/moq-media';
+
+subscriber.subscribe(
+  { namespace, track: INTERRUPT_TRACK },
+  {
+    onObject(object) {
+      const interrupt = parseInterrupt(object.payload); // throws on a malformed payload
+      if (interrupt.track === 'audio') input.cut(interrupt);
+    },
+  },
+);
+```
+
+See [spec/media-layer.md](../spec/media-layer.md#audio-player) for the rules and why, and its
+[Interrupt track](../spec/media-layer.md#interrupt-track) section for the convention.
 
 **Echo cancellation.** In a call the page also captures a microphone, and Chromium's echo canceller
 only removes audio that WebRTC played: audio played straight from an `AudioContext` reaches the
