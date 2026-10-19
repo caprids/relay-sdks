@@ -39,6 +39,10 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `target_latency_us`, by default twice the longest recent keyframe interval (`report_keyframe_interval`), 2 s before
   one is known; wall pacing now re-anchors on a late frame only beyond it, instead of beyond `max_video_delay_us`. The
   Video.js streaming example's keyframe interval (`--gop`) now defaults to 1 s.
+- Frame grouping plays every frame of a group that holds several, one per object, as `open_group()` writes them: the
+  sequencer's position is a group and an object, so a group's later objects are no longer dropped as behind its first,
+  and an object skipped inside a group is a `gap`. Groups of one frame, as the frame writer sends audio, behave as
+  before.
 - MOQT draft-22 by default ([#274](https://github.com/muxinc/relay-sdks/issues/274)): connections offer `moqt-22`,
   then `moqt-20` as a fallback, and speak whichever the relay selects. The drafts differ on the wire only in the
   LOCATION_FILTER parameter, which `moq_core` now encodes for the negotiated draft: its encoders and decoders that carry

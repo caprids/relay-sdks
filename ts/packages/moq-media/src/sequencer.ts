@@ -122,8 +122,9 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   // The group being delivered and its next object, under keyframe grouping.
   let cursor: { groupId: number; nextObjectId: number } | undefined;
   let lastDeliveredUs: number | undefined;
-  // Under frame grouping, the group of the last delivered frame.
+  // Under frame grouping, the group and object of the last delivered frame.
   let lastDeliveredGroup: number | undefined;
+  let lastDeliveredObject = 0;
   let deliveredSinceRestart = false;
   let pending: FrameDiscontinuity | undefined;
   // Starving: something arrived but none of it was within the budget, since this position, and late by about this much.
@@ -328,7 +329,9 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     }
   };
 
-  // Frame grouping: every frame stands alone; deliver in order at once, and drop what is late or behind.
+  // Frame grouping: every frame stands alone; deliver in order at once, and drop what is late or behind. A group may
+  // hold several frames, one per object, as a subgroup writer sends them: the position taken is a (group, object) pair,
+  // so the group's later objects are still ahead of it while its earlier ones are behind.
   const pollFrames = (out: SequencedFrame[]): number | undefined => {
     let positionUs = clock.position();
     let lateBefore = positionUs === undefined ? Number.NEGATIVE_INFINITY : positionUs - clock.lateDropUs;
@@ -346,7 +349,8 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
           lateBefore = Number.NEGATIVE_INFINITY;
         }
         group.frames.delete(objectId);
-        floor = id;
+        floor = id - 1;
+        cursor = { groupId: id, nextObjectId: objectId + 1 };
         if (positionUs !== undefined && frame.timestampUs < lateBefore) {
           stats.late++;
           newestLate = { groupId: id, group: { frames: new Map([[objectId, frame]]), ended: true, reset: false } };
@@ -354,9 +358,16 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
           if (deliveredSinceRestart) pending ??= 'gap';
           continue;
         }
-        // A group ID skipped since the last delivered frame is a frame that never came, or was reset.
-        if (deliveredSinceRestart && lastDeliveredGroup !== undefined && id > lastDeliveredGroup + 1) pending ??= 'gap';
+        // A group ID or an object ID skipped since the last delivered frame is a frame that never came, or was reset.
+        if (deliveredSinceRestart && lastDeliveredGroup !== undefined) {
+          const skipped =
+            id === lastDeliveredGroup
+              ? objectId > lastDeliveredObject + 1
+              : id > lastDeliveredGroup + 1 || objectId > 0;
+          if (skipped) pending ??= 'gap';
+        }
         lastDeliveredGroup = id;
+        lastDeliveredObject = objectId;
         deliver(frame, out);
       }
       groups.delete(id);
@@ -415,7 +426,10 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     for (const id of [...groups.keys()]) {
       if (id < groupId) groups.delete(id);
     }
-    groups.set(groupId, group);
+    // Under frame grouping the group's later objects may be held already: keep them beside the candidate.
+    const held = groups.get(groupId);
+    if (held) for (const [objectId, frame] of group.frames) held.frames.set(objectId, frame);
+    else groups.set(groupId, group);
     floor = groupId - 1;
     cursor = undefined;
     pending = pending === 'restart' ? 'restart' : 'resync';
@@ -476,7 +490,10 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     for (const id of [...groups.keys()]) {
       if (id < groupId) groups.delete(id);
     }
-    groups.set(groupId, group);
+    // Under frame grouping the group's later objects may be held already: keep them beside the candidate.
+    const held = groups.get(groupId);
+    if (held) for (const [objectId, frame] of group.frames) held.frames.set(objectId, frame);
+    else groups.set(groupId, group);
     floor = groupId - 1;
     cursor = undefined;
   };

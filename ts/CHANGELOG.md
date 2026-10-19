@@ -56,6 +56,10 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `targetLatencyUs`, by default twice the longest recent keyframe interval (`reportKeyframeInterval`), 2 s before one
   is known; wall pacing now re-anchors on a late frame only beyond it, instead of beyond `maxVideoDelayUs`. Both
   examples now force a keyframe at least every second.
+- Frame grouping plays every frame of a group that holds several, one per object, as `openGroup()` writes them: the
+  sequencer's position is a group and an object, so a group's later objects are no longer dropped as behind its first,
+  and an object skipped inside a group is a `gap`. Groups of one frame, as the frame writer sends audio, behave as
+  before.
 - `@mux/relay`: `subscriber.namespaceEvents({ prefix })` discovers which namespaces under a prefix are announced
   ([#259](https://github.com/muxinc/relay-sdks/issues/259)). The subscriber's SETUP now carries the SOLICIT option,
   so the relay advertises namespaces only when asked. A prefix overlapping one the connection already discovers is
