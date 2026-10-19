@@ -3204,6 +3204,212 @@
           ]
         }
       ]
+    },
+    {
+      "name": "a segment that arrives after a cut it runs into is ended there, as if it had arrived first",
+      "steps": [
+        {
+          "cut": {
+            "untilUs": "4000"
+          },
+          "positionUs": "2000"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Late",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "1",
+            "fromUs": "1500",
+            "untilUs": "3000",
+            "text": "Late, with its end",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "2",
+            "fromUs": "500",
+            "untilUs": "900",
+            "text": "Done before",
+            "final": true
+          },
+          "applied": true
+        }
+      ],
+      "lines": [
+        {
+          "seq": "2",
+          "track": "audio",
+          "fromUs": "500",
+          "untilUs": "900",
+          "text": "Done before",
+          "final": true,
+          "cut": false
+        },
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "2000",
+          "text": "Late",
+          "final": true,
+          "cut": true
+        },
+        {
+          "seq": "1",
+          "track": "audio",
+          "fromUs": "1500",
+          "untilUs": "2000",
+          "text": "Late, with its end",
+          "final": true,
+          "cut": true
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "1500",
+          "seqs": [
+            "2",
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a delayed final whose audio ended before the cut replaces the cut line",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Done",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "9000"
+          },
+          "positionUs": "3500"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Done",
+            "final": false
+          },
+          "applied": false
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "2000",
+            "text": "Done.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "2000",
+            "text": "Done.",
+            "final": true
+          },
+          "applied": false
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "2000",
+          "text": "Done.",
+          "final": true,
+          "cut": false
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "3500",
+          "seqs": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a delayed final that runs past the cut stays cut, with its text",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Long",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "9000"
+          },
+          "positionUs": "3500"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "5000",
+            "text": "Long answer.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "5000",
+            "text": "Long answer.",
+            "final": true
+          },
+          "applied": false
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "3500",
+          "text": "Long answer.",
+          "final": true,
+          "cut": true
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "3500",
+          "seqs": [
+            "0"
+          ]
+        }
+      ]
     }
   ],
   "transcriptCutErrors": [

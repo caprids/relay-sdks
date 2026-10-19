@@ -57,13 +57,16 @@ export interface TranscriptCutRange {
 /**
  * What a listener has read of one audio track's transcript: each segment's latest version, less what was cut.
  * `apply` each segment read for the track and `cut` on each interrupt for it; `linesAt` gives what to show as the
- * audio plays. A segment's final version is kept against later ones. A segment is known by its `seq` within one run of
- * the talker's track, so create a new transcript when the talker starts over.
+ * audio plays. A segment's final version is kept against later ones. Cuts are remembered, so a version that arrives
+ * after one is clipped as if it had arrived before. A segment is known by its `seq` within one run of the talker's
+ * track, so create a new transcript when the talker starts over.
  */
 export interface Transcript {
   /**
-   * Keep a segment's version; `false` if it changed nothing. Ignored: a version of a segment already final or cut, and
-   * a segment that starts inside a range cut earlier, as audio arriving there late is.
+   * Keep a segment's version, clipped by the cuts so far; `false` if it changed nothing. Ignored: a version of a
+   * segment the talker already sent final, a segment that starts inside a range cut earlier (as audio arriving there
+   * late is), and an interim version of a segment a cut ended. A cut segment takes the talker's final version,
+   * clipped: one whose audio ended before the cut is no longer cut.
    */
   apply(segment: TranscriptSegment): boolean;
   /**
@@ -134,14 +137,47 @@ export function parseTranscriptSegment(payload: Uint8Array): TranscriptSegment {
 export function createTranscript(): Transcript {
   const held = new Map<number, TranscriptLine>();
   const cuts: { startUs: number; untilUs: number }[] = [];
+  // Ended where a cut starts: final, since nothing after it plays, and cut.
+  const clipped = (line: TranscriptLine, startUs: number): TranscriptLine => ({
+    ...line,
+    untilUs: startUs,
+    final: true,
+    cut: true,
+  });
+  const same = (a: TranscriptLine, b: TranscriptLine | undefined) =>
+    b !== undefined &&
+    a.seq === b.seq &&
+    a.track === b.track &&
+    a.fromUs === b.fromUs &&
+    a.untilUs === b.untilUs &&
+    a.text === b.text &&
+    a.final === b.final &&
+    a.cut === b.cut;
   const lines = () =>
     [...held.values()].sort((a, b) => a.fromUs - b.fromUs || a.seq - b.seq).map((line) => ({ ...line }));
   return {
     apply(segment) {
-      if (cuts.some(({ startUs, untilUs }) => startUs <= segment.fromUs && segment.fromUs < untilUs)) return false;
-      if (held.get(segment.seq)?.final) return false;
+      const previous = held.get(segment.seq);
+      if (previous?.final && (!previous.cut || !segment.final)) return false;
       const { seq, track, fromUs, untilUs, text, final } = segment;
-      held.set(seq, { seq, track, fromUs, ...(untilUs === undefined ? {} : { untilUs }), text, final, cut: false });
+      let line: TranscriptLine = {
+        seq,
+        track,
+        fromUs,
+        ...(untilUs === undefined ? {} : { untilUs }),
+        text,
+        final,
+        cut: false,
+      };
+      for (const cut of [...cuts].sort((a, b) => a.startUs - b.startUs || a.untilUs - b.untilUs)) {
+        if (cut.startUs <= fromUs && fromUs < cut.untilUs) return false;
+        if (fromUs < cut.startUs && (untilUs === undefined || untilUs > cut.startUs)) {
+          line = clipped(line, cut.startUs);
+          break;
+        }
+      }
+      if (same(line, previous)) return false;
+      held.set(seq, line);
       return true;
     },
     cut(range, positionUs) {
@@ -158,8 +194,7 @@ export function createTranscript(): Transcript {
       for (const [seq, line] of held) {
         if (line.fromUs >= untilUs) continue;
         if (line.fromUs >= startUs) held.delete(seq);
-        else if (line.untilUs === undefined || line.untilUs > startUs)
-          held.set(seq, { ...line, untilUs: startUs, final: true, cut: true });
+        else if (line.untilUs === undefined || line.untilUs > startUs) held.set(seq, clipped(line, startUs));
       }
     },
     get lines() {

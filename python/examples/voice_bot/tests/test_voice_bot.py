@@ -177,11 +177,26 @@ class TestSpeaker:
         assert (hello.text, hello.from_us, hello.until_us, hello.final) == ("Hello", stamps[0], None, False)
         assert (hello_final.seq, hello_final.final) == (hello.seq, True)
         assert (there.seq, there.text, there.final) == (hello.seq + 1, "there", False)
-        # Each part's segment ends where its own audio does, and the next starts there.
-        assert hello_final.until_us == there.from_us
+        # Each part's segment ends where its own audio does, and the next starts there or, after a scheduling delay,
+        # later.
+        assert hello_final.until_us - OPUS_FRAME_US in stamps[4:]
         assert there.from_us in stamps[5:]
-        assert there.from_us - OPUS_FRAME_US in stamps
+        assert hello_final.until_us <= there.from_us
         assert (there_final.until_us, there_final.final) == (stamps[-1] + OPUS_FRAME_US, True)
+
+    async def test_text_after_audio_too_short_for_a_packet_starts_its_own_segment(self) -> None:
+        speaker, _, _, events = self.speaker()
+
+        async def reply(_: Utterance) -> AsyncIterator[bytes | str]:
+            yield "First"
+            yield tone(160, 16_000)  # 10 ms: the encoder holds it
+            yield "Second"
+            yield tone(1600, 16_000)
+
+        speaker.say(reply(Utterance(b"", 16_000, 0, 0)))
+        await wait_for(lambda: "replied" in events, timeout=3)
+        texts = [(segment.text, segment.final) for segment in self.segments()]
+        assert texts == [("First", False), ("First", True), ("Second", False), ("Second", True)]
 
     async def test_an_interrupted_segment_gets_no_final_version(self) -> None:
         speaker, audio, interrupts, _ = self.speaker()

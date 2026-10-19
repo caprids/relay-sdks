@@ -91,8 +91,9 @@ class Transcript:
     """What a listener has read of one audio track's transcript: each segment's latest version, less what was cut.
 
     ``apply`` each segment read for the track and ``cut`` on each interrupt for it; ``lines_at`` gives what to show as
-    the audio plays. A segment's final version is kept against later ones. A segment is known by its ``seq`` within
-    one run of the talker's track, so use a new ``Transcript`` when the talker starts over.
+    the audio plays. A segment's final version is kept against later ones. Cuts are remembered, so a version that
+    arrives after one is clipped as if it had arrived before. A segment is known by its ``seq`` within one run of the
+    talker's track, so use a new ``Transcript`` when the talker starts over.
     """
 
     def __init__(self) -> None:
@@ -100,17 +101,16 @@ class Transcript:
         self._cuts: list[tuple[int, int]] = []
 
     def apply(self, segment: TranscriptSegment) -> bool:
-        """Keep a segment's version; ``False`` if it changed nothing.
+        """Keep a segment's version, clipped by the cuts so far; ``False`` if it changed nothing.
 
-        Ignored: a version of a segment already final or cut, and a segment that starts inside a range cut earlier,
-        as audio arriving there late is.
+        Ignored: a version of a segment the talker already sent final, a segment that starts inside a range cut
+        earlier (as audio arriving there late is), and an interim version of a segment a cut ended. A cut segment
+        takes the talker's final version, clipped: one whose audio ended before the cut is no longer cut.
         """
-        if any(start <= segment.from_us < until for start, until in self._cuts):
-            return False
         held = self._lines.get(segment.seq)
-        if held is not None and held.final:
+        if held is not None and held.final and (not held.cut or not segment.final):
             return False
-        self._lines[segment.seq] = TranscriptLine(
+        line = TranscriptLine(
             seq=segment.seq,
             track=segment.track,
             from_us=segment.from_us,
@@ -118,6 +118,15 @@ class Transcript:
             text=segment.text,
             final=segment.final,
         )
+        for start, until in sorted(self._cuts):
+            if start <= line.from_us < until:
+                return False
+            if line.from_us < start and (line.until_us is None or line.until_us > start):
+                line = _clipped(line, start)
+                break
+        if line == held:
+            return False
+        self._lines[segment.seq] = line
         return True
 
     def cut(self, *, until_us: int, from_us: int | None = None, position_us: float | None = None) -> None:
@@ -144,15 +153,7 @@ class Transcript:
             if line.from_us >= start:
                 del self._lines[seq]
             elif line.until_us is None or line.until_us > start:
-                self._lines[seq] = TranscriptLine(
-                    seq=line.seq,
-                    track=line.track,
-                    from_us=line.from_us,
-                    until_us=start,
-                    text=line.text,
-                    final=True,
-                    cut=True,
-                )
+                self._lines[seq] = _clipped(line, start)
 
     @property
     def lines(self) -> list[TranscriptLine]:
@@ -164,6 +165,19 @@ class Transcript:
         if position_us is None:
             return []
         return [line for line in self.lines if line.from_us <= position_us]
+
+
+def _clipped(line: TranscriptLine, start_us: int) -> TranscriptLine:
+    # Ended where a cut starts: final, since nothing after it plays, and cut.
+    return TranscriptLine(
+        seq=line.seq,
+        track=line.track,
+        from_us=line.from_us,
+        until_us=start_us,
+        text=line.text,
+        final=True,
+        cut=True,
+    )
 
 
 def _reject_constant(name: str) -> object:

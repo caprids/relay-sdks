@@ -874,10 +874,13 @@ interim version read after a newer interim one shows until the final one replace
 **Interrupts retract.** A talker that interrupts its audio sends no final version for the segment
 it cut; the interrupt ends it. A listener applies the interrupt to its transcript at its playout
 position: audio before the position was heard, so the cut starts at the later of the interrupt's
-`fromUs` and the position. It drops the segments that start inside the cut, ends the one playing at
-the cut's start there and marks it cut, and ignores later versions of either, and any segment that
-starts inside the cut later, as the audio player does with audio that arrives late. A listener that
-applied the interrupt before the segment's interim version arrived still drops it.
+`fromUs` and the position. It drops the segments that start inside the cut, and ends the one playing
+at the cut's start there and marks it cut. It remembers the cut, so a version that arrives later is
+treated as if it had arrived first, as the audio player treats audio that arrives late: a segment
+that starts inside the cut is dropped, one that runs into it is ended at its start, and an interim
+version of a cut segment changes nothing. The talker's final version of a cut segment, delayed past
+the interrupt, is clipped the same way, so a segment whose audio ended before the cut is no longer
+marked cut.
 
 **Showing it.** A listener shows a segment once its playout clock reaches `fromUs`: the text
 appears as the audio it belongs to plays, not when it arrives, and a segment the interrupt dropped

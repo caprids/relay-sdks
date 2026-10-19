@@ -237,7 +237,7 @@ class Speaker:
         try:
             async for chunk in chunks:
                 if isinstance(chunk, str):
-                    if self._segment is not None:
+                    if self._encoder.next_timestamp_us is not None:
                         # Send what the encoder holds of the last text's audio, so its segment ends where it does.
                         self._drop_if_starved()
                         sent += await self._send(self._encoder.flush())
@@ -277,14 +277,14 @@ class Speaker:
             delay_us = packet.timestamp_us - self._clock.now_us()
             if delay_us > 0:
                 await asyncio.sleep(delay_us / 1_000_000)
+            # Counted before the writes: an interrupt that cancels one mid-way must cut the packet, and its text, too.
+            self._sent_until_us = packet.timestamp_us + packet.duration_us
             if self._pending_text is not None:
                 # The text's audio starts here; the interim segment goes first, so a listener has it when it plays.
                 self._segment = (self._seq, packet.timestamp_us, self._pending_text)
                 self._seq += 1
                 self._pending_text = None
                 await self._write_segment(*self._segment)
-            # Counted before the write: an interrupt that cancels it mid-way must cut the packet too.
-            self._sent_until_us = packet.timestamp_us + packet.duration_us
             # A frame writer reports a failed frame rather than raising; the next packet tries again.
             await self._writer.write(packet)
         return len(packets)

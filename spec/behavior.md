@@ -1248,12 +1248,14 @@ to both languages.
   or timestamp that is not a nonnegative safe integer, an empty or non-string track, a track or
   text that is not valid Unicode, a non-string text, a non-boolean `final`, an `untilUs` not after
   `fromUs`, and a final segment without `untilUs`. The reader refuses a payload that is not a UTF-8
-  JSON object, reads an integral number as an integer, and ignores unknown fields. A `Transcript`
-  keeps each segment's latest version, a final one against any later, and ignores a segment that
-  starts inside a range cut earlier. A cut starts at the later of the range's `fromUs` (or 0) and
-  the floored playout position, and changes nothing when that is not before `untilUs`; otherwise
-  it drops the segments starting in the cut and ends any segment running past its start there,
-  final and marked cut. Lines are ordered by `fromUs`, then `seq`; at a position, those with
+  JSON object, reads an integral number as an integer, and ignores unknown fields. A cut starts at
+  the later of the range's `fromUs` (or 0) and the floored playout position, and changes nothing
+  when that is not before `untilUs`; otherwise a `Transcript` remembers it, drops the segments
+  starting in it, and ends any segment running past its start there, final and marked cut. `apply`
+  keeps a segment's latest version, clipped by the remembered cuts in order of start: refused if it
+  starts inside one, ended at the start of the first it runs into. It refuses any version of a
+  segment the talker sent final, and an interim version of a cut segment; a final version of a cut
+  segment replaces it, clipped. It returns whether the held line changed. Lines are ordered by `fromUs`, then `seq`; at a position, those with
   `fromUs` at or before it, and none while idle. Pinned by `vectors/media.json`
   `transcriptSegments`, `transcriptSegmentErrors`, `transcriptSegmentReads`,
   `transcriptSegmentReadErrors`, `transcripts` and `transcriptCutErrors`; the track name by
