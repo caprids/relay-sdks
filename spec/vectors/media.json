@@ -1,5 +1,5 @@
 {
-  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 §7, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional wall-clock time that defaults to the timestamp (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers. locTimestamps (issue #290) read an object's LOC Timestamp in microseconds from its properties ([type, decimal value] pairs) and optional track properties (never the catalog's timescale, which MSF does not tie to the LOC Timestamp); timestampUs null means no usable Timestamp.",
+  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 §7, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional wall-clock time that defaults to the timestamp (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers. locTimestamps (issue #290) read an object's LOC Timestamp in microseconds from its properties ([type, decimal value] pairs) and optional track properties (never the catalog's timescale, which MSF does not tie to the LOC Timestamp); timestampUs null means no usable Timestamp. Transcript vectors (issue #320): transcriptSegments build one segment from decimal-string inputs into exact json; transcriptSegmentReads are parse-only payloads, parsed with decimal strings; transcriptSegmentErrors and transcriptSegmentReadErrors must be rejected by both languages. transcripts run steps against an empty Transcript: apply a segment (and whether it changed anything) or cut an interrupt's range at an optional playout position, then compare every line held and the seqs shown at each position (null: idle); transcriptCutErrors must be rejected.",
   "catalogs": [
     {
       "name": "h264-opus",
@@ -2499,6 +2499,1072 @@
     {
       "name": "from not before until",
       "json": "{\"track\":\"audio\",\"fromUs\":5,\"untilUs\":5}"
+    }
+  ],
+  "transcriptSegments": [
+    {
+      "name": "interim, default track, end not known",
+      "input": {
+        "seq": "0",
+        "fromUs": "1760000000000000",
+        "text": "Hello",
+        "final": false
+      },
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":1760000000000000,\"text\":\"Hello\",\"final\":false}"
+    },
+    {
+      "name": "final, with its end",
+      "input": {
+        "seq": "0",
+        "fromUs": "1760000000000000",
+        "untilUs": "1760000000480000",
+        "text": "Hello there.",
+        "final": true
+      },
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":1760000000000000,\"untilUs\":1760000000480000,\"text\":\"Hello there.\",\"final\":true}"
+    },
+    {
+      "name": "interim with its end, on a named track",
+      "input": {
+        "seq": "7",
+        "track": "bot-voice",
+        "fromUs": "1000",
+        "untilUs": "2000",
+        "text": "partial",
+        "final": false
+      },
+      "json": "{\"seq\":7,\"track\":\"bot-voice\",\"fromUs\":1000,\"untilUs\":2000,\"text\":\"partial\",\"final\":false}"
+    },
+    {
+      "name": "empty text",
+      "input": {
+        "seq": "1",
+        "fromUs": "0",
+        "text": "",
+        "final": false
+      },
+      "json": "{\"seq\":1,\"track\":\"audio\",\"fromUs\":0,\"text\":\"\",\"final\":false}"
+    },
+    {
+      "name": "quotes and a newline escaped, non-ASCII stays UTF-8",
+      "input": {
+        "seq": "2",
+        "fromUs": "5",
+        "text": "Olá \"mundo\" 🦜\n",
+        "final": false
+      },
+      "json": "{\"seq\":2,\"track\":\"audio\",\"fromUs\":5,\"text\":\"Olá \\\"mundo\\\" 🦜\\n\",\"final\":false}"
+    },
+    {
+      "name": "largest safe numbers",
+      "input": {
+        "seq": "9007199254740991",
+        "fromUs": "9007199254740990",
+        "untilUs": "9007199254740991",
+        "text": "x",
+        "final": true
+      },
+      "json": "{\"seq\":9007199254740991,\"track\":\"audio\",\"fromUs\":9007199254740990,\"untilUs\":9007199254740991,\"text\":\"x\",\"final\":true}"
+    }
+  ],
+  "transcriptSegmentErrors": [
+    {
+      "name": "negative seq",
+      "input": {
+        "seq": "-1",
+        "fromUs": "0",
+        "text": "x",
+        "final": false
+      }
+    },
+    {
+      "name": "fractional seq",
+      "input": {
+        "seq": "1.5",
+        "fromUs": "0",
+        "text": "x",
+        "final": false
+      }
+    },
+    {
+      "name": "unsafe seq",
+      "input": {
+        "seq": "9007199254740992",
+        "fromUs": "0",
+        "text": "x",
+        "final": false
+      }
+    },
+    {
+      "name": "negative from",
+      "input": {
+        "seq": "0",
+        "fromUs": "-1",
+        "text": "x",
+        "final": false
+      }
+    },
+    {
+      "name": "until equal to from",
+      "input": {
+        "seq": "0",
+        "fromUs": "5",
+        "untilUs": "5",
+        "text": "x",
+        "final": false
+      }
+    },
+    {
+      "name": "until before from",
+      "input": {
+        "seq": "0",
+        "fromUs": "5",
+        "untilUs": "4",
+        "text": "x",
+        "final": false
+      }
+    },
+    {
+      "name": "final without until",
+      "input": {
+        "seq": "0",
+        "fromUs": "5",
+        "text": "x",
+        "final": true
+      }
+    },
+    {
+      "name": "empty track",
+      "input": {
+        "seq": "0",
+        "track": "",
+        "fromUs": "5",
+        "text": "x",
+        "final": false
+      }
+    },
+    {
+      "name": "null track",
+      "input": {
+        "seq": "0",
+        "fromUs": "5",
+        "text": "x",
+        "final": false,
+        "track": null
+      }
+    },
+    {
+      "name": "null text",
+      "input": {
+        "seq": "0",
+        "fromUs": "5",
+        "text": null,
+        "final": false
+      }
+    },
+    {
+      "name": "lone surrogate in text",
+      "input": {
+        "seq": "0",
+        "fromUs": "5",
+        "text": "\ud800",
+        "final": false
+      }
+    },
+    {
+      "name": "final not a boolean",
+      "input": {
+        "seq": "0",
+        "fromUs": "5",
+        "untilUs": "6",
+        "text": "x",
+        "final": "yes"
+      }
+    }
+  ],
+  "transcriptSegmentReads": [
+    {
+      "name": "interim without its end",
+      "json": "{\"seq\":3,\"track\":\"audio\",\"fromUs\":1000,\"text\":\"Hel\",\"final\":false}",
+      "parsed": {
+        "seq": "3",
+        "track": "audio",
+        "fromUs": "1000",
+        "text": "Hel",
+        "final": false
+      }
+    },
+    {
+      "name": "final",
+      "json": "{\"seq\":3,\"track\":\"audio\",\"fromUs\":1000,\"untilUs\":1600,\"text\":\"Hello.\",\"final\":true}",
+      "parsed": {
+        "seq": "3",
+        "track": "audio",
+        "fromUs": "1000",
+        "untilUs": "1600",
+        "text": "Hello.",
+        "final": true
+      }
+    },
+    {
+      "name": "unknown fields ignored, any order",
+      "json": "{\"final\":true,\"text\":\"Hi\",\"untilUs\":20,\"speaker\":\"bot\",\"fromUs\":10,\"track\":\"voice\",\"seq\":3}",
+      "parsed": {
+        "seq": "3",
+        "track": "voice",
+        "fromUs": "10",
+        "untilUs": "20",
+        "text": "Hi",
+        "final": true
+      }
+    },
+    {
+      "name": "integral exponent reads as an integer",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":2e3,\"text\":\"x\",\"final\":false}",
+      "parsed": {
+        "seq": "0",
+        "track": "audio",
+        "fromUs": "2000",
+        "text": "x",
+        "final": false
+      }
+    }
+  ],
+  "transcriptSegmentReadErrors": [
+    {
+      "name": "not JSON",
+      "json": "transcript"
+    },
+    {
+      "name": "an array",
+      "json": "[{\"seq\":0,\"track\":\"audio\",\"fromUs\":0,\"text\":\"x\",\"final\":false}]"
+    },
+    {
+      "name": "null",
+      "json": "null"
+    },
+    {
+      "name": "missing seq",
+      "json": "{\"track\":\"audio\",\"fromUs\":0,\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "missing track",
+      "json": "{\"seq\":0,\"fromUs\":0,\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "missing from",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "missing text",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":0,\"final\":false}"
+    },
+    {
+      "name": "missing final",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":0,\"text\":\"x\"}"
+    },
+    {
+      "name": "final as a string",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":0,\"text\":\"x\",\"final\":\"false\"}"
+    },
+    {
+      "name": "text not a string",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":0,\"text\":7,\"final\":false}"
+    },
+    {
+      "name": "empty track",
+      "json": "{\"seq\":0,\"track\":\"\",\"fromUs\":0,\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "negative seq",
+      "json": "{\"seq\":-1,\"track\":\"audio\",\"fromUs\":0,\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "seq as a string",
+      "json": "{\"seq\":\"0\",\"track\":\"audio\",\"fromUs\":0,\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "fractional from",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":1.5,\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "null until",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":0,\"untilUs\":null,\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "until not after from",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":5,\"untilUs\":5,\"text\":\"x\",\"final\":false}"
+    },
+    {
+      "name": "final without until",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":5,\"text\":\"x\",\"final\":true}"
+    },
+    {
+      "name": "lone surrogate in text",
+      "json": "{\"seq\":0,\"track\":\"audio\",\"fromUs\":0,\"text\":\"\\ud800\",\"final\":false}"
+    }
+  ],
+  "transcripts": [
+    {
+      "name": "a final version replaces the interim one and is kept against later ones",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Hel",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "3000",
+            "text": "Hello",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Hel",
+            "final": false
+          },
+          "applied": false
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "3000",
+          "text": "Hello",
+          "final": true,
+          "cut": false
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": null,
+          "seqs": []
+        },
+        {
+          "positionUs": "999",
+          "seqs": []
+        },
+        {
+          "positionUs": "1000",
+          "seqs": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "lines in timeline order, shown once their audio starts",
+      "steps": [
+        {
+          "apply": {
+            "seq": "1",
+            "fromUs": "5000",
+            "text": "second",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "first",
+            "final": false
+          },
+          "applied": true
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "text": "first",
+          "final": false,
+          "cut": false
+        },
+        {
+          "seq": "1",
+          "track": "audio",
+          "fromUs": "5000",
+          "text": "second",
+          "final": false,
+          "cut": false
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "4999.9",
+          "seqs": [
+            "0"
+          ]
+        },
+        {
+          "positionUs": "5000",
+          "seqs": [
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "barge-in ends the playing segment at the position and drops the next, and its late versions",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "One.",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "1",
+            "fromUs": "3000",
+            "text": "Two.",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "4000"
+          },
+          "positionUs": "2000.7"
+        },
+        {
+          "apply": {
+            "seq": "1",
+            "fromUs": "3000",
+            "untilUs": "4000",
+            "text": "Two.",
+            "final": true
+          },
+          "applied": false
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "3000",
+            "text": "One.",
+            "final": true
+          },
+          "applied": false
+        },
+        {
+          "apply": {
+            "seq": "2",
+            "fromUs": "4000",
+            "text": "Three.",
+            "final": false
+          },
+          "applied": true
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "2000",
+          "text": "One.",
+          "final": true,
+          "cut": true
+        },
+        {
+          "seq": "2",
+          "track": "audio",
+          "fromUs": "4000",
+          "text": "Three.",
+          "final": false,
+          "cut": false
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "3000",
+          "seqs": [
+            "0"
+          ]
+        },
+        {
+          "positionUs": "4000",
+          "seqs": [
+            "0",
+            "2"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a cut before anything played drops every segment before its end",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "2000",
+            "text": "Unheard.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "5000"
+          }
+        }
+      ],
+      "lines": [],
+      "linesAt": [
+        {
+          "positionUs": "9000",
+          "seqs": []
+        }
+      ]
+    },
+    {
+      "name": "a segment that ended before the position is kept as it was",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "2000",
+            "text": "Done.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "1",
+            "fromUs": "2000",
+            "text": "Next",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "9000"
+          },
+          "positionUs": "2500"
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "2000",
+          "text": "Done.",
+          "final": true,
+          "cut": false
+        },
+        {
+          "seq": "1",
+          "track": "audio",
+          "fromUs": "2000",
+          "untilUs": "2500",
+          "text": "Next",
+          "final": true,
+          "cut": true
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "2500",
+          "seqs": [
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a cut from a later point leaves the audio before it alone",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "3000",
+            "text": "Keep",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "1",
+            "fromUs": "3000",
+            "text": "Drop",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "fromUs": "3000",
+            "untilUs": "6000"
+          },
+          "positionUs": "1500"
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "3000",
+          "text": "Keep",
+          "final": false,
+          "cut": false
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "1500",
+          "seqs": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a cut the position has passed changes nothing",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Heard",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "2000"
+          },
+          "positionUs": "2000"
+        },
+        {
+          "apply": {
+            "seq": "1",
+            "fromUs": "1500",
+            "text": "Late",
+            "final": false
+          },
+          "applied": true
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "text": "Heard",
+          "final": false,
+          "cut": false
+        },
+        {
+          "seq": "1",
+          "track": "audio",
+          "fromUs": "1500",
+          "text": "Late",
+          "final": false,
+          "cut": false
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "2000",
+          "seqs": [
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a segment that arrives after a cut it runs into is ended there, as if it had arrived first",
+      "steps": [
+        {
+          "cut": {
+            "untilUs": "4000"
+          },
+          "positionUs": "2000"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Late",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "1",
+            "fromUs": "1500",
+            "untilUs": "3000",
+            "text": "Late, with its end",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "2",
+            "fromUs": "500",
+            "untilUs": "900",
+            "text": "Done before",
+            "final": true
+          },
+          "applied": true
+        }
+      ],
+      "lines": [
+        {
+          "seq": "2",
+          "track": "audio",
+          "fromUs": "500",
+          "untilUs": "900",
+          "text": "Done before",
+          "final": true,
+          "cut": false
+        },
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "2000",
+          "text": "Late",
+          "final": true,
+          "cut": true
+        },
+        {
+          "seq": "1",
+          "track": "audio",
+          "fromUs": "1500",
+          "untilUs": "2000",
+          "text": "Late, with its end",
+          "final": true,
+          "cut": true
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "1500",
+          "seqs": [
+            "2",
+            "0",
+            "1"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a delayed final whose audio ended before the cut replaces the cut line",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Done",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "9000"
+          },
+          "positionUs": "3500"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Done",
+            "final": false
+          },
+          "applied": false
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "2000",
+            "text": "Done.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "2000",
+            "text": "Done.",
+            "final": true
+          },
+          "applied": false
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "2000",
+          "text": "Done.",
+          "final": true,
+          "cut": false
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "3500",
+          "seqs": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a delayed final that runs past the cut stays cut, with its text",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "text": "Long",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "9000"
+          },
+          "positionUs": "3500"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "5000",
+            "text": "Long answer.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "5000",
+            "text": "Long answer.",
+            "final": true
+          },
+          "applied": false
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "3500",
+          "text": "Long answer.",
+          "final": true,
+          "cut": true
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "3500",
+          "seqs": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a segment the talker sent final keeps its version after a cut ends it",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "5000",
+            "text": "Full.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "9000"
+          },
+          "positionUs": "3500"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "2000",
+            "text": "Other",
+            "final": true
+          },
+          "applied": false
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "3500",
+          "text": "Full.",
+          "final": true,
+          "cut": true
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "3500",
+          "seqs": [
+            "0"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a final version that starts inside a cut drops the segment for good",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "500",
+            "text": "Early guess",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "4000"
+          },
+          "positionUs": "1000"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "2000",
+            "untilUs": "3000",
+            "text": "Unheard.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "500",
+            "text": "Early guess",
+            "final": false
+          },
+          "applied": false
+        }
+      ],
+      "lines": [],
+      "linesAt": [
+        {
+          "positionUs": "4000",
+          "seqs": []
+        }
+      ]
+    },
+    {
+      "name": "a final version dropped by a cut before any other version keeps later ones out",
+      "steps": [
+        {
+          "cut": {
+            "untilUs": "4000"
+          },
+          "positionUs": "1000"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "2000",
+            "untilUs": "3000",
+            "text": "Unheard.",
+            "final": true
+          },
+          "applied": false
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "500",
+            "text": "Late guess",
+            "final": false
+          },
+          "applied": false
+        }
+      ],
+      "lines": [],
+      "linesAt": [
+        {
+          "positionUs": "4000",
+          "seqs": []
+        }
+      ]
+    }
+  ],
+  "transcriptCutErrors": [
+    {
+      "name": "from not before until",
+      "cut": {
+        "fromUs": "5",
+        "untilUs": "5"
+      }
+    },
+    {
+      "name": "fractional until",
+      "cut": {
+        "untilUs": "1.5"
+      }
+    },
+    {
+      "name": "negative position",
+      "cut": {
+        "untilUs": "5"
+      },
+      "positionUs": "-1"
     }
   ]
 }

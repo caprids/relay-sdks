@@ -102,6 +102,17 @@ export {
   parseMediaTimeline,
 } from './timeline.js';
 export {
+  buildTranscriptSegment,
+  createTranscript,
+  parseTranscriptSegment,
+  TRANSCRIPT_TRACK,
+  type Transcript,
+  type TranscriptCutRange,
+  type TranscriptLine,
+  type TranscriptSegment,
+  type TranscriptSegmentInput,
+} from './transcript.js';
+export {
   audioDecoderConfigFromTrack,
   audioTrackFromDecoderConfig,
   type ChunkToLocFrameOptions,

@@ -105,6 +105,16 @@ listeners drop the audio they already hold. List the track in the catalog
 `parse_interrupt(payload)` reads one back as an `Interrupt`. See
 [spec/media-layer.md](../../../spec/media-layer.md#interrupt-track).
 
+## Transcripts
+
+A talker publishes the text of its audio on the transcript track, so listeners show it as the audio
+plays. List the track (`DataTrackInfo(name=TRANSCRIPT_TRACK)`), register it, and write
+`build_transcript_segment(seq=, from_us=, text=)` just before the segment's first audio, then the
+same `seq` with `until_us=` and `final=True` once its last audio is sent; send no final version for a
+segment an interrupt cut. A listener reads each with `parse_transcript_segment`, keeps them in a
+`Transcript` (`apply`, and `cut` on each interrupt with the playout position), and shows
+`lines_at(clock.position_us)`. See [spec/media-layer.md](../../../spec/media-layer.md#transcript-track).
+
 ## Opus
 
 `pip install "mux-moq-media[opus]"` adds PyAV and `moq_media.opus`: Opus encoding and decoding for a

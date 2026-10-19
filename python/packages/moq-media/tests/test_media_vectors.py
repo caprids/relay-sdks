@@ -306,6 +306,88 @@ def test_interrupt_read_errors(vector: dict[str, Any]) -> None:
         media.parse_interrupt(vector["json"].encode("utf-8"))
 
 
+def transcript_input(raw: dict[str, Any]) -> bytes:
+    return media.build_transcript_segment(
+        seq=decimal(raw["seq"]),
+        from_us=decimal(raw["fromUs"]),
+        text=raw["text"],
+        final=raw["final"],
+        **({"until_us": decimal(raw["untilUs"])} if "untilUs" in raw else {}),
+        **({"track": raw["track"]} if "track" in raw else {}),
+    )
+
+
+def transcript_segment(raw: dict[str, Any]) -> media.TranscriptSegment:
+    return media.TranscriptSegment(
+        seq=int(raw["seq"]),
+        track=raw["track"],
+        from_us=int(raw["fromUs"]),
+        until_us=int(raw["untilUs"]) if "untilUs" in raw else None,
+        text=raw["text"],
+        final=raw["final"],
+    )
+
+
+@pytest.mark.parametrize("vector", VECTORS["transcriptSegments"], ids=lambda v: v["name"])
+def test_transcript_segment_bytes(vector: dict[str, Any]) -> None:
+    payload = transcript_input(vector["input"])
+    assert payload == vector["json"].encode("utf-8")
+    assert media.parse_transcript_segment(payload) == media.parse_transcript_segment(vector["json"].encode("utf-8"))
+
+
+@pytest.mark.parametrize("vector", VECTORS["transcriptSegmentErrors"], ids=lambda v: v["name"])
+def test_transcript_segment_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        transcript_input(vector["input"])
+
+
+@pytest.mark.parametrize("vector", VECTORS["transcriptSegmentReads"], ids=lambda v: v["name"])
+def test_transcript_segment_reads(vector: dict[str, Any]) -> None:
+    read = media.parse_transcript_segment(vector["json"].encode("utf-8"))
+    assert read == transcript_segment(vector["parsed"])
+
+
+@pytest.mark.parametrize("vector", VECTORS["transcriptSegmentReadErrors"], ids=lambda v: v["name"])
+def test_transcript_segment_read_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        media.parse_transcript_segment(vector["json"].encode("utf-8"))
+
+
+def transcript_cut(transcript: media.Transcript, step: dict[str, Any]) -> None:
+    transcript.cut(
+        until_us=decimal(step["cut"]["untilUs"]),
+        from_us=decimal(step["cut"]["fromUs"]) if "fromUs" in step["cut"] else None,
+        position_us=float(step["positionUs"]) if "positionUs" in step else None,
+    )
+
+
+@pytest.mark.parametrize("vector", VECTORS["transcripts"], ids=lambda v: v["name"])
+def test_transcripts(vector: dict[str, Any]) -> None:
+    transcript = media.Transcript()
+    for step in vector["steps"]:
+        if "apply" in step:
+            segment = media.parse_transcript_segment(transcript_input(step["apply"]))
+            assert transcript.apply(segment) is step["applied"]
+        else:
+            transcript_cut(transcript, step)
+    assert transcript.lines == [
+        media.TranscriptLine(**vars_of(transcript_segment(line)), cut=line["cut"]) for line in vector["lines"]
+    ]
+    for shown in vector["linesAt"]:
+        position = None if shown["positionUs"] is None else float(shown["positionUs"])
+        assert [line.seq for line in transcript.lines_at(position)] == [int(seq) for seq in shown["seqs"]]
+
+
+def vars_of(segment: media.TranscriptSegment) -> dict[str, Any]:
+    return {name: getattr(segment, name) for name in segment.__dataclass_fields__}
+
+
+@pytest.mark.parametrize("vector", VECTORS["transcriptCutErrors"], ids=lambda v: v["name"])
+def test_transcript_cut_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        transcript_cut(media.Transcript(), vector)
+
+
 @pytest.mark.parametrize("vector", VECTORS["opusPacketDurations"], ids=lambda v: v["name"])
 def test_opus_packet_durations(vector: dict[str, Any]) -> None:
     expected = vector["durationUs"]
@@ -403,6 +485,7 @@ def test_protocol_pins() -> None:
             "audio": media.AUDIO_TRACK,
             "mediaTimeline": media.MEDIA_TIMELINE_TRACK,
             "interrupt": media.INTERRUPT_TRACK,
+            "transcript": media.TRANSCRIPT_TRACK,
         },
         "properties": {
             "timestamp": media.LOC_TIMESTAMP,

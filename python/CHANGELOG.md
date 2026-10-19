@@ -19,6 +19,12 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306)); a bare
   `open_group()` has no object to time. The frame writer opens every group this way, so a frame whose open fails
   reports no `group_id`, and `groups` counts only opens that returned a group.
+- Transcripts ([#320](https://github.com/muxinc/relay-sdks/issues/320)): `moq_media.build_transcript_segment` and
+  `parse_transcript_segment` write and read the transcript track's segments (`TRANSCRIPT_TRACK`, `"transcript"`): the
+  text of a talker's audio from `from_us`, sent in interim and final versions that share a `seq`. `Transcript` keeps
+  a listener's segments, retracts what an interrupt cut at the playout position, and gives the lines heard by a
+  position. The voice bot example publishes the text of its replies: `Respond` may yield `str` before the audio it
+  is the text of.
 - Interrupts ([#320](https://github.com/muxinc/relay-sdks/issues/320)): `moq_media.build_interrupt` and
   `parse_interrupt` write and read the interrupt track's messages (`INTERRUPT_TRACK`, `"interrupt"`), which tell a
   listener to drop audio a talker already sent, up to `until_us`. A new parrot voice bot example

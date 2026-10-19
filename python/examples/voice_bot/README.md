@@ -3,7 +3,8 @@
 [`bot.py`](bot.py) is a parrot: it listens to a browser user's microphone, waits for a pause, and
 says what it heard back. Talk over it and it stops at once, and sends an
 [interrupt](../../../spec/media-layer.md#interrupt-track) so the user's player drops the reply audio
-it still holds. The user's side is the [voice bot page](../../../ts/examples/voice-bot/README.md).
+it still holds. The text of each reply goes on the
+[transcript track](../../../spec/media-layer.md#transcript-track), for the page to show as it plays. The user's side is the [voice bot page](../../../ts/examples/voice-bot/README.md).
 
 Everything between the microphone and the speaker is the SDKs':
 
@@ -13,6 +14,7 @@ captureMicrophone → publishMicrophone ──▶ <namespace>/user/audio ──�
                                                                      → EnergyGate → respond(utterance)
 listenAudio ◀── <namespace>/bot/audio ◀── FrameWriter ◀── OpusEncoder, paced in real time
   input.cut ◀── <namespace>/bot/interrupt ◀── build_interrupt(until_us=end of what was sent)
+ transcript ◀── <namespace>/bot/transcript ◀── build_transcript_segment(seq, from_us, text, until_us, final)
 ```
 
 ## Run it
@@ -55,13 +57,16 @@ replied          ms=680
 STT, a language model and TTS go in one async function, `Respond`: it gets an `Utterance` (mono s16
 PCM at 16 kHz, and where it lies on the user's timeline) and yields the reply as PCM at the same
 rate, in chunks of any size. The bot speaks each chunk as it arrives and cancels the iterator when
-it is talked over.
+it is talked over. A `str` it yields is the text of the audio after it, up to the next `str`: the
+bot publishes it on the transcript track where that audio starts.
 
 ```python
-async def respond(utterance: Utterance) -> AsyncIterator[bytes]:
+async def respond(utterance: Utterance) -> AsyncIterator[bytes | str]:
     text = await speech_to_text(utterance.pcm, rate=utterance.rate)
-    async for pcm in text_to_speech(await reply_to(text), rate=utterance.rate):
-        yield pcm
+    for sentence in split_sentences(await reply_to(text)):
+        yield sentence
+        async for pcm in text_to_speech(sentence, rate=utterance.rate):
+            yield pcm
 
 
 await run_bot(publisher, subscriber, user_namespace=..., bot_namespace=..., respond=respond, log=log)
@@ -90,14 +95,27 @@ await run_bot(publisher, subscriber, user_namespace=..., bot_namespace=..., resp
   out: the listener drops everything it has not played. The next reply starts at or after
   `until_us`, as the interrupt track requires. A reply still being thought up when the user talks
   is cancelled with no interrupt: nothing of it was sent.
+- **Transcript.** Each `str` from `Respond` becomes a transcript segment. The bot sends its interim
+  version just before the segment's first audio, so the page has it when that audio plays, and the
+  final one, with where the audio ended, once its last packet is sent; at the boundary it flushes the
+  encoder, so each segment ends where its own audio does. Segments go out in order from a queue of
+  their own, so a slow transcript write never holds the audio back. An interrupted segment gets no
+  final version: the page cuts it with the interrupt, and text whose audio a stall dropped is
+  dropped with it. Segment numbers start at the clock's millisecond, so
+  a restarted bot does not reuse them. The parrot cannot tell what the user said, so its text says
+  how long it was.
 - **Echo.** The page plays the bot through Chromium's echo canceller, so the bot does not hear itself
   and take it for the user talking over it.
 
 `examples/voice_bot/tests` runs the bot over the in-memory relay hub against a scripted microphone:
 it answers after a pause, interrupts itself when talked over, and every packet of the first reply
-lies before the interrupt's `until_us` and every packet of the next at or after it.
+lies before the interrupt's `until_us` and every packet of the next at or after it. Each reply's
+transcript segment starts at its first packet, and only the uninterrupted one gets a final version.
 
 Measured on 2026-10-19 against `sjc.relay.mux.global`, with the page in headless Chromium on a
 scripted microphone (1.5 s of speech, a 1 s pause, 0.6 s talking over the reply): over four runs of
 three turns each, every interrupt reached the page's player 32 to 50 ms after the bot's last audio,
-the player cut 117 to 140 ms of held reply audio per run, and playback had no underrun.
+the player cut 117 to 140 ms of held reply audio per run, and playback had no underrun. With the
+transcript track, over four more runs: interrupts landed 32 to 51 ms after the bot's last audio, each
+reply's text reached the page 65 to 72 ms before its audio played, and each cut reply's line was shown
+marked cut.

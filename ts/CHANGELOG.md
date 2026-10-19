@@ -34,6 +34,12 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   counts the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306));
   a bare `openGroup()` has no object to time. The frame writer opens every group this way, so a frame whose open
   fails reports no `groupId`, and `groups` counts only opens that returned a group.
+- `@mux/moq-media`: transcripts ([#320](https://github.com/muxinc/relay-sdks/issues/320)). `buildTranscriptSegment`
+  and `parseTranscriptSegment` write and read the transcript track's segments (`TRANSCRIPT_TRACK`, `'transcript'`):
+  the text of a talker's audio from `fromUs`, sent in interim and final versions that share a `seq`.
+  `createTranscript()` keeps a listener's segments, retracts what an interrupt cut at the playout position, and gives
+  the lines heard by a position. The WebCodecs example's `listenAudio` keeps one as `listener.transcript` when the
+  catalog lists the track, and the voice bot page shows the bot's words as its audio plays.
 - `@mux/moq-media`: interrupts ([#320](https://github.com/muxinc/relay-sdks/issues/320)). `buildInterrupt` and
   `parseInterrupt` write and read the interrupt track's messages (`INTERRUPT_TRACK`, `'interrupt'`), which tell a
   listener to drop audio a talker already sent; a parsed `Interrupt` is an `AudioCutRange`, so

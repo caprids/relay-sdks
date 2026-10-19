@@ -1,4 +1,4 @@
-import { createBroadcastClock, type Interrupt } from '@mux/moq-media';
+import { createBroadcastClock, type Interrupt, type TranscriptSegment } from '@mux/moq-media';
 import type { RelayPublisher, RelaySubscriber } from '@mux/relay';
 import { captureMicrophone } from '../webcodecs/capture-microphone.js';
 import { type AudioListener, listenAudio } from '../webcodecs/listen-audio.js';
@@ -8,7 +8,7 @@ import { publishMicrophone } from '../webcodecs/publish-microphone.js';
 export interface TalkToBotOptions {
   /** Aborting hangs up. */
   signal: AbortSignal;
-  /** The bot's namespace, where it publishes its catalog, its audio and its interrupt track. */
+  /** The bot's namespace, where it publishes its catalog, its audio, and its interrupt and transcript tracks. */
   botNamespace: readonly string[];
   /** The namespace `publisher` was connected with, where the microphone goes. */
   userNamespace: readonly string[];
@@ -20,6 +20,8 @@ export interface TalkToBotOptions {
   onListening?(listener: AudioListener): void;
   /** The bot stopped talking because it was talked over; the player has already cut what it held. */
   onInterrupt?(interrupt: Interrupt): void;
+  /** A transcript segment of the bot's audio arrived; `listener.transcript` has it. */
+  onTranscript?(segment: TranscriptSegment): void;
   /** A failure that does not hang up: an attempt to reach the bot, or one of the listener's. */
   onError?(error: unknown): void;
 }
@@ -44,9 +46,10 @@ function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
 
 /**
  * Talk to a voice bot such as python/examples/voice_bot: publish the microphone alone, and play the bot's audio
- * through the audio player, cutting it on each interrupt. Playback goes through Chromium's echo canceller, so the bot
- * does not hear itself and take it for being talked over. The bot can start before or after the page: until its
- * catalog arrives, the listener retries every second, waiting at most 5 s for each attempt. Runs until aborted, or until publishing fails.
+ * through the audio player, cutting it and its transcript on each interrupt. Playback goes through Chromium's echo
+ * canceller, so the bot does not hear itself and take it for being talked over. The bot can start before or after the
+ * page: until its catalog arrives, the listener retries every second, waiting at most 5 s for each attempt. Runs until
+ * aborted, or until publishing fails.
  */
 export async function talkToBot(
   publisher: RelayPublisher,
@@ -70,6 +73,7 @@ export async function talkToBot(
           signal: AbortSignal.any([signal, AbortSignal.timeout(CATALOG_TIMEOUT_MS)]),
           ...(options.onError ? { onError: options.onError } : {}),
           ...(options.onInterrupt ? { onInterrupt: options.onInterrupt } : {}),
+          ...(options.onTranscript ? { onTranscript: options.onTranscript } : {}),
         });
       } catch (error) {
         // Not announced yet, or announced but not serving its catalog yet (the announce race).

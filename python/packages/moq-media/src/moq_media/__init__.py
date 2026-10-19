@@ -71,6 +71,14 @@ from .timeline import (
     media_timeline_entry,
     parse_media_timeline,
 )
+from .transcript import (
+    TRANSCRIPT_TRACK,
+    Transcript,
+    TranscriptLine,
+    TranscriptSegment,
+    build_transcript_segment,
+    parse_transcript_segment,
+)
 
 __all__ = [
     "AUDIO_TRACK",
@@ -88,6 +96,7 @@ __all__ = [
     "OPUS_FRAME_US",
     "OPUS_SAMPLE_RATE",
     "TRACK_TIMESCALE_PROPERTIES",
+    "TRANSCRIPT_TRACK",
     "VIDEO_TRACK",
     "AudioTrackInfo",
     "BroadcastClock",
@@ -110,6 +119,9 @@ __all__ = [
     "SequencedFrame",
     "SequencerPoll",
     "SourceTimeline",
+    "Transcript",
+    "TranscriptLine",
+    "TranscriptSegment",
     "VideoTrackInfo",
     "annexb_to_avcc",
     "avc_codec_string",
@@ -118,6 +130,7 @@ __all__ = [
     "build_media_timeline",
     "build_msf_catalog",
     "build_msf_end_catalog",
+    "build_transcript_segment",
     "compose_player_url",
     "encode_name_component",
     "encode_namespace_name",
@@ -132,4 +145,5 @@ __all__ = [
     "parse_interrupt",
     "parse_media_timeline",
     "parse_msf_catalog",
+    "parse_transcript_segment",
 ]

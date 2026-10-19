@@ -1,5 +1,11 @@
 import { resolveObjectURL } from 'node:buffer';
-import { buildInterrupt, buildMsfCatalog, INTERRUPT_TRACK } from '@mux/moq-media';
+import {
+  buildInterrupt,
+  buildMsfCatalog,
+  buildTranscriptSegment,
+  INTERRUPT_TRACK,
+  TRANSCRIPT_TRACK,
+} from '@mux/moq-media';
 import type { RelaySubscriber } from '@mux/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { listenAudio } from '../examples/webcodecs/listen-audio.js';
@@ -229,5 +235,69 @@ it('reports an interrupt that does not parse and cuts nothing', async () => {
 
   expect(cut).not.toHaveBeenCalled();
   expect(onError).toHaveBeenCalledTimes(1);
+  await listener.stop();
+});
+
+const transcriptCatalog = () =>
+  buildMsfCatalog({ namespace: NAMESPACE, audio: {}, data: [{ name: INTERRUPT_TRACK }, { name: TRANSCRIPT_TRACK }] });
+
+it('keeps the transcript of the audio track when the catalog lists it, and stop() cancels it', async () => {
+  const fake = fakeSubscriber();
+  const onTranscript = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onTranscript });
+  fake.deliverCatalog(transcriptCatalog());
+  const listener = await listening;
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual([
+    'catalog',
+    'audio',
+    INTERRUPT_TRACK,
+    TRANSCRIPT_TRACK,
+  ]);
+
+  deliver(fake, TRANSCRIPT_TRACK, buildTranscriptSegment({ seq: 0, track: 'other', fromUs: 1_000, text: 'Not ours' }));
+  deliver(fake, TRANSCRIPT_TRACK, buildTranscriptSegment({ seq: 0, fromUs: 1_000, text: 'Hel' }));
+  deliver(
+    fake,
+    TRANSCRIPT_TRACK,
+    buildTranscriptSegment({ seq: 0, fromUs: 1_000, untilUs: 2_000, text: 'Hello', final: true }),
+  );
+  deliver(fake, TRANSCRIPT_TRACK, buildTranscriptSegment({ seq: 0, fromUs: 1_000, text: 'Hel' }));
+
+  expect(onTranscript).toHaveBeenCalledTimes(2);
+  expect(listener.transcript.lines).toEqual([
+    { seq: 0, track: 'audio', fromUs: 1_000, untilUs: 2_000, text: 'Hello', final: true, cut: false },
+  ]);
+  await listener.stop();
+  expect(fake.subscriptions[3]?.cancel).toHaveBeenCalledTimes(1);
+});
+
+it('cuts the transcript at the playout position on an interrupt', async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  fake.deliverCatalog(transcriptCatalog());
+  const listener = await listening;
+  vi.spyOn(listener.clock, 'position').mockReturnValue(1_500);
+
+  deliver(fake, TRANSCRIPT_TRACK, buildTranscriptSegment({ seq: 0, fromUs: 1_000, text: 'One' }));
+  deliver(fake, TRANSCRIPT_TRACK, buildTranscriptSegment({ seq: 1, fromUs: 2_000, text: 'Two' }));
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ untilUs: 3_000 }));
+
+  expect(listener.transcript.lines).toEqual([
+    { seq: 0, track: 'audio', fromUs: 1_000, untilUs: 1_500, text: 'One', final: true, cut: true },
+  ]);
+  await listener.stop();
+});
+
+it('reports a transcript segment that does not parse', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(transcriptCatalog());
+  const listener = await listening;
+
+  deliver(fake, TRANSCRIPT_TRACK, new TextEncoder().encode('{"seq":0}'));
+
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(listener.transcript.lines).toEqual([]);
   await listener.stop();
 });

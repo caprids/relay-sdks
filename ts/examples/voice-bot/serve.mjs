@@ -36,6 +36,7 @@ const body = `
 <label>Relay token <input id="token" type="password" autocomplete="off"></label>
 <p><button id="talk">Talk</button><button id="hang-up" disabled>Hang up</button></p>
 <p id="status"></p>
+<pre id="said"></pre>
 <pre id="log"></pre>
 <script>window.voiceBot = ${json};</script>
 <script type="module" src="/examples/voice-bot/page.js"></script>`;

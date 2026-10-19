@@ -226,6 +226,12 @@ that arrives late or twice drops nothing it should not.
 _Avoid_: flush, barge-in (the cause, not the message), interruption (that is the frame writer's
 failure), stop
 
+**Transcript segment**:
+A piece of the text of a talker's audio, on the transcript track, placed on the audio's timeline
+from where its audio starts. It is sent in versions, interim then final, that share its number. A
+listener shows it once playback reaches its start, and an interrupt retracts what it cut.
+_Avoid_: caption (a rendering), utterance (what the user said, in the example bot), message
+
 **Discontinuity** (reading):
 Why a frame the reader delivers is not the one decoded after the frame before it: a gap (frames
 were skipped), a resync, or a restart. A decoder resets there. On the writing side it is the frame's

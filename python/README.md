@@ -828,7 +828,8 @@ setup after completing the data quickstart; media helpers and player integration
 [voice_bot](examples/voice_bot/README.md) is a parrot voice bot for a browser user: it decodes the
 user's microphone with `moq_media.opus.OpusDecoder`, waits for a pause, answers with `OpusEncoder`,
 and sends an interrupt when the user talks over it. STT, a language model and TTS plug in through
-one async function. Its browser side is `ts/examples/voice-bot`.
+one async function, and the text of each reply goes on the transcript track. Its browser side is
+`ts/examples/voice-bot`.
 
 ## Package boundaries
 
