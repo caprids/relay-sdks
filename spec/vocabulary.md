@@ -631,7 +631,7 @@ the format package still does not depend on the product package.
 | What the player needs of Web Audio | `AudioPlayerContext`, `AudioPlayerNode`, `AudioPlayerGainNode` | — |
 | A catalog audio track's decoder config | `audioDecoderConfigFromTrack(track)` | — |
 | An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | `opus_packet_duration_us(packet)` (`moq_media`; see below) |
-| The target latency for a broadcast with no video | `AUDIO_ONLY_TARGET_LATENCY_US` (500,000) | — |
+| The target latency for a broadcast with no video | `AUDIO_ONLY_TARGET_LATENCY_US` (500,000) | `AUDIO_ONLY_TARGET_LATENCY_US` (500,000; `moq_media`), passed as `PlayoutClock(target_latency_us=...)` |
 | Play a node where Chromium's echo canceller hears it | `await createEchoCancellationLoopback(context, node, { sinkId, timeoutMs })` → `EchoCancellationLoopback { setSinkId, close }` (`EchoCancellationContext`, `EchoCancellationLoopbackOptions`) | — |
 | When a context renders, on `performance.now()`'s clock | `createRenderClock({ windowUs })` → `RenderClock { observe, best, renderedAtUs }` (`RenderClockOptions`, `RenderObservation`) | — |
 

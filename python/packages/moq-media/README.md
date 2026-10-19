@@ -44,7 +44,12 @@ reports a microphone's input delay, so pass the one you know as `capture_latency
 190 ms for AirPods). Use
 `sample_timeline(48_000)` for a sample counter with nothing to calibrate against, such as a file. `PlayoutClock()` is the player side. Audio is the master: report what is
 audible with `report_audio(timestamp_us)`, and `due(timestamp_us)` returns a `PlayoutDecision` to
-wait, show, or drop a video frame. With no audio it paces by wall clock. See
+wait, show, or drop a video frame. With no audio it paces by wall clock. A broadcast with no video
+never reports a keyframe interval, so its clock would keep the 2 s default target latency, and a
+lasting delay increase would cost 2 s of silence before a frame sequencer resyncs: create an
+audio-only clock with `PlayoutClock(target_latency_us=AUDIO_ONLY_TARGET_LATENCY_US)` (500 ms), the
+same constant as TypeScript's. A clock nothing anchors, as in a bot that only decodes, judges
+nothing late and needs none. See
 [spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
 
 On the subscriber side, `loc_timestamp_us(obj.properties, track_properties=ok.track_properties)`

@@ -431,6 +431,8 @@ async def run_bot(
     bot = VoiceBot(speaker, respond=respond, gate=gate, log=log)
 
     # The bot is a listener with no player: nothing reports audio to the clock, so it stays idle and nothing is late.
+    # The target latency then never applies, so AUDIO_ONLY_TARGET_LATENCY_US would change nothing; a bot that plays or
+    # paces the user's audio on this clock should pass it.
     reader: FrameReader[SequencedFrame] = FrameReader(FrameSequencer(PlayoutClock(), grouping="frame"))
 
     def restarted(reason: RestartReason, namespace: tuple[str, ...]) -> None:
