@@ -1,5 +1,9 @@
-"""Pure LOC/MSF format helpers; encoding and transport belong to the application."""
+"""Pure LOC/MSF format helpers; transport belongs to the application.
 
+The one encoder, ``moq_media.opus``, needs the ``opus`` extra and is not imported here.
+"""
+
+from .audio import OPUS_FRAME_US, OPUS_SAMPLE_RATE, opus_packet_duration_us
 from .catalog import (
     MSF_CATALOG_VERSION,
     AudioTrackInfo,
@@ -79,6 +83,8 @@ __all__ = [
     "MICROSECONDS_PER_SECOND",
     "MSF_CATALOG_VERSION",
     "MSF_DOCUMENT",
+    "OPUS_FRAME_US",
+    "OPUS_SAMPLE_RATE",
     "TRACK_TIMESCALE_PROPERTIES",
     "VIDEO_TRACK",
     "AudioTrackInfo",
@@ -118,6 +124,7 @@ __all__ = [
     "loc_track_properties",
     "media_timeline_entry",
     "nal_unit_type",
+    "opus_packet_duration_us",
     "parse_media_timeline",
     "parse_msf_catalog",
 ]

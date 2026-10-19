@@ -618,7 +618,7 @@ the format package still does not depend on the product package.
 | Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, cutUs, reports }` | — |
 | What the player needs of Web Audio | `AudioPlayerContext`, `AudioPlayerNode`, `AudioPlayerGainNode` | — |
 | A catalog audio track's decoder config | `audioDecoderConfigFromTrack(track)` | — |
-| An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | — |
+| An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | `opus_packet_duration_us(packet)` (`moq_media`; see below) |
 | The target latency for a broadcast with no video | `AUDIO_ONLY_TARGET_LATENCY_US` (500,000) | — |
 | Play a node where Chromium's echo canceller hears it | `await createEchoCancellationLoopback(context, node, { sinkId, timeoutMs })` → `EchoCancellationLoopback { setSinkId, close }` (`EchoCancellationContext`, `EchoCancellationLoopbackOptions`) | — |
 | When a context renders, on `performance.now()`'s clock | `createRenderClock({ windowUs })` → `RenderClock { observe, best, renderedAtUs }` (`RenderClockOptions`, `RenderObservation`) | — |
@@ -636,6 +636,34 @@ issue #314: `addSource(frameReader, …)` (the format package cannot take a fram
 method for the loopback (it is a function over any node, so the v10 renderer can use it too), and a
 `createPlayoutClock({ audioOnly: true })` preset or an automatic audio-only default (the clock is
 pinned by shared vectors in both SDKs; the constant changes nothing for Python).
+
+## Opus encoding: `OpusEncoder`, `OpusDecoder`
+
+PCM to Opus and back for a server-side talker such as a voice bot
+([issue #320](https://github.com/muxinc/relay-sdks/issues/320)). Python only, in `moq_media.opus`,
+on PyAV's libopus and installed with the `opus` extra (`mux-moq-media[opus]`, [ADR 0006](../docs/adr/0006-opus-codec-behind-an-extra.md)).
+A browser has WebCodecs' `AudioEncoder` and `AudioDecoder`, which the TypeScript helpers already
+take.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| Encode s16 PCM, or a PyAV frame, into 20 ms packets on the broadcast timeline | — (WebCodecs `AudioEncoder`) | `OpusEncoder(input_rate=48_000, input_channels=1, channels=1, bitrate=32_000, application="voip")`; `encoder.encode(pcm, timestamp_us=...)` → `list[OpusPacket]` |
+| libopus tuning | — | `OpusApplication` (`"voip"`, `"audio"`, `"lowdelay"`) |
+| End a run of audio, such as an utterance | — | `encoder.flush()` → `list[OpusPacket]` |
+| Where the next sample lands, or nothing between runs | — | `encoder.next_timestamp_us` |
+| One encoded packet, which a frame writer takes as a frame | — (WebCodecs `EncodedAudioChunk`) | `OpusPacket(timestamp_us, payload, duration_us)`, with `key`, `discontinuity` and LOC `properties` |
+| Decode packets into s16 PCM at a chosen rate | — (WebCodecs `AudioDecoder`) | `OpusDecoder(rate=48_000, channels=1)`; `decoder.decode(payload)` → `bytes`; `decoder.reset()` |
+| An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | `opus_packet_duration_us(packet)` (`moq_media`, no PyAV) |
+| Opus's decode rate; the encoder's frame length | — | `OPUS_SAMPLE_RATE` (48,000), `OPUS_FRAME_US` (20,000) (`moq_media`) |
+
+"Run", not "utterance" or "segment": the encoder knows only contiguous audio, and a bot's utterance
+is one use. A run's first `encode` takes the timeline timestamp and later calls continue by sample
+count, because a timestamp per call from a clock that drifts against the sample rate would gap or
+overlap packets. `flush` follows PyAV's and libavcodec's drain, which is what it does to the
+encoder; it is not the audio player's `cut`, which drops what a listener holds. "Packet" is RFC
+6716's word for what one Opus encode produces, and keeps clear of the frame writer's `Frame`.
+The decoder returns bytes and no timestamps: the caller has each frame's timestamp, and
+a resampler's output length varies from packet to packet.
 
 ## Media publishing: `FrameWriter`, `CatalogService`, `mediaTrackProperties`
 

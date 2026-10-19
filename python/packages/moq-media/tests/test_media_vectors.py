@@ -268,6 +268,14 @@ def test_loc_timestamps(vector: dict[str, Any]) -> None:
     assert read == (None if expected is None else int(expected))
 
 
+@pytest.mark.parametrize("vector", VECTORS["opusPacketDurations"], ids=lambda v: v["name"])
+def test_opus_packet_durations(vector: dict[str, Any]) -> None:
+    expected = vector["durationUs"]
+    assert media.opus_packet_duration_us(bytes.fromhex(vector["packet"])) == (
+        None if expected is None else int(expected)
+    )
+
+
 @pytest.mark.parametrize("vector", VECTORS["loc"], ids=lambda v: v["name"])
 def test_loc(vector: dict[str, Any]) -> None:
     properties = media.loc_properties(

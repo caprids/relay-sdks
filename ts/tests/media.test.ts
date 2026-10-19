@@ -67,6 +67,7 @@ interface Vectors {
     json: string;
   }[];
   timelineRetentionErrors: { name: string; maxEntries: string }[];
+  opusPacketDurations: { name: string; packet: string; durationUs: string | null }[];
 }
 const vectors = JSON.parse(readFileSync(new URL('../../spec/vectors/media.json', import.meta.url), 'utf8')) as Vectors;
 const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
@@ -252,6 +253,12 @@ describe('shared media vectors', () => {
           ...(vector.trackProperties ? { trackProperties: pairs(vector.trackProperties) } : {}),
         }),
       ).toBe(vector.timestampUs === null ? undefined : Number(vector.timestampUs)));
+  }
+  for (const vector of vectors.opusPacketDurations) {
+    it(`Opus packet duration ${vector.name}`, () =>
+      expect(media.opusPacketDurationUs(bytes(vector.packet))).toBe(
+        vector.durationUs === null ? undefined : Number(vector.durationUs),
+      ));
   }
   for (const vector of vectors.urls) {
     it(`URL ${vector.name}`, () =>

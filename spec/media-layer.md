@@ -963,8 +963,11 @@ lines. It gives up the snapshot-and-migrate story, and it puts a catalog builder
 publisher could use behind a Relay dependency. If the package count is the concern, start there
 and split later; the boundary between the two tiers is the same either way.
 
-Encoders stay out of both. An `H264Config` record that turns Annex B into an avcC is a format
-helper; a class that opens libx264 is not.
+Encoders stay out of the product packages, and out of the format packages' roots. An `H264Config`
+record that turns Annex B into an avcC is a format helper; a class that opens libx264 is not. The
+exception is Python's Opus encoder and decoder ([issue #320](https://github.com/muxinc/relay-sdks/issues/320)),
+which a voice bot needs both ways: `moq_media.opus`, on PyAV, behind the `opus` extra, and never
+imported by the package root ([ADR 0006](../docs/adr/0006-opus-codec-behind-an-extra.md)).
 
 ## Keeping the languages in lockstep
 

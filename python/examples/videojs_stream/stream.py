@@ -32,8 +32,6 @@ from urllib.parse import urlsplit
 
 import av
 import numpy as np
-from av.audio.fifo import AudioFifo
-from av.audio.resampler import AudioResampler
 from av.codec.context import Flags
 from av.video.frame import PictureType
 
@@ -60,6 +58,7 @@ from moq_media import (
     parse_media_timeline,
     parse_msf_catalog,
 )
+from moq_media.opus import OpusEncoder
 from mux_relay import (
     DEFAULT_ENDPOINT,
     CancellationToken,
@@ -300,53 +299,26 @@ class VideoEncoder:
 
 
 class AudioEncoder:
-    """libopus at 48 kHz stereo; input frames of any rate/layout are resampled and re-chunked to 20 ms."""
+    """Stereo Opus on ``moq_media.opus``; input frames of any rate/layout are resampled and re-chunked to 20 ms."""
 
     def __init__(self, bitrate: int = 96_000) -> None:
-        context = av.CodecContext.create("libopus", "w")
-        context.sample_rate = OPUS_RATE
-        context.layout = "stereo"
-        context.format = "s16"
-        context.bit_rate = bitrate
-        context.time_base = Fraction(1, OPUS_RATE)
-        context.open()
-        self._context = context
-        self._resampler = AudioResampler(format="s16", layout="stereo", rate=OPUS_RATE)
-        self._fifo = AudioFifo()
-        self._origin_us: int | None = None
-        self._samples_out = 0
+        self._encoder = OpusEncoder(channels=2, bitrate=bitrate, application="audio")
         self.epoch_us = 0  # as VideoEncoder.epoch_us
 
     def encode(self, frame: av.AudioFrame, timestamp_us: int) -> list[EncodedSample]:
         """Encode one decoded frame whose first sample plays at ``timestamp_us`` on the shared timeline."""
-        if self._origin_us is None:
-            self._origin_us = timestamp_us
-
-        for resampled in self._resampler.resample(frame):
-            resampled.pts = None
-            self._fifo.write(resampled)
-
-        samples: list[EncodedSample] = []
-
-        while (chunk := self._fifo.read(OPUS_FRAME_SAMPLES)) is not None:
-            chunk.pts = self._samples_out
-            chunk.time_base = Fraction(1, OPUS_RATE)
-            chunk.sample_rate = OPUS_RATE
-            timestamp = self._origin_us + self._samples_out * MICROSECONDS_PER_SECOND // OPUS_RATE
-            self._samples_out += OPUS_FRAME_SAMPLES
-
-            for packet in self._context.encode(chunk):
-                samples.append(
-                    EncodedSample(
-                        kind="audio",
-                        timestamp_us=timestamp,
-                        payload=bytes(packet),
-                        key=True,
-                        properties=loc_properties(self.epoch_us + timestamp),
-                    )
-                )
-
-        return samples
+        # One run for the whole stream: only its first frame's timestamp counts, as the samples follow on.
+        start = timestamp_us if self._encoder.next_timestamp_us is None else None
+        return [
+            EncodedSample(
+                kind="audio",
+                timestamp_us=packet.timestamp_us,
+                payload=packet.payload,
+                key=True,
+                properties=loc_properties(self.epoch_us + packet.timestamp_us),
+            )
+            for packet in self._encoder.encode(frame, timestamp_us=start)
+        ]
 
 
 # ---------------------------------------------------------------------------------------------------

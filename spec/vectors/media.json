@@ -2236,5 +2236,77 @@
       "name": "unsafe entries",
       "maxEntries": "9007199254740992"
     }
+  ],
+  "opusPacketDurations": [
+    {
+      "name": "SILK 10 ms, one frame",
+      "packet": "00",
+      "durationUs": "10000"
+    },
+    {
+      "name": "SILK 20 ms, one frame (config 1)",
+      "packet": "08",
+      "durationUs": "20000"
+    },
+    {
+      "name": "SILK 60 ms, one frame (config 11)",
+      "packet": "58",
+      "durationUs": "60000"
+    },
+    {
+      "name": "hybrid 10 ms, one frame (config 12)",
+      "packet": "60",
+      "durationUs": "10000"
+    },
+    {
+      "name": "hybrid 20 ms, two equal frames (config 13, code 1)",
+      "packet": "69",
+      "durationUs": "40000"
+    },
+    {
+      "name": "hybrid 20 ms, two frames of different sizes (config 15, code 2)",
+      "packet": "7a",
+      "durationUs": "40000"
+    },
+    {
+      "name": "hybrid 20 ms fullband, one frame (config 15): what libopus voip at 32 kb/s emits",
+      "packet": "78",
+      "durationUs": "20000"
+    },
+    {
+      "name": "CELT 2.5 ms, one frame (config 16)",
+      "packet": "80",
+      "durationUs": "2500"
+    },
+    {
+      "name": "CELT 5 ms, two equal frames (config 17, code 1)",
+      "packet": "89",
+      "durationUs": "10000"
+    },
+    {
+      "name": "CELT 20 ms fullband, one frame (config 31), frame bytes ignored",
+      "packet": "f8aa",
+      "durationUs": "20000"
+    },
+    {
+      "name": "SILK 60 ms, three frames (config 3, code 3, count 3)",
+      "packet": "1b03",
+      "durationUs": "180000"
+    },
+    {
+      "name": "code 3 count reads the low six bits only (VBR and padding flags set)",
+      "packet": "9bc6",
+      "durationUs": "120000"
+    },
+    {
+      "name": "empty packet",
+      "packet": "",
+      "durationUs": null
+    },
+    {
+      "name": "code 3 without its frame count byte",
+      "packet": "fb",
+      "durationUs": null
+    }
   ]
 }
