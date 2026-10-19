@@ -195,6 +195,10 @@ class Speaker:
         self._pending_text: str | None = None
         self._pending_encoded = False
         self._segment: tuple[int, int, str] | None = None
+        # Segments wait here for the transcript track, written in order apart from the audio, so that a slow
+        # transcript write never holds the audio back.
+        self._segments: asyncio.Queue[bytes] = asyncio.Queue()
+        self._publishing: asyncio.Task[None] | None = None
 
     @property
     def speaking(self) -> bool:
@@ -225,10 +229,11 @@ class Speaker:
         self._log("interrupted", {"untilUs": self._cut_until_us})
 
     async def close(self) -> None:
-        """Stop speaking."""
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
+        """Stop speaking, and publishing transcript segments."""
+        for task in (self._task, self._publishing):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
 
     def _uncut_audio_playing(self) -> bool:
         # A reply written to its end is still in listeners' jitter buffers and in flight for a while after.
@@ -243,7 +248,7 @@ class Speaker:
                         # Send what the encoder holds of the last text's audio, so its segment ends where it does.
                         self._drop_if_starved()
                         sent += await self._send(self._encoder.flush())
-                    await self._end_segment()
+                    self._end_segment()
                     # Text with no audio after it yet runs on into the next.
                     self._pending_text = chunk if self._pending_text is None else f"{self._pending_text} {chunk}"
                     self._pending_encoded = False
@@ -257,7 +262,7 @@ class Speaker:
                     sent += await self._send(self._encoder.encode(chunk))
             self._drop_if_starved()
             sent += await self._send(self._encoder.flush())
-            await self._end_segment()
+            self._end_segment()
             self._log("replied", {"ms": sent * OPUS_FRAME_US // 1000})
         finally:
             # Cancelled mid-reply: the rest of the run is never sent, and the interrupt ends its segment. Text that
@@ -294,27 +299,34 @@ class Speaker:
                 self._seq += 1
                 self._pending_text = None
                 self._pending_encoded = False
-                await self._write_segment(*self._segment)
+                self._publish_segment(*self._segment)
             # A frame writer reports a failed frame rather than raising; the next packet tries again.
             await self._writer.write(packet)
         return len(packets)
 
-    async def _end_segment(self) -> None:
+    def _end_segment(self) -> None:
         if self._segment is not None:
             seq, from_us, text = self._segment
             self._segment = None
-            await self._write_segment(seq, from_us, text, until_us=self._sent_until_us)
+            self._publish_segment(seq, from_us, text, until_us=self._sent_until_us)
 
-    async def _write_segment(self, seq: int, from_us: int, text: str, *, until_us: int | None = None) -> None:
-        if not self._transcripts.has_demand:
-            return
+    def _publish_segment(self, seq: int, from_us: int, text: str, *, until_us: int | None = None) -> None:
         payload = build_transcript_segment(
             seq=seq, from_us=from_us, text=text, until_us=until_us, final=until_us is not None
         )
-        try:
-            await self._transcripts.write(payload)
-        except Exception as error:  # A lost transcript must not stop the reply; the audio matters more.
-            self._log("transcript failed", {"error": f"{type(error).__name__}: {error}"})
+        self._segments.put_nowait(payload)
+        if self._publishing is None or self._publishing.done():
+            self._publishing = asyncio.create_task(self._write_segments())
+
+    async def _write_segments(self) -> None:
+        while True:
+            payload = await self._segments.get()
+            if not self._transcripts.has_demand:
+                continue
+            try:
+                await self._transcripts.write(payload)
+            except Exception as error:  # A lost transcript must not stop the bot; the audio matters more.
+                self._log("transcript failed", {"error": f"{type(error).__name__}: {error}"})
 
 
 class VoiceBot:

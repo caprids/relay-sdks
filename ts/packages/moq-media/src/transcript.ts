@@ -162,6 +162,8 @@ export function createTranscript(): Transcript {
       const previous = held.get(segment.seq);
       if (finals.has(segment.seq) || (previous?.cut && !segment.final)) return false;
       const { seq, track, fromUs, untilUs, text, final } = segment;
+      // Final even if a cut drops it below: no later version may bring the segment back.
+      if (final) finals.add(seq);
       let line: TranscriptLine = {
         seq,
         track,
@@ -172,13 +174,13 @@ export function createTranscript(): Transcript {
         cut: false,
       };
       for (const cut of [...cuts].sort((a, b) => a.startUs - b.startUs || a.untilUs - b.untilUs)) {
-        if (cut.startUs <= fromUs && fromUs < cut.untilUs) return false;
+        // Starts inside a cut: never heard. A final version says an earlier one held is wrong.
+        if (cut.startUs <= fromUs && fromUs < cut.untilUs) return final && held.delete(seq);
         if (fromUs < cut.startUs && (untilUs === undefined || untilUs > cut.startUs)) {
           line = clipped(line, cut.startUs);
           break;
         }
       }
-      if (final) finals.add(seq);
       if (same(line, previous)) return false;
       held.set(seq, line);
       return true;

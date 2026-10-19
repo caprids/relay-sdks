@@ -3460,6 +3460,89 @@
           ]
         }
       ]
+    },
+    {
+      "name": "a final version that starts inside a cut drops the segment for good",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "500",
+            "text": "Early guess",
+            "final": false
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "4000"
+          },
+          "positionUs": "1000"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "2000",
+            "untilUs": "3000",
+            "text": "Unheard.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "500",
+            "text": "Early guess",
+            "final": false
+          },
+          "applied": false
+        }
+      ],
+      "lines": [],
+      "linesAt": [
+        {
+          "positionUs": "4000",
+          "seqs": []
+        }
+      ]
+    },
+    {
+      "name": "a final version dropped by a cut before any other version keeps later ones out",
+      "steps": [
+        {
+          "cut": {
+            "untilUs": "4000"
+          },
+          "positionUs": "1000"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "2000",
+            "untilUs": "3000",
+            "text": "Unheard.",
+            "final": true
+          },
+          "applied": false
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "500",
+            "text": "Late guess",
+            "final": false
+          },
+          "applied": false
+        }
+      ],
+      "lines": [],
+      "linesAt": [
+        {
+          "positionUs": "4000",
+          "seqs": []
+        }
+      ]
     }
   ],
   "transcriptCutErrors": [

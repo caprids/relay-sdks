@@ -98,8 +98,10 @@ await run_bot(publisher, subscriber, user_namespace=..., bot_namespace=..., resp
 - **Transcript.** Each `str` from `Respond` becomes a transcript segment. The bot sends its interim
   version just before the segment's first audio, so the page has it when that audio plays, and the
   final one, with where the audio ended, once its last packet is sent; at the boundary it flushes the
-  encoder, so each segment ends where its own audio does. An interrupted segment gets no final
-  version: the page cuts it with the interrupt. Segment numbers start at the clock's millisecond, so
+  encoder, so each segment ends where its own audio does. Segments go out in order from a queue of
+  their own, so a slow transcript write never holds the audio back. An interrupted segment gets no
+  final version: the page cuts it with the interrupt, and text whose audio a stall dropped is
+  dropped with it. Segment numbers start at the clock's millisecond, so
   a restarted bot does not reuse them. The parrot cannot tell what the user said, so its text says
   how long it was.
 - **Echo.** The page plays the bot through Chromium's echo canceller, so the bot does not hear itself

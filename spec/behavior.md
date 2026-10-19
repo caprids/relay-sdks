@@ -1253,8 +1253,9 @@ to both languages.
   when that is not before `untilUs`; otherwise a `Transcript` remembers it, drops the segments
   starting in it, and ends any segment running past its start there, final and marked cut. `apply`
   keeps a segment's latest version, clipped by the remembered cuts in order of start: refused if it
-  starts inside one, ended at the start of the first it runs into. It refuses any version of a
-  segment the talker sent final, and an interim version of a cut segment; a final version of a cut
+  starts inside one (a final version refused this way also drops the line held for its segment),
+  ended at the start of the first it runs into. It refuses any version of a segment the talker sent
+  final, even one a cut dropped, and an interim version of a cut segment; a final version of a cut
   segment replaces it, clipped. It returns whether the held line changed. Lines are ordered by `fromUs`, then `seq`; at a position, those with
   `fromUs` at or before it, and none while idle. Pinned by `vectors/media.json`
   `transcriptSegments`, `transcriptSegmentErrors`, `transcriptSegmentReads`,

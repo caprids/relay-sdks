@@ -158,8 +158,26 @@ class TestSpeaker:
     def stamps(audio: FakeTrackWriter) -> list[int]:
         return [loc_timestamp_us(group.objects[0][1]) or 0 for group in audio.groups]
 
-    def segments(self) -> list[TranscriptSegment]:
+    async def published(self, count: int) -> list[TranscriptSegment]:
+        """The transcript segments written, once there are ``count``: the speaker writes them apart from the audio."""
+        await wait_for(lambda: len(self.transcripts.writes) >= count, timeout=3)
+        await asyncio.sleep(0.05)  # Nothing more follows.
         return [parse_transcript_segment(payload) for payload in self.transcripts.writes]
+
+    async def test_a_slow_transcript_track_does_not_hold_the_audio_back(self) -> None:
+        speaker, audio, _, events = self.speaker()
+        original = self.transcripts.write
+
+        async def slow_write(payload: bytes) -> None:
+            await asyncio.sleep(0.25)
+            await original(payload)
+
+        self.transcripts.write = slow_write  # ty: ignore[invalid-assignment]
+        speaker.say(parrot(Utterance(tone(1600, 16_000), 16_000, 0, 100_000)))
+        await wait_for(lambda: "replied" in events, timeout=3)
+        assert len(audio.groups) >= 5
+        assert max(audio.lateness_us) < 2 * OPUS_FRAME_US
+        assert [segment.final for segment in await self.published(2)] == [False, True]
 
     async def test_each_part_of_a_reply_gets_its_text_before_its_audio_and_a_final_version_after(self) -> None:
         speaker, audio, _, events = self.speaker()
@@ -173,7 +191,7 @@ class TestSpeaker:
         speaker.say(reply(Utterance(b"", 16_000, 0, 0)))
         await wait_for(lambda: "replied" in events, timeout=3)
         stamps = self.stamps(audio)
-        hello, hello_final, there, there_final = self.segments()
+        hello, hello_final, there, there_final = await self.published(4)
         assert (hello.text, hello.from_us, hello.until_us, hello.final) == ("Hello", stamps[0], None, False)
         assert (hello_final.seq, hello_final.final) == (hello.seq, True)
         assert (there.seq, there.text, there.final) == (hello.seq + 1, "there", False)
@@ -196,7 +214,7 @@ class TestSpeaker:
 
         speaker.say(reply(Utterance(b"", 16_000, 0, 0)))
         await wait_for(lambda: "replied" in events, timeout=3)
-        texts = [(segment.text, segment.final) for segment in self.segments()]
+        texts = [(segment.text, segment.final) for segment in await self.published(4)]
         assert texts == [("First", False), ("First", True), ("Second", False), ("Second", True)]
 
     async def test_text_whose_audio_starved_is_dropped_with_it(self) -> None:
@@ -211,7 +229,8 @@ class TestSpeaker:
 
         speaker.say(reply(Utterance(b"", 16_000, 0, 0)))
         await wait_for(lambda: "replied" in events, timeout=3)
-        assert [(segment.text, segment.final) for segment in self.segments()] == [("Second", False), ("Second", True)]
+        segments = await self.published(2)
+        assert [(segment.text, segment.final) for segment in segments] == [("Second", False), ("Second", True)]
 
     async def test_an_interrupted_segment_gets_no_final_version(self) -> None:
         speaker, audio, interrupts, _ = self.speaker()
@@ -224,7 +243,7 @@ class TestSpeaker:
         speaker.say(reply(Utterance(b"", 16_000, 0, 0)))
         await wait_for(lambda: len(audio.groups) >= 3, timeout=3)
         await speaker.interrupt()
-        (segment,) = self.segments()
+        (segment,) = await self.published(1)
         assert (segment.text, segment.final) == ("A long answer", False)
         assert parse_interrupt(interrupts.writes[0]).until_us > segment.from_us
 
@@ -405,6 +424,7 @@ async def test_the_bot_answers_after_a_pause_and_interrupts_itself_when_talked_o
     assert dbfs(middle) > -20
 
     # Each reply's text lies where its audio starts; the interrupted one never got a final version.
+    await wait_for(lambda: len(segments) >= 3, timeout=3)
     first_text, second_text, second_final = segments
     assert first_text.text.startswith("(your words back: ")
     assert (first_text.from_us, first_text.final) == (loc_timestamp_us(first[0].properties), False)

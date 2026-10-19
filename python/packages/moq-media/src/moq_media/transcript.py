@@ -112,6 +112,9 @@ class Transcript:
         held = self._lines.get(segment.seq)
         if segment.seq in self._finals or (held is not None and held.cut and not segment.final):
             return False
+        if segment.final:
+            # Final even if a cut drops it below: no later version may bring the segment back.
+            self._finals.add(segment.seq)
         line = TranscriptLine(
             seq=segment.seq,
             track=segment.track,
@@ -122,12 +125,11 @@ class Transcript:
         )
         for start, until in sorted(self._cuts):
             if start <= line.from_us < until:
-                return False
+                # Starts inside a cut: never heard. A final version says an earlier one held is wrong.
+                return segment.final and self._lines.pop(segment.seq, None) is not None
             if line.from_us < start and (line.until_us is None or line.until_us > start):
                 line = _clipped(line, start)
                 break
-        if segment.final:
-            self._finals.add(segment.seq)
         if line == held:
             return False
         self._lines[segment.seq] = line
