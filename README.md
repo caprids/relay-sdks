@@ -68,9 +68,9 @@ RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:tes
 ```
 
 `RELAY_RUNTIME` picks the runtimes, comma-separated: `node`, `chromium`, `node-websocket` and
-`chromium-websocket` (the default four), and on request `webkit-websocket`, `firefox-websocket`
-(each needs `playwright install webkit` or `firefox`) and `chromium-fallback`, Chromium through
-`withWebSocketFallback`. The task builds
+`chromium-websocket` (the default four), and on request `firefox` (WebTransport, Firefox 155 or
+later), `webkit-websocket`, `firefox-websocket` (each needs `playwright install firefox` or
+`webkit`) and `chromium-fallback`, Chromium through `withWebSocketFallback`. The task builds
 `@mux/relay-quic`'s native addon from source first, with the Rust toolchain it brings: the
 workspace never installs the [prebuilt platform packages](ts/packages/relay-quic/README.md#prebuilt-binaries),
 which are added only when packing.

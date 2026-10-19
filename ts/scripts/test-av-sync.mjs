@@ -9,10 +9,10 @@ import { startModuleServer } from './module-server.js';
 // The live A/V sync test (issue #288): scripts/av-sync/scenario.ts publishes the WebCodecs example's canvas and
 // microphone and plays them back in the same page, once per run, one browser at a time.
 //
-// AV_SYNC_RUNS lists the runs as browser:transport, default "chromium:relay,firefox:hub". `relay` is the production
-// Relay (RELAY_URL, RELAY_TOKEN, RELAY_NAMESPACE_PREFIX); `hub` is the in-memory relay hub inside the page. Firefox
-// (148) cannot reach the Relay: its WebTransport offers no protocols (no `protocol` attribute), and the SDK refuses a
-// session that negotiates none (spec/transport-adapter.md, TA-7). AV_SYNC_REPORT picks how the player reports audio:
+// AV_SYNC_RUNS lists the runs as browser:transport, default "chromium:relay,firefox:relay,firefox:hub". `relay` is the
+// production Relay (RELAY_URL, RELAY_TOKEN, RELAY_NAMESPACE_PREFIX); `hub` is the in-memory relay hub inside the page.
+// Firefox reaches the Relay from 155, which added WebTransport protocol negotiation (#322); the SDK refuses a session
+// that negotiates none (spec/transport-adapter.md, TA-7). AV_SYNC_REPORT picks how the player reports audio:
 // `render-clock` (default) or `output-timestamp`. AV_SYNC_PHASE_SECONDS sets each phase's length; AV_SYNC_OUT writes
 // the full results as JSON.
 //
@@ -27,11 +27,11 @@ const prefix = (process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-smoke').split('
 const reportMethod = process.env.AV_SYNC_REPORT ?? 'render-clock';
 assert(['render-clock', 'output-timestamp'].includes(reportMethod), 'AV_SYNC_REPORT: render-clock or output-timestamp');
 const phaseSeconds = Number(process.env.AV_SYNC_PHASE_SECONDS ?? 10);
-// The player's audio jitter buffer. Firefox's (148, Linux) H.264 VideoEncoder holds about 41 frames, 1.4 s, even with
-// latencyMode 'realtime' (VP8, VP9 and AV1 do not), so its video arrives that much after its audio. The playout clock
-// keeps audio the master and drops late video; the audio path has to wait for the video instead.
+// The player's audio jitter buffer. Firefox's (148, Linux; 155 too) H.264 VideoEncoder holds about 41 frames, 1.4 s,
+// even with latencyMode 'realtime' (VP8, VP9 and AV1 do not), so its video arrives that much after its audio. The
+// playout clock keeps audio the master and drops late video; the audio path has to wait for the video instead.
 const jitterMsFor = (browser) => Number(process.env.AV_SYNC_JITTER_MS ?? (browser === 'firefox' ? 1600 : 150));
-const runs = (process.env.AV_SYNC_RUNS ?? 'chromium:relay,firefox:hub').split(',').map((run) => {
+const runs = (process.env.AV_SYNC_RUNS ?? 'chromium:relay,firefox:relay,firefox:hub').split(',').map((run) => {
   const [browser, transport] = run.split(':');
   assert(['chromium', 'firefox', 'webkit'].includes(browser), `Unknown browser in AV_SYNC_RUNS: ${browser}`);
   assert(['relay', 'hub'].includes(transport), `Unknown transport in AV_SYNC_RUNS: ${transport}`);

@@ -60,14 +60,14 @@ dir = "ts"
 run = "pnpm run docs"
 
 [tasks."ts:test:relay"]
-description = "Opt-in live smoke test against a real Relay, in Node and in Chromium, over QUIC and WebSocket (RELAY_TOKEN or hidden prompt)"
+description = "Opt-in live smoke test against a real Relay, in Node and in Chromium (Firefox on request), over QUIC and WebSocket (RELAY_TOKEN or hidden prompt)"
 depends = ["ts:install"]
 tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts"
 run = "pnpm test:relay"
 
 [tasks."ts:test:av-sync"]
-description = "Opt-in live A/V sync test of the WebCodecs example: Chromium through the Relay, Firefox through an in-memory hub (RELAY_TOKEN)"
+description = "Opt-in live A/V sync test of the WebCodecs example: Chromium and Firefox through the Relay, Firefox through an in-memory hub (RELAY_TOKEN)"
 depends = ["ts:install"]
 dir = "ts"
 run = "pnpm test:av-sync"
