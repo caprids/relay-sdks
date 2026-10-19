@@ -37,6 +37,11 @@ export interface ListenAudioOptions {
   onError?(error: unknown): void;
   /** An interrupt for the audio track, called after the player has cut. */
   onInterrupt?(interrupt: Interrupt): void;
+  /**
+   * Aborting while the listener starts cancels what it set up and rejects with the reason, as when the catalog is
+   * slow to arrive. Once started, stop it with `stop()`.
+   */
+  signal?: AbortSignal;
 }
 
 /** A running listener. */
@@ -50,14 +55,16 @@ export interface AudioListener {
   stop(): Promise<void>;
 }
 
-function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[]) {
+function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[], signal: AbortSignal | undefined) {
   return new Promise<{ tracks: MsfCatalogTrack[]; subscription: RelaySubscription }>((resolve, reject) => {
+    signal?.throwIfAborted();
     let subscription: RelaySubscription | undefined;
     // The first catalog object, or the first error, decides; later ones change nothing.
     let outcome: { tracks: MsfCatalogTrack[] } | { error: unknown; ended: boolean } | undefined;
     // An object may arrive before subscribe() returns, so the outcome waits until the subscription is in hand.
     const settle = () => {
       if (!outcome || !subscription) return;
+      signal?.removeEventListener('abort', abort);
       if ('tracks' in outcome) resolve({ tracks: outcome.tracks, subscription });
       else {
         // An error ends the subscription; a catalog that does not parse leaves it open.
@@ -65,6 +72,13 @@ function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[]) 
         reject(outcome.error);
       }
     };
+    // Aborted before the catalog came: cancel the subscription and reject.
+    const abort = () => {
+      if (outcome) return;
+      outcome = { error: signal?.reason, ended: false };
+      settle();
+    };
+    signal?.addEventListener('abort', abort, { once: true });
     subscription = subscriber.subscribe(
       { namespace: [...namespace], track: CATALOG_TRACK },
       {
@@ -105,17 +119,19 @@ export async function listenAudio(
   const release: (() => void | Promise<void>)[] = [];
   if (ownsContext) release.push(() => context.close());
   try {
-    const { tracks, subscription: catalog } = await readCatalog(subscriber, namespace);
+    const { tracks, subscription: catalog } = await readCatalog(subscriber, namespace, options.signal);
     release.push(() => catalog.cancel());
     const track = tracks.find((candidate) => candidate.name === AUDIO_TRACK);
     if (!track) throw new Error(`The catalog at ${namespace.join('/')} lists no ${AUDIO_TRACK} track`);
 
     const player = await createAudioPlayer({ context });
     release.push(() => player.close());
+    options.signal?.throwIfAborted();
     let loopback: EchoCancellationLoopback | undefined;
     if (options.echoCancellation) {
       loopback = await createEchoCancellationLoopback(context, player.output);
       release.push(() => loopback?.close());
+      options.signal?.throwIfAborted();
     } else player.output.connect(context.destination);
 
     const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });

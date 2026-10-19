@@ -1,7 +1,6 @@
 import {
   AUDIO_TRACK,
   type AudioTrackInfo,
-  audioTrackFromDecoderConfig,
   type BroadcastClock,
   buildMsfCatalog,
   CATALOG_TRACK,
@@ -12,7 +11,6 @@ import {
   type LocFrame,
   locTrackProperties,
   MEDIA_TIMELINE_TRACK,
-  type SourceTimeline,
   VIDEO_TRACK,
   type VideoTrackInfo,
   videoTrackFromDecoderConfig,
@@ -27,7 +25,8 @@ import {
   type FrameWriter,
   mediaTrackProperties,
 } from '@mux/relay/media';
-import type { MicrophoneBlock, MicrophoneCapture } from './capture-microphone.js';
+import type { MicrophoneCapture } from './capture-microphone.js';
+import { encodeMicrophone, type MicrophoneEncoding, microphoneOpus } from './publish-microphone.js';
 
 /** The longest stretch between video keyframes; the writer can ask for one sooner. */
 const KEYFRAME_INTERVAL_US = 1_000_000;
@@ -92,10 +91,8 @@ export async function publishCanvas(
   void publisher.closed.then(({ error }) => fail(error ?? new Error('Publisher closed')));
   const tracks: RelayTrackWriter[] = [];
   let videoWriter: FrameWriter<LocFrame> | undefined;
-  let audioWriter: FrameWriter<LocFrame> | undefined;
+  let audioEncoding: MicrophoneEncoding | undefined;
   let encoder: VideoEncoder | undefined;
-  let audioEncoder: AudioEncoder | undefined;
-  let audioTimeline: SourceTimeline | undefined;
   let audio: AudioTrackInfo | undefined;
   let video: VideoTrackInfo | undefined;
   let catalog: CatalogService | undefined;
@@ -111,9 +108,7 @@ export async function publishCanvas(
     if (!signal.aborted) fail(error);
   };
   const shutdown = () => {
-    if (microphone) microphone.onblock = undefined;
     if (encoder && encoder.state !== 'closed') encoder.close();
-    if (audioEncoder && audioEncoder.state !== 'closed') audioEncoder.close();
     for (const track of tracks) track.close();
   };
   signal.addEventListener('abort', shutdown, { once: true });
@@ -132,21 +127,8 @@ export async function publishCanvas(
     const { supported } = await VideoEncoder.isConfigSupported(config);
     signal.throwIfAborted();
     if (!supported) throw new Error('This browser cannot encode the canvas with the example AVC configuration');
-    const audioConfig =
-      microphone &&
-      ({
-        codec: 'opus',
-        sampleRate: microphone.context.sampleRate,
-        numberOfChannels: 1,
-        bitrate: 64_000,
-      } satisfies AudioEncoderConfig);
-    if (audioConfig) {
-      const { supported } = await AudioEncoder.isConfigSupported(audioConfig);
-      signal.throwIfAborted();
-      if (!supported) throw new Error('This browser cannot encode the microphone with the example Opus configuration');
-      // Opus needs no description, so the catalog entry is known before the first chunk.
-      audio = { ...audioTrackFromDecoderConfig(audioConfig), bitrate: audioConfig.bitrate };
-    }
+    const opus = microphone && (await microphoneOpus(microphone, signal));
+    audio = opus?.track;
     const register = (track: string, media: PublishProperty[] = []) => {
       const writer = publisher.registerTrack({ track, trackProperties: [...locTrackProperties(), ...media] });
       tracks.push(writer);
@@ -230,79 +212,12 @@ export async function publishCanvas(
       },
     });
     encoder.configure(config);
-    if (microphone && audioTrack && audioConfig) {
-      // Every audio frame is its own group: Opus frames decode independently, so a lost one costs only itself, and a
-      // transport that falls behind drops the oldest frames first.
-      const frames = createFrameWriter<LocFrame>(audioTrack, { grouping: 'frame' });
-      audioWriter = frames;
-      const writeAudio = (chunk: EncodedAudioChunk, timestampUs: number) => {
-        // Before the Unix epoch, as on a clock pinned near zero: LOC has no place for it. Without demand, unsent.
-        if (timestampUs < 0 || !audioTrack.hasDemand) return;
-        const frame = chunkToLocFrame(chunk, { timestampOffsetUs: timestampUs - chunk.timestamp });
-        frames.write(frame).then(check).catch(rejected);
-      };
-      // Encoders do not carry input timestamps through: Chromium's counts samples from its first input and ignores
-      // gaps, Firefox's subtracts its lookahead. So the encoder gets one contiguous count, and each chunk is mapped
-      // back to context time through the block it started in, then onto the broadcast timeline. The block also keeps
-      // the capture latency of the microphone it came from: a device switch must not restamp audio still encoding.
-      let fed: { encoderUs: number; contextUs: number; captureLatencyUs: number }[] = [];
-      let framesFed = 0;
-      const blockOf = (encoderUs: number) => {
-        while (fed.length > 1 && (fed[1] as (typeof fed)[number]).encoderUs <= encoderUs) fed.shift();
-        return fed[0];
-      };
-      const encodeBlock = (block: MicrophoneBlock) => {
-        if (signal.aborted) return;
-        try {
-          // A new context brings a new timeline, and its time starts over: give it a fresh encoder.
-          if (block.timeline !== audioTimeline || !audioEncoder) {
-            if (audioEncoder && audioEncoder.state !== 'closed') audioEncoder.close();
-            const timeline = block.timeline;
-            audioTimeline = timeline;
-            // A closed encoder delivers no more output, so the old map can go.
-            fed = [];
-            framesFed = 0;
-            audioEncoder = new AudioEncoder({
-              error: fail,
-              output(chunk) {
-                if (signal.aborted) return;
-                try {
-                  const from = blockOf(chunk.timestamp);
-                  if (from === undefined) return;
-                  const contextUs = from.contextUs + (chunk.timestamp - from.encoderUs);
-                  // timestampUs subtracts the latency current now; put back the difference from the block's own.
-                  const latencyShiftUs = timeline.captureLatencyUs - from.captureLatencyUs;
-                  writeAudio(chunk, timeline.timestampUs(contextUs) + latencyShiftUs);
-                } catch (error) {
-                  fail(error);
-                }
-              },
-            });
-            audioEncoder.configure({ ...audioConfig, sampleRate: block.sampleRate });
-          }
-          // Encode every block, demand or not, so the encoder's count runs with the context's.
-          if (audioEncoder.encodeQueueSize >= 25) throw new Error('The audio encoder cannot keep up');
-          const encoderUs = Math.round((framesFed * 1_000_000) / block.sampleRate);
-          fed.push({ encoderUs, contextUs: block.contextUs, captureLatencyUs: block.captureLatencyUs });
-          framesFed += block.samples.length;
-          const data = new AudioData({
-            format: 'f32-planar',
-            sampleRate: block.sampleRate,
-            numberOfFrames: block.samples.length,
-            numberOfChannels: 1,
-            timestamp: encoderUs,
-            data: block.samples,
-          });
-          try {
-            audioEncoder.encode(data);
-          } finally {
-            data.close();
-          }
-        } catch (error) {
-          fail(error);
-        }
-      };
-      microphone.onblock = encodeBlock;
+    if (microphone && audioTrack && opus) {
+      audioEncoding = encodeMicrophone(microphone, audioTrack, opus.config, {
+        signal,
+        onOutcome: check,
+        onError: rejected,
+      });
     }
     let lastKeyframeUs = Number.NEGATIVE_INFINITY;
     while (!signal.aborted) {
@@ -329,6 +244,6 @@ export async function publishCanvas(
     lifetime.abort(new Error('Canvas publishing finished'));
     shutdown();
     signal.removeEventListener('abort', shutdown);
-    await Promise.allSettled([videoWriter?.close(), audioWriter?.close(), ...serving]);
+    await Promise.allSettled([videoWriter?.close(), audioEncoding?.close(), ...serving]);
   }
 }

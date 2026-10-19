@@ -43,6 +43,7 @@
     "test:av-sync": "pnpm build && node scripts/test-av-sync.mjs",
     "test:audio-player": "pnpm build && node scripts/test-audio-player.mjs",
     "test:conformance": "pnpm build && node scripts/test-conformance.mjs",
+    "example:voice-bot": "pnpm build && node examples/voice-bot/serve.mjs",
     "example:mux-global": "pnpm build && pnpm --filter @mux/relay-quic build:native && node examples/mux-global/run.mjs",
     "test:conformance:node": "pnpm build && pnpm --filter @mux/relay-quic build:native && vitest run --config conformance/vitest.relay-quic.config.js",
     "test:conformance:websocket": "pnpm build && vitest run --config conformance/vitest.websocket.config.js",

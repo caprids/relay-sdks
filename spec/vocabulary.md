@@ -651,6 +651,9 @@ message on a data track that tells listeners to drop audio they already hold. It
 | Read one | `parseInterrupt(payload)` | `parse_interrupt(payload)` |
 | List the track in the WebCodecs example's catalog | `publishCanvas(..., { data: [{ name: INTERRUPT_TRACK }] })` (example code) | — |
 | Hear about an applied interrupt in the example's listener | `listenAudio(..., { onInterrupt })` (example code) | — |
+| Publish a microphone with no video, as a voice participant | `publishMicrophone(publisher, namespace, { signal, microphone, data })` (example code) | — |
+| Talk to a bot: publish the microphone, play the bot, cut on its interrupts | `talkToBot(publisher, subscriber, { userNamespace, botNamespace, context, stream, onInterrupt })` (example code) | — |
+| A bot that answers after a pause and interrupts itself when talked over | — | `run_bot(publisher, subscriber, user_namespace=, bot_namespace=, respond=, gate=)`, with `Respond`, `Utterance` and `EnergyGate` (example code) |
 
 "Interrupt" is the talker's act, as the [glossary](../CONTEXT.md)'s entry for a cut already said;
 the listener's response stays `cut`. It is not the frame writer's "interruption" (a failure that

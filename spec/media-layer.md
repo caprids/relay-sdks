@@ -827,6 +827,13 @@ interrupt (everything held and the next 300 ms of the timeline) from the publish
 listener: the listener applied it 0.4 ms after the write through the in-memory hub, and 50.7 ms after
 it through the Relay (`sjc`). It cut 60 ms and 39 ms of held audio, and playback resumed with no underrun.
 
+The [voice bot example](../python/examples/voice_bot/README.md) is a talker built this way: a
+Python bot answers a browser page and interrupts itself when talked over, leaving `fromUs` out. Its
+test runs it over the in-memory hub. Against `sjc` on 2026-10-19, with the page in headless Chromium
+on a scripted microphone, over four runs of three turns each, every interrupt reached the page's
+player 32 to 50 ms after the bot's last audio, and each run cut 117 to 140 ms of held reply audio, with
+no underrun.
+
 ## Media Timeline track
 
 [Issue #291](https://github.com/muxinc/relay-sdks/issues/291). Format helpers implemented in both

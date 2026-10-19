@@ -21,7 +21,9 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   reports no `group_id`, and `groups` counts only opens that returned a group.
 - Interrupts ([#320](https://github.com/muxinc/relay-sdks/issues/320)): `moq_media.build_interrupt` and
   `parse_interrupt` write and read the interrupt track's messages (`INTERRUPT_TRACK`, `"interrupt"`), which tell a
-  listener to drop audio a talker already sent, up to `until_us`.
+  listener to drop audio a talker already sent, up to `until_us`. A new parrot voice bot example
+  (`examples/voice_bot`) decodes a browser user's microphone with `OpusDecoder`, answers with `OpusEncoder` after a
+  pause, and sends an interrupt when talked over; its `Respond` function is where STT, a model and TTS plug in.
 - Opus for voice bots ([#320](https://github.com/muxinc/relay-sdks/issues/320)): `moq_media.opus.OpusEncoder` and
   `OpusDecoder` on PyAV's libopus, installed with the `opus` extra (`mux-moq-media[opus]`). The encoder turns s16 PCM
   into 20 ms packets stamped on the broadcast timeline, in runs that `flush()` ends; the decoder returns s16 PCM at the
