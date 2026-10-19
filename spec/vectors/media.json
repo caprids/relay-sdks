@@ -3410,6 +3410,56 @@
           ]
         }
       ]
+    },
+    {
+      "name": "a segment the talker sent final keeps its version after a cut ends it",
+      "steps": [
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "5000",
+            "text": "Full.",
+            "final": true
+          },
+          "applied": true
+        },
+        {
+          "cut": {
+            "untilUs": "9000"
+          },
+          "positionUs": "3500"
+        },
+        {
+          "apply": {
+            "seq": "0",
+            "fromUs": "1000",
+            "untilUs": "2000",
+            "text": "Other",
+            "final": true
+          },
+          "applied": false
+        }
+      ],
+      "lines": [
+        {
+          "seq": "0",
+          "track": "audio",
+          "fromUs": "1000",
+          "untilUs": "3500",
+          "text": "Full.",
+          "final": true,
+          "cut": true
+        }
+      ],
+      "linesAt": [
+        {
+          "positionUs": "3500",
+          "seqs": [
+            "0"
+          ]
+        }
+      ]
     }
   ],
   "transcriptCutErrors": [

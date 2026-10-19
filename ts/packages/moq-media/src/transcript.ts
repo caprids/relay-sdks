@@ -137,6 +137,8 @@ export function parseTranscriptSegment(payload: Uint8Array): TranscriptSegment {
 export function createTranscript(): Transcript {
   const held = new Map<number, TranscriptLine>();
   const cuts: { startUs: number; untilUs: number }[] = [];
+  // The segments the talker sent final: a line a cut ended is final too, but takes the talker's final version.
+  const finals = new Set<number>();
   // Ended where a cut starts: final, since nothing after it plays, and cut.
   const clipped = (line: TranscriptLine, startUs: number): TranscriptLine => ({
     ...line,
@@ -158,7 +160,7 @@ export function createTranscript(): Transcript {
   return {
     apply(segment) {
       const previous = held.get(segment.seq);
-      if (previous?.final && (!previous.cut || !segment.final)) return false;
+      if (finals.has(segment.seq) || (previous?.cut && !segment.final)) return false;
       const { seq, track, fromUs, untilUs, text, final } = segment;
       let line: TranscriptLine = {
         seq,
@@ -176,6 +178,7 @@ export function createTranscript(): Transcript {
           break;
         }
       }
+      if (final) finals.add(seq);
       if (same(line, previous)) return false;
       held.set(seq, line);
       return true;

@@ -190,8 +190,10 @@ class Speaker:
         self._cut_until_us = 0
         # Segment numbers start at the clock's millisecond, so a bot that starts over does not reuse its last run's.
         self._seq = clock.now_us() // 1000
-        # Text whose audio has not started yet, and the segment whose audio is being sent: (seq, from_us, text).
+        # Text whose audio has not started yet, whether the encoder holds some of that audio, and the segment whose
+        # audio is being sent: (seq, from_us, text).
         self._pending_text: str | None = None
+        self._pending_encoded = False
         self._segment: tuple[int, int, str] | None = None
 
     @property
@@ -244,8 +246,10 @@ class Speaker:
                     await self._end_segment()
                     # Text with no audio after it yet runs on into the next.
                     self._pending_text = chunk if self._pending_text is None else f"{self._pending_text} {chunk}"
+                    self._pending_encoded = False
                     continue
                 self._drop_if_starved()
+                self._pending_encoded = self._pending_text is not None
                 if self._encoder.next_timestamp_us is None:
                     start_us = max(self._clock.now_us(), self._sent_until_us)
                     sent += await self._send(self._encoder.encode(chunk, timestamp_us=start_us))
@@ -260,6 +264,7 @@ class Speaker:
             # never got audio is dropped: there is nowhere on the timeline to put it.
             self._encoder.flush()
             self._pending_text = None
+            self._pending_encoded = False
             self._segment = None
             aclose = getattr(chunks, "aclose", None)
             if aclose is not None:
@@ -271,6 +276,10 @@ class Speaker:
         next_us = self._encoder.next_timestamp_us
         if next_us is not None and next_us < self._clock.now_us() - _STARVED_US:
             self._encoder.flush()
+            if self._pending_encoded:
+                # The text's audio went with the run: no audio of it will play.
+                self._pending_text = None
+                self._pending_encoded = False
 
     async def _send(self, packets: Sequence[OpusPacket]) -> int:
         for packet in packets:
@@ -284,6 +293,7 @@ class Speaker:
                 self._segment = (self._seq, packet.timestamp_us, self._pending_text)
                 self._seq += 1
                 self._pending_text = None
+                self._pending_encoded = False
                 await self._write_segment(*self._segment)
             # A frame writer reports a failed frame rather than raising; the next packet tries again.
             await self._writer.write(packet)

@@ -99,6 +99,8 @@ class Transcript:
     def __init__(self) -> None:
         self._lines: dict[int, TranscriptLine] = {}
         self._cuts: list[tuple[int, int]] = []
+        # The segments the talker sent final: a line a cut ended is final too, but takes the talker's final version.
+        self._finals: set[int] = set()
 
     def apply(self, segment: TranscriptSegment) -> bool:
         """Keep a segment's version, clipped by the cuts so far; ``False`` if it changed nothing.
@@ -108,7 +110,7 @@ class Transcript:
         takes the talker's final version, clipped: one whose audio ended before the cut is no longer cut.
         """
         held = self._lines.get(segment.seq)
-        if held is not None and held.final and (not held.cut or not segment.final):
+        if segment.seq in self._finals or (held is not None and held.cut and not segment.final):
             return False
         line = TranscriptLine(
             seq=segment.seq,
@@ -124,6 +126,8 @@ class Transcript:
             if line.from_us < start and (line.until_us is None or line.until_us > start):
                 line = _clipped(line, start)
                 break
+        if segment.final:
+            self._finals.add(segment.seq)
         if line == held:
             return False
         self._lines[segment.seq] = line
