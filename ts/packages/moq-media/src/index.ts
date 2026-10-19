@@ -49,6 +49,7 @@ export {
   type EchoCancellationLoopbackOptions,
 } from './echo-loopback.js';
 export { avcCodecString } from './h264.js';
+export { buildInterrupt, INTERRUPT_TRACK, type Interrupt, type InterruptInput, parseInterrupt } from './interrupt.js';
 export {
   AUDIO_TRACK,
   CATALOG_TRACK,

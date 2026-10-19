@@ -95,6 +95,16 @@ await group.write(h264.to_avcc(access_unit), properties=loc_properties(timestamp
 tracks = parse_msf_catalog(catalog_object.payload, catalog_namespace=["room", "live"]).tracks
 ```
 
+## Interrupts
+
+A talker that stops mid-utterance, such as a voice bot the user talks over, writes an interrupt so
+listeners drop the audio they already hold. List the track in the catalog
+(`data=[DataTrackInfo(name=INTERRUPT_TRACK)]`), register it, and write
+`build_interrupt(until_us=...)` to it, with `until_us` the end of the last audio sent: the last
+`OpusPacket`'s `timestamp_us + duration_us`. Start the next audio at or after it.
+`parse_interrupt(payload)` reads one back as an `Interrupt`. See
+[spec/media-layer.md](../../../spec/media-layer.md#interrupt-track).
+
 ## Opus
 
 `pip install "mux-moq-media[opus]"` adds PyAV and `moq_media.opus`: Opus encoding and decoding for a

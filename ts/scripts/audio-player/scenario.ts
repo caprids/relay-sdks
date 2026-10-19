@@ -2,9 +2,10 @@
  * The live audio player scenario, run inside one browser page: the WebCodecs example publishes a synthetic microphone
  * (a steady 440 Hz tone) with its canvas, and the example's audio-only listener plays it back through the audio
  * player. Publisher and listener share the page, so they share `performance.now()`'s clock, and the playout delay is
- * the broadcast clock's now less the playout clock's position: capture to audible, less any microphone latency.
+ * the broadcast clock's now less the playout clock's position: capture to audible, less any microphone latency. The
+ * publisher also lists the interrupt track, and the cut phase sends an interrupt the listener applies.
  */
-import { createBroadcastClock } from '@mux/moq-media';
+import { buildInterrupt, createBroadcastClock, INTERRUPT_TRACK, type Interrupt } from '@mux/moq-media';
 import { connectRelayPublisher, connectRelaySubscriber, type RelayTransportFactory } from '@mux/relay';
 import { captureMicrophone } from '../../examples/webcodecs/capture-microphone.js';
 import { listenAudio } from '../../examples/webcodecs/listen-audio.js';
@@ -63,7 +64,12 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
   const draw = canvas.getContext('2d');
   if (!draw) throw new Error('No 2D canvas context');
   draw.fillRect(0, 0, 320, 180);
-  const publishing = publishCanvas(canvas, publisher, options.namespace, { signal: stop.signal, microphone });
+  const interrupts = publisher.registerTrack({ track: INTERRUPT_TRACK });
+  const publishing = publishCanvas(canvas, publisher, options.namespace, {
+    signal: stop.signal,
+    microphone,
+    data: [{ name: INTERRUPT_TRACK }],
+  });
   publishing.catch((error) => stop.signal.aborted || failures.push(error));
   await publisher.announced;
 
@@ -71,11 +77,13 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
   const playback = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
   await playback.resume();
   let listener: Awaited<ReturnType<typeof listenAudio>> | undefined;
+  const applied: { interrupt: Interrupt; at: number }[] = [];
   for (const deadline = performance.now() + 15_000; !listener; ) {
     try {
       listener = await listenAudio(subscriber, options.namespace, {
         context: playback,
         onError: (error) => failures.push(error),
+        onInterrupt: (interrupt) => applied.push({ interrupt, at: performance.now() }),
       });
     } catch (error) {
       // A subscribe that reaches the relay before the announce is rejected (the announce race); retry for a while.
@@ -126,9 +134,14 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
     await options.report(phases.at(-1) as object);
     phases.push(await sample('steady', (options.seconds ?? 8) * 1000));
     await options.report(phases.at(-1) as object);
-    // An interruption: drop everything held and whatever arrives for the next 300 ms of the timeline.
-    input.cut({ untilUs: broadcast.now() + 300_000 });
-    phases.push(await sample('cut', 2000));
+    // An interruption over the wire: drop everything held and whatever arrives for the next 300 ms of the timeline.
+    const sentAt = performance.now();
+    const untilUs = broadcast.now() + 300_000;
+    await interrupts.write(buildInterrupt({ untilUs }));
+    const cut = await sample('cut', 2000);
+    const received = applied.find((entry) => entry.interrupt.untilUs === untilUs);
+    if (!received) throw new Error('The listener applied no interrupt within 2 s');
+    phases.push({ ...cut, interruptMs: Math.round((received.at - sentAt) * 10) / 10 });
     await options.report(phases.at(-1) as object);
     if (failures.length > 0) throw failures[0];
     return { phases, sequencer: { ...sequencer.stats }, stats: { ...input.stats } };

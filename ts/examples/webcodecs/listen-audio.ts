@@ -11,8 +11,11 @@ import {
   createPlayoutClock,
   type EchoCancellationLoopback,
   type FrameSequencer,
+  INTERRUPT_TRACK,
+  type Interrupt,
   type MsfCatalogTrack,
   type PlayoutClock,
+  parseInterrupt,
   parseMsfCatalog,
 } from '@mux/moq-media';
 import type { RelaySubscriber, RelaySubscription } from '@mux/relay';
@@ -27,8 +30,13 @@ export interface ListenAudioOptions {
    * microphone. Default `false`: connect straight to the context's destination.
    */
   echoCancellation?: boolean;
-  /** A failure after the listener started: the audio subscription ended with an error, or a decoder failed. */
+  /**
+   * A failure after the listener started: the audio or interrupt subscription ended with an error, a decoder failed, or
+   * an interrupt object did not parse.
+   */
   onError?(error: unknown): void;
+  /** An interrupt for the audio track, called after the player has cut. */
+  onInterrupt?(interrupt: Interrupt): void;
 }
 
 /** A running listener. */
@@ -83,7 +91,8 @@ function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[]) 
 /**
  * Play the audio track of the broadcast at `namespace`, such as the WebCodecs example's microphone, with no video:
  * the catalog gives the decoder config, a frame reader orders the frames, and the audio player buffers and plays
- * them. The playout clock is created for audio only, so it does not wait 2 s for keyframes that never come.
+ * them. The playout clock is created for audio only, so it does not wait 2 s for keyframes that never come. When the
+ * catalog lists the interrupt track, each interrupt for the audio track cuts the audio the player holds.
  */
 export async function listenAudio(
   subscriber: RelaySubscriber,
@@ -122,6 +131,29 @@ export async function listenAudio(
       { namespace: [...namespace], track: AUDIO_TRACK },
       { ...reader, onError: (error) => options.onError?.(error) },
     );
+    release.push(() => audio.cancel());
+    // A talker that can stop mid-utterance lists the interrupt track; each interrupt cuts what the player holds.
+    const interrupts = tracks.some((candidate) => candidate.name === INTERRUPT_TRACK)
+      ? subscriber.subscribe(
+          { namespace: [...namespace], track: INTERRUPT_TRACK },
+          {
+            onObject(object) {
+              if (object.status !== 'normal') return;
+              let interrupt: Interrupt;
+              try {
+                interrupt = parseInterrupt(object.payload);
+              } catch (error) {
+                options.onError?.(error);
+                return;
+              }
+              if (interrupt.track !== AUDIO_TRACK) return;
+              input.cut(interrupt);
+              options.onInterrupt?.(interrupt);
+            },
+            onError: (error) => options.onError?.(error),
+          },
+        )
+      : undefined;
 
     return {
       context,
@@ -132,6 +164,7 @@ export async function listenAudio(
       async stop() {
         reader.close();
         audio.cancel();
+        interrupts?.cancel();
         catalog.cancel();
         loopback?.close();
         player.close();

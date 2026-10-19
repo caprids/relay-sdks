@@ -55,7 +55,10 @@ try {
 [`listen-audio.ts`](listen-audio.ts) plays a broadcast's `audio` track with no video, as a voice
 listener would: it reads the catalog for the decoder config, gives the playout clock the audio-only
 target latency, and plays the frames a frame reader delivers through `@mux/moq-media`'s audio player.
-Pass `echoCancellation: true` in Chromium when the page also captures a microphone.
+Pass `echoCancellation: true` in Chromium when the page also captures a microphone. When the
+catalog lists the interrupt track (`INTERRUPT_TRACK`), the listener subscribes to it too and cuts
+the audio each interrupt names; `onInterrupt` hears about each one. `publishCanvas`'s `data` option
+lists extra data tracks, such as that one, in the catalog it serves.
 
 ```ts
 import { connectRelaySubscriber } from '@mux/relay';
@@ -70,7 +73,7 @@ await listener.stop();
 
 `mise run ts:test:audio-player` publishes this example's microphone and plays it back through
 `listen-audio.ts` in headless Chromium, through an in-memory relay hub, or the Relay with
-`AUDIO_PLAYER_RUNS=relay`.
+`AUDIO_PLAYER_RUNS=relay`, then interrupts it over the interrupt track.
 
 ## Audio and the shared timeline
 

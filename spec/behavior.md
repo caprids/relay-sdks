@@ -1200,6 +1200,16 @@ to both languages.
   20 ms, CELT 2.5, 5, 10 or 20 ms), times one frame for code 0, two for codes 1 and 2, and for code 3
   the low six bits of the next byte. An empty packet, or a code 3 packet without that byte, reads as
   nothing. Pinned by `vectors/media.json` `opusPacketDurations`.
+- The interrupt track (`INTERRUPT_TRACK`, `interrupt`; [media-layer.md](media-layer.md#interrupt-track),
+  issue #320) carries one interrupt per group as compact UTF-8 JSON: `track` (default `audio`), the
+  optional `fromUs`, then `untilUs`, with no `fromUs` key when it is absent. The builder
+  (`buildInterrupt` / `build_interrupt`) and the reader (`parseInterrupt` / `parse_interrupt`)
+  refuse an empty or non-string track, a track that is not valid Unicode, a timestamp that is not a
+  nonnegative safe integer, and a `fromUs` that is not before `untilUs`. The reader refuses a
+  payload that is not a UTF-8 JSON object, reads an integral number such as `2e3` as an integer,
+  and ignores unknown fields. A listener applies an interrupt for an audio track it plays as a cut
+  of that range. Pinned by `vectors/media.json` `interrupts`, `interruptErrors`, `interruptReads`
+  and `interruptReadErrors`; the track name by `protocol.json`.
 - Python's Opus encoder and decoder (`moq_media.opus`, the `opus` extra; issue #320, ADR 0006) are
   PyAV's libopus. The encoder takes signed 16-bit PCM, or a PyAV frame, in runs: the first call of a
   run gives the timeline timestamp of its first sample and later calls refuse one, packet *k* of a

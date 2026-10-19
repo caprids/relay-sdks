@@ -8,6 +8,7 @@ import {
   chunkToLocFrame,
   createBroadcastClock,
   createMediaTimeline,
+  type DataTrackInfo,
   type LocFrame,
   locTrackProperties,
   MEDIA_TIMELINE_TRACK,
@@ -56,6 +57,11 @@ export interface PublishCanvasOptions {
   clock?: BroadcastClock;
   /** A microphone to publish as Opus on the same timeline, from `captureMicrophone`. Capture stays the caller's. */
   microphone?: MicrophoneCapture;
+  /**
+   * More tracks to list in the catalog as data tracks, such as the interrupt track (`INTERRUPT_TRACK`). The caller
+   * registers and writes them on the same publisher.
+   */
+  data?: readonly DataTrackInfo[];
 }
 
 /**
@@ -188,6 +194,7 @@ export async function publishCanvas(
               namespace,
               video: nextVideo,
               ...(audio ? { audio } : {}),
+              ...(options.data ? { data: options.data } : {}),
               mediaTimeline: {},
             });
             if (

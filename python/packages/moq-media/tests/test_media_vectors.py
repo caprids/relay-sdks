@@ -268,6 +268,44 @@ def test_loc_timestamps(vector: dict[str, Any]) -> None:
     assert read == (None if expected is None else int(expected))
 
 
+def interrupt_input(raw: dict[str, Any]) -> bytes:
+    return media.build_interrupt(
+        until_us=decimal(raw["untilUs"]),
+        **({"from_us": decimal(raw["fromUs"])} if "fromUs" in raw else {}),
+        **({"track": raw["track"]} if "track" in raw else {}),
+    )
+
+
+@pytest.mark.parametrize("vector", VECTORS["interrupts"], ids=lambda v: v["name"])
+def test_interrupt_bytes(vector: dict[str, Any]) -> None:
+    payload = interrupt_input(vector["input"])
+    assert payload == vector["json"].encode("utf-8")
+    assert media.parse_interrupt(payload) == media.parse_interrupt(vector["json"].encode("utf-8"))
+
+
+@pytest.mark.parametrize("vector", VECTORS["interruptErrors"], ids=lambda v: v["name"])
+def test_interrupt_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        interrupt_input(vector["input"])
+
+
+@pytest.mark.parametrize("vector", VECTORS["interruptReads"], ids=lambda v: v["name"])
+def test_interrupt_reads(vector: dict[str, Any]) -> None:
+    read = media.parse_interrupt(vector["json"].encode("utf-8"))
+    parsed = vector["parsed"]
+    assert read == media.Interrupt(
+        track=parsed["track"],
+        until_us=int(parsed["untilUs"]),
+        from_us=int(parsed["fromUs"]) if "fromUs" in parsed else None,
+    )
+
+
+@pytest.mark.parametrize("vector", VECTORS["interruptReadErrors"], ids=lambda v: v["name"])
+def test_interrupt_read_errors(vector: dict[str, Any]) -> None:
+    with pytest.raises(ValueError):
+        media.parse_interrupt(vector["json"].encode("utf-8"))
+
+
 @pytest.mark.parametrize("vector", VECTORS["opusPacketDurations"], ids=lambda v: v["name"])
 def test_opus_packet_durations(vector: dict[str, Any]) -> None:
     expected = vector["durationUs"]
@@ -364,6 +402,7 @@ def test_protocol_pins() -> None:
             "video": media.VIDEO_TRACK,
             "audio": media.AUDIO_TRACK,
             "mediaTimeline": media.MEDIA_TIMELINE_TRACK,
+            "interrupt": media.INTERRUPT_TRACK,
         },
         "properties": {
             "timestamp": media.LOC_TIMESTAMP,
