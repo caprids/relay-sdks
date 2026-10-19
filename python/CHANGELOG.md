@@ -19,6 +19,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306)); a bare
   `open_group()` has no object to time. The frame writer opens every group this way, so a frame whose open fails
   reports no `group_id`, and `groups` counts only opens that returned a group.
+- `moq_media.AUDIO_ONLY_TARGET_LATENCY_US` (500 ms), the same constant as TypeScript's
+  ([#328](https://github.com/muxinc/relay-sdks/issues/328)): pass it as
+  `PlayoutClock(target_latency_us=AUDIO_ONLY_TARGET_LATENCY_US)` for a broadcast with no video. Without it the clock
+  keeps its 2 s default, since no keyframe interval is ever reported, and a frame sequencer waits 2 s of silence before
+  it resyncs. The clock's behaviour is unchanged.
 - Transcripts ([#320](https://github.com/muxinc/relay-sdks/issues/320)): `moq_media.build_transcript_segment` and
   `parse_transcript_segment` write and read the transcript track's segments (`TRANSCRIPT_TRACK`, `"transcript"`): the
   text of a talker's audio from `from_us`, sent in interim and final versions that share a `seq`. `Transcript` keeps

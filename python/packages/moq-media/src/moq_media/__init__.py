@@ -17,6 +17,7 @@ from .catalog import (
     parse_msf_catalog,
 )
 from .clock import (
+    AUDIO_ONLY_TARGET_LATENCY_US,
     BroadcastClock,
     PlayoutAction,
     PlayoutClock,
@@ -81,6 +82,7 @@ from .transcript import (
 )
 
 __all__ = [
+    "AUDIO_ONLY_TARGET_LATENCY_US",
     "AUDIO_TRACK",
     "CATALOG_TRACK",
     "INTERRUPT_TRACK",

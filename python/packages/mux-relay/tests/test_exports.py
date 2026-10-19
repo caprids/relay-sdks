@@ -12,6 +12,7 @@ import types
 from pathlib import Path
 
 import moq_core
+import moq_media
 import mux_relay
 import mux_relay.media
 import mux_relay.quic
@@ -162,6 +163,15 @@ def test_core_reexports_are_exactly_what_the_typescript_sdk_reexports_plus_close
     typescript = {name.strip() for name in block.group(1).split(",") if name.strip()}
     python = {name for name in mux_relay.__all__ if getattr(moq_core, name, None) is getattr(mux_relay, name)}
     assert python == typescript | {"Closed"}
+
+
+def test_the_audio_only_target_latency_is_exported_and_equals_the_typescript_constant() -> None:
+    """``moq_media.AUDIO_ONLY_TARGET_LATENCY_US`` is ``@mux/moq-media``'s constant, by name and by value (#328)."""
+    clock = (REPO / "ts" / "packages" / "moq-media" / "src" / "clock.ts").read_text()
+    declared = re.search(r"export const AUDIO_ONLY_TARGET_LATENCY_US = ([\d_]+);", clock)
+    assert declared is not None, "ts/packages/moq-media/src/clock.ts no longer declares AUDIO_ONLY_TARGET_LATENCY_US"
+    assert "AUDIO_ONLY_TARGET_LATENCY_US" in moq_media.__all__
+    assert moq_media.AUDIO_ONLY_TARGET_LATENCY_US == int(declared.group(1).replace("_", "")) == 500_000
 
 
 def test_exports_one_entry_point_per_connection_role_and_nothing_under_the_old_names() -> None:
