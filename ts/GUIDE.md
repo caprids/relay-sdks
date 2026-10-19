@@ -812,6 +812,67 @@ wall clock. The [@mux/moq-media README](packages/moq-media/README.md) shows how 
 audible timestamp. See [media subscribing](../spec/behavior.md#media-subscribing) for the
 sequencer's contract.
 
+A broadcast with no video never reports a keyframe interval, so its clock would keep the 2 s
+default: a lasting delay increase would then cost 2 s of silence before the reader resyncs. Create
+an audio-only clock with `createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US })`
+(500 ms).
+
+### Playing audio
+
+`createAudioPlayer({ context })` from `@mux/moq-media` plays decoded audio, with no UI. Each
+`player.addInput({ clock, decoderConfig })`, usually one per speaker, decodes the frames it is
+pushed with WebCodecs, holds them in an adaptive jitter buffer in an `AudioWorklet`, and reports
+what is audible to `clock` about every 20 ms, so the clock follows the device and stays the master
+for any video. Pass `input.push` as a frame reader's `onFrame`. Every input goes through its own
+`gain` into `player.output`, one node for the whole mix, which you connect:
+
+```ts
+import {
+  AUDIO_ONLY_TARGET_LATENCY_US,
+  audioDecoderConfigFromTrack,
+  createAudioPlayer,
+  createFrameSequencer,
+  createPlayoutClock,
+} from '@mux/moq-media';
+import { createFrameReader } from '@mux/relay/media';
+
+const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' }); // in a user gesture
+const player = await createAudioPlayer({ context }); // one per context, shared by every speaker
+player.output.connect(context.destination);
+
+const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US }); // one per broadcast
+const input = player.addInput({ clock, decoderConfig: audioDecoderConfigFromTrack(audioTrack) });
+const reader = createFrameReader(createFrameSequencer({ clock, grouping: 'frame' }), { onFrame: input.push });
+subscriber.subscribe({ namespace, track: 'audio' }, { ...reader, onError });
+// Later: reader.close(), cancel the subscription, input.remove(); player.close() when the call ends.
+```
+
+The buffer starts at 60 ms, grows by 20 ms after each underrun, shrinks by 10 ms after 8 s of
+smooth playback (never below 40 ms), and trims audio it held but never needed. It stays under 400 ms
+and under the clock's target latency less the output delay. `input.stats` has the underruns, the
+buffer depth and target, the frames dropped as late, and what was trimmed, concealed with silence or
+cut. The decoder resets at every discontinuity and timestamp jump, and a `resync` or `restart`
+flushes the buffer. `input.cut({ fromUs, untilUs })` drops received audio in a timeline range, held
+or arriving later, as when a talker is interrupted. See
+[spec/media-layer.md](../spec/media-layer.md#audio-player) for the rules and why.
+
+**Echo cancellation.** In a call the page also captures a microphone, and Chromium's echo canceller
+only removes audio that WebRTC played: audio played straight from an `AudioContext` reaches the
+other side again through the speakers. In Chromium, route the mix through a local WebRTC loopback
+instead of connecting it to the destination:
+
+```ts
+import { createEchoCancellationLoopback } from '@mux/moq-media';
+
+const loopback = await createEchoCancellationLoopback(context, player.output); // rejects if it cannot connect
+// loopback.setSinkId(deviceId) picks the output device; loopback.close() stops it.
+```
+
+Firefox and Safari cancel echo from all page output, so play directly there. The loopback adds the
+WebRTC receiver's buffering, which no API reports; set `player.outputDelayUs` if video must stay in
+sync with the audio. The [WebCodecs example](examples/webcodecs/README.md)'s `listen-audio.ts`
+plays its microphone track this way.
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:

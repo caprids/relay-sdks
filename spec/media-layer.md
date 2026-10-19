@@ -534,7 +534,7 @@ consistently, the audio path needs a deeper buffer, and the clock cannot add one
 | Late-drop threshold | `lateDropUs` | `late_drop_us` | 40,000 | A late frame makes audio effectively early; EBU R37 puts the audio-early limit at 40 ms |
 | Lead before re-sync | `maxVideoDelayUs` | `max_video_delay_us` | 1,000,000 | Above a deep audio jitter buffer plus output latency |
 | Audio silence before wall pacing | `audioTimeoutUs` | `audio_timeout_us` | 500,000 | Reports come every 10–20 ms; half a second without one is a stall or a mute |
-| Target latency | `targetLatencyUs` | `target_latency_us` | 2 × the longest of the last four reported keyframe intervals; 2,000,000 before any | Two GOPs: room to wait for a late group and still decode up to the next keyframe; see [Frame reader](#frame-reader) |
+| Target latency | `targetLatencyUs` | `target_latency_us` | 2 × the longest of the last four reported keyframe intervals; 2,000,000 before any | Two GOPs: room to wait for a late group and still decode up to the next keyframe; see [Frame reader](#frame-reader) For a broadcast with no video, pass `AUDIO_ONLY_TARGET_LATENCY_US` (500,000); see [Audio player](#audio-player) |
 | Time source | `now` | `now_us` | `performance.now()` µs / `time.monotonic_ns() // 1000` | Injected so tests are exact |
 
 The clock does not buffer, decode, or render frames, and it never changes how much audio is buffered.
@@ -683,6 +683,88 @@ The publisher side of the same stall is [issue #302](https://github.com/muxinc/r
 delivery timeouts. They derive from the same keyframe interval, about one interval for video, under
 the reader's two, so a publisher stops spending bandwidth on frames the reader would drop. Nothing
 links the two on the wire.
+
+### Audio player
+
+[Issue #314](https://github.com/muxinc/relay-sdks/issues/314). TypeScript only, in
+`@mux/moq-media`: `createAudioPlayer({ context })` plays any number of inputs, usually one per
+speaker, into one `AudioContext`. Each `player.addInput({ clock, decoderConfig })` takes frames in
+decode order from a frame reader (`onFrame: input.push`), decodes them with WebCodecs, holds them in
+a jitter buffer in an `AudioWorklet`, and reports what is audible to its broadcast's playout clock.
+Every input goes through its own gain into `player.output`, which the application connects. The
+player has no UI and no transport, so the Video.js renderer can use the same core behind its own
+frames-in, clock-out seam.
+
+**Decoding.** The decoder is built from the catalog entry (`audioDecoderConfigFromTrack`), or
+defaults to Opus at 48 kHz. Decoders count output timestamps on from their first input (see
+[Playout clock](#playout-clock-player)), so the input resets its decoder wherever a frame does not
+start where the previous one ended: at a `gap`, a `resync` or a `restart`, and at any jump of more
+than 1 ms. For Opus the previous frame's length is read from its TOC byte (RFC 6716 §3.1), so the
+check does not wait for decoder output. At a `gap` or a jump the old decoder is flushed, not closed:
+a frame reader can deliver frames and the gap after them in one poll, before any of them is decoded,
+so the old decoder first outputs what it was given, and the frames after the gap wait for the new
+decoder until it has. A frame that starts before the previous one ended is behind it and is dropped
+as late. A `resync` or `restart` closes the decoder, drops its pending output, and flushes what the
+buffer holds, all of which belongs to the replaced timeline. A context at another rate than the decoder's gets linearly resampled
+audio.
+
+**Jitter buffer.** A ring in the worklet, in the context's frames, starting from the numbers
+Huddle's player worklet runs with (`demos/huddle`):
+
+| Rule | Default | Why |
+| --- | --- | --- |
+| Hold the target before playing, at the start and after running dry | 60 ms | Three 20 ms Opus frames: room for one late frame and a burst of two. Huddle runs on the Relay with this start. The A/V test's fixed 150 ms was sized for video and Firefox's encoder, not for voice |
+| Grow the target after an underrun | +20 ms | One Opus frame per underrun (Huddle) |
+| Count an underrun only when audio comes back within the ceiling | | A longer dry spell is the talker going quiet, which no buffer would cover |
+| Shrink the target after 8 s with no underrun | −10 ms, to 40 ms | Huddle's floor and cadence; two frames always held |
+| Ceiling | 400 ms, and never more than the clock's target latency less the output delay and 40 ms | Huddle's ceiling; a frame further ahead of the clock than its target latency makes the frame sequencer resync forward, which would flush the buffer |
+| Trim, each second, held audio that never dipped to the target | when ≥ 10 ms | A burst after a stall would otherwise stay as lasting latency, since audio arrives as fast as it plays |
+| Hard bound | 2 × target + 60 ms, under the ceiling | Huddle's backlog bound |
+| A frame that never came, inside held audio | silence for its length, up to 1 s | Keeps later audio on time; WebCodecs exposes no packet-loss concealment |
+
+**Clock.** About every 20 ms the worklet posts the context frame it is rendering and the timeline
+timestamp of the sample there. The main thread times those posts with a [render clock](#browser-capture),
+on the playout clock's own time source, and reports `reportAudio(timestamp, renderedAt +
+baseLatency + outputLatency + player.outputDelayUs)`, reading the latencies fresh each time. While
+the buffer is dry it reports nothing, so the clock runs on by itself and frames that missed their
+slot are dropped as late instead of played late.
+
+**Audio-only target latency.** The clock's 2 s default waits for keyframe intervals that an
+audio-only broadcast never reports. `AUDIO_ONLY_TARGET_LATENCY_US`, 500 ms, is the smallest budget
+that still holds the 400 ms jitter-buffer ceiling plus a wired output delay (about 50–60 ms in
+Chromium's headless runs below), and it cuts the silence before a resync from 2 s to half a
+second. A Bluetooth output delay lowers the ceiling instead: to 260 ms at a 200 ms delay.
+ITU-T G.114 puts the limit for most conversation at 400 ms one way, so a jitter buffer near the
+ceiling is already the network's failure, not a setting to plan for. The default stays a constant
+the application passes, rather than a clock preset or an automatic default, because the clock's
+behavior is pinned by shared vectors in both SDKs.
+
+**Cut.** `input.cut({ fromUs, untilUs })` drops received audio in a timeline range: what the
+buffer holds, output still in the decoder, and, up to `untilUs`, frames that arrive later. The
+first audio from the cut's start on is joined on without silence for the range cut out; audio from
+before the cut's start that was still decoding can land first and plays as usual, and a frame lost
+outside the range is still filled with silence. With no range it drops
+everything held. Nothing in the protocol carries an interruption yet; issue #320 proposes one.
+
+**Echo cancellation.** Chromium's echo canceller takes only audio that WebRTC plays as its
+reference. `createEchoCancellationLoopback(context, player.output)` sends the output through two
+local `RTCPeerConnection`s into a media element; Firefox and Safari cancel echo from all page output
+and need none. The loopback adds its receiver's buffering, which no API reports: set
+`player.outputDelayUs` if video must stay in sync with it.
+
+Measured live on 2026-10-16 with `mise run ts:test:audio-player`: headless Chromium plays the
+WebCodecs example's synthetic microphone (a steady tone) through the example's audio-only listener,
+8 s steady, then a cut of everything held and the next 300 ms of the timeline. "Delay" is the
+broadcast clock's now less the playout clock's position: capture to audible, with no microphone
+latency. Medians [p95]:
+
+| Path | Frames | Underruns | Buffer, ms | Delay, ms | Output latency, ms |
+| --- | --- | --- | --- | --- | --- |
+| In-memory hub | 399 | 0 | 55 [70] | 124 [132] | 59.6 |
+| Relay (`sjc`) | 401 | 0 | 64 [84] | 183 [191] | 51.6 |
+
+In both runs the target shrank from 60 to 50 ms during the steady phase, playback resumed after the
+cut with no underrun, and the frame sequencer resynced nothing.
 
 ## Media Timeline track
 

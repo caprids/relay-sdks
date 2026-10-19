@@ -1,0 +1,150 @@
+import {
+  AUDIO_ONLY_TARGET_LATENCY_US,
+  AUDIO_TRACK,
+  type AudioPlayer,
+  type AudioPlayerInput,
+  audioDecoderConfigFromTrack,
+  CATALOG_TRACK,
+  createAudioPlayer,
+  createEchoCancellationLoopback,
+  createFrameSequencer,
+  createPlayoutClock,
+  type EchoCancellationLoopback,
+  type FrameSequencer,
+  type MsfCatalogTrack,
+  type PlayoutClock,
+  parseMsfCatalog,
+} from '@mux/moq-media';
+import type { RelaySubscriber, RelaySubscription } from '@mux/relay';
+import { createFrameReader } from '@mux/relay/media';
+
+/** Options for {@link listenAudio}. */
+export interface ListenAudioOptions {
+  /** The context to play through; create or resume it from a user gesture. Default: a new 48 kHz context. */
+  context?: AudioContext;
+  /**
+   * Play through a WebRTC loopback, so Chromium's echo canceller hears this audio when the page also captures a
+   * microphone. Default `false`: connect straight to the context's destination.
+   */
+  echoCancellation?: boolean;
+  /** A failure after the listener started: the audio subscription ended with an error, or a decoder failed. */
+  onError?(error: unknown): void;
+}
+
+/** A running listener. */
+export interface AudioListener {
+  readonly context: AudioContext;
+  readonly player: AudioPlayer<GainNode>;
+  readonly input: AudioPlayerInput;
+  readonly clock: PlayoutClock;
+  readonly sequencer: FrameSequencer;
+  /** Stop playing and cancel the subscriptions. A context the listener created is closed too. */
+  stop(): Promise<void>;
+}
+
+function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[]) {
+  return new Promise<{ tracks: MsfCatalogTrack[]; subscription: RelaySubscription }>((resolve, reject) => {
+    let subscription: RelaySubscription | undefined;
+    // The first catalog object, or the first error, decides; later ones change nothing.
+    let outcome: { tracks: MsfCatalogTrack[] } | { error: unknown; ended: boolean } | undefined;
+    // An object may arrive before subscribe() returns, so the outcome waits until the subscription is in hand.
+    const settle = () => {
+      if (!outcome || !subscription) return;
+      if ('tracks' in outcome) resolve({ tracks: outcome.tracks, subscription });
+      else {
+        // An error ends the subscription; a catalog that does not parse leaves it open.
+        if (!outcome.ended) subscription.cancel();
+        reject(outcome.error);
+      }
+    };
+    subscription = subscriber.subscribe(
+      { namespace: [...namespace], track: CATALOG_TRACK },
+      {
+        onObject(object) {
+          if (outcome || object.status !== 'normal') return;
+          try {
+            outcome = { tracks: parseMsfCatalog(object.payload, { catalogNamespace: namespace }).tracks };
+          } catch (error) {
+            outcome = { error, ended: false };
+          }
+          settle();
+        },
+        onError(error) {
+          if (outcome) return;
+          outcome = { error, ended: true };
+          settle();
+        },
+      },
+    );
+    settle();
+  });
+}
+
+/**
+ * Play the audio track of the broadcast at `namespace`, such as the WebCodecs example's microphone, with no video:
+ * the catalog gives the decoder config, a frame reader orders the frames, and the audio player buffers and plays
+ * them. The playout clock is created for audio only, so it does not wait 2 s for keyframes that never come.
+ */
+export async function listenAudio(
+  subscriber: RelaySubscriber,
+  namespace: readonly string[],
+  options: ListenAudioOptions = {},
+): Promise<AudioListener> {
+  const ownsContext = !options.context;
+  const context = options.context ?? new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
+  // What setup has created so far, released in reverse order if a later step fails.
+  const release: (() => void | Promise<void>)[] = [];
+  if (ownsContext) release.push(() => context.close());
+  try {
+    const { tracks, subscription: catalog } = await readCatalog(subscriber, namespace);
+    release.push(() => catalog.cancel());
+    const track = tracks.find((candidate) => candidate.name === AUDIO_TRACK);
+    if (!track) throw new Error(`The catalog at ${namespace.join('/')} lists no ${AUDIO_TRACK} track`);
+
+    const player = await createAudioPlayer({ context });
+    release.push(() => player.close());
+    let loopback: EchoCancellationLoopback | undefined;
+    if (options.echoCancellation) {
+      loopback = await createEchoCancellationLoopback(context, player.output);
+      release.push(() => loopback?.close());
+    } else player.output.connect(context.destination);
+
+    const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
+    const input = player.addInput({
+      clock,
+      decoderConfig: audioDecoderConfigFromTrack(track),
+      ...(options.onError ? { onError: options.onError } : {}),
+    });
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
+    const reader = createFrameReader(sequencer, { onFrame: input.push });
+    release.push(() => reader.close());
+    const audio = subscriber.subscribe(
+      { namespace: [...namespace], track: AUDIO_TRACK },
+      { ...reader, onError: (error) => options.onError?.(error) },
+    );
+
+    return {
+      context,
+      player,
+      input,
+      clock,
+      sequencer,
+      async stop() {
+        reader.close();
+        audio.cancel();
+        catalog.cancel();
+        loopback?.close();
+        player.close();
+        if (ownsContext) await context.close();
+      },
+    };
+  } catch (error) {
+    // A failure while cleaning up must not hide the one that stopped the setup.
+    for (const undo of release.reverse()) {
+      try {
+        await undo();
+      } catch {}
+    }
+    throw error;
+  }
+}

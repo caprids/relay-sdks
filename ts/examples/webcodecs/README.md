@@ -50,6 +50,28 @@ try {
 }
 ```
 
+## Listen to the audio
+
+[`listen-audio.ts`](listen-audio.ts) plays a broadcast's `audio` track with no video, as a voice
+listener would: it reads the catalog for the decoder config, gives the playout clock the audio-only
+target latency, and plays the frames a frame reader delivers through `@mux/moq-media`'s audio player.
+Pass `echoCancellation: true` in Chromium when the page also captures a microphone.
+
+```ts
+import { connectRelaySubscriber } from '@mux/relay';
+import { listenAudio } from './listen-audio.js';
+
+const subscriber = await connectRelaySubscriber({ url, getToken: () => subscriberToken });
+const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' }); // in a user gesture
+const listener = await listenAudio(subscriber, ['demo', 'live'], { context, onError: console.error });
+console.log(listener.input.stats); // underruns, buffer depth and target, frames dropped as late
+await listener.stop();
+```
+
+`mise run ts:test:audio-player` publishes this example's microphone and plays it back through
+`listen-audio.ts` in headless Chromium, through an in-memory relay hub, or the Relay with
+`AUDIO_PLAYER_RUNS=relay`.
+
 ## Audio and the shared timeline
 
 Both tracks are stamped from one broadcast clock, in microseconds since the Unix epoch
@@ -58,7 +80,7 @@ get `clock.now()` when they are captured. The microphone runs through an `AudioC
 `AudioWorklet`, which works in Chromium, Firefox and Safari: no `MediaStreamTrackProcessor`. The
 worklet cuts the input into 20 ms blocks stamped with context time. A source timeline maps them onto
 the broadcast clock. It is calibrated on every block from the context's render clock
-([`render-clock.ts`](render-clock.ts)): the block that reached the main thread soonest after its
+([`createRenderClock`](render-clock.ts) from `@mux/moq-media`): the block that reached the main thread soonest after its
 render, over the last second. The catalog lists the audio beside the video in one render group, and
 every Opus frame is its own group.
 

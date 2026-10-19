@@ -72,6 +72,12 @@ depends = ["ts:install"]
 dir = "ts"
 run = "pnpm test:av-sync"
 
+[tasks."ts:test:audio-player"]
+description = "Opt-in live test of the audio player: Chromium plays the WebCodecs example's microphone through an in-memory hub, or the Relay with AUDIO_PLAYER_RUNS=relay (RELAY_TOKEN)"
+depends = ["ts:install"]
+dir = "ts"
+run = "pnpm test:audio-player"
+
 [tasks."ts:test:conformance"]
 description = "Run the transport adapter conformance suite in headless Chromium against the Python accepting end"
 depends = ["ts:install", "python:install"]
