@@ -4,6 +4,7 @@ Install with the ``opus`` extra (``mux-moq-media[opus]``). This is the one modul
 needs PyAV; ``import moq_media`` does not load it.
 """
 
+import math
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Literal
@@ -58,8 +59,8 @@ class OpusEncoder:
     end. :meth:`flush` ends the run, the end of an utterance, padding its last partial frame with silence.
 
     Packet *k* of a run is stamped at the run's timestamp plus 20 ms per packet before it, as WebCodecs stamps its
-    output. Decoded audio trails those stamps by the encoder's 6.5 ms look-ahead, and a flushed run ends
-    with one packet more than the frames it was given, which carries that look-ahead's tail.
+    output. Decoded audio trails those stamps by the encoder's look-ahead (6.5 ms, or 2.5 ms for ``lowdelay``),
+    and a flushed run ends with one packet more than the frames it was given, which carries that look-ahead's tail.
     """
 
     def __init__(
@@ -116,6 +117,8 @@ class OpusEncoder:
 
         if isinstance(pcm, av.AudioFrame):
             frame = pcm
+            if not frame.samples:
+                return []
             self._input_seconds += Fraction(frame.samples, frame.sample_rate)
         else:
             data = memoryview(pcm).cast("B")
@@ -126,6 +129,7 @@ class OpusEncoder:
                 return []
             frame = _frame(bytes(data), self.input_channels, self.input_rate)
             self._input_seconds += Fraction(len(data) // stride, self.input_rate)
+        self._input = (frame.format.name, frame.layout.name, frame.sample_rate)
         for resampled in self._resampler.resample(frame):
             self._take(resampled)
         return self._encode_pending()
@@ -138,12 +142,23 @@ class OpusEncoder:
         """
         if self._origin_us is None:
             return []
+        # The resampler holds back its last few input samples, all of a short run, until it sees more:
+        # push them through with silence, then cut the output back to the run's length.
+        expected = math.ceil(self._input_seconds * OPUS_SAMPLE_RATE)
+        if self._input is not None and self._taken < expected:
+            for resampled in self._resampler.resample(_silence(*self._input)):
+                self._take(resampled)
         for resampled in self._resampler.resample(None):
             self._take(resampled)
-        frame_bytes = _FRAME_SAMPLES * _SAMPLE_BYTES * self.channels
+        stride = _SAMPLE_BYTES * self.channels
+        excess = min(self._taken - expected, len(self._pending) // stride)
+        if excess > 0:
+            del self._pending[len(self._pending) - excess * stride :]
+        packets = self._encode_pending()
+        frame_bytes = _FRAME_SAMPLES * stride
         if self._pending:
             self._pending.extend(bytes(frame_bytes - len(self._pending)))
-        packets = self._encode_pending()
+        packets.extend(self._encode_pending())
         packets.extend(self._packet(packet) for packet in self._context.encode(None))
         self._origin_us = None
         self._input_seconds = Fraction(0)
@@ -163,11 +178,14 @@ class OpusEncoder:
         self._context = context
         self._resampler = AudioResampler(format="s16", layout=_LAYOUTS[self.channels], rate=OPUS_SAMPLE_RATE)
         self._pending.clear()
+        self._input: tuple[str, str, int] | None = None
+        self._taken = 0
         self._frames_in = 0
         self._packets_out = 0
 
     def _take(self, frame: av.AudioFrame) -> None:
         # Packed s16 has one plane; its buffer can be longer than the samples it holds.
+        self._taken += frame.samples
         self._pending.extend(bytes(frame.planes[0])[: frame.samples * _SAMPLE_BYTES * self.channels])
 
     def _encode_pending(self) -> list[OpusPacket]:
@@ -240,6 +258,17 @@ def _integer(value: int, name: str, *, positive: bool = False) -> None:
 def _channels(value: int, name: str) -> None:
     if isinstance(value, bool) or value not in _LAYOUTS:
         raise ValueError(f"{name} must be 1 or 2")
+
+
+def _silence(format_name: str, layout: str, rate: int) -> av.AudioFrame:
+    """20 ms of silence in an input format, to push a resampler's held samples out."""
+    frame = av.AudioFrame(
+        format=format_name, layout=layout, samples=rate * OPUS_FRAME_US // MICROSECONDS_PER_SECOND, align=1
+    )
+    for plane in frame.planes:
+        plane.update(bytes(plane.buffer_size))
+    frame.sample_rate = rate
+    return frame
 
 
 def _frame(data: bytes, channels: int, rate: int) -> av.AudioFrame:

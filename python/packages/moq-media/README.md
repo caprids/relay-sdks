@@ -124,7 +124,7 @@ async for frame in frame_reader:
 ```
 
 Packet *k* of a run is stamped at the run's timestamp plus 20 ms per packet before it, as WebCodecs
-stamps its output; decoded audio trails the stamps by libopus's 6.5 ms look-ahead. A flushed run has
+stamps its output; decoded audio trails the stamps by libopus's look-ahead: 6.5 ms, or 2.5 ms with `application="lowdelay"`. A flushed run has
 one packet more than the frames it was given, which carries the look-ahead's tail.
 `opus_packet_duration_us(payload)` reads a packet's duration from its TOC byte without PyAV, held to
 the same vectors as TypeScript's `opusPacketDurationUs`. See [ADR 0006](../../../docs/adr/0006-opus-codec-behind-an-extra.md).

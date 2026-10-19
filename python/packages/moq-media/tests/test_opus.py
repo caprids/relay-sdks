@@ -88,6 +88,27 @@ class TestOpusEncoder:
         assert len(packets) in (10, 11, 12)
         assert packets[-1].timestamp_us == ORIGIN_US + (len(packets) - 1) * OPUS_FRAME_US
 
+    def test_a_flush_whose_drain_crosses_a_frame_boundary_pads_only_the_remainder(self) -> None:
+        # 481 samples at 24 kHz: 930 at 48 kHz are out before the flush, and the drain brings the run to 962.
+        encoder = OpusEncoder(input_rate=24_000)
+        encoder.encode(tone(481 / 24_000, rate=24_000), timestamp_us=ORIGIN_US)
+
+        packets = encoder.flush()
+
+        # Two frames (one whole, one padded), then the look-ahead's tail.
+        assert [packet.timestamp_us for packet in packets] == [ORIGIN_US + k * OPUS_FRAME_US for k in range(3)]
+
+    def test_a_short_resampled_run_keeps_its_audio(self) -> None:
+        encoder = OpusEncoder(input_rate=8_000)
+        encoder.encode(tone(20 / 8_000, rate=8_000, hz=1_000), timestamp_us=ORIGIN_US)
+
+        packets = encoder.flush()
+        decoder = OpusDecoder()
+        pcm = b"".join(decoder.decode(packet.payload) for packet in packets)
+
+        assert len(packets) == 2
+        assert rms(pcm) > 100
+
     def test_takes_pyav_frames(self) -> None:
         encoder = OpusEncoder(channels=2, bitrate=96_000, application="audio")
         data = tone(0.04, rate=44_100, channels=2)
