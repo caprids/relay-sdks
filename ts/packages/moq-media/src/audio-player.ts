@@ -11,7 +11,6 @@ import {
   type AudioPlayerProcessorOptions,
   type AudioPlayerProcessorReport,
 } from './audio-worklet.js';
-import type { PlayoutClock } from './clock.js';
 import { MICROSECONDS_PER_SECOND } from './loc.js';
 import { createRenderClock, type RenderClock } from './render-clock.js';
 import type { FrameDiscontinuity, SequencedFrame } from './sequencer.js';
@@ -62,17 +61,38 @@ export type AudioPlayerFrame = Pick<SequencedFrame, 'timestampUs' | 'payload'> &
   discontinuity?: FrameDiscontinuity | undefined;
 };
 
+/**
+ * What an input calls on its clock. A `PlayoutClock` qualifies; so does a player's own clock, such as one that holds
+ * its position while the buffer is dry.
+ */
+export interface AudioInputClock {
+  /** Caps the jitter buffer: it holds no more than this less the output delay and 40 ms. */
+  readonly targetLatencyUs: number;
+  /** The time source reports are measured on, in microseconds. */
+  localNow(): number;
+  /**
+   * The audio with this timeline timestamp is audible at local time `atUs`. `stats` are the input's, refreshed with
+   * this report: a newer `playStarts` says the audio is from after the buffer last ran dry, not the tail before it.
+   * The object is updated in place by later reports, so copy what you keep.
+   */
+  reportAudio(timestampUs: number, atUs: number, stats: Readonly<AudioInputStats>): void;
+  /** The input was removed. */
+  stopAudio(): void;
+}
+
 /** Options for {@link AudioPlayer.addInput}. Durations are microseconds. */
 export interface AudioInputOptions {
   /**
    * The broadcast's playout clock. The input reports the audible timestamp to it about every 20 ms while it plays,
    * and its target latency caps the jitter buffer. Without one, nothing is reported.
    */
-  clock?: PlayoutClock;
+  clock?: AudioInputClock;
   /** How to decode. Default: Opus, 48 kHz, two channels; `audioDecoderConfigFromTrack` reads one from the catalog. */
   decoderConfig?: AudioDecoderConfig;
   /** The input's gain. Default 1. */
   gain?: number;
+  /** Held audio played per output frame, from 0.5 to 2; see {@link AudioPlayerInput.playbackRate}. Default 1. */
+  playbackRate?: number;
   /** How much audio to hold before playing, at the start and after each underrun. Default 60,000. */
   jitterTargetUs?: number;
   /** The least the target shrinks to while playback is smooth. Default 40,000. */
@@ -112,6 +132,15 @@ export interface AudioInputStats {
   underruns: number;
   /** Whether the buffer is playing, rather than filling to its target. */
   playing: boolean;
+  /** Times playback started: at the start, after running dry, and after a flush or a cut that emptied the buffer. */
+  playStarts: number;
+  /** The timeline timestamp just past the newest audio held: the end of decoded audio. `null` when nothing is held. */
+  heldUntilUs: number | null;
+  /**
+   * The timeline timestamp where the buffer last ran dry while playing, until playback starts again; `null` otherwise,
+   * and after a flush or a cut that empties the buffer.
+   */
+  dryAtUs: number | null;
   /** The audio held now. */
   bufferedUs: number;
   /** The jitter-buffer target now. */
@@ -140,6 +169,12 @@ export interface AudioPlayerInput {
   cut(range?: AudioCutRange): void;
   /** The input's gain. */
   gain: number;
+  /**
+   * Held audio played per output frame, from the next render quantum: above 1 sheds latency, below 1 gains it, and
+   * pitch shifts with it (no time-stretching). From 0.5 to 2. Held audio, the jitter target, trims and the hard bound
+   * stay measured in held audio, and reports carry the timestamp at the fractional read position.
+   */
+  playbackRate: number;
   /** Counters, refreshed with each report from the worklet. */
   readonly stats: Readonly<AudioInputStats>;
   /** Stop: the decoder closes, the worklet stops, and the clock goes to wall pacing. */
@@ -219,6 +254,11 @@ function duration(value: number | undefined, fallback: number, name: string): nu
   const result = value ?? fallback;
   if (!Number.isFinite(result) || result <= 0) throw new RangeError(`${name} must be positive`);
   return result;
+}
+
+function playbackRate(value: number): number {
+  if (!Number.isFinite(value) || value < 0.5 || value > 2) throw new RangeError('playbackRate must be from 0.5 to 2');
+  return value;
 }
 
 /**
@@ -353,6 +393,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   const minTargetUs = duration(options.minJitterTargetUs, 40_000, 'minJitterTargetUs');
   const maxTargetUs = duration(options.maxJitterTargetUs, 400_000, 'maxJitterTargetUs');
   if (minTargetUs > maxTargetUs) throw new RangeError('minJitterTargetUs must not exceed maxJitterTargetUs');
+  let rate = playbackRate(options.playbackRate ?? 1);
   const { sampleRate } = context;
   const toFrames = (us: number) => Math.round((us * sampleRate) / MICROSECONDS_PER_SECOND);
   const toUs = (frames: number) => Math.round((frames * MICROSECONDS_PER_SECOND) / sampleRate);
@@ -375,6 +416,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       targetFrames: toFrames(startTargetUs),
       minTargetFrames: toFrames(minTargetUs),
       maxTargetFrames: ceiling,
+      playbackRate: rate,
     },
   });
   const gain = context.createGain();
@@ -389,6 +431,9 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     errors: 0,
     underruns: 0,
     playing: false,
+    playStarts: 0,
+    heldUntilUs: null,
+    dryAtUs: null,
     bufferedUs: 0,
     jitterTargetUs: Math.min(startTargetUs, toUs(ceiling)),
     trimmedUs: 0,
@@ -537,6 +582,9 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     const nowUs = localNow();
     renders.observe((report.rendered * MICROSECONDS_PER_SECOND) / sampleRate, nowUs);
     stats.playing = report.playing;
+    stats.playStarts = report.playStarts;
+    stats.heldUntilUs = report.heldUntilUs;
+    stats.dryAtUs = report.dryAtUs;
     stats.bufferedUs = toUs(report.bufferedFrames);
     stats.jitterTargetUs = toUs(report.targetFrames);
     stats.underruns = report.underruns;
@@ -553,7 +601,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       // When that sample renders, on the clock's own time source, and then reaches the speaker.
       const renderedAtUs = renders.renderedAtUs((report.frame * MICROSECONDS_PER_SECOND) / sampleRate);
       if (renderedAtUs !== undefined) {
-        clock.reportAudio(report.timestampUs, renderedAtUs + outputLatencyUs());
+        clock.reportAudio(report.timestampUs, renderedAtUs + outputLatencyUs(), stats);
         stats.reports++;
       }
     }
@@ -609,6 +657,13 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     set gain(value: number) {
       if (!Number.isFinite(value)) throw new RangeError('gain must be finite');
       gain.gain.value = value;
+    },
+    get playbackRate() {
+      return rate;
+    },
+    set playbackRate(value: number) {
+      rate = playbackRate(value);
+      if (!removed) post({ type: 'rate', playbackRate: rate });
     },
     get stats() {
       return stats;

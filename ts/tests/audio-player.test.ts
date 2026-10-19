@@ -2,6 +2,8 @@ import { resolveObjectURL } from 'node:buffer';
 import type { MoqtObject } from '@mux/moq-core';
 import {
   AUDIO_ONLY_TARGET_LATENCY_US,
+  type AudioInputClock,
+  type AudioInputStats,
   type AudioPlayer,
   type AudioPlayerInput,
   audioDecoderConfigFromTrack,
@@ -142,6 +144,8 @@ class FakeDecoder {
   static hold = false;
   /** A marker whose frame `decode()` throws on. */
   static failOn: number | undefined;
+  /** Output a ramp that rises `RAMP` per sample of the timeline from `BASE_US`, instead of the marker. */
+  static ramp = false;
   state = 'unconfigured';
   config: AudioDecoderConfig | undefined;
   nextUs: number | undefined;
@@ -170,7 +174,11 @@ class FakeDecoder {
         numberOfFrames: FRAME_SAMPLES,
         numberOfChannels: 1,
         copyTo(destination: Float32Array) {
-          destination.fill(value);
+          if (!FakeDecoder.ramp) destination.fill(value);
+          else {
+            const start = ((timestamp - BASE_US) * RATE) / 1e6;
+            for (let index = 0; index < destination.length; index++) destination[index] = (start + index) * RAMP;
+          }
         },
         close() {},
       } as unknown as AudioData);
@@ -213,6 +221,7 @@ beforeEach(() => {
   FakeDecoder.instances = [];
   FakeDecoder.hold = false;
   FakeDecoder.failOn = undefined;
+  FakeDecoder.ramp = false;
   vi.stubGlobal('AudioWorkletNode', FakeWorkletNode);
   vi.stubGlobal('AudioDecoder', FakeDecoder);
   vi.stubGlobal('EncodedAudioChunk', FakeChunk);
@@ -222,6 +231,7 @@ afterEach(() => {
 });
 
 const BASE_US = 1_000_000_000;
+const RAMP = 1e-5;
 const frameAt = (index: number, discontinuity?: 'gap' | 'resync' | 'restart') => ({
   timestampUs: BASE_US + index * FRAME_US,
   payload: packet(index % 100),
@@ -680,6 +690,167 @@ describe('createAudioPlayer', () => {
     expect(FakeDecoder.instances.at(-1)?.state).toBe('configured');
   });
 
+  it('rejects a playback rate outside 0.5 to 2, from the options and the setter', async () => {
+    const { player } = await setUp();
+    for (const playbackRate of [0.49, 2.01, 0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => player.addInput({ playbackRate })).toThrow(RangeError);
+    }
+    const input = player.addInput({ playbackRate: 0.5 });
+    expect(input.playbackRate).toBe(0.5);
+    input.playbackRate = 2;
+    expect(input.playbackRate).toBe(2);
+    expect(() => {
+      input.playbackRate = 2.5;
+    }).toThrow(RangeError);
+    expect(input.playbackRate).toBe(2);
+    expect(player.addInput().playbackRate).toBe(1);
+  });
+
+  it('plays held audio faster at a rate above 1, keeping the jitter buffer in held audio', async () => {
+    const { context, player } = await setUp();
+    const reports: { timestampUs: number; atUs: number }[] = [];
+    const clock: AudioInputClock = {
+      targetLatencyUs: 2_000_000,
+      localNow: () => nowUs,
+      reportAudio: (timestampUs, atUs) => reports.push({ timestampUs, atUs }),
+      stopAudio() {},
+    };
+    const input = player.addInput({ clock, playbackRate: 1.5 });
+    for (let index = 1; index <= 8; index++) input.push(frameAt(index));
+    // 160 ms held, past the 60 ms target. The latest report came after 3072 frames of output, which read 4608.
+    context.render(80);
+    expect(input.stats).toMatchObject({ playing: true, bufferedUs: 64_000, jitterTargetUs: 60_000, trimmedUs: 0 });
+    // Each report's timestamp moves 1.5 times as far as its render time.
+    const [first, second] = reports.slice(-2) as [(typeof reports)[0], (typeof reports)[0]];
+    expect(Math.abs((second.timestampUs - first.timestampUs) / (second.atUs - first.atUs) - 1.5)).toBeLessThan(0.01);
+  });
+
+  it('keeps the fractional read position across quanta and rate changes, and reports the timestamp there', async () => {
+    const { context, player } = await setUp();
+    FakeDecoder.ramp = true;
+    const reports: { timestampUs: number; atUs: number }[] = [];
+    const clock: AudioInputClock = {
+      targetLatencyUs: 2_000_000,
+      localNow: () => nowUs,
+      reportAudio: (timestampUs, atUs) => reports.push({ timestampUs, atUs }),
+      stopAudio() {},
+    };
+    const input = player.addInput({ clock, playbackRate: 0.95 });
+    for (let index = 0; index < 8; index++) input.push(frameAt(index));
+    const played = [...(context.render(30).get(nodeOf(context)) ?? [])];
+    input.playbackRate = 1.05;
+    played.push(...(context.render(30).get(nodeOf(context)) ?? []));
+    input.playbackRate = 1;
+    played.push(...(context.render(30).get(nodeOf(context)) ?? []));
+    // It plays from the first quantum. A linear ramp read at a rate rises by the rate per sample: any other step would
+    // be a click.
+    const steps = new Set<number>();
+    for (let index = 1; index < played.length; index++) {
+      steps.add(Math.round(((played[index] as number) - (played[index - 1] as number)) / RAMP / 1e-3) * 1e-3);
+    }
+    expect([...steps].map((step) => step.toFixed(2)).sort()).toEqual(['0.95', '1.00', '1.05']);
+    // A report's timestamp is the read position of the sample output at its render time.
+    for (const report of reports) {
+      const sample = played[Math.round((report.atUs * RATE) / 1e6)] as number;
+      expect(Math.abs(report.timestampUs - (BASE_US + (sample / RAMP / RATE) * 1e6))).toBeLessThanOrEqual(1);
+    }
+    expect(reports.length).toBeGreaterThan(2);
+  });
+
+  it('does not trim the audio a rate below 1 gains, and trims it as usual once back at 1', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput({ playbackRate: 0.95, jitterTargetUs: 120_000 });
+    let next = 1;
+    for (; next <= 6; next++) input.push(frameAt(next));
+    // Steady arrival, a frame per 20 ms, for 3 s at 0.95: held audio grows 50 ms a second, across three trim windows,
+    // and stays under the 300 ms hard bound.
+    for (let tick = 0; tick < 150; tick++) {
+      context.render(20);
+      input.push(frameAt(next++));
+    }
+    expect(input.stats).toMatchObject({ trimmedUs: 0, underruns: 0 });
+    expect(input.stats.bufferedUs).toBeGreaterThan(240_000);
+    // Back at 1, held audio that never dips to the target is delay nobody needs again.
+    input.playbackRate = 1;
+    for (let tick = 0; tick < 100; tick++) {
+      context.render(20);
+      input.push(frameAt(next++));
+    }
+    expect(input.stats.trimmedUs).toBeGreaterThan(0);
+    expect(input.stats.bufferedUs).toBeLessThanOrEqual(140_000);
+  });
+
+  it('stops the read position at the newest held sample at rate 2', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput({ playbackRate: 2 });
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    // 60 ms held plays out in 30 ms, then runs dry exactly where the audio ends.
+    expect(markers(context.render(100).get(nodeOf(context)) ?? [])).toEqual([1, 2, 3]);
+    expect(input.stats).toMatchObject({ playing: false, bufferedUs: 0, dryAtUs: frameAt(4).timestampUs });
+  });
+
+  it('runs dry with nothing held at a fractional rate, so a gap after it is not filled with silence', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput({ playbackRate: 0.95 });
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    context.render(200);
+    expect(input.stats).toMatchObject({ playing: false, bufferedUs: 0, heldUntilUs: null });
+    expect(Math.abs((input.stats.dryAtUs as number) - frameAt(4).timestampUs)).toBeLessThanOrEqual(21);
+    // The talker went quiet for 200 ms: the audio after it starts the buffer again, with no silence in front.
+    for (let index = 14; index <= 16; index++) input.push(frameAt(index));
+    await settle();
+    context.render(30);
+    expect(input.stats).toMatchObject({ concealedUs: 0, bufferedUs: expect.any(Number), trimmedUs: 0 });
+    expect(input.stats.bufferedUs).toBeLessThanOrEqual(60_000);
+  });
+
+  it('forgets where it ran dry at a flush of an empty buffer', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    context.render(100);
+    expect(input.stats.dryAtUs).toBe(frameAt(4).timestampUs);
+    input.push(frameAt(500, 'resync'));
+    context.render(30);
+    expect(input.stats).toMatchObject({ dryAtUs: null, underruns: 0 });
+  });
+
+  it('reports where held audio ends, where it ran dry, and each start of playback to the clock', async () => {
+    const { context, player } = await setUp();
+    const reports: { timestampUs: number; stats: Pick<AudioInputStats, 'playStarts' | 'playing'> }[] = [];
+    const clock: AudioInputClock = {
+      targetLatencyUs: 2_000_000,
+      localNow: () => nowUs,
+      reportAudio: (timestampUs, _atUs, { playStarts, playing }) =>
+        reports.push({ timestampUs, stats: { playStarts, playing } }),
+      stopAudio() {},
+    };
+    const input = player.addInput({ clock });
+    expect(input.stats).toMatchObject({ playStarts: 0, heldUntilUs: null, dryAtUs: null });
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    context.render(30);
+    expect(input.stats).toMatchObject({ playStarts: 1, heldUntilUs: frameAt(4).timestampUs, dryAtUs: null });
+    // It runs dry at the end of frame 3, and holds that until it plays again.
+    context.render(100);
+    expect(input.stats).toMatchObject({ playing: false, playStarts: 1, heldUntilUs: null });
+    expect(input.stats.dryAtUs).toBe(frameAt(4).timestampUs);
+    const tail = reports.length;
+    // Back soon enough to count as an underrun: the target grows to 80 ms.
+    for (let index = 9; index <= 12; index++) input.push(frameAt(index));
+    await settle();
+    context.render(30);
+    expect(input.stats).toMatchObject({ playing: true, playStarts: 2, dryAtUs: null });
+    // Reports of the tail carry the old count, and reports of the resumed audio the new one.
+    expect(reports.slice(0, tail).every((report) => report.stats.playStarts === 1)).toBe(true);
+    expect(reports.slice(tail).every((report) => report.stats.playStarts === 2)).toBe(true);
+    expect(reports[tail]?.timestampUs).toBeGreaterThanOrEqual(frameAt(9).timestampUs);
+    // A cut of everything held is a new start too, and forgets nothing it did not hold.
+    input.cut();
+    for (let index = 20; index <= 23; index++) input.push(frameAt(index, index === 20 ? 'resync' : undefined));
+    context.render(30);
+    expect(input.stats).toMatchObject({ playStarts: 3, dryAtUs: null, heldUntilUs: frameAt(24).timestampUs });
+  });
+
   it('loads the worklet once per context', async () => {
     const context = new FakeContext();
     const players: AudioPlayer[] = await Promise.all([createAudioPlayer({ context }), createAudioPlayer({ context })]);
@@ -713,9 +884,19 @@ describe('audio helpers', () => {
   });
 });
 
-// Type-level only, never called: a Web Audio context and its nodes satisfy the structural types.
-async function typeCheck(context: AudioContext, input: AudioPlayerInput) {
+// Type-level only, never called: a Web Audio context and its nodes satisfy the structural types, and a playout clock
+// or a clock that takes only a timestamp and a time is an input's clock.
+async function typeCheck(context: AudioContext, input: AudioPlayerInput, clock: PlayoutClock) {
   const player = await createAudioPlayer({ context });
+  player.addInput({ clock });
+  player.addInput({
+    clock: {
+      targetLatencyUs: 1,
+      localNow: () => 0,
+      reportAudio(_timestampUs: number, _atUs?: number) {},
+      stopAudio() {},
+    },
+  });
   const gain: GainNode = player.output;
   gain.connect(context.destination);
   input.push({ timestampUs: 0, payload: new Uint8Array() });

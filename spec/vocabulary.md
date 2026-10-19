@@ -623,11 +623,13 @@ the format package still does not depend on the product package.
 | One player per `AudioContext` | `await createAudioPlayer({ context })` → `AudioPlayer` (`AudioPlayerOptions`) | — |
 | The mix, which the application routes | `player.output` (the context's own gain node type) | — |
 | Delay after the output that the context does not report | `player.outputDelayUs` (settable) | — |
-| One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
+| One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, playbackRate, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
+| What an input calls on its clock; a `PlayoutClock` qualifies | `AudioInputClock { targetLatencyUs, localNow(), reportAudio(timestampUs, atUs, stats), stopAudio() }` | — |
 | Hand it a frame in decode order | `input.push(frame)` (`AudioPlayerFrame`: `timestampUs`, `payload`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
 | Drop received audio in a timeline range | `input.cut({ fromUs?, untilUs? })` (`AudioCutRange`, which a parsed `Interrupt` is); `cut()` drops everything held | — |
 | Per-input gain; stop | `input.gain`; `input.remove()`, `input.removed`; `player.close()` | — |
-| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, cutUs, reports }` | — |
+| Held audio played per output frame, 0.5 to 2 | `input.playbackRate` (settable) | — |
+| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, playStarts, heldUntilUs, dryAtUs, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, cutUs, reports }` | — |
 | What the player needs of Web Audio | `AudioPlayerContext`, `AudioPlayerNode`, `AudioPlayerGainNode` | — |
 | A catalog audio track's decoder config | `audioDecoderConfigFromTrack(track)` | — |
 | An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | `opus_packet_duration_us(packet)` (`moq_media`; see below) |
@@ -648,6 +650,19 @@ issue #314: `addSource(frameReader, …)` (the format package cannot take a fram
 method for the loopback (it is a function over any node, so the v10 renderer can use it too), and a
 `createPlayoutClock({ audioOnly: true })` preset or an automatic audio-only default (the clock is
 pinned by shared vectors in both SDKs; the constant changes nothing for Python).
+
+`playbackRate` is Web Audio's and `HTMLMediaElement`'s name for the same ratio
+([issue #329](https://github.com/muxinc/relay-sdks/issues/329)); the Video.js renderer applied its
+latency nudges to `AudioBufferSourceNode.playbackRate` before it used the player. `AudioInputClock`
+names the members the input calls, rather than `Pick<PlayoutClock, …>`, because its `reportAudio`
+takes a third argument that `PlayoutClock` does not: the input's stats, refreshed with the report.
+Issue #329 asked for `{ playStarts }` there; the whole stats object also gives a clock `dryAtUs` and
+`heldUntilUs` as of that report without a reference to the input, which a clock created before
+`addInput` does not have. `PlayoutClock` stays as it is, pinned by the shared vectors, and still
+qualifies, since a function that ignores an argument is assignable. `playStarts`, not `reports`
+bumped per start: `reports` counts reports, and two meanings in one counter would make both harder
+to read. `dryAtUs` and `heldUntilUs` are timeline timestamps, so they end in `Us` like `fromUs` and
+`untilUs`.
 
 ## Interrupts: `INTERRUPT_TRACK`, `buildInterrupt`, `parseInterrupt`
 
