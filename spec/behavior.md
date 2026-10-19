@@ -1240,6 +1240,24 @@ to both languages.
   and ignores unknown fields. A listener applies an interrupt for an audio track it plays as a cut
   of that range. Pinned by `vectors/media.json` `interrupts`, `interruptErrors`, `interruptReads`
   and `interruptReadErrors`; the track name by `protocol.json`.
+- The transcript track (`TRANSCRIPT_TRACK`, `transcript`; [media-layer.md](media-layer.md#transcript-track),
+  issue #320) carries one version of one segment per group as compact UTF-8 JSON: `seq`, `track`
+  (default `audio`), `fromUs`, the optional `untilUs`, `text` and `final`, in that order, with no
+  `untilUs` key when it is absent. The builder and the reader (`buildTranscriptSegment` /
+  `build_transcript_segment`, `parseTranscriptSegment` / `parse_transcript_segment`) refuse a `seq`
+  or timestamp that is not a nonnegative safe integer, an empty or non-string track, a track or
+  text that is not valid Unicode, a non-string text, a non-boolean `final`, an `untilUs` not after
+  `fromUs`, and a final segment without `untilUs`. The reader refuses a payload that is not a UTF-8
+  JSON object, reads an integral number as an integer, and ignores unknown fields. A `Transcript`
+  keeps each segment's latest version, a final one against any later, and ignores a segment that
+  starts inside a range cut earlier. A cut starts at the later of the range's `fromUs` (or 0) and
+  the floored playout position, and changes nothing when that is not before `untilUs`; otherwise
+  it drops the segments starting in the cut and ends any segment running past its start there,
+  final and marked cut. Lines are ordered by `fromUs`, then `seq`; at a position, those with
+  `fromUs` at or before it, and none while idle. Pinned by `vectors/media.json`
+  `transcriptSegments`, `transcriptSegmentErrors`, `transcriptSegmentReads`,
+  `transcriptSegmentReadErrors`, `transcripts` and `transcriptCutErrors`; the track name by
+  `protocol.json`.
 - Python's Opus encoder and decoder (`moq_media.opus`, the `opus` extra; issue #320, ADR 0006) are
   PyAV's libopus. The encoder takes signed 16-bit PCM, or a PyAV frame, in runs: the first call of a
   run gives the timeline timestamp of its first sample and later calls refuse one, packet *k* of a

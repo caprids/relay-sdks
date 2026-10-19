@@ -871,8 +871,24 @@ subscriber.subscribe(
 );
 ```
 
+A talker can also list a `transcript` track with the text of what it says. Keep it in a
+`Transcript`, cut it with the same interrupt, and show what playback has reached:
+
+```ts
+import { createTranscript, parseTranscriptSegment, TRANSCRIPT_TRACK } from '@mux/moq-media';
+
+const transcript = createTranscript();
+subscriber.subscribe(
+  { namespace, track: TRANSCRIPT_TRACK },
+  { onObject: (object) => transcript.apply(parseTranscriptSegment(object.payload)) },
+);
+// With each interrupt: transcript.cut(interrupt, clock.position()).
+const said = transcript.linesAt(clock.position()).map((line) => line.text);
+```
+
 See [spec/media-layer.md](../spec/media-layer.md#audio-player) for the rules and why, and its
-[Interrupt track](../spec/media-layer.md#interrupt-track) section for the convention.
+[Interrupt track](../spec/media-layer.md#interrupt-track) and
+[Transcript track](../spec/media-layer.md#transcript-track) sections for the conventions.
 
 **Echo cancellation.** In a call the page also captures a microphone, and Chromium's echo canceller
 only removes audio that WebRTC played: audio played straight from an `AudioContext` reaches the

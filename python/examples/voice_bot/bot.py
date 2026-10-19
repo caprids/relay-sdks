@@ -4,10 +4,10 @@ back. When the user talks over it, it stops and sends an interrupt, so the user'
     RELAY_TOKEN=... mise run python:example:voice-bot -- --namespace mattypoo/voice-bot
 
 The user's page publishes its microphone at ``<namespace>/user`` and the bot answers at ``<namespace>/bot``, with an
-Opus ``audio`` track and the ``interrupt`` track listed in its catalog. Speech-to-text, a language model and
-text-to-speech plug in through one async function, :data:`Respond`: it gets what the user said as PCM and yields the
-reply as PCM. The default, :func:`parrot`, says the user's words back. Voice activity detection is an energy gate in
-this example, not SDK code.
+Opus ``audio`` track and the ``interrupt`` and ``transcript`` tracks listed in its catalog. Speech-to-text, a language
+model and text-to-speech plug in through one async function, :data:`Respond`: it gets what the user said as PCM and
+yields the reply as PCM, with the text of each part before it. The default, :func:`parrot`, says the user's words
+back. Voice activity detection is an energy gate in this example, not SDK code.
 """
 
 from __future__ import annotations
@@ -32,6 +32,7 @@ from moq_media import (
     CATALOG_TRACK,
     INTERRUPT_TRACK,
     OPUS_FRAME_US,
+    TRANSCRIPT_TRACK,
     AudioTrackInfo,
     BroadcastClock,
     DataTrackInfo,
@@ -40,6 +41,7 @@ from moq_media import (
     SequencedFrame,
     build_interrupt,
     build_msf_catalog,
+    build_transcript_segment,
     loc_track_properties,
 )
 from moq_media.opus import OpusDecoder, OpusEncoder, OpusPacket
@@ -76,16 +78,18 @@ class Utterance:
     until_us: int
 
 
-Respond = Callable[[Utterance], AsyncIterator[bytes]]
+Respond = Callable[[Utterance], AsyncIterator[bytes | str]]
 """The bot's brain: given an utterance, yield the reply as mono s16 PCM at the utterance's rate, in chunks of any size.
 
 Plug speech-to-text, a language model and text-to-speech in here. The bot speaks each chunk as it arrives and cancels
-the iterator when the user talks over it.
+the iterator when the user talks over it. A ``str`` is the text of the audio that follows it, up to the next ``str``
+or the end of the reply: the bot publishes it on the transcript track, placed where that audio lies.
 """
 
 
-async def parrot(utterance: Utterance) -> AsyncIterator[bytes]:
-    """Say the user's words back."""
+async def parrot(utterance: Utterance) -> AsyncIterator[bytes | str]:
+    """Say the user's words back. It cannot tell what they were, so its transcript says how long they took."""
+    yield f"(your words back: {(utterance.until_us - utterance.from_us) / 1_000_000:.1f} s)"
     yield utterance.pcm
 
 
@@ -158,13 +162,16 @@ class Speaker:
 
     Each reply is one run of the Opus encoder, stamped from the broadcast clock when its first audio arrives and
     written as the clock reaches each packet, as a microphone would send it. So a listener holds little of a reply
-    at any moment, and an interrupt has little to cut.
+    at any moment, and an interrupt has little to cut. The text of each part of a reply goes on the transcript track:
+    an interim segment just before its first audio, and a final one once its last audio is sent. An interrupted
+    segment gets no final version; the interrupt ends it.
     """
 
     def __init__(
         self,
         writer: FrameWriter[OpusPacket],
         interrupts: RelayTrackWriter,
+        transcripts: RelayTrackWriter,
         clock: BroadcastClock,
         *,
         rate: int,
@@ -172,6 +179,7 @@ class Speaker:
     ) -> None:
         self._writer = writer
         self._interrupts = interrupts
+        self._transcripts = transcripts
         self._clock = clock
         self._encoder = OpusEncoder(input_rate=rate)
         self._log = log
@@ -180,13 +188,18 @@ class Speaker:
         self._sent_until_us = 0
         # The end of the audio the last interrupt cut: what was sent after it is not cut yet.
         self._cut_until_us = 0
+        # Segment numbers start at the clock's millisecond, so a bot that starts over does not reuse its last run's.
+        self._seq = clock.now_us() // 1000
+        # Text whose audio has not started yet, and the segment whose audio is being sent: (seq, from_us, text).
+        self._pending_text: str | None = None
+        self._segment: tuple[int, int, str] | None = None
 
     @property
     def speaking(self) -> bool:
         """Whether a reply is under way, or the end of one may still be playing at a listener."""
         return (self._task is not None and not self._task.done()) or self._uncut_audio_playing()
 
-    def say(self, chunks: AsyncIterator[bytes]) -> None:
+    def say(self, chunks: AsyncIterator[bytes | str]) -> None:
         """Start speaking a reply, in place of any under way."""
         if self._task is not None:
             self._task.cancel()
@@ -219,10 +232,19 @@ class Speaker:
         # A reply written to its end is still in listeners' jitter buffers and in flight for a while after.
         return self._sent_until_us > self._cut_until_us and self._clock.now_us() < self._sent_until_us + _HELD_US
 
-    async def _say(self, chunks: AsyncIterator[bytes]) -> None:
+    async def _say(self, chunks: AsyncIterator[bytes | str]) -> None:
         sent = 0
         try:
             async for chunk in chunks:
+                if isinstance(chunk, str):
+                    if self._segment is not None:
+                        # Send what the encoder holds of the last text's audio, so its segment ends where it does.
+                        self._drop_if_starved()
+                        sent += await self._send(self._encoder.flush())
+                    await self._end_segment()
+                    # Text with no audio after it yet runs on into the next.
+                    self._pending_text = chunk if self._pending_text is None else f"{self._pending_text} {chunk}"
+                    continue
                 self._drop_if_starved()
                 if self._encoder.next_timestamp_us is None:
                     start_us = max(self._clock.now_us(), self._sent_until_us)
@@ -231,10 +253,14 @@ class Speaker:
                     sent += await self._send(self._encoder.encode(chunk))
             self._drop_if_starved()
             sent += await self._send(self._encoder.flush())
+            await self._end_segment()
             self._log("replied", {"ms": sent * OPUS_FRAME_US // 1000})
         finally:
-            # Cancelled mid-reply: the rest of the run is never sent.
+            # Cancelled mid-reply: the rest of the run is never sent, and the interrupt ends its segment. Text that
+            # never got audio is dropped: there is nowhere on the timeline to put it.
             self._encoder.flush()
+            self._pending_text = None
+            self._segment = None
             aclose = getattr(chunks, "aclose", None)
             if aclose is not None:
                 await aclose()
@@ -251,11 +277,34 @@ class Speaker:
             delay_us = packet.timestamp_us - self._clock.now_us()
             if delay_us > 0:
                 await asyncio.sleep(delay_us / 1_000_000)
+            if self._pending_text is not None:
+                # The text's audio starts here; the interim segment goes first, so a listener has it when it plays.
+                self._segment = (self._seq, packet.timestamp_us, self._pending_text)
+                self._seq += 1
+                self._pending_text = None
+                await self._write_segment(*self._segment)
             # Counted before the write: an interrupt that cancels it mid-way must cut the packet too.
             self._sent_until_us = packet.timestamp_us + packet.duration_us
             # A frame writer reports a failed frame rather than raising; the next packet tries again.
             await self._writer.write(packet)
         return len(packets)
+
+    async def _end_segment(self) -> None:
+        if self._segment is not None:
+            seq, from_us, text = self._segment
+            self._segment = None
+            await self._write_segment(seq, from_us, text, until_us=self._sent_until_us)
+
+    async def _write_segment(self, seq: int, from_us: int, text: str, *, until_us: int | None = None) -> None:
+        if not self._transcripts.has_demand:
+            return
+        payload = build_transcript_segment(
+            seq=seq, from_us=from_us, text=text, until_us=until_us, final=until_us is not None
+        )
+        try:
+            await self._transcripts.write(payload)
+        except Exception as error:  # A lost transcript must not stop the reply; the audio matters more.
+            self._log("transcript failed", {"error": f"{type(error).__name__}: {error}"})
 
 
 class VoiceBot:
@@ -323,11 +372,11 @@ def reply_writer(track: RelayTrackWriter, clock: BroadcastClock) -> FrameWriter[
 
 
 def bot_catalog(namespace: Sequence[str]) -> bytes:
-    """The bot's catalog: mono Opus, and the interrupt track a listener cuts on."""
+    """The bot's catalog: mono Opus, the interrupt track a listener cuts on, and the transcript of the bot's audio."""
     return build_msf_catalog(
         namespace,
         audio=AudioTrackInfo(channel_config="1", bitrate=32_000),
-        data=[DataTrackInfo(name=INTERRUPT_TRACK)],
+        data=[DataTrackInfo(name=INTERRUPT_TRACK), DataTrackInfo(name=TRANSCRIPT_TRACK)],
     )
 
 
@@ -352,10 +401,11 @@ async def run_bot(
         AUDIO_TRACK, track_properties=[*loc_track_properties(), *media_track_properties("audio")]
     )
     interrupt_track = publisher.register_track(INTERRUPT_TRACK, track_properties=loc_track_properties())
+    transcript_track = publisher.register_track(TRANSCRIPT_TRACK, track_properties=loc_track_properties())
     catalog = CatalogService(catalog_track, bot_catalog(bot_namespace))
     clock = BroadcastClock()
     writer = reply_writer(audio_track, clock)
-    speaker = Speaker(writer, interrupt_track, clock, rate=gate.rate, log=log)
+    speaker = Speaker(writer, interrupt_track, transcript_track, clock, rate=gate.rate, log=log)
     bot = VoiceBot(speaker, respond=respond, gate=gate, log=log)
 
     # The bot is a listener with no player: nothing reports audio to the clock, so it stays idle and nothing is late.

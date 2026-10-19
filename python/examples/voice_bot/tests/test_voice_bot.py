@@ -18,11 +18,14 @@ from moq_media import (
     AUDIO_TRACK,
     INTERRUPT_TRACK,
     OPUS_FRAME_US,
+    TRANSCRIPT_TRACK,
     BroadcastClock,
     Interrupt,
+    TranscriptSegment,
     loc_timestamp_us,
     loc_track_properties,
     parse_interrupt,
+    parse_transcript_segment,
 )
 from moq_media.opus import OpusDecoder, OpusEncoder, OpusPacket
 from mux_relay import (
@@ -117,9 +120,9 @@ class TestEnergyGate:
         assert gate.push(tone(320, 16_000, amplitude=0.9)) == "start"
 
 
-async def test_parrot_says_the_utterance_back() -> None:
-    utterance = Utterance(b"\x01\x00\x02\x00", 16_000, 0, 125)
-    assert [chunk async for chunk in parrot(utterance)] == [utterance.pcm]
+async def test_parrot_says_the_utterance_back_after_its_text() -> None:
+    utterance = Utterance(b"\x01\x00\x02\x00", 16_000, 0, 1_500_000)
+    assert [chunk async for chunk in parrot(utterance)] == ["(your words back: 1.5 s)", utterance.pcm]
 
 
 class TimedTrackWriter(FakeTrackWriter):
@@ -141,18 +144,59 @@ class TestSpeaker:
     def speaker(self) -> tuple[Speaker, TimedTrackWriter, FakeTrackWriter, list[str]]:
         clock = BroadcastClock()
         audio, interrupts = TimedTrackWriter(clock), FakeTrackWriter()
+        self.transcripts = FakeTrackWriter()
         events: list[str] = []
         writer: FrameWriter[OpusPacket] = FrameWriter(audio, grouping="frame")
 
         def log(event: str, _: dict[str, Any]) -> None:
             events.append(event)
 
-        speaker = Speaker(writer, cast(Any, interrupts), clock, rate=16_000, log=log)
+        speaker = Speaker(writer, cast(Any, interrupts), cast(Any, self.transcripts), clock, rate=16_000, log=log)
         return speaker, audio, interrupts, events
 
     @staticmethod
     def stamps(audio: FakeTrackWriter) -> list[int]:
         return [loc_timestamp_us(group.objects[0][1]) or 0 for group in audio.groups]
+
+    def segments(self) -> list[TranscriptSegment]:
+        return [parse_transcript_segment(payload) for payload in self.transcripts.writes]
+
+    async def test_each_part_of_a_reply_gets_its_text_before_its_audio_and_a_final_version_after(self) -> None:
+        speaker, audio, _, events = self.speaker()
+
+        async def reply(_: Utterance) -> AsyncIterator[bytes | str]:
+            yield "Hello"
+            yield tone(1600, 16_000)
+            yield "there"
+            yield tone(1600, 16_000)
+
+        speaker.say(reply(Utterance(b"", 16_000, 0, 0)))
+        await wait_for(lambda: "replied" in events, timeout=3)
+        stamps = self.stamps(audio)
+        hello, hello_final, there, there_final = self.segments()
+        assert (hello.text, hello.from_us, hello.until_us, hello.final) == ("Hello", stamps[0], None, False)
+        assert (hello_final.seq, hello_final.final) == (hello.seq, True)
+        assert (there.seq, there.text, there.final) == (hello.seq + 1, "there", False)
+        # Each part's segment ends where its own audio does, and the next starts there.
+        assert hello_final.until_us == there.from_us
+        assert there.from_us in stamps[5:]
+        assert there.from_us - OPUS_FRAME_US in stamps
+        assert (there_final.until_us, there_final.final) == (stamps[-1] + OPUS_FRAME_US, True)
+
+    async def test_an_interrupted_segment_gets_no_final_version(self) -> None:
+        speaker, audio, interrupts, _ = self.speaker()
+
+        async def reply(_: Utterance) -> AsyncIterator[bytes | str]:
+            yield "A long answer"
+            yield tone(16_000, 16_000)
+            yield "never said"
+
+        speaker.say(reply(Utterance(b"", 16_000, 0, 0)))
+        await wait_for(lambda: len(audio.groups) >= 3, timeout=3)
+        await speaker.interrupt()
+        (segment,) = self.segments()
+        assert (segment.text, segment.final) == ("A long answer", False)
+        assert parse_interrupt(interrupts.writes[0]).until_us > segment.from_us
 
     async def test_a_reply_that_stalls_is_restamped_rather_than_sent_late(self) -> None:
         speaker, audio, _, events = self.speaker()
@@ -260,7 +304,13 @@ async def test_the_bot_answers_after_a_pause_and_interrupts_itself_when_talked_o
     microphone = user.register_track(AUDIO_TRACK, track_properties=loc_track_properties())
     heard: list[MoqtObject] = []
     interrupts: list[Interrupt] = []
+    segments: list[TranscriptSegment] = []
     listener.subscribe(BOT, AUDIO_TRACK, RelaySubscriptionHandlers(on_object=heard.append))
+    listener.subscribe(
+        BOT,
+        TRANSCRIPT_TRACK,
+        RelaySubscriptionHandlers(on_object=lambda obj: segments.append(parse_transcript_segment(obj.payload))),
+    )
     listener.subscribe(
         BOT,
         INTERRUPT_TRACK,
@@ -323,3 +373,11 @@ async def test_the_bot_answers_after_a_pause_and_interrupts_itself_when_talked_o
     decoder = OpusDecoder(rate=16_000)
     middle = b"".join(decoder.decode(obj.payload) for obj in first[:10])[3200:]
     assert dbfs(middle) > -20
+
+    # Each reply's text lies where its audio starts; the interrupted one never got a final version.
+    first_text, second_text, second_final = segments
+    assert first_text.text.startswith("(your words back: ")
+    assert (first_text.from_us, first_text.final) == (loc_timestamp_us(first[0].properties), False)
+    assert (second_text.seq, second_text.from_us) == (first_text.seq + 1, loc_timestamp_us(second[0].properties))
+    assert (second_final.seq, second_final.final) == (second_text.seq, True)
+    assert second_final.until_us == (loc_timestamp_us(second[-1].properties) or 0) + OPUS_FRAME_US

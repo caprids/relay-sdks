@@ -13,7 +13,7 @@ Conventions:
 
 | File | Covers |
 | --- | --- |
-| `media.json` | Exact MSF catalog UTF-8 JSON (with a Media Timeline track entry), Media Timeline records, documents and retention, LOC properties, MSF source URLs, H.264 avcC and access units, Opus packet durations from the TOC byte (RFC 6716 §3.1), interrupts built and read, and rejected inputs |
+| `media.json` | Exact MSF catalog UTF-8 JSON (with a Media Timeline track entry), Media Timeline records, documents and retention, LOC properties, MSF source URLs, H.264 avcC and access units, Opus packet durations from the TOC byte (RFC 6716 §3.1), interrupts built and read, transcript segments built and read and a transcript's steps, and rejected inputs |
 | `clock.json` | The broadcast clock's origin, source mapping, capture-clock and sample timelines, and the playout clock's modes and wait/show/drop decisions, per `../media-layer.md` "Shared timeline and playout clock", and the origin's Unix-epoch time, per its "Media Timeline track" |
 | `varint.json` | MOQT variable-length integers, draft-ietf-moq-transport-22 §8.1 |
 | `setup-options.json` | The PATH and AUTHORITY setup options the core sends for an endpoint URL and token, by framing, per `../transport-adapter.md` TA-6; TypeScript only until Python speaks native QUIC (#199) |

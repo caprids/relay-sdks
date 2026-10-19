@@ -1,8 +1,9 @@
 # Talk to a voice bot in the browser
 
 The user's side of the [Python voice bot](../../../python/examples/voice_bot/README.md). The page
-publishes the microphone alone and plays the bot through `@mux/moq-media`'s audio player. When the
-bot is talked over and sends an interrupt, the player cuts the reply audio it still holds.
+publishes the microphone alone and plays the bot through `@mux/moq-media`'s audio player, showing the
+text of each reply as its audio plays. When the bot is talked over and sends an interrupt, the
+player cuts the reply audio it still holds, and the transcript the words it did not say.
 
 [`talk-to-bot.ts`](talk-to-bot.ts) is the part to copy. It is the WebCodecs example's pieces put
 together:
@@ -34,6 +35,9 @@ await talkToBot(publisher, subscriber, {
   target latency and, because the bot's catalog lists the interrupt track, cuts on each interrupt.
   `talkToBot` passes `echoCancellation: true`, so playback goes through Chromium's echo canceller
   and the bot does not hear itself.
+- Because the catalog lists the transcript track, the listener keeps the bot's
+  [transcript](../../../spec/media-layer.md#transcript-track): `listener.transcript.linesAt(listener.clock.position())`
+  is what the bot has said so far, each line marked `cut` where it was talked over.
 - The bot can start before or after the page: until its catalog arrives, `talkToBot` retries every
   second and reports each failed attempt to `onError`.
 
@@ -51,4 +55,5 @@ RELAY_TOKEN=... mise run ts:example:voice-bot -- --namespace mattypoo/voice-bot
 `--port` picks another port. With `RELAY_TOKEN` set the page holds the token, so the server listens
 on the loopback interface only and never prints it; without it, paste one into the page. The status
 line shows how much of the bot's audio the player has played, its buffer, underruns, interrupts and
-how much they cut, and the log says how long after the bot's last audio each interrupt landed.
+how much they cut; below it, the bot's words appear as they play, with `—` where it was talked over.
+The log says how long after the bot's last audio each interrupt landed.

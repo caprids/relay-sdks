@@ -72,6 +72,28 @@ interface Vectors {
   interruptErrors: { name: string; input: RawInterrupt }[];
   interruptReads: { name: string; json: string; parsed: RawInterrupt & { track: string } }[];
   interruptReadErrors: { name: string; json: string }[];
+  transcriptSegments: { name: string; input: RawSegment; json: string }[];
+  transcriptSegmentErrors: { name: string; input: RawSegment }[];
+  transcriptSegmentReads: { name: string; json: string; parsed: RawSegment & { track: string } }[];
+  transcriptSegmentReadErrors: { name: string; json: string }[];
+  transcripts: {
+    name: string;
+    steps: (
+      | { apply: RawSegment; applied: boolean }
+      | { cut: { fromUs?: string; untilUs: string }; positionUs?: string }
+    )[];
+    lines: (RawSegment & { track: string; cut: boolean })[];
+    linesAt: { positionUs: string | null; seqs: string[] }[];
+  }[];
+  transcriptCutErrors: { name: string; cut: { fromUs?: string; untilUs: string }; positionUs?: string }[];
+}
+interface RawSegment {
+  seq: string;
+  track?: string | null;
+  fromUs: string;
+  untilUs?: string;
+  text: string | null;
+  final: boolean | string;
 }
 interface RawInterrupt {
   track?: string | null;
@@ -285,6 +307,60 @@ describe('shared media vectors', () => {
     it(`rejects interrupt payload ${vector.name}`, () =>
       expect(() => media.parseInterrupt(utf8(vector.json))).toThrow());
   }
+  const segment = (raw: RawSegment) =>
+    ({
+      seq: Number(raw.seq),
+      ...(raw.track === undefined ? {} : { track: raw.track }),
+      fromUs: Number(raw.fromUs),
+      ...(raw.untilUs === undefined ? {} : { untilUs: Number(raw.untilUs) }),
+      text: raw.text,
+      final: raw.final,
+    }) as media.TranscriptSegmentInput /* null and string values in error vectors */;
+  for (const vector of vectors.transcriptSegments) {
+    it(`transcript segment ${vector.name}`, () =>
+      expect(new TextDecoder().decode(media.buildTranscriptSegment(segment(vector.input)))).toBe(vector.json));
+  }
+  for (const vector of vectors.transcriptSegmentErrors) {
+    it(`rejects transcript segment ${vector.name}`, () =>
+      expect(() => media.buildTranscriptSegment(segment(vector.input))).toThrow(RangeError));
+  }
+  for (const vector of vectors.transcriptSegmentReads) {
+    it(`reads transcript segment ${vector.name}`, () =>
+      expect(media.parseTranscriptSegment(utf8(vector.json))).toEqual(segment(vector.parsed)));
+  }
+  for (const vector of vectors.transcriptSegmentReadErrors) {
+    it(`rejects transcript payload ${vector.name}`, () =>
+      expect(() => media.parseTranscriptSegment(utf8(vector.json))).toThrow());
+  }
+  const cutRange = (raw: { fromUs?: string; untilUs: string }) => ({
+    ...(raw.fromUs === undefined ? {} : { fromUs: Number(raw.fromUs) }),
+    untilUs: Number(raw.untilUs),
+  });
+  for (const vector of vectors.transcripts) {
+    it(`transcript ${vector.name}`, () => {
+      const transcript = media.createTranscript();
+      for (const step of vector.steps) {
+        if ('apply' in step)
+          expect(
+            transcript.apply(media.parseTranscriptSegment(media.buildTranscriptSegment(segment(step.apply)))),
+          ).toBe(step.applied);
+        else transcript.cut(cutRange(step.cut), step.positionUs === undefined ? undefined : Number(step.positionUs));
+      }
+      expect(transcript.lines).toEqual(vector.lines.map((line) => ({ ...segment(line), cut: line.cut })));
+      for (const shown of vector.linesAt)
+        expect(
+          transcript.linesAt(shown.positionUs === null ? undefined : Number(shown.positionUs)).map((line) => line.seq),
+        ).toEqual(shown.seqs.map(Number));
+    });
+  }
+  for (const vector of vectors.transcriptCutErrors) {
+    it(`rejects transcript cut ${vector.name}`, () =>
+      expect(() =>
+        media
+          .createTranscript()
+          .cut(cutRange(vector.cut), vector.positionUs === undefined ? undefined : Number(vector.positionUs)),
+      ).toThrow(RangeError));
+  }
   for (const vector of vectors.opusPacketDurations) {
     it(`Opus packet duration ${vector.name}`, () =>
       expect(media.opusPacketDurationUs(bytes(vector.packet))).toBe(
@@ -342,6 +418,7 @@ it('pins every media constant', () => {
       audio: media.AUDIO_TRACK,
       mediaTimeline: media.MEDIA_TIMELINE_TRACK,
       interrupt: media.INTERRUPT_TRACK,
+      transcript: media.TRANSCRIPT_TRACK,
     },
     properties: {
       timestamp: media.LOC_TIMESTAMP,

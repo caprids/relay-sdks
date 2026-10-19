@@ -678,6 +678,34 @@ media-layer.md). The JSON fields are `fromUs` and `untilUs` in both languages, t
 No player method takes interrupts: an input does not know its track's name, and the one line that
 matches them belongs to the listener.
 
+## Transcripts: `TRANSCRIPT_TRACK`, `buildTranscriptSegment`, `Transcript`
+
+The text of a talker's audio, placed on its timeline
+([issue #320](https://github.com/muxinc/relay-sdks/issues/320)). Its design is in
+[media-layer.md](media-layer.md#transcript-track). Both format packages.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| The transcript track's default name | `TRANSCRIPT_TRACK` (`'transcript'`) | `TRANSCRIPT_TRACK` (`"transcript"`) |
+| One version of a segment | `TranscriptSegment { seq, track, fromUs, untilUs?, text, final }` | `TranscriptSegment(seq=, track=, from_us=, until_us=None, text=, final=False)` |
+| Build a segment object's payload | `buildTranscriptSegment({ seq, track?, fromUs, untilUs?, text, final? })` (`TranscriptSegmentInput`) | `build_transcript_segment(*, seq, from_us, text, until_us=None, final=False, track=AUDIO_TRACK)` |
+| Read one | `parseTranscriptSegment(payload)` | `parse_transcript_segment(payload)` |
+| A listener's transcript of one audio track | `createTranscript()` → `Transcript` | `Transcript()` |
+| Keep a segment's version | `transcript.apply(segment)` → `boolean` | `transcript.apply(segment)` → `bool` |
+| Retract what an interrupt cut, at the playout position | `transcript.cut(interrupt, clock.position())` (`TranscriptCutRange`) | `transcript.cut(until_us=, from_us=None, position_us=clock.position_us)` |
+| What has been said by a position; everything held | `transcript.linesAt(positionUs)`; `transcript.lines` → `TranscriptLine[]` | `transcript.lines_at(position_us)`; `transcript.lines` → `list[TranscriptLine]` |
+| A segment as held, and whether an interrupt cut it | `TranscriptLine` (a `TranscriptSegment` with `cut`) | `TranscriptLine(..., cut=)` |
+| Keep the bot's transcript in the example's listener | `listenAudio(..., { onTranscript })`, `listener.transcript` (example code) | — |
+| Give a reply's text to the example bot | — | `Respond` yields `str` before the audio it is the text of (example code) |
+
+"Segment", as captioning and STT services name a timed piece of text, and "final", the issue's word
+and theirs, for the last version. "Line" is a segment as a listener holds and shows it. "Cut", the
+audio player's word, for what an interrupt does to it. `seq` names a segment, so its versions find
+each other; it is not an order across segments, which the timeline gives. Not adopted: "caption"
+(a rendering, and WebVTT's word), "utterance" (the example bot's word for what the user said),
+`isFinal` (the wire's other fields have no `is`), a separate retraction message (the interrupt
+already says what was cut), and a player method (the transcript is text, not audio).
+
 ## Opus encoding: `OpusEncoder`, `OpusDecoder`
 
 PCM to Opus and back for a server-side talker such as a voice bot

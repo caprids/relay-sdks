@@ -62,7 +62,9 @@ listener would: it reads the catalog for the decoder config, gives the playout c
 target latency, and plays the frames a frame reader delivers through `@mux/moq-media`'s audio player.
 Pass `echoCancellation: true` in Chromium when the page also captures a microphone. When the
 catalog lists the interrupt track (`INTERRUPT_TRACK`), the listener subscribes to it too and cuts
-the audio each interrupt names; `onInterrupt` hears about each one. `publishCanvas`'s `data` option
+the audio each interrupt names; `onInterrupt` hears about each one. When it lists the transcript
+track (`TRANSCRIPT_TRACK`), the listener keeps the audio track's transcript as `listener.transcript`,
+which interrupts cut too; `onTranscript` hears about each segment. `publishCanvas`'s `data` option
 lists extra data tracks, such as that one, in the catalog it serves.
 
 ```ts

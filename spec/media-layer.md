@@ -819,8 +819,8 @@ joins and is handed the track's latest object (a relay cache) drops only audio o
 will play. Nothing about an interrupt needs the relay to deliver it before the audio it cuts.
 
 **What it does not do.** Detecting that the user is talking (VAD, turn detection) is the talker's
-business, as is cancelling whatever produced the audio. The convention cuts audio only: a
-transcript of the cut audio is the transcript track's to retract (issue #320's fourth part).
+business, as is cancelling whatever produced the audio. The convention cuts audio only; a listener
+applies the same interrupt to the [transcript](#transcript-track) of the audio it cuts.
 
 Measured live on 2026-10-19 with `mise run ts:test:audio-player`, which now sends its cut as an
 interrupt (everything held and the next 300 ms of the timeline) from the publisher page to the
@@ -833,6 +833,79 @@ test runs it over the in-memory hub. Against `sjc` on 2026-10-19, with the page 
 on a scripted microphone, over four runs of three turns each, every interrupt reached the page's
 player 32 to 50 ms after the bot's last audio, and each run cut 117 to 140 ms of held reply audio, with
 no underrun.
+
+## Transcript track
+
+[Issue #320](https://github.com/muxinc/relay-sdks/issues/320). The text of what a talker says, such
+as a voice bot's reply from its TTS, for a listener to show as the audio plays. A data track written
+one group per write has no order across groups and no tie to the audio, and a transcript of audio
+an interrupt cut would still claim the cut words were said. The transcript track places each piece
+of text on the audio's timeline and lets an interrupt retract it.
+
+**The track.** A data track in the broadcast's namespace, named `transcript` by default
+(`TRANSCRIPT_TRACK`), listed in the catalog by name with no role. Each object is one version of one
+segment, in a group of its own, its payload compact UTF-8 JSON (`buildTranscriptSegment` /
+`build_transcript_segment`):
+
+```json
+{"seq":12,"track":"audio","fromUs":1760000000000000,"untilUs":1760000000480000,"text":"Hello there.","final":true}
+```
+
+| Field | Meaning |
+| --- | --- |
+| `seq` | Required. The segment's number. A later version of the same segment repeats it; a talker numbers its segments in timeline order. |
+| `track` | Required. The audio track in the same namespace whose audio this is the text of. |
+| `fromUs` | Required. Where the segment's audio starts, on the broadcast timeline. |
+| `untilUs` | Optional. Where it ends, after `fromUs`. Absent while the talker does not know yet. |
+| `text` | Required, possibly empty. A later version replaces it whole. |
+| `final` | Required. `true`: no later version follows. A final segment has `untilUs`. |
+
+Numbers are non-negative safe integers, timestamps in microseconds on the timeline the audio is
+stamped on. A reader (`parseTranscriptSegment` / `parse_transcript_segment`) refuses a payload
+that breaks those rules and ignores fields it does not know.
+
+**Versions.** A segment can be sent more than once: interim versions while its text or its end is
+not known, then a final one. An STT talker sends its partial hypotheses this way; a TTS talker sends
+an interim version just before the segment's first audio, so that a listener has it when the audio
+plays, and the final one when its last audio is sent. A listener keeps a segment's final version
+against any later one, and otherwise the last version it read. Groups can arrive out of order, so an
+interim version read after a newer interim one shows until the final one replaces it.
+
+**Interrupts retract.** A talker that interrupts its audio sends no final version for the segment
+it cut; the interrupt ends it. A listener applies the interrupt to its transcript at its playout
+position: audio before the position was heard, so the cut starts at the later of the interrupt's
+`fromUs` and the position. It drops the segments that start inside the cut, ends the one playing at
+the cut's start there and marks it cut, and ignores later versions of either, and any segment that
+starts inside the cut later, as the audio player does with audio that arrives late. A listener that
+applied the interrupt before the segment's interim version arrived still drops it.
+
+**Showing it.** A listener shows a segment once its playout clock reaches `fromUs`: the text
+appears as the audio it belongs to plays, not when it arrives, and a segment the interrupt dropped
+is never shown.
+
+`Transcript` (`createTranscript()` / `Transcript()`) is that listener's state for one audio track:
+`apply(segment)` keeps a version and says whether it changed anything, `cut(range, positionUs)`
+applies an interrupt (a parsed `Interrupt` is the range), and `linesAt(positionUs)` /
+`lines_at(position_us)` gives the segments whose audio has started, in timeline order, each a
+`TranscriptLine` with a `cut` flag. It is pure, so both SDKs hold it to the same vectors. A segment
+is known by its `seq` within one run of the talker's track, so a listener uses a new `Transcript`
+when the talker starts over, and a talker that starts over should not reuse its last run's numbers
+(the example bot starts at the clock's millisecond). The transcript keeps every segment it is given;
+a long-lived listener that wants a bound starts a new one.
+
+**No ordering track or sequence across segments.** The timeline gives the order (`fromUs`), and
+`seq` only names a segment so that its versions find each other. A relay that hands a late joiner
+the track's latest object hands it the latest version of one segment, which is all the transcript
+it can have: earlier segments are history the talker would publish another way.
+
+The [voice bot example](../python/examples/voice_bot/README.md) publishes the text of each part of
+its replies, and its page shows each line as the audio reaches it, marked where it was talked over.
+Measured against `sjc` on 2026-10-19, with the page in headless Chromium on a scripted microphone,
+over four runs of three turns each: each interim segment reached the page 65 to 72 ms before its
+audio played (14 segments; the first of a run is not measured, while the clock is idle), every line
+appeared with its audio, and every reply the user talked over was shown marked cut, with no
+underrun. The margin is about the jitter buffer's depth, since the bot sends the text just before
+the audio: a talker that knows its text earlier, as a TTS does, can send it sooner.
 
 ## Media Timeline track
 

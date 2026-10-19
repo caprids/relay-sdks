@@ -9,6 +9,7 @@ import {
   createEchoCancellationLoopback,
   createFrameSequencer,
   createPlayoutClock,
+  createTranscript,
   type EchoCancellationLoopback,
   type FrameSequencer,
   INTERRUPT_TRACK,
@@ -17,6 +18,10 @@ import {
   type PlayoutClock,
   parseInterrupt,
   parseMsfCatalog,
+  parseTranscriptSegment,
+  TRANSCRIPT_TRACK,
+  type Transcript,
+  type TranscriptSegment,
 } from '@mux/moq-media';
 import type { RelaySubscriber, RelaySubscription } from '@mux/relay';
 import { createFrameReader } from '@mux/relay/media';
@@ -31,12 +36,14 @@ export interface ListenAudioOptions {
    */
   echoCancellation?: boolean;
   /**
-   * A failure after the listener started: the audio or interrupt subscription ended with an error, a decoder failed, or
-   * an interrupt object did not parse.
+   * A failure after the listener started: the audio, interrupt or transcript subscription ended with an error, a
+   * decoder failed, or an interrupt or transcript object did not parse.
    */
   onError?(error: unknown): void;
-  /** An interrupt for the audio track, called after the player has cut. */
+  /** An interrupt for the audio track, called after the player and the transcript have cut. */
   onInterrupt?(interrupt: Interrupt): void;
+  /** A transcript segment for the audio track that changed `transcript`. */
+  onTranscript?(segment: TranscriptSegment): void;
   /**
    * Aborting while the listener starts cancels what it set up and rejects with the reason, as when the catalog is
    * slow to arrive. Once started, stop it with `stop()`.
@@ -51,6 +58,11 @@ export interface AudioListener {
   readonly input: AudioPlayerInput;
   readonly clock: PlayoutClock;
   readonly sequencer: FrameSequencer;
+  /**
+   * The audio track's transcript, when the catalog lists the transcript track: `transcript.linesAt(clock.position())`
+   * is what has been said so far. Interrupts cut it as they cut the player.
+   */
+  readonly transcript: Transcript;
   /** Stop playing and cancel the subscriptions. A context the listener created is closed too. */
   stop(): Promise<void>;
 }
@@ -106,7 +118,8 @@ function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[], 
  * Play the audio track of the broadcast at `namespace`, such as the WebCodecs example's microphone, with no video:
  * the catalog gives the decoder config, a frame reader orders the frames, and the audio player buffers and plays
  * them. The playout clock is created for audio only, so it does not wait 2 s for keyframes that never come. When the
- * catalog lists the interrupt track, each interrupt for the audio track cuts the audio the player holds.
+ * catalog lists the interrupt track, each interrupt for the audio track cuts the audio the player holds; when it lists
+ * the transcript track, the listener keeps the audio track's transcript, which interrupts cut too.
  */
 export async function listenAudio(
   subscriber: RelaySubscriber,
@@ -148,8 +161,11 @@ export async function listenAudio(
       { ...reader, onError: (error) => options.onError?.(error) },
     );
     release.push(() => audio.cancel());
-    // A talker that can stop mid-utterance lists the interrupt track; each interrupt cuts what the player holds.
-    const interrupts = tracks.some((candidate) => candidate.name === INTERRUPT_TRACK)
+    const listed = (name: string) => tracks.some((candidate) => candidate.name === name);
+    const transcript = createTranscript();
+    // A talker that can stop mid-utterance lists the interrupt track; each interrupt cuts what the player holds, and
+    // the transcript of what was not heard.
+    const interrupts = listed(INTERRUPT_TRACK)
       ? subscriber.subscribe(
           { namespace: [...namespace], track: INTERRUPT_TRACK },
           {
@@ -164,7 +180,28 @@ export async function listenAudio(
               }
               if (interrupt.track !== AUDIO_TRACK) return;
               input.cut(interrupt);
+              transcript.cut(interrupt, clock.position());
               options.onInterrupt?.(interrupt);
+            },
+            onError: (error) => options.onError?.(error),
+          },
+        )
+      : undefined;
+    if (interrupts) release.push(() => interrupts.cancel());
+    const transcripts = listed(TRANSCRIPT_TRACK)
+      ? subscriber.subscribe(
+          { namespace: [...namespace], track: TRANSCRIPT_TRACK },
+          {
+            onObject(object) {
+              if (object.status !== 'normal') return;
+              let segment: TranscriptSegment;
+              try {
+                segment = parseTranscriptSegment(object.payload);
+              } catch (error) {
+                options.onError?.(error);
+                return;
+              }
+              if (segment.track === AUDIO_TRACK && transcript.apply(segment)) options.onTranscript?.(segment);
             },
             onError: (error) => options.onError?.(error),
           },
@@ -177,10 +214,12 @@ export async function listenAudio(
       input,
       clock,
       sequencer,
+      transcript,
       async stop() {
         reader.close();
         audio.cancel();
         interrupts?.cancel();
+        transcripts?.cancel();
         catalog.cancel();
         loopback?.close();
         player.close();
