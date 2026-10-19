@@ -55,6 +55,21 @@ jobs:
         working-directory: ts
       - run: mise run ts:test:conformance
 
+  # The WebSocket transport adapter (@mux/relay-websocket): in Node, then in Chromium, Firefox and WebKit. Its accepting
+  # end is Node's, so it needs no Python.
+  conformance-websocket:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v2
+        with:
+          install_args: node pnpm
+      - run: mise run ts:install
+      - run: pnpm exec playwright install --with-deps chromium firefox webkit
+        working-directory: ts
+      - run: mise run ts:test:conformance:websocket
+      - run: mise run ts:test:conformance:websocket:browsers
+
   # The Node transport adapter (@mux/relay-quic). Its Rust is linted and built only here: the mise tasks below bring the
   # Rust toolchain they pin, and `check` builds no Rust.
   conformance-node:
