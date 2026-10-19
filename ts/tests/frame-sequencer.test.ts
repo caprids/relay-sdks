@@ -471,6 +471,36 @@ describe('createFrameSequencer: reorderWindowUs', () => {
     }
   });
 
+  it('waits by group with groups of several frames: the next group is due, a later object of the last one still plays', () => {
+    const { state, sequencer, put } = harness({
+      grouping: 'frame',
+      reorderWindowUs: 2_000_000,
+      lateDropUs: Number.POSITIVE_INFINITY,
+    });
+    const taken = () => sequencer.poll().frames.map((frame) => [frame.groupId, frame.objectId]);
+    state.now = 1_000_000;
+    put(0, 1_000_000, 0);
+    put(0, 1_020_000, 1);
+    expect(taken()).toEqual([
+      [0, 0],
+      [0, 1],
+    ]);
+    // Group 2 waits for group 1; group 0's next object is not held behind that wait.
+    state.now = 1_060_000;
+    put(2, 1_060_000, 0);
+    expect(taken()).toEqual([]);
+    put(0, 1_040_000, 2);
+    expect(taken()).toEqual([[0, 2]]);
+    put(1, 1_050_000, 0);
+    expect(taken()).toEqual([
+      [1, 0],
+      [2, 0],
+    ]);
+    // After a group of several frames, the next group goes out at once.
+    put(3, 1_080_000, 0);
+    expect(taken()).toEqual([[3, 0]]);
+  });
+
   it('ends the wait for an empty group reset before the later one arrives', () => {
     const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
     state.now = 1_000_000;

@@ -191,6 +191,16 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   let caughtUp = false;
   // The group of the last frame delivered, under either grouping, for `missingGroups`; reset with the group IDs.
   let lastGroupOut: number | undefined;
+  // Under a reorder window, the highest group an end or reset with nothing in it said was over. It moves no floor: a
+  // multi-frame group taken before it may still bring later objects.
+  let emptyThrough: number | undefined;
+  // Under a reorder window, the highest group taken, dropped or known to be over: the next one is due, and any further
+  // one waits for the groups between. Frame grouping keeps the group being taken in `cursor` and `floor` one below it.
+  const settledThrough = (): number | undefined => {
+    const candidates = [floor, cursor?.groupId, floor === undefined && cursor === undefined ? undefined : emptyThrough];
+    const known = candidates.filter((id): id is number => id !== undefined);
+    return known.length === 0 ? undefined : Math.max(...known);
+  };
   const keyframes = new Map<number, number>();
   // The most frames one poll may return.
   let limit = Number.POSITIVE_INFINITY;
@@ -419,16 +429,17 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
         // A group that ended or was reset with nothing in it brings nothing: the next one need not wait for it. One
         // further on, or one seen before anything was delivered (so before there is a floor), is kept until the
         // groups before it are settled.
+        const through = settledThrough();
         if (group.frames.size === 0 && (group.ended || group.reset)) {
-          if (floor !== undefined && id <= floor + 1) {
+          if (through !== undefined && id <= through + 1) {
             groups.delete(id);
-            floor = Math.max(floor, id);
+            emptyThrough = Math.max(emptyThrough ?? id, id);
           }
           continue;
         }
         // An earlier group is missing: this one, and every newer one, waits for it until the window from its arrival
         // ends.
-        if (floor !== undefined && id > floor + 1 && group.arrivedUs !== undefined) {
+        if (through !== undefined && id > through + 1 && group.arrivedUs !== undefined) {
           const waitUs = group.arrivedUs + reorderWindowUs - clock.localNow();
           if (waitUs > 0) return waitUs;
         }
@@ -659,6 +670,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       lastDeliveredUs = undefined;
       lastDeliveredGroup = undefined;
       lastGroupOut = undefined;
+      emptyThrough = undefined;
       lateSinceUs = undefined;
       starve = undefined;
       newestLate = undefined;

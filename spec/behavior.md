@@ -1417,7 +1417,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   - `lateDropUs`, frame grouping only: the late-drop limit for this track instead of the clock's.
     `Infinity` drops nothing as late, for a reader that wants every frame (speech-to-text).
   - `reorderWindowUs`, frame grouping only (default 0): a frame whose group ID is more than one past
-    the last group delivered or dropped waits, with every newer one, for the missing group, until
+    the last group delivered, dropped or known to be over waits, with every newer one, for the
+    missing group (a later object of the last group taken is not held), until
     the window has passed since that frame's group arrived (on the clock's local time). A missing
     group that arrives in time goes out in order with no `gap`; after the window the waiting frames
     go out with `gap`. A group that ended or was reset with nothing in it releases the wait at once,
