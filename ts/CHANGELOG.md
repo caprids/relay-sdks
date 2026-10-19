@@ -29,7 +29,10 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   delivery timeout, so a stall costs stale frames instead of lasting latency
   ([#302](https://github.com/muxinc/relay-sdks/issues/302)): 500 ms for audio, and for video the target latency less
   the keyframe interval, never less than one interval (one interval by default). Pass its result to `registerTrack`
-  beside `locTrackProperties()`; video needs `keyframeIntervalUs`. The WebCodecs example uses it.
+  beside `locTrackProperties()`; video needs `keyframeIntervalUs`. The WebCodecs example uses it. It also sets a
+  default publisher priority (`0x0E`) that puts audio ahead of video, 16 for audio and 96 for video, which
+  `publisherPriority` replaces ([#316](https://github.com/muxinc/relay-sdks/issues/316)). moq-relay 0.17 passes it to
+  viewers but orders delivery by their subscriber priority alone, so it changes no delivery there yet.
 - `openGroup({ payload, properties })` opens a group with its first object, so that object's delivery timeout
   counts the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306));
   a bare `openGroup()` has no object to time. The frame writer opens every group this way, so a frame whose open

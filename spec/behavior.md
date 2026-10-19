@@ -190,7 +190,7 @@ connection state, because it depends on the connection's registry.
 | Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. | not a string; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
 | Deadline | A number in (0, 2147483647] milliseconds in TypeScript, (0, 2147483.647] seconds in Python: the largest delay a JavaScript timer holds, and the same bound in both SDKs. The connection, request and write deadlines share one check. | not a number, including a boolean | zero, negative, NaN, infinite, or above the bound | `connectTimeoutMs` / `connect_timeout` on both connect calls; `requestTimeoutMs` / `request_timeout`; `writeTimeoutMs` / `write_timeout` on `registerTrack` / `register_track` |
 | Track registration | A track name not yet registered on this publisher connection, including after its writer closed. Checked after the track name, properties and deadline, and after connection state. | | a name already registered | `registerTrack` / `register_track` |
-| Media track timing | A media kind, `'audio'` or `'video'`; every duration a positive integer number of microseconds (a safe integer in TypeScript, an `int` other than a boolean in Python) of at most 2147483647000, the deadline bound in whole milliseconds. Video needs a keyframe interval, and a target latency is at least the keyframe interval. | a kind that is not a string; video without a keyframe interval; a duration that is not a number (TypeScript) or not an `int`, including a boolean and any float (Python) | another kind; a target latency below the keyframe interval; a duration that is zero, negative or above the bound, and in TypeScript also fractional, NaN or infinite | `mediaTrackProperties` / `media_track_properties` |
+| Media track timing | A media kind, `'audio'` or `'video'`; every duration a positive integer number of microseconds (a safe integer in TypeScript, an `int` other than a boolean in Python) of at most 2147483647000, the deadline bound in whole milliseconds. Video needs a keyframe interval, and a target latency is at least the keyframe interval. A publisher priority, when given, is an integer from 0 to 255. | a kind that is not a string; video without a keyframe interval; a duration or publisher priority that is not a number (TypeScript) or not an `int`, including a boolean and any float (Python) | another kind; a target latency below the keyframe interval; a duration that is zero, negative or above the bound, and in TypeScript also fractional, NaN or infinite; a publisher priority below 0 or above 255, and in TypeScript also fractional, NaN or infinite | `mediaTrackProperties` / `media_track_properties` |
 | Object status | `normal`, `end-of-group` or `end-of-track`; defaults to `normal`. | not a string | any other string | `write`, `writeText`, `writeJSON` on a group writer |
 | Event capacity | A positive integer (a safe integer in TypeScript); defaults to 64. | not a number, including a boolean | zero, negative, fractional, NaN, or infinite | `subscribeEvents` / `subscribe_events`, `namespaceEvents` / `namespace_events` |
 | Payload | A byte sequence: any `ArrayBufferView` in TypeScript; any object supporting the buffer protocol in Python (`bytes`, `bytearray`, `memoryview`, ...). Copied once. At most `limits.maxObjectPayloadBytes`. | a string, an `ArrayBuffer`, a list of integers, anything else | longer than the object payload limit | `write`, `writeText`, `writeJSON` on a track or group writer |
@@ -1383,6 +1383,22 @@ Implemented in both SDKs.
     wait out a stall in the transport; dropping late video is then the reader's.
   - A downlink stall is outside the publisher's reach: the relay keeps a stalled viewer's backlog
     whatever these values are.
+- The same properties put audio ahead of video with a Default Publisher Priority (`0x0E`), lower
+  being more urgent (draft-22 §5.1): 16 for audio and 96 for video, the values Huddle set by hand,
+  pinned in `spec/protocol.json` as `mediaTrackProperties.publisherPriority`. An explicit publisher priority
+  replaces either default. Group headers leave the priority out, so it is the track's value for
+  every group.
+  - On moq-relay 0.17 the default changes no delivery. The relay passes a publisher's `0x0E` to
+    viewers in SUBSCRIBE_OK, but orders what it sends a viewer by subscriber priority alone and
+    ignores the publisher's when subscriber priorities tie
+    ([#154](https://github.com/muxinc/relay-sdks/issues/154), [relay interop](relay-interop.md#subscription-parameters)).
+    A viewer that wants audio first under congestion asks for it with its own SUBSCRIBER_PRIORITY,
+    as Huddle does with 16 on its audio wants; whether the SDKs should default that is
+    [#337](https://github.com/muxinc/relay-sdks/issues/337).
+  - Nor does it order the publisher's own uplink: the SDKs schedule no stream by priority, and a
+    browser's WebTransport sends every stream alike unless given a `sendOrder`
+    ([#336](https://github.com/muxinc/relay-sdks/issues/336)). The default is there for a relay
+    that honours it and for viewers that read it.
 - Every frame gets exactly one outcome: sent, skipped, stale, dropped, interrupted or ended. The
   writer returns it rather than raising, so a caller keeps counters without catching per frame, and
   the group the frame was written to or that was reset on its behalf travels with it. Closing the
