@@ -224,6 +224,8 @@ function audioPlayerWorklet(name: string): void {
     flush() {
       this.pendingCuts = [];
       this.dropTo(this.written, false);
+      // Already empty, as after running dry: still forget the replaced timeline's dry point.
+      this.emptied();
     }
 
     /** Drop held samples before `index`: as trimmed (latency shed) or as a flush. */
@@ -337,11 +339,14 @@ function audioPlayerWorklet(name: string): void {
         if (this.buffered === 0) this.phase = 0;
         this.prune();
         if (available < frames) {
-          // Ran dry: wait for the target again. Whether it counts as an underrun is known when audio comes back.
+          // Ran dry: wait for the target again. Whether it counts as an underrun is known when audio comes back. Off rate
+          // 1, less than a sample can be left, past the read position: it was played, as at rate 1.
           this.playing = false;
           this.dry = frames - available;
-          this.dryAtUs = this.timestampAt(this.read, this.phase);
-          if (this.buffered === 0) this.segments = [];
+          this.read = this.written;
+          this.phase = 0;
+          this.dryAtUs = this.timestampAt(this.read);
+          this.segments = [];
         } else {
           this.lowWater = Math.min(this.lowWater, this.buffered);
           this.smooth += frames;

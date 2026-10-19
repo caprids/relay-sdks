@@ -718,7 +718,7 @@ Huddle's player worklet runs with (`demos/huddle`):
 | --- | --- | --- |
 | Hold the target before playing, at the start and after running dry | 60 ms | Three 20 ms Opus frames: room for one late frame and a burst of two. Huddle runs on the Relay with this start. The A/V test's fixed 150 ms was sized for video and Firefox's encoder, not for voice |
 | Grow the target after an underrun | +20 ms | One Opus frame per underrun (Huddle) |
-| Count an underrun only when audio comes back within the ceiling | | A longer dry spell is the talker going quiet, which no buffer would cover |
+| Count an underrun only when audio comes back within the ceiling, and not after a flush | | A longer dry spell is the talker going quiet, which no buffer would cover; audio after a flush starts a new timeline |
 | Shrink the target after 8 s with no underrun | −10 ms, to 40 ms | Huddle's floor and cadence; two frames always held |
 | Ceiling | 400 ms, and never more than the clock's target latency less the output delay and 40 ms | Huddle's ceiling; a frame further ahead of the clock than its target latency makes the frame sequencer resync forward, which would flush the buffer |
 | Trim, each second, held audio that never dipped to the target | when ≥ 10 ms | A burst after a stall would otherwise stay as lasting latency, since audio arrives as fast as it plays |
@@ -808,7 +808,9 @@ Rerun on 2026-10-19 with two phases between the steady phase and the cut: playba
 second, then 1.05 for a second ([issue #329](https://github.com/muxinc/relay-sdks/issues/329)).
 "Delay moved" is the playout delay at the end of the phase less at its start; a second at ±5 %
 should move it 50 ms. "Largest step" is the largest difference between two consecutive output
-samples, read through an `AnalyserNode` every 20 ms: the 0.3 tone's own steepest is 0.0174 at rate
+samples, read through an `AnalyserNode` every 20 ms (a rerun after the fix for running dry at a
+fractional rate, which none of these phases did, moved the delay by +49.2 / −49.1 ms on the hub and
++49.0 / −49.2 ms on the Relay): the 0.3 tone's own steepest is 0.0174 at rate
 1 and 0.0181 at 1.05, and a click would be far larger. Neither phase trimmed or concealed audio,
 and the clock's position never stepped back between 20 ms ticks:
 

@@ -766,6 +766,32 @@ describe('createAudioPlayer', () => {
     expect(input.stats).toMatchObject({ playing: false, bufferedUs: 0, dryAtUs: frameAt(4).timestampUs });
   });
 
+  it('runs dry with nothing held at a fractional rate, so a gap after it is not filled with silence', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput({ playbackRate: 0.95 });
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    context.render(200);
+    expect(input.stats).toMatchObject({ playing: false, bufferedUs: 0, heldUntilUs: null });
+    expect(Math.abs((input.stats.dryAtUs as number) - frameAt(4).timestampUs)).toBeLessThanOrEqual(21);
+    // The talker went quiet for 200 ms: the audio after it starts the buffer again, with no silence in front.
+    for (let index = 14; index <= 16; index++) input.push(frameAt(index));
+    await settle();
+    context.render(30);
+    expect(input.stats).toMatchObject({ concealedUs: 0, bufferedUs: expect.any(Number), trimmedUs: 0 });
+    expect(input.stats.bufferedUs).toBeLessThanOrEqual(60_000);
+  });
+
+  it('forgets where it ran dry at a flush of an empty buffer', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput();
+    for (let index = 1; index <= 3; index++) input.push(frameAt(index));
+    context.render(100);
+    expect(input.stats.dryAtUs).toBe(frameAt(4).timestampUs);
+    input.push(frameAt(500, 'resync'));
+    context.render(30);
+    expect(input.stats).toMatchObject({ dryAtUs: null, underruns: 0 });
+  });
+
   it('reports where held audio ends, where it ran dry, and each start of playback to the clock', async () => {
     const { context, player } = await setUp();
     const reports: { timestampUs: number; stats: Pick<AudioInputStats, 'playStarts' | 'playing'> }[] = [];
