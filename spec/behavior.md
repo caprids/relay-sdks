@@ -1420,7 +1420,8 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
     the last group delivered or dropped waits, with every newer one, for the missing group, until
     the window has passed since that frame's group arrived (on the clock's local time). A missing
     group that arrives in time goes out in order with no `gap`; after the window the waiting frames
-    go out with `gap`. A group that ended or was reset with nothing in it releases the wait at once.
+    go out with `gap`. A group that ended or was reset with nothing in it releases the wait at once,
+    whenever its end arrived, before the first delivery or after a restart included.
     A frame that turns late while it waits is dropped as late. For a reader that wants every frame
     of a talker, the window should be at least the publisher's delivery timeout (audio's default is
     500 ms): a group the publisher's transport is still resending can arrive that long after the

@@ -445,6 +445,32 @@ describe('createFrameSequencer: reorderWindowUs', () => {
     expect(frames[1]).toMatchObject({ discontinuity: 'gap', missingGroups: { firstGroupId: 2, lastGroupId: 2 } });
   });
 
+  it('remembers a group that ended before anything was delivered, and again after a restart', () => {
+    for (const end of ['groupEnded', 'groupReset'] as const) {
+      const { state, sequencer, put, groupIds } = harness({
+        grouping: 'frame',
+        reorderWindowUs: 2_000_000,
+        lateDropUs: Number.POSITIVE_INFINITY,
+      });
+      for (const round of [0, 1]) {
+        if (round === 1) sequencer.restart();
+        const base = 10_000_000 * (round + 1);
+        state.now = base;
+        // Concurrent group streams: group 1's empty end lands before group 0's frame, and before any floor exists.
+        sequencer[end](1);
+        expect(sequencer.poll().frames).toEqual([]);
+        put(0, base);
+        expect(groupIds(sequencer.poll().frames)).toEqual([0]);
+        state.now = base + 40_000;
+        put(2, base + 40_000);
+        const { frames, waitUs } = sequencer.poll();
+        expect(waitUs).toBeUndefined();
+        expect(groupIds(frames)).toEqual([2]);
+        expect(frames[0]).toMatchObject({ missingGroups: { firstGroupId: 1, lastGroupId: 1 } });
+      }
+    }
+  });
+
   it('ends the wait for an empty group reset before the later one arrives', () => {
     const { state, sequencer, put, groupIds } = harness({ grouping: 'frame', reorderWindowUs: 100_000 });
     state.now = 1_000_000;
