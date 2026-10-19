@@ -12,8 +12,8 @@ import { summarizeRuns } from './relay-runs.js';
 // The launchers for the live-relay scenario in relay-scenario.js. It runs once per runtime, each with a fresh
 // namespace: in Node over @mux/relay-quic's native QUIC, in a headless Chromium page over WebTransport, then both again
 // over @mux/relay-websocket's QMux over WebSocket (#321). RELAY_RUNTIME names the runtimes to run, comma-separated:
-// those four (node, chromium, node-websocket, chromium-websocket), plus webkit-websocket and firefox-websocket, and
-// chromium-fallback, Chromium through withWebSocketFallback. Each runtime's outcome is reported, redacted, and folded
+// those four (node, chromium, node-websocket, chromium-websocket), plus firefox (WebTransport, Firefox 155+, #322),
+// webkit-websocket and firefox-websocket, and chromium-fallback, Chromium through withWebSocketFallback. Each runtime's outcome is reported, redacted, and folded
 // into a summary that calls out a scenario passing on one runtime and failing on the other.
 //
 // Over WebSocket, Node trusts a local relay's certificate only through NODE_EXTRA_CA_CERTS, and the browsers ignore
@@ -39,6 +39,7 @@ const caFile = process.env.RELAY_CA_FILE;
 const launchers = {
   node: runInNode,
   chromium: (options) => runInBrowser('chromium', 'webtransport', options),
+  firefox: (options) => runInBrowser('firefox', 'webtransport', options),
   'node-websocket': runInNodeOverWebSocket,
   'chromium-websocket': (options) => runInBrowser('chromium', 'websocket', options),
   'webkit-websocket': (options) => runInBrowser('webkit', 'websocket', options),

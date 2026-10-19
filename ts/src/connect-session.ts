@@ -127,12 +127,12 @@ const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
       'connecting',
     );
   }
-  // Deno 2.x has a global that ignores protocols and has no protocol getter, so it could never
-  // agree on a MOQT version; refuse it here rather than hang waiting for a SETUP that cannot come.
+  // Deno 2.x and Firefox before 155 have a global that ignores protocols and has no protocol getter, so
+  // it could never agree on a MOQT version; refuse it here rather than hang waiting for a SETUP that cannot come.
   if (!('protocol' in WebTransport.prototype)) {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
-      'WebTransport in this runtime cannot negotiate protocols; supply createTransport with a transport adapter for this runtime',
+      'WebTransport in this runtime cannot negotiate protocols (Firefox needs 155 or later); supply createTransport with a transport adapter for this runtime',
       'connecting',
     );
   }

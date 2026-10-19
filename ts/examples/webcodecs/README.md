@@ -115,8 +115,8 @@ every Opus frame is its own group.
 
 `mise run ts:test:av-sync` runs this example end to end and measures the A/V offset a player gets,
 with device switches; see [spec/media-layer.md](../../../spec/media-layer.md#measured-in-browsers)
-for the results. Firefox's H.264 encoder (148, Linux) holds about 1.4 s of video, so a player needs
-an audio buffer that deep to keep video from being dropped as late.
+for the results. Firefox's H.264 encoder (148, Linux; 155 too) holds about 1.4 s of video, so a
+player needs an audio buffer that deep to keep video from being dropped as late.
 
 The function keeps the latest decoder configuration when subsequent output callbacks omit it. It
 starts serving the catalog after the first configuration arrives and re-sends it on each catalog

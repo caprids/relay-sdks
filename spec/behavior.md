@@ -1565,8 +1565,8 @@ and subscribes on the same random namespace, then asserts:
 
 Adding an assertion here means adding it to every SDK's smoke test. The TypeScript test runs the
 same scenario over each transport it ships: native QUIC in Node, WebTransport in Chromium, and QMux
-over WebSocket in Node and Chromium, with WebKit, Firefox and the WebTransport-to-WebSocket fallback
-on request (`RELAY_RUNTIME`).
+over WebSocket in Node and Chromium, with WebTransport in Firefox, WebKit and Firefox over WebSocket,
+and the WebTransport-to-WebSocket fallback on request (`RELAY_RUNTIME`).
 See [relay interoperability](relay-interop.md#reproduce-against-a-local-relay) for a local moq-relay test.
 
 ## Not yet specified

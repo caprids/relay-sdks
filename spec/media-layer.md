@@ -552,7 +552,8 @@ audio plays that much late.
 
 [Issue #288](https://github.com/muxinc/relay-sdks/issues/288). `mise run ts:test:av-sync` publishes
 the WebCodecs example's canvas and microphone and plays them back in the same page, through the
-production Relay in Chromium and through the in-memory relay hub in Firefox. Every 600 ms the canvas
+production Relay in Chromium and through the in-memory relay hub in Firefox (and, since Firefox 155,
+through the Relay too; see below). Every 600 ms the canvas
 flashes white and a synthetic microphone beeps. The A/V offset is how much later the beep reached
 the player's output after it was emitted than the white frame was shown after it was captured.
 Frame quantization does not count, because the white frame's own capture time is the video
@@ -587,19 +588,33 @@ In Chromium it was +5 ms (median; p5 −1, p95 16). In Firefox it was −48 ms (
 which would stamp audio that much early. With players reporting from `getOutputTimestamp()`, Firefox
 played audio 33–36 ms late; Chromium's settled offsets stayed within ±17 ms.
 
-Firefox 148 cannot run against the Relay over WebTransport: its WebTransport offers no protocols and
-has no `protocol` attribute, and the SDK refuses a session that negotiates none
-([transport-adapter.md](transport-adapter.md), TA-7). Firefox 155 (stable 2026-09-01) added both, so
-current Firefox should reach the Relay over WebTransport; that is not yet re-tested against the
-relay. Over QMux over WebSocket (`@mux/relay-websocket`), Firefox 148 and Playwright's WebKit both
-passed the live data scenario against a local moq-relay 0.17.5 on 2026-10-17
-([QMux over WebSocket](relay-interop.md#qmux-over-websocket)); the A/V sync run has not been repeated
-over WebSocket. Firefox also needs an audio server: without
-one, its `AudioContext` stays suspended. Its H.264 `VideoEncoder` (148, Linux) holds about 41 frames,
-1.4 s, even with `latencyMode: 'realtime'`, while VP8, VP9 and AV1 return each frame within
+Firefox reaches the Relay over WebTransport from 155 (stable 2026-09-01), which added the
+`protocols` option and the `protocol` attribute. Firefox 148 has neither, and the SDK refuses a
+session that negotiates no protocol ([transport-adapter.md](transport-adapter.md), TA-7). A run on
+2026-10-19 ([issue #322](https://github.com/muxinc/relay-sdks/issues/322)), with Playwright's
+Chromium 153 and Firefox 155 both through the production Relay (sjc), passed every phase, in ms:
+
+| Phase | Chromium 153, Relay: settled mean [min, max] | Firefox 155, Relay: settled mean [min, max] |
+| --- | --- | --- |
+| Baseline | 6.1 [1.1, 15.6] | −1.8 [−3.1, 0.5] |
+| Second microphone (16 kHz) | 4.2 [−2.3, 11.2] | −2.5 [−4.8, 0.5] |
+| Replaced capture context | 3.2 [−4.9, 13.3] | −4.3 [−6.1, 1.2] |
+| Output delay +200 ms | 5.0 [−12.3, 20.8] | −3.5 [−5.5, −0.5] |
+| Audio resumed after a 3 s gap | 4.8 [−19.3, 29.4] | −2.0 [−5.1, 1.2] |
+
+Each dropped at most one frame in the whole run. The same day's Firefox run through the hub failed,
+in 148 and in 155 alike: its player has judged nearly every video frame late since the frame reader
+landed ([issue #339](https://github.com/muxinc/relay-sdks/issues/339)).
+
+Over QMux over WebSocket (`@mux/relay-websocket`), Firefox 148 and Playwright's WebKit both passed
+the live data scenario against a local moq-relay 0.17.5 on 2026-10-17
+([QMux over WebSocket](relay-interop.md#qmux-over-websocket)); the A/V sync run has not been
+repeated over WebSocket. Firefox also needs an audio server: without one, its `AudioContext` stays
+suspended. Its H.264 `VideoEncoder` (148, Linux) holds about 41 frames, 1.4 s, even with `latencyMode: 'realtime'`, while VP8, VP9 and AV1 return each frame within
 milliseconds. So its video arrives that much after its audio. The playout clock keeps audio the
 master and would drop video that late, so the Firefox run gives the player a 1.6 s audio jitter
-buffer. Playwright's WebKit (Safari 26.4's engine, on Linux) runs the hub scenario with short phases
+buffer. Firefox 155 still needs it: with a 150 ms buffer it showed no video through the Relay.
+Playwright's WebKit (Safari 26.4's engine, on Linux) runs the hub scenario with short phases
 (settled offsets 4–7 ms), but at full length it stops responding partway through. It cannot open a
 WebTransport session to the Relay (it can reach it over WebSocket, above), and its
 `getOutputTimestamp()` is seconds off. It is opt-in

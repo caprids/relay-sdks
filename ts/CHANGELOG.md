@@ -9,8 +9,9 @@ each section says what changed and what to do about it. How to cut a release is 
 
 The first release. Rename this heading to the version (`## 0.1.0`) in the release PR.
 
-- `@mux/relay`: `connectRelayPublisher` and `connectRelaySubscriber` for browsers over WebTransport, and
-  `@mux/relay/node` for Node 24+ over native QUIC.
+- `@mux/relay`: `connectRelayPublisher` and `connectRelaySubscriber` for browsers over WebTransport (Chromium, and
+  Firefox 155 or later: [#322](https://github.com/muxinc/relay-sdks/issues/322)), and `@mux/relay/node` for Node 24+
+  over native QUIC.
 - `@mux/relay-websocket`: a transport adapter for QMux over WebSocket, the relay's TCP 443 path for networks that
   block UDP and browsers without a usable WebTransport ([#321](https://github.com/muxinc/relay-sdks/issues/321)).
   Pass `createWebSocketTransport()` as `createTransport` to always use it, or `withWebSocketFallback()` to dial
