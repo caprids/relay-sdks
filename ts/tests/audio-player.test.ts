@@ -757,6 +757,29 @@ describe('createAudioPlayer', () => {
     expect(reports.length).toBeGreaterThan(2);
   });
 
+  it('does not trim the audio a rate below 1 gains, and trims it as usual once back at 1', async () => {
+    const { context, player } = await setUp();
+    const input = player.addInput({ playbackRate: 0.95, jitterTargetUs: 120_000 });
+    let next = 1;
+    for (; next <= 6; next++) input.push(frameAt(next));
+    // Steady arrival, a frame per 20 ms, for 3 s at 0.95: held audio grows 50 ms a second, across three trim windows,
+    // and stays under the 300 ms hard bound.
+    for (let tick = 0; tick < 150; tick++) {
+      context.render(20);
+      input.push(frameAt(next++));
+    }
+    expect(input.stats).toMatchObject({ trimmedUs: 0, underruns: 0 });
+    expect(input.stats.bufferedUs).toBeGreaterThan(240_000);
+    // Back at 1, held audio that never dips to the target is delay nobody needs again.
+    input.playbackRate = 1;
+    for (let tick = 0; tick < 100; tick++) {
+      context.render(20);
+      input.push(frameAt(next++));
+    }
+    expect(input.stats.trimmedUs).toBeGreaterThan(0);
+    expect(input.stats.bufferedUs).toBeLessThanOrEqual(140_000);
+  });
+
   it('stops the read position at the newest held sample at rate 2', async () => {
     const { context, player } = await setUp();
     const input = player.addInput({ playbackRate: 2 });

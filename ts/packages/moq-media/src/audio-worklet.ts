@@ -353,8 +353,9 @@ function audioPlayerWorklet(name: string): void {
           this.window += frames;
           if (this.window >= TRIM_WINDOW) {
             // Held audio that never dipped to the target over a whole window is delay nobody needed.
+            // Not below rate 1, which gains that delay on purpose: only the hard bound limits it then.
             const excess = this.lowWater - this.target;
-            if (excess >= MIN_TRIM) this.dropTo(this.read + excess, true);
+            if (excess >= MIN_TRIM && this.rate >= 1) this.dropTo(this.read + excess, true);
             this.window = 0;
             this.lowWater = this.buffered;
           }

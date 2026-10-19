@@ -721,7 +721,7 @@ Huddle's player worklet runs with (`demos/huddle`):
 | Count an underrun only when audio comes back within the ceiling, and not after a flush | | A longer dry spell is the talker going quiet, which no buffer would cover; audio after a flush starts a new timeline |
 | Shrink the target after 8 s with no underrun | −10 ms, to 40 ms | Huddle's floor and cadence; two frames always held |
 | Ceiling | 400 ms, and never more than the clock's target latency less the output delay and 40 ms | Huddle's ceiling; a frame further ahead of the clock than its target latency makes the frame sequencer resync forward, which would flush the buffer |
-| Trim, each second, held audio that never dipped to the target | when ≥ 10 ms | A burst after a stall would otherwise stay as lasting latency, since audio arrives as fast as it plays |
+| Trim, each second, held audio that never dipped to the target | when ≥ 10 ms, and not while the playback rate is below 1 | A burst after a stall would otherwise stay as lasting latency, since audio arrives as fast as it plays; a rate below 1 gains that delay on purpose |
 | Hard bound | 2 × target + 60 ms, under the ceiling | Huddle's backlog bound |
 | A frame that never came, inside held audio | silence for its length, up to 1 s | Keeps later audio on time; WebCodecs exposes no packet-loss concealment |
 
@@ -760,7 +760,11 @@ would play silence. The worklet keeps a fractional read position and reads betwe
 by linear interpolation, as the resampler does, carrying the fraction across quanta and rate
 changes, so a change does not click. Pitch shifts with the rate (about 0.85 semitone at 5 %); there
 is no time-stretching. Held audio, the jitter target, trims, the hard bound and underruns stay in
-held audio, and `bufferedUs` stays timeline time. Reports carry the timestamp at the fractional
+held audio, and `bufferedUs` stays timeline time. Below rate 1 the input does not trim: held
+audio that never dips to the target is the latency being gained, and trimming it would cut out what
+the slower rate added. Only the hard bound limits it then, and back at rate 1 the usual trim
+applies. A player that keeps more latency than that holds it upstream and meters frames in, as the
+Video.js renderer does with its subscriber buffer. Reports carry the timestamp at the fractional
 read position of the reporting quantum's first sample, so a `PlayoutClock` extrapolating at rate 1
 between reports is off by at most |rate − 1| × 20 ms, 1 ms at 5 %. Rate 0 is not a rate: pausing
 is `context.suspend()`.
