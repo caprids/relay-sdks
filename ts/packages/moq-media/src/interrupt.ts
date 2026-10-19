@@ -18,8 +18,8 @@ export interface Interrupt {
   /** Drop from this timestamp on, in microseconds on the broadcast timeline. Absent: from the oldest audio held. */
   fromUs?: number;
   /**
-   * Drop before this timestamp: the end of the last audio the talker sent. Frames that arrive later with an earlier
-   * timestamp are dropped too, so the talker's next audio must start at or after it.
+   * Drop before this timestamp: the end of the last audio the talker sent. Frames that arrive later inside the range
+   * are dropped too, so the talker's next audio must start at or after it.
    */
   untilUs: number;
 }
@@ -52,7 +52,7 @@ function checked(track: unknown, fromUs: unknown, untilUs: unknown): Interrupt {
 
 /** An interrupt object's payload: compact JSON, `{"track":…,"fromUs":…,"untilUs":…}`, without `fromUs` when absent. */
 export function buildInterrupt(input: InterruptInput): Uint8Array {
-  const interrupt = checked(input.track ?? AUDIO_TRACK, input.fromUs, input.untilUs);
+  const interrupt = checked(input.track === undefined ? AUDIO_TRACK : input.track, input.fromUs, input.untilUs);
   return new TextEncoder().encode(JSON.stringify(interrupt));
 }
 

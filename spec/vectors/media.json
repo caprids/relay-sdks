@@ -2395,6 +2395,13 @@
         "track": "",
         "untilUs": "5"
       }
+    },
+    {
+      "name": "null track",
+      "input": {
+        "track": null,
+        "untilUs": "5"
+      }
     }
   ],
   "interruptReads": [

@@ -24,8 +24,7 @@ class Interrupt:
     until_us: int
     """Drop before this timestamp: the end of the last audio the talker sent.
 
-    Frames that arrive later with an earlier timestamp are dropped too, so the talker's next audio must start at or
-    after it.
+    Frames that arrive later inside the range are dropped too, so the talker's next audio must start at or after it.
     """
     from_us: int | None = None
     """Drop from this timestamp on; ``None`` drops from the oldest audio held."""

@@ -707,7 +707,8 @@ a frame reader can deliver frames and the gap after them in one poll, before any
 so the old decoder first outputs what it was given, and the frames after the gap wait for the new
 decoder until it has. A frame that starts before the previous one ended is behind it and is dropped
 as late. A `resync` or `restart` closes the decoder, drops its pending output, and flushes what the
-buffer holds, all of which belongs to the replaced timeline. A context at another rate than the decoder's gets linearly resampled
+buffer holds, all of which belongs to the replaced timeline. A `restart` also forgets earlier cuts;
+a `resync` keeps them, because audio a talker interrupted can still arrive behind one. A context at another rate than the decoder's gets linearly resampled
 audio.
 
 **Jitter buffer.** A ring in the worklet, in the context's frames, starting from the numbers
@@ -742,7 +743,8 @@ the application passes, rather than a clock preset or an automatic default, beca
 behavior is pinned by shared vectors in both SDKs.
 
 **Cut.** `input.cut({ fromUs, untilUs })` drops received audio in a timeline range: what the
-buffer holds, output still in the decoder, and, up to `untilUs`, frames that arrive later. The
+buffer holds, output still in the decoder, and, when the range has an `untilUs`, frames that arrive
+later inside it, until a `restart`. The
 first audio from the cut's start on is joined on without silence for the range cut out; audio from
 before the cut's start that was still decoding can land first and plays as usual, and a frame lost
 outside the range is still filled with silence. With no range it drops
@@ -806,8 +808,8 @@ audio up to a point, such as the end of a word.
 
 **The listener** applies an interrupt for an audio track it plays as a cut,
 `input.cut(interrupt)`: it drops what the buffer holds and what is still decoding in the range,
-and frames that arrive later from before `untilUs`, which covers audio still in flight on the
-audio track when the interrupt overtakes it. The listener ignores an interrupt for a track it does
+and frames that arrive later inside the range, which covers audio still in flight on the audio
+track when the interrupt overtakes it. Audio from before a `fromUs` still plays, wherever it is. The listener ignores an interrupt for a track it does
 not play and reports one that does not parse.
 
 **No sequence number.** A cut can only drop audio before its `untilUs`, and the talker's next audio

@@ -74,7 +74,7 @@ interface Vectors {
   interruptReadErrors: { name: string; json: string }[];
 }
 interface RawInterrupt {
-  track?: string;
+  track?: string | null;
   fromUs?: string;
   untilUs: string;
 }
@@ -264,7 +264,7 @@ describe('shared media vectors', () => {
       ).toBe(vector.timestampUs === null ? undefined : Number(vector.timestampUs)));
   }
   const interrupt = (raw: RawInterrupt) => ({
-    ...(raw.track === undefined ? {} : { track: raw.track }),
+    ...(raw.track === undefined ? {} : { track: raw.track as string }) /* null in an error vector */,
     ...(raw.fromUs === undefined ? {} : { fromUs: Number(raw.fromUs) }),
     untilUs: Number(raw.untilUs),
   });

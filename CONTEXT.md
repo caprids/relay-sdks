@@ -214,7 +214,7 @@ reorder buffer
 
 **Cut**:
 Dropping an audio player input's received audio in a timeline range, held or still decoding, and
-frames that arrive later from before its end: what a listener does when a talker is interrupted.
+frames that arrive later inside it: what a listener does when a talker is interrupted.
 _Avoid_: flush (that drops everything, at a resync or restart), interrupt (that is the talker's
 act), barge-in
 
