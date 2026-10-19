@@ -2686,3 +2686,185 @@ describe('rotation before the credential expires (#261)', () => {
     });
   });
 });
+
+describe('SupervisedSubscriber.catchUp', () => {
+  async function start() {
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: fast },
+    );
+    cleanup.push(() => subscriber.close());
+    const seen: string[] = [];
+    const handlers: WantHandlers = {
+      onSubscribed: () => seen.push('subscribed'),
+      onObject: (object) => seen.push(`object ${object.groupId}`),
+      onRestarted: ({ reason }) => seen.push(`restarted ${reason}`),
+      onError: (error) => seen.push(`error ${(error as RelayError).code}`),
+    };
+    return { subscriber, connections, seen, handlers };
+  }
+
+  const slow = { initialDelayMs: 60_000, maxDelayMs: 60_000 };
+  const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  it('replaces a subscription that moved past its first group at once, ignoring the retry backoff', async () => {
+    const { subscriber, connections, seen, handlers } = await start();
+    subscriber.want('video', { namespace: ['room'], track: 'video', retry: slow }, handlers);
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    const first = connections[0]!.subscriptions[0]!;
+    first.accept();
+    first.object(3);
+    first.object(4);
+    first.object(5);
+    subscriber.catchUp('video');
+    await until(() => connections[0]!.subscriptions.length === 2, 'resubscribe without delay');
+    expect(first.cancelled).toBe(true);
+    const second = connections[0]!.subscriptions[1]!;
+    expect(second.options).toMatchObject({ namespace: ['room'], track: 'video' });
+    second.accept();
+    second.object(9);
+    second.object(10);
+    expect(seen).toEqual([
+      'subscribed',
+      'object 3',
+      'object 4',
+      'object 5',
+      'restarted catch-up',
+      'subscribed',
+      'object 9',
+      'object 10',
+    ]);
+  });
+
+  it('keeps replacing at once while each subscription progresses, so the backoff never builds', async () => {
+    const { subscriber, connections, seen, handlers } = await start();
+    subscriber.want('video', { namespace: ['room'], track: 'video', retry: slow }, handlers);
+    for (let round = 0; round < 3; round++) {
+      await until(() => connections[0]!.subscriptions.length === round + 1, `subscribe ${round}`);
+      const current = connections[0]!.subscriptions[round]!;
+      current.accept();
+      current.object(round * 10);
+      current.object(round * 10 + 1);
+      subscriber.catchUp('video');
+    }
+    await until(() => connections[0]!.subscriptions.length === 4, 'fourth subscription');
+    expect(seen.filter((entry) => entry === 'restarted catch-up')).toHaveLength(3);
+  });
+
+  it('waits out the retry backoff when the subscription never left its first group', async () => {
+    const { subscriber, connections, seen, handlers } = await start();
+    subscriber.want(
+      'video',
+      { namespace: ['room'], track: 'video', retry: { initialDelayMs: 300, maxDelayMs: 300 } },
+      handlers,
+    );
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    const first = connections[0]!.subscriptions[0]!;
+    first.accept();
+    first.object(3);
+    first.object(3, 1);
+    subscriber.catchUp('video');
+    // The backoff draws from its upper half: at least 150 ms.
+    await pause(100);
+    expect(first.cancelled).toBe(true);
+    expect(connections[0]!.subscriptions).toHaveLength(1);
+    await until(() => connections[0]!.subscriptions.length === 2, 'resubscribe after the backoff', 2_000);
+    connections[0]!.subscriptions[1]!.accept();
+    connections[0]!.subscriptions[1]!.object(8);
+    expect(seen).toEqual(['subscribed', 'object 3', 'object 3', 'restarted catch-up', 'subscribed', 'object 8']);
+  });
+
+  it('is ignored for a key that is not wanted, or was forgotten', async () => {
+    const { subscriber, connections, seen, handlers } = await start();
+    subscriber.want('video', { namespace: ['room'], track: 'video', retry: fast }, handlers);
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    const first = connections[0]!.subscriptions[0]!;
+    first.accept();
+    first.object(1);
+    first.object(2);
+    expect(() => subscriber.catchUp('audio')).not.toThrow();
+    await pause(30);
+    expect(first.cancelled).toBe(false);
+    expect(connections[0]!.subscriptions).toHaveLength(1);
+    subscriber.unwant('video');
+    expect(() => subscriber.catchUp('video')).not.toThrow();
+    await pause(30);
+    expect(connections[0]!.subscriptions).toHaveLength(1);
+    expect(seen).toEqual(['subscribed', 'object 1', 'object 2']);
+  });
+
+  it('throws a TypeError for a key that is not a string', async () => {
+    const { subscriber } = await start();
+    expect(() => subscriber.catchUp(undefined as unknown as string)).toThrow(TypeError);
+    expect(() => subscriber.catchUp(7 as unknown as string)).toThrow(TypeError);
+    expect(() => subscriber.catchUp(null as unknown as string)).toThrow(TypeError);
+  });
+
+  it('does nothing before the subscription is accepted', async () => {
+    const { subscriber, connections, seen, handlers } = await start();
+    subscriber.want('video', { namespace: ['room'], track: 'video', retry: fast }, handlers);
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    const first = connections[0]!.subscriptions[0]!;
+    subscriber.catchUp('video');
+    await pause(30);
+    expect(first.cancelled).toBe(false);
+    expect(connections[0]!.subscriptions).toHaveLength(1);
+    first.accept();
+    first.object(1);
+    expect(seen).toEqual(['subscribed', 'object 1']);
+  });
+
+  it('ignores a second call while the want waits to resubscribe after the first', async () => {
+    const { subscriber, connections, seen, handlers } = await start();
+    subscriber.want(
+      'video',
+      { namespace: ['room'], track: 'video', retry: { initialDelayMs: 300, maxDelayMs: 300 } },
+      handlers,
+    );
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    const first = connections[0]!.subscriptions[0]!;
+    first.accept();
+    first.object(1);
+    subscriber.catchUp('video');
+    subscriber.catchUp('video');
+    await until(() => connections[0]!.subscriptions.length === 2, 'resubscribe after the backoff', 2_000);
+    await pause(30);
+    expect(connections[0]!.subscriptions).toHaveLength(2);
+    expect(seen.filter((entry) => entry === 'restarted catch-up')).toHaveLength(1);
+    // The replacement is not accepted yet: a call now does nothing to it.
+    subscriber.catchUp('video');
+    await pause(30);
+    expect(connections[0]!.subscriptions[1]!.cancelled).toBe(false);
+    expect(connections[0]!.subscriptions).toHaveLength(2);
+  });
+
+  it('leaves the other wants alone', async () => {
+    const { subscriber, connections, handlers } = await start();
+    const audioSeen: string[] = [];
+    subscriber.want('video', { namespace: ['room'], track: 'video', retry: fast }, handlers);
+    subscriber.want(
+      'audio',
+      { namespace: ['room'], track: 'audio', retry: fast },
+      { onRestarted: ({ reason }) => audioSeen.push(reason) },
+    );
+    await until(() => connections[0]!.subscriptions.length === 2, 'both subscribe');
+    const [video, audio] = connections[0]!.subscriptions as [
+      (typeof connections)[0]['subscriptions'][0],
+      (typeof connections)[0]['subscriptions'][0],
+    ];
+    video.accept();
+    audio.accept();
+    video.object(1);
+    video.object(2);
+    subscriber.catchUp('video');
+    await until(() => connections[0]!.subscriptions.length === 3, 'video resubscribes');
+    expect(video.cancelled).toBe(true);
+    expect(audio.cancelled).toBe(false);
+    expect(audioSeen).toEqual([]);
+  });
+});

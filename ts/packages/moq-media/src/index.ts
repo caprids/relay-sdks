@@ -86,6 +86,7 @@ export {
   type FrameSequencer,
   type FrameSequencerOptions,
   type FrameSequencerStats,
+  type MissingGroups,
   type SequencedFrame,
   type SequencerPoll,
 } from './sequencer.js';

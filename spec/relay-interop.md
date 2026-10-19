@@ -516,6 +516,48 @@ the relay's raw-QUIC sessions still map codes as for WebTransport: code 1 arrive
 2026-10-05 (3 of 3 per case, both SDKs) and the same on a local 0.15.8. Treat a subgroup reset as
 "this group was abandoned" and nothing more.
 
+## Voice delivery on 0.17.5: deadlines, FETCH and group order
+
+What a voice application can tune on the relay's side, measured on a local moq-relay 0.17.5 (tag
+`moq-relay-v0.17.5`, the OCI fleet's image, with no cache settings, as the fleet runs it) on
+2026-10-17 with the Python probe below, and read in its source (`rs/moq-net/src/ietf/subscribe.rs`,
+`publisher.rs`). The publisher wrote one-object groups every 20 ms, with track Timescale 1,000,000
+and a LOC Timestamp on every object. For the slow-link rows the subscriber's link went through
+`moq-shaper --rate 300000 --queue 1s` with 1000-byte objects, so the relay built a backlog.
+
+| question | moq-relay 0.17.5 | effect for an application |
+| --- | --- | --- |
+| Does a subscriber's OBJECT_ / SUBGROUP_DELIVERY_TIMEOUT bound delivery? | no: decoded and dropped. With 100 ms set, and with neither set, the slow link delivered 600 of 600 groups, lateness p50 about 2.2 s and max about 11.5 s; a 24 s run delivered every group, the last about 24 s late. The track's 5 s default retention did not cut it short either | the relay never drops for a late subscriber. A listener bounds its own delay: the sequencer's late drop and catch-up ([behavior.md](behavior.md#media-subscribing)) |
+| How does a group the relay drops show? | a group never opened leaves only a missing group ID; a stream it stops mid-group is reset with code 1 (CANCELLED), never 0x2 (DELIVERY_TIMEOUT). None occurred in the runs above | a missing group ID is the trace; the sequencer reports it as `missingGroups` |
+| GROUP_ORDER (`0x22`) on SUBSCRIBE | ignored by this release, as by 0.17.0: SUBSCRIBE_OK states 2 (descending), and group streams carry only the subscriber priority. On the slow link, Descending and Ascending gave the same arrival order, oldest backlog first | there is no newest-group-first delivery to ask for on this relay |
+| FETCH of a recent group | served, one group per FETCH: a two-group range is refused with REQUEST_ERROR 3 `FETCH spanning several groups not supported`. Single groups 40 ms to 29 s old (the oldest tried) came back in 1-2 ms on a clean link; with no cache capacity or duration set, as on the fleet, the 5 s retention does not age groups out of the cache | a gap can be filled from the relay group by group, but on a slow link the FETCH queues behind the live backlog (2-5 s in the runs above) |
+| Properties on FETCH objects | none: a standalone FETCH answers without a Timescale, so the relay writes no properties and the LOC Timestamp is lost | a fetched frame cannot be placed on the timeline from its own properties |
+
+These rows are facts about the releases named, not about moq-relay in general. **0.17.7**, read in
+source and not measured, has the same code on each path: the delivery timeouts are decoded into
+unused bindings, a standalone FETCH answers unstamped, and group streams carry only the subscriber
+priority. Upstream **`main`** differs, read in source and not measured: it applies GROUP_ORDER on
+the IETF publisher, and FETCH keeps object timestamps
+([moq-dev/moq#4822](https://github.com/moq-dev/moq/pull/4822),
+[#5494](https://github.com/moq-dev/moq/pull/5494), in neither 0.17.6 nor 0.17.7). Its delivery
+timeouts are still advisory by design (`doc/concept/standard.md` at 7a13b8f8b: they "do not drop
+objects or reset subgroups"), and nothing maps an IETF subscriber's budget onto the relay's
+presentation-time `max_delay`: asked for in
+[moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881), and a bench relay that honours the
+timeout is being built for the voice benchmark. The SDK's delivery options
+([behavior.md](behavior.md#media-subscribing)) are meant to work with and without such a relay: the
+subscriber's timeout goes on the SUBSCRIBE either way, and the late drop, reorder window and
+catch-up act on whatever the relay sends.
+
+To re-measure, against a local relay as in [Reproduce against a local relay](#reproduce-against-a-local-relay)
+or a deployed one, and through an impairer for the slow-link rows (`RELAY_SUB_URL` is the
+subscriber's endpoint, `VOICE_*` set the payload, timing, delivery timeouts and group order; the
+script's docstring lists them):
+
+```sh
+RELAY_URL="$RELAY_URL" mise run python:probe:voice-delivery
+```
+
 ## Draft-22 deviations
 
 The relay behavior behind the [relay interop deviations](behavior.md#relay-interop-deviations).

@@ -118,7 +118,9 @@ export type RestartReason =
   /** The subscriber connection ended and was replaced. */
   | 'connection'
   /** The relay ended the subscription with REQUEST_ERROR after accepting it. */
-  | 'terminated';
+  | 'terminated'
+  /** The application asked for it with `catchUp(key)`: the subscription was delivering too late to use. */
+  | 'catch-up';
 
 /** Where a want's subscription was made: the namespace (the generation's, when following one) and the track. */
 export interface WantTarget {
@@ -185,6 +187,15 @@ export interface SupervisedSubscriber {
   want(key: string, options: WantOptions, handlers?: WantHandlers): void;
   /** Cancel a want's subscription and forget it. Unknown keys are ignored. */
   unwant(key: string): void;
+  /**
+   * Replace a want's accepted subscription at once, break-before-make, because it delivers too late to use: cancel it,
+   * which makes the relay drop what it still holds queued for it, and subscribe again with the same options, so a
+   * want without a location filter starts at the newest group. `onRestarted` reports `'catch-up'`. A frame reader's
+   * `onCatchUp` is the usual caller. The new subscription opens without delay when the old one had moved past its
+   * first group, and otherwise after the want's `retry` backoff, so a link too slow for the track cannot make it spin.
+   * Ignored for an unknown key and while no subscription is accepted.
+   */
+  catchUp(key: string): void;
   /** Where the supervisor stands; see {@link SupervisedStatus}. */
   readonly status: SupervisedStatus;
   /** Resolves once the supervisor stops: `close()`, the signal, or a failure it does not retry. Never rejects. */
@@ -277,6 +288,8 @@ interface Want {
   connection?: Connection | undefined;
   /** A discovery failure no wait fixes, seen while backing off, for the loop to surface. */
   deferred?: { error: unknown };
+  /** Ends the running attempt for a catch-up; set while an attempt runs. */
+  catchUp?: (() => void) | undefined;
 }
 
 /**
@@ -680,6 +693,10 @@ export async function superviseRelaySubscriber(
       const want = wants.get(key);
       if (want) forget(key, want);
     },
+    catchUp(key) {
+      if (typeof key !== 'string') throw new TypeError('want key must be a string');
+      wants.get(key)?.catchUp?.();
+    },
     rotate() {
       requestRotation();
     },
@@ -802,6 +819,11 @@ async function superviseWant(
         continue;
       }
       if (outcome.kind !== 'retry' || want.target !== asked) continue;
+      // A catch-up replaces a subscription that was delivering: the replacement is wanted now, not after a backoff.
+      if (outcome.reason === 'catch-up' && outcome.progressed) {
+        failures = 0;
+        continue;
+      }
       // Cached objects followed by a done are not progress: only a later group resets the backoff.
       if (outcome.progressed) failures = 0;
       await backoff(want, connection, backoffDelay(failures++, want.retry));
@@ -1478,6 +1500,11 @@ async function follow(
     watchStale();
     reconcile();
   };
+  const catchUp = () => {
+    if (over() || !accepted()) return;
+    settle({ kind: 'retry', accepted: true, progressed: active.progressed, reason: 'catch-up' });
+  };
+  want.catchUp = catchUp;
   watchStale();
   want.changes.add(changed);
   let unwatch = watch?.onChange(reconcile);
@@ -1489,6 +1516,7 @@ async function follow(
   } finally {
     // Settles the attempt, so nothing reaches the handlers from here on.
     settle({ kind: 'cancelled' });
+    if (want.catchUp === catchUp) want.catchUp = undefined;
     clearInterval(stale);
     clearRetry();
     unwatch?.();

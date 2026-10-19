@@ -162,6 +162,11 @@ description = "Opt-in live probe of which SUBSCRIBE parameters a Relay honors (R
 dir = "python"
 run = "uv run python scripts/probe_relay_parameters.py"
 
+[tasks."python:probe:voice-delivery"]
+description = "Opt-in live probe of a relay's voice delivery: subscriber delivery timeouts, FETCH of recent groups, group order (RELAY_TOKEN or hidden prompt)"
+dir = "python"
+run = "uv run python scripts/probe_voice_delivery.py"
+
 [tasks."python:example:mux-global"]
 description = "Run the mux.global example natively over aioquic; pass its options after --"
 dir = "python"

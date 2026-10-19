@@ -891,6 +891,59 @@ WebRTC receiver's buffering, which no API reports; set `player.outputDelayUs` if
 sync with the audio. The [WebCodecs example](examples/webcodecs/README.md)'s `listen-audio.ts`
 plays its microphone track this way.
 
+### Voice: delivery per direction
+
+Voice wants different things in each direction, and each track's sequencer takes its own policy
+without touching the clock its other tracks share. moq-relay 0.17.5 (measured) and 0.17.7 (read in
+source) deliver every group however late, whatever delivery timeout a subscriber sends, and answer
+FETCH without timestamps
+([relay-interop.md](../spec/relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)),
+so on those releases both policies live in the subscriber. The options are meant to work with and
+without a relay that honours the subscriber's delivery timeout
+([moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881)): there the relay drops what is
+late, and the subscriber's options handle whatever still arrives late or out of order.
+
+**To a listener** (an agent's or a caller's voice to a person): low, steady latency, where a gap
+beats a stall. Drop audio late against the playout target, and catch up when it keeps arriving
+late: `catchUpAfterUs` makes the sequencer ask for it, and a supervised subscriber's `catchUp(key)`
+replaces the subscription at the live edge, which drops the relay's backlog. The want's
+`onRestarted` (reason `'catch-up'`) restarts the reader. Keep `catchUpAfterUs` below the clock's
+target latency, or a resync re-anchors on the late audio first. The subscriber's own delivery
+timeout goes on the SUBSCRIBE as well, for a relay that honours it; moq-relay 0.17.5 and 0.17.7
+ignore it.
+
+```ts
+const voice = createFrameReader(
+  createFrameSequencer({ clock, grouping: 'frame', lateDropUs: 60_000, catchUpAfterUs: 300_000 }),
+  { onFrame: input.push, onCatchUp: () => subscriber.catchUp('voice') },
+);
+subscriber.want(
+  'voice',
+  { namespace, track: 'audio', parameters: { objectDeliveryTimeout: 150, subgroupDeliveryTimeout: 150 } },
+  { ...voice, onError },
+);
+```
+
+**To an agent** (a person's voice to speech-to-text): every word, soon after the person stops.
+Completeness comes from the person's publisher and the reorder window, not from FETCH. Give the
+person's audio track a longer delivery timeout
+(`mediaTrackProperties('audio', { subgroupTimeoutUs: 2_000_000 })`, 1 to 2 s instead of audio's
+500 ms), so the publisher's transport keeps resending through loss. On the agent, drop nothing as late, and wait for a missing group at least
+as long as that timeout, since a resent group can arrive that long after the one that follows it.
+A frame after a group that never came carries `missingGroups`: the group IDs to act on.
+
+```ts
+const words = createFrameReader(
+  createFrameSequencer({ clock, grouping: 'frame', lateDropUs: Number.POSITIVE_INFINITY, reorderWindowUs: 2_000_000 }),
+  {
+    onFrame(frame) {
+      if (frame.missingGroups) noteGap(frame.missingGroups.firstGroupId, frame.missingGroups.lastGroupId);
+      transcriber.push(frame);
+    },
+  },
+);
+```
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not message wording. SDK lifecycle errors use these stable codes:

@@ -60,6 +60,16 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   sequencer's position is a group and an object, so a group's later objects are no longer dropped as behind its first,
   and an object skipped inside a group is a `gap`. Groups of one frame, as the frame writer sends audio, behave as
   before.
+- Voice delivery per direction (relay-3cnp, the voice benchmark). `createFrameSequencer` takes three per-track
+  options, each off by default: `lateDropUs` (frame grouping) replaces the clock's late-drop limit for one track,
+  `Infinity` dropping nothing; `reorderWindowUs` (frame grouping) holds newer audio that long for a missing earlier
+  group instead of dropping the latecomer; and `catchUpAfterUs` makes `poll()` return `catchUp: true` once audio has
+  kept arriving late that long. `createFrameReader`'s `onCatchUp` receives it, and the supervised subscriber's new
+  `catchUp(key)` replaces the want's subscription at the live edge, which drops the relay's backlog; `onRestarted`
+  reports the new reason `'catch-up'`. A delivered frame after skipped groups carries `missingGroups`
+  (`MissingGroups`: `firstGroupId`, `lastGroupId`). moq-relay 0.17.5 and 0.17.7 ignore a subscriber's delivery timeout,
+  so on those releases these are how a subscriber bounds its delay; they work with a relay that honours it too
+  ([spec/relay-interop.md](../spec/relay-interop.md)). TypeScript only.
 - `@mux/relay`: `subscriber.namespaceEvents({ prefix })` discovers which namespaces under a prefix are announced
   ([#259](https://github.com/muxinc/relay-sdks/issues/259)). The subscriber's SETUP now carries the SOLICIT option,
   so the relay advertises namespaces only when asked. A prefix overlapping one the connection already discovers is
