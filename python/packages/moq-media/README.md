@@ -1,7 +1,8 @@
 # MoQ media formats
 
 Pure LOC (`draft-ietf-moq-loc-04`) and independent MSF (`draft-ietf-moq-msf-01`) format helpers.
-Depends only on the generic MoQ core. No encoders, transport libraries, or Relay connection required.
+Depends only on the generic MoQ core. No transport libraries or Relay connection required. The one
+encoder, `moq_media.opus`, needs the `opus` extra (see [Opus](#opus)); `import moq_media` never loads it.
 
 The catalog builder emits compact UTF-8 JSON bytes. It withholds `avc1`/`avc3` until non-empty init
 data exists, derives their profile/constraint/level suffix from avcC (preserving `avc3`), forces Opus
@@ -93,6 +94,40 @@ await group.write(h264.to_avcc(access_unit), properties=loc_properties(timestamp
 
 tracks = parse_msf_catalog(catalog_object.payload, catalog_namespace=["room", "live"]).tracks
 ```
+
+## Opus
+
+`pip install "mux-moq-media[opus]"` adds PyAV and `moq_media.opus`: Opus encoding and decoding for a
+server-side talker such as a voice bot. `OpusEncoder` takes interleaved s16 PCM (or a PyAV
+`AudioFrame`) at any rate and returns 20 ms `OpusPacket`s stamped on the broadcast timeline. Its
+defaults are for voice: mono, 32 kb/s, libopus's `voip` application. Audio comes in runs. The first
+`encode` of a run gives the timestamp of its first sample, later calls continue by sample count, and
+`flush()` ends the run (an utterance) by padding the last partial frame with silence.
+`OpusDecoder(rate=16_000)` turns packets back into s16 PCM at the rate speech recognition wants. Call
+`reset()` at a frame's `discontinuity`.
+
+```python
+from moq_media import AudioTrackInfo
+from moq_media.opus import OpusDecoder, OpusEncoder
+
+encoder = OpusEncoder(input_rate=24_000)  # the TTS engine's rate
+audio_info = AudioTrackInfo(channel_config="1", bitrate=encoder.bitrate)  # for build_msf_catalog
+# An OpusPacket carries its LOC properties, so mux_relay.media.FrameWriter takes it as a frame.
+for packet in encoder.encode(tts_pcm, timestamp_us=clock.now_us()) + encoder.flush():
+    await frame_writer.write(packet)
+
+decoder = OpusDecoder(rate=16_000)
+async for frame in frame_reader:
+    if frame.discontinuity:
+        decoder.reset()
+    stt.feed(decoder.decode(frame.payload))
+```
+
+Packet *k* of a run is stamped at the run's timestamp plus 20 ms per packet before it, as WebCodecs
+stamps its output; decoded audio trails the stamps by libopus's look-ahead: 6.5 ms, or 2.5 ms with `application="lowdelay"`. A flushed run has
+one packet more than the frames it was given, which carries the look-ahead's tail.
+`opus_packet_duration_us(payload)` reads a packet's duration from its TOC byte without PyAV, held to
+the same vectors as TypeScript's `opusPacketDurationUs`. See [ADR 0006](../../../docs/adr/0006-opus-codec-behind-an-extra.md).
 
 The distribution on PyPI is `mux-moq-media`; the import name is `moq_media`.
 

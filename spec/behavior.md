@@ -1195,6 +1195,18 @@ to both languages.
   retained entries; before the first it is `[]`. A rejected entry leaves the timeline unchanged.
   Retention is pinned by `vectors/media.json`. Cadence (one entry per video group that was sent)
   and the publishing rules are in media-layer.md. Implemented in both SDKs.
+- The Opus packet duration (`opusPacketDurationUs` / `opus_packet_duration_us`) reads RFC 6716
+  §3.1's TOC byte: the frame length from the configuration (SILK 10, 20, 40 or 60 ms, hybrid 10 or
+  20 ms, CELT 2.5, 5, 10 or 20 ms), times one frame for code 0, two for codes 1 and 2, and for code 3
+  the low six bits of the next byte. An empty packet, or a code 3 packet without that byte, reads as
+  nothing. Pinned by `vectors/media.json` `opusPacketDurations`.
+- Python's Opus encoder and decoder (`moq_media.opus`, the `opus` extra; issue #320, ADR 0006) are
+  PyAV's libopus. The encoder takes signed 16-bit PCM, or a PyAV frame, in runs: the first call of a
+  run gives the timeline timestamp of its first sample and later calls refuse one, packet *k* of a
+  run is stamped at that timestamp plus *k* × 20 ms, and ending the run pads its partial frame with
+  silence and drains the encoder. Defaults are voice: mono, 32 kb/s, libopus's `voip` application.
+  The decoder returns s16 PCM at the caller's rate and channel count, and resets on request, at a
+  discontinuity. TypeScript uses WebCodecs instead and has no counterpart.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below, and
   reading frames in decode order within a latency budget is [Media subscribing](#media-subscribing),
@@ -1400,7 +1412,9 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
 - The optional TypeScript Mediabunny adapter depends on the media format package and declares
   Mediabunny as a peer. Neither the core, format package, nor product SDK depends on the adapter.
 - The generic media format package depends only on the core, imports no product or transport
-  library, and owns no encoder. The core imports nothing from the media package.
+  library, and owns no encoder outside a module behind an optional extra that its root does not
+  import: Python's `moq_media.opus`, on PyAV (ADR 0006). The core imports nothing from the media
+  package.
 - The product package does not depend on the media format package either. Its media policy pairs
   with it structurally: a frame carries its own properties, and the frame reader drives a sequencer
   it is given.

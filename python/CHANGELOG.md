@@ -19,6 +19,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306)); a bare
   `open_group()` has no object to time. The frame writer opens every group this way, so a frame whose open fails
   reports no `group_id`, and `groups` counts only opens that returned a group.
+- Opus for voice bots ([#320](https://github.com/muxinc/relay-sdks/issues/320)): `moq_media.opus.OpusEncoder` and
+  `OpusDecoder` on PyAV's libopus, installed with the `opus` extra (`mux-moq-media[opus]`). The encoder turns s16 PCM
+  into 20 ms packets stamped on the broadcast timeline, in runs that `flush()` ends; the decoder returns s16 PCM at the
+  rate you ask for. `moq_media.opus_packet_duration_us` reads a packet's duration from its TOC byte. The Video.js
+  streaming example's audio encoder is built on `OpusEncoder`.
 - `mux-moq-core` (imported as `moq_core`): the transport-independent MOQT sessions the SDK is built on.
 - `ConnectingTransport.framing` accepts `"websocket"`, a factory carrying MOQT on QMux over WebSocket, which sends the
   same SETUP as `"webtransport"` ([#321](https://github.com/muxinc/relay-sdks/issues/321)). The package ships no such

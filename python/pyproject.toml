@@ -6,7 +6,7 @@ name = "relay-sdks-python"
 version = "0.0.0"
 description = "Development workspace for the Relay Python SDK"
 requires-python = ">=3.11"
-dependencies = ["mux-moq-core", "mux-moq-media", "mux-relay"]
+dependencies = ["mux-moq-core", "mux-moq-media[opus]", "mux-relay"]
 
 [dependency-groups]
 dev = [
@@ -129,3 +129,12 @@ name = "moq_media imports neither Relay nor transport libraries"
 type = "forbidden"
 source_modules = ["moq_media"]
 forbidden_modules = ["mux_relay", "aioquic", "cryptography", "certifi"]
+
+# PyAV is the opus extra's, so only moq_media.opus may import it. The ignore drops that one edge, so
+# this contract cannot see the package root importing moq_media.opus; test_opus.py checks that.
+[[tool.importlinter.contracts]]
+name = "Only moq_media.opus imports PyAV"
+type = "forbidden"
+source_modules = ["moq_media"]
+forbidden_modules = ["av"]
+ignore_imports = ["moq_media.opus -> av"]

@@ -9,6 +9,10 @@ requires-python = ">=3.11"
 # Released in lockstep with mux-moq-core, so the pin is exact; scripts/release_version.py moves it.
 dependencies = ["mux-moq-core==0.0.0"]
 
+[project.optional-dependencies]
+# moq_media.opus, the Opus encoder and decoder. Nothing else in the package imports PyAV.
+opus = ["av>=15"]
+
 [project.urls]
 Repository = "https://github.com/muxinc/relay-sdks"
 
