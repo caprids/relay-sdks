@@ -48,7 +48,9 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   untilUs })` drops received audio in a timeline range. Also `createEchoCancellationLoopback` for Chromium's echo
   canceller, `audioDecoderConfigFromTrack`, `opusPacketDurationUs`, and `AUDIO_ONLY_TARGET_LATENCY_US` (500 ms) for
   an audio-only clock, whose 2 s default otherwise waits for keyframes. `createRenderClock` moved into the package
-  from the WebCodecs example, which gains an audio-only listener, `listen-audio.ts`.
+  from the WebCodecs example, which gains an audio-only listener, `listen-audio.ts`. `input.playbackRate` (0.5 to 2)
+  nudges latency without cuts or silence, and an input's `clock` is any `AudioInputClock`, which each report hands the
+  input's stats, now with `playStarts`, `heldUntilUs` and `dryAtUs` ([#329](https://github.com/muxinc/relay-sdks/issues/329)).
 - Reading frames in decode order within a latency budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)).
   `@mux/moq-media`'s `createFrameSequencer({ clock, grouping })` orders one track's objects across group streams, waits
   for a late group only while it can still matter, skips to the next keyframe past the deadline, drops late audio, and

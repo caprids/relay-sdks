@@ -728,9 +728,42 @@ Huddle's player worklet runs with (`demos/huddle`):
 **Clock.** About every 20 ms the worklet posts the context frame it is rendering and the timeline
 timestamp of the sample there. The main thread times those posts with a [render clock](#browser-capture),
 on the playout clock's own time source, and reports `reportAudio(timestamp, renderedAt +
-baseLatency + outputLatency + player.outputDelayUs)`, reading the latencies fresh each time. While
-the buffer is dry it reports nothing, so the clock runs on by itself and frames that missed their
-slot are dropped as late instead of played late.
+baseLatency + outputLatency + player.outputDelayUs, input.stats)`, reading the latencies fresh each
+time. While the buffer is dry it reports nothing, so the clock runs on by itself and frames that
+missed their slot are dropped as late instead of played late.
+
+The input calls four members of its clock, `targetLatencyUs`, `localNow`, `reportAudio` and
+`stopAudio` (`AudioInputClock`), so a player can pass its own clock instead of a `PlayoutClock`
+([issue #329](https://github.com/muxinc/relay-sdks/issues/329)). The Video.js renderer does: its
+clock holds where the buffer ran dry rather than handing over to wall pacing, which would step the
+position back when audio resumes. Such a clock needs to know what the worklet has played, which it
+cannot rebuild from the frames pushed and the timing of reports, so each report carries the input's
+stats, refreshed with it:
+
+| Stat | Meaning |
+| --- | --- |
+| `heldUntilUs` | Timeline timestamp just past the newest held sample: the end of decoded audio, or `null` when nothing is held |
+| `dryAtUs` | Timeline timestamp of the read position where the buffer last ran dry while playing, until it plays again; `null` otherwise, and after a flush or a cut that empties it |
+| `playStarts` | Bumped each time playback starts: at the start, after running dry, after a flush or a cut that emptied it |
+
+A report whose `playStarts` is newer than the one before is of audio played after the buffer last
+ran dry; one with the same count, still in flight when it ran dry, is the tail before it. A clock
+can hold at `dryAtUs` while it is set and release on the first report of a newer `playStarts`.
+`PlayoutClock` ignores the third argument: its behavior is pinned by the shared vectors, and it
+paces by wall clock while the buffer is dry.
+
+**Playback rate.** `input.playbackRate` (and the `playbackRate` option), from 0.5 to 2, default 1,
+is how much held audio each output frame plays, from the next render quantum. A player that owns
+its latency, as the Video.js renderer's controller does with ±5 % for seconds at a time, nudges
+it: above 1 sheds latency, below 1 gains it, where trimming would cut audibly and running dry
+would play silence. The worklet keeps a fractional read position and reads between held samples
+by linear interpolation, as the resampler does, carrying the fraction across quanta and rate
+changes, so a change does not click. Pitch shifts with the rate (about 0.85 semitone at 5 %); there
+is no time-stretching. Held audio, the jitter target, trims, the hard bound and underruns stay in
+held audio, and `bufferedUs` stays timeline time. Reports carry the timestamp at the fractional
+read position of the reporting quantum's first sample, so a `PlayoutClock` extrapolating at rate 1
+between reports is off by at most |rate − 1| × 20 ms, 1 ms at 5 %. Rate 0 is not a rate: pausing
+is `context.suspend()`.
 
 **Audio-only target latency.** The clock's 2 s default waits for keyframe intervals that an
 audio-only broadcast never reports. `AUDIO_ONLY_TARGET_LATENCY_US`, 500 ms, is the smallest budget
@@ -770,6 +803,25 @@ latency. Medians [p95]:
 
 In both runs the target shrank from 60 to 50 ms during the steady phase, playback resumed after the
 cut with no underrun, and the frame sequencer resynced nothing.
+
+Rerun on 2026-10-19 with two phases between the steady phase and the cut: playback rate 0.95 for a
+second, then 1.05 for a second ([issue #329](https://github.com/muxinc/relay-sdks/issues/329)).
+"Delay moved" is the playout delay at the end of the phase less at its start; a second at ±5 %
+should move it 50 ms. "Largest step" is the largest difference between two consecutive output
+samples, read through an `AnalyserNode` every 20 ms: the 0.3 tone's own steepest is 0.0174 at rate
+1 and 0.0181 at 1.05, and a click would be far larger. Neither phase trimmed or concealed audio,
+and the clock's position never stepped back between 20 ms ticks:
+
+| Path | Phase | Underruns | Delay moved, ms | Buffer p50 [p95], ms | Largest step |
+| --- | --- | --- | --- | --- | --- |
+| In-memory hub | 0.95 | 0 | +49.1 | 76 [111] | 0.0174 |
+| In-memory hub | 1.05 | 0 | −49.0 | 80 [105] | 0.0183 |
+| Relay (`sjc`) | 0.95 | 0 | +49.1 | 74 [92] | 0.0174 |
+| Relay (`sjc`) | 1.05 | 0 | −49.4 | 68 [96] | 0.0183 |
+
+The steady phases in the same runs: hub 399 frames, buffer 46 [56] ms, delay 101 ms, output
+latency 42 ms; Relay 400 frames, buffer 43 [53] ms, delay 142 ms. The hub's steady phase concealed
+25 ms of frames that came late, which no rate phase did.
 
 ## Interrupt track
 

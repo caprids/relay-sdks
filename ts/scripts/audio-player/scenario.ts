@@ -3,7 +3,9 @@
  * (a steady 440 Hz tone) with its canvas, and the example's audio-only listener plays it back through the audio
  * player. Publisher and listener share the page, so they share `performance.now()`'s clock, and the playout delay is
  * the broadcast clock's now less the playout clock's position: capture to audible, less any microphone latency. The
- * publisher also lists the interrupt track, and the cut phase sends an interrupt the listener applies.
+ * publisher also lists the interrupt track, and the cut phase sends an interrupt the listener applies. Between steady
+ * playback and the cut, the input's playback rate is nudged as the Video.js renderer's latency controller does: 0.95
+ * for a second, then 1.05 for a second (issue #329).
  */
 import { buildInterrupt, createBroadcastClock, INTERRUPT_TRACK, type Interrupt } from '@mux/moq-media';
 import { connectRelayPublisher, connectRelaySubscriber, type RelayTransportFactory } from '@mux/relay';
@@ -92,18 +94,37 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
     }
   }
   const { input, clock, sequencer } = listener;
+  // The largest step between two output samples: the tone's own is about 0.017, and a click is a larger one.
+  const analyser = new AnalyserNode(playback, { fftSize: 2048 });
+  listener.player.output.connect(analyser);
+  const recent = new Float32Array(analyser.fftSize);
   const sample = (phase: string, durationMs: number) => {
     const delays: number[] = [];
     const depths: number[] = [];
     const modes: Record<string, number> = {};
     const before = { ...input.stats };
+    let maxStep = 0;
+    // The smallest advance of the clock's position between two ticks: negative is a step back.
+    let minAdvanceMs = Number.POSITIVE_INFINITY;
+    let lastPosition: number | undefined;
     return new Promise<object>((resolve) => {
       const started = performance.now();
       const ticker = setInterval(() => {
         modes[clock.mode] = (modes[clock.mode] ?? 0) + 1;
         const position = clock.position();
         if (position !== undefined && clock.mode === 'audio') delays.push((broadcast.now() - position) / 1000);
+        if (position !== undefined && lastPosition !== undefined) {
+          minAdvanceMs = Math.min(minAdvanceMs, (position - lastPosition) / 1000);
+        }
+        lastPosition = position;
         depths.push(input.stats.bufferedUs / 1000);
+        // The analyser holds the last 43 ms, so ticks every 20 ms see every sample.
+        if (input.stats.playing) {
+          analyser.getFloatTimeDomainData(recent);
+          for (let index = 1; index < recent.length; index++) {
+            maxStep = Math.max(maxStep, Math.abs((recent[index] as number) - (recent[index - 1] as number)));
+          }
+        }
         if (performance.now() - started < durationMs) return;
         clearInterval(ticker);
         const after = input.stats;
@@ -120,6 +141,10 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
             delays.length > 0
               ? { p5: quantile(delays, 0.05), p50: quantile(delays, 0.5), p95: quantile(delays, 0.95) }
               : undefined,
+          delayFirstLastMs: delays.length > 0 ? [delays[0], delays.at(-1)] : undefined,
+          maxStep: Math.round(maxStep * 1e4) / 1e4,
+          minAdvanceMs: Number.isFinite(minAdvanceMs) ? Math.round(minAdvanceMs * 10) / 10 : undefined,
+          playbackRate: input.playbackRate,
           outputLatencyMs: Math.round((playback.baseLatency + playback.outputLatency) * 1e4) / 10,
           modes,
         });
@@ -134,6 +159,16 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
     await options.report(phases.at(-1) as object);
     phases.push(await sample('steady', (options.seconds ?? 8) * 1000));
     await options.report(phases.at(-1) as object);
+    // Gain 50 ms of latency, then shed it, as the Video.js renderer's ±5 % nudges do.
+    for (const [phase, rate] of [
+      ['slow', 0.95],
+      ['fast', 1.05],
+    ] as const) {
+      input.playbackRate = rate;
+      phases.push(await sample(phase, 1000));
+      await options.report(phases.at(-1) as object);
+    }
+    input.playbackRate = 1;
     // An interruption over the wire: drop everything held and whatever arrives for the next 300 ms of the timeline.
     const sentAt = performance.now();
     const untilUs = broadcast.now() + 300_000;
@@ -146,6 +181,7 @@ export async function runAudioPlayerScenario(options: ScenarioOptions) {
     if (failures.length > 0) throw failures[0];
     return { phases, sequencer: { ...sequencer.stats }, stats: { ...input.stats } };
   } finally {
+    analyser.disconnect();
     stop.abort();
     await listener.stop();
     microphone.close();

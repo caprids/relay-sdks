@@ -16,6 +16,8 @@ export interface AudioPlayerProcessorOptions {
   targetFrames: number;
   minTargetFrames: number;
   maxTargetFrames: number;
+  /** Held frames read per output frame. */
+  playbackRate: number;
 }
 
 /** What the main thread sends. Timestamps are on the broadcast timeline, in microseconds. */
@@ -24,6 +26,7 @@ export type AudioPlayerProcessorCommand =
   | { type: 'flush' }
   | { type: 'cut'; fromUs: number | null; untilUs: number | null }
   | { type: 'ceiling'; maxTargetFrames: number }
+  | { type: 'rate'; playbackRate: number }
   | { type: 'stop' };
 
 /** What the processor reports, about every 20 ms. Counters are cumulative, in frames. */
@@ -32,9 +35,15 @@ export interface AudioPlayerProcessorReport {
   frame: number;
   /** The context frames rendered when the report was posted. */
   rendered: number;
-  /** The timeline timestamp of the sample output at `frame`, or `null` when it was silence. */
+  /** The timeline timestamp of the read position output at `frame`, or `null` when it was silence. */
   timestampUs: number | null;
   playing: boolean;
+  /** Times playback started: at the start, after running dry, and after a flush or a cut that emptied the buffer. */
+  playStarts: number;
+  /** The timeline timestamp just past the newest held sample, or `null` when nothing is held. */
+  heldUntilUs: number | null;
+  /** The timeline timestamp of the read position where the buffer last ran dry while playing, until it plays again. */
+  dryAtUs: number | null;
   bufferedFrames: number;
   targetFrames: number;
   underruns: number;
@@ -77,9 +86,15 @@ function audioPlayerWorklet(name: string): void {
 
   class AudioPlayerInput extends AudioWorkletProcessor {
     readonly ring: Float32Array[];
-    /** Samples ever written and read: the ring holds `written − read` of them. */
+    /**
+     * Samples ever written and read: the ring holds `written − read` of them. The read position is `read + phase`:
+     * at a playback rate other than 1, output falls between held samples, and `phase` (0 ≤ phase < 1) carries the
+     * fraction across quanta and rate changes.
+     */
     written = 0;
     read = 0;
+    phase = 0;
+    rate: number;
     segments: Segment[] = [];
     playing = false;
     target: number;
@@ -87,6 +102,9 @@ function audioPlayerWorklet(name: string): void {
     maxTarget: number;
     /** Frames of silence output since the buffer ran dry while playing; `undefined` when it has not. */
     dry: number | undefined;
+    /** Where it ran dry, until playback starts again. */
+    dryAtUs: number | null = null;
+    playStarts = 0;
     smooth = 0;
     window = 0;
     lowWater = Number.POSITIVE_INFINITY;
@@ -105,7 +123,8 @@ function audioPlayerWorklet(name: string): void {
 
     constructor(options: { processorOptions: AudioPlayerProcessorOptions }) {
       super();
-      const { channels, targetFrames, minTargetFrames, maxTargetFrames } = options.processorOptions;
+      const { channels, targetFrames, minTargetFrames, maxTargetFrames, playbackRate } = options.processorOptions;
+      this.rate = playbackRate;
       this.ring = Array.from({ length: channels }, () => new Float32Array(CAPACITY));
       this.minTarget = minTargetFrames;
       this.maxTarget = Math.max(minTargetFrames, maxTargetFrames);
@@ -124,17 +143,21 @@ function audioPlayerWorklet(name: string): void {
       else if (command.type === 'ceiling') {
         this.maxTarget = Math.max(this.minTarget, command.maxTargetFrames);
         this.target = Math.min(this.target, this.maxTarget);
-      } else this.stopped = true;
+      } else if (command.type === 'rate') this.rate = command.playbackRate;
+      else this.stopped = true;
     }
 
-    /** The timestamp of sample `index`, held or the next to be written; silence written for a gap continues its run. */
-    timestampAt(index: number) {
+    /**
+     * The timestamp of sample `index`, held or the next to be written, plus `fraction` of a sample; silence written for
+     * a gap continues its run.
+     */
+    timestampAt(index: number, fraction = 0) {
       let segment = this.segments[0] as Segment;
       for (const candidate of this.segments) {
         if (candidate.start > index) break;
         segment = candidate;
       }
-      return segment.timestampUs + Math.round(((index - segment.start) * 1_000_000) / sampleRate);
+      return segment.timestampUs + Math.round(((index + fraction - segment.start) * 1_000_000) / sampleRate);
     }
 
     /** The index of the first held sample whose timestamp is at or after `timestampUs`; `written` when none is. */
@@ -217,6 +240,8 @@ function audioPlayerWorklet(name: string): void {
     emptied() {
       this.playing = false;
       this.dry = undefined;
+      this.dryAtUs = null;
+      this.phase = 0;
       this.segments = [];
     }
 
@@ -269,6 +294,8 @@ function audioPlayerWorklet(name: string): void {
       const frames = output[0]?.length ?? 128;
       if (!this.playing && this.buffered >= this.target) {
         this.playing = true;
+        this.playStarts++;
+        this.dryAtUs = null;
         this.lowWater = this.buffered;
         this.window = 0;
       }
@@ -278,21 +305,42 @@ function audioPlayerWorklet(name: string): void {
         if (this.buffered > hard) this.dropTo(this.written - hard, true);
       }
       if (this.playing) {
-        const available = Math.min(frames, this.buffered);
-        timestampUs = this.timestampAt(this.read);
+        // Output `offset` reads position `phase + offset × rate` past `read`, between two held samples: as many as
+        // stay at or before the newest one.
+        const { rate, phase } = this;
+        const last = this.buffered - 1 - phase;
+        const available = last < 0 ? 0 : Math.min(frames, Math.floor(last / rate) + 1);
+        timestampUs = this.timestampAt(this.read, phase);
         for (let channel = 0; channel < output.length; channel++) {
           const ring = this.ring[Math.min(channel, this.ring.length - 1)] as Float32Array;
           const out = output[channel] as Float32Array;
-          for (let offset = 0; offset < available; offset++)
-            out[offset] = ring[(this.read + offset) % CAPACITY] as number;
+          if (rate === 1 && phase === 0) {
+            for (let offset = 0; offset < available; offset++)
+              out[offset] = ring[(this.read + offset) % CAPACITY] as number;
+          } else {
+            for (let offset = 0; offset < available; offset++) {
+              const at = phase + offset * rate;
+              const whole = Math.floor(at);
+              const fraction = at - whole;
+              const a = ring[(this.read + whole) % CAPACITY] as number;
+              const b = fraction === 0 ? a : (ring[(this.read + whole + 1) % CAPACITY] as number);
+              out[offset] = a + (b - a) * fraction;
+            }
+          }
           out.fill(0, available);
         }
-        this.read += available;
+        // Rate 2 can step one sample past the newest: the position stops there.
+        const advance = phase + available * rate;
+        const whole = Math.min(Math.floor(advance), this.buffered);
+        this.read += whole;
+        this.phase = whole === Math.floor(advance) ? advance - whole : 0;
+        if (this.buffered === 0) this.phase = 0;
         this.prune();
         if (available < frames) {
           // Ran dry: wait for the target again. Whether it counts as an underrun is known when audio comes back.
           this.playing = false;
           this.dry = frames - available;
+          this.dryAtUs = this.timestampAt(this.read, this.phase);
           if (this.buffered === 0) this.segments = [];
         } else {
           this.lowWater = Math.min(this.lowWater, this.buffered);
@@ -322,6 +370,9 @@ function audioPlayerWorklet(name: string): void {
           rendered: currentFrame + frames,
           timestampUs,
           playing: this.playing,
+          playStarts: this.playStarts,
+          heldUntilUs: this.buffered > 0 ? this.timestampAt(this.written) : null,
+          dryAtUs: this.dryAtUs,
           bufferedFrames: this.buffered,
           targetFrames: this.target,
           underruns: this.underruns,

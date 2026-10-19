@@ -150,6 +150,9 @@ untilUs })` drops received audio in a timeline range; an `Interrupt` read with `
 from a talker's interrupt track (`INTERRUPT_TRACK`) is one, so `input.cut(parseInterrupt(object.payload))`
 applies it, and `buildInterrupt({ untilUs })` writes one. `createEchoCancellationLoopback(context,
 node)` plays a node through a local WebRTC loopback so Chromium's echo canceller hears it.
+`input.playbackRate` (0.5 to 2) lets a player that owns its latency nudge it, and an input's clock
+can be the player's own (`AudioInputClock`): each report passes it the input's stats, including
+`playStarts`, `heldUntilUs` and `dryAtUs`.
 `createRenderClock` times an `AudioContext`'s renders on `performance.now()`'s clock, for capture
 and playout alike. Give an audio-only broadcast's clock `AUDIO_ONLY_TARGET_LATENCY_US` (500 ms): the
 2 s default waits for keyframe intervals. The player takes structural Web Audio types, so it imports

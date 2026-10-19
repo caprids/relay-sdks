@@ -1,5 +1,6 @@
 export {
   type AudioCutRange,
+  type AudioInputClock,
   type AudioInputOptions,
   type AudioInputStats,
   type AudioPlayer,

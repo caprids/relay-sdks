@@ -40,12 +40,22 @@ const server = await startModuleServer({
 const { chromium } = await import('playwright');
 
 // What a pass needs: steady playback with the clock driven by audio, no underrun, the buffer near its target, and
-// audio flowing again after the cut, which an interrupt sent on the interrupt track triggered.
+// audio flowing again after the cut, which an interrupt sent on the interrupt track triggered. The rate nudges (issue
+// #329) move the delay by about 50 ms each way, with no underrun, no step back of the clock, and no click: no step
+// between samples past 0.025, where the 0.3 tone's own steepest is 0.018 at 1.05. A frame concealed with silence
+// steps further, so a phase that concealed one is not checked for clicks.
 const verdict = ({ phases }) => {
   const steady = phases.find((phase) => phase.phase === 'steady');
   const cut = phases.find((phase) => phase.phase === 'cut');
   const ticks = Object.values(steady.modes).reduce((sum, count) => sum + count, 0);
+  const nudged = ['slow', 'fast'].map((name) => phases.find((phase) => phase.phase === name));
+  const moved = ({ delayFirstLastMs: [first, last] }) => last - first;
   return (
+    nudged.every(
+      (phase) => phase.underruns === 0 && (phase.concealedMs > 0 || phase.maxStep <= 0.025) && phase.minAdvanceMs > 0,
+    ) &&
+    Math.abs(moved(nudged[0]) - 50) <= 20 &&
+    Math.abs(moved(nudged[1]) + 50) <= 20 &&
     steady.decoded >= seconds * 45 &&
     steady.underruns === 0 &&
     (steady.modes.audio ?? 0) >= ticks * 0.95 &&
