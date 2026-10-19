@@ -50,6 +50,11 @@ try {
 }
 ```
 
+For a voice participant with no video, [`publish-microphone.ts`](publish-microphone.ts)'s
+`publishMicrophone(publisher, namespace, { signal, microphone, data })` publishes a catalog with the
+audio track alone; `publishCanvas` encodes its microphone through the same code. The
+[voice bot page](../voice-bot/README.md) uses it.
+
 ## Listen to the audio
 
 [`listen-audio.ts`](listen-audio.ts) plays a broadcast's `audio` track with no video, as a voice

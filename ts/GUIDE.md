@@ -889,7 +889,8 @@ const loopback = await createEchoCancellationLoopback(context, player.output); /
 Firefox and Safari cancel echo from all page output, so play directly there. The loopback adds the
 WebRTC receiver's buffering, which no API reports; set `player.outputDelayUs` if video must stay in
 sync with the audio. The [WebCodecs example](examples/webcodecs/README.md)'s `listen-audio.ts`
-plays its microphone track this way.
+plays its microphone track this way, and the [voice bot page](examples/voice-bot/README.md) plays a
+Python bot through it while publishing the microphone.
 
 ### Voice: delivery per direction
 

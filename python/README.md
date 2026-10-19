@@ -823,6 +823,13 @@ transcoded file, with optional Opus audio) in the MSF/LOC shape consumed by Vide
 `examples` dependency group (PyAV, numpy), which `uv sync` installs by default. Follow that example's
 setup after completing the data quickstart; media helpers and player integration are separate topics.
 
+## Voice bot example
+
+[voice_bot](examples/voice_bot/README.md) is a parrot voice bot for a browser user: it decodes the
+user's microphone with `moq_media.opus.OpusDecoder`, waits for a pause, answers with `OpusEncoder`,
+and sends an interrupt when the user talks over it. STT, a language model and TTS plug in through
+one async function. Its browser side is `ts/examples/voice-bot`.
+
 ## Package boundaries
 
 - `packages/mux-relay`, `mux_relay`, owns the Relay product API, the authentication convention, and

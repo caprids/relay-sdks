@@ -38,7 +38,8 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   `parseInterrupt` write and read the interrupt track's messages (`INTERRUPT_TRACK`, `'interrupt'`), which tell a
   listener to drop audio a talker already sent; a parsed `Interrupt` is an `AudioCutRange`, so
   `input.cut(interrupt)` applies it. The WebCodecs example's `listenAudio` applies them when the catalog lists the
-  track, and `publishCanvas` takes `data` tracks to list.
+  track, and `publishCanvas` takes `data` tracks to list. A new voice bot page (`examples/voice-bot`) talks to the
+  Python bot through them, on the WebCodecs example's new audio-only `publishMicrophone`.
 - `@mux/moq-media`: a headless audio player ([#314](https://github.com/muxinc/relay-sdks/issues/314)).
   `createAudioPlayer({ context })` mixes any number of inputs into one `output` node; each
   `player.addInput({ clock, decoderConfig })` decodes with WebCodecs, resets its decoder at discontinuities, holds

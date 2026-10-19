@@ -100,6 +100,7 @@ testpaths = [
   "packages/mux-relay/tests",
   "examples/shared/tests",
   "examples/videojs_stream/tests",
+  "examples/voice_bot/tests",
 ]
 pythonpath = ["packages/moq-core/tests", "packages/mux-relay/tests"]
 asyncio_mode = "auto"
