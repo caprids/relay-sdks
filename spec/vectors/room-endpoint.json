@@ -34,6 +34,8 @@
     { "name": "hash in a field", "endpoint": "https://relay.example", "room": ["a#b"], "error": "range" },
     { "name": "backslash in a field", "endpoint": "https://relay.example", "room": ["a\\b"], "error": "range" },
     { "name": "control character in a field", "endpoint": "https://relay.example", "room": ["a\tb"], "error": "range" },
+    { "name": "trailing newline in a field", "endpoint": "https://relay.example", "room": ["a\n"], "error": "range" },
+    { "name": "dot-dot with a trailing newline", "endpoint": "https://relay.example/acme", "room": ["..\n", "rooms"], "error": "range" },
     { "name": "dot field", "endpoint": "https://relay.example", "room": ["acme", "."], "error": "range" },
     { "name": "dot-dot field", "endpoint": "https://relay.example", "room": [".."], "error": "range" },
     {
