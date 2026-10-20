@@ -59,14 +59,13 @@ const sizes = {
 const namespace = [...(env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-probe').split('/').filter(Boolean), randomUUID()];
 
 const resolveTo = env.PRIORITY_RESOLVE;
+let subscriberDialing = false; // set only while the subscriber's transport dials, so the publisher keeps its path
 if (resolveTo !== undefined) {
-  // Dial the impairer for the subscriber's host and port only, keeping the host as the TLS server name.
-  const { hostname, port } = new URL(subUrl);
+  // Dial the impairer for the subscriber only, keeping the host as the TLS server name.
   const { Client } = loadAddon();
   const dial = Client.prototype.dial;
-  Client.prototype.dial = function (host, dialPort, serverName, protocols) {
-    const impaired = host === hostname && dialPort === Number(port || 443);
-    return dial.call(this, impaired ? resolveTo : host, dialPort, serverName, protocols);
+  Client.prototype.dial = function (host, port, serverName, protocols) {
+    return dial.call(this, subscriberDialing ? resolveTo : host, port, serverName, protocols);
   };
 }
 
@@ -74,7 +73,13 @@ const arrivals = { audio: [], video: [] }; // [captureMs, arrivalMs]
 const sent = {}; // track -> SUBSCRIBER_PRIORITY on its SUBSCRIBE, or null
 // Read each SUBSCRIBE off the subscriber's request streams as the session writes it.
 const createTransport = (dial) => (transportUrl, protocols) => {
-  const opened = dial(transportUrl, protocols);
+  subscriberDialing = true;
+  let opened;
+  try {
+    opened = dial(transportUrl, protocols); // the native client dials synchronously
+  } finally {
+    subscriberDialing = false;
+  }
   const open = opened.transport.createBidirectionalStream.bind(opened.transport);
   opened.transport.createBidirectionalStream = async () => {
     const stream = await open();

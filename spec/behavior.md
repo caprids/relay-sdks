@@ -1488,11 +1488,11 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
     probe read each SUBSCRIBE off the subscriber's request streams: SUBSCRIBER_PRIORITY 16 and 96
     with the helper, none without. On a clean path every mode delivered audio in 1 to 2 ms.
 
-    | subscriber priority | runs | audio p50 | p95 | p99 | max | audio received |
+    | subscriber priority | runs | audio p50 | p95 | p99 | max | audio received after the warm-up |
     | --- | --- | --- | --- | --- | --- | --- |
-    | on (audio 16, video 96) | 3 | 43–45 ms | 70–72 ms | 74–76 ms | 76–93 ms | 995 of 1,245 |
-    | off | 3 | 176–181 ms | 243–245 ms | 253–259 ms | 308–441 ms | 996 of 1,245 |
-    | inverted (audio 96, video 16) | 2 | 11.9 s, 2 frames; none | | | | 2 and 0 |
+    | on (audio 16, video 96) | 3 | 43–45 ms | 70–72 ms | 74–76 ms | 76–93 ms | 995 of about 1,000 published |
+    | off | 3 | 176–181 ms | 243–245 ms | 253–259 ms | 308–441 ms | 996 of about 1,000 published |
+    | inverted (audio 96, video 16) | 2 | 11.9 s, 2 frames; none | | | | 2 and 0 of about 1,000 |
 
     Video lagged 7.7 to 8.3 s at p50 either way: the cap is below its rate, and the relay keeps a
     stalled viewer's backlog. With the publisher's `0x0E` set, the relay stamped each group stream
