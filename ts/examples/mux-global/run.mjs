@@ -28,6 +28,8 @@ const built = [
 const usage = `Usage: node examples/mux-global/run.mjs [options]
 
   --url <https url>      Relay endpoint (default RELAY_URL or https://sjc.relay.mux.global)
+  --room <a/b/c>         Root --url at these slash-separated fields with roomEndpoint, such as the
+                         token's root on the bare host; --namespace is then relative to them
   --namespace <a/b/c>    Namespace, slash-separated, relative to the --url path (on the bare
                          host, include the token's root prefix)
                          (default RELAY_NAMESPACE_PREFIX or relay-sdk-example, plus a random field)
@@ -56,6 +58,7 @@ try {
   ({ values: args } = parseArgs({
     options: {
       url: { type: 'string', default: process.env.RELAY_URL ?? 'https://sjc.relay.mux.global' },
+      room: { type: 'string' },
       namespace: { type: 'string' },
       track: { type: 'string', default: 'ticker' },
       mode: { type: 'string', default: 'both' },
@@ -101,6 +104,14 @@ await Promise.all(built.map((directory) => access(resolve(directory, 'index.js')
 // native addon has not been built for this platform.
 const { nativeQuicTransport } = await import('@mux/relay-quic');
 const { runDemo } = await import('./demo.js');
+const { roomEndpoint } = await import('@mux/relay');
+if (args.room !== undefined) {
+  try {
+    config.url = roomEndpoint(config.url, args.room.split('/').filter(Boolean));
+  } catch (error) {
+    fail(`--room: ${error.message}`);
+  }
+}
 let createTransport;
 try {
   createTransport = nativeQuicTransport();

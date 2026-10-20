@@ -68,6 +68,7 @@ without a row here is a bug.
 | A want moved make-before-break (a newer generation, or another track or parameters) | `until` and `drainMs` on `WantOptions`; `onSwitched(info)` with `WantSwitchedInfo` (`from`, `to`, each a `WantTarget` of `namespace` and `track`; `subscribed`) | `until=` and `drain=` (seconds) on `want`; `on_switched(info)` with `WantSwitchedInfo` (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`) |
 | Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()` |
 | Backoff bounds between attempts | `SupervisionBackoff` (`initialDelayMs`, `maxDelayMs`), given as `reconnect` or `retry` | `SupervisionBackoff` (`initial_delay`, `max_delay`, seconds), as `reconnect=` or `retry=` |
+| Build a room-rooted endpoint: the endpoint with a room's fields appended to its path | `roomEndpoint(endpoint, room)` returns a URL string | `room_endpoint(endpoint, room)` returns a URL `str` |
 | The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
@@ -290,6 +291,30 @@ the relay's state interchangeably); `watchNamespaces()` (a verb, where every oth
 for what it yields); `subscribeNamespace()` (the core's protocol name, which `trackSource` already
 keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
 message).
+
+## Room-rooted endpoints: `roomEndpoint`
+
+`roomEndpoint(endpoint, room)` returns the endpoint with the room's fields appended to its path. A
+connection to that URL names namespaces relative to the room
+([Subscribing](behavior.md#subscribing), [issue #348](https://github.com/muxinc/relay-sdks/issues/348)).
+It is a pure function: it builds a string and connects nothing. "Room" is the word the docs already
+use for the path a token grants, and the result is an endpoint, the same noun as `url` on every
+connect call, so the name says what it returns, as `mediaTrackProperties` does. `room` is a
+namespace prefix, so it follows the namespace argument rules, including the 32-field limit.
+
+It encodes nothing. moq-relay reads each path segment as a namespace field without percent-decoding
+it, so `a%20b` is the field `a%20b`, not `a b`
+([endpoint paths](relay-interop.md#endpoint-paths)). An encoded URL would therefore root the
+connection somewhere else, with no error. For that reason the helper refuses any field that a URL
+cannot carry unchanged, and that room is reached from the bare host instead.
+
+Not adopted: `rootedEndpoint` (it names the mechanism, while the docs and the token name the
+room); `endpointFor` or `withPrefix` (they do not say the prefix becomes the path); a `room` option on
+`connectRelay*` (it would change how every connect call reads its namespace, and it would hide the
+URL that both the relay and the logs see); percent-encoding as #348 proposed (it is wrong on every
+relay measured; it can be added if the relay starts decoding, without breaking an accepted room);
+keeping the helper in the examples (its value is the validation, which applications need as much as
+the examples do).
 
 ## Switching tracks: `subscribeSwitchable`, `switchTo`, `onSwitched`
 

@@ -52,7 +52,7 @@ RELAY_TOKEN=... mise run python:example:voice-bot -- --namespace mattypoo/voice-
 RELAY_TOKEN=... mise run ts:example:voice-bot -- --namespace mattypoo/voice-bot
 ```
 
-`--port` picks another port. With `RELAY_TOKEN` set the page holds the token, so the server listens
+`--port` picks another port, and `--room` roots `RELAY_URL` at the given fields with `roomEndpoint`, as the bot's `--room` does. With `RELAY_TOKEN` set the page holds the token, so the server listens
 on the loopback interface only and never prints it; without it, paste one into the page. The status
 line shows how much of the bot's audio the player has played, its buffer, underruns, interrupts and
 how much they cut; below it, the bot's words appear as they play, with `—` where it was talked over.

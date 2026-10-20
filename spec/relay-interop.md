@@ -275,6 +275,32 @@ includes routes learned from cluster peers.
   6 to 14 of 40 (same relay) and 40 of 40 (other relay) for a subscribe right after the publisher's
   `announced` ([announce propagation](#announce-propagation)).
 
+## Endpoint paths
+
+moq-relay takes the endpoint URL's path, split on `/`, as the namespace prefix of a connection
+([room-rooted endpoints](behavior.md#room-rooted-endpoints)). It does not percent-decode the
+segments. Measured on 2026-10-20 on `ord.relay.mux.global` (moq-relay 0.17.5) and
+`sjc.relay.mux.global` (0.17.0), for [issue #348](https://github.com/muxinc/relay-sdks/issues/348).
+A Python publisher (native QUIC) connected to `<host>/<root>/<run>/<segment>` with the namespace
+`['t']`, and bare-host discovery named the namespace the relay derived. The TypeScript smoke test,
+with a room field `a b`, failed in the same way on Node (native QUIC) and Chromium (WebTransport).
+Its room publisher at `.../a%20b/...` never appeared under the bare `a b` namespace.
+
+| Path segment | Field the relay derived |
+| --- | --- |
+| `a%20b`, `a%25b`, `a%2Fb`, `a%2fb`, `a%2Eb`, `%2E%2E`, `%C3%A9` | the same text, `%` sequences included: never `a b`, `a%b`, `a/b`, `a.b`, `..` or `é` |
+| raw `é` (UTF-8 bytes in PATH, native QUIC only; a browser URL encodes it) | `é` |
+| `a~b`, `a!b`, `a$b`, `a&b`, `a'b`, `a(b)`, `a+b`, `a,b`, `a;b`, `a=b`, `a:b`, `a@b` (ord only) | the same text |
+| `a*b` (ord only) | none: the connection fails with `UNAUTHORIZED` |
+
+An encoded `/` is a literal part of a field, not a separator and not a refusal. A browser cannot
+send a raw space or non-ASCII character in a path, and the WHATWG URL parser folds `.`, `..` and
+their encoded forms into the path before the request leaves. `roomEndpoint` / `room_endpoint`
+therefore refuses those fields instead of encoding them. The live smoke test passed on ord with a
+room field holding every character the helper allows
+(`RELAY_NAMESPACE_PREFIX="<root>/a-._~!$&'()+,;=:@Z9"`), in Python and on all four TypeScript
+runtimes, QMux over WebSocket included. Encoded segments were not measured over WebSocket.
+
 ## Supervised generations
 
 Measured on 2026-10-06 against `sjc.relay.mux.global` (moq-relay 0.17.0) with the TypeScript SDK

@@ -28,6 +28,7 @@ describe('public vocabulary', () => {
       'connectSupervisedSubscriber',
       'readJSON',
       'readText',
+      'roomEndpoint',
     ]);
     expect(relay).not.toHaveProperty('connectRelay');
   });

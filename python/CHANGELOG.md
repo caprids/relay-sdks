@@ -10,6 +10,10 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 
 - `mux-relay`: `connect_relay_publisher` and `connect_relay_subscriber` over native QUIC through aioquic,
   and the `mux_relay.media` frame writer and catalog service.
+- `mux_relay.room_endpoint(endpoint, room)` builds the recommended room-rooted endpoint, the endpoint with the
+  token's root appended to its path ([#348](https://github.com/muxinc/relay-sdks/issues/348)). It keeps the query
+  and encodes nothing: moq-relay reads the path without percent-decoding it, so a field that would need encoding
+  (a space, `%`, `/`, `*`, non-ASCII, `.` or `..`) raises `ValueError`, and that room is reached from the bare host.
 - `mux_relay.media.media_track_properties("audio" | "video", ...)` gives a media track a default subgroup delivery
   timeout, so a stall costs stale frames instead of lasting latency
   ([#302](https://github.com/muxinc/relay-sdks/issues/302)): 500 ms for audio, and for video the target latency less

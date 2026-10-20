@@ -188,6 +188,7 @@ connection state, because it depends on the connection's registry.
 | Track name | A non-empty string, in both roles. | anything else | | `registerTrack` / `register_track`; the three subscriber entry points |
 | Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length). A track's properties encode to at most `limits.maxTrackPropertiesBytes` (65,525 bytes, the room SUBSCRIBE_OK leaves them), hold at most `relay.limits.maxTrackProperties` (64) pairs, and keep Default Publisher Priority (`0x0E`) at most 255 and Default Publisher Group Order (`0x22`) at 1 or 2 (`trackProperties`, draft-22 §10.4 and §10.5), because otherwise the track registers but every subscribe to it fails while the publisher's writes time out. An object's properties on `write` encode to at most `relay.limits.maxObjectPropertiesBytes` (64 KiB), because the relay drops a larger object without an error to either side. The SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds its bound; track properties with more than 64 pairs, or a `0x0E` or `0x22` value draft-22 rules out | `registerTrack` / `register_track`; `write` on a track or group writer |
 | Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. | not a string; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
+| Room | The endpoint follows the Endpoint rule and the room the Namespace rule. Each room field is also made only of the characters a URL path carries unchanged and the relay reads back as the same field, `A`–`Z`, `a`–`z`, `0`–`9` and `-._~!$&'()+,;=:@`, and is not `.` or `..` ([room-rooted endpoints](#room-rooted-endpoints)). Checked endpoint first, then room. | as Endpoint and Namespace | as Endpoint and Namespace; a room field with any other character, such as a space, `%`, `/`, `*`, `?`, `#`, `\` or a non-ASCII character, or a field that is `.` or `..` | `roomEndpoint` / `room_endpoint` |
 | Deadline | A number in (0, 2147483647] milliseconds in TypeScript, (0, 2147483.647] seconds in Python: the largest delay a JavaScript timer holds, and the same bound in both SDKs. The connection, request and write deadlines share one check. | not a number, including a boolean | zero, negative, NaN, infinite, or above the bound | `connectTimeoutMs` / `connect_timeout` on both connect calls; `requestTimeoutMs` / `request_timeout`; `writeTimeoutMs` / `write_timeout` on `registerTrack` / `register_track` |
 | Track registration | A track name not yet registered on this publisher connection, including after its writer closed. Checked after the track name, properties and deadline, and after connection state. | | a name already registered | `registerTrack` / `register_track` |
 | Media track timing | A media kind, `'audio'` or `'video'`; every duration a positive integer number of microseconds (a safe integer in TypeScript, an `int` other than a boolean in Python) of at most 2147483647000, the deadline bound in whole milliseconds. Video needs a keyframe interval, and a target latency is at least the keyframe interval. A publisher priority, when given, is an integer from 0 to 255. | a kind that is not a string; video without a keyframe interval; a duration or publisher priority that is not a number (TypeScript) or not an `int`, including a boolean and any float (Python) | another kind; a target latency below the keyframe interval; a duration that is zero, negative or above the bound, and in TypeScript also fractional, NaN or infinite; a publisher priority below 0 or above 255, and in TypeScript also fractional, NaN or infinite | `mediaTrackProperties` / `media_track_properties` |
@@ -224,6 +225,9 @@ Messages are not a compatibility contract; the class and the point of rejection 
   ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)). Namespaces and track names
   follow the [Arguments](#arguments) table in both roles: an invalid one is rejected locally,
   before connecting a publisher or sending a subscription.
+- `roomEndpoint(endpoint, room)` / `room_endpoint(endpoint, room)` builds the room-rooted endpoint,
+  so an application does not assemble the URL itself
+  ([room-rooted endpoints](#room-rooted-endpoints)).
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The callback path adds no application queue, no
@@ -366,6 +370,37 @@ and the response timeout keep the one-turn hold.
 
 A readiness awaitable nobody awaits cannot surface as an unhandled rejection: the SDK pre-handles
 it. Awaiting it later still observes the same result.
+
+
+### Room-rooted endpoints
+
+`roomEndpoint(endpoint, room)` / `room_endpoint(endpoint, room)` returns the room-rooted endpoint
+for a room, the namespace prefix its path names
+([issue #348](https://github.com/muxinc/relay-sdks/issues/348)). It is a pure function: it reads no
+token, opens no connection and changes nothing about `connect*`. The cases live in
+`vectors/room-endpoint.json` and run in every SDK's suite.
+
+- **Validation.** The endpoint follows the Endpoint rule and the room the Namespace rule of the
+  [Arguments](#arguments) table, with the same error classes, endpoint first. A room field must
+  also be one or more of `A`–`Z`, `a`–`z`, `0`–`9` and `-._~!$&'()+,;=:@`, and not `.` or `..`.
+  Anything else is a `RangeError` (TypeScript) or `ValueError` (Python) that names the field.
+- **No encoding.** The helper percent-encodes nothing. moq-relay takes each segment of the path
+  as a namespace field without percent-decoding it, so `a%20b`, `a%25b`, `a%2Fb` and `%C3%A9`
+  root a connection at fields that still hold the `%` sequence, not at `a b`, `a%b`, `a/b` or `é`
+  ([endpoint paths](relay-interop.md#endpoint-paths)). An encoded `/` is therefore neither a
+  separator nor a refusal: it is part of a literal field. A browser's URL parser always encodes a
+  space or a non-ASCII character and folds `.` and `..` segments into the path, and moq-relay
+  refuses a path containing `*` with `UNAUTHORIZED`. No URL can root a connection at a field like
+  these, so the helper refuses them. A namespace with such a field is still valid, and the
+  application reaches it from the bare host with absolute fields.
+- **Path.** The result keeps the endpoint's scheme, host and port, as the language's URL parser
+  writes them. It takes the endpoint's path without its trailing slashes and appends `/` and each
+  room field, so `https://relay.example` and `https://relay.example/` give the same URL. An
+  existing path stays in front of the room: with `https://relay.example/acme` and
+  `['rooms', '42']` the result is `https://relay.example/acme/rooms/42`.
+- **Query.** The endpoint's query is kept unchanged after the new path, including a present but
+  empty `?`. A `jwt` parameter stays in the query, never in the path, and the connect calls read it
+  there as usual. The endpoint has no fragment to keep, because the Endpoint rule refuses one.
 
 ## Async subscription consumption
 
@@ -1697,8 +1732,10 @@ and subscribes on the same random namespace, then asserts:
 8. A [switchable subscription](#switching-tracks) moves from one layer to another
    make-before-break. The layers carry the same frame numbers, one group per frame, and no frame
    number is missing across the cutover. The report records how long the cutover took.
-9. A room-rooted endpoint, whose path is the run's namespace, takes namespaces relative to that
-   path ([subscribing](#subscribing)). A publisher on each form and a subscriber on each form
+9. A room-rooted endpoint, whose path is the run's namespace (built with `roomEndpoint` /
+   `room_endpoint`, so the namespace prefix must hold only
+   [room fields](#room-rooted-endpoints)), takes namespaces relative to that path
+   ([subscribing](#subscribing)). A publisher on each form and a subscriber on each form
    receive each other's objects, discovery on each form names both publishers in its own form,
    and the relay refuses an absolute namespace on the rooted connection without delivering any of
    the room's objects. The report records how long discovery took and the refusal.

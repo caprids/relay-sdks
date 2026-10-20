@@ -29,10 +29,10 @@ and serve it with its `@mux/moq-core` dependency, as described in
 ## Publish and subscribe
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber, readText } from '@mux/relay';
+import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@mux/relay';
 
-const url = 'https://sjc.relay.mux.global';
-const namespace = ['team', 'quickstart', 'unique-run']; // a namespace your token authorizes
+const url = roomEndpoint('https://sjc.relay.mux.global', ['team']); // your token's root as the path
+const namespace = ['quickstart', 'unique-run']; // relative to that root
 const getToken = () => token; // a Relay JWT allowed to publish and subscribe there
 
 const publisher = await connectRelayPublisher({ url, namespace, getToken });
@@ -80,10 +80,10 @@ binary, a connect call fails with `RelayError` code `TRANSPORT_UNAVAILABLE`.
 The code is the browser example's, with a different import:
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber, readText } from '@mux/relay/node';
+import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@mux/relay/node';
 
-const url = 'https://sjc.relay.mux.global';
-const namespace = ['team', 'quickstart', 'unique-run'];
+const url = roomEndpoint('https://sjc.relay.mux.global', ['team']);
+const namespace = ['quickstart', 'unique-run'];
 const getToken = () => process.env.RELAY_TOKEN;
 
 const publisher = await connectRelayPublisher({ url, namespace, getToken });

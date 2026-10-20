@@ -11,6 +11,7 @@ import {
   connectRelaySubscriber,
   connectSupervisedPublisher,
   connectSupervisedSubscriber,
+  roomEndpoint,
 } from '@mux/relay';
 
 /**
@@ -464,20 +465,16 @@ export async function runRelayScenario({
       switchable.cancel();
     }
 
-    // Assertion 9. A room-rooted endpoint (issue #266): the endpoint's path is the run's namespace and
-    // its connections name namespaces relative to it. A publisher on each form, a subscriber on each
-    // form subscribing to the other's track, and discovery on each form must agree: the relay resolves
-    // `<endpoint>/<room>` + `['pair', 'rooted']` to what `<endpoint>` + `[...room, 'pair', 'rooted']`
-    // addresses. Each publisher writes a counter while it has demand, so an object the relay's first
-    // hop drops (issue #243) is followed by another. An absolute namespace on a rooted connection
-    // addresses a namespace below the room, not the run's own, so the relay refuses its subscription
-    // as unroutable and it never gets the bare publisher's objects.
+    // Assertion 9. A room-rooted endpoint (issue #266), built with roomEndpoint (issue #348): the endpoint's
+    // path is the run's namespace and its connections name namespaces relative to it. A publisher on each form,
+    // a subscriber on each form subscribing to the other's track, and discovery on each form must agree: the
+    // relay resolves `<endpoint>/<room>` + `['pair', 'rooted']` to what `<endpoint>` + `[...room, 'pair',
+    // 'rooted']` addresses. Each publisher writes a counter while it has demand, so an object the relay's first
+    // hop drops (issue #243) is followed by another. An absolute namespace on a rooted connection addresses a
+    // namespace below the room, not the run's own, so the relay refuses its subscription as unroutable and it
+    // never gets the bare publisher's objects.
     const room = namespace;
-    const rooted = (url) => {
-      const target = new URL(url);
-      target.pathname = `${target.pathname.replace(/\/$/, '')}/${room.map(encodeURIComponent).join('/')}`;
-      return target.href;
-    };
+    const rooted = (url) => roomEndpoint(url, room);
     const connectRoom = async (connect, options) => {
       const connection = await connect({ getToken: () => token, signal: lifetime.signal, createTransport, ...options });
       roomConnections.push(connection);

@@ -38,6 +38,22 @@ so a publisher and a subscriber can each use their nearest relay
 `https://sjc.relay.mux.global`, which still requires authorized credentials. For another deployment,
 use the endpoint supplied by its operator.
 
+`roomEndpoint` builds that endpoint from a relay and the token's root, so the URL is not assembled by
+hand:
+
+```ts
+import { roomEndpoint } from '@mux/relay';
+
+const url = roomEndpoint('https://sjc.relay.mux.global', ['acme', 'rooms', '42']);
+// 'https://sjc.relay.mux.global/acme/rooms/42'
+```
+
+It appends each field to the endpoint's path and keeps the endpoint's query. It encodes nothing,
+because the relay reads the path without decoding it. A field may hold only letters, digits and
+`-._~!$&'()+,;=:@`, and may not be `.` or `..`; any other field throws a `RangeError`. Reach a room
+with such a field from the bare host
+([room-rooted endpoints](../spec/behavior.md#room-rooted-endpoints)).
+
 The runner reads `RELAY_TOKEN` when set, otherwise prompts with hidden input. Prefer the prompt for
 manual runs; automation can inject the environment variable through its secret manager. Do not put
 tokens in commands, source files, URLs, or committed `.env` files. Tokens are passed to `getToken`

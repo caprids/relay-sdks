@@ -35,6 +35,7 @@ Options:
 
 | Flag | Meaning |
 | --- | --- |
+| `--room FIELDS` | Append these slash-separated fields to `--url` with `room_endpoint`, such as your token's root on the bare host; `--namespace` is then relative to them |
 | `--input FILE` | Transcode a media file (video scaled to `--width`/`--height`; its audio as Opus with `--audio auto`) |
 | `--loop` | Loop the input file |
 | `--width`, `--height`, `--fps`, `--bitrate`, `--gop` | Test-pattern size and encoder settings (defaults 640x360, 30 fps, 1.5 Mbit/s target, 1 s GOP) |
