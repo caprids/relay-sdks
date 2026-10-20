@@ -1564,7 +1564,8 @@ def parse_args(argv: list[str]) -> Config:
     parser.add_argument("--url", default=os.environ.get("RELAY_URL", DEFAULT_ENDPOINT), help="Relay endpoint")
     parser.add_argument(
         "--namespace",
-        help="Namespace, slash-separated, including the token's root prefix "
+        help="Namespace, slash-separated, relative to the --url path "
+        "(on the bare host, include the token's root prefix) "
         "(default RELAY_NAMESPACE_PREFIX or relay-sdk-example, plus a random field)",
     )
     parser.add_argument("--input", type=Path, help="Media file to transcode instead of the generated test pattern")

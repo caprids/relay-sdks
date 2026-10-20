@@ -495,7 +495,8 @@ def parse_args(argv: list[str]) -> Config:
     parser.add_argument("--url", default=os.environ.get("RELAY_URL", DEFAULT_ENDPOINT), help="Relay endpoint")
     parser.add_argument(
         "--namespace",
-        help="The conversation's namespace, slash-separated, including the token's root prefix; the user publishes "
+        help="The conversation's namespace, slash-separated, relative to the --url path (on the bare host, "
+        "including the token's root prefix); the user publishes "
         "one field below it at user, the bot at bot (default RELAY_NAMESPACE_PREFIX or relay-sdk-example, "
         "plus voice-bot)",
     )

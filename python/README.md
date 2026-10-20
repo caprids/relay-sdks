@@ -19,16 +19,19 @@ or a WebSocket. The endpoint and network must allow QUIC/UDP traffic.
 ### Endpoint and credentials
 
 Ask the team operating your Relay deployment (or your application's backend owner) for an HTTPS
-Relay endpoint, the exact authorized namespace fields, and a
+Relay endpoint, your token's root (the namespace prefix it grants), and a
 short-lived Relay JWT authorized to **publish and subscribe** there. The SDK consumes tokens; it
 does not issue them or provide a public token signup flow. A Mux API access token is not a Relay JWT.
-Namespace fields are relative to the endpoint URL's path: on an endpoint with no path they include
-the token's root prefix, and on an endpoint whose path is that root (for example
-`https://sjc.relay.mux.global/acme/rooms/42`) they leave it out
+Use an endpoint whose path is your token's root (for example
+`https://sjc.relay.mux.global/acme/rooms/42` for a token rooted at `acme/rooms/42`), and name
+namespaces relative to it (`["p", "a"]` rather than `["acme", "rooms", "42", "p", "a"]`). The
+connection then cannot reach outside that root, and a path the token does not grant fails at
+connect with `UNAUTHORIZED`. A client that spans several rooms under one grant can use the bare
+host, where namespace fields include the token's root
 ([namespaces](../spec/behavior.md#subscribing)). The Mux relays carry announcements between regions,
-so a publisher and a subscriber can each use their nearest relay, with either form
+so a publisher and a subscriber can each use their nearest relay
 ([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)).
-The hosted demo defaults to `https://sjc.relay.mux.global`, which still requires authorized credentials.
+The hosted demo defaults to the bare host `https://sjc.relay.mux.global`, which still requires authorized credentials.
 For another deployment, use the endpoint supplied by its operator.
 
 The demo reads `RELAY_TOKEN` when set, otherwise prompts with hidden input. Prefer the prompt for
@@ -55,14 +58,15 @@ retries only that subscription rejection with capped backoff, and waits for dema
 Once a write starts, a failure stops the run; it never automatically replays potentially delivered
 bytes.
 
-Enter the endpoint and a **fresh namespace authorized by your token** when prompted below. The CLI
-splits `team/quickstart/unique-run` into `["team", "quickstart", "unique-run"]`; the SDK itself sends
+Enter the endpoint, ending in your token's root, and a **fresh namespace below it** when prompted
+below. The CLI splits `quickstart/unique-run` into `["quickstart", "unique-run"]`; the SDK itself sends
 fields verbatim. Both connections use those same fields and track `ticker`. If your token authorizes
-only one exact namespace, use that and avoid overlapping publishers or stale cached objects.
+only one exact namespace, enter the bare host as the endpoint and that whole namespace (a namespace
+needs at least one field), and avoid overlapping publishers or stale cached objects.
 
 ```sh
-read -r -p 'Relay HTTPS endpoint: ' RELAY_URL
-read -r -p 'Authorized namespace (slash-separated): ' RELAY_NAMESPACE
+read -r -p "Relay HTTPS endpoint with your token's root as its path: " RELAY_URL
+read -r -p 'Namespace below that root (slash-separated): ' RELAY_NAMESPACE
 mise run python:example:mux-global -- --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE" --track ticker --count 1 --timeout 30
 # Enter the Relay token at the hidden prompt.
 ```

@@ -206,14 +206,19 @@ Messages are not a compatibility contract; the class and the point of rejection 
   namespace the application supplies. With a path the token grants, such as a room-rooted endpoint
   whose path is the token's root (`https://sjc.relay.mux.global/acme/rooms/42`), the path is the
   prefix and the application supplies only the fields below it: `['p', 'a']` there addresses what
-  `['acme', 'rooms', '42', 'p', 'a']` addresses on the bare host. Both forms are supported, and
-  they meet on the relay: a subscriber on either form receives a track published on the other, and
+  `['acme', 'rooms', '42', 'p', 'a']` addresses on the bare host. The room-rooted endpoint is the
+  recommended form: namespaces leave the token's root out, and a connection is confined to the
+  path it dialed. The bare host suits a client that spans several rooms under one grant, such as
+  a lobby that discovers every room. Both forms are supported, and they meet on the relay: a subscriber on either form receives a track published on the other, and
   [discovery](#discovery) on a room-rooted connection names namespaces relative to its path, as
   its prefix is. A connection to a room-rooted endpoint cannot address anything outside that room:
   an absolute namespace there names one below the room (`['acme', 'rooms', '42', 'acme', ...]`),
   so a subscribe reaches only a publisher that announced that longer namespace, and is refused as
-  unroutable when there is none; a `..` field is an ordinary field. An endpoint path the token does not grant fails the connection
-  with `UNAUTHORIZED`. Measured on `*.relay.mux.global` (moq-relay 0.17.0) on one relay and across
+  unroutable when there is none; a `..` field is an ordinary field. An endpoint path the token
+  does not grant fails the connection with `UNAUTHORIZED`, where on the bare host a namespace
+  outside the grant fails only its own subscribe, and its publish never announces
+  ([issue #119](https://github.com/muxinc/relay-sdks/issues/119)). The token remains the access
+  boundary: the path confines a connection, not its token, which can dial any path it grants. Measured on `*.relay.mux.global` (moq-relay 0.17.0) on one relay and across
   regions, on 2026-10-05 and again on 2026-10-20 in both SDKs over every transport, which the
   [live smoke test](#live-smoke-test) now repeats
   ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)). Namespaces and track names
