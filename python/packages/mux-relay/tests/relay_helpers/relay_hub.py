@@ -16,10 +16,11 @@ publisher ends a track by FINing the hub's SUBSCRIBE stream (no PUBLISH_DONE eve
 retracts a namespace with NAMESPACE_DONE; both land in ``track_ends``.
 
 Subscriber side answers SUBSCRIBE with SUBSCRIBE_OK (carrying LARGEST_OBJECT once the track has
-content) and forwards objects one-per-subgroup-stream, resolving the request's Location Filter
-using the draft-22 §3.3.1 rules. FETCH is answered with REQUEST_ERROR. An upstream
-FIN ends the track's downstream subscriptions with PUBLISH_DONE, the way a real relay ends the track
-for every viewer.
+content) and forwards each upstream subgroup on one downstream stream, FINed or reset when the upstream
+stream is, the way a relay preserves subgroups (a frame reader takes a subgroup's FIN as its group's end),
+resolving the request's Location Filter using the draft-22 §3.3.1 rules. FETCH is answered with
+REQUEST_ERROR. An upstream FIN ends the track's downstream subscriptions with PUBLISH_DONE, the way a
+real relay ends the track for every viewer.
 
 Tracks and demand persist across publisher sessions, so the hub can also observe teardown/reconnect
 churn instead of crashing on it.
@@ -71,7 +72,7 @@ from moq_core.control_messages import (
     resolve_moqt_protocol,
 )
 from moq_core.object_stream import STREAM_TYPE, is_subgroup_header_type, read_subgroup_header, read_subgroup_objects
-from moq_core.subgroup_writer import create_subgroup_writer
+from moq_core.subgroup_writer import SubgroupWriter, create_subgroup_writer
 from moq_core.transport import BidirectionalStream, MoqtTransport, ReceiveStream
 from mux_relay import ConnectingTransport
 
@@ -88,20 +89,45 @@ class BufferedObject:
     payload: bytes
 
 
+GroupEnd = Literal["fin", "reset"]
+"""How an upstream subgroup stream ended."""
+
+
+@dataclass(slots=True)
+class _BufferedGroup:
+    objects: list[BufferedObject] = field(default_factory=list)
+    end: GroupEnd | None = None
+    """Set once the upstream stream carrying the group has ended."""
+
+
+@dataclass(slots=True)
+class _GroupStream:
+    """One group's downstream stream for one subscription."""
+
+    writer: SubgroupWriter | None = None
+    done: bool = False
+    """A write failed: nothing more is written."""
+    chain: asyncio.Task[None] | None = None
+    """The latest queued write; each waits for the one before it."""
+
+
 @dataclass(slots=True)
 class _Subscription:
     track_alias: int
     start: Location
     """First object this subscription may receive (inclusive), resolved from its Location Filter at subscribe time."""
     deliver: Callable[[BufferedObject], None]
+    end_group: Callable[[int, GroupEnd], None]
+    """The group's upstream stream ended: end its downstream stream the same way."""
     end: Callable[[int], None]
 
 
 @dataclass(slots=True)
 class _TrackRecord:
     name: str
-    groups: dict[int, list[BufferedObject]] = field(default_factory=dict)
-    """Insertion-ordered group id -> objects, pruned to the newest few groups."""
+    groups: dict[int, _BufferedGroup] = field(default_factory=dict)
+    """Insertion-ordered group id -> objects, pruned to the newest few groups. The publish driver sends one subgroup
+    per group (subgroup ID 0), so a group is one upstream stream."""
     largest: Location | None = None
     objects_received: int = 0
     subscribers: set[int] = field(default_factory=set)
@@ -231,7 +257,7 @@ class RelayHub:
         group = track.groups.get(obj.group_id)
 
         if group is None:
-            group = []
+            group = _BufferedGroup()
             track.groups[obj.group_id] = group
 
             while len(track.groups) > MAX_BUFFERED_GROUPS:
@@ -239,7 +265,7 @@ class RelayHub:
                 del track.groups[oldest]
 
         location = location_of(obj)
-        group.append(obj)
+        group.objects.append(obj)
         track.objects_received += 1
 
         if track.largest is None or not is_at_or_after(track.largest, location):
@@ -248,6 +274,15 @@ class RelayHub:
         for subscription in list(track.subscriptions.values()):
             if is_at_or_after(location, subscription.start):
                 subscription.deliver(obj)
+
+    def _end_group(self, track: _TrackRecord, group_id: int, how: GroupEnd) -> None:
+        group = track.groups.get(group_id)
+
+        if group is not None:
+            group.end = how
+
+        for subscription in list(track.subscriptions.values()):
+            subscription.end_group(group_id, how)
 
     def subscribe_upstream(self, track_name: str) -> None:
         """Register standing upstream demand for a track without a downstream viewer.
@@ -476,15 +511,22 @@ class RelayHub:
                     reader.cancel()
                     return
 
-                async for obj in read_subgroup_objects(reader, header):
-                    if obj.status != "normal":
-                        continue
+                try:
+                    async for obj in read_subgroup_objects(reader, header):
+                        if obj.status != "normal":
+                            continue
 
-                    self._buffer_and_forward(
-                        track, BufferedObject(obj.group_id, obj.object_id, obj.properties, obj.payload)
-                    )
+                        self._buffer_and_forward(
+                            track, BufferedObject(obj.group_id, obj.object_id, obj.properties, obj.payload)
+                        )
+                except Exception:
+                    # Stream reset (drop path or teardown): buffered objects stay, and downstream streams are reset.
+                    self._end_group(track, header.group_id, "reset")
+                    raise
+
+                self._end_group(track, header.group_id, "fin")
             except Exception:
-                pass  # Stream reset (drop path or teardown): buffered objects stay.
+                pass  # Stream reset or teardown.
 
         async def accept_uni_streams() -> None:
             try:
@@ -563,22 +605,74 @@ class RelayHub:
         protocol = resolve_moqt_protocol(getattr(server, "protocol_id", None))
         open_flag = [True]
 
-        def forward_object(track_alias: int, obj: BufferedObject) -> None:
-            if not open_flag[0] or self._destroyed:
-                return
+        def group_streams(
+            track_alias: int,
+        ) -> tuple[Callable[[BufferedObject], None], Callable[[int, GroupEnd], None]]:
+            """One subscription's downstream subgroup streams, one per group: objects are written in order on the
+            group's stream, opened by its first object, and the stream ends as the upstream one did, after the objects
+            received before the end: a relay forwards what it received before a reset. A failed write ends the group
+            for this subscriber, so later objects never reopen it on a second stream."""
+            streams: dict[int, _GroupStream] = {}
 
-            async def send() -> None:
-                try:
-                    stream = await server.create_unidirectional_stream()
-                    writer = create_subgroup_writer(
-                        stream, track_alias=track_alias, group_id=obj.group_id, has_properties=True, end_of_group=False
-                    )
-                    await writer.write_object(object_id=obj.object_id, properties=obj.properties, payload=obj.payload)
-                    await writer.fin()
-                except Exception:
-                    pass  # Subscriber went away.
+            def forward(obj: BufferedObject) -> None:
+                if not open_flag[0] or self._destroyed:
+                    return
 
-            _spawn(send())
+                state = streams.setdefault(obj.group_id, _GroupStream())
+                previous = state.chain
+
+                async def send() -> None:
+                    if previous is not None:
+                        await previous
+
+                    if state.done:
+                        return
+
+                    try:
+                        if state.writer is None:
+                            stream = await server.create_unidirectional_stream()
+                            state.writer = create_subgroup_writer(
+                                stream,
+                                track_alias=track_alias,
+                                group_id=obj.group_id,
+                                has_properties=True,
+                                end_of_group=False,
+                            )
+
+                        await state.writer.write_object(
+                            object_id=obj.object_id, properties=obj.properties, payload=obj.payload
+                        )
+                    except Exception:
+                        state.done = True  # Subscriber went away, or cancelled this stream.
+
+                state.chain = _spawn(send())
+
+            def end(group_id: int, how: GroupEnd) -> None:
+                state = streams.pop(group_id, None)
+
+                if state is None:
+                    return
+
+                chain = state.chain
+
+                async def finish() -> None:
+                    if chain is not None:
+                        await chain
+
+                    try:
+                        if state.writer is None:
+                            return
+
+                        if how == "reset":
+                            state.writer.abort()
+                        elif not state.done:
+                            await state.writer.fin()
+                    except Exception:
+                        pass  # Subscriber went away.
+
+                _spawn(finish())
+
+            return forward, end
 
         async def serve_request_stream(stream: BidirectionalStream) -> None:
             reader = StreamReader(stream.readable)
@@ -621,18 +715,25 @@ class RelayHub:
 
                             _spawn(finish())
 
+                        forward, end_group = group_streams(track_alias)
                         subscription = _Subscription(
                             track_alias=track_alias,
                             start=resolve_start(message.parameters.location_filter, track.largest),
-                            deliver=lambda obj, alias=track_alias: forward_object(alias, obj),
+                            deliver=forward,
+                            end_group=end_group,
                             end=end,
                         )
 
                         # Replay whatever the filter reaches back for, then follow live.
                         for group_id in sorted(track.groups):
-                            for obj in track.groups[group_id]:
+                            group = track.groups[group_id]
+
+                            for obj in group.objects:
                                 if is_at_or_after(location_of(obj), subscription.start):
                                     subscription.deliver(obj)
+
+                            if group.end is not None:
+                                subscription.end_group(group_id, group.end)
 
                         track.subscriptions[track_alias] = subscription
                         subscription_key = track_alias

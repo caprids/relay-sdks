@@ -1,11 +1,22 @@
 """The frame reader over a real sequencer: events in, frames out in decode order, polled again when a wait ends."""
 
 import asyncio
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field, replace
 
 import pytest
+from core_helpers.waiting import wait_for
+from relay_helpers.relay_hub import RelayHub, create_relay_hub
 
 from moq_core import KeyValuePair, MoqtObject, SubgroupEnd, SubgroupReset, SubscribeOk
 from moq_media import LOC_TIMESCALE, LOC_TIMESTAMP, FrameSequencer, PlayoutClock, SequencedFrame
+from mux_relay import (
+    RelayGroupWriter,
+    RelaySubscriber,
+    RelayTrackWriter,
+    connect_relay_publisher,
+    connect_relay_subscriber,
+)
 from mux_relay.media import FrameReader
 from mux_relay.supervised_subscriber import WantSwitchedInfo
 
@@ -202,3 +213,97 @@ async def test_a_partly_read_burst_is_judged_when_read() -> None:
     clock.report_audio(5_000_000)
     handlers.on_object(obj(2, 0, 5_100_000))
     assert ids(await take(reader, 1)) == [(2, 0, "gap")]
+
+
+HUB_URL = "https://relay.example.com/moq"
+HUB_NAMESPACE = ["testing", "video"]
+
+
+@pytest.fixture
+async def hub_connection() -> AsyncIterator[tuple[RelayHub, RelayTrackWriter, RelaySubscriber]]:
+    hub = create_relay_hub()
+    publisher = await connect_relay_publisher(HUB_URL, namespace=HUB_NAMESPACE, create_transport=hub.connect_publisher)
+    subscriber = await connect_relay_subscriber(HUB_URL, create_transport=hub.connect_subscriber)
+    try:
+        yield hub, publisher.register_track("video"), subscriber
+    finally:
+        subscriber.close()
+        await publisher.close()
+        hub.destroy()
+
+
+@dataclass
+class HubReading:
+    sequencer: FrameSequencer
+    reader: FrameReader[SequencedFrame]
+    ends: list[int] = field(default_factory=list)
+    resets: list[int] = field(default_factory=list)
+
+
+def read_through_hub(subscriber: RelaySubscriber) -> HubReading:
+    """Subscribe through a frame reader, recording the group ends and resets it was handed."""
+    sequencer = FrameSequencer(PlayoutClock())
+    reading = HubReading(sequencer, FrameReader(sequencer))
+    handlers = reading.reader.subscription_handlers()
+    on_end, on_reset = handlers.on_subgroup_end, handlers.on_subgroup_reset
+    assert on_end is not None and on_reset is not None
+
+    def ended(info: SubgroupEnd) -> None:
+        reading.ends.append(info.group_id)
+        on_end(info)
+
+    def reset(info: SubgroupReset) -> None:
+        reading.resets.append(info.group_id)
+        on_reset(info)
+
+    subscriber.subscribe(HUB_NAMESPACE, "video", replace(handlers, on_subgroup_end=ended, on_subgroup_reset=reset))
+    return reading
+
+
+async def write_group(track: RelayTrackWriter, count: int) -> RelayGroupWriter:
+    group = await track.open_group()
+    for object_id in range(count):
+        await group.write(bytes([object_id]), properties=[KeyValuePair(LOC_TIMESTAMP, object_id * 33_333)])
+    return group
+
+
+async def test_reads_every_frame_of_a_keyframe_group_the_hub_forwards_on_one_stream_ended_once(
+    hub_connection: tuple[RelayHub, RelayTrackWriter, RelaySubscriber],
+) -> None:
+    # #339: the hub forwarded each object on a subgroup stream of its own and FINed it, so the reader took the group
+    # as ended after its keyframe and dropped every later frame as behind.
+    _, track, subscriber = hub_connection
+    reading = read_through_hub(subscriber)
+    group = await write_group(track, 10)
+    await group.close()
+    frames = await asyncio.wait_for(take(reading.reader, 10), 5)
+    await wait_for(lambda: reading.ends == [0])
+    assert [frame.object_id for frame in frames] == list(range(10))
+    assert reading.sequencer.stats.late == 0
+    assert reading.resets == []
+
+
+async def test_resets_the_group_stream_when_the_publisher_resets_the_group(
+    hub_connection: tuple[RelayHub, RelayTrackWriter, RelaySubscriber],
+) -> None:
+    _, track, subscriber = hub_connection
+    reading = read_through_hub(subscriber)
+    group = await write_group(track, 3)
+    await asyncio.wait_for(take(reading.reader, 3), 5)
+    group.abort()
+    await wait_for(lambda: reading.resets == [0])
+    assert reading.ends == []
+
+
+async def test_replays_an_ended_group_and_its_end_to_a_later_subscriber(
+    hub_connection: tuple[RelayHub, RelayTrackWriter, RelaySubscriber],
+) -> None:
+    hub, track, subscriber = hub_connection
+    hub.subscribe_upstream("video")
+    group = await write_group(track, 10)
+    await group.close()
+    await wait_for(lambda: hub.object_count("video") == 10)
+    reading = read_through_hub(subscriber)
+    frames = await asyncio.wait_for(take(reading.reader, 10), 5)
+    await wait_for(lambda: reading.ends == [0])
+    assert [frame.object_id for frame in frames] == list(range(10))

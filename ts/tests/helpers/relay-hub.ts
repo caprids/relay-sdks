@@ -13,7 +13,8 @@
  * NAMESPACE_DONE; both land in `trackEnds`, the churn signal the source-switch regression tests assert on.
  *
  * Subscriber side (`connectSubscriber`): answers SUBSCRIBE with SUBSCRIBE_OK (carrying LARGEST_OBJECT once the track
- * has content) and forwards objects one-per-subgroup-stream, resolving the request's Location Filter (draft-22 §3.3.1)
+ * has content) and forwards each upstream subgroup on one downstream stream, FINed or reset when the upstream stream
+ * is, the way a relay preserves subgroups (a frame reader takes a subgroup's FIN as its group's end), resolving the request's Location Filter (draft-22 §3.3.1)
  * using the draft-22 Location Filter rules — `relative-group 1` replays the current group from object 0 then follows live
  * (catalog joins), `relative-group 0` forwards only groups that start after the subscribe (video joins), and
  * `next-object` is strict: nothing already published is replayed (audio joins). FETCH is answered with REQUEST_ERROR;
@@ -53,7 +54,7 @@ import {
 } from '../../packages/moq-core/src/protocol/object-stream.js';
 import type { BidirectionalStreamLike } from '../../packages/moq-core/src/protocol/request-stream.js';
 import type { MoqtTransport } from '../../packages/moq-core/src/protocol/session.js';
-import { createSubgroupWriter } from '../../packages/moq-core/src/protocol/subgroup-writer.js';
+import { createSubgroupWriter, type SubgroupWriter } from '../../packages/moq-core/src/protocol/subgroup-writer.js';
 import { createTransportPair } from '../../packages/moq-core/src/tests/helpers/transport-pair.js';
 import type { RelayTransportFactory as ConnectPublishTransport } from '../../src/index.js';
 
@@ -68,18 +69,32 @@ interface BufferedObject {
   payload: Uint8Array;
 }
 
+/** How an upstream subgroup stream ended: FIN, or reset. */
+type GroupEnd = 'fin' | 'reset';
+
+interface BufferedGroup {
+  objects: BufferedObject[];
+  /** Set once the upstream stream carrying the group has ended. */
+  end?: GroupEnd;
+}
+
 interface Subscription {
   trackAlias: number;
   /** First object this subscription may receive (inclusive), resolved from its Location Filter at subscribe time. */
   start: Location;
   deliver(object: BufferedObject): void;
+  /** The group's upstream stream ended: end its downstream stream the same way. */
+  endGroup(groupId: number, how: GroupEnd): void;
   end(statusCode: number): void;
 }
 
 interface TrackRecord {
   name: string;
-  /** Insertion-ordered groupId → objects, pruned to the newest few groups. */
-  groups: Map<number, BufferedObject[]>;
+  /**
+   * Insertion-ordered groupId → objects, pruned to the newest few groups. The publish engine sends one subgroup per
+   * group (subgroup ID 0), so a group is one upstream stream.
+   */
+  groups: Map<number, BufferedGroup>;
   /** Largest Object received from the publisher; `undefined` until the first one lands. */
   largest: Location | undefined;
   objectsReceived: number;
@@ -230,7 +245,7 @@ export function createRelayHub({
     let group = track.groups.get(object.groupId);
 
     if (!group) {
-      group = [];
+      group = { objects: [] };
       track.groups.set(object.groupId, group);
 
       while (track.groups.size > MAX_BUFFERED_GROUPS) {
@@ -242,7 +257,7 @@ export function createRelayHub({
 
     const location = locationOf(object);
 
-    group.push(object);
+    group.objects.push(object);
     track.objectsReceived++;
 
     if (!track.largest || !isAtOrAfter(track.largest, location)) track.largest = location;
@@ -250,6 +265,14 @@ export function createRelayHub({
     for (const subscriber of track.subscribers) {
       if (isAtOrAfter(location, subscriber.start)) subscriber.deliver(object);
     }
+  };
+
+  const endGroup = (track: TrackRecord, groupId: number, how: GroupEnd): void => {
+    const group = track.groups.get(groupId);
+
+    if (group) group.end = how;
+
+    for (const subscriber of track.subscribers) subscriber.endGroup(groupId, how);
   };
 
   /** Standing demand: dedupe onto one live upstream subscription per track. */
@@ -446,18 +469,26 @@ export function createRelayHub({
                 return;
               }
 
-              for await (const object of readSubgroupObjects(reader, header)) {
-                if (object.status !== 'normal') continue;
+              try {
+                for await (const object of readSubgroupObjects(reader, header)) {
+                  if (object.status !== 'normal') continue;
 
-                bufferAndForward(track, {
-                  groupId: object.groupId,
-                  objectId: object.objectId,
-                  properties: object.properties,
-                  payload: object.payload,
-                });
+                  bufferAndForward(track, {
+                    groupId: object.groupId,
+                    objectId: object.objectId,
+                    properties: object.properties,
+                    payload: object.payload,
+                  });
+                }
+              } catch (error) {
+                // Stream reset (drop path or teardown) — buffered objects stay, and downstream streams are reset.
+                endGroup(track, header.groupId, 'reset');
+                throw error;
               }
+
+              endGroup(track, header.groupId, 'fin');
             } catch {
-              // Stream reset (drop path or teardown) — buffered objects stay.
+              // Stream reset or teardown.
             }
           })();
         }
@@ -551,30 +582,76 @@ export function createRelayHub({
     const server = pair.server;
     let open = true;
 
-    /** Forward one object on its own subgroup stream toward the player. */
-    const forwardObject = (trackAlias: number, object: BufferedObject): void => {
-      if (!open || destroyed) return;
+    /**
+     * One subscription's downstream subgroup streams, one per group: objects are written in order on the group's stream,
+     * opened by its first object, and the stream ends as the upstream one did, after the objects received before the
+     * end: a relay forwards what it received before a reset. A failed write ends the group for this subscriber, so
+     * later objects never reopen it on a second stream.
+     */
+    const createGroupStreams = (trackAlias: number) => {
+      interface GroupStream {
+        writer?: SubgroupWriter;
+        /** A write failed: nothing more is written. */
+        done: boolean;
+        chain: Promise<void>;
+      }
+      const streams = new Map<number, GroupStream>();
 
-      void (async () => {
-        try {
-          const stream = await server.createUnidirectionalStream();
-          const writer = createSubgroupWriter(stream, {
-            trackAlias,
-            groupId: object.groupId,
-            hasProperties: true,
-            endOfGroup: false,
-          });
+      return {
+        forward(object: BufferedObject): void {
+          if (!open || destroyed) return;
 
-          await writer.writeObject({
-            objectId: object.objectId,
-            properties: object.properties,
-            payload: object.payload,
+          let group = streams.get(object.groupId);
+
+          if (!group) {
+            group = { done: false, chain: Promise.resolve() };
+            streams.set(object.groupId, group);
+          }
+
+          const state = group;
+
+          state.chain = state.chain.then(async () => {
+            if (state.done) return;
+
+            try {
+              if (!state.writer) {
+                const stream = await server.createUnidirectionalStream();
+
+                state.writer = createSubgroupWriter(stream, {
+                  trackAlias,
+                  groupId: object.groupId,
+                  hasProperties: true,
+                  endOfGroup: false,
+                });
+              }
+
+              await state.writer.writeObject({
+                objectId: object.objectId,
+                properties: object.properties,
+                payload: object.payload,
+              });
+            } catch {
+              // Subscriber went away, or cancelled this stream.
+              state.done = true;
+            }
           });
-          await writer.fin();
-        } catch {
-          // Subscriber went away.
-        }
-      })();
+        },
+        end(groupId: number, how: GroupEnd): void {
+          const state = streams.get(groupId);
+
+          if (!state) return;
+
+          streams.delete(groupId);
+          void state.chain.then(async () => {
+            try {
+              if (how === 'reset') state.writer?.abort();
+              else if (!state.done) await state.writer?.fin();
+            } catch {
+              // Subscriber went away.
+            }
+          });
+        },
+      };
     };
 
     const serveRequestStream = async (stream: BidirectionalStreamLike): Promise<void> => {
@@ -595,6 +672,7 @@ export function createRelayHub({
             ensureUpstream(message.trackName);
             const track = trackFor(message.trackName);
             const trackAlias = nextSubscriberAlias++;
+            const groupStreams = createGroupStreams(trackAlias);
 
             // Like the relay on draft-20, SUBSCRIBE_OK reports the Largest
             // Object once the track has content (two bare varints, §9.20.17).
@@ -604,7 +682,8 @@ export function createRelayHub({
             subscription = {
               trackAlias,
               start: resolveStart(message.parameters.locationFilter, track.largest),
-              deliver: (object) => forwardObject(trackAlias, object),
+              deliver: (object) => groupStreams.forward(object),
+              endGroup: (groupId, how) => groupStreams.end(groupId, how),
               end: (statusCode) => {
                 void writer
                   .write(encodePublishDone(statusCode, 0, ''))
@@ -616,9 +695,13 @@ export function createRelayHub({
             // Replay whatever the filter reaches back for (the current
             // group on a `relative-group 1` join), then follow live.
             for (const groupId of [...track.groups.keys()].sort((a, b) => a - b)) {
-              for (const object of track.groups.get(groupId) ?? []) {
+              const group = track.groups.get(groupId) as BufferedGroup;
+
+              for (const object of group.objects) {
                 if (isAtOrAfter(locationOf(object), subscription.start)) subscription.deliver(object);
               }
+
+              if (group.end) subscription.endGroup(groupId, group.end);
             }
 
             track.subscribers.add(subscription);
