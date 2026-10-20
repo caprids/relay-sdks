@@ -101,6 +101,17 @@ class _BufferedGroup:
 
 
 @dataclass(slots=True)
+class _GroupStream:
+    """One group's downstream stream for one subscription."""
+
+    writer: SubgroupWriter | None = None
+    done: bool = False
+    """A write failed: nothing more is written."""
+    chain: asyncio.Task[None] | None = None
+    """The latest queued write; each waits for the one before it."""
+
+
+@dataclass(slots=True)
 class _Subscription:
     track_alias: int
     start: Location
@@ -598,53 +609,64 @@ class RelayHub:
             track_alias: int,
         ) -> tuple[Callable[[BufferedObject], None], Callable[[int, GroupEnd], None]]:
             """One subscription's downstream subgroup streams, one per group: objects are written in order on the
-            group's stream, opened by its first object, and the stream ends as the upstream one did."""
-            streams: dict[int, asyncio.Task[SubgroupWriter | None]] = {}
+            group's stream, opened by its first object, and the stream ends as the upstream one did, after the objects
+            received before the end: a relay forwards what it received before a reset. A failed write ends the group
+            for this subscriber, so later objects never reopen it on a second stream."""
+            streams: dict[int, _GroupStream] = {}
 
             def forward(obj: BufferedObject) -> None:
                 if not open_flag[0] or self._destroyed:
                     return
 
-                previous = streams.get(obj.group_id)
+                state = streams.setdefault(obj.group_id, _GroupStream())
+                previous = state.chain
 
-                async def send() -> SubgroupWriter | None:
-                    writer = await previous if previous is not None else None
+                async def send() -> None:
+                    if previous is not None:
+                        await previous
+
+                    if state.done:
+                        return
 
                     try:
-                        if writer is None:
-                            writer = create_subgroup_writer(
-                                await server.create_unidirectional_stream(),
+                        if state.writer is None:
+                            stream = await server.create_unidirectional_stream()
+                            state.writer = create_subgroup_writer(
+                                stream,
                                 track_alias=track_alias,
                                 group_id=obj.group_id,
                                 has_properties=True,
                                 end_of_group=False,
                             )
-                        await writer.write_object(
+
+                        await state.writer.write_object(
                             object_id=obj.object_id, properties=obj.properties, payload=obj.payload
                         )
-                        return writer
                     except Exception:
-                        return None  # Subscriber went away.
+                        state.done = True  # Subscriber went away, or cancelled this stream.
 
-                streams[obj.group_id] = _spawn(send())
+                state.chain = _spawn(send())
 
             def end(group_id: int, how: GroupEnd) -> None:
-                stream = streams.pop(group_id, None)
+                state = streams.pop(group_id, None)
 
-                if stream is None:
+                if state is None:
                     return
 
-                async def finish() -> None:
-                    try:
-                        writer = await stream
+                chain = state.chain
 
-                        if writer is None:
+                async def finish() -> None:
+                    if chain is not None:
+                        await chain
+
+                    try:
+                        if state.writer is None:
                             return
 
-                        if how == "fin":
-                            await writer.fin()
-                        else:
-                            writer.abort()
+                        if how == "reset":
+                            state.writer.abort()
+                        elif not state.done:
+                            await state.writer.fin()
                     except Exception:
                         pass  # Subscriber went away.
 

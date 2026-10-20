@@ -308,36 +308,88 @@ describe('createFrameReader: onCatchUp', () => {
 });
 
 describe('createFrameReader through the relay hub', () => {
+  const url = 'https://relay.example.com/moq';
+  const namespace = ['testing', 'video'];
+  const hubCleanup: (() => unknown)[] = [];
+  afterEach(async () => {
+    for (const dispose of hubCleanup.splice(0).reverse()) await dispose();
+  });
+
+  async function connect() {
+    const hub = createRelayHub();
+    hubCleanup.push(() => hub.destroy());
+    const publisher = await connectRelayPublisher({ url, namespace, createTransport: hub.connectPublisher });
+    hubCleanup.push(() => publisher.close());
+    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
+    hubCleanup.push(() => subscriber.close());
+    return { hub, track: publisher.registerTrack({ track: 'video' }), subscriber };
+  }
+
+  /** Subscribe through a frame reader, recording the group ends and resets it was handed. */
+  function read(subscriber: Awaited<ReturnType<typeof connect>>['subscriber']) {
+    const sequencer = createFrameSequencer({ clock: createPlayoutClock() });
+    const frames: SequencedFrame[] = [];
+    const ends: number[] = [];
+    const resets: number[] = [];
+    const reader = createFrameReader(sequencer, { onFrame: (frame) => frames.push(frame) });
+    subscriber.subscribe(
+      { namespace, track: 'video' },
+      {
+        ...reader,
+        onSubgroupEnd(info) {
+          ends.push(info.groupId);
+          reader.onSubgroupEnd(info);
+        },
+        onSubgroupReset(info) {
+          resets.push(info.groupId);
+          reader.onSubgroupReset(info);
+        },
+      },
+    );
+    return { sequencer, frames, ends, resets };
+  }
+
+  async function writeGroup(track: Awaited<ReturnType<typeof connect>>['track'], count: number) {
+    const group = await track.openGroup();
+    for (let objectId = 0; objectId < count; objectId++) {
+      await group.write(new Uint8Array([objectId]), {
+        properties: [{ type: LOC_TIMESTAMP, value: objectId * 33_333 }],
+      });
+    }
+    return group;
+  }
+
   // #339: the hub forwarded each object on a subgroup stream of its own and FINed it, so the reader took the group as
   // ended after its keyframe and dropped every later frame as behind.
-  it('reads every frame of a keyframe group, which the hub forwards on one stream', async () => {
-    const hub = createRelayHub();
-    const url = 'https://relay.example.com/moq';
-    const namespace = ['testing', 'video'];
-    const publisher = await connectRelayPublisher({ url, namespace, createTransport: hub.connectPublisher });
-    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
-    try {
-      const track = publisher.registerTrack({ track: 'video' });
-      const sequencer = createFrameSequencer({ clock: createPlayoutClock() });
-      const frames: SequencedFrame[] = [];
-      subscriber.subscribe(
-        { namespace, track: 'video' },
-        createFrameReader(sequencer, { onFrame: (frame) => frames.push(frame) }),
-      );
-      const group = await track.openGroup();
-      for (let objectId = 0; objectId < 10; objectId++) {
-        await group.write(new Uint8Array([objectId]), {
-          properties: [{ type: LOC_TIMESTAMP, value: objectId * 33_333 }],
-        });
-      }
-      await group.close();
-      await vi.waitFor(() => expect(frames).toHaveLength(10));
-      expect(frames.map((frame) => frame.objectId)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-      expect(sequencer.stats.late).toBe(0);
-    } finally {
-      subscriber.close();
-      publisher.close();
-      hub.destroy();
-    }
+  it('reads every frame of a keyframe group, which the hub forwards on one stream ended once', async () => {
+    const { track, subscriber } = await connect();
+    const reading = read(subscriber);
+    const group = await writeGroup(track, 10);
+    await group.close();
+    await vi.waitFor(() => expect(reading.ends).toEqual([0]));
+    expect(reading.frames.map((frame) => frame.objectId)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(reading.sequencer.stats.late).toBe(0);
+    expect(reading.resets).toEqual([]);
+  });
+
+  it('resets the group stream when the publisher resets the group', async () => {
+    const { track, subscriber } = await connect();
+    const reading = read(subscriber);
+    const group = await writeGroup(track, 3);
+    await vi.waitFor(() => expect(reading.frames).toHaveLength(3));
+    group.abort();
+    await vi.waitFor(() => expect(reading.resets).toEqual([0]));
+    expect(reading.ends).toEqual([]);
+  });
+
+  it('replays an ended group, and its end, to a later subscriber', async () => {
+    const { hub, track, subscriber } = await connect();
+    hub.subscribeUpstream('video');
+    const group = await writeGroup(track, 10);
+    await group.close();
+    await vi.waitFor(() => expect(hub.objectCount('video')).toBe(10));
+    const reading = read(subscriber);
+    await vi.waitFor(() => expect(reading.ends).toEqual([0]));
+    expect(reading.frames.map((frame) => frame.objectId)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
   });
 });

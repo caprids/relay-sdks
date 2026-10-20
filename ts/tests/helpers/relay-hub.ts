@@ -584,53 +584,68 @@ export function createRelayHub({
 
     /**
      * One subscription's downstream subgroup streams, one per group: objects are written in order on the group's stream,
-     * opened by its first object, and the stream ends as the upstream one did.
+     * opened by its first object, and the stream ends as the upstream one did, after the objects received before the
+     * end: a relay forwards what it received before a reset. A failed write ends the group for this subscriber, so
+     * later objects never reopen it on a second stream.
      */
     const createGroupStreams = (trackAlias: number) => {
-      const streams = new Map<number, Promise<SubgroupWriter | undefined>>();
+      interface GroupStream {
+        writer?: SubgroupWriter;
+        /** A write failed: nothing more is written. */
+        done: boolean;
+        chain: Promise<void>;
+      }
+      const streams = new Map<number, GroupStream>();
 
       return {
         forward(object: BufferedObject): void {
           if (!open || destroyed) return;
 
-          const previous = streams.get(object.groupId) ?? Promise.resolve(undefined);
+          let group = streams.get(object.groupId);
 
-          streams.set(
-            object.groupId,
-            previous.then(async (existing) => {
-              try {
-                const writer =
-                  existing ??
-                  createSubgroupWriter(await server.createUnidirectionalStream(), {
-                    trackAlias,
-                    groupId: object.groupId,
-                    hasProperties: true,
-                    endOfGroup: false,
-                  });
+          if (!group) {
+            group = { done: false, chain: Promise.resolve() };
+            streams.set(object.groupId, group);
+          }
 
-                await writer.writeObject({
-                  objectId: object.objectId,
-                  properties: object.properties,
-                  payload: object.payload,
+          const state = group;
+
+          state.chain = state.chain.then(async () => {
+            if (state.done) return;
+
+            try {
+              if (!state.writer) {
+                const stream = await server.createUnidirectionalStream();
+
+                state.writer = createSubgroupWriter(stream, {
+                  trackAlias,
+                  groupId: object.groupId,
+                  hasProperties: true,
+                  endOfGroup: false,
                 });
-                return writer;
-              } catch {
-                // Subscriber went away.
-                return undefined;
               }
-            }),
-          );
+
+              await state.writer.writeObject({
+                objectId: object.objectId,
+                properties: object.properties,
+                payload: object.payload,
+              });
+            } catch {
+              // Subscriber went away, or cancelled this stream.
+              state.done = true;
+            }
+          });
         },
         end(groupId: number, how: GroupEnd): void {
-          const stream = streams.get(groupId);
+          const state = streams.get(groupId);
 
-          if (!stream) return;
+          if (!state) return;
 
           streams.delete(groupId);
-          void stream.then(async (writer) => {
+          void state.chain.then(async () => {
             try {
-              if (how === 'fin') await writer?.fin();
-              else writer?.abort();
+              if (how === 'reset') state.writer?.abort();
+              else if (!state.done) await state.writer?.fin();
             } catch {
               // Subscriber went away.
             }
