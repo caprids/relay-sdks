@@ -59,6 +59,18 @@ import { type BidirectionalStreamLike, openRequestStream, type RequestStream } f
 // ============================================================================
 
 /**
+ * How the transport schedules a stream's bytes against the session's other streams: the W3C `WebTransportSendOptions`
+ * subset the publisher uses.
+ */
+export interface MoqtSendStreamOptions {
+  /**
+   * The W3C WebTransport send order: while a stream with a higher value has bytes queued, a lower one waits. The
+   * default, and the value of every stream opened without one, is 0. A transport without send priorities ignores it.
+   */
+  sendOrder?: number;
+}
+
+/**
  * Structural subset of `WebTransport` the session driver needs. A real `WebTransport` instance satisfies this; tests
  * provide an in-memory fake (the same seam pattern as SPF's fetch injection).
  */
@@ -72,8 +84,8 @@ export interface MoqtTransport {
   readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
   /** Bidirectional streams the peer opens: its request streams. */
   readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStreamLike>;
-  /** Open a unidirectional stream to the peer. */
-  createUnidirectionalStream(): Promise<WritableStream<Uint8Array>>;
+  /** Open a unidirectional stream to the peer, scheduled by `options.sendOrder` where the transport supports it. */
+  createUnidirectionalStream(options?: MoqtSendStreamOptions): Promise<WritableStream<Uint8Array>>;
   /** Open a bidirectional stream to the peer. */
   createBidirectionalStream(): Promise<BidirectionalStreamLike>;
   /** Close the transport session with an optional application close code and reason. */

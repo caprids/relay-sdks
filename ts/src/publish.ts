@@ -7,6 +7,7 @@ import {
   subscriberTimeouts,
 } from './delivery-timeouts.js';
 import { RelayError } from './errors.js';
+import { trackSendOptions } from './send-order.js';
 import { createSettlingGroups } from './settling-groups.js';
 import { namespaceFields, trackName, trackPropertyPairs } from './validation.js';
 import { createWriteSlot, type WriteSlot } from './write-slot.js';
@@ -296,9 +297,14 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
         trackName: name,
         trackProperties: properties,
       });
+      const sendOptions = trackSendOptions(properties);
       const slot = createWriteSlot({
         openSubgroup: async (trackAlias, groupId) =>
-          createSubgroupWriter(await session.openUniStream(trackAlias), { trackAlias, groupId, hasProperties: true }),
+          createSubgroupWriter(await session.openUniStream(trackAlias, sendOptions), {
+            trackAlias,
+            groupId,
+            hasProperties: true,
+          }),
         settlingGroups,
         namespaceSolicited: () => session.namespaceSolicited,
         assertOpen: lifetime.assertOpen,

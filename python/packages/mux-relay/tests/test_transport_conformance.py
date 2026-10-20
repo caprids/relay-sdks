@@ -1050,6 +1050,13 @@ async def test_ta_24_a_session_error_after_the_peers_close_carries_its_code_and_
         check(carried == (0x10, "unauthorized"), f"(close_code, reason): {carried!r}")
 
 
+def test_ta_28_is_not_bound_in_python() -> None:
+    pytest.skip(
+        "TA-28: create_unidirectional_stream() takes no send order; the Python publisher sets none and aioquic has no "
+        "stream priorities (spec/transport-adapter.md, Python mapping)"
+    )
+
+
 # ── Process lifetime ──────────────────────────────────────────────────────────────────────────────────────────────
 
 

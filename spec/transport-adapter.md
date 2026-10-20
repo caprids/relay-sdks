@@ -80,7 +80,7 @@ The seam is the factory a connection calls and the transport it returns.
 | `transport.protocol` | The protocol identifier the peer selected (TA-8). A browser's `WebTransport` has it. |
 | `transport.incomingUnidirectionalStreams` | `ReadableStream` of the peer's unidirectional streams, each a `ReadableStream<Uint8Array>`. |
 | `transport.incomingBidirectionalStreams` | `ReadableStream` of the peer's bidirectional streams, each `{ readable, writable }`. |
-| `transport.createUnidirectionalStream()` | Opens a send stream: `Promise<WritableStream<Uint8Array>>`. |
+| `transport.createUnidirectionalStream(options?)` | Opens a send stream: `Promise<WritableStream<Uint8Array>>`. `options.sendOrder` is its send order (TA-28). |
 | `transport.createBidirectionalStream()` | Opens a bidirectional stream: `Promise<{ readable, writable }>`. |
 | `transport.close({ closeCode, reason })` | Closes the session. |
 | `transport.closed` | Settles when the session has ended. |
@@ -279,6 +279,22 @@ would have to change if web-transport-moq stopped mapping on raw QUIC.
 `transport: invalid RESET_STREAM: 7`, and the encoded one as `code=7`. Either way the relay forwards
 the reset with code 1 rather than the publisher's (#156), so subscribers read 1 today.
 
+**TA-28.** `createUnidirectionalStream(options)` MUST accept `{ sendOrder }`, an integer where a
+higher value is more urgent and 0 is what every stream opened without one gets, and MUST open the
+stream as it would without it. An adapter whose transport can schedule streams SHOULD hold a stream's
+queued bytes while a stream with a higher send order has bytes queued, as a WebTransport send order
+does within its send group; one that cannot MUST ignore the option.
+**Why:** the publisher opens each data stream of a track that declares a Default Publisher Priority
+with a send order below 0 ([behavior.md, "Send order"](behavior.md#send-order)), so that under a
+congested uplink the publisher's own transport sends audio before video, and both after the control
+and request streams.
+**Evidence:** a browser's `WebTransport` takes `sendOrder` itself (W3C WebTransport,
+`WebTransportSendOptions`): Firefox 155 schedules by it, and Chromium 153 ignores it (see
+[Known deviations](#known-deviations)). `@moq/qmux` 0.3.3 schedules stream data
+highest `sendOrder` first, round-robin among equals (`scheduler.d.ts`). quinn 0.11's
+`SendStream::set_priority` takes an `i32`, higher sent first and 0 by default; `@mux/relay-quic`
+clamps the send order to that range.
+
 ### Error shape
 
 **TA-22.** Every error an adapter raises for a stream or session failure MUST be an object with a
@@ -374,6 +390,12 @@ adapters MUST NOT copy them.
   token, a tampered signature and a wrong path each gave "Connection lost." in 3/3 runs. On
   2026-10-05 (0.17.0): a missing, malformed, tampered, expired-looking or wrong-path token each gave
   `UNAUTHORIZED` in phase `connecting` in 3/3 runs.
+- **Chromium send order (TA-28).** Chromium 153 has no `WebTransportSendStream` and no
+  `createSendGroup()`, and drops `sendOrder` from the options: its streams are scheduled alike.
+  Firefox 155 has both and schedules by it. **Evidence:** on 2026-10-20, through an 800 kbit/s
+  uplink cap (`ts/scripts/probe-send-order.mjs`), turning the media streams' order around starved
+  a Firefox publisher's audio and left a Chromium publisher's unchanged
+  ([behavior.md, "Send order"](behavior.md#send-order)).
 - **Browser stream error codes (TA-22).** A browser's `streamErrorCode` is nullable and is `null`
   when the browser does not know the code, which TA-22 allows.
 - **Chromium `ready` without a selected protocol (TA-7).** When the peer's response names no
@@ -459,6 +481,7 @@ stream halves and QUIC plumbing (#232). How the rules map:
 | TA-24 | `close_info` carries the peer's application close, and so does the session error an operation raises once it has ended the session (`close_code` and `reason`). The SDK reports `UNAUTHORIZED` from either, in any phase. |
 | TA-25, TA-26 | asyncio holds no process open by itself: the application's own `asyncio.run` decides. |
 | TA-27 | `QuicSession` encodes and decodes stream codes in its `_to_wire_code` and `_from_wire_code` hooks (`mux_relay.quic._errors`). The test suite's native QUIC accepting ends map them the same way, as the relay does. |
+| TA-28 | **Not bound:** `create_unidirectional_stream()` takes no options, since the Python publisher sets no send order and aioquic has no stream priorities. |
 
 ## Conformance
 

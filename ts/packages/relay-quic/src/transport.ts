@@ -1,5 +1,5 @@
 /** A `MoqtTransport` over one native QUIC dial (spec/transport-adapter.md, "Session lifetime"). */
-import type { BidirectionalStreamLike, MoqtTransport } from '@mux/moq-core';
+import type { BidirectionalStreamLike, MoqtSendStreamOptions, MoqtTransport } from '@mux/moq-core';
 import type { Dial, Failure, Session } from './addon.js';
 import { NativeQuicSessionError, safeCode, toError } from './errors.js';
 import { bidirectional, recvReadable, sendWritable } from './streams.js';
@@ -14,6 +14,12 @@ export interface CloseInfo {
 
 function isFailure(value: object): value is Failure {
   return 'source' in value;
+}
+
+/** A send order as quinn's 32-bit stream priority: an integer, clamped to the range; anything else is no priority. */
+function streamPriority(sendOrder: number | undefined): number | undefined {
+  if (sendOrder === undefined || !Number.isInteger(sendOrder)) return undefined;
+  return Math.min(Math.max(sendOrder, -0x8000_0000), 0x7fff_ffff);
 }
 
 /** The transport for one dial. `ready` resolves once the peer selected a protocol; closing first cancels the dial. */
@@ -55,8 +61,9 @@ export class NativeQuicTransport implements MoqtTransport {
     return this.#established?.protocol ?? '';
   }
 
-  async createUnidirectionalStream(): Promise<WritableStream<Uint8Array>> {
-    const opened = (await this.#session).openUni();
+  /** quinn schedules by stream priority, highest first, as WebTransport does by `sendOrder`. */
+  async createUnidirectionalStream(options?: MoqtSendStreamOptions): Promise<WritableStream<Uint8Array>> {
+    const opened = (await this.#session).openUni(streamPriority(options?.sendOrder));
     if (isFailure(opened)) throw toError(opened);
     return sendWritable(opened);
   }

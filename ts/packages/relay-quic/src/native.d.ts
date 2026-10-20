@@ -86,9 +86,10 @@ export declare class Session {
   get protocol(): string | null
   /**
    * Open a unidirectional stream now, or fail at once with `credit` when the peer's stream limit
-   * is used up (TA-21).
+   * is used up (TA-21). `send_order` is quinn's stream priority, which like WebTransport's send
+   * order sends a higher value first and defaults to 0.
    */
-  openUni(): SendStream | Failure
+  openUni(sendOrder?: number | undefined | null): SendStream | Failure
   /** Open a bidirectional stream now, or fail at once with `credit` (TA-21). */
   openBi(): BiStream | Failure
   /** The next unidirectional stream the peer opens, or nothing once the session is over (TA-12). */

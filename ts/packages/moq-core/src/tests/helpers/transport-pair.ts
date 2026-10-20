@@ -5,7 +5,7 @@
  */
 import { MESSAGE_TYPE, MOQT_PROTOCOL_ID, type MoqtProtocolId } from '../../protocol/control-messages.js';
 import type { BidirectionalStreamLike } from '../../protocol/request-stream.js';
-import type { MoqtTransport } from '../../protocol/session.js';
+import type { MoqtSendStreamOptions, MoqtTransport } from '../../protocol/session.js';
 import { decodeVarint, encodeVarintInto, varintByteLength } from '../../protocol/varint.js';
 
 interface PushChannel<T> {
@@ -416,7 +416,7 @@ export function createTransportPairFactory({
       const transport = {
         incomingUnidirectionalStreams: client.incomingUnidirectionalStreams,
         incomingBidirectionalStreams: client.incomingBidirectionalStreams,
-        createUnidirectionalStream: () => client.createUnidirectionalStream(),
+        createUnidirectionalStream: (options?: MoqtSendStreamOptions) => client.createUnidirectionalStream(options),
         createBidirectionalStream: () => client.createBidirectionalStream(),
         close(closeInfo?: { closeCode?: number; reason?: string }) {
           if (state === 'dialling') failDial('The session was closed before it was established.');
@@ -503,7 +503,7 @@ export function withServerRequestIds(transport: MoqtTransport): MoqtTransport {
     },
     incomingUnidirectionalStreams: transport.incomingUnidirectionalStreams,
     incomingBidirectionalStreams: transport.incomingBidirectionalStreams,
-    createUnidirectionalStream: () => transport.createUnidirectionalStream(),
+    createUnidirectionalStream: (options?: MoqtSendStreamOptions) => transport.createUnidirectionalStream(options),
     async createBidirectionalStream() {
       const stream = await transport.createBidirectionalStream();
       const rewrite = new TransformStream<Uint8Array, Uint8Array>({

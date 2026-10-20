@@ -55,7 +55,7 @@ import {
 import { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './errors.js';
 import { isSubgroupHeaderType, STREAM_TYPE } from './object-stream.js';
 import type { BidirectionalStreamLike } from './request-stream.js';
-import type { Goaway, MoqtTransport } from './session.js';
+import type { Goaway, MoqtSendStreamOptions, MoqtTransport } from './session.js';
 import { streamResetReason } from './stream-reset.js';
 import { isSessionError } from './transport-error.js';
 
@@ -179,9 +179,10 @@ export interface MoqtPublishSession {
    * Open a unidirectional data stream for the live subscription bound to `trackAlias`. The stream counts toward that
    * subscription's PUBLISH_DONE Stream Count, and a stream still open when the subscription ends is reset before
    * PUBLISH_DONE is written (§9.9). Rejects once the session is closing, when no live subscription holds the alias,
-   * and when the subscription ends while the stream is opening (the stream is reset first).
+   * and when the subscription ends while the stream is opening (the stream is reset first). `options` go to the
+   * transport as they are.
    */
-  openUniStream(trackAlias: number): Promise<WritableStream<Uint8Array>>;
+  openUniStream(trackAlias: number, options?: MoqtSendStreamOptions): Promise<WritableStream<Uint8Array>>;
   /**
    * Orderly stop: end every live subscription (PUBLISH_DONE `TRACK_ENDED`, then FIN) and retract the announce
    * (NAMESPACE_DONE), give those writes a bounded window to reach the wire (closing a WebTransport discards queued
@@ -786,7 +787,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     return undefined;
   }
 
-  async openUniStream(trackAlias: number): Promise<WritableStream<Uint8Array>> {
+  async openUniStream(trackAlias: number, options?: MoqtSendStreamOptions): Promise<WritableStream<Uint8Array>> {
     // Refuse rather than touch the transport once the session is going
     // away. Encoders keep producing frames for a beat after a peer kills
     // the session, and hammering createUnidirectionalStream() on a
@@ -807,7 +808,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     subscriber.opening.add(opening);
 
     try {
-      const stream = await this.#transport.createUnidirectionalStream();
+      const stream = await this.#transport.createUnidirectionalStream(options);
 
       if (subscriber.finished) {
         // The subscription ended while this stream was opening. Its PUBLISH_DONE waits on `opening`, so the reset lands
