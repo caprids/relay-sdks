@@ -992,8 +992,9 @@ higher value goes first and every other stream has 0.
 - A track without the property gets no send order, so its streams share 0 with the control streams
   and go ahead of every track that declares a priority. A catalog or a media timeline registered
   without one reaches a joining viewer ahead of the media it describes.
-- Every stream of a track has the same send order, so its groups are not reordered among
-  themselves; the transport decides how equal streams share the uplink.
+- Every stream of a track has the same send order, so the mapping prefers no group of a track over
+  another. The transport decides how equal streams share the uplink, and a later group's stream can
+  still finish first.
 - Where it applies ([TA-28](transport-adapter.md#streams)): Firefox's `WebTransport` from 155;
   `@mux/relay-websocket`, whose QMux scheduler sends highest first, round-robin among equals; and
   `@mux/relay-quic`, as quinn's stream priority. Chromium's does not: Chromium 153 has no

@@ -236,6 +236,18 @@ describe('withWebSocketFallback', () => {
     connection.transport.close();
   });
 
+  it("hands a stream's send order to QMux's scheduler through the fallback (TA-28)", async () => {
+    fakeWebTransport('fail');
+    const create = vi.spyOn(Session.prototype, 'createUnidirectionalStream');
+    const connection = withWebSocketFallback()(`${origin}/`, ['moqt-22']);
+    await connection.ready;
+    const opened = await connection.transport.createUnidirectionalStream({ sendOrder: -17 });
+    expect(create).toHaveBeenLastCalledWith({ sendOrder: -17 });
+    await opened.getWriter().close();
+    create.mockRestore();
+    connection.transport.close();
+  });
+
   it('keeps a WebTransport session that comes up, and never dials WebSocket', async () => {
     const dialled = fakeWebTransport('succeed');
     const onFallback = vi.fn();
