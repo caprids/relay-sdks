@@ -84,11 +84,13 @@ Any result but `PASS` exits nonzero.
 The test waits for the publisher's `announced`, subscribes through a supervised subscriber's wants,
 warms each track up until a marker arrives, checks binary and empty payloads plus independent track
 closure, checks that a want follows a supervised publisher's newer generation, then closes every
-connection. It defaults to
+connection. It defaults to the bare host
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
-another relay to put the subscribers there. Namespace fields sent by
-the SDK are relative to the endpoint URL's path: with no path, as here, include the token's root
-prefix when required by the relay.
+another relay to put the subscribers there. Namespace fields are relative to the endpoint URL's
+path: with the recommended endpoint, whose path is the token's root (as the quickstart prompts
+for), `RELAY_NAMESPACE_PREFIX` leaves the root out; with the bare default it includes it. Either
+way the test also dials an endpoint rooted at its own namespace and checks that the two forms reach
+each other's tracks and discovery ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)).
 
 The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
 on `status`, with the second status object delivered after the events track closed.
@@ -124,11 +126,13 @@ RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python
 
 The test waits for the publisher's `announced`, subscribes through the examples' announce-race
 retry and reports how often it retried, warms each track up until a marker arrives, checks binary,
-empty, and text payloads plus independent track closure, then closes both connections. It defaults to
+empty, and text payloads plus independent track closure, then closes both connections. It defaults to the bare host
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
-another relay to put the subscribers there. Namespace fields sent by
-the SDK are relative to the endpoint URL's path: with no path, as here, include the token's root
-prefix when required by the relay.
+another relay to put the subscribers there. Namespace fields are relative to the endpoint URL's
+path: with the recommended endpoint, whose path is the token's root (as the quickstart prompts
+for), `RELAY_NAMESPACE_PREFIX` leaves the root out; with the bare default it includes it. Either
+way the test also dials an endpoint rooted at its own namespace and checks that the two forms reach
+each other's tracks and discovery ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)).
 
 The live test passed against `sjc.relay.mux.global` on 2026-10-03 over the default native QUIC
 transport: three objects on `events` and two on `status`, with the second status object delivered

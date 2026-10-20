@@ -206,9 +206,21 @@ Messages are not a compatibility contract; the class and the point of rejection 
   namespace the application supplies. With a path the token grants, such as a room-rooted endpoint
   whose path is the token's root (`https://sjc.relay.mux.global/acme/rooms/42`), the path is the
   prefix and the application supplies only the fields below it: `['p', 'a']` there addresses what
-  `['acme', 'rooms', '42', 'p', 'a']` addresses on the bare host. Both forms are supported; a
-  connection to a room-rooted endpoint cannot address anything outside that room. Measured on
-  `*.relay.mux.global` (moq-relay 0.17.0) on 2026-10-05, on one relay and across regions
+  `['acme', 'rooms', '42', 'p', 'a']` addresses on the bare host. The room-rooted endpoint is the
+  recommended form: namespaces leave the token's root out, and a connection is confined to the
+  path it dialed. The bare host suits a client that spans several rooms under one grant, such as
+  a lobby that discovers every room. Both forms are supported, and they meet on the relay: a subscriber on either form receives a track published on the other, and
+  [discovery](#discovery) on a room-rooted connection names namespaces relative to its path, as
+  its prefix is. A connection to a room-rooted endpoint cannot address anything outside that room:
+  an absolute namespace there names one below the room (`['acme', 'rooms', '42', 'acme', ...]`),
+  so a subscribe reaches only a publisher that announced that longer namespace, and is refused as
+  unroutable when there is none; a `..` field is an ordinary field. An endpoint path the token
+  does not grant fails the connection with `UNAUTHORIZED`, where on the bare host a namespace
+  outside the grant fails only its own subscribe, and its publish never announces
+  ([issue #119](https://github.com/muxinc/relay-sdks/issues/119)). The token remains the access
+  boundary: the path confines a connection, not its token, which can dial any path it grants. Measured on `*.relay.mux.global` (moq-relay 0.17.0) on one relay and across
+  regions, on 2026-10-05 and again on 2026-10-20 in both SDKs over every transport, which the
+  [live smoke test](#live-smoke-test) now repeats
   ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)). Namespaces and track names
   follow the [Arguments](#arguments) table in both roles: an invalid one is rejected locally,
   before connecting a publisher or sending a subscription.
@@ -1682,7 +1694,15 @@ and subscribes on the same random namespace, then asserts:
    a few of the latest delivered, with a 1 s drain. It reports one `onSwitched` and no
    `onRestarted`, and no beat number is missing across the move, on one relay and across two. The
    report records how long the move took.
-8. All connections close cleanly once the test closes them.
+8. A [switchable subscription](#switching-tracks) moves from one layer to another
+   make-before-break. The layers carry the same frame numbers, one group per frame, and no frame
+   number is missing across the cutover. The report records how long the cutover took.
+9. A room-rooted endpoint, whose path is the run's namespace, takes namespaces relative to that
+   path ([subscribing](#subscribing)). A publisher on each form and a subscriber on each form
+   receive each other's objects, discovery on each form names both publishers in its own form,
+   and the relay refuses an absolute namespace on the rooted connection without delivering any of
+   the room's objects. The report records how long discovery took and the refusal.
+10. All connections close cleanly once the test closes them.
 
 Adding an assertion here means adding it to every SDK's smoke test. The TypeScript test runs the
 same scenario over each transport it ships: native QUIC in Node, WebTransport in Chromium, and QMux

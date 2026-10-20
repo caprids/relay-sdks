@@ -13,9 +13,10 @@ const decoder = new TextDecoder();
 
 /**
  * @param {object} config
- * @param {string} config.url Relay endpoint, e.g. https://sjc.relay.mux.global
+ * @param {string} config.url Relay endpoint, e.g. https://sjc.relay.mux.global/acme/rooms/42 (the token's root as its path)
  * @param {string} config.token Relay JWT authorized for `namespace`
- * @param {string[]} config.namespace Absolute namespace tuple, including the token's root prefix
+ * @param {string[]} config.namespace Namespace tuple, relative to the endpoint's path (on the bare host, including the
+ *   token's root prefix)
  * @param {string} config.track Track name inside the namespace
  * @param {'both' | 'publish' | 'subscribe'} config.mode Run both sides in this process, or only one
  * @param {number} config.count Objects to publish and/or wait for
