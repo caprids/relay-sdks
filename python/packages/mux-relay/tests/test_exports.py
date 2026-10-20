@@ -84,6 +84,7 @@ PUBLIC_NAMES = [
     "connect_supervised_subscriber",
     "read_json",
     "read_text",
+    "room_endpoint",
 ]
 """The whole public interface. A name added here needs a row in ``spec/vocabulary.md`` first."""
 

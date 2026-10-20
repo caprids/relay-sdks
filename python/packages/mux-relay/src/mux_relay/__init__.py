@@ -36,6 +36,7 @@ from .errors import RelayError, RelayErrorCode, RelayErrorPhase
 from .namespace_events import NamespaceEvent, NamespaceEvents
 from .payload import read_json, read_text
 from .publish import RelayGroupWriter, RelayPublisher, RelayTrackWriter, connect_relay_publisher
+from .room_endpoint import room_endpoint
 from .subscription_events import (
     GoawayEvent,
     ObjectEvent,
@@ -128,4 +129,5 @@ __all__ = [
     "connect_supervised_subscriber",
     "read_json",
     "read_text",
+    "room_endpoint",
 ]

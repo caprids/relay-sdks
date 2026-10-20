@@ -1,0 +1,64 @@
+{
+  "source": "spec/behavior.md, \"Room-rooted endpoints\" and the Room row of the Arguments table; the refused fields follow spec/relay-interop.md, \"Endpoint paths\" (measured on moq-relay 0.17.5 and 0.17.0)",
+  "note": "A case with `expected` returns exactly that URL string. A case with `error` throws: `type` is TypeError in both languages; `range` is RangeError in TypeScript and ValueError in Python. Endpoints here are written as both URL parsers serialize them (a lowercase host, no default port).",
+  "cases": [
+    { "name": "bare host", "endpoint": "https://relay.example", "room": ["acme", "rooms", "42"], "expected": "https://relay.example/acme/rooms/42" },
+    { "name": "bare host with a trailing slash", "endpoint": "https://relay.example/", "room": ["acme"], "expected": "https://relay.example/acme" },
+    { "name": "existing path", "endpoint": "https://relay.example/acme", "room": ["rooms", "42"], "expected": "https://relay.example/acme/rooms/42" },
+    { "name": "existing path with a trailing slash", "endpoint": "https://relay.example/acme/", "room": ["rooms"], "expected": "https://relay.example/acme/rooms" },
+    { "name": "existing path with several trailing slashes", "endpoint": "https://relay.example/acme//", "room": ["rooms"], "expected": "https://relay.example/acme/rooms" },
+    { "name": "port kept", "endpoint": "https://relay.example:4443", "room": ["acme"], "expected": "https://relay.example:4443/acme" },
+    { "name": "query kept", "endpoint": "https://relay.example/acme?region=ord&x=1", "room": ["rooms"], "expected": "https://relay.example/acme/rooms?region=ord&x=1" },
+    { "name": "empty query kept", "endpoint": "https://relay.example/?", "room": ["acme"], "expected": "https://relay.example/acme?" },
+    { "name": "jwt stays in the query", "endpoint": "https://relay.example?jwt=abc.def.ghi", "room": ["acme"], "expected": "https://relay.example/acme?jwt=abc.def.ghi" },
+    { "name": "every allowed punctuation character", "endpoint": "https://relay.example", "room": ["a-._~!$&'()+,;=:@Z9"], "expected": "https://relay.example/a-._~!$&'()+,;=:@Z9" },
+    { "name": "dots inside a field", "endpoint": "https://relay.example", "room": ["v1.2", "...", ".hidden"], "expected": "https://relay.example/v1.2/.../.hidden" },
+    {
+      "name": "32 fields",
+      "endpoint": "https://relay.example",
+      "room": [
+        "f01", "f02", "f03", "f04", "f05", "f06", "f07", "f08",
+        "f09", "f10", "f11", "f12", "f13", "f14", "f15", "f16",
+        "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24",
+        "f25", "f26", "f27", "f28", "f29", "f30", "f31", "f32"
+      ],
+      "expected": "https://relay.example/f01/f02/f03/f04/f05/f06/f07/f08/f09/f10/f11/f12/f13/f14/f15/f16/f17/f18/f19/f20/f21/f22/f23/f24/f25/f26/f27/f28/f29/f30/f31/f32"
+    },
+    { "name": "space in a field", "endpoint": "https://relay.example", "room": ["acme", "a b"], "error": "range" },
+    { "name": "percent in a field", "endpoint": "https://relay.example", "room": ["acme", "a%b"], "error": "range" },
+    { "name": "already percent-encoded field", "endpoint": "https://relay.example", "room": ["a%20b"], "error": "range" },
+    { "name": "slash in a field", "endpoint": "https://relay.example", "room": ["acme", "rooms/42"], "error": "range" },
+    { "name": "non-ASCII field", "endpoint": "https://relay.example", "room": ["café"], "error": "range" },
+    { "name": "asterisk in a field", "endpoint": "https://relay.example", "room": ["a*b"], "error": "range" },
+    { "name": "question mark in a field", "endpoint": "https://relay.example", "room": ["a?b"], "error": "range" },
+    { "name": "hash in a field", "endpoint": "https://relay.example", "room": ["a#b"], "error": "range" },
+    { "name": "backslash in a field", "endpoint": "https://relay.example", "room": ["a\\b"], "error": "range" },
+    { "name": "control character in a field", "endpoint": "https://relay.example", "room": ["a\tb"], "error": "range" },
+    { "name": "dot field", "endpoint": "https://relay.example", "room": ["acme", "."], "error": "range" },
+    { "name": "dot-dot field", "endpoint": "https://relay.example", "room": [".."], "error": "range" },
+    {
+      "name": "33 fields",
+      "endpoint": "https://relay.example",
+      "room": [
+        "f01", "f02", "f03", "f04", "f05", "f06", "f07", "f08",
+        "f09", "f10", "f11", "f12", "f13", "f14", "f15", "f16",
+        "f17", "f18", "f19", "f20", "f21", "f22", "f23", "f24",
+        "f25", "f26", "f27", "f28", "f29", "f30", "f31", "f32",
+        "f33"
+      ],
+      "error": "range"
+    },
+    { "name": "string room", "endpoint": "https://relay.example", "room": "acme", "error": "type" },
+    { "name": "empty room", "endpoint": "https://relay.example", "room": [], "error": "type" },
+    { "name": "empty field", "endpoint": "https://relay.example", "room": ["acme", ""], "error": "type" },
+    { "name": "number field", "endpoint": "https://relay.example", "room": ["acme", 42], "error": "type" },
+    { "name": "number endpoint", "endpoint": 7, "room": ["acme"], "error": "type" },
+    { "name": "relative endpoint", "endpoint": "/acme", "room": ["rooms"], "error": "type" },
+    { "name": "https endpoint with no host", "endpoint": "https://", "room": ["acme"], "error": "type" },
+    { "name": "http endpoint", "endpoint": "http://relay.example", "room": ["acme"], "error": "range" },
+    { "name": "endpoint with a fragment", "endpoint": "https://relay.example#x", "room": ["acme"], "error": "range" },
+    { "name": "endpoint with userinfo", "endpoint": "https://user@relay.example", "room": ["acme"], "error": "range" },
+    { "name": "endpoint with an empty jwt", "endpoint": "https://relay.example?jwt=", "room": ["acme"], "error": "range" },
+    { "name": "endpoint checked before the room", "endpoint": "http://relay.example", "room": "acme", "error": "range" }
+  ]
+}

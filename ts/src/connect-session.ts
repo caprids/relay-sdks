@@ -197,23 +197,15 @@ export const resolveTransport = Symbol('resolveTransport');
 export type RelaySessionOptions = ConnectRelayOptions & { [resolveTransport]?: () => Promise<RelayTransportFactory> };
 
 /**
- * Shared transport/auth lifetime for the subscribe and publish session drivers. It validates only
- * the shared options; each role checks its own options before calling it.
+ * Check an endpoint by the Endpoint rule in spec/behavior.md and return it parsed. Not a string, or
+ * not a URL at all (including an https URL with no host), is a TypeError: the wrong shape. A URL
+ * that parses but is not one Relay accepts is a RangeError: a disallowed value.
  */
-export async function openRelaySession<T extends Session>(
-  options: RelaySessionOptions,
-  createSession: (
-    transport: MoqtTransport,
-    callbacks: Pick<MoqtSessionCallbacks, 'onReady' | 'onClosed' | 'onGoaway'>,
-    setupOptions: KeyValuePair[],
-  ) => T,
-): Promise<RelaySessionLifetime<T>> {
-  // Not a string, or not a URL at all (including an https URL with no host), is a TypeError: the
-  // wrong shape. A URL that parses but is not one Relay accepts is a RangeError: a disallowed value.
-  if (typeof options.url !== 'string') throw new TypeError('Relay endpoints must be a URL string');
+export function endpointUrl(endpoint: unknown): URL {
+  if (typeof endpoint !== 'string') throw new TypeError('Relay endpoints must be a URL string');
   let url: URL;
   try {
-    url = new URL(options.url);
+    url = new URL(endpoint);
   } catch (error) {
     throw new TypeError('Relay endpoints must be a valid absolute URL', { cause: error });
   }
@@ -225,6 +217,22 @@ export async function openRelaySession<T extends Session>(
     throw new RangeError(
       'Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply getToken',
     );
+  return url;
+}
+
+/**
+ * Shared transport/auth lifetime for the subscribe and publish session drivers. It validates only
+ * the shared options; each role checks its own options before calling it.
+ */
+export async function openRelaySession<T extends Session>(
+  options: RelaySessionOptions,
+  createSession: (
+    transport: MoqtTransport,
+    callbacks: Pick<MoqtSessionCallbacks, 'onReady' | 'onClosed' | 'onGoaway'>,
+    setupOptions: KeyValuePair[],
+  ) => T,
+): Promise<RelaySessionLifetime<T>> {
+  const url = endpointUrl(options.url);
 
   const timeoutMs = options.connectTimeoutMs ?? 10_000;
   assertTimeoutMs('connectTimeoutMs', timeoutMs);

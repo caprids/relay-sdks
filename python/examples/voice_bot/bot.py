@@ -52,6 +52,7 @@ from mux_relay import (
     SupervisedSubscriber,
     connect_relay_publisher,
     connect_supervised_subscriber,
+    room_endpoint,
 )
 from mux_relay.media import CatalogService, FrameReader, FrameWriter, media_track_properties
 
@@ -494,6 +495,11 @@ def parse_args(argv: list[str]) -> Config:
     parser = argparse.ArgumentParser(description="A parrot voice bot: talk to it from the voice-bot page.")
     parser.add_argument("--url", default=os.environ.get("RELAY_URL", DEFAULT_ENDPOINT), help="Relay endpoint")
     parser.add_argument(
+        "--room",
+        help="Root --url at these slash-separated fields with room_endpoint, such as the token's root on the "
+        "bare host; --namespace is then relative to them",
+    )
+    parser.add_argument(
         "--namespace",
         help="The conversation's namespace, slash-separated, relative to the --url path (on the bare host, "
         "including the token's root prefix); the user publishes "
@@ -509,6 +515,12 @@ def parse_args(argv: list[str]) -> Config:
         parser.error("--url must be an https URL")
     if "jwt=" in parts.query:
         parser.error("Supply the token via RELAY_TOKEN or the prompt, not inside --url")
+    url = args.url
+    if args.room is not None:
+        try:
+            url = room_endpoint(args.url, [field for field in args.room.split("/") if field])
+        except (TypeError, ValueError) as error:
+            parser.error(f"--room: {error}")
     namespace_text = args.namespace or f"{os.environ.get('RELAY_NAMESPACE_PREFIX', 'relay-sdk-example')}/voice-bot"
     namespace = [field for field in namespace_text.split("/") if field]
     if not namespace:
@@ -516,7 +528,7 @@ def parse_args(argv: list[str]) -> Config:
     token = read_token()
     if not token:
         parser.error("A Relay token is required (RELAY_TOKEN or the prompt)")
-    return Config(url=args.url, token=token, namespace=namespace, threshold_dbfs=args.threshold)
+    return Config(url=url, token=token, namespace=namespace, threshold_dbfs=args.threshold)
 
 
 async def run(config: Config, log: Log) -> None:

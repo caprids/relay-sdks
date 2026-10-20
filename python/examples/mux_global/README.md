@@ -91,6 +91,9 @@ mise run python:example:mux-global -- --help
 - `--mode`: `both` (default), `publish`, or `subscribe`.
 - `--url`: defaults to `RELAY_URL` or the bare host `https://sjc.relay.mux.global`. Prefer an
   endpoint whose path is your token's root, such as `https://sjc.relay.mux.global/acme/rooms/42`.
+- `--room`: slash-separated fields appended to the `--url` path with `room_endpoint`, such as your token's
+  root on the bare host (`--room acme/rooms/42`), so `--namespace` is relative to them. Fields that a
+  URL path cannot carry unchanged are refused ([room-rooted endpoints](../../../spec/behavior.md#room-rooted-endpoints)).
 - `--namespace`: slash-separated fields, relative to the `--url` path: on the bare host,
   include the token's root prefix ([namespaces](../../../spec/behavior.md#subscribing)). Without it, the CLI
   appends a random field to `RELAY_NAMESPACE_PREFIX` (or `relay-sdk-example`). That generated

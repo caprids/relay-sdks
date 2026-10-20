@@ -38,6 +38,7 @@ bot exits with the error, and you start it again.
 | `--namespace` | The conversation: the page publishes at `<namespace>/user`, the bot at `<namespace>/bot` |
 | `--threshold` | Speech is louder than this, in dBFS (default -45); raise it in a noisy room |
 | `--url` | Relay endpoint (default `RELAY_URL` or `https://sjc.relay.mux.global`) |
+| `--room` | Fields appended to the `--url` path with `room_endpoint`, such as your token's root on the bare host; `--namespace` is then relative to them. The page's `--room` must match |
 
 Its output shows each turn:
 

@@ -34,6 +34,22 @@ so a publisher and a subscriber can each use their nearest relay
 The hosted demo defaults to the bare host `https://sjc.relay.mux.global`, which still requires authorized credentials.
 For another deployment, use the endpoint supplied by its operator.
 
+`room_endpoint` builds that endpoint from a relay and the token's root, so the URL is not assembled by
+hand:
+
+```python
+from mux_relay import room_endpoint
+
+url = room_endpoint("https://sjc.relay.mux.global", ["acme", "rooms", "42"])
+# 'https://sjc.relay.mux.global/acme/rooms/42'
+```
+
+It appends each field to the endpoint's path and keeps the endpoint's query. It encodes nothing,
+because the relay reads the path without decoding it. A field may hold only letters, digits and
+`-._~!$&'()+,;=:@`, and may not be `.` or `..`; any other field raises `ValueError`. Reach a room
+with such a field from the bare host
+([room-rooted endpoints](../spec/behavior.md#room-rooted-endpoints)).
+
 The demo reads `RELAY_TOKEN` when set, otherwise prompts with hidden input. Prefer the prompt for
 manual runs; automation can inject the environment variable through its secret manager. Do not put
 tokens in commands, source files, URLs, or committed `.env` files. The demo passes the token to
@@ -905,6 +921,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `subscriber.trackSource` | `subscriber.track_source` |
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
 | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
+| `roomEndpoint(endpoint, room)` throws `RangeError` | `room_endpoint(endpoint, room)` raises `ValueError` |
 | Browser `WebTransport`, or `@mux/relay-quic` on Node | aioquic native QUIC client (`mux_relay.quic.connect_quic`) |
 | `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry, until, drainMs }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=..., until=..., drain=seconds)` |
 | `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })`, `onSwitched({ from, to, subscribed })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)`, `on_switched(WantSwitchedInfo)` with `from_namespace`, `from_track`, `to_namespace`, `to_track` |

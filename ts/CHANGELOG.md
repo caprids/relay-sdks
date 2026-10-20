@@ -12,6 +12,10 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 - `@mux/relay`: `connectRelayPublisher` and `connectRelaySubscriber` for browsers over WebTransport (Chromium, and
   Firefox 155 or later: [#322](https://github.com/muxinc/relay-sdks/issues/322)), and `@mux/relay/node` for Node 24+
   over native QUIC.
+- `@mux/relay`: `roomEndpoint(endpoint, room)` builds the recommended room-rooted endpoint, the endpoint with the
+  token's root appended to its path ([#348](https://github.com/muxinc/relay-sdks/issues/348)). It keeps the query
+  and encodes nothing: moq-relay reads the path without percent-decoding it, so a field that would need encoding
+  (a space, `%`, `/`, `*`, non-ASCII, `.` or `..`) throws a `RangeError`, and that room is reached from the bare host.
 - `@mux/relay-websocket`: a transport adapter for QMux over WebSocket, the relay's TCP 443 path for networks that
   block UDP and browsers without a usable WebTransport ([#321](https://github.com/muxinc/relay-sdks/issues/321)).
   Pass `createWebSocketTransport()` as `createTransport` to always use it, or `withWebSocketFallback()` to dial

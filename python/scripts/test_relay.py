@@ -20,10 +20,11 @@ on aioquic), then asserts the list in ``spec/behavior.md``:
    want reports one ``on_switched`` and no ``on_restarted``, and no beat number is missing across the
    move. The report records how long the move took.
 8. A switchable subscription moves from one layer to another make-before-break with no gap.
-9. A room-rooted endpoint (issue #266), whose path is the run's namespace, takes namespaces relative
-   to that path: a publisher and a subscriber on each form reach each other's track, discovery on
-   each form names both publishers, and the relay refuses an absolute namespace on a rooted
-   connection without delivering the room's objects.
+9. A room-rooted endpoint (issue #266), whose path is the run's namespace (built with
+   ``room_endpoint``, issue #348), takes namespaces relative to that path: a publisher and a
+   subscriber on each form reach each other's track, discovery on each form names both publishers,
+   and the relay refuses an absolute namespace on a rooted connection without delivering the room's
+   objects.
 10. All connections close cleanly once the test closes them.
 
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
@@ -47,7 +48,7 @@ import time
 import uuid
 from getpass import getpass
 from typing import Any
-from urllib.parse import quote, urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 from moq_core import RelativeGroupFilter
 from mux_relay import (
@@ -70,6 +71,7 @@ from mux_relay import (
     connect_relay_subscriber,
     connect_supervised_publisher,
     connect_supervised_subscriber,
+    room_endpoint,
 )
 
 RUN_DEADLINE = 60.0
@@ -594,20 +596,18 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             if not layer_writes.done():
                 layer_writes.cancel()
 
-        # Assertion 9. A room-rooted endpoint (issue #266): the endpoint's path is the run's namespace and
-        # its connections name namespaces relative to it. A publisher on each form, a subscriber on each
-        # form subscribing to the other's track, and discovery on each form must agree: the relay resolves
-        # `<endpoint>/<room>` + `['pair', 'rooted']` to what `<endpoint>` + `[*room, 'pair', 'rooted']`
-        # addresses. Each publisher writes a counter while it has demand, so an object the relay's first
-        # hop drops (issue #243) is followed by another. An absolute namespace on a rooted connection
-        # addresses a namespace below the room, not the run's own, so the relay refuses its subscription
-        # as unroutable and it never gets the bare publisher's objects.
+        # Assertion 9. A room-rooted endpoint (issue #266), built with room_endpoint (issue #348): the
+        # endpoint's path is the run's namespace and its connections name namespaces relative to it. A publisher
+        # on each form, a subscriber on each form subscribing to the other's track, and discovery on each form
+        # must agree: the relay resolves `<endpoint>/<room>` + `['pair', 'rooted']` to what `<endpoint>` +
+        # `[*room, 'pair', 'rooted']` addresses. Each publisher writes a counter while it has demand, so an
+        # object the relay's first hop drops (issue #243) is followed by another. An absolute namespace on a
+        # rooted connection addresses a namespace below the room, not the run's own, so the relay refuses its
+        # subscription as unroutable and it never gets the bare publisher's objects.
         room = namespace
 
         def rooted(url: str) -> str:
-            parts = urlsplit(url)
-            path = parts.path.rstrip("/") + "/" + "/".join(quote(field, safe="") for field in room)
-            return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+            return room_endpoint(url, room)
 
         room_publisher = await connect_relay_publisher(
             rooted(endpoint),

@@ -40,6 +40,7 @@ from mux_relay import (
     WantHandlers,
     connect_relay_publisher,
     connect_supervised_subscriber,
+    room_endpoint,
 )
 
 # The policies the examples share live one directory up; a script run by path cannot see them otherwise.
@@ -313,6 +314,11 @@ def parse_args(argv: list[str]) -> Config:
     parser = argparse.ArgumentParser(description="Publish JSON ticks to a Relay namespace and subscribe to them again.")
     parser.add_argument("--url", default=os.environ.get("RELAY_URL", DEFAULT_ENDPOINT), help="Relay endpoint")
     parser.add_argument(
+        "--room",
+        help="Root --url at these slash-separated fields with room_endpoint, such as the token's root on the "
+        "bare host; --namespace is then relative to them",
+    )
+    parser.add_argument(
         "--namespace",
         help="Namespace, slash-separated, relative to the --url path "
         "(on the bare host, include the token's root prefix) "
@@ -332,6 +338,12 @@ def parse_args(argv: list[str]) -> Config:
         parser.error("--url must be an https URL")
     if "jwt=" in parts.query:
         parser.error("Supply the token via RELAY_TOKEN or the prompt, not inside --url")
+    url = args.url
+    if args.room is not None:
+        try:
+            url = room_endpoint(args.url, [field for field in args.room.split("/") if field])
+        except (TypeError, ValueError) as error:
+            parser.error(f"--room: {error}")
 
     for name in ("count", "interval", "timeout"):
         if getattr(args, name) <= 0:
@@ -351,7 +363,7 @@ def parse_args(argv: list[str]) -> Config:
         parser.error("A Relay token is required (RELAY_TOKEN or the prompt)")
 
     return Config(
-        url=args.url,
+        url=url,
         token=token,
         namespace=namespace,
         track=args.track,

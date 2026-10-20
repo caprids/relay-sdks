@@ -1,6 +1,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
+import { roomEndpoint } from '@mux/relay';
 import { startModuleServer } from '../../scripts/module-server.js';
 
 // Serve the voice bot page on http://127.0.0.1 (a secure context, as WebTransport needs). The page talks to the bot
@@ -10,13 +11,15 @@ import { startModuleServer } from '../../scripts/module-server.js';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const { values } = parseArgs({
-  options: { namespace: { type: 'string' }, port: { type: 'string', default: '8320' } },
+  options: { room: { type: 'string' }, namespace: { type: 'string' }, port: { type: 'string', default: '8320' } },
 });
 const namespace = (values.namespace ?? `${process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-example'}/voice-bot`)
   .split('/')
   .filter(Boolean);
+const relayUrl = process.env.RELAY_URL ?? 'https://sjc.relay.mux.global';
 const config = {
-  url: process.env.RELAY_URL ?? 'https://sjc.relay.mux.global',
+  // --room roots RELAY_URL at its slash-separated fields, as the bot's --room does; --namespace is then relative to them.
+  url: values.room === undefined ? relayUrl : roomEndpoint(relayUrl, values.room.split('/').filter(Boolean)),
   namespace,
   ...(process.env.RELAY_TOKEN ? { token: process.env.RELAY_TOKEN } : {}),
 };
