@@ -823,8 +823,9 @@ async consumption limits bound local buffering only (see
 
 A very long-lived connection also grows slowly in memory: aioquic keeps every finished stream's ID in
 `QuicConnection._streams_finished` for the life of the connection, and no release prunes it, so a
-publisher holds about 28 bytes per group it has ever sent, roughly 2.5 MB a day at 1000 groups/s,
-until it reconnects ([#47](https://github.com/muxinc/relay-sdks/issues/47)).
+publisher holds about 28 bytes per group it has ever sent until it reconnects: roughly 2.4 MB a day
+for each group per second it sends, or 2.4 GB a day at 1000 groups/s
+([#47](https://github.com/muxinc/relay-sdks/issues/47)).
 
 `packages/mux-relay/tests/test_quic.py` runs the full smoke-test assertion list over a real QUIC
 loopback: native QUIC listeners on `localhost` (aioquic, self-signed certificates) fronting the

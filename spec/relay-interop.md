@@ -456,8 +456,8 @@ The table holds only for tracks published over moqt, as both SDKs publish. When 
 publisher speaks moq-lite (the `moq` CLI, moq-rs, `@moq/net`), the relay treats the **first**
 moqt subscriber differently: its SUBSCRIBE_OK carries no LARGEST_OBJECT, and within about 100 ms it
 receives every group the publisher still retains, in one burst and out of order, whatever filter it
-sent (none, `NextObjectFilter` or `RelativeGroupFilter`; groups 0-8 in 3 of 3 runs on 0.17.0,
-against 2 of 2 correct with the same producer publishing over moqt). Later subscribers are filtered
+sent (none, `NextObjectFilter` or `RelativeGroupFilter`, on `moqt-20`; groups 0-8 in 3 of 3 runs
+on 0.17.0, against 2 of 2 correct with the same producer publishing over moqt). Later subscribers are filtered
 as the table says. A subscriber to a third-party moq-lite broadcast that wants the live edge drops
 any group older than the newest it has seen. The fix belongs upstream in moq-relay
 ([issue #153](https://github.com/muxinc/relay-sdks/issues/153)).
