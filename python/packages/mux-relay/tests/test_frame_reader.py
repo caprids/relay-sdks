@@ -3,9 +3,11 @@
 import asyncio
 
 import pytest
+from relay_helpers.relay_hub import create_relay_hub
 
 from moq_core import KeyValuePair, MoqtObject, SubgroupEnd, SubgroupReset, SubscribeOk
 from moq_media import LOC_TIMESCALE, LOC_TIMESTAMP, FrameSequencer, PlayoutClock, SequencedFrame
+from mux_relay import connect_relay_publisher, connect_relay_subscriber
 from mux_relay.media import FrameReader
 from mux_relay.supervised_subscriber import WantSwitchedInfo
 
@@ -202,3 +204,29 @@ async def test_a_partly_read_burst_is_judged_when_read() -> None:
     clock.report_audio(5_000_000)
     handlers.on_object(obj(2, 0, 5_100_000))
     assert ids(await take(reader, 1)) == [(2, 0, "gap")]
+
+
+async def test_reads_every_frame_of_a_keyframe_group_the_hub_forwards_on_one_stream() -> None:
+    # #339: the hub forwarded each object on a subgroup stream of its own and FINed it, so the reader took the group
+    # as ended after its keyframe and dropped every later frame as behind.
+    hub = create_relay_hub()
+    url = "https://relay.example.com/moq"
+    namespace = ["testing", "video"]
+    publisher = await connect_relay_publisher(url, namespace=namespace, create_transport=hub.connect_publisher)
+    subscriber = await connect_relay_subscriber(url, create_transport=hub.connect_subscriber)
+    try:
+        track = publisher.register_track("video")
+        sequencer = FrameSequencer(PlayoutClock())
+        reader = FrameReader(sequencer)
+        subscriber.subscribe(namespace, "video", reader.subscription_handlers())
+        group = await track.open_group()
+        for object_id in range(10):
+            await group.write(bytes([object_id]), properties=[KeyValuePair(LOC_TIMESTAMP, object_id * 33_333)])
+        await group.close()
+        frames = await asyncio.wait_for(take(reader, 10), 5)
+        assert [frame.object_id for frame in frames] == list(range(10))
+        assert sequencer.stats.late == 0
+    finally:
+        subscriber.close()
+        await publisher.close()
+        hub.destroy()

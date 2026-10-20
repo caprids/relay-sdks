@@ -7,8 +7,14 @@ import {
   type SequencedFrame,
 } from '@mux/moq-media';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
-import type { RelaySubscriptionHandlers, WantHandlers } from '../src/index.js';
+import {
+  connectRelayPublisher,
+  connectRelaySubscriber,
+  type RelaySubscriptionHandlers,
+  type WantHandlers,
+} from '../src/index.js';
 import { createFrameReader, type FrameReader, type FrameReaderSequencer } from '../src/media.js';
+import { createRelayHub } from './helpers/relay-hub.js';
 
 const object = (groupId: number, objectId: number, timestampUs: number): MoqtObject => ({
   groupId,
@@ -298,5 +304,40 @@ describe('createFrameReader: onCatchUp', () => {
       reader.onObject(object(step + 1, 0, step * 100_000));
     }
     expect(onCatchUp).toHaveBeenCalledOnce();
+  });
+});
+
+describe('createFrameReader through the relay hub', () => {
+  // #339: the hub forwarded each object on a subgroup stream of its own and FINed it, so the reader took the group as
+  // ended after its keyframe and dropped every later frame as behind.
+  it('reads every frame of a keyframe group, which the hub forwards on one stream', async () => {
+    const hub = createRelayHub();
+    const url = 'https://relay.example.com/moq';
+    const namespace = ['testing', 'video'];
+    const publisher = await connectRelayPublisher({ url, namespace, createTransport: hub.connectPublisher });
+    const subscriber = await connectRelaySubscriber({ url, createTransport: hub.connectSubscriber });
+    try {
+      const track = publisher.registerTrack({ track: 'video' });
+      const sequencer = createFrameSequencer({ clock: createPlayoutClock() });
+      const frames: SequencedFrame[] = [];
+      subscriber.subscribe(
+        { namespace, track: 'video' },
+        createFrameReader(sequencer, { onFrame: (frame) => frames.push(frame) }),
+      );
+      const group = await track.openGroup();
+      for (let objectId = 0; objectId < 10; objectId++) {
+        await group.write(new Uint8Array([objectId]), {
+          properties: [{ type: LOC_TIMESTAMP, value: objectId * 33_333 }],
+        });
+      }
+      await group.close();
+      await vi.waitFor(() => expect(frames).toHaveLength(10));
+      expect(frames.map((frame) => frame.objectId)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      expect(sequencer.stats.late).toBe(0);
+    } finally {
+      subscriber.close();
+      publisher.close();
+      hub.destroy();
+    }
   });
 });
