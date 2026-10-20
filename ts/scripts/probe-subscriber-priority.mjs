@@ -9,7 +9,7 @@
 // capture-to-arrival latency. Point RELAY_SUB_URL through a downlink impairer, so the relay holds a backlog for it.
 // SUBSCRIBER_PRIORITY=on subscribes with mediaSubscribeParameters; off subscribes with no parameters, which is a
 // viewer before #337; invert overrides the priorities, video ahead of audio (audio 96, video 16): a check that the
-// relay orders by them at all. It prints a summary of audio latency after a warm-up, how much video arrived, and the
+// relay orders by them at all. It prints a summary of audio latency after a warm-up from the first frame published, how much video arrived, and the
 // SUBSCRIBER_PRIORITY each SUBSCRIBE carried, read off the subscriber's request streams. The priority the relay stamps
 // on group streams is no evidence: moq-relay 0.17.5 stamps a track's 0x0E whatever the subscriber asks for.
 //
@@ -138,6 +138,7 @@ const frame = (bytes, key) => {
   return { payload, key };
 };
 let videoFrames = 0;
+const startMs = Date.now(); // the warm-up runs from here, whatever arrives first
 const timers = [
   setInterval(() => void audio.write(frame(sizes.audio, true)).then(count('audio')), 20),
   setInterval(() => {
@@ -153,7 +154,7 @@ for (const subscription of subscriptions) subscription.cancel();
 await Promise.all([publisher.close(), subscriber.close()]);
 
 const measured = (track) => {
-  const after = arrivals[track].filter(([captured]) => captured >= arrivals[track][0]?.[0] + warmUpMs);
+  const after = arrivals[track].filter(([captured]) => captured >= startMs + warmUpMs);
   const latencies = after.map(([captured, at]) => at - captured).sort((a, b) => a - b);
   const at = (p) => (latencies.length === 0 ? null : Math.round(latencies[Math.floor((latencies.length - 1) * p)]));
   return { received: after.length, p50Ms: at(0.5), p95Ms: at(0.95), p99Ms: at(0.99), maxMs: at(1) };
