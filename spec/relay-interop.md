@@ -28,12 +28,16 @@ Location Filter Type that says which fields follow and has no length
 ([draft-22 §9.20.9](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.20.9)).
 Draft-20 length-prefixed up to four fields and read the meaning from how many were present
 ([docs/research/moqt-22-delta.md](../docs/research/moqt-22-delta.md)). The SDKs encode the filter
-for the negotiated draft. moq-relay negotiates `moqt-22` from 0.15.0 but frames LOCATION_FILTER
-the draft-20 way on every draft from 20 on (`Filter::is_draft20` and `Param for Filter` in
-`rs/moq-net/src/ietf/filter.rs` at tag `moq-relay-v0.17.0`, unchanged on upstream `main` on
-2026-10-06). The two spellings are the same bytes when the field count equals the type and every
-field is under 128 (`spec/vectors/location-filter.json`), so most filters work; the ones that do
-not are:
+for the negotiated draft. moq-relay negotiates `moqt-22` from 0.15.0, but through 0.17.2 it frames
+LOCATION_FILTER the draft-20 way on every draft from 20 on (`Filter::is_draft20` and
+`Param for Filter` in `rs/moq-net/src/ietf/filter.rs` at tag `moq-relay-v0.17.0`). moq-relay
+0.17.3 fixed this: it frames the filter by the draft-22 rules on `moqt-22`
+([moq-dev/moq#5080](https://github.com/moq-dev/moq/pull/5080), for
+[moq-dev/moq#4847](https://github.com/moq-dev/moq/issues/4847)). As of 2026-10-20 the OCI relays
+run 0.17.5 and have the fix, but `*.relay.mux.global` and the Fly r1 fleet run 0.17.0 and do not
+([issue #275](https://github.com/muxinc/relay-sdks/issues/275)). On 0.17.0 the two spellings are
+the same bytes when the field count equals the type and every field is under 128
+(`spec/vectors/location-filter.json`), so most filters work; the ones that do not are:
 
 | filter | draft-22 bytes the SDK sends | what moq-relay 0.17.0 does on `moqt-22` |
 | --- | --- | --- |
@@ -47,9 +51,9 @@ delivered on `moqt-22`; Next Object closed the session as above. The relay's own
 to an SDK publisher carries `21 02 00 00` (Next Object, in the draft-20 framing) and a fill of
 `21 01 01`, which read under draft-22 as an absolute start at `{0,0}` and a relative start of 1. No
 SDK publisher acts on a subscription's filter, so that changes nothing. On `moqt-20` every shape
-works, Next Object included. Until the relay frames the filter by the draft-22 rules, a live-edge
-subscriber uses a relative start of 0 (the next group) rather than Next Object, as the live smoke
-tests do, or leaves the filter out ([issue #275](https://github.com/muxinc/relay-sdks/issues/275)).
+works, Next Object included. Until production runs 0.17.3 or later, a live-edge subscriber uses a
+relative start of 0 (the next group) rather than Next Object, as the live smoke tests do, or leaves
+the filter out ([issue #275](https://github.com/muxinc/relay-sdks/issues/275)).
 
 Publishers still retain no history and advertise no `LARGEST_OBJECT`. The relay's
 Next Object + current-group `FILL_PARAMETERS` pull (since 0.14.17, unchanged through 0.17.0, whose
@@ -371,9 +375,10 @@ a document more than once.
 
 ### A viewer on another relay
 
-When the first viewer of a track is on a different relay from the publisher, the publisher sees
-two relay subscriptions, not one
-([issue #243](https://github.com/muxinc/relay-sdks/issues/243)). Relays mesh over moq-lite, and a
+When the first viewer of a track is on a different relay from the publisher, or is a moq-lite
+viewer on any relay, the publisher sees two relay subscriptions, not one
+([issue #243](https://github.com/muxinc/relay-sdks/issues/243),
+[issue #150](https://github.com/muxinc/relay-sdks/issues/150)). Relays mesh over moq-lite, and a
 lite-05 subscriber fetches a track's TRACK_INFO before it subscribes (`TrackInfoFetch` in
 `rs/moq-net/src/lite/subscriber.rs` at `moq-relay-v0.17.0`). The publisher's relay can learn the
 info of an IETF publisher's track only from a SUBSCRIBE_OK, so it subscribes to answer the query
@@ -394,8 +399,12 @@ Objects written to the first subscription reach no viewer. A write still in flig
 cancelled fails with `SUBSCRIPTION_CHANGED`; a write that completed before the cancel was accepted by
 the transport and is dropped by the relay without an error. Against local relays the first object
 of a continuous publisher was lost in every run, and on the fleet the remote viewer's first object
-was seq 1 or 2 on three of four paths. A viewer on the publisher's own relay sends no TRACK_INFO
-query and gets one subscription (3 of 3 on 0.17.0 on 2026-10-05). The SDKs cannot tell the two
+was seq 1 or 2 on three of four paths. An IETF viewer (either SDK) on the publisher's own relay
+sends no TRACK_INFO query and gets one subscription (3 of 3 on 0.17.0 on 2026-10-05). A moq-lite
+viewer (the `moq` CLI, `@moq/watch`) is a lite subscriber itself, so it causes the same subscribe,
+cancel, subscribe on the publisher's own relay: 11 of 11 runs on 0.17.0 had two upstream
+SUBSCRIBEs, the first cancelled about 50 ms after it started
+([issue #150](https://github.com/muxinc/relay-sdks/issues/150)). The SDKs cannot tell the two
 subscriptions apart: each is a demanded value, the first followed by `false` ([ADR 0001](../docs/adr/0001-one-relay-subscription-per-track.md)).
 Because publishers retain no history, the second subscription's current-group fill has nothing to
 recover either. A live publisher therefore cannot count on its first objects after demand begins
@@ -443,6 +452,16 @@ history subscribes with `RelativeGroupFilter` / `{ type: 'relative-group' }` (`g
 either reaches depends on what the relay still holds; on 0.15.8 the absolute case above started
 later than it asked for.
 
+The table holds only for tracks published over moqt, as both SDKs publish. When the track's
+publisher speaks moq-lite (the `moq` CLI, moq-rs, `@moq/net`), the relay treats the **first**
+moqt subscriber differently: its SUBSCRIBE_OK carries no LARGEST_OBJECT, and within about 100 ms it
+receives every group the publisher still retains, in one burst and out of order, whatever filter it
+sent (none, `NextObjectFilter` or `RelativeGroupFilter`; groups 0-8 in 3 of 3 runs on 0.17.0,
+against 2 of 2 correct with the same producer publishing over moqt). Later subscribers are filtered
+as the table says. A subscriber to a third-party moq-lite broadcast that wants the live edge drops
+any group older than the newest it has seen. The fix belongs upstream in moq-relay
+([issue #153](https://github.com/muxinc/relay-sdks/issues/153)).
+
 ## Subscription parameters
 
 `MessageParameters` exposes every draft-22 SUBSCRIBE parameter, and both SDKs send whatever the
@@ -454,9 +473,9 @@ application sets. moq-relay decides which it acts on. Read from the source at ta
 | parameter | moq-relay 0.17.0 | effect for an application |
 | --- | --- | --- |
 | SUBSCRIBER_PRIORITY (`0x20`) | honored on SUBSCRIBE: it sets the priority the relay serves this viewer with. It is not passed upstream (the relay's own SUBSCRIBE carried 255 when the viewer asked for 7) | set it on the SUBSCRIBE; changing it later with `update()` ends the subscription ([deviation 4](behavior.md#relay-interop-deviations)) |
-| publisher priority (track property `0x0E`) | honored: carried in group headers and SUBSCRIBE_OK | delivery is ordered by subscriber priority; the publisher's is ignored when those tie ([#154](https://github.com/muxinc/relay-sdks/issues/154)), so the media defaults (audio 16, video 96) do not change it ([behavior.md](behavior.md#media-publishing)); a viewer sets the same values as its subscriber priority with `mediaSubscribeParameters` ([behavior.md](behavior.md#media-subscribing)) |
-| LOCATION_FILTER (`0x21`) | honored, with draft-20 framing on every draft | see [late subscribers](#late-subscribers-and-location-filters) and [LOCATION_FILTER framing](#draft-22-location_filter-framing) |
-| GROUP_ORDER (`0x22`) | decoded and **ignored**: SUBSCRIBE_OK states Descending whatever the viewer asked for and whatever the publisher declared (DEFAULT_PUBLISHER_GROUP_ORDER), and the relay's upstream SUBSCRIBE always asks for Descending | do not rely on group order either way. A late subscriber that asked for Ascending got its cached groups in no consistent order in 9 of 10 runs (for example `[2..10, 1, 11, 12]`), and ascending once |
+| publisher priority (track property `0x0E`) | carried in group headers and SUBSCRIBE_OK, but **not used** to order delivery; under congestion only subscriber priority does | an app protects audio by setting its subscriber priority. The publisher's is ignored even when subscriber priorities tie (3 of 3 on 0.17.0, [#154](https://github.com/muxinc/relay-sdks/issues/154)), so the media defaults (audio 16, video 96) do not change it ([behavior.md](behavior.md#media-publishing)); a viewer sets the same values as its subscriber priority with `mediaSubscribeParameters` ([behavior.md](behavior.md#media-subscribing)) |
+| LOCATION_FILTER (`0x21`) | honored, with draft-20 framing on every draft (fixed in 0.17.3) | see [late subscribers](#late-subscribers-and-location-filters) and [LOCATION_FILTER framing](#draft-22-location_filter-framing) |
+| GROUP_ORDER (`0x22`) | decoded and **ignored**: SUBSCRIBE_OK states Descending whatever the viewer asked for and whatever the publisher declared (DEFAULT_PUBLISHER_GROUP_ORDER), and the relay's upstream SUBSCRIBE always asks for Descending | do not rely on group order either way. A late subscriber that asked for Ascending got its cached groups in no consistent order in 9 of 10 runs (for example `[2..10, 1, 11, 12]`), and ascending once. Upstream `main` applies it ([moq-dev/moq#5385](https://github.com/moq-dev/moq/pull/5385)), in no release through 0.17.7 |
 | NEW_GROUP_REQUEST (`0x32`) | decoded and **ignored**, on SUBSCRIBE and REQUEST_UPDATE: never forwarded upstream, neither in the SUBSCRIBE for a track without a subscription nor as a REQUEST_UPDATE for one already served, which draft-22 §9.20.19 requires of a relay | there is no protocol key-frame request through this relay. An application that needs one (a decoder error, a layer switch) carries the request on its own track back to the publisher |
 | OBJECT_DELIVERY_TIMEOUT (`0x02`), SUBGROUP_DELIVERY_TIMEOUT (`0x06`) | decoded and ignored; not passed upstream | only the publisher's own values apply ([delivery timeouts](behavior.md#delivery-timeouts)) |
 | AUTHORIZATION_TOKEN (`0x03`) on a request | ignored: the session's grant authorizes every request | authorize at connect time |
@@ -538,7 +557,7 @@ source and not measured, has the same code on each path: the delivery timeouts a
 unused bindings, a standalone FETCH answers unstamped, and group streams carry only the subscriber
 priority. Upstream **`main`** differs, read in source and not measured: it applies GROUP_ORDER on
 the IETF publisher, and FETCH keeps object timestamps
-([moq-dev/moq#4822](https://github.com/moq-dev/moq/pull/4822),
+([moq-dev/moq#5385](https://github.com/moq-dev/moq/pull/5385),
 [#5494](https://github.com/moq-dev/moq/pull/5494), in neither 0.17.6 nor 0.17.7). Its delivery
 timeouts are still advisory by design (`doc/concept/standard.md` at 7a13b8f8b: they "do not drop
 objects or reset subgroups"), and nothing maps an IETF subscriber's budget onto the relay's

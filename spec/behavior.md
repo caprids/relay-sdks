@@ -15,8 +15,8 @@ against that file.
   offers `moqt-22`, then `moqt-20`, and no other protocol identifier, and speaks whichever the relay
   selects. The two drafts differ on the wire only in the LOCATION_FILTER parameter, which the core
   encodes for the negotiated one. moq-relay selects `moqt-22` from 0.15.0, so every relay version
-  the SDKs support speaks it, but it frames LOCATION_FILTER the draft-20 way on `moqt-22` too
-  ([draft-22 LOCATION_FILTER framing](relay-interop.md#draft-22-location_filter-framing)).
+  the SDKs support speaks it, but before 0.17.3 it frames LOCATION_FILTER the draft-20 way on
+  `moqt-22` too ([draft-22 LOCATION_FILTER framing](relay-interop.md#draft-22-location_filter-framing)).
 - Authentication is a JWT supplied by the application. The SDK sends it as the `jwt` query
   parameter on the endpoint URL. An explicit `jwt` parameter already present on the URL takes
   precedence over a token callback, and the callback is not called. An empty `jwt` parameter
@@ -201,9 +201,17 @@ Messages are not a compatibility contract; the class and the point of rejection 
 ## Subscribing
 
 - Namespaces are ordered tuples of fields sent verbatim. The SDK adds no prefix and performs no
-  normalization. Fields are absolute: the token's root prefix is part of the namespace the
-  application supplies. Namespaces and track names follow the [Arguments](#arguments) table in both
-  roles: an invalid one is rejected locally, before connecting a publisher or sending a subscription.
+  normalization. The relay resolves a namespace relative to the endpoint URL's path. With no path
+  (`https://sjc.relay.mux.global`), fields are absolute: the token's root prefix is part of the
+  namespace the application supplies. With a path the token grants, such as a room-rooted endpoint
+  whose path is the token's root (`https://sjc.relay.mux.global/acme/rooms/42`), the path is the
+  prefix and the application supplies only the fields below it: `['p', 'a']` there addresses what
+  `['acme', 'rooms', '42', 'p', 'a']` addresses on the bare host. Both forms are supported; a
+  connection to a room-rooted endpoint cannot address anything outside that room. Measured on
+  `*.relay.mux.global` (moq-relay 0.17.0) on 2026-10-05, on one relay and across regions
+  ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)). Namespaces and track names
+  follow the [Arguments](#arguments) table in both roles: an invalid one is rejected locally,
+  before connecting a publisher or sending a subscription.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The callback path adds no application queue, no
@@ -893,9 +901,10 @@ taken over.
   count nor a liveness signal. A document re-sent on each demanded value reaches the viewers who
   join during one relay subscription from the relay's cache, not as a re-send, so a state-shaped
   track writes only state that is safe to serve from cache and to receive more than once
-  ([relay demand](relay-interop.md#relay-demand)). When the first viewer is on another relay, the
-  publisher's relay first subscribes briefly to answer a track-info query and then subscribes again,
-  so objects written during the first subscription reach no viewer, with or without a
+  ([relay demand](relay-interop.md#relay-demand)). When the first viewer is on another relay, or
+  is a moq-lite viewer on any relay, the publisher's relay first subscribes briefly to answer a
+  track-info query and then subscribes again, so objects written during the first subscription reach
+  no viewer, with or without a
   `SUBSCRIPTION_CHANGED` error; a live publisher cannot rely on its first objects after demand
   begins being delivered ([a viewer on another relay](relay-interop.md#a-viewer-on-another-relay)).
   Implemented in both SDKs.
@@ -1064,8 +1073,12 @@ MSF and LOC say nothing about an abandoned group. Implemented in both SDKs.
 
 These are deployment observations, separate from the SDK guarantees above. Tests against
 production moq-relay 0.15.8 on 2026-09-28 (3 of 3 runs identical) found the following, and the
-same matrix was identical on production 0.17.0 on 2026-10-05. The relay stores each object as its
-size and a timestamp only, so no other object property can survive it.
+same matrix was identical on production 0.17.0 on 2026-10-05. moq-relay 0.17.5 and earlier strip
+object properties: the relay stores each object as its size and a timestamp only, so no other
+object property can survive it (a cluster interop run through 0.17.5 also delivered only `0x10`). This
+is fixed upstream in [moq-dev/moq#5494](https://github.com/moq-dev/moq/pull/5494), which keeps
+object properties through the relay, but no release has it yet
+([issue #262](https://github.com/muxinc/relay-sdks/issues/262)).
 
 - Of the object properties, only Timestamp (`0x10`) reaches a subscriber. The relay also reads
   `0x06`, the Timestamp id of draft-ietf-moq-loc-03, as a Timestamp and forwards it as `0x10`.

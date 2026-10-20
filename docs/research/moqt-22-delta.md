@@ -132,7 +132,9 @@ sentences above.
   the same way, and the Python live smoke test passes against it.
 - **The relay's -22 LOCATION_FILTER is the -20 one.** moq-net treats every draft from 20 on as
   "draft-20" for this parameter (`Filter::is_draft20` and `impl Param for Filter` in
-  `rs/moq-net/src/ietf/filter.rs`, same on `main`). Measured live on production on `moqt-22`:
+  `rs/moq-net/src/ietf/filter.rs` at `moq-relay-v0.17.0`). Fixed in moq-relay 0.17.3
+  ([moq-dev/moq#5080](https://github.com/moq-dev/moq/pull/5080)); production `*.relay.mux.global`
+  still runs 0.17.0. Measured live on production (0.17.0) on `moqt-22`:
   - a filter whose two spellings coincide is accepted: none, type `0x00`, relative-group 1, or an
     absolute start;
   - a draft-22 Next Object (`21 05`) closes the session with PROTOCOL_VIOLATION (0x3)
