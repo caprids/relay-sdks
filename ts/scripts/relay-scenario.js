@@ -38,12 +38,14 @@ export async function runRelayScenario({
   let lateSubscriber;
   let layerPublisher;
   let layerSwitch;
+  let roomPair;
+  const roomConnections = [];
   let lateLargestObject;
   let discovery;
   const discovered = [];
   const announcedNamespaces = new Set();
   const lifetime = new AbortController();
-  const deadline = setTimeout(() => lifetime.abort(new Error('Live relay test exceeded 45 seconds')), 45_000);
+  const deadline = setTimeout(() => lifetime.abort(new Error('Live relay test exceeded 60 seconds')), 60_000);
   const received = { events: [], status: [], lateStatus: [] };
   const errors = [];
   const expectedEvents = [[0, 255, 128, 1], Array.from(new TextEncoder().encode('hello from Relay SDK')), []];
@@ -234,7 +236,7 @@ export async function runRelayScenario({
       throw new Error(`Discovery mismatch: ${JSON.stringify(discovered)}`);
     }
 
-    // Assertion 8. A want following a supervised publisher's root moves to a newer generation that
+    // Assertion 7. A want following a supervised publisher's root moves to a newer generation that
     // announces while the old one is still up, the way a restarted publisher replaces a crashed one
     // whose announce the relay still holds, or a publisher rotates its connection. The move is made
     // before the break (issue #282): both generations beat one shared counter every 50 ms, the want
@@ -354,7 +356,7 @@ export async function runRelayScenario({
     }
     if (errors.length > 0) throw new Error(errors.join('; '));
 
-    // Assertion 9. A switchable subscription moves from one layer to another make-before-break: the
+    // Assertion 8. A switchable subscription moves from one layer to another make-before-break: the
     // layers carry the same frame numbers, one group per frame, and the frames the handlers receive
     // leave no gap across the cutover (issue #264). The frame number stands in for a media timestamp:
     // the switch waits for a new-layer frame within a few of the latest the old layer delivered, as a
@@ -462,6 +464,130 @@ export async function runRelayScenario({
       switchable.cancel();
     }
 
+    // Assertion 9. A room-rooted endpoint (issue #266): the endpoint's path is the run's namespace and
+    // its connections name namespaces relative to it. A publisher on each form, a subscriber on each
+    // form subscribing to the other's track, and discovery on each form must agree: the relay resolves
+    // `<endpoint>/<room>` + `['pair', 'rooted']` to what `<endpoint>` + `[...room, 'pair', 'rooted']`
+    // addresses. Each publisher writes a counter while it has demand, so an object the relay's first
+    // hop drops (issue #243) is followed by another. An absolute namespace on a rooted connection
+    // addresses a namespace below the room, not the run's own, so its subscription never gets the bare
+    // publisher's objects.
+    const room = namespace;
+    const rooted = (url) => {
+      const target = new URL(url);
+      target.pathname = `${target.pathname.replace(/\/$/, '')}/${room.map(encodeURIComponent).join('/')}`;
+      return target.href;
+    };
+    const connectRoom = async (connect, options) => {
+      const connection = await connect({ getToken: () => token, signal: lifetime.signal, createTransport, ...options });
+      roomConnections.push(connection);
+      return connection;
+    };
+    const roomPublisher = await connectRoom(connectRelayPublisher, {
+      url: rooted(endpoint),
+      namespace: ['pair', 'rooted'],
+    });
+    observeClosed('room publisher', roomPublisher);
+    const barePairPublisher = await connectRoom(connectRelayPublisher, {
+      url: endpoint,
+      namespace: [...room, 'pair', 'bare'],
+    });
+    observeClosed('bare pair publisher', barePairPublisher);
+    const roomSubscriber = await connectRoom(connectRelaySubscriber, { url: rooted(subEndpoint) });
+    observeClosed('room subscriber', roomSubscriber);
+    await report({ phase: 'room-rooted connections', publisher: rooted(endpoint), subscriber: rooted(subEndpoint) });
+    const roomDiscovered = new Set();
+    const roomDiscovery = roomSubscriber.namespaceEvents({ prefix: ['pair'], signal: lifetime.signal });
+    void (async () => {
+      try {
+        for await (const event of roomDiscovery) {
+          if (event.type === 'announced') roomDiscovered.add(JSON.stringify(event.namespace));
+        }
+      } catch (error) {
+        if (!closing) errors.push(`room discovery: ${String(error)}`);
+      }
+    })();
+    const pairWriters = [roomPublisher, barePairPublisher].map((connection) =>
+      connection.registerTrack({ track: 'pair', writeTimeoutMs: 2_000 }),
+    );
+    let writingPairs = true;
+    const pairWrites = (async () => {
+      for (let n = 0; writingPairs; n += 1) {
+        await Promise.all(
+          pairWriters
+            .filter((writer) => writer.hasDemand)
+            .map((writer) =>
+              writer.write(new TextEncoder().encode(String(n))).catch((error) => {
+                if (!['SUBSCRIPTION_CHANGED', 'WRITE_TIMEOUT'].includes(error?.code)) throw error;
+              }),
+            ),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    })().catch((error) => errors.push(`pair write: ${String(error)}`));
+    const pairStarted = performance.now();
+    try {
+      await Promise.all([roomPublisher.announced, barePairPublisher.announced]);
+      // Each form's discovery names both publishers, the room's relative to its path.
+      await waitFor(
+        () =>
+          announcedNamespaces.has(JSON.stringify([...room, 'pair', 'rooted'])) &&
+          announcedNamespaces.has(JSON.stringify([...room, 'pair', 'bare'])),
+        'bare discovery: both pair publishers',
+      );
+      await waitFor(
+        () => roomDiscovered.has('["pair","rooted"]') && roomDiscovered.has('["pair","bare"]'),
+        'room discovery: both pair publishers',
+      );
+      const discoveredAfterMs = Math.round(performance.now() - pairStarted);
+      await report({ phase: 'room-rooted discovery', afterMs: discoveredAfterMs });
+      const pairObjects = { roomFromBare: 0, bareFromRoom: 0, escape: 0 };
+      const pairSubscriptions = [];
+      const subscribePair = (label, connection, pairNamespace, onError) =>
+        pairSubscriptions.push(
+          connection.subscribe(
+            { namespace: pairNamespace, track: 'pair' },
+            {
+              onObject: (object) => {
+                if (object.status === 'normal') pairObjects[label] += 1;
+              },
+              onError,
+            },
+          ),
+        );
+      const pairError = (label) => (error) => errors.push(`${label}: ${error.errorCode} ${error.reason}`);
+      let escapeRefused;
+      try {
+        subscribePair('roomFromBare', roomSubscriber, ['pair', 'bare'], pairError('room subscriber'));
+        subscribePair('bareFromRoom', subscriber, [...room, 'pair', 'rooted'], pairError('bare subscriber'));
+        subscribePair('escape', roomSubscriber, [...room, 'pair', 'bare'], (error) => {
+          escapeRefused = `${error.errorCode} ${error.reason}`;
+        });
+        await waitFor(
+          () => pairObjects.roomFromBare >= 3 && pairObjects.bareFromRoom >= 3,
+          'pair objects across the endpoint forms',
+        );
+      } finally {
+        for (const subscription of pairSubscriptions) subscription.cancel();
+      }
+      if (pairObjects.escape > 0) {
+        throw new Error(`A rooted connection's absolute namespace reached the room: ${pairObjects.escape} objects`);
+      }
+      roomPair = {
+        roomPath: new URL(rooted(endpoint)).pathname,
+        discoveredAfterMs,
+        roomFromBare: pairObjects.roomFromBare,
+        bareFromRoom: pairObjects.bareFromRoom,
+        absoluteOnRooted: escapeRefused ?? 'no objects',
+      };
+      await report({ phase: 'room-rooted pair', ...roomPair });
+    } finally {
+      writingPairs = false;
+      await pairWrites;
+      roomDiscovery.close();
+    }
+    if (errors.length > 0) throw new Error(errors.join('; '));
+
     return {
       endpoint,
       subscriberEndpoint: subEndpoint,
@@ -475,6 +601,7 @@ export async function runRelayScenario({
       discovery: { announced: 'passed', withdrawnAfterMs },
       generationSwitch,
       layerSwitch,
+      roomPair,
     };
   } finally {
     closing = true;
@@ -486,6 +613,7 @@ export async function runRelayScenario({
         publisher?.close(),
         layerPublisher?.close(),
         ...supervisedPublishers.map((supervised) => supervised.close()),
+        ...roomConnections.map((connection) => connection.close()),
       ]);
     } finally {
       subscriber?.close();

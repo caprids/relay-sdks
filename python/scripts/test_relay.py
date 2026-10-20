@@ -19,7 +19,12 @@ on aioquic), then asserts the list in ``spec/behavior.md``:
    the newer generation make-before-break (issue #282): both generations beat one shared counter, the
    want reports one ``on_switched`` and no ``on_restarted``, and no beat number is missing across the
    move. The report records how long the move took.
-8. All connections close cleanly once the test closes them.
+8. A switchable subscription moves from one layer to another make-before-break with no gap.
+9. A room-rooted endpoint (issue #266), whose path is the run's namespace, takes namespaces relative
+   to that path: a publisher and a subscriber on each form reach each other's track, discovery on
+   each form names both publishers, and an absolute namespace on a rooted connection does not reach
+   the room's track.
+10. All connections close cleanly once the test closes them.
 
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
 (https, without the token), ``RELAY_SUB_URL`` (the subscribers' relay for a cross-relay run, defaulting
@@ -42,7 +47,7 @@ import time
 import uuid
 from getpass import getpass
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 from moq_core import RelativeGroupFilter
 from mux_relay import (
@@ -67,7 +72,7 @@ from mux_relay import (
     connect_supervised_subscriber,
 )
 
-RUN_DEADLINE = 45.0
+RUN_DEADLINE = 60.0
 RECEIVE_DEADLINE = 10.0
 WARM_UP = b"relay-sdk-smoke warm-up"
 WARM_UP_INTERVAL = 0.25
@@ -141,6 +146,9 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
     layer_switch: dict[str, Any] | None = None
     discovery_task: asyncio.Task[None] | None = None
     closed_on_purpose: set[str] = set()
+    room_publishers: list[RelayPublisher] = []
+    room_subscriber: RelaySubscriber | None = None
+    room_pair: dict[str, Any] | None = None
 
     def observe_closed(label: str, closed: RelayAwaitable[Closed]) -> None:
         def done(future: asyncio.Future[Closed]) -> None:
@@ -480,7 +488,7 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
         if errors:
             raise RuntimeError("; ".join(errors))
 
-        # Assertion 9. A switchable subscription moves from one layer to another make-before-break: the
+        # Assertion 8. A switchable subscription moves from one layer to another make-before-break: the
         # layers carry the same frame numbers, one group per frame, and the frames the handlers receive
         # leave no gap across the cutover (issue #264). The frame number stands in for a media timestamp:
         # the switch waits for a new-layer frame within a few of the latest the old layer delivered, as a
@@ -586,6 +594,153 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             if not layer_writes.done():
                 layer_writes.cancel()
 
+        # Assertion 9. A room-rooted endpoint (issue #266): the endpoint's path is the run's namespace and
+        # its connections name namespaces relative to it. A publisher on each form, a subscriber on each
+        # form subscribing to the other's track, and discovery on each form must agree: the relay resolves
+        # `<endpoint>/<room>` + `['pair', 'rooted']` to what `<endpoint>` + `[*room, 'pair', 'rooted']`
+        # addresses. Each publisher writes a counter while it has demand, so an object the relay's first
+        # hop drops (issue #243) is followed by another. An absolute namespace on a rooted connection
+        # addresses a namespace below the room, not the run's own, so its subscription never gets the bare
+        # publisher's objects.
+        room = namespace
+
+        def rooted(url: str) -> str:
+            parts = urlsplit(url)
+            path = parts.path.rstrip("/") + "/" + "/".join(quote(field, safe="") for field in room)
+            return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+
+        room_publisher = await connect_relay_publisher(
+            rooted(endpoint),
+            namespace=["pair", "rooted"],
+            get_token=lambda: token,
+            cancellation=lifetime,
+            create_transport=create_transport,
+        )
+        room_publishers.append(room_publisher)
+        observe_closed("room publisher", room_publisher.closed)
+        bare_pair_publisher = await connect_relay_publisher(
+            endpoint,
+            namespace=[*room, "pair", "bare"],
+            get_token=lambda: token,
+            cancellation=lifetime,
+            create_transport=create_transport,
+        )
+        room_publishers.append(bare_pair_publisher)
+        observe_closed("bare pair publisher", bare_pair_publisher.closed)
+        room_subscriber = await connect_relay_subscriber(
+            rooted(sub_endpoint), get_token=lambda: token, cancellation=lifetime, create_transport=create_transport
+        )
+        observe_closed("room subscriber", room_subscriber.closed)
+        report({"phase": "room-rooted connections", "publisher": rooted(endpoint), "subscriber": rooted(sub_endpoint)})
+        room_discovered: set[tuple[str, ...]] = set()
+        room_discovery = room_subscriber.namespace_events(["pair"], cancellation=lifetime)
+
+        async def discover_room() -> None:
+            try:
+                async with room_discovery:
+                    async for event in room_discovery:
+                        if event.type == "announced":
+                            room_discovered.add(tuple(event.namespace))
+            except Exception as error:
+                if not closing:
+                    errors.append(f"room discovery: {error!r}")
+
+        room_discovery_task = asyncio.create_task(discover_room())
+        pair_writers = [publisher.register_track("pair", write_timeout=2) for publisher in room_publishers]
+        writing_pairs = True
+
+        async def write_pairs() -> None:
+            n = 0
+            try:
+                while writing_pairs:
+                    await asyncio.gather(
+                        *(write_layer(writer, str(n).encode()) for writer in pair_writers if writer.has_demand)
+                    )
+                    n += 1
+                    await asyncio.sleep(0.1)
+            except Exception as error:
+                errors.append(f"pair write: {error!r}")
+
+        pair_writes = asyncio.create_task(write_pairs())
+        pair_started = time.monotonic()
+        try:
+            await room_publisher.announced
+            await bare_pair_publisher.announced
+            # Each form's discovery names both publishers, the room's relative to its path.
+            await wait_for(
+                lambda: {(*room, "pair", "rooted"), (*room, "pair", "bare")} <= announced_namespaces,
+                "bare discovery: both pair publishers",
+            )
+            await wait_for(
+                lambda: {("pair", "rooted"), ("pair", "bare")} <= room_discovered,
+                "room discovery: both pair publishers",
+            )
+            discovered_after_ms = round((time.monotonic() - pair_started) * 1000)
+            report({"phase": "room-rooted discovery", "afterMs": discovered_after_ms})
+            pair_objects = {"roomFromBare": 0, "bareFromRoom": 0, "escape": 0}
+            escape_refused: str | None = None
+
+            def count_pair(label: str) -> Any:
+                def on_object(obj: MoqtObject) -> None:
+                    if obj.status == "normal":
+                        pair_objects[label] += 1
+
+                return on_object
+
+            def on_escape_error(error: Any) -> None:
+                nonlocal escape_refused
+                escape_refused = f"{error.error_code} {error.reason}"
+
+            pair_subscriptions = [
+                room_subscriber.subscribe(
+                    ["pair", "bare"],
+                    "pair",
+                    RelaySubscriptionHandlers(
+                        on_object=count_pair("roomFromBare"),
+                        on_error=lambda error: errors.append(f"room subscriber: {error.error_code} {error.reason}"),
+                    ),
+                ),
+                subscriber.subscribe(
+                    [*room, "pair", "rooted"],
+                    "pair",
+                    RelaySubscriptionHandlers(
+                        on_object=count_pair("bareFromRoom"),
+                        on_error=lambda error: errors.append(f"bare subscriber: {error.error_code} {error.reason}"),
+                    ),
+                ),
+                room_subscriber.subscribe(
+                    [*room, "pair", "bare"],
+                    "pair",
+                    RelaySubscriptionHandlers(on_object=count_pair("escape"), on_error=on_escape_error),
+                ),
+            ]
+            try:
+                await wait_for(
+                    lambda: pair_objects["roomFromBare"] >= 3 and pair_objects["bareFromRoom"] >= 3,
+                    "pair objects across the endpoint forms",
+                )
+            finally:
+                for subscription in pair_subscriptions:
+                    subscription.cancel()
+            if pair_objects["escape"]:
+                raise RuntimeError(
+                    f"A rooted connection's absolute namespace reached the room: {pair_objects['escape']} objects"
+                )
+            room_pair = {
+                "roomPath": urlsplit(rooted(endpoint)).path,
+                "discoveredAfterMs": discovered_after_ms,
+                "roomFromBare": pair_objects["roomFromBare"],
+                "bareFromRoom": pair_objects["bareFromRoom"],
+                "absoluteOnRooted": escape_refused or "no objects",
+            }
+            report({"phase": "room-rooted pair", **room_pair})
+        finally:
+            writing_pairs = False
+            await pair_writes
+            room_discovery_task.cancel()
+        if errors:
+            raise RuntimeError("; ".join(errors))
+
         return {
             "endpoint": endpoint,
             "subscriberEndpoint": sub_endpoint,
@@ -604,6 +759,7 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
             "discovery": {"announced": "passed", "withdrawnAfterMs": withdrawn_after_ms},
             "generationSwitch": generation_switch,
             "layerSwitch": layer_switch,
+            "roomPair": room_pair,
         }
     finally:
         closing = True
@@ -620,12 +776,15 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
                 closing_publishers.append(publisher.close())
             if layer_publisher is not None:
                 closing_publishers.append(layer_publisher.close())
+            closing_publishers.extend(room_publisher.close() for room_publisher in room_publishers)
             await asyncio.gather(*closing_publishers)
         finally:
             if subscriber is not None:
                 subscriber.close()
             if late_subscriber is not None:
                 late_subscriber.close()
+            if room_subscriber is not None:
+                room_subscriber.close()
 
 
 def main() -> int:

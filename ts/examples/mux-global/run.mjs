@@ -28,7 +28,8 @@ const built = [
 const usage = `Usage: node examples/mux-global/run.mjs [options]
 
   --url <https url>      Relay endpoint (default RELAY_URL or https://sjc.relay.mux.global)
-  --namespace <a/b/c>    Namespace, slash-separated, including the token's root prefix
+  --namespace <a/b/c>    Namespace, slash-separated, relative to the --url path (with no path,
+                         include the token's root prefix)
                          (default RELAY_NAMESPACE_PREFIX or relay-sdk-example, plus a random field)
   --track <name>         Track name (default ticker)
   --mode <both|publish|subscribe>

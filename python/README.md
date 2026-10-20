@@ -25,7 +25,9 @@ does not issue them or provide a public token signup flow. A Mux API access toke
 Namespace fields are relative to the endpoint URL's path: on an endpoint with no path they include
 the token's root prefix, and on an endpoint whose path is that root (for example
 `https://sjc.relay.mux.global/acme/rooms/42`) they leave it out
-([namespaces](../spec/behavior.md#subscribing)).
+([namespaces](../spec/behavior.md#subscribing)). The Mux relays carry announcements between regions,
+so a publisher and a subscriber can each use their nearest relay, with either form
+([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)).
 The hosted demo defaults to `https://sjc.relay.mux.global`, which still requires authorized credentials.
 For another deployment, use the endpoint supplied by its operator.
 
