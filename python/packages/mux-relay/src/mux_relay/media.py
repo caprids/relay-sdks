@@ -33,7 +33,7 @@ from typing import Generic, Literal, Protocol, TypeVar
 from moq_core import KeyValuePair, ObjectStatus
 
 from ._frame_reader import FrameReader, FrameReaderPoll, FrameReaderSequencer
-from ._validation import payload_bytes
+from ._validation import DEFAULT_PUBLISHER_PRIORITY, MAX_DEFAULT_PUBLISHER_PRIORITY, payload_bytes
 from ._write_slot import SUBGROUP_DELIVERY_TIMEOUT
 from .errors import RelayError
 
@@ -930,10 +930,13 @@ class DocumentService:
 
 
 MediaKind = Literal["audio", "video"]
-"""What a media track carries, which decides its default delivery timeout."""
+"""What a media track carries, which decides its default delivery timeout and publisher priority."""
 
 _AUDIO_SUBGROUP_TIMEOUT_US = 500_000
 """Audio's default subgroup timeout: measured under a 2 s uplink stall to sjc (issue #302)."""
+
+_PUBLISHER_PRIORITY: dict[str, int] = {"audio": 16, "video": 96}
+"""Default Publisher Priority per kind, lower being more urgent: audio ahead of video, as Huddle sets them by hand."""
 
 _MAX_TIMEOUT_US = 2_147_483_647_000
 """The largest value whose whole milliseconds the TypeScript SDK's timers hold, the bound in both SDKs."""
@@ -945,8 +948,9 @@ def media_track_properties(
     keyframe_interval_us: int | None = None,
     target_latency_us: int | None = None,
     subgroup_timeout_us: int | None = None,
+    publisher_priority: int | None = None,
 ) -> list[KeyValuePair]:
-    """The track properties that give a media track its default delivery timeout.
+    """The track properties that give a media track its default delivery timeout and publisher priority.
 
     Pass them to ``register_track`` with the track's format properties, so a stall costs stale
     frames rather than lasting latency::
@@ -959,11 +963,15 @@ def media_track_properties(
             ],
         )
 
-    The result is one SUBGROUP_DELIVERY_TIMEOUT (0x06) in whole milliseconds, rounded up: 500 ms for
+    The result is a SUBGROUP_DELIVERY_TIMEOUT (0x06) in whole milliseconds, rounded up: 500 ms for
     audio, and for video the target latency less the keyframe interval, but never less than the
-    interval. Every argument is a positive integer number of microseconds. ``keyframe_interval_us``
+    interval. Every duration is a positive integer number of microseconds. ``keyframe_interval_us``
     is required for video; ``target_latency_us`` (see ``CONTEXT.md``) defaults to twice it and may
     not be smaller; audio ignores both. ``subgroup_timeout_us`` replaces the default for either kind.
+    Then a Default Publisher Priority (0x0E) that puts audio ahead of video: 16 for audio, 96 for
+    video, lower being more urgent; ``publisher_priority``, an integer from 0 to 255, replaces it.
+    moq-relay 0.17 passes it on to viewers in SUBSCRIBE_OK but orders delivery by subscriber
+    priority alone, so on that relay it changes nothing yet.
     No object timeout is set, in either SDK: through a frame writer it would never fire in a browser,
     because a group's wait for settling room is not counted and, once its stream is open, the
     browser's transport takes each object at once even during a stall.
@@ -975,6 +983,11 @@ def media_track_properties(
     _check_microseconds(keyframe_interval_us, "keyframe_interval_us")
     _check_microseconds(target_latency_us, "target_latency_us")
     _check_microseconds(subgroup_timeout_us, "subgroup_timeout_us")
+    if publisher_priority is not None:
+        if isinstance(publisher_priority, bool) or not isinstance(publisher_priority, int):
+            raise TypeError("publisher_priority must be an integer")
+        if not 0 <= publisher_priority <= MAX_DEFAULT_PUBLISHER_PRIORITY:
+            raise ValueError(f"publisher_priority must be an integer from 0 to {MAX_DEFAULT_PUBLISHER_PRIORITY}")
     if kind == "video" and keyframe_interval_us is None:
         raise TypeError("keyframe_interval_us is required for video")
     if keyframe_interval_us is not None and target_latency_us is not None and target_latency_us < keyframe_interval_us:
@@ -988,7 +1001,11 @@ def media_track_properties(
         assert keyframe_interval_us is not None
         target = 2 * keyframe_interval_us if target_latency_us is None else target_latency_us
         timeout_us = max(keyframe_interval_us, target - keyframe_interval_us)
-    return [KeyValuePair(SUBGROUP_DELIVERY_TIMEOUT, -(-timeout_us // 1000))]
+    priority = _PUBLISHER_PRIORITY[kind] if publisher_priority is None else publisher_priority
+    return [
+        KeyValuePair(SUBGROUP_DELIVERY_TIMEOUT, -(-timeout_us // 1000)),
+        KeyValuePair(DEFAULT_PUBLISHER_PRIORITY, priority),
+    ]
 
 
 def _check_microseconds(value: object, name: str) -> None:

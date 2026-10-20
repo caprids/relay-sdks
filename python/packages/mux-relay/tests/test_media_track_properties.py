@@ -1,7 +1,9 @@
-"""``media_track_properties``: a media track's default delivery timeout (the "Media publishing" section of
-``spec/behavior.md``), mirrored by ``ts/tests/media-track-properties.test.ts``.
+"""``media_track_properties``: a media track's default delivery timeout and publisher priority (the "Media
+publishing" section of ``spec/behavior.md``), mirrored by ``ts/tests/media-track-properties.test.ts``.
 """
 
+import json
+from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -11,16 +13,50 @@ from mux_relay._validation import track_property_pairs
 from mux_relay.media import media_track_properties
 
 SUBGROUP_DELIVERY_TIMEOUT = 0x06
+DEFAULT_PUBLISHER_PRIORITY = 0x0E
+REPO = Path(__file__).resolve().parents[4]
+PRIORITY = json.loads((REPO / "spec" / "protocol.json").read_text())["mediaTrackProperties"]["publisherPriority"]
 
 
 def timeout_ms(properties: list[KeyValuePair]) -> int | bytes:
-    assert len(properties) == 1
+    assert len(properties) == 2
     assert properties[0].type == SUBGROUP_DELIVERY_TIMEOUT
     return properties[0].value
 
 
-def test_audio_gets_a_500_ms_subgroup_timeout_and_no_object_timeout() -> None:
-    assert media_track_properties("audio") == [KeyValuePair(SUBGROUP_DELIVERY_TIMEOUT, 500)]
+def priority(properties: list[KeyValuePair]) -> int | bytes:
+    assert len(properties) == 2
+    assert properties[1].type == DEFAULT_PUBLISHER_PRIORITY
+    return properties[1].value
+
+
+def test_audio_gets_a_500_ms_subgroup_timeout_no_object_timeout_and_publisher_priority_16() -> None:
+    assert media_track_properties("audio") == [
+        KeyValuePair(SUBGROUP_DELIVERY_TIMEOUT, 500),
+        KeyValuePair(DEFAULT_PUBLISHER_PRIORITY, 16),
+    ]
+
+
+def test_puts_audio_ahead_of_video_with_the_priorities_spec_protocol_json_pins() -> None:
+    assert PRIORITY == {"audio": 16, "video": 96}
+    assert priority(media_track_properties("audio")) == PRIORITY["audio"]
+    assert priority(media_track_properties("video", keyframe_interval_us=1_000_000)) == PRIORITY["video"]
+    assert PRIORITY["audio"] < PRIORITY["video"]
+
+
+def test_an_explicit_publisher_priority_from_0_to_255_replaces_the_default_for_either_kind() -> None:
+    assert priority(media_track_properties("audio", publisher_priority=0)) == 0
+    assert priority(media_track_properties("video", keyframe_interval_us=1_000_000, publisher_priority=255)) == 255
+
+
+def test_refuses_a_publisher_priority_that_is_not_an_integer_from_0_to_255() -> None:
+    wrong: tuple[Any, ...] = ("16", True, 16.0, float("nan"))
+    for value in wrong:
+        with pytest.raises(TypeError):
+            media_track_properties("audio", publisher_priority=value)
+    for value in (-1, 256):
+        with pytest.raises(ValueError):
+            media_track_properties("audio", publisher_priority=value)
 
 
 def test_audio_ignores_the_keyframe_interval_and_target_latency() -> None:
@@ -55,7 +91,11 @@ def test_rounds_up_to_whole_milliseconds() -> None:
 
 def test_returns_properties_register_track_accepts() -> None:
     properties = media_track_properties("video", keyframe_interval_us=2_000_000)
-    assert track_property_pairs(properties) == [KeyValuePair(SUBGROUP_DELIVERY_TIMEOUT, 2000)]
+    assert track_property_pairs(properties) == [
+        KeyValuePair(SUBGROUP_DELIVERY_TIMEOUT, 2000),
+        KeyValuePair(DEFAULT_PUBLISHER_PRIORITY, 96),
+    ]
+    track_property_pairs(media_track_properties("audio", publisher_priority=255))
 
 
 def test_refuses_a_kind_that_is_not_a_string_with_type_error_and_another_string_with_value_error() -> None:

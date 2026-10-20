@@ -774,7 +774,7 @@ TypeScript package's export test. TypeScript uses factories that return interfac
 | Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8, or 25 under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
 | The next frame sent must be a keyframe; told on each entry | `writer.keyframeNeeded`; `onKeyframeNeeded()` | `writer.keyframe_needed`; `on_keyframe_needed()` |
 | FIN the open group and refuse further frames | `await writer.close()` | `await writer.close()` |
-| A media track's default delivery timeout, as track properties | `mediaTrackProperties(kind, { keyframeIntervalUs, targetLatencyUs, subgroupTimeoutUs })` (`MediaKind`: `'audio'`, `'video'`; `MediaTrackPropertiesOptions`) | `media_track_properties(kind, *, keyframe_interval_us=None, target_latency_us=None, subgroup_timeout_us=None)` (`MediaKind`) |
+| A media track's default delivery timeout and publisher priority, as track properties | `mediaTrackProperties(kind, { keyframeIntervalUs, targetLatencyUs, subgroupTimeoutUs, publisherPriority })` (`MediaKind`: `'audio'`, `'video'`; `MediaTrackPropertiesOptions`) | `media_track_properties(kind, *, keyframe_interval_us=None, target_latency_us=None, subgroup_timeout_us=None, publisher_priority=None)` (`MediaKind`) |
 | The writer ended, and how | `writer.closed`, `writer.ended` | `writer.closed`, `writer.ended` |
 | Groups opened and objects accepted | `writer.groups`, `writer.objects` | `writer.groups`, `writer.objects` |
 
@@ -807,6 +807,10 @@ does not depend on `@mux/moq-media`, so the caller adds `locTrackProperties()`);
 already registered, and an object-level `0x06` reaches viewers as a Timestamp); `deliveryTimeoutMs`
 (media durations are microseconds, and the budget is what the application knows); an object
 timeout (see behavior.md).
+
+`publisherPriority` is draft-22's name for what `0x0E` carries (Default Publisher Priority), so it
+reads as the protocol value it sets, not as a scheduling promise: on moq-relay 0.17 only the
+viewer's subscriber priority orders delivery ([#316](https://github.com/muxinc/relay-sdks/issues/316)).
 
 Not adopted: `FramePublisher.publish()` ("publisher" is the connection role, and `publish()` was
 already rejected as the name of a step that does not send); `MediaTrackWriter.write_frame()`

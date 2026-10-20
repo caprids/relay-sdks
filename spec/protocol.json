@@ -51,5 +51,9 @@
       "videoConfig": 13,
       "audioConfig": 15
     }
+  },
+  "mediaTrackProperties": {
+    "publisherPriority": { "audio": 16, "video": 96 },
+    "note": "The Default Publisher Priority (track property 0x0E) mediaTrackProperties / media_track_properties give each kind; lower is more urgent (draft-22 section 5.1), so audio goes ahead of video. moq-relay 0.17 orders delivery by subscriber priority alone (issue #154)."
   }
 }
