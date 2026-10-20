@@ -1508,9 +1508,12 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
     | inverted (audio 96, video 16) | 2 | 11.9 s, 2 frames; none | | | | 2 and 0 of about 1,000 |
 
     Video lagged 7.7 to 8.3 s at p50 either way: the cap is below its rate, and the relay keeps a
-    stalled viewer's backlog. With the publisher's `0x0E` set, the relay stamped each group stream
-    with the publisher's priority in every mode, so a group header does not show what the viewer
-    asked for.
+    stalled viewer's backlog. The relay stamped each group stream header with the track's `0x0E` in
+    every mode, so a group header does not show what the viewer asked for. A track without `0x0E`
+    gets 128 in its headers, and delivery still follows SUBSCRIBER_PRIORITY: the same runs without
+    `mediaTrackProperties` gave the same latencies, and inverted audio starved again
+    ([#344](https://github.com/muxinc/relay-sdks/issues/344),
+    [relay interop](relay-interop.md#group-stream-priority-in-source)).
   - It has to be chosen before SUBSCRIBE: on that relay any `update()` ends the subscription
     ([deviation 4](#relay-interop-deviations)), so a viewer that wants another priority switches or
     subscribes again. SUBSCRIBE_OK carries the publisher's `0x0E` only after the choice is made.

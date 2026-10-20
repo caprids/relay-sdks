@@ -2,21 +2,25 @@
 // Run after `pnpm build` and `pnpm --filter @mux/relay-quic build:native`.
 //
 // A publisher in this process, on RELAY_URL (give it a clean path), publishes one audio and one video track,
-// registered with mediaTrackProperties, so both carry the default publisher priorities: 20 ms audio frames of
+// registered with mediaTrackProperties, so both carry the default publisher priorities (PRIORITY_TRACK_PROPERTIES=off
+// registers them with no track properties, so neither carries 0x0E): 20 ms audio frames of
 // PRIORITY_AUDIO_BYTES (default 160), one group per frame, and 30 fps video of PRIORITY_DELTA_BYTES (default 3000) per
 // delta with a PRIORITY_KEY_BYTES (default 40000) keyframe every second, about 1 Mbit/s. Every payload starts with its
 // capture time (Date.now(), float64). A subscriber in this process, on RELAY_SUB_URL, measures each audio frame's
 // capture-to-arrival latency. Point RELAY_SUB_URL through a downlink impairer, so the relay holds a backlog for it.
 // SUBSCRIBER_PRIORITY=on subscribes with mediaSubscribeParameters; off subscribes with no parameters, which is a
 // viewer before #337; invert overrides the priorities, video ahead of audio (audio 96, video 16): a check that the
-// relay orders by them at all. It prints a summary of audio latency after a warm-up from the first frame published, how much video arrived, and the
-// SUBSCRIBER_PRIORITY each SUBSCRIBE carried, read off the subscriber's request streams. The priority the relay stamps
-// on group streams is no evidence: moq-relay 0.17.5 stamps a track's 0x0E whatever the subscriber asks for.
+// relay orders by them at all. It prints a summary of audio latency after a warm-up from the first frame published,
+// how much video arrived, and the SUBSCRIBER_PRIORITY each SUBSCRIBE carried, read off the subscriber's request
+// streams. It also prints, per track, the 0x0E the relay's SUBSCRIBE_OK carried and how many objects arrived under
+// each group stream header priority ("inherit" for a header without one). The header priority is no evidence of what
+// the viewer asked for: moq-relay 0.17 stamps the track's 0x0E, or 128 without one, whatever the subscriber asks for
+// (spec/relay-interop.md).
 //
 // Environment: RELAY_URL, RELAY_SUB_URL (default RELAY_URL), RELAY_TOKEN, RELAY_NAMESPACE_PREFIX, SUBSCRIBER_PRIORITY
-// (on, off or invert; default on), PRIORITY_RUN_S (default 25), PRIORITY_WARM_UP_S (default 5), PRIORITY_RESOLVE (an
-// address the subscriber dials instead of RELAY_SUB_URL's host, for an impairer on a local port; TLS still checks the
-// host).
+// (on, off or invert; default on), PRIORITY_TRACK_PROPERTIES (on or off; default on), PRIORITY_RUN_S (default 25),
+// PRIORITY_WARM_UP_S (default 5), PRIORITY_RESOLVE (an address the subscriber dials instead of RELAY_SUB_URL's host,
+// for an impairer on a local port; TLS still checks the host).
 //
 // With the shared UDP impairment proxy (impair.py, stdlib Python) between the subscriber and ord.relay.mux.global:
 //
@@ -39,6 +43,8 @@ const token = env.RELAY_TOKEN;
 if (!token) throw new Error('RELAY_TOKEN is required');
 const priority = env.SUBSCRIBER_PRIORITY ?? 'on';
 if (!['on', 'off', 'invert'].includes(priority)) throw new Error('SUBSCRIBER_PRIORITY must be on, off or invert');
+const trackProperties = env.PRIORITY_TRACK_PROPERTIES ?? 'on';
+if (!['on', 'off'].includes(trackProperties)) throw new Error('PRIORITY_TRACK_PROPERTIES must be on or off');
 const inverted = { audio: 96, video: 16 };
 const parameters = (track) =>
   priority === 'off'
@@ -71,6 +77,8 @@ if (resolveTo !== undefined) {
 
 const arrivals = { audio: [], video: [] }; // [captureMs, arrivalMs]
 const sent = {}; // track -> SUBSCRIBER_PRIORITY on its SUBSCRIBE, or null
+const headerPriorities = { audio: {}, video: {} }; // track -> header priority (or 'inherit') -> objects received
+const subscribeOkPriority = {}; // track -> 0x0E on the relay's SUBSCRIBE_OK, or null
 // Read each SUBSCRIBE off the subscriber's request streams as the session writes it.
 const createTransport = (dial) => (transportUrl, protocols) => {
   subscriberDialing = true;
@@ -109,13 +117,18 @@ const subscriber = await connectRelaySubscriber({
 });
 const capture = (payload) => new DataView(payload.buffer, payload.byteOffset, 8).getFloat64(0);
 const audio = createFrameWriter(
-  publisher.registerTrack({ track: 'audio', trackProperties: mediaTrackProperties('audio') }),
+  publisher.registerTrack({
+    track: 'audio',
+    ...(trackProperties === 'on' ? { trackProperties: mediaTrackProperties('audio') } : {}),
+  }),
   { grouping: 'frame' },
 );
 const video = createFrameWriter(
   publisher.registerTrack({
     track: 'video',
-    trackProperties: mediaTrackProperties('video', { keyframeIntervalUs: 1_000_000 }),
+    ...(trackProperties === 'on'
+      ? { trackProperties: mediaTrackProperties('video', { keyframeIntervalUs: 1_000_000 }) }
+      : {}),
   }),
 );
 await publisher.announced;
@@ -125,12 +138,20 @@ const subscriptions = ['audio', 'video'].map((track) =>
     {
       onObject(object) {
         arrivals[track].push([capture(object.payload), Date.now()]);
+        const header = object.priority ?? 'inherit';
+        headerPriorities[track][header] = (headerPriorities[track][header] ?? 0) + 1;
       },
       onError: (error) => console.error(`${track}: ${error}`),
     },
   ),
 );
-await Promise.all(subscriptions.map((subscription) => subscription.subscribed));
+await Promise.all(
+  subscriptions.map(async (subscription, index) => {
+    const ok = await subscription.subscribed;
+    subscribeOkPriority[['audio', 'video'][index]] =
+      ok.trackProperties.find(({ type }) => type === 0x0e)?.value ?? null;
+  }),
+);
 
 const counts = {};
 const count = (track) => (outcome) => {
@@ -168,12 +189,15 @@ console.log(
   JSON.stringify({
     result: 'MEASURED',
     subscriberPriority: priority,
+    trackProperties,
     warmUpMs,
     runMs,
     sizes,
     audio: measured('audio'),
     video: measured('video'),
     subscribeSent: sent,
+    subscribeOkPriority,
+    headerPriorities,
     outcomes: counts,
   }),
 );
