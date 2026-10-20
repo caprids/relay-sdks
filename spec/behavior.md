@@ -973,6 +973,54 @@ properties it already passes.
 
 Implemented in both SDKs.
 
+### Send order
+
+The TypeScript publisher opens every data stream of a track that declares a Default Publisher
+Priority (`0x0E`) with a send order of `-1 - p`, for the first integer `p` among its track
+properties: from -1 for priority 0 down to -256 for 255
+([#336](https://github.com/muxinc/relay-sdks/issues/336)). A transport adapter takes it as
+`createUnidirectionalStream({ sendOrder })` ([TA-28](transport-adapter.md#streams)), where a
+higher value goes first and every other stream has 0.
+
+- Under a congested uplink the publisher's own transport then sends a more urgent track's bytes
+  first: with the media defaults, audio (-17) ahead of video (-97). Without it, the audio streams
+  share the uplink with the video streams that have bytes queued, and wait behind them before the
+  relay sees them.
+- Draft-22's lower-is-more-urgent priority (§5.1) is turned around into WebTransport's
+  higher-first order, and kept below 0, because the control and request streams have 0: a
+  backlogged track never holds up SUBSCRIBE_OK, PUBLISH_DONE or a request.
+- A track without the property gets no send order, so its streams share 0 with the control streams
+  and go ahead of every track that declares a priority. A catalog or a media timeline registered
+  without one reaches a joining viewer ahead of the media it describes.
+- Every stream of a track has the same send order, so its groups are not reordered among
+  themselves; the transport decides how equal streams share the uplink.
+- Where it applies ([TA-28](transport-adapter.md#streams)): Firefox's `WebTransport` from 155;
+  `@mux/relay-websocket`, whose QMux scheduler sends highest first, round-robin among equals; and
+  `@mux/relay-quic`, as quinn's stream priority. Chromium's does not: Chromium 153 has no
+  `WebTransportSendStream` and drops the option, so a Chromium publisher sends as before. The
+  Python SDK sets none: aioquic has no stream priorities.
+- It orders only what the publisher still holds. A backlog already in the network, in a deep
+  bottleneck queue, delays audio and video alike. What the relay sends each viewer is ordered by the
+  viewer's subscriber priority ([#154](https://github.com/muxinc/relay-sdks/issues/154)).
+- Measured on 2026-10-20 with `ts/scripts/probe-send-order.mjs`: a Firefox 155 page published
+  50 fps audio (160-byte frames, one group per frame) and about 1 Mbit/s of 30 fps video (a 40 kB
+  keyframe each second) to sjc through an uplink capped at 800 kbit/s, and a subscriber on a clean
+  path timed the audio from capture to arrival. "Off" is the publisher before #336, with the send
+  order stripped from every stream:
+
+  | uplink queue | send order | runs | audio p50 | p95 | p99 | max |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | none (no cap) | on | 1 | 51 ms | 52 ms | 53 ms | 54 ms |
+  | 50 ms | on | 3 | 89 ms | 105–106 ms | 108–109 ms | 110–115 ms |
+  | 50 ms | off | 4 | 120–125 ms | 207–229 ms | 264–302 ms | 326–444 ms |
+  | 300 ms | on | 1 | 328 ms | 354 ms | 359 ms | 361 ms |
+  | 300 ms | off | 1 | 352 ms | 463 ms | 655 ms | 923 ms |
+
+  A fifth run without it, on the 50 ms queue, delivered no audio at all: every audio group waited
+  out its 500 ms subgroup timeout behind video. With the order turned around (video first), no audio
+  arrived either, which shows Firefox schedules by it. In Chromium 153 on, off and turned around
+  measured the same (audio p50 119–121 ms on the 50 ms queue). Video arrived alike either way.
+
 ### Write phases and interruptions
 
 Every write and every open group is one operation occupying the track's write slot (see
@@ -1388,17 +1436,16 @@ Implemented in both SDKs.
   pinned in `spec/protocol.json` as `mediaTrackProperties.publisherPriority`. An explicit publisher priority
   replaces either default. Group headers leave the priority out, so it is the track's value for
   every group.
-  - On moq-relay 0.17 the default changes no delivery. The relay passes a publisher's `0x0E` to
+  - The TypeScript publisher's transport sends the more urgent track first when the uplink is
+    congested, in Firefox, in Node and over WebSocket ([send order](#send-order)). Chromium's
+    WebTransport and the Python publisher do not.
+  - On moq-relay 0.17 the default changes no delivery from the relay. The relay passes a publisher's `0x0E` to
     viewers in SUBSCRIBE_OK, but orders what it sends a viewer by subscriber priority alone and
     ignores the publisher's when subscriber priorities tie
     ([#154](https://github.com/muxinc/relay-sdks/issues/154), [relay interop](relay-interop.md#subscription-parameters)).
     A viewer that wants audio first under congestion asks for it with its own SUBSCRIBER_PRIORITY,
     as Huddle does with 16 on its audio wants; whether the SDKs should default that is
     [#337](https://github.com/muxinc/relay-sdks/issues/337).
-  - Nor does it order the publisher's own uplink: the SDKs schedule no stream by priority, and a
-    browser's WebTransport sends every stream alike unless given a `sendOrder`
-    ([#336](https://github.com/muxinc/relay-sdks/issues/336)). The default is there for a relay
-    that honours it and for viewers that read it.
 - Every frame gets exactly one outcome: sent, skipped, stale, dropped, interrupted or ended. The
   writer returns it rather than raising, so a caller keeps counters without catching per frame, and
   the group the frame was written to or that was reset on its behalf travels with it. Closing the

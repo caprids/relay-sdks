@@ -1,6 +1,6 @@
 /** A `MoqtTransport` over one QMux-over-WebSocket dial (spec/transport-adapter.md, "Session lifetime"). */
 import Session from '@moq/qmux';
-import type { BidirectionalStreamLike, MoqtTransport } from '@mux/moq-core';
+import type { BidirectionalStreamLike, MoqtSendStreamOptions, MoqtTransport } from '@mux/moq-core';
 import { type CloseInfo, isStreamError, WebSocketSessionError } from './errors.js';
 import { bidirectional, type MapFailure, recvReadable, type SessionEnd, sendWritable } from './streams.js';
 
@@ -144,10 +144,11 @@ export class WebSocketTransport implements MoqtTransport {
     return this.#protocol;
   }
 
-  async createUnidirectionalStream(): Promise<WritableStream<Uint8Array>> {
+  /** QMux schedules stream data by `sendOrder` as WebTransport does: the highest first, round-robin among equals. */
+  async createUnidirectionalStream(options?: MoqtSendStreamOptions): Promise<WritableStream<Uint8Array>> {
     await this.ready;
     try {
-      return sendWritable(await this.#session.createUnidirectionalStream(), this.#mapFailure);
+      return sendWritable(await this.#session.createUnidirectionalStream(options), this.#mapFailure);
     } catch (error) {
       throw this.#mapFailure(error);
     }

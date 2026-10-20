@@ -257,11 +257,18 @@ impl Session {
     }
 
     /// Open a unidirectional stream now, or fail at once with `credit` when the peer's stream limit
-    /// is used up (TA-21).
+    /// is used up (TA-21). `send_order` is quinn's stream priority, which like WebTransport's send
+    /// order sends a higher value first and defaults to 0.
     #[napi]
-    pub fn open_uni(&self) -> Either<SendStream, Failure> {
+    pub fn open_uni(&self, send_order: Option<i32>) -> Either<SendStream, Failure> {
         match self.connection.open_uni().now_or_never() {
-            Some(Ok(stream)) => Either::A(SendStream::new(stream)),
+            Some(Ok(stream)) => {
+                if let Some(order) = send_order {
+                    // Fails only on a stream already finished or reset, which a new one is not.
+                    let _ = stream.set_priority(order);
+                }
+                Either::A(SendStream::new(stream))
+            }
             Some(Err(error)) => Either::B(failure::connection(&error)),
             None => Either::B(Failure::credit()),
         }

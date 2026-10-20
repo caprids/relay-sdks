@@ -34,6 +34,12 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   default publisher priority (`0x0E`) that puts audio ahead of video, 16 for audio and 96 for video, which
   `publisherPriority` replaces ([#316](https://github.com/muxinc/relay-sdks/issues/316)). moq-relay 0.17 passes it to
   viewers but orders delivery by their subscriber priority alone, so it changes no delivery there yet.
+- The publisher opens each data stream of a track with a publisher priority (`0x0E`) with a WebTransport send order
+  from it, so a congested uplink sends audio before video, and both after the control streams
+  ([#336](https://github.com/muxinc/relay-sdks/issues/336)). Through an 800 kbit/s uplink cap it brought a Firefox
+  publisher's audio p99 from 264–302 ms to 108–109 ms. Firefox 155 schedules by it; Chromium 153 ignores it.
+  `@mux/relay-websocket` and `@mux/relay-quic` schedule by it too. A transport adapter's `createUnidirectionalStream`
+  now takes `{ sendOrder }` (`MoqtSendStreamOptions`, TA-28); an adapter that cannot schedule ignores it.
 - `openGroup({ payload, properties })` opens a group with its first object, so that object's delivery timeout
   counts the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306));
   a bare `openGroup()` has no object to time. The frame writer opens every group this way, so a frame whose open

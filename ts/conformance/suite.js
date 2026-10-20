@@ -897,6 +897,29 @@ export const cases = [
   },
 
   {
+    rule: 'TA-28',
+    name: 'TA-28 a send stream opened with a send order carries bytes and FIN',
+    async run(ctx) {
+      const transport = await open(ctx);
+      for (const sendOrder of [-17, 0, 5, -(2 ** 31), 2 ** 31 - 1]) {
+        const stream = await resolves(
+          transport.createUnidirectionalStream({ sendOrder }),
+          `createUnidirectionalStream with sendOrder ${sendOrder}`,
+        );
+        const writer = stream.getWriter();
+        await writer.write(text(`order ${sendOrder}`));
+        await writer.close();
+        const id = await resolves(ctx.peer.acceptUni(), 'the peer accepting the stream');
+        const { bytes, fin, resetCode } = await ctx.peer.read(id);
+        equal(
+          { bytes, fin, resetCode },
+          { bytes: [...text(`order ${sendOrder}`)], fin: true, resetCode: null },
+          `what the peer read with sendOrder ${sendOrder}`,
+        );
+      }
+    },
+  },
+  {
     rule: 'TA-27',
     name: 'TA-27 a reset goes out in the HTTP/3 encoding',
     needs: ['native-quic', 'wireCodes'],

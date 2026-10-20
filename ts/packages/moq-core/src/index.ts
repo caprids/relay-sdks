@@ -41,6 +41,7 @@ export type {
   Goaway,
   IncomingPublish,
   MoqtFetchOptions,
+  MoqtSendStreamOptions,
   MoqtSession,
   MoqtSessionCallbacks,
   MoqtSessionConfig,

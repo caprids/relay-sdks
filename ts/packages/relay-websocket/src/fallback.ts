@@ -2,7 +2,7 @@
  * WebTransport first, then QMux over WebSocket: the fallback policy (spec/behavior.md, "Transport fallback"). One
  * transport stands for whichever dial wins, so the SDK's connect call sees a single factory.
  */
-import type { BidirectionalStreamLike, MoqtTransport } from '@mux/moq-core';
+import type { BidirectionalStreamLike, MoqtSendStreamOptions, MoqtTransport } from '@mux/moq-core';
 import { type CloseInfo, WebSocketSessionError } from './errors.js';
 import { WebSocketTransport } from './transport.js';
 
@@ -89,8 +89,8 @@ export class FallbackTransport implements MoqtTransport {
     return this.#winner?.protocol ?? '';
   }
 
-  async createUnidirectionalStream(): Promise<WritableStream<Uint8Array>> {
-    return (await this.#won).createUnidirectionalStream();
+  async createUnidirectionalStream(options?: MoqtSendStreamOptions): Promise<WritableStream<Uint8Array>> {
+    return (await this.#won).createUnidirectionalStream(options);
   }
 
   async createBidirectionalStream(): Promise<BidirectionalStreamLike> {
