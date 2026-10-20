@@ -473,7 +473,7 @@ application sets. moq-relay decides which it acts on. Read from the source at ta
 | parameter | moq-relay 0.17.0 | effect for an application |
 | --- | --- | --- |
 | SUBSCRIBER_PRIORITY (`0x20`) | honored on SUBSCRIBE: it sets the priority the relay serves this viewer with. It is not passed upstream (the relay's own SUBSCRIBE carried 255 when the viewer asked for 7) | set it on the SUBSCRIBE; changing it later with `update()` ends the subscription ([deviation 4](behavior.md#relay-interop-deviations)) |
-| publisher priority (track property `0x0E`) | carried in group headers and SUBSCRIBE_OK, but **not used** to order delivery; under congestion only subscriber priority does | an app protects audio by setting its subscriber priority. The publisher's is ignored even when subscriber priorities tie (3 of 3 on 0.17.0, [#154](https://github.com/muxinc/relay-sdks/issues/154)), so the media defaults (audio 16, video 96) do not change it ([behavior.md](behavior.md#media-publishing)); a viewer sets the same values as its subscriber priority with `mediaSubscribeParameters` ([behavior.md](behavior.md#media-subscribing)) |
+| publisher priority (track property `0x0E`) | carried in group headers and SUBSCRIBE_OK, but **not used** to order delivery; under congestion only subscriber priority does. Every group stream header carries the track's `0x0E`, or 128 when the track has none, whatever SUBSCRIBER_PRIORITY the viewer sent, and so does the SUBSCRIBE_OK a viewer gets unless it asked for no properties ([INCLUDE_PROPERTIES](behavior.md#relay-property-handling) = 0 empties the list): with and without `0x0E`, each subscribed with the media priorities, without SUBSCRIBER_PRIORITY and inverted, 3 of 3 per case on 0.17.0 (sjc) and 0.17.5 (ord) on 2026-10-20 ([#344](https://github.com/muxinc/relay-sdks/issues/344)). On ord's capped downlink, delivery followed SUBSCRIBER_PRIORITY in both cases: inverted, audio starved even when every header said 128 ([source](#group-stream-priority-in-source)) | an app protects audio by setting its subscriber priority. The publisher's is ignored even when subscriber priorities tie (3 of 3 on 0.17.0, [#154](https://github.com/muxinc/relay-sdks/issues/154)), so the media defaults (audio 16, video 96) do not change it ([behavior.md](behavior.md#media-publishing)); a viewer sets the same values as its subscriber priority with `mediaSubscribeParameters` ([behavior.md](behavior.md#media-subscribing)) |
 | LOCATION_FILTER (`0x21`) | honored, with draft-20 framing on every draft (fixed in 0.17.3) | see [late subscribers](#late-subscribers-and-location-filters) and [LOCATION_FILTER framing](#draft-22-location_filter-framing) |
 | GROUP_ORDER (`0x22`) | decoded and **ignored**: SUBSCRIBE_OK states Descending whatever the viewer asked for and whatever the publisher declared (DEFAULT_PUBLISHER_GROUP_ORDER), and the relay's upstream SUBSCRIBE always asks for Descending | do not rely on group order either way. A late subscriber that asked for Ascending got its cached groups in no consistent order in 9 of 10 runs (for example `[2..10, 1, 11, 12]`), and ascending once. Upstream `main` applies it ([moq-dev/moq#5385](https://github.com/moq-dev/moq/pull/5385)), in no release through 0.17.7 |
 | NEW_GROUP_REQUEST (`0x32`) | decoded and **ignored**, on SUBSCRIBE and REQUEST_UPDATE: never forwarded upstream, neither in the SUBSCRIBE for a track without a subscription nor as a REQUEST_UPDATE for one already served, which draft-22 §9.20.19 requires of a relay | there is no protocol key-frame request through this relay. An application that needs one (a decoder error, a layer switch) carries the request on its own track back to the publisher |
@@ -497,6 +497,33 @@ a relay fact, not an SDK contract, so only the Python SDK runs it.
 
 ```sh
 RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python:probe:relay-parameters
+```
+
+### Group stream priority in source
+
+The header priority and the send priority come from different values. Read at tag
+`moq-relay-v0.17.7` (the same code at `moq-relay-v0.17.5` and `moq-relay-v0.17.0`), in
+`rs/moq-net/src/ietf/`:
+
+- The relay keeps the publisher's `0x0E` from the SUBSCRIBE_OK it gets upstream
+  (`subscriber.rs:2184`, `priority: msg.properties.priority`), and uses wire 128 when there is none
+  (`subscriber.rs:1787`, `priority.unwrap_or(128)`).
+- It stamps that value on every group stream header it sends a viewer (`publisher.rs:2499`,
+  `publisher_priority: ...to_wire(self.track.info().priority)`). Its SUBSCRIBE_OK to the viewer
+  carries the same value as `0x0E` (`publisher.rs:695`), unless the viewer set INCLUDE_PROPERTIES
+  to 0, which empties the SUBSCRIBE_OK properties; the headers carry it either way.
+- It opens each group stream at the viewer's SUBSCRIBER_PRIORITY (`publisher.rs:2711`,
+  `stream.set_priority(self.applied)`, from the subscription's priority at `publisher.rs:2362`).
+  That is the value the QUIC send scheduler orders by.
+
+To re-measure the header priority, run the TypeScript probe with and without the media track
+properties. It prints each track's SUBSCRIBE_OK `0x0E` and the header priorities that arrived
+(`headerPriorities`). Run it with `SUBSCRIBER_PRIORITY` set to `on`, `off` and `invert`, from `ts/`
+after `mise run ts:build` and `mise run ts:build:native`:
+
+```sh
+RELAY_URL="$RELAY_URL" RELAY_TOKEN="$RELAY_TOKEN" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" \
+  PRIORITY_TRACK_PROPERTIES=off SUBSCRIBER_PRIORITY=invert node scripts/probe-subscriber-priority.mjs
 ```
 
 ## Subgroup resets
@@ -548,14 +575,14 @@ and a LOC Timestamp on every object. For the slow-link rows the subscriber's lin
 | --- | --- | --- |
 | Does a subscriber's OBJECT_ / SUBGROUP_DELIVERY_TIMEOUT bound delivery? | no: decoded and dropped. With 100 ms set, and with neither set, the slow link delivered 600 of 600 groups, lateness p50 about 2.2 s and max about 11.5 s; a 24 s run delivered every group, the last about 24 s late. The track's 5 s default retention did not cut it short either | the relay never drops for a late subscriber. A listener bounds its own delay: the sequencer's late drop and catch-up ([behavior.md](behavior.md#media-subscribing)) |
 | How does a group the relay drops show? | a group never opened leaves only a missing group ID; a stream it stops mid-group is reset with code 1 (CANCELLED), never 0x2 (DELIVERY_TIMEOUT). None occurred in the runs above | a missing group ID is the trace; the sequencer reports it as `missingGroups` |
-| GROUP_ORDER (`0x22`) on SUBSCRIBE | ignored by this release, as by 0.17.0: SUBSCRIBE_OK states 2 (descending), and group streams carry only the subscriber priority. On the slow link, Descending and Ascending gave the same arrival order, oldest backlog first | there is no newest-group-first delivery to ask for on this relay |
+| GROUP_ORDER (`0x22`) on SUBSCRIBE | ignored by this release, as by 0.17.0: SUBSCRIBE_OK states 2 (descending), and each group stream is sent at the subscriber priority alone, with nothing for its group's place in the order (its header carries the track's `0x0E`, or 128, [above](#subscription-parameters)). On the slow link, Descending and Ascending gave the same arrival order, oldest backlog first | there is no newest-group-first delivery to ask for on this relay |
 | FETCH of a recent group | served, one group per FETCH: a two-group range is refused with REQUEST_ERROR 3 `FETCH spanning several groups not supported`. Single groups 40 ms to 29 s old (the oldest tried) came back in 1-2 ms on a clean link; with no cache capacity or duration set, as on the fleet, the 5 s retention does not age groups out of the cache | a gap can be filled from the relay group by group, but on a slow link the FETCH queues behind the live backlog (2-5 s in the runs above) |
 | Properties on FETCH objects | none: a standalone FETCH answers without a Timescale, so the relay writes no properties and the LOC Timestamp is lost | a fetched frame cannot be placed on the timeline from its own properties |
 
 These rows are facts about the releases named, not about moq-relay in general. **0.17.7**, read in
 source and not measured, has the same code on each path: the delivery timeouts are decoded into
-unused bindings, a standalone FETCH answers unstamped, and group streams carry only the subscriber
-priority. Upstream **`main`** differs, read in source and not measured: it applies GROUP_ORDER on
+unused bindings, a standalone FETCH answers unstamped, and group streams are sent at the subscriber
+priority alone, with the track's `0x0E` in their headers ([group stream priority in source](#group-stream-priority-in-source)). Upstream **`main`** differs, read in source and not measured: it applies GROUP_ORDER on
 the IETF publisher, and FETCH keeps object timestamps
 ([moq-dev/moq#5385](https://github.com/moq-dev/moq/pull/5385),
 [#5494](https://github.com/moq-dev/moq/pull/5494), in neither 0.17.6 nor 0.17.7). Its delivery
