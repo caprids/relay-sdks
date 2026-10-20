@@ -203,7 +203,9 @@ track. A failure does not send it.
 Each media track is registered with its default delivery timeout and publisher priority from
 `mediaTrackProperties` / `media_track_properties` ([issue #302](https://github.com/muxinc/relay-sdks/issues/302),
 [issue #316](https://github.com/muxinc/relay-sdks/issues/316)), which the handle would compute from
-the track's kind and keyframe interval.
+the track's kind and keyframe interval. A viewer subscribes to each media track with
+`mediaSubscribeParameters` / `media_subscribe_parameters` for the matching subscriber priority
+([issue #337](https://github.com/muxinc/relay-sdks/issues/337)), the only one moq-relay 0.17 orders delivery by.
 
 The catalog service is the loop `serve_catalog()` runs today, generalized:
 

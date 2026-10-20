@@ -1,7 +1,8 @@
 /**
  * `@mux/relay/media`: the media policy over registered tracks and subscriptions (spec/behavior.md, "Media publishing"
  * and "Media subscribing"). A frame writer maps encoded frames onto a track's groups; a catalog service and a document
- * service serve state-shaped tracks, and `mediaTrackProperties` gives a media track its default delivery timeout; a
+ * service serve state-shaped tracks, and `mediaTrackProperties` gives a media track its default delivery timeout and publisher
+ * priority; `mediaSubscribeParameters` gives a viewer's subscription to it the matching subscriber priority, and a
  * frame reader reads a subscription as frames in decode order. They know no format: a frame carries its own object
  * properties, a document is bytes, and the reader drives a sequencer it is given, so they pair with `@mux/moq-media`'s
  * LOC and MSF helpers and its `FrameSequencer` without depending on them.
@@ -44,4 +45,9 @@ export {
   type FrameWriter,
   type FrameWriterOptions,
 } from './frame-writer.js';
-export { type MediaKind, type MediaTrackPropertiesOptions, mediaTrackProperties } from './media-track-properties.js';
+export {
+  type MediaKind,
+  type MediaTrackPropertiesOptions,
+  mediaSubscribeParameters,
+  mediaTrackProperties,
+} from './media-track-properties.js';

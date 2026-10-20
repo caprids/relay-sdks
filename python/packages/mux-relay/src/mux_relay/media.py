@@ -1,5 +1,6 @@
 """Media policy over registered tracks and subscriptions: the catalog and document services, the frame writer, the
-track properties that give a media track its default delivery timeout, and the frame reader.
+track properties that give a media track its default delivery timeout and publisher priority, the subscription
+parameters that give a viewer's subscription to it the matching subscriber priority, and the frame reader.
 
 This is the part of stage 2 in ``spec/media-layer.md`` that the Video.js streaming example proved
 against the relay. A catalog is a state-shaped track whose document is re-sent on every relay
@@ -25,12 +26,13 @@ subscribing" section of ``spec/behavior.md`` is its contract.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass
 from typing import Generic, Literal, Protocol, TypeVar
 
-from moq_core import KeyValuePair, ObjectStatus
+from moq_core import KeyValuePair, MessageParameters, ObjectStatus
 
 from ._frame_reader import FrameReader, FrameReaderPoll, FrameReaderSequencer
 from ._validation import DEFAULT_PUBLISHER_PRIORITY, MAX_DEFAULT_PUBLISHER_PRIORITY, payload_bytes
@@ -930,13 +932,19 @@ class DocumentService:
 
 
 MediaKind = Literal["audio", "video"]
-"""What a media track carries, which decides its default delivery timeout and publisher priority."""
+"""What a media track carries, which decides its default delivery timeout and priorities."""
 
 _AUDIO_SUBGROUP_TIMEOUT_US = 500_000
 """Audio's default subgroup timeout: measured under a 2 s uplink stall to sjc (issue #302)."""
 
 _PUBLISHER_PRIORITY: dict[str, int] = {"audio": 16, "video": 96}
 """Default Publisher Priority per kind, lower being more urgent: audio ahead of video, as Huddle sets them by hand."""
+
+_SUBSCRIBER_PRIORITY: dict[str, int] = {"audio": 16, "video": 96}
+"""SUBSCRIBER_PRIORITY per kind, lower being more urgent: the same values as the publisher priorities."""
+
+_MAX_SUBSCRIBER_PRIORITY = 255
+"""The largest SUBSCRIBER_PRIORITY, a single byte."""
 
 _MAX_TIMEOUT_US = 2_147_483_647_000
 """The largest value whose whole milliseconds the TypeScript SDK's timers hold, the bound in both SDKs."""
@@ -1008,6 +1016,40 @@ def media_track_properties(
     ]
 
 
+def media_subscribe_parameters(kind: MediaKind, overrides: MessageParameters | None = None) -> MessageParameters:
+    """The subscription parameters a viewer gives a media track, so audio goes ahead of video on a congested downlink.
+
+    Pass them to ``subscribe``, ``want`` or ``switch_to`` (``spec/behavior.md``, "Media subscribing")::
+
+        audio = subscriber.subscribe(namespace, "audio", handlers, parameters=media_subscribe_parameters("audio"))
+        video = subscriber.subscribe(namespace, "video", handlers, parameters=media_subscribe_parameters("video"))
+
+    The result is a new ``MessageParameters`` with a SUBSCRIBER_PRIORITY of 16 for audio and 96 for
+    video, lower being more urgent: the same values ``media_track_properties`` gives as publisher
+    priorities. moq-relay 0.17 orders what it sends a viewer by subscriber priority alone and ignores
+    the publisher's, so this is the priority that decides delivery there. It cannot be changed later:
+    on that relay any ``update()`` ends the subscription. ``overrides`` are copied onto the result,
+    such as a ``location_filter``; an explicit ``subscriber_priority``, an integer from 0 to 255,
+    replaces the default.
+    """
+    if not isinstance(kind, str):
+        raise TypeError("kind must be 'audio' or 'video'")
+    if kind not in ("audio", "video"):
+        raise ValueError("kind must be 'audio' or 'video'")
+    if overrides is None:
+        overrides = MessageParameters()
+    elif not isinstance(overrides, MessageParameters):
+        raise TypeError("overrides must be MessageParameters")
+    priority = overrides.subscriber_priority
+    if priority is None:
+        priority = _SUBSCRIBER_PRIORITY[kind]
+    elif isinstance(priority, bool) or not isinstance(priority, int):
+        raise TypeError("subscriber_priority must be an integer")
+    elif not 0 <= priority <= _MAX_SUBSCRIBER_PRIORITY:
+        raise ValueError(f"subscriber_priority must be an integer from 0 to {_MAX_SUBSCRIBER_PRIORITY}")
+    return dataclasses.replace(overrides, subscriber_priority=priority)
+
+
 def _check_microseconds(value: object, name: str) -> None:
     """Accept ``None`` or a positive integer of microseconds whose whole milliseconds fit the timer bound."""
     if value is None:
@@ -1029,5 +1071,6 @@ __all__ = [
     "FrameReaderSequencer",
     "FrameWriter",
     "MediaKind",
+    "media_subscribe_parameters",
     "media_track_properties",
 ]

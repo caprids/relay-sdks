@@ -153,6 +153,7 @@ assert.deepEqual(Object.keys(mediaPolicy).sort(), [
   'createDocumentService',
   'createFrameReader',
   'createFrameWriter',
+  'mediaSubscribeParameters',
   'mediaTrackProperties',
 ]);
 // Its declarations stand without the optional adapter installed.

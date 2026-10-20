@@ -18,6 +18,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   also sets a default publisher priority (`0x0E`) that puts audio ahead of video, 16 for audio and 96 for video, which
   `publisher_priority` replaces ([#316](https://github.com/muxinc/relay-sdks/issues/316)). moq-relay 0.17 passes it to
   viewers but orders delivery by their subscriber priority alone, so it changes no delivery there yet.
+- `mux_relay.media.media_subscribe_parameters("audio" | "video", overrides=None)` gives a viewer's subscription the
+  matching subscriber priority, 16 for audio and 96 for video, the one moq-relay 0.17 orders delivery by
+  ([#337](https://github.com/muxinc/relay-sdks/issues/337)). Pass it as `parameters=` to `subscribe`, `want` or
+  `switch_to`; `overrides` adds other parameters, and its `subscriber_priority` replaces the default. The Video.js
+  example's `--verify` viewer uses it.
 - `open_group(payload, properties=...)` opens a group with its first object, so that object's delivery timeout counts
   the wait for demand, settling room and the stream ([#306](https://github.com/muxinc/relay-sdks/issues/306)); a bare
   `open_group()` has no object to time. The frame writer opens every group this way, so a frame whose open fails

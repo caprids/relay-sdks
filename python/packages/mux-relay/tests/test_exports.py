@@ -98,6 +98,7 @@ MEDIA_NAMES = [
     "FrameReaderSequencer",
     "FrameWriter",
     "MediaKind",
+    "media_subscribe_parameters",
     "media_track_properties",
 ]
 """The public interface of ``mux_relay.media``, the media policy; the root exports none of it."""

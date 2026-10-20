@@ -191,6 +191,7 @@ connection state, because it depends on the connection's registry.
 | Deadline | A number in (0, 2147483647] milliseconds in TypeScript, (0, 2147483.647] seconds in Python: the largest delay a JavaScript timer holds, and the same bound in both SDKs. The connection, request and write deadlines share one check. | not a number, including a boolean | zero, negative, NaN, infinite, or above the bound | `connectTimeoutMs` / `connect_timeout` on both connect calls; `requestTimeoutMs` / `request_timeout`; `writeTimeoutMs` / `write_timeout` on `registerTrack` / `register_track` |
 | Track registration | A track name not yet registered on this publisher connection, including after its writer closed. Checked after the track name, properties and deadline, and after connection state. | | a name already registered | `registerTrack` / `register_track` |
 | Media track timing | A media kind, `'audio'` or `'video'`; every duration a positive integer number of microseconds (a safe integer in TypeScript, an `int` other than a boolean in Python) of at most 2147483647000, the deadline bound in whole milliseconds. Video needs a keyframe interval, and a target latency is at least the keyframe interval. A publisher priority, when given, is an integer from 0 to 255. | a kind that is not a string; video without a keyframe interval; a duration or publisher priority that is not a number (TypeScript) or not an `int`, including a boolean and any float (Python) | another kind; a target latency below the keyframe interval; a duration that is zero, negative or above the bound, and in TypeScript also fractional, NaN or infinite; a publisher priority below 0 or above 255, and in TypeScript also fractional, NaN or infinite | `mediaTrackProperties` / `media_track_properties` |
+| Media subscribe parameters | A media kind, `'audio'` or `'video'`; overrides that are message parameters (an object in TypeScript, `MessageParameters` in Python); a subscriber priority in them, when given, is an integer from 0 to 255. | a kind that is not a string; overrides that are not an object (TypeScript) or not `MessageParameters` (Python); a subscriber priority that is not a number (TypeScript) or not an `int`, including a boolean and any float (Python) | another kind; a subscriber priority below 0 or above 255, and in TypeScript also fractional, NaN or infinite | `mediaSubscribeParameters` / `media_subscribe_parameters` |
 | Object status | `normal`, `end-of-group` or `end-of-track`; defaults to `normal`. | not a string | any other string | `write`, `writeText`, `writeJSON` on a group writer |
 | Event capacity | A positive integer (a safe integer in TypeScript); defaults to 64. | not a number, including a boolean | zero, negative, fractional, NaN, or infinite | `subscribeEvents` / `subscribe_events`, `namespaceEvents` / `namespace_events` |
 | Payload | A byte sequence: any `ArrayBufferView` in TypeScript; any object supporting the buffer protocol in Python (`bytes`, `bytearray`, `memoryview`, ...). Copied once. At most `limits.maxObjectPayloadBytes`. | a string, an `ArrayBuffer`, a list of integers, anything else | longer than the object payload limit | `write`, `writeText`, `writeJSON` on a track or group writer |
@@ -1445,8 +1446,8 @@ Implemented in both SDKs.
     ignores the publisher's when subscriber priorities tie
     ([#154](https://github.com/muxinc/relay-sdks/issues/154), [relay interop](relay-interop.md#subscription-parameters)).
     A viewer that wants audio first under congestion asks for it with its own SUBSCRIBER_PRIORITY,
-    as Huddle does with 16 on its audio wants; whether the SDKs should default that is
-    [#337](https://github.com/muxinc/relay-sdks/issues/337).
+    which `mediaSubscribeParameters` / `media_subscribe_parameters` gives it with the same values
+    ([media subscribing](#media-subscribing)).
 - Every frame gets exactly one outcome: sent, skipped, stale, dropped, interrupted or ended. The
   writer returns it rather than raising, so a caller keeps counters without catching per frame, and
   the group the frame was written to or that was reset on its behalf travels with it. Closing the
@@ -1462,6 +1463,46 @@ The raw subscription delivers them as they arrive. A frame sequencer (`createFra
 drops what is too late against the broadcast's playout clock. A frame reader (`createFrameReader` /
 `FrameReader`, in `@mux/relay/media` and `mux_relay.media`) is a subscription's or a want's handlers
 that drive a sequencer and poll it when a wait ends; it knows no format. Implemented in both SDKs.
+
+- A viewer subscribes to a media track with the parameters from
+  `mediaSubscribeParameters(kind, overrides)` / `media_subscribe_parameters(kind, overrides)`, in
+  `@mux/relay/media` and `mux_relay.media` ([#337](https://github.com/muxinc/relay-sdks/issues/337)).
+  They hold a SUBSCRIBER_PRIORITY that puts audio ahead of video, lower being more urgent: 16 for
+  audio and 96 for video, the same values as the [publisher priorities](#media-publishing), pinned
+  in `spec/protocol.json` as `mediaSubscribeParameters.subscriberPriority`. The overrides are copied
+  onto a new result, and an explicit subscriber priority, an integer from 0 to 255, replaces the
+  default; a kind other than `'audio'` or `'video'`, or a priority outside that range, is refused
+  like the media track timing [arguments](#arguments).
+  - This is the priority that decides delivery on moq-relay 0.17. The relay orders what it sends a
+    viewer by subscriber priority alone and ignores the publisher's `0x0E` even when subscriber
+    priorities tie ([#154](https://github.com/muxinc/relay-sdks/issues/154): 2.1 s against 26.9 s
+    of lag with different subscriber priorities on a congested link, no difference with publisher
+    priorities alone; [relay interop](relay-interop.md#subscription-parameters)). Without it, a
+    viewer whose downlink is congested gets no audio preference, whatever the publisher declared.
+  - Measured on 2026-10-20 against ord (moq-relay 0.17.5) with `ts/scripts/probe-subscriber-priority.mjs`:
+    a Node publisher on a clean path sent 50 fps audio (160-byte frames, one group per frame) and
+    about 1 Mbit/s of 30 fps video (a 40 kB keyframe each second), both registered with
+    `mediaTrackProperties`, and a Node subscriber behind a downlink capped at 800 kbit/s (100 ms
+    queue) timed the audio from capture to arrival, after a 5 s warm-up of a 25 s run. "Off"
+    subscribes with no parameters, as before #337; "inverted" sends audio 96 and video 16. The
+    probe read each SUBSCRIBE off the subscriber's request streams: SUBSCRIBER_PRIORITY 16 and 96
+    with the helper, none without. On a clean path every mode delivered audio in 1 to 2 ms.
+
+    | subscriber priority | runs | audio p50 | p95 | p99 | max | audio received after the warm-up |
+    | --- | --- | --- | --- | --- | --- | --- |
+    | on (audio 16, video 96) | 3 | 43–45 ms | 70–72 ms | 74–76 ms | 76–93 ms | 995 of about 1,000 published |
+    | off | 3 | 176–181 ms | 243–245 ms | 253–259 ms | 308–441 ms | 996 of about 1,000 published |
+    | inverted (audio 96, video 16) | 2 | 11.9 s, 2 frames; none | | | | 2 and 0 of about 1,000 |
+
+    Video lagged 7.7 to 8.3 s at p50 either way: the cap is below its rate, and the relay keeps a
+    stalled viewer's backlog. With the publisher's `0x0E` set, the relay stamped each group stream
+    with the publisher's priority in every mode, so a group header does not show what the viewer
+    asked for.
+  - It has to be chosen before SUBSCRIBE: on that relay any `update()` ends the subscription
+    ([deviation 4](#relay-interop-deviations)), so a viewer that wants another priority switches or
+    subscribes again. SUBSCRIBE_OK carries the publisher's `0x0E` only after the choice is made.
+  - The relay serves each viewer separately, so the priority orders only that viewer's own tracks
+    against each other. A track subscribed without it gets the relay's default.
 
 - Lateness is measured against the playout clock's position, which advances in real time through a
   stall. While the clock is idle nothing is late. The budget is the clock's target latency, one

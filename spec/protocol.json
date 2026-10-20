@@ -55,5 +55,9 @@
   "mediaTrackProperties": {
     "publisherPriority": { "audio": 16, "video": 96 },
     "note": "The Default Publisher Priority (track property 0x0E) mediaTrackProperties / media_track_properties give each kind; lower is more urgent (draft-22 section 5.1), so audio goes ahead of video. moq-relay 0.17 orders delivery by subscriber priority alone (issue #154)."
+  },
+  "mediaSubscribeParameters": {
+    "subscriberPriority": { "audio": 16, "video": 96 },
+    "note": "The SUBSCRIBER_PRIORITY mediaSubscribeParameters / media_subscribe_parameters give a viewer's subscription to each kind: the same values as mediaTrackProperties.publisherPriority, lower being more urgent. moq-relay 0.17 orders what it sends a viewer by subscriber priority alone and ignores the publisher's (issue #154, spec/relay-interop.md), so this is the priority that puts audio ahead of video there (issue #337)."
   }
 }

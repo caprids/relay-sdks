@@ -1,9 +1,10 @@
+import type { MessageParameters } from '@mux/moq-core';
 import { MAX_TIMEOUT_MS } from './connect-session.js';
 import { SUBGROUP_DELIVERY_TIMEOUT } from './delivery-timeouts.js';
 import type { PublishProperty } from './publish.js';
 import { DEFAULT_PUBLISHER_PRIORITY, MAX_DEFAULT_PUBLISHER_PRIORITY } from './validation.js';
 
-/** What a media track carries, which decides its default delivery timeout and publisher priority. */
+/** What a media track carries, which decides its default delivery timeout and priorities. */
 export type MediaKind = 'audio' | 'video';
 
 /** Options for {@link mediaTrackProperties}. Every duration is a positive integer number of microseconds. */
@@ -28,6 +29,10 @@ export interface MediaTrackPropertiesOptions {
 const AUDIO_SUBGROUP_TIMEOUT_US = 500_000;
 /** Default Publisher Priority per kind, lower being more urgent: audio ahead of video, as Huddle sets them by hand. */
 const PUBLISHER_PRIORITY: Readonly<Record<MediaKind, number>> = { audio: 16, video: 96 };
+/** SUBSCRIBER_PRIORITY per kind, lower being more urgent: the same values as the publisher priorities. */
+const SUBSCRIBER_PRIORITY: Readonly<Record<MediaKind, number>> = { audio: 16, video: 96 };
+/** The largest SUBSCRIBER_PRIORITY, a single byte. */
+const MAX_SUBSCRIBER_PRIORITY = 255;
 /** The largest value whose whole milliseconds the write slot's timers hold. */
 const MAX_TIMEOUT_US = MAX_TIMEOUT_MS * 1000;
 
@@ -77,6 +82,29 @@ export function mediaTrackProperties(kind: MediaKind, options: MediaTrackPropert
   }
 }
 
+/**
+ * The subscription parameters a viewer gives a media track, so audio goes ahead of video when the downlink is congested
+ * (spec/behavior.md, "Media subscribing"). Pass them to `subscribe`, `want` or `switchTo`:
+ *
+ * ```ts
+ * subscriber.subscribe({ namespace, track: 'audio', parameters: mediaSubscribeParameters('audio') }, handlers);
+ * subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, handlers);
+ * ```
+ *
+ * The result is a SUBSCRIBER_PRIORITY of 16 for audio and 96 for video, lower being more urgent: the same values
+ * `mediaTrackProperties` gives as publisher priorities. moq-relay 0.17 orders what it sends a viewer by subscriber
+ * priority alone and ignores the publisher's, so this is the priority that decides delivery there. It cannot be
+ * changed later: on that relay any `update()` ends the subscription. `overrides` are copied onto the result, such as a
+ * `locationFilter`; an explicit `subscriberPriority`, an integer from 0 to 255, replaces the default.
+ */
+export function mediaSubscribeParameters(kind: MediaKind, overrides: MessageParameters = {}): MessageParameters {
+  if (typeof kind !== 'string') throw new TypeError("kind must be 'audio' or 'video'");
+  if (kind !== 'audio' && kind !== 'video') throw new RangeError("kind must be 'audio' or 'video'");
+  if (typeof overrides !== 'object' || overrides === null) throw new TypeError('overrides must be an object');
+  const subscriberPriority = optionalSubscriberPriority(overrides.subscriberPriority);
+  return { ...overrides, subscriberPriority: subscriberPriority ?? SUBSCRIBER_PRIORITY[kind] };
+}
+
 /** A positive safe integer of microseconds whose whole milliseconds fit the timer bound, or `undefined`. */
 function optionalMicroseconds(value: unknown, name: string): number | undefined {
   if (value === undefined) return undefined;
@@ -93,6 +121,16 @@ function optionalPriority(value: unknown): number | undefined {
   if (typeof value !== 'number') throw new TypeError('publisherPriority must be a number');
   if (!Number.isInteger(value) || value < 0 || value > MAX_DEFAULT_PUBLISHER_PRIORITY) {
     throw new RangeError(`publisherPriority must be an integer from 0 to ${MAX_DEFAULT_PUBLISHER_PRIORITY}`);
+  }
+  return value;
+}
+
+/** An integer SUBSCRIBER_PRIORITY from 0 to 255, or `undefined`. */
+function optionalSubscriberPriority(value: unknown): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'number') throw new TypeError('subscriberPriority must be a number');
+  if (!Number.isInteger(value) || value < 0 || value > MAX_SUBSCRIBER_PRIORITY) {
+    throw new RangeError(`subscriberPriority must be an integer from 0 to ${MAX_SUBSCRIBER_PRIORITY}`);
   }
   return value;
 }

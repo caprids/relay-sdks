@@ -75,7 +75,15 @@ from mux_relay import (
     connect_relay_publisher,
     connect_supervised_subscriber,
 )
-from mux_relay.media import CatalogService, DocumentService, FrameOutcome, FrameWriter, media_track_properties
+from mux_relay.media import (
+    CatalogService,
+    DocumentService,
+    FrameOutcome,
+    FrameWriter,
+    MediaKind,
+    media_subscribe_parameters,
+    media_track_properties,
+)
 
 Log = Callable[[str, dict[str, Any]], None]
 
@@ -1166,7 +1174,10 @@ async def verify(
     if config.audio != "off":
         tracks.append((AUDIO_TRACK, on_audio))
 
+    # Audio ahead of video on a congested downlink: moq-relay orders delivery by subscriber priority alone.
+    kinds: dict[str, MediaKind] = {AUDIO_TRACK: "audio", VIDEO_TRACK: "video"}
     for track, on_object in tracks:
+        kind = kinds.get(track)
         subscriber.want(
             track,
             config.namespace,
@@ -1177,6 +1188,7 @@ async def verify(
                 on_error=on_error(track),
                 on_restarted=on_restarted(track),
             ),
+            parameters=None if kind is None else media_subscribe_parameters(kind),
         )
 
     try:
