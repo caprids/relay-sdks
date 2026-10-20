@@ -206,7 +206,7 @@ begun forwarding, so an aborted group can leave no trace except a gap in group I
 transit, and it does not end the subscription. Cancel the subscription when you are finished with it.
 
 The SDK sends every subscription parameter you set, but moq-relay acts on only some of them. It
-honors `subscriberPriority` and `locationFilter` on the subscribe, and ignores `groupOrder` (the
+honors `subscriberPriority` (for media, see [`mediaSubscribeParameters`](#subscribing-to-media)) and `locationFilter` on the subscribe, and ignores `groupOrder` (the
 relay always serves Descending), `newGroupRequest`, both delivery timeouts and a per-request
 `authorizationTokens`. With `newGroupRequest` ignored there is no protocol key-frame request through
 the relay: an application that needs one sends it to the publisher on a track of its own. See
@@ -779,7 +779,7 @@ the default. `reader.close()` stops delivery; cancel the subscription as well.
 
 ```ts
 import { createFrameSequencer, createPlayoutClock } from '@mux/moq-media';
-import { createFrameReader } from '@mux/relay/media';
+import { createFrameReader, mediaSubscribeParameters } from '@mux/relay/media';
 
 const clock = createPlayoutClock(); // one per broadcast, shared by its tracks
 const video = createFrameReader(createFrameSequencer({ clock }), {
@@ -791,9 +791,16 @@ const video = createFrameReader(createFrameSequencer({ clock }), {
   },
 });
 const audio = createFrameReader(createFrameSequencer({ clock, grouping: 'frame' }), { onFrame: decodeAudio });
-subscriber.subscribe({ namespace, track: 'video' }, { ...video, onError });
-subscriber.subscribe({ namespace, track: 'audio' }, { ...audio, onError });
+subscriber.subscribe({ namespace, track: 'video', parameters: mediaSubscribeParameters('video') }, { ...video, onError });
+subscriber.subscribe({ namespace, track: 'audio', parameters: mediaSubscribeParameters('audio') }, { ...audio, onError });
 ```
+
+`mediaSubscribeParameters(kind)` gives each subscription a subscriber priority that puts audio ahead
+of video when your downlink is congested: 16 for audio, 96 for video, the values
+`mediaTrackProperties` gives the publisher. moq-relay orders what it sends you by your subscriber
+priority alone and ignores the publisher's, so without it audio waits behind video's backlog. Choose
+it when you subscribe: an `update()` ends the subscription. Pass other parameters as the second
+argument, such as `{ locationFilter }`; a `subscriberPriority` there replaces the default.
 
 A frame's `timestampUs` is its LOC timestamp on the broadcast timeline, scaled by whichever
 Timescale the object or the track declares. The clock's target latency is the lateness budget for

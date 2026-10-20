@@ -192,7 +192,8 @@ finished  videoGroups=30 videoObjects=1800 audioObjects=2989 skippedVideo=0 skip
 `--verify` runs an in-process subscriber on the same tracks and prints what a player would see, which
 is how the example is checked without a browser. It is a
 [supervised subscriber](../../README.md#stay-connected-supervised-connections) whose wants retry the
-announce race and resubscribe after a publisher's done, logging each resubscription as
+announce race and resubscribe after a publisher's done, with audio's subscriber priority ahead of
+video's (`media_subscribe_parameters`), logging each resubscription as
 `verify: resubscribing`, and it waits for the publisher's `announced` and every track's acceptance
 before the media starts. The catalog line lists the tracks `parse_msf_catalog`
 reads back from the received document (name, packaging, codec, size or sample rate, init-data

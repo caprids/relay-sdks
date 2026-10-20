@@ -103,13 +103,14 @@ describe('public vocabulary', () => {
 
 /** `@mux/relay/media`: the media policy, which the root does not export (spec/vocabulary.md). */
 describe('media vocabulary', () => {
-  it('exports factories for the frame writer, the frame reader and the two document-shaped services, the track properties helper, and nothing else', async () => {
+  it('exports factories for the frame writer, the frame reader and the two document-shaped services, the track properties and subscribe parameters helpers, and nothing else', async () => {
     const media = await import('../src/media.js');
     expect(Object.keys(media).sort()).toEqual([
       'createCatalogService',
       'createDocumentService',
       'createFrameReader',
       'createFrameWriter',
+      'mediaSubscribeParameters',
       'mediaTrackProperties',
     ]);
     expect(relay).not.toHaveProperty('createFrameWriter');

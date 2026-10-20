@@ -588,6 +588,7 @@ sequencer as an argument.
 | The sequencer asks for its subscription to be replaced | `SequencerPoll.catchUp`; the reader's `onCatchUp()` on `FrameReaderOptions` | not yet (TypeScript only) |
 | Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
 | Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
+| A media track's subscriber priority, as subscription parameters | `mediaSubscribeParameters(kind, overrides?)` → `MessageParameters` (`MediaKind`) | `media_subscribe_parameters(kind, overrides=None)` → `MessageParameters` (`MediaKind`) |
 | A subscription's or a want's handlers that read frames | `createFrameReader(sequencer, { onFrame })` → `FrameReader` (`FrameReaderOptions`); spread into `subscribe` or `want` handlers | `FrameReader(sequencer)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)`; `async for frame in reader` |
 | What a reader drives | `FrameReaderSequencer<F>` | `FrameReaderSequencer`, `FrameReaderPoll` (protocols) |
 | Stop reading | `reader.close()` | `reader.close()`, `reader.closed` |
@@ -608,6 +609,16 @@ the delay, while a catch-up replaces the subscription so the delay goes away. It
 wait for an earlier group. `lateDropUs` on the sequencer keeps the clock option's name because it is
 the same limit, for one track. `missingGroups` names groups, not frames, because a group ID is what
 a relay can be asked about.
+
+`mediaSubscribeParameters` says what it returns, like `mediaTrackProperties`: the `parameters` that
+`subscribe`, `want` and `switchTo` take, so it pairs with the publisher's helper and lives beside it
+in `@mux/relay/media` and `mux_relay.media`
+([#337](https://github.com/muxinc/relay-sdks/issues/337)). It takes the whole parameters as
+overrides rather than a `subscriberPriority` option, so a viewer adds a location filter without
+spreading two objects. Not adopted: reading the publisher's `0x0E` from SUBSCRIBE_OK (the priority
+is chosen before SUBSCRIBE, and changing it later ends the subscription on moq-relay); a default
+inside `subscribe` (the product package knows nothing about media kinds); documentation alone
+(nothing in the media tier would point a viewer at the one priority the relay acts on).
 
 ## Audio playout: `createAudioPlayer`, `AudioPlayerInput`
 
@@ -810,7 +821,8 @@ timeout (see behavior.md).
 
 `publisherPriority` is draft-22's name for what `0x0E` carries (Default Publisher Priority), so it
 reads as the protocol value it sets, not as a scheduling promise: on moq-relay 0.17 only the
-viewer's subscriber priority orders delivery ([#316](https://github.com/muxinc/relay-sdks/issues/316)).
+viewer's subscriber priority orders delivery ([#316](https://github.com/muxinc/relay-sdks/issues/316)), which
+`mediaSubscribeParameters` sets ([#337](https://github.com/muxinc/relay-sdks/issues/337)).
 
 Not adopted: `FramePublisher.publish()` ("publisher" is the connection role, and `publish()` was
 already rejected as the name of a step that does not send); `MediaTrackWriter.write_frame()`

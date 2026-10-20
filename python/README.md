@@ -209,6 +209,20 @@ relay always serves Descending), `new_group_request`, both delivery timeouts and
 the relay: an application that needs one sends it to the publisher on a track of its own. See
 [subscription parameters](../spec/relay-interop.md#subscription-parameters).
 
+For media, `mux_relay.media.media_subscribe_parameters(kind)` gives a subscription the subscriber
+priority that puts audio ahead of video when the viewer's downlink is congested: 16 for audio, 96
+for video, the values `media_track_properties` gives the publisher. moq-relay orders what it sends a
+viewer by subscriber priority alone and ignores the publisher's, so without it audio waits behind
+video's backlog. Pass other parameters as `overrides`; a `subscriber_priority` there replaces the
+default. See [media subscribing](../spec/behavior.md#media-subscribing).
+
+```python
+from mux_relay.media import media_subscribe_parameters
+
+audio = subscriber.subscribe(namespace, "audio", handlers, parameters=media_subscribe_parameters("audio"))
+video = subscriber.subscribe(namespace, "video", handlers, parameters=media_subscribe_parameters("video"))
+```
+
 `subscription.update(parameters)` sends REQUEST_UPDATE, the protocol's way to change what an
 accepted subscription delivers. **moq-relay does not implement it**: the relay never acknowledges an
 update, and any update, including `MessageParameters(forward=0)` or an empty one, ends the
