@@ -87,7 +87,8 @@ closure, checks that a want follows a supervised publisher's newer generation, t
 connection. It defaults to
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
 another relay to put the subscribers there. Namespace fields sent by
-the SDK are absolute: include the token's root prefix when required by the relay.
+the SDK are relative to the endpoint URL's path: with no path, as here, include the token's root
+prefix when required by the relay.
 
 The live test passed against `sjc.relay.mux.global` on 2026-09-09: three objects on `events` and two
 on `status`, with the second status object delivered after the events track closed.
@@ -126,7 +127,8 @@ retry and reports how often it retried, warms each track up until a marker arriv
 empty, and text payloads plus independent track closure, then closes both connections. It defaults to
 `https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
 another relay to put the subscribers there. Namespace fields sent by
-the SDK are absolute: include the token's root prefix when required by the relay.
+the SDK are relative to the endpoint URL's path: with no path, as here, include the token's root
+prefix when required by the relay.
 
 The live test passed against `sjc.relay.mux.global` on 2026-10-03 over the default native QUIC
 transport: three objects on `events` and two on `status`, with the second status object delivered

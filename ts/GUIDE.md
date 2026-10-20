@@ -23,11 +23,15 @@ from the repository root.
 ### Endpoint and credentials
 
 Ask the team operating your Relay deployment (or your application's backend owner) for an HTTPS
-WebTransport endpoint, the exact authorized namespace fields including any root prefix, and a
+WebTransport endpoint, the exact authorized namespace fields, and a
 short-lived Relay JWT authorized to **publish and subscribe** there. The SDK consumes tokens; it
 does not issue them or provide a public token signup flow. Do not use a Mux API access token in
-place of a Relay JWT. The hosted demo defaults to `https://sjc.relay.mux.global`, which still requires
-authorized credentials. For another deployment, use the endpoint supplied by its operator.
+place of a Relay JWT. Namespace fields are relative to the endpoint URL's path: on an endpoint with
+no path they include the token's root prefix, and on an endpoint whose path is that root (for
+example `https://sjc.relay.mux.global/acme/rooms/42`) they leave it out
+([namespaces](../spec/behavior.md#subscribing)). The hosted demo defaults to
+`https://sjc.relay.mux.global`, which still requires authorized credentials. For another deployment,
+use the endpoint supplied by its operator.
 
 The runner reads `RELAY_TOKEN` when set, otherwise prompts with hidden input. Prefer the prompt for
 manual runs; automation can inject the environment variable through its secret manager. Do not put
@@ -603,9 +607,11 @@ which the relay drops silently. The SDK measures the encoding with the core's ow
 oversized property never opens a stream. The SDK adds
 no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB of payload.
 
-Properties are encoded as supplied, but subscribers see the relay's output. With moq-relay 0.17.0,
-only the object Timestamp (`0x10`, or the older `0x06`) survives, rescaled to microseconds by the
-declared Timescale (`0x08`); every other object property, including Video Config, is dropped. Tracks
+Properties are encoded as supplied, but subscribers see the relay's output. moq-relay 0.17.5 and
+earlier strip object properties (fixed upstream in moq #5494, not yet released;
+[#262](https://github.com/muxinc/relay-sdks/issues/262)): only the object Timestamp (`0x10`, or the
+older `0x06`) survives, rescaled to microseconds by the declared Timescale (`0x08`); every other
+object property, including Video Config, is dropped. Tracks
 without a declared Timescale, and objects without a Timestamp, get relay-clock timestamps. Declaring
 `trackProperties: [{ type: 0x08, value: 1_000_000 }]` keeps supplied Timestamp values unchanged.
 Every `SUBSCRIBE_OK` carries the relay's track properties (`0x08` = 1,000,000, `0x0E` = 128 unless
@@ -709,7 +715,8 @@ viewer that resubscribes on the same connection within about 30 seconds can rece
 cached copy before the re-sent one. `true` does not prove anyone is watching. Write only state that
 is safe to serve from cache and to receive more than once. Pausing an encoder while there is no
 demand is safe, because a frame written then reaches no viewer; resume at a keyframe, which a frame
-writer asks for through `keyframeNeeded`. When the first viewer is on another relay, the publisher's relay subscribes once
+writer asks for through `keyframeNeeded`. When the first viewer is on another relay, or is a
+moq-lite viewer (such as `@moq/watch`) on any relay, the publisher's relay subscribes once
 to look up the track's info, cancels about 50 ms later, and subscribes again: `true`, `false`, `true`. Objects
 written during that first subscription reach no viewer, so do not rely on the first objects after
 demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and

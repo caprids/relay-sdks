@@ -19,9 +19,13 @@ or a WebSocket. The endpoint and network must allow QUIC/UDP traffic.
 ### Endpoint and credentials
 
 Ask the team operating your Relay deployment (or your application's backend owner) for an HTTPS
-Relay endpoint, the exact authorized namespace fields including any root prefix, and a
+Relay endpoint, the exact authorized namespace fields, and a
 short-lived Relay JWT authorized to **publish and subscribe** there. The SDK consumes tokens; it
 does not issue them or provide a public token signup flow. A Mux API access token is not a Relay JWT.
+Namespace fields are relative to the endpoint URL's path: on an endpoint with no path they include
+the token's root prefix, and on an endpoint whose path is that root (for example
+`https://sjc.relay.mux.global/acme/rooms/42`) they leave it out
+([namespaces](../spec/behavior.md#subscribing)).
 The hosted demo defaults to `https://sjc.relay.mux.global`, which still requires authorized credentials.
 For another deployment, use the endpoint supplied by its operator.
 
@@ -540,9 +544,11 @@ an oversized property never opens a stream.
 The SDK adds no default timescale, timestamp, or LOC media packaging. Objects are limited to 16 MiB
 of payload.
 
-Properties are encoded as supplied, but subscribers see the relay's output. With moq-relay 0.17.0,
-only the object Timestamp (`0x10`, or the older `0x06`) survives, rescaled to microseconds by the
-declared Timescale (`0x08`); every other object property, including Video Config, is dropped. Tracks
+Properties are encoded as supplied, but subscribers see the relay's output. moq-relay 0.17.5 and
+earlier strip object properties (fixed upstream in moq #5494, not yet released;
+[#262](https://github.com/muxinc/relay-sdks/issues/262)): only the object Timestamp (`0x10`, or the
+older `0x06`) survives, rescaled to microseconds by the declared Timescale (`0x08`); every other
+object property, including Video Config, is dropped. Tracks
 without a declared Timescale, and objects without a Timestamp, get relay-clock timestamps. Declaring
 `track_properties=[KeyValuePair(0x08, 1_000_000)]` keeps supplied Timestamp values unchanged. Every
 `SUBSCRIBE_OK` carries the relay's track properties (`0x08` = 1,000,000, `0x0E` = 128 unless the
@@ -633,7 +639,8 @@ viewer that resubscribes on the same connection within about 30 seconds can rece
 cached copy before the re-sent one. `True` does not prove anyone is watching. Write only state that
 is safe to serve from cache and to receive more than once. Pausing an encoder while there is no
 demand is safe, because a frame written then reaches no viewer; resume at a keyframe, which a
-`FrameWriter` asks for through `keyframe_needed`. When the first viewer is on another relay, the publisher's relay subscribes once
+`FrameWriter` asks for through `keyframe_needed`. When the first viewer is on another relay, or is
+a moq-lite viewer (such as `@moq/watch`) on any relay, the publisher's relay subscribes once
 to look up the track's info, cancels about 50 ms later, and subscribes again: `True`, `False`, `True`. Objects
 written during that first subscription reach no viewer, so do not rely on the first objects after
 demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and
@@ -814,6 +821,12 @@ end-to-end latency and growing subscriber memory. The SDK has no transport-wide 
 async consumption limits bound local buffering only (see
 [async subscription consumption](../spec/behavior.md#async-subscription-consumption)).
 
+A very long-lived connection also grows slowly in memory: aioquic keeps every finished stream's ID in
+`QuicConnection._streams_finished` for the life of the connection, and no release prunes it, so a
+publisher holds about 28 bytes per group it has ever sent until it reconnects: roughly 2.4 MB a day
+for each group per second it sends, or 2.4 GB a day at 1000 groups/s
+([#47](https://github.com/muxinc/relay-sdks/issues/47)).
+
 `packages/mux-relay/tests/test_quic.py` runs the full smoke-test assertion list over a real QUIC
 loopback: native QUIC listeners on `localhost` (aioquic, self-signed certificates) fronting the
 in-memory relay hub (`tests/relay_helpers/quic_hub.py`), so the default transport is exercised end to
@@ -821,7 +834,8 @@ end in `python:check`. It also holds the native QUIC dialing end to the transpor
 test per rule, against the conformance peer's native QUIC mode. `test_quic_session.py` drives the
 session against a loopback server on the same QUIC plumbing (`tests/relay_helpers/quic_server.py`), whose
 inbound link it can impair: backpressure, the drain before close, pruning, the keepalive and the socket.
-The stream halves and the dropped-FIN retry also have in-process tests that need no socket
+The stream halves and the dropped-FIN retry (`mux_relay/quic/_fin_retry.py`) also have in-process
+tests that need no socket
 (`test_quic_streams.py`, which holds the halves to the same expectations as the core's in-memory
 `Pipe`, and `test_quic_fin_retry.py`), and `test_quic_aioquic.py` pins the aioquic internals the adapter
 reaches into, all named in `mux_relay/quic/_aioquic.py`, along with the aioquic behaviour its workarounds
