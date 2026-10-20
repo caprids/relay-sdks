@@ -470,8 +470,8 @@ export async function runRelayScenario({
     // `<endpoint>/<room>` + `['pair', 'rooted']` to what `<endpoint>` + `[...room, 'pair', 'rooted']`
     // addresses. Each publisher writes a counter while it has demand, so an object the relay's first
     // hop drops (issue #243) is followed by another. An absolute namespace on a rooted connection
-    // addresses a namespace below the room, not the run's own, so its subscription never gets the bare
-    // publisher's objects.
+    // addresses a namespace below the room, not the run's own, so the relay refuses its subscription
+    // as unroutable and it never gets the bare publisher's objects.
     const room = namespace;
     const rooted = (url) => {
       const target = new URL(url);
@@ -567,6 +567,8 @@ export async function runRelayScenario({
           () => pairObjects.roomFromBare >= 3 && pairObjects.bareFromRoom >= 3,
           'pair objects across the endpoint forms',
         );
+        // The absolute namespace's request must have been answered, not just outrun by the others.
+        await waitFor(() => escapeRefused !== undefined, "refusal of the rooted connection's absolute namespace");
       } finally {
         for (const subscription of pairSubscriptions) subscription.cancel();
       }
@@ -578,7 +580,7 @@ export async function runRelayScenario({
         discoveredAfterMs,
         roomFromBare: pairObjects.roomFromBare,
         bareFromRoom: pairObjects.bareFromRoom,
-        absoluteOnRooted: escapeRefused ?? 'no objects',
+        absoluteOnRooted: escapeRefused,
       };
       await report({ phase: 'room-rooted pair', ...roomPair });
     } finally {

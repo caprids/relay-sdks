@@ -22,8 +22,8 @@ on aioquic), then asserts the list in ``spec/behavior.md``:
 8. A switchable subscription moves from one layer to another make-before-break with no gap.
 9. A room-rooted endpoint (issue #266), whose path is the run's namespace, takes namespaces relative
    to that path: a publisher and a subscriber on each form reach each other's track, discovery on
-   each form names both publishers, and an absolute namespace on a rooted connection does not reach
-   the room's track.
+   each form names both publishers, and the relay refuses an absolute namespace on a rooted
+   connection without delivering the room's objects.
 10. All connections close cleanly once the test closes them.
 
 Environment (shared by every SDK's tooling): ``RELAY_TOKEN`` (or a hidden prompt), ``RELAY_URL``
@@ -600,8 +600,8 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
         # `<endpoint>/<room>` + `['pair', 'rooted']` to what `<endpoint>` + `[*room, 'pair', 'rooted']`
         # addresses. Each publisher writes a counter while it has demand, so an object the relay's first
         # hop drops (issue #243) is followed by another. An absolute namespace on a rooted connection
-        # addresses a namespace below the room, not the run's own, so its subscription never gets the bare
-        # publisher's objects.
+        # addresses a namespace below the room, not the run's own, so the relay refuses its subscription
+        # as unroutable and it never gets the bare publisher's objects.
         room = namespace
 
         def rooted(url: str) -> str:
@@ -719,6 +719,10 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
                     lambda: pair_objects["roomFromBare"] >= 3 and pair_objects["bareFromRoom"] >= 3,
                     "pair objects across the endpoint forms",
                 )
+                # The absolute namespace's request must have been answered, not just outrun by the others.
+                await wait_for(
+                    lambda: escape_refused is not None, "refusal of the rooted connection's absolute namespace"
+                )
             finally:
                 for subscription in pair_subscriptions:
                     subscription.cancel()
@@ -731,7 +735,7 @@ async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: li
                 "discoveredAfterMs": discovered_after_ms,
                 "roomFromBare": pair_objects["roomFromBare"],
                 "bareFromRoom": pair_objects["bareFromRoom"],
-                "absoluteOnRooted": escape_refused or "no objects",
+                "absoluteOnRooted": escape_refused,
             }
             report({"phase": "room-rooted pair", **room_pair})
         finally:

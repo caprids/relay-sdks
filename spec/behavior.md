@@ -1691,8 +1691,8 @@ and subscribes on the same random namespace, then asserts:
 9. A room-rooted endpoint, whose path is the run's namespace, takes namespaces relative to that
    path ([subscribing](#subscribing)). A publisher on each form and a subscriber on each form
    receive each other's objects, discovery on each form names both publishers in its own form,
-   and an absolute namespace on the rooted connection gets none of the room's objects. The report
-   records how long discovery took and how that subscription ended.
+   and the relay refuses an absolute namespace on the rooted connection without delivering any of
+   the room's objects. The report records how long discovery took and the refusal.
 10. All connections close cleanly once the test closes them.
 
 Adding an assertion here means adding it to every SDK's smoke test. The TypeScript test runs the
