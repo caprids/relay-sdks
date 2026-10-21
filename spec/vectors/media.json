@@ -1969,7 +1969,7 @@
     },
     {
       "name": "track-groups",
-      "source": "Synthetic: alternates are grouped per render group and alternate group in order of first member; tracks with no altGroup, or no renderGroup, stand alone; altGroup is read only when integral.",
+      "source": "Synthetic: alternates are grouped per render group and alternate group in order of first member, including alternates that declare no render group; a track with no altGroup stands alone; altGroup is read only when integral.",
       "catalogNamespace": [
         "room"
       ],

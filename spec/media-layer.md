@@ -328,8 +328,8 @@ plays one track from each set of the render group it wants, and moves between al
 one has started.
 
 The helper picks nothing: bandwidth estimation, layout and which render group is on screen belong
-to the player. It skips no track either, so data tracks and tracks with no render group come
-back as sets of one.
+to the player. It skips no track either: a track with no alternate group, a data track among them, comes back
+as a set of one. Tracks sharing an alternate group but declaring no render group form one set.
 
 ### Keeping the catalog current
 
@@ -340,7 +340,14 @@ with the rebuilt bytes when the configuration changes. The new document goes out
 once while the relay is subscribed, and identical bytes send nothing. Adding a track this way
 registers it first; a track removed from the catalog keeps its name on the connection.
 
-A viewer can receive a key frame before the catalog that describes it, because the catalog and the
+msf-01 §5.3 fixes a track's attributes to its namespace and name: "To modify any attribute, a new
+track with a different Namespace|Name tuple is created". The rule sits among the delta-update
+rules, but its wording is general, so the conforming way to change a codec, its init data or its
+dimensions is a new track: register `video-2`, list it in place of `video` in the next catalog,
+and let viewers move to it with `want(..., { until })`. Rewriting a listed track's entry in place
+works only with viewers that reconfigure their decoder on every catalog, and is outside msf-01.
+
+Either way, a viewer can receive a key frame before the catalog that describes it, because the catalog and the
 media are separate tracks. Until relays forward object properties
 ([issue #262](https://github.com/muxinc/relay-sdks/issues/262)), the catalog is the only copy of
 the decoder configuration a viewer can rely on, so a viewer that sees a key frame it cannot decode
@@ -349,8 +356,8 @@ forward them, the LOC Video Config property on each key frame (`0x0D`) is the ea
 viewer can prefer it. To shorten the wait, a publisher updates the catalog before it sends the
 first key frame of the new configuration.
 
-Not covered: `temporalId` / `spatialId` (§5.2.16, §5.2.17, scalable layers within one track) and
-delta catalog updates.
+Not covered: `temporalId` / `spatialId` (§5.2.16, §5.2.17, the temporal and spatial layer a
+scalable-coded track carries) and delta catalog updates.
 
 ## Shared timeline and playout clock
 

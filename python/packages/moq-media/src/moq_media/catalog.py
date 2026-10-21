@@ -136,11 +136,11 @@ def build_msf_catalog(
         raise ValueError("data tracks must not use media roles")
     if any(not _is_group_number(track.render_group) or not _is_group_number(track.alt_group) for track in media_tracks):
         raise ValueError("render and alternate groups must be non-negative safe integers")
-    alternates: dict[int, tuple[type, int]] = {}
+    alternates: dict[int, tuple[bool, int]] = {}
     for track in media_tracks:
         if track.alt_group is not None:
-            first = alternates.setdefault(track.alt_group, (type(track), track.render_group))
-            if first != (type(track), track.render_group):
+            grouping = (isinstance(track, VideoTrackInfo), track.render_group)
+            if alternates.setdefault(track.alt_group, grouping) != grouping:
                 raise ValueError("alternate group members must share a role and a render group")
     media_names = [track.name for track in media_tracks]
     default_depends = [
