@@ -1224,7 +1224,8 @@ to both languages.
   per-track namespace, LOC packaging, and live status. It omits `isComplete`: msf-01 §5.1.3 forbids
   the field while false and forbids removing it once added. Absent optional fields are
   omitted, as is empty init data. Catalog strings must be valid Unicode, with no lone surrogates.
-  Entries are ordered video, audio, then data in caller order. Init-data entries have
+  Entries are ordered `video`, `audio`, the `media` list in caller order, the media timeline, then
+  data in caller order. Init-data entries have
   `<track-name>-init` IDs and inline base64 data. Numbers must be finite; integral values must be safe integers and have no decimal suffix.
   Fractional values use ECMAScript JSON number spelling, including its exponent threshold.
 - The end-of-broadcast catalog (`buildMsfEndCatalog` / `build_msf_end_catalog`) is msf-01 §11.3's
@@ -1236,8 +1237,10 @@ to both languages.
   suffix comes from the record's profile/constraints/level; the `avc1`/`avc3` prefix is retained.
   Header inspection rejects truncated/wrong-version headers; it does not decode SPS semantics.
 - Opus always declares 48,000 Hz and defaults to channel configuration `"2"`. Video and audio
-  entries carry `renderGroup: 1` (msf-01 §5.2.11): one broadcast timeline, played together. No
-  target latency or buffer is set. Data entries have only name and optional role beyond the
+  entries carry `renderGroup` (msf-01 §5.2.11), 1 unless the caller names another, and `altGroup`
+  (§5.2.12) when the caller names one. Both must be non-negative safe integers, and the members of
+  an alternate group must share a role and a render group ([media-layer.md](media-layer.md#several-media-tracks),
+  issue #351). No target latency or buffer is set. Data entries have only name and optional role beyond the
   common fields, and reject the media roles `video`,
   `signlanguage`, `audio`, `audiodescription`, `caption`, and `subtitle`. Track names must be
   non-empty and unique, including tracks temporarily withheld pending init data.
@@ -1276,14 +1279,17 @@ to both languages.
   a subscriber MUST NOT parse a version it does not understand), a missing `tracks` array, a
   `deltaUpdate`, and init data that is not base64 (decoded as WHATWG `atob` does). Everything else
   is ignored when not understood, as msf-01 requires: unknown fields, fields of the wrong JSON type,
-  non-integral widths, heights, sample rates, bitrates and generation times, track entries that are
+  non-integral widths, heights, sample rates, bitrates, render and alternate groups, and generation
+  times, track entries that are
   not objects or have no string name, and init entries whose type is not `inline`. A track's
   slash-joined `namespace` is split back into fields, dropping empty ones (the builder's dialect);
   a track without one inherits the catalog track's namespace (§5.2.2). Packaging is returned as
   declared, `loc` or otherwise, and payloads are not interpreted. Absent packaging reads as the
   empty string and absent `isLive` as false. `initRef` resolves through `initDataList` to bytes;
   an unresolved reference leaves the track without init data. Every builder document must read
-  back as its vector's `parsed` value.
+  back as its vector's `parsed` value. `groupMsfTracks` / `group_msf_tracks` groups parsed tracks
+  into the sets a viewer picks one track from: tracks sharing a render group and an alternate group
+  form one set, every other track is a set of its own, and sets are ordered by their first track.
 - One timeline, and the playout clock
   ([media-layer.md](media-layer.md#shared-timeline-and-playout-clock), issues #285 and #290): every
   LOC media track one catalog lists is stamped in microseconds since the Unix epoch, its capture

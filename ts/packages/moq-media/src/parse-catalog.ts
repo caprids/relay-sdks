@@ -40,6 +40,8 @@ export interface MsfCatalogTrack {
   bitrate?: number;
   /** Render group (§5.2.11): tracks sharing one are meant to play together; integral values only. */
   renderGroup?: number;
+  /** Alternate group (§5.2.12): tracks sharing one are alternate versions of one content; integral values only. */
+  altGroup?: number;
   /** MIME type (§5.2.19), e.g. `'application/json'` on a media timeline track. */
   mimetype?: string;
   /** Names of the tracks this one depends on (§5.2.14), its string items only. */
@@ -133,6 +135,7 @@ function parseCatalogTrack(
       channelConfig: string(raw['channelConfig']),
       bitrate: integer(raw['bitrate']),
       renderGroup: integer(raw['renderGroup']),
+      altGroup: integer(raw['altGroup']),
       mimetype: string(raw['mimetype']),
       depends: Array.isArray(raw['depends']) ? raw['depends'].filter(isString) : undefined,
       initData: initRef === undefined ? undefined : initDataList.get(initRef),
@@ -180,4 +183,42 @@ export function parseMsfCatalog(payload: Uint8Array, options: ParseMsfCatalogOpt
     isComplete: raw['isComplete'] === true,
     tracks,
   };
+}
+
+/**
+ * A set of catalog tracks a viewer picks one of: the members of one alternate group (§5.2.12) within one render group,
+ * or a single track that names no alternate group.
+ */
+export interface MsfTrackGroup {
+  /** The members' render group (§5.2.11), if declared. */
+  renderGroup?: number;
+  /** The members' alternate group, if declared. A group without one holds exactly one track. */
+  altGroup?: number;
+  /** The members, in catalog order. */
+  tracks: MsfCatalogTrack[];
+}
+
+/**
+ * Group catalog tracks into the sets a viewer picks one track from, in order of each set's first track: tracks
+ * sharing a render group and an alternate group form one set, and every other track is a set of its own. A viewer
+ * plays one track from each set of a render group, and moves between alternates with `want(..., { until })`.
+ */
+export function groupMsfTracks(tracks: readonly MsfCatalogTrack[]): MsfTrackGroup[] {
+  const groups: MsfTrackGroup[] = [];
+  const alternates = new Map<string, MsfTrackGroup>();
+
+  for (const track of tracks) {
+    const { renderGroup, altGroup } = track;
+    const key = altGroup === undefined ? undefined : `${renderGroup ?? ''}/${altGroup}`;
+    const existing = key === undefined ? undefined : alternates.get(key);
+    if (existing) {
+      existing.tracks.push(track);
+      continue;
+    }
+    const group: MsfTrackGroup = { ...pruneUndefined({ renderGroup, altGroup }), tracks: [track] };
+    groups.push(group);
+    if (key !== undefined) alternates.set(key, group);
+  }
+
+  return groups;
 }

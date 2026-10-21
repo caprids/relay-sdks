@@ -34,6 +34,14 @@ class VideoTrackInfo:
     bitrate: int | None = None
     init_data: bytes | None = None
     """Decoder configuration (avcC for ``avc1``), emitted inline as ``initDataList``."""
+    render_group: int = 1
+    """Render group (msf-01 §5.2.11): tracks sharing one play together on one timeline.
+
+    Give a second source, such as a screen share and its audio, its own."""
+    alt_group: int | None = None
+    """Alternate group (msf-01 §5.2.12): alternate versions of the same content, such as simulcast layers.
+
+    A viewer subscribes to one member. Members share a role and a render group."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -48,6 +56,14 @@ class AudioTrackInfo:
     bitrate: int | None = None
     init_data: bytes | None = None
     """Decoder configuration, emitted inline as ``initDataList``."""
+    render_group: int = 1
+    """Render group (msf-01 §5.2.11): tracks sharing one play together on one timeline.
+
+    Give a second source, such as a screen share and its audio, its own."""
+    alt_group: int | None = None
+    """Alternate group (msf-01 §5.2.12): alternate versions of the same content, such as simulcast layers.
+
+    A viewer subscribes to one member. Members share a role and a render group."""
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -70,7 +86,7 @@ class MediaTimelineTrackInfo:
     depends: Sequence[str] | None = None
     """The video and audio tracks the timeline applies to (msf-01 §7.2); its locations point into the first.
 
-    Default: the video track followed by the audio track, whichever the catalog has."""
+    Default: the first video track followed by the first audio track, whichever the catalog has."""
 
 
 _MEDIA_ROLES = frozenset({"video", "audio", "caption", "subtitle", "audiodescription", "signlanguage"})
@@ -80,11 +96,8 @@ def _prune(entry: dict[str, object]) -> dict[str, object]:
     return {key: value for key, value in entry.items() if value is not None}
 
 
-MEDIA_RENDER_GROUP = 1
-"""The render group (msf-01 §5.2.11) every video and audio entry joins: one broadcast timeline, played together.
-
-The builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be identical across a render group.
-"""
+def _is_group_number(value: object) -> bool:
+    return value is None or (isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**53 - 1)
 
 
 def build_msf_catalog(
@@ -92,6 +105,7 @@ def build_msf_catalog(
     *,
     video: VideoTrackInfo | None = None,
     audio: AudioTrackInfo | None = None,
+    media: Sequence[VideoTrackInfo | AudioTrackInfo] = (),
     data: Sequence[DataTrackInfo] = (),
     media_timeline: MediaTimelineTrackInfo | None = None,
     generated_at_ms: int | None = None,
@@ -100,23 +114,45 @@ def build_msf_catalog(
 
     The catalog leaves ``isComplete`` out: msf-01 §5.1.3 forbids it while false, and once present it can
     never be removed. End a broadcast with :func:`build_msf_end_catalog`.
+
+    ``video`` and ``audio`` are shorthand for one-entry ``media`` lists, listed first. ``media`` lists
+    further video and audio tracks in order: simulcast layers sharing an ``alt_group``, or several
+    sources in their own render groups. Every media entry carries its render group (default 1); the
+    builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be identical across
+    a render group.
     """
     if isinstance(namespace, str):
         raise ValueError("namespace must be a sequence of fields, not a string")
     if not namespace or any(not field or "/" in field for field in namespace):
         raise ValueError("catalog namespace fields must be non-empty and contain no slash")
-    descriptions = [track for track in (video, audio, media_timeline, *data) if track is not None]
+    media_tracks = [track for track in (video, audio, *media) if track is not None]
+    if any(not isinstance(track, (VideoTrackInfo, AudioTrackInfo)) for track in media_tracks):
+        raise ValueError("media tracks must be VideoTrackInfo or AudioTrackInfo")
+    descriptions = [*media_tracks, *([media_timeline] if media_timeline is not None else []), *data]
     names = [track.name for track in descriptions]
     if any(not name for name in names) or len(set(names)) != len(names):
         raise ValueError("catalog track names must be non-empty and unique")
     if any(track.role in _MEDIA_ROLES for track in data):
         raise ValueError("data tracks must not use media roles")
-    media_names = [track.name for track in (video, audio) if track is not None]
+    if any(not _is_group_number(track.render_group) or not _is_group_number(track.alt_group) for track in media_tracks):
+        raise ValueError("render and alternate groups must be non-negative safe integers")
+    alternates: dict[int, tuple[type, int]] = {}
+    for track in media_tracks:
+        if track.alt_group is not None:
+            first = alternates.setdefault(track.alt_group, (type(track), track.render_group))
+            if first != (type(track), track.render_group):
+                raise ValueError("alternate group members must share a role and a render group")
+    media_names = [track.name for track in media_tracks]
+    default_depends = [
+        first.name
+        for kind in (VideoTrackInfo, AudioTrackInfo)
+        if (first := next((track for track in media_tracks if isinstance(track, kind)), None)) is not None
+    ]
     depends: list[str] = []
     if media_timeline is not None:
         if isinstance(media_timeline.depends, str):
             raise ValueError("media timeline depends must be a sequence of track names, not a string")
-        depends = list(media_timeline.depends if media_timeline.depends is not None else media_names)
+        depends = list(media_timeline.depends if media_timeline.depends is not None else default_depends)
         if not depends or len(set(depends)) != len(depends) or any(name not in media_names for name in depends):
             raise ValueError("media timeline depends must name distinct video or audio tracks of this catalog")
     namespace_text = "/".join(namespace)
@@ -132,44 +168,47 @@ def build_msf_catalog(
         init_data_list.append({"id": identifier, "type": "inline", "data": base64.b64encode(init_data).decode()})
         return {"initRef": identifier}
 
-    h264 = video is not None and video.codec.split(".")[0] in {"avc1", "avc3"}
-    if video is not None and (not h264 or video.init_data):
-        codec = video.codec
-        if h264 and video.init_data is not None:
-            codec = video.codec.split(".")[0] + avc_codec_string(video.init_data)[4:]
-        tracks.append(
-            _prune(
-                {
-                    **shared,
-                    **register_init_data(video.name, video.init_data),
-                    "name": video.name,
-                    "role": "video",
-                    "renderGroup": MEDIA_RENDER_GROUP,
-                    "codec": codec,
-                    "width": video.width,
-                    "height": video.height,
-                    "framerate": video.framerate,
-                    "bitrate": video.bitrate,
-                }
+    for track in media_tracks:
+        groups = {"renderGroup": track.render_group, "altGroup": track.alt_group}
+        if isinstance(track, VideoTrackInfo):
+            h264 = track.codec.split(".")[0] in {"avc1", "avc3"}
+            if h264 and not track.init_data:
+                continue
+            codec = track.codec
+            if h264 and track.init_data is not None:
+                codec = track.codec.split(".")[0] + avc_codec_string(track.init_data)[4:]
+            tracks.append(
+                _prune(
+                    {
+                        **shared,
+                        **register_init_data(track.name, track.init_data),
+                        "name": track.name,
+                        "role": "video",
+                        **groups,
+                        "codec": codec,
+                        "width": track.width,
+                        "height": track.height,
+                        "framerate": track.framerate,
+                        "bitrate": track.bitrate,
+                    }
+                )
             )
-        )
-
-    if audio is not None:
-        tracks.append(
-            _prune(
-                {
-                    **shared,
-                    **register_init_data(audio.name, audio.init_data),
-                    "name": audio.name,
-                    "role": "audio",
-                    "renderGroup": MEDIA_RENDER_GROUP,
-                    "codec": audio.codec,
-                    "samplerate": 48_000 if audio.codec == "opus" else audio.samplerate,
-                    "channelConfig": audio.channel_config,
-                    "bitrate": audio.bitrate,
-                }
+        else:
+            tracks.append(
+                _prune(
+                    {
+                        **shared,
+                        **register_init_data(track.name, track.init_data),
+                        "name": track.name,
+                        "role": "audio",
+                        **groups,
+                        "codec": track.codec,
+                        "samplerate": 48_000 if track.codec == "opus" else track.samplerate,
+                        "channelConfig": track.channel_config,
+                        "bitrate": track.bitrate,
+                    }
+                )
             )
-        )
 
     listed = {track["name"] for track in tracks}
     if media_timeline is not None and (indexed := [name for name in depends if name in listed]):
@@ -264,6 +303,8 @@ class MsfCatalogTrack:
     bitrate: int | None = None
     render_group: int | None = None
     """Render group (§5.2.11): tracks sharing one are meant to play together."""
+    alt_group: int | None = None
+    """Alternate group (§5.2.12): tracks sharing one are alternate versions of one content."""
     mimetype: str | None = None
     """MIME type (§5.2.19), e.g. ``application/json`` on a media timeline track."""
     depends: tuple[str, ...] | None = None
@@ -325,6 +366,43 @@ def parse_msf_catalog(payload: bytes, *, catalog_namespace: Sequence[str]) -> Ms
     )
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class MsfTrackGroup:
+    """A set of catalog tracks a viewer picks one of.
+
+    The members of one alternate group (§5.2.12) within one render group, or a single track that
+    names no alternate group.
+    """
+
+    tracks: tuple[MsfCatalogTrack, ...]
+    """The members, in catalog order."""
+    render_group: int | None = None
+    alt_group: int | None = None
+    """``None`` for a group holding exactly one track that names no alternate group."""
+
+
+def group_msf_tracks(tracks: Sequence[MsfCatalogTrack]) -> tuple[MsfTrackGroup, ...]:
+    """Group catalog tracks into the sets a viewer picks one track from, in order of each set's first track.
+
+    Tracks sharing a render group and an alternate group form one set, and every other track is a
+    set of its own. A viewer plays one track from each set of a render group, and moves between
+    alternates with ``want(..., until=...)``.
+    """
+    members: list[list[MsfCatalogTrack]] = []
+    alternates: dict[tuple[int | None, int], list[MsfCatalogTrack]] = {}
+    for track in tracks:
+        if track.alt_group is None:
+            members.append([track])
+        elif (key := (track.render_group, track.alt_group)) in alternates:
+            alternates[key].append(track)
+        else:
+            members.append(alternates.setdefault(key, [track]))
+    return tuple(
+        MsfTrackGroup(tracks=tuple(group), render_group=group[0].render_group, alt_group=group[0].alt_group)
+        for group in members
+    )
+
+
 def _reject_constant(name: str) -> object:
     # JSON.parse rejects NaN and Infinity; so does this reader.
     raise ValueError(f"MSF catalog is not valid JSON: {name}")
@@ -357,6 +435,7 @@ def _parse_track(
         channel_config=_string(raw.get("channelConfig")),
         bitrate=_integer(raw.get("bitrate")),
         render_group=_integer(raw.get("renderGroup")),
+        alt_group=_integer(raw.get("altGroup")),
         mimetype=_string(raw.get("mimetype")),
         depends=tuple(name for name in depends if isinstance(name, str)) if isinstance(depends, list) else None,
         init_data=None if init_ref is None else init_data_list.get(init_ref),

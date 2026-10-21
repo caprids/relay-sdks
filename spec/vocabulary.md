@@ -474,12 +474,15 @@ names from the original examples; the mappings below are explicit.
 | Video description | `VideoTrackInfo` | `VideoTrackInfo` |
 | Audio description | `AudioTrackInfo` | `AudioTrackInfo` |
 | Data description | `DataTrackInfo` | `DataTrackInfo` |
+| Video or audio entry of the catalog's media list | `MediaTrackInfo` (`{ role: 'video' \| 'audio', ... }`), `MsfCatalogInput.media` | `VideoTrackInfo \| AudioTrackInfo`, `build_msf_catalog(media=...)` |
+| Render group / alternate group of a media track (msf-01 §5.2.11, §5.2.12) | `renderGroup`, `altGroup` | `render_group`, `alt_group` |
 | Catalog input | `MsfCatalogInput` | `build_msf_catalog` keyword arguments |
 | Build independent catalog bytes | `buildMsfCatalog` | `build_msf_catalog` |
 | Build the end-of-broadcast catalog (msf-01 §11.3) | `buildMsfEndCatalog` / `MsfEndCatalogInput` | `build_msf_end_catalog` keyword arguments |
 | Read an independent catalog object's payload | `parseMsfCatalog(payload, { catalogNamespace })` | `parse_msf_catalog(payload, catalog_namespace=...)` |
 | Catalog as read | `MsfCatalog` | `MsfCatalog` |
 | Track description as read | `MsfCatalogTrack` | `MsfCatalogTrack` |
+| Sets of tracks a viewer picks one of | `groupMsfTracks` / `MsfTrackGroup` | `group_msf_tracks` / `MsfTrackGroup` |
 | Reader options | `ParseMsfCatalogOptions` | `parse_msf_catalog` keyword arguments |
 | LOC track properties | `locTrackProperties` | `loc_track_properties` |
 | LOC object properties from microseconds | `locProperties` / `LocPropertiesOptions` | `loc_properties` keyword arguments |

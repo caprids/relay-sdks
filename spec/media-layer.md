@@ -170,7 +170,7 @@ mirrors, so the TypeScript side can start as an attributed snapshot the way `@mu
 | --- | --- | --- |
 | LOC property registry (`0x10` Timestamp, `0x08` Timescale, `0x0D` Video Config, `0x0F` Audio Config) and the microsecond default | The constants block in `moq_media.py` | `loc.ts` |
 | Track properties for a LOC track (declared timescale) and object properties for one frame (timestamp, timescale, config on keyframes) | `TRACK_TIMESCALE_PROPERTIES`, `loc_properties()` | `loc-packaging.ts` |
-| Catalog builder taking video, audio, and data track descriptions and a namespace, returning the MSF `draft-01` JSON bytes | `VideoTrackInfo`, `AudioTrackInfo`, `build_msf_catalog()` | `build-catalog.ts` |
+| Catalog builder taking video, audio, and data track descriptions and a namespace, returning the MSF `draft-01` JSON bytes; any number of video and audio tracks, in render and alternate groups ([several media tracks](#several-media-tracks)) | `VideoTrackInfo`, `AudioTrackInfo`, `build_msf_catalog()` | `build-catalog.ts` |
 | Source URL composer, and the namespace and track-name escaping it depends on | `compose_player_url()`, `encode_namespace_name()` | `composeMoqSource`, `encodeNamespaceName` in `parse-source.ts` |
 | H.264 configuration: SPS/PPS from Annex B, avcC from SPS/PPS, `avc1.PPCCLL` from an avcC, and Annex B to AVCC re-framing for each access unit | `extract_parameter_sets()`, `build_avcc()`, `avc_codec_string()`, `annexb_to_avcc()` | `avc-codec.ts` (the codec string; the browser does the re-framing) |
 
@@ -185,6 +185,8 @@ cannot play. The rules come straight from what the example and the Video.js publ
   level, and the string is the only place the player learns the bitstream contract.
 - Opus declares `samplerate: 48000` whatever the encoder was fed, because that is the rate an Opus
   stream decodes at (RFC 7845 §5.1), and `channelConfig` is a string.
+- Members of one alternate group share a role and a render group (see
+  [several media tracks](#several-media-tracks)).
 - Data tracks are emitted with name and role only. A media role on an entry with no codec would
   round-trip into an undecodable renderable track.
 - Fields the caller left out are omitted, never nulled, and the document is compact JSON, so the
@@ -272,6 +274,84 @@ symmetric with `read_text` and `read_json`:
   moq-relay only because it rescales every timestamp to microseconds and declares Timescale
   1,000,000; a relay that passes the publisher's Timescale through needs the scaling.
 
+## Several media tracks
+
+[Issue #351](https://github.com/muxinc/relay-sdks/issues/351). A broadcast can carry simulcast
+layers and more than one source, such as a camera and a screen share. msf-01 describes both with
+two integers on a track entry:
+
+- `renderGroup` (§5.2.11): tracks "designed to be rendered together", such as a camera and its
+  microphone.
+- `altGroup` (§5.2.12): "alternate versions of one-another", such as the same camera at three
+  bitrates. "A subscriber typically subscribes to one track" of the group, and alternates "MUST
+  have matching media time sequences".
+
+### Building
+
+`buildMsfCatalog` / `build_msf_catalog` takes a `media` list of video and audio track
+descriptions, each with an optional `renderGroup` / `render_group` (default 1) and `altGroup` /
+`alt_group`. In TypeScript each entry names its role (`{ role: 'video', ... }`); in Python it is a
+`VideoTrackInfo` or an `AudioTrackInfo`. The single `video` and `audio` inputs remain, as shorthand
+for one-entry lists listed before `media`, so existing callers build the same bytes. A group
+participant publishing a camera in three layers, a microphone, and a screen share with its audio
+lists:
+
+| Track | Role | `renderGroup` | `altGroup` |
+| --- | --- | --- | --- |
+| `video-hi`, `video-mid`, `video-lo` | video | 1 | 1 |
+| `audio` | audio | 1 | — |
+| `screen` | video | 2 | — |
+| `screen-audio` | audio | 2 | — |
+
+The builder refuses:
+
+- a duplicate track name, across media, data and the media timeline, as before;
+- a render or alternate group that is not a non-negative safe integer;
+- an alternate group whose members differ in role or render group. Alternates are one content, so
+  they play with the same companions. A viewer picks one track per alternate group within a
+  render group, which is only well defined when the alternate group sits inside one render group.
+
+Each H.264 entry is still withheld until it has init data, so an alternate group can list fewer
+members than the caller passed. The media timeline's default `depends` is the first video track
+then the first audio track; name the tracks to index others. Alternates are time-aligned but their
+group IDs are not (see [switching tracks](behavior.md#switching-tracks)), so a timeline's
+locations point into its first dependency only.
+
+### Reading and choosing
+
+The catalog reader returns `altGroup` / `alt_group` beside `renderGroup` / `render_group`, as
+declared. `groupMsfTracks` / `group_msf_tracks` turns a parsed track list into the sets a viewer
+chooses from, in order of each set's first track: tracks sharing a render group and an alternate
+group form one set, and every other track is a set of its own, alternate group or not. A viewer
+plays one track from each set of the render group it wants, and moves between alternates with
+`want(..., { until })` (`want(..., until=...)`), which already holds the old track until the new
+one has started.
+
+The helper picks nothing: bandwidth estimation, layout and which render group is on screen belong
+to the player. It skips no track either, so data tracks and tracks with no render group come
+back as sets of one.
+
+### Keeping the catalog current
+
+A publisher's encoder configuration can change mid-broadcast: a camera switch, a resized shared
+window, a codec fallback from H.264 to VP8. Each change is a new catalog. Serve the catalog with
+`createDocumentService` / `DocumentService` instead of the fixed catalog service, and `update()` it
+with the rebuilt bytes when the configuration changes. The new document goes out as a new group at
+once while the relay is subscribed, and identical bytes send nothing. Adding a track this way
+registers it first; a track removed from the catalog keeps its name on the connection.
+
+A viewer can receive a key frame before the catalog that describes it, because the catalog and the
+media are separate tracks. Until relays forward object properties
+([issue #262](https://github.com/muxinc/relay-sdks/issues/262)), the catalog is the only copy of
+the decoder configuration a viewer can rely on, so a viewer that sees a key frame it cannot decode
+with its current configuration waits for the next catalog and drops frames until then. Once relays
+forward them, the LOC Video Config property on each key frame (`0x0D`) is the earlier copy, and a
+viewer can prefer it. To shorten the wait, a publisher updates the catalog before it sends the
+first key frame of the new configuration.
+
+Not covered: `temporalId` / `spatialId` (§5.2.16, §5.2.17, scalable layers within one track) and
+delta catalog updates.
+
 ## Shared timeline and playout clock
 
 [Issue #285](https://github.com/muxinc/relay-sdks/issues/285). Implemented in both format packages;
@@ -306,9 +386,11 @@ them from one broadcast clock:
   that nothing on the wire signals which anchor a broadcast uses. The epoch anchor is a convention
   between the SDKs and players that follow this document; a receiver that does not know it sees
   only an application-defined anchor (LOC §2.3.1.2).
-- The catalog puts the video and audio entries in one render group: `renderGroup: 1` (msf-01
-  §5.2.11, "tracks with the same group number SHOULD be rendered simultaneously"). That is
-  msf-01's way to say tracks play together, and moq-rs catalogs already send it. There is no
+- The catalog puts the video and audio entries in one render group unless the caller names
+  another: `renderGroup: 1` (msf-01 §5.2.11, "tracks with the same group number SHOULD be rendered
+  simultaneously"). That is msf-01's way to say tracks play together, and moq-rs catalogs already
+  send it. A second source, such as a screen share, takes its own render group; see
+  [several media tracks](#several-media-tracks). There is no
   `timeline` field, because msf-01 defines none and a player ignores fields it does not know. The
   builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be identical within
   a render group. The catalog reader returns `renderGroup` as declared. The Video.js MoQ player

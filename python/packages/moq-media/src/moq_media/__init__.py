@@ -11,9 +11,11 @@ from .catalog import (
     MediaTimelineTrackInfo,
     MsfCatalog,
     MsfCatalogTrack,
+    MsfTrackGroup,
     VideoTrackInfo,
     build_msf_catalog,
     build_msf_end_catalog,
+    group_msf_tracks,
     parse_msf_catalog,
 )
 from .clock import (
@@ -113,6 +115,7 @@ __all__ = [
     "MediaTimelineTrackInfo",
     "MsfCatalog",
     "MsfCatalogTrack",
+    "MsfTrackGroup",
     "PlayoutAction",
     "PlayoutClock",
     "PlayoutDecision",
@@ -137,6 +140,7 @@ __all__ = [
     "encode_name_component",
     "encode_namespace_name",
     "extract_parameter_sets",
+    "group_msf_tracks",
     "iter_annexb_nal_units",
     "loc_properties",
     "loc_timestamp_us",
