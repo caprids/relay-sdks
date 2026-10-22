@@ -155,6 +155,12 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   takes audio reports and answers `due(timestampUs)` with wait, show, or drop, falling back to wall-clock pacing without
   audio. Both are DOM-free. `buildMsfCatalog` puts video and audio in one render group (`renderGroup: 1`, msf-01
   §5.2.11), and `parseMsfCatalog` returns `renderGroup`.
+- `@mux/moq-media`: `buildMsfCatalog` describes any number of video and audio tracks
+  ([#351](https://github.com/muxinc/relay-sdks/issues/351)). `media` takes `MediaTrackInfo` entries
+  (`{ role: 'video' | 'audio', ... }`), and every video or audio description takes `renderGroup` (default 1) and
+  `altGroup` (msf-01 §5.2.12) for simulcast layers; members of an alternate group must share a role and a render group.
+  `video` and `audio` are unchanged. `parseMsfCatalog` returns `altGroup`, and `groupMsfTracks` lists the sets of
+  tracks a viewer picks one of.
 - `@mux/moq-media`: format helpers for msf-01's Media Timeline track, which maps media time to wall-clock time
   ([#291](https://github.com/muxinc/relay-sdks/issues/291)). `mediaTimelineEntry` turns a timeline timestamp and a group
   into a record, `buildMediaTimeline` and `parseMediaTimeline` write and read a timeline object, and `buildMsfCatalog`

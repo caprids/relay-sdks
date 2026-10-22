@@ -34,6 +34,25 @@ dimensions, rates, bitrate, render group, and init data resolved from `initRef` 
 on unsupported versions and delta updates, ignores unknown fields, and returns non-`loc` packagings
 (such as moq-rs `cmaf`) as declared.
 
+For simulcast layers or a second source, pass `media`: a list of `VideoTrackInfo` and
+`AudioTrackInfo`, each with a `render_group` (default 1, tracks played together) and an optional
+`alt_group` (alternate versions of one content, of which a viewer plays one). Members of an
+alternate group share a role and a render group. `parse_msf_catalog` returns both fields, and
+`group_msf_tracks(catalog.tracks)` lists the sets a viewer picks one track from. See
+[several media tracks](../../../spec/media-layer.md#several-media-tracks).
+
+```python
+catalog = build_msf_catalog(
+    namespace,
+    media=[
+        VideoTrackInfo(name="video-hi", codec="vp8", width=1280, height=720, alt_group=1),
+        VideoTrackInfo(name="video-lo", codec="vp8", width=320, height=180, alt_group=1),
+        AudioTrackInfo(name="audio"),
+        VideoTrackInfo(name="screen", codec="vp9", render_group=2),
+    ],
+)
+```
+
 Every media track shares one timeline: LOC timestamps are capture times in microseconds since the
 Unix epoch, with Timescale 1,000,000 declared on each track. `BroadcastClock()` pins a moment on the
 monotonic clock to the system clock (`origin_us`, `origin_epoch_us`) and counts from there. Use

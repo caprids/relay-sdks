@@ -1,5 +1,5 @@
 {
-  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 §11.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases; catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 §7, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional wall-clock time that defaults to the timestamp (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers. locTimestamps (issue #290) read an object's LOC Timestamp in microseconds from its properties ([type, decimal value] pairs) and optional track properties (never the catalog's timescale, which MSF does not tie to the LOC Timestamp); timestampUs null means no usable Timestamp. Transcript vectors (issue #320): transcriptSegments build one segment from decimal-string inputs into exact json; transcriptSegmentReads are parse-only payloads, parsed with decimal strings; transcriptSegmentErrors and transcriptSegmentReadErrors must be rejected by both languages. transcripts run steps against an empty Transcript: apply a segment (and whether it changed anything) or cut an interrupt's range at an optional playout position, then compare every line held and the seqs shown at each position (null: idle); transcriptCutErrors must be rejected.",
+  "source": "LOC draft-04, MSF draft-01; derived from the Python Video.js example and Video.js media/moq. Boundary cases derived from encoding rules. Numeric inputs and LOC integer values are decimal strings; catalog json is the exact expected UTF-8 document. parsed is what both catalog readers return for a json document: camelCase fields, namespaces as tuples, init data as hex, absent optional fields omitted. Every catalogs document must read back as its parsed value with the input namespace as the catalog namespace; endCatalogs are msf-01 \u00a711.3 end-of-broadcast documents, read back the same way; catalogReads are parse-only documents from other producers or edge cases, and where one has groups, groupMsfTracks / group_msf_tracks must return those sets (render group, alternate group, member names) in that order; catalog media entries name their role, and their renderGroup and altGroup are decimal strings (issue #351); catalogReadErrors must be rejected by both readers. Media Timeline vectors (msf-01 \u00a77, issue #291): timelineEntries map a broadcast-timeline timestamp, a location and an optional wall-clock time that defaults to the timestamp (decimal strings) to one record; timelines are records in, exact json out, read back as the same records; timelineReads are parse-only payloads; timelineEntryErrors, timelineErrors and timelineReadErrors must be rejected by both languages. Records are written as msf-01 writes them, [mediaTimeMs, [group, object], wallclockMs], with plain JSON numbers. locTimestamps (issue #290) read an object's LOC Timestamp in microseconds from its properties ([type, decimal value] pairs) and optional track properties (never the catalog's timescale, which MSF does not tie to the LOC Timestamp); timestampUs null means no usable Timestamp. Transcript vectors (issue #320): transcriptSegments build one segment from decimal-string inputs into exact json; transcriptSegmentReads are parse-only payloads, parsed with decimal strings; transcriptSegmentErrors and transcriptSegmentReadErrors must be rejected by both languages. transcripts run steps against an empty Transcript: apply a segment (and whether it changed anything) or cut an interrupt's range at an optional playout position, then compare every line held and the seqs shown at each position (null: idle); transcriptCutErrors must be rejected.",
   "catalogs": [
     {
       "name": "h264-opus",
@@ -224,7 +224,7 @@
         ],
         "data": [
           {
-            "name": "métadata",
+            "name": "m\u00e9tadata",
             "role": "metadata"
           },
           {
@@ -232,7 +232,7 @@
           }
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"métadata\",\"role\":\"metadata\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"m\u00e9tadata\",\"role\":\"metadata\"},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"chat\"}]}",
       "parsed": {
         "version": "draft-01",
         "isComplete": false,
@@ -242,7 +242,7 @@
               "room",
               "live"
             ],
-            "name": "métadata",
+            "name": "m\u00e9tadata",
             "packaging": "loc",
             "isLive": true,
             "role": "metadata"
@@ -432,12 +432,12 @@
         ],
         "data": [
           {
-            "name": "📽️",
+            "name": "\ud83d\udcfd\ufe0f",
             "role": "metadata"
           }
         ]
       },
-      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"📽️\",\"role\":\"metadata\"}]}",
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"\ud83d\udcfd\ufe0f\",\"role\":\"metadata\"}]}",
       "parsed": {
         "version": "draft-01",
         "isComplete": false,
@@ -446,7 +446,7 @@
             "namespace": [
               "room"
             ],
-            "name": "📽️",
+            "name": "\ud83d\udcfd\ufe0f",
             "packaging": "loc",
             "isLive": true,
             "role": "metadata"
@@ -743,6 +743,497 @@
           }
         ]
       }
+    },
+    {
+      "name": "msf-01-simulcast",
+      "input": {
+        "namespace": [
+          "room",
+          "live"
+        ],
+        "media": [
+          {
+            "role": "video",
+            "name": "hd",
+            "codec": "av01",
+            "width": "1920",
+            "height": "1080",
+            "bitrate": "5000000",
+            "framerate": "30",
+            "altGroup": "1"
+          },
+          {
+            "role": "video",
+            "name": "md",
+            "codec": "av01",
+            "width": "720",
+            "height": "640",
+            "bitrate": "3000000",
+            "framerate": "30",
+            "altGroup": "1"
+          },
+          {
+            "role": "video",
+            "name": "sd",
+            "codec": "av01",
+            "width": "192",
+            "height": "144",
+            "bitrate": "500000",
+            "framerate": "30",
+            "altGroup": "1"
+          },
+          {
+            "role": "audio",
+            "name": "audio",
+            "bitrate": "32000"
+          }
+        ],
+        "generatedAt": "1746104606044"
+      },
+      "json": "{\"version\":\"draft-01\",\"generatedAt\":1746104606044,\"tracks\":[{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"hd\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1,\"codec\":\"av01\",\"width\":1920,\"height\":1080,\"framerate\":30,\"bitrate\":5000000},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"md\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1,\"codec\":\"av01\",\"width\":720,\"height\":640,\"framerate\":30,\"bitrate\":3000000},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"sd\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1,\"codec\":\"av01\",\"width\":192,\"height\":144,\"framerate\":30,\"bitrate\":500000},{\"namespace\":\"room/live\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\",\"bitrate\":32000}]}",
+      "parsed": {
+        "version": "draft-01",
+        "generatedAt": 1746104606044,
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "hd",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "av01",
+            "width": 1920,
+            "height": 1080,
+            "framerate": 30.0,
+            "bitrate": 5000000,
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "md",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "av01",
+            "width": 720,
+            "height": 640,
+            "framerate": 30.0,
+            "bitrate": 3000000,
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "sd",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "av01",
+            "width": 192,
+            "height": 144,
+            "framerate": 30.0,
+            "bitrate": 500000,
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "bitrate": 32000,
+            "renderGroup": 1
+          }
+        ]
+      }
+    },
+    {
+      "name": "camera-and-screen",
+      "input": {
+        "namespace": [
+          "huddle",
+          "alice"
+        ],
+        "media": [
+          {
+            "role": "video",
+            "name": "video-hi",
+            "codec": "avc1.FFFFFF",
+            "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80",
+            "width": "1280",
+            "height": "720",
+            "altGroup": "1"
+          },
+          {
+            "role": "video",
+            "name": "video-mid",
+            "codec": "vp9",
+            "width": "640",
+            "height": "360",
+            "altGroup": "1"
+          },
+          {
+            "role": "video",
+            "name": "video-lo",
+            "codec": "vp8",
+            "width": "320",
+            "height": "180",
+            "altGroup": "1"
+          },
+          {
+            "role": "audio",
+            "name": "audio",
+            "channelConfig": "1"
+          },
+          {
+            "role": "video",
+            "name": "screen",
+            "codec": "vp9",
+            "renderGroup": "2"
+          },
+          {
+            "role": "audio",
+            "name": "screen-audio",
+            "renderGroup": "2"
+          }
+        ],
+        "data": [
+          {
+            "name": "state"
+          }
+        ]
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"huddle/alice\",\"packaging\":\"loc\",\"isLive\":true,\"initRef\":\"video-hi-init\",\"name\":\"video-hi\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1,\"codec\":\"avc1.42C014\",\"width\":1280,\"height\":720},{\"namespace\":\"huddle/alice\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video-mid\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1,\"codec\":\"vp9\",\"width\":640,\"height\":360},{\"namespace\":\"huddle/alice\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video-lo\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1,\"codec\":\"vp8\",\"width\":320,\"height\":180},{\"namespace\":\"huddle/alice\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"1\"},{\"namespace\":\"huddle/alice\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"screen\",\"role\":\"video\",\"renderGroup\":2,\"codec\":\"vp9\"},{\"namespace\":\"huddle/alice\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"screen-audio\",\"role\":\"audio\",\"renderGroup\":2,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"huddle/alice\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"state\"}],\"initDataList\":[{\"id\":\"video-hi-init\",\"type\":\"inline\",\"data\":\"AULAFP/hAApnQsAU2gUGfnhAAQAEaM48gA==\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "huddle",
+              "alice"
+            ],
+            "name": "video-hi",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "avc1.42C014",
+            "width": 1280,
+            "height": 720,
+            "renderGroup": 1,
+            "altGroup": 1,
+            "initData": "0142c014ffe1000a6742c014da05067e784001000468ce3c80"
+          },
+          {
+            "namespace": [
+              "huddle",
+              "alice"
+            ],
+            "name": "video-mid",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp9",
+            "width": 640,
+            "height": 360,
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "huddle",
+              "alice"
+            ],
+            "name": "video-lo",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "width": 320,
+            "height": 180,
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "huddle",
+              "alice"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "1",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "huddle",
+              "alice"
+            ],
+            "name": "screen",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp9",
+            "renderGroup": 2
+          },
+          {
+            "namespace": [
+              "huddle",
+              "alice"
+            ],
+            "name": "screen-audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 2
+          },
+          {
+            "namespace": [
+              "huddle",
+              "alice"
+            ],
+            "name": "state",
+            "packaging": "loc",
+            "isLive": true
+          }
+        ]
+      }
+    },
+    {
+      "name": "shorthand-before-media",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "video": {
+          "codec": "vp8",
+          "altGroup": "3"
+        },
+        "audio": {},
+        "media": [
+          {
+            "role": "video",
+            "name": "video-lo",
+            "codec": "vp8",
+            "width": "320",
+            "altGroup": "3"
+          }
+        ]
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":3,\"codec\":\"vp8\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"audio\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"video-lo\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":3,\"codec\":\"vp8\",\"width\":320}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "video",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "renderGroup": 1,
+            "altGroup": 3
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "video-lo",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "width": 320,
+            "renderGroup": 1,
+            "altGroup": 3
+          }
+        ]
+      }
+    },
+    {
+      "name": "h264-alternate-awaiting-init",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "media": [
+          {
+            "role": "video",
+            "name": "hi",
+            "codec": "avc1.42E01F",
+            "altGroup": "0"
+          },
+          {
+            "role": "video",
+            "name": "lo",
+            "codec": "vp8",
+            "altGroup": "0"
+          }
+        ]
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"lo\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":0,\"codec\":\"vp8\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "lo",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "renderGroup": 1,
+            "altGroup": 0
+          }
+        ]
+      }
+    },
+    {
+      "name": "media-timeline-default-first-of-each-role",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "media": [
+          {
+            "role": "audio",
+            "name": "mic"
+          },
+          {
+            "role": "video",
+            "name": "cam-hi",
+            "codec": "vp8",
+            "altGroup": "1"
+          },
+          {
+            "role": "video",
+            "name": "cam-lo",
+            "codec": "vp8",
+            "altGroup": "1"
+          },
+          {
+            "role": "audio",
+            "name": "screen-audio",
+            "renderGroup": "2"
+          }
+        ],
+        "mediaTimeline": {}
+      },
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"mic\",\"role\":\"audio\",\"renderGroup\":1,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"cam-hi\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1,\"codec\":\"vp8\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"cam-lo\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1,\"codec\":\"vp8\"},{\"namespace\":\"room\",\"packaging\":\"loc\",\"isLive\":true,\"name\":\"screen-audio\",\"role\":\"audio\",\"renderGroup\":2,\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\"},{\"namespace\":\"room\",\"packaging\":\"mediatimeline\",\"isLive\":true,\"name\":\"timeline\",\"role\":\"mediatimeline\",\"mimetype\":\"application/json\",\"depends\":[\"cam-hi\",\"mic\"]}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "mic",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "cam-hi",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "cam-lo",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "vp8",
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "screen-audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "renderGroup": 2
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "timeline",
+            "packaging": "mediatimeline",
+            "isLive": true,
+            "role": "mediatimeline",
+            "mimetype": "application/json",
+            "depends": [
+              "cam-hi",
+              "mic"
+            ]
+          }
+        ]
+      }
     }
   ],
   "catalogErrors": [
@@ -1028,6 +1519,144 @@
           "name": ""
         }
       }
+    },
+    {
+      "name": "alt-group-mixed-roles",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "media": [
+          {
+            "role": "video",
+            "name": "v",
+            "codec": "vp8",
+            "altGroup": "1"
+          },
+          {
+            "role": "audio",
+            "name": "a",
+            "altGroup": "1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "alt-group-across-render-groups",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "media": [
+          {
+            "role": "video",
+            "name": "a",
+            "codec": "vp8",
+            "altGroup": "1"
+          },
+          {
+            "role": "video",
+            "name": "b",
+            "codec": "vp8",
+            "altGroup": "1",
+            "renderGroup": "2"
+          }
+        ]
+      }
+    },
+    {
+      "name": "alt-group-shorthand-and-media-roles",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "audio": {
+          "altGroup": "1"
+        },
+        "media": [
+          {
+            "role": "video",
+            "name": "v",
+            "codec": "vp8",
+            "altGroup": "1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "negative-render-group",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "media": [
+          {
+            "role": "video",
+            "name": "v",
+            "codec": "vp8",
+            "renderGroup": "-1"
+          }
+        ]
+      }
+    },
+    {
+      "name": "negative-alt-group",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "audio": {
+          "altGroup": "-1"
+        }
+      }
+    },
+    {
+      "name": "unsafe-alt-group",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "audio": {
+          "altGroup": "9007199254740992"
+        }
+      }
+    },
+    {
+      "name": "duplicate-name-in-media",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "video": {
+          "codec": "vp8"
+        },
+        "media": [
+          {
+            "role": "video",
+            "name": "video",
+            "codec": "vp8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "duplicate-name-media-and-data",
+      "input": {
+        "namespace": [
+          "room"
+        ],
+        "media": [
+          {
+            "role": "audio",
+            "name": "chat"
+          }
+        ],
+        "data": [
+          {
+            "name": "chat"
+          }
+        ]
+      }
     }
   ],
   "endCatalogs": [
@@ -1204,7 +1833,7 @@
     },
     {
       "name": "media-timeline-fields",
-      "source": "msf-01 §5.6.9's timeline entry, with a non-string item in depends; a second entry has a wrong-typed mimetype and depends. depends keeps its string items; both fields are read only with their JSON type.",
+      "source": "msf-01 \u00a75.6.9's timeline entry, with a non-string item in depends; a second entry has a wrong-typed mimetype and depends. depends keeps its string items; both fields are read only with their JSON type.",
       "catalogNamespace": [
         "conference"
       ],
@@ -1238,6 +1867,253 @@
           }
         ]
       }
+    },
+    {
+      "name": "msf-01-simulcast-example",
+      "source": "draft-ietf-moq-msf-01 \u00a75.6.2 (three simulcast video tracks in one alternate group, plus audio), whitespace removed. Tracks inherit the catalog namespace; targetLatency is not read.",
+      "catalogNamespace": [
+        "room",
+        "live"
+      ],
+      "json": "{\"version\":\"1\",\"generatedAt\":1746104606044,\"tracks\":[{\"name\":\"hd\",\"renderGroup\":1,\"packaging\":\"loc\",\"isLive\":true,\"targetLatency\":1500,\"role\":\"video\",\"codec\":\"av01\",\"width\":1920,\"height\":1080,\"bitrate\":5000000,\"framerate\":30,\"altGroup\":1},{\"name\":\"md\",\"renderGroup\":1,\"packaging\":\"loc\",\"isLive\":true,\"targetLatency\":1500,\"role\":\"video\",\"codec\":\"av01\",\"width\":720,\"height\":640,\"bitrate\":3000000,\"framerate\":30,\"altGroup\":1},{\"name\":\"sd\",\"renderGroup\":1,\"packaging\":\"loc\",\"isLive\":true,\"targetLatency\":1500,\"role\":\"video\",\"codec\":\"av01\",\"width\":192,\"height\":144,\"bitrate\":500000,\"framerate\":30,\"altGroup\":1},{\"name\":\"audio\",\"renderGroup\":1,\"packaging\":\"loc\",\"isLive\":true,\"targetLatency\":1500,\"role\":\"audio\",\"codec\":\"opus\",\"samplerate\":48000,\"channelConfig\":\"2\",\"bitrate\":32000}]}",
+      "parsed": {
+        "version": "1",
+        "generatedAt": 1746104606044,
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "hd",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "av01",
+            "width": 1920,
+            "height": 1080,
+            "framerate": 30.0,
+            "bitrate": 5000000,
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "md",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "av01",
+            "width": 720,
+            "height": 640,
+            "framerate": 30.0,
+            "bitrate": 3000000,
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "sd",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "video",
+            "codec": "av01",
+            "width": 192,
+            "height": 144,
+            "framerate": 30.0,
+            "bitrate": 500000,
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room",
+              "live"
+            ],
+            "name": "audio",
+            "packaging": "loc",
+            "isLive": true,
+            "role": "audio",
+            "codec": "opus",
+            "samplerate": 48000,
+            "channelConfig": "2",
+            "bitrate": 32000,
+            "renderGroup": 1
+          }
+        ]
+      },
+      "groups": [
+        {
+          "renderGroup": 1,
+          "altGroup": 1,
+          "tracks": [
+            "hd",
+            "md",
+            "sd"
+          ]
+        },
+        {
+          "renderGroup": 1,
+          "tracks": [
+            "audio"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "track-groups",
+      "source": "Synthetic: alternates are grouped per render group and alternate group in order of first member, including alternates that declare no render group; a track with no altGroup stands alone; altGroup is read only when integral.",
+      "catalogNamespace": [
+        "room"
+      ],
+      "json": "{\"version\":\"draft-01\",\"tracks\":[{\"name\":\"cam-hi\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1},{\"name\":\"mic\",\"role\":\"audio\",\"renderGroup\":1},{\"name\":\"screen-hi\",\"role\":\"video\",\"renderGroup\":2,\"altGroup\":1},{\"name\":\"cam-lo\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1},{\"name\":\"screen-lo\",\"role\":\"video\",\"renderGroup\":2,\"altGroup\":1},{\"name\":\"loose-a\",\"role\":\"video\",\"altGroup\":7},{\"name\":\"loose-b\",\"role\":\"video\",\"altGroup\":7},{\"name\":\"odd\",\"role\":\"video\",\"renderGroup\":1,\"altGroup\":1.5},{\"name\":\"chat\"}]}",
+      "parsed": {
+        "version": "draft-01",
+        "isComplete": false,
+        "tracks": [
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "cam-hi",
+            "packaging": "",
+            "isLive": false,
+            "role": "video",
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "mic",
+            "packaging": "",
+            "isLive": false,
+            "role": "audio",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "screen-hi",
+            "packaging": "",
+            "isLive": false,
+            "role": "video",
+            "renderGroup": 2,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "cam-lo",
+            "packaging": "",
+            "isLive": false,
+            "role": "video",
+            "renderGroup": 1,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "screen-lo",
+            "packaging": "",
+            "isLive": false,
+            "role": "video",
+            "renderGroup": 2,
+            "altGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "loose-a",
+            "packaging": "",
+            "isLive": false,
+            "role": "video",
+            "altGroup": 7
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "loose-b",
+            "packaging": "",
+            "isLive": false,
+            "role": "video",
+            "altGroup": 7
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "odd",
+            "packaging": "",
+            "isLive": false,
+            "role": "video",
+            "renderGroup": 1
+          },
+          {
+            "namespace": [
+              "room"
+            ],
+            "name": "chat",
+            "packaging": "",
+            "isLive": false
+          }
+        ]
+      },
+      "groups": [
+        {
+          "renderGroup": 1,
+          "altGroup": 1,
+          "tracks": [
+            "cam-hi",
+            "cam-lo"
+          ]
+        },
+        {
+          "renderGroup": 1,
+          "tracks": [
+            "mic"
+          ]
+        },
+        {
+          "renderGroup": 2,
+          "altGroup": 1,
+          "tracks": [
+            "screen-hi",
+            "screen-lo"
+          ]
+        },
+        {
+          "altGroup": 7,
+          "tracks": [
+            "loose-a",
+            "loose-b"
+          ]
+        },
+        {
+          "renderGroup": 1,
+          "tracks": [
+            "odd"
+          ]
+        },
+        {
+          "tracks": [
+            "chat"
+          ]
+        }
+      ]
     }
   ],
   "catalogReadErrors": [
@@ -1624,7 +2500,7 @@
       "name": "unicode-and-delimiters",
       "origin": "https://relay.example",
       "namespace": [
-        "é",
+        "\u00e9",
         "a/b",
         "x.y-z"
       ],
@@ -1968,7 +2844,7 @@
   ],
   "timelines": [
     {
-      "name": "msf-01 §7.1.1 example",
+      "name": "msf-01 \u00a77.1.1 example",
       "entries": [
         [
           0,
@@ -2085,7 +2961,7 @@
   "timelineReads": [
     {
       "name": "lenient records",
-      "source": "Synthetic: records of the wrong shape are skipped, a §7.4 template array among them; extra items are ignored; integral floats read as integers.",
+      "source": "Synthetic: records of the wrong shape are skipped, a \u00a77.4 template array among them; extra items are ignored; integral floats read as integers.",
       "json": "[[0,[0,0],1759924158381],[1,[2,0,9],3,\"x\"],[2.0,[3,0],4],[1.5,[0,0],0],[-1,[0,0],0],[0,[0],0],[0,\"0,0\",0],\"record\",[0,[0,0]],[0,2002,[0,0],[1,0],1759924158381,2002],[0,[9007199254740992,0],0],{\"a\":1},[true,[0,0],0],[0,[0,false],0]]",
       "entries": [
         [
@@ -2115,7 +2991,7 @@
       ]
     },
     {
-      "name": "msf-01 §7.1.1 example, spaced",
+      "name": "msf-01 \u00a77.1.1 example, spaced",
       "json": "[\n  [0, [0,0], 1759924158381],\n  [2002, [1,0], 1759924160383]\n]",
       "entries": [
         [
@@ -2343,10 +3219,10 @@
     {
       "name": "non-ASCII track stays UTF-8",
       "input": {
-        "track": "voz-é",
+        "track": "voz-\u00e9",
         "untilUs": "1"
       },
-      "json": "{\"track\":\"voz-é\",\"untilUs\":1}"
+      "json": "{\"track\":\"voz-\u00e9\",\"untilUs\":1}"
     }
   ],
   "interruptErrors": [
@@ -2550,10 +3426,10 @@
       "input": {
         "seq": "2",
         "fromUs": "5",
-        "text": "Olá \"mundo\" 🦜\n",
+        "text": "Ol\u00e1 \"mundo\" \ud83e\udd9c\n",
         "final": false
       },
-      "json": "{\"seq\":2,\"track\":\"audio\",\"fromUs\":5,\"text\":\"Olá \\\"mundo\\\" 🦜\\n\",\"final\":false}"
+      "json": "{\"seq\":2,\"track\":\"audio\",\"fromUs\":5,\"text\":\"Ol\u00e1 \\\"mundo\\\" \ud83e\udd9c\\n\",\"final\":false}"
     },
     {
       "name": "largest safe numbers",

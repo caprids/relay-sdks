@@ -145,3 +145,19 @@ class TestPlayerUrl:
 
         with pytest.raises(ValueError):
             compose_player_url("https://relay.example.com", [])
+
+
+def test_alternate_group_compares_roles_not_classes() -> None:
+    class Layer(VideoTrackInfo):
+        __slots__ = ()
+
+    catalog = json.loads(
+        build_msf_catalog(
+            ["ns"],
+            media=[
+                VideoTrackInfo(name="hi", codec="vp8", alt_group=1),
+                Layer(name="lo", codec="vp8", alt_group=1),
+            ],
+        )
+    )
+    assert [track["altGroup"] for track in catalog["tracks"]] == [1, 1]

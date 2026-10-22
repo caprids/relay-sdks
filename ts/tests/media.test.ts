@@ -12,11 +12,14 @@ interface RawTrack {
   initData?: string;
   samplerate?: string;
   channelConfig?: string;
+  renderGroup?: string;
+  altGroup?: string;
 }
 interface RawCatalog {
   namespace: string[];
   video?: RawTrack & { codec: string };
   audio?: RawTrack;
+  media?: (RawTrack & { role: 'video' | 'audio' })[];
   data?: media.DataTrackInfo[];
   mediaTimeline?: media.MediaTimelineTrackInfo;
   generatedAt?: string;
@@ -35,7 +38,13 @@ interface Vectors {
   catalogErrors: { name: string; input: RawCatalog }[];
   endCatalogs: { name: string; input: { generatedAt?: string }; json: string; parsed: unknown }[];
   endCatalogErrors: { name: string; input: { generatedAt?: string } }[];
-  catalogReads: { name: string; catalogNamespace: string[]; json: string; parsed: unknown }[];
+  catalogReads: {
+    name: string;
+    catalogNamespace: string[];
+    json: string;
+    parsed: unknown;
+    groups?: { renderGroup?: number; altGroup?: number; tracks: string[] }[];
+  }[];
   catalogReadErrors: { name: string; catalogNamespace: string[]; json: string }[];
   loc: {
     name: string;
@@ -113,7 +122,7 @@ const readable = (catalog: media.MsfCatalog) => ({
 });
 function track(raw: RawTrack): Record<string, unknown> {
   const result: Record<string, unknown> = { ...raw };
-  for (const key of ['width', 'height', 'framerate', 'bitrate', 'samplerate'] as const) {
+  for (const key of ['width', 'height', 'framerate', 'bitrate', 'samplerate', 'renderGroup', 'altGroup'] as const) {
     if (raw[key] !== undefined) result[key] = Number(raw[key]);
   }
   if (raw.initData !== undefined) Object.assign(result, { initData: bytes(raw.initData) });
@@ -124,6 +133,7 @@ function input(raw: RawCatalog): media.MsfCatalogInput {
     namespace: raw.namespace,
     ...(raw.video ? { video: track(raw.video) as unknown as media.VideoTrackInfo } : {}),
     ...(raw.audio ? { audio: track(raw.audio) as media.AudioTrackInfo } : {}),
+    ...(raw.media ? { media: raw.media.map((entry) => track(entry) as unknown as media.MediaTrackInfo) } : {}),
     ...(raw.data ? { data: raw.data } : {}),
     ...(raw.mediaTimeline ? { mediaTimeline: raw.mediaTimeline } : {}),
     ...(raw.generatedAt !== undefined ? { generatedAt: Number(raw.generatedAt) } : {}),
@@ -255,7 +265,14 @@ describe('shared media vectors', () => {
   for (const vector of vectors.catalogReads) {
     it(`reads catalog ${vector.name}`, () => {
       const payload = new TextEncoder().encode(vector.json);
-      expect(readable(media.parseMsfCatalog(payload, vector))).toEqual(vector.parsed);
+      const catalog = media.parseMsfCatalog(payload, vector);
+      expect(readable(catalog)).toEqual(vector.parsed);
+      if (vector.groups) {
+        const groups = media.groupMsfTracks(catalog.tracks);
+        expect(groups.map(({ tracks, ...group }) => ({ ...group, tracks: tracks.map(({ name }) => name) }))).toEqual(
+          vector.groups,
+        );
+      }
     });
   }
   for (const vector of vectors.catalogReadErrors) {

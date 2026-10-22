@@ -26,6 +26,16 @@ export interface VideoTrackInfo {
    * `initDataList` entry referenced by the track's `initRef`.
    */
   initData?: Uint8Array;
+  /**
+   * Render group (msf-01 §5.2.11): tracks sharing one play together on one timeline. Default 1; give a second source,
+   * such as a screen share and its audio, its own.
+   */
+  renderGroup?: number;
+  /**
+   * Alternate group (msf-01 §5.2.12): tracks sharing one are alternate versions of the same content, such as simulcast
+   * layers, and a viewer subscribes to one of them. Members share a role and a render group.
+   */
+  altGroup?: number;
 }
 
 /** The audio track {@link buildMsfCatalog} advertises. Unset fields default to Opus, 48 kHz, stereo. */
@@ -42,7 +52,28 @@ export interface AudioTrackInfo {
   bitrate?: number;
   /** Decoder init data, e.g. an AAC AudioSpecificConfig — Opus carries none. */
   initData?: Uint8Array;
+  /**
+   * Render group (msf-01 §5.2.11): tracks sharing one play together on one timeline. Default 1; give a second source,
+   * such as a screen share and its audio, its own.
+   */
+  renderGroup?: number;
+  /**
+   * Alternate group (msf-01 §5.2.12): tracks sharing one are alternate versions of the same content, such as simulcast
+   * layers, and a viewer subscribes to one of them. Members share a role and a render group.
+   */
+  altGroup?: number;
 }
+
+/** One entry of {@link MsfCatalogInput.media}: a video or audio track, tagged with its MSF role. */
+export type MediaTrackInfo =
+  | ({
+      /** MSF role (§5.2.6) of the entry. */
+      role: 'video';
+    } & VideoTrackInfo)
+  | ({
+      /** MSF role (§5.2.6) of the entry. */
+      role: 'audio';
+    } & AudioTrackInfo);
 
 /** A non-media track {@link buildMsfCatalog} advertises, such as application data. */
 export interface DataTrackInfo {
@@ -65,7 +96,7 @@ export interface MediaTimelineTrackInfo {
   name?: string;
   /**
    * The video and audio tracks the timeline applies to (§5.2.14, §7.2); its locations point into the first. Default:
-   * the video track, then the audio track, whichever exist.
+   * the first video track, then the first audio track, whichever exist.
    */
   depends?: readonly string[];
 }
@@ -74,10 +105,15 @@ export interface MediaTimelineTrackInfo {
 export interface MsfCatalogInput {
   /** Track namespace tuple every track is published under. */
   namespace: readonly string[];
-  /** The video track, if any. */
+  /** A video track, if any: shorthand for a one-entry {@link media} list, listed first. */
   video?: VideoTrackInfo;
-  /** The audio track, if any. */
+  /** An audio track, if any: shorthand for a one-entry {@link media} list, listed after `video`. */
   audio?: AudioTrackInfo;
+  /**
+   * Video and audio tracks, listed in this order after `video` and `audio`: simulcast layers sharing an `altGroup`,
+   * or several sources in their own render groups.
+   */
+  media?: readonly MediaTrackInfo[];
   /**
    * Application data tracks published beside the media — advertised so consumers can discover and subscribe to them,
    * but carrying none of the media fields (`mediaKindOf` on the parse side classifies them as non-renderable
@@ -124,11 +160,13 @@ function registerInitData(entries: MsfInitDataEntry[], name: string, initData: U
 }
 
 /**
- * The render group (msf-01 §5.2.11) every video and audio entry joins: they are stamped on one broadcast timeline
- * and meant to play together. The builder sets no target latency or buffer, which §5.2.8 and §5.2.9 require to be
- * identical across a render group.
+ * The render group (msf-01 §5.2.11) a video or audio entry joins unless it names another: tracks stamped on one
+ * broadcast timeline and meant to play together. The builder sets no target latency or buffer, which §5.2.8 and
+ * §5.2.9 require to be identical across a render group.
  */
 const MEDIA_RENDER_GROUP = 1;
+
+const isGroupNumber = (value: number | undefined) => value === undefined || (Number.isSafeInteger(value) && value >= 0);
 
 /**
  * Build the publisher's independent MSF catalog JSON for a live broadcast.
@@ -143,14 +181,19 @@ const MEDIA_RENDER_GROUP = 1;
 export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
   if (input.namespace.length === 0 || input.namespace.some((field) => !field || field.includes('/')))
     throw new Error('catalog namespace fields must be non-empty and contain no slash');
-  const video = input.video ? { ...input.video, name: input.video.name ?? VIDEO_TRACK } : undefined;
-  const audio = input.audio
-    ? { codec: 'opus', samplerate: 48000, channelConfig: '2', ...input.audio, name: input.audio.name ?? AUDIO_TRACK }
-    : undefined;
+  const media = [
+    ...(input.video ? [{ ...input.video, role: 'video' as const }] : []),
+    ...(input.audio ? [{ ...input.audio, role: 'audio' as const }] : []),
+    ...(input.media ?? []),
+  ].map((track) =>
+    track.role === 'video'
+      ? { ...track, name: track.name ?? VIDEO_TRACK }
+      : { codec: 'opus', samplerate: 48000, channelConfig: '2', ...track, name: track.name ?? AUDIO_TRACK }
+  );
   const timeline = input.mediaTimeline
     ? { ...input.mediaTimeline, name: input.mediaTimeline.name ?? MEDIA_TIMELINE_TRACK }
     : undefined;
-  const names = [video, audio, timeline, ...(input.data ?? [])]
+  const names = [...media, timeline, ...(input.data ?? [])]
     .filter((track) => track !== undefined)
     .map((track) => track.name);
   if (names.some((name) => !name) || new Set(names).size !== names.length)
@@ -158,52 +201,69 @@ export function buildMsfCatalog(input: MsfCatalogInput): Uint8Array {
   const mediaRoles = new Set(['video', 'audio', 'caption', 'subtitle', 'audiodescription', 'signlanguage']);
   if (input.data?.some((track) => track.role !== undefined && mediaRoles.has(track.role)))
     throw new Error('data tracks must not use media roles');
-  const mediaNames = [video, audio].filter((track) => track !== undefined).map((track) => track.name);
-  const depends = timeline ? [...(timeline.depends ?? mediaNames)] : [];
+  if (media.some((track) => track.role !== 'video' && track.role !== 'audio'))
+    throw new Error('media tracks must have the role video or audio');
+  if (media.some((track) => !isGroupNumber(track.renderGroup) || !isGroupNumber(track.altGroup)))
+    throw new Error('render and alternate groups must be non-negative safe integers');
+  const alternates = new Map<number, { role: string; renderGroup: number }>();
+  for (const { altGroup, role, renderGroup = MEDIA_RENDER_GROUP } of media) {
+    if (altGroup === undefined) continue;
+    const first = alternates.get(altGroup) ?? { role, renderGroup };
+    if (first.role !== role || first.renderGroup !== renderGroup)
+      throw new Error('alternate group members must share a role and a render group');
+    alternates.set(altGroup, first);
+  }
+  const mediaNames = media.map((track) => track.name);
+  const defaultDepends = (['video', 'audio'] as const)
+    .map((role) => media.find((track) => track.role === role)?.name)
+    .filter((name) => name !== undefined);
+  const depends = timeline ? [...(timeline.depends ?? defaultDepends)] : [];
   if (
     timeline &&
     (depends.length === 0 || new Set(depends).size !== depends.length || depends.some((n) => !mediaNames.includes(n)))
   )
     throw new Error('media timeline depends must name distinct video or audio tracks of this catalog');
-  const h264 = video !== undefined && /^(avc1|avc3)(\.|$)/.test(video.codec);
   const namespace = input.namespace.join('/');
   const shared = { namespace, packaging: 'loc', isLive: true };
   const initDataList: MsfInitDataEntry[] = [];
   const tracks: Record<string, unknown>[] = [];
 
-  if (video && (!h264 || (video.initData !== undefined && video.initData.length > 0))) {
-    const codec =
-      h264 && video.initData ? video.codec.slice(0, 4) + avcCodecString(video.initData).slice(4) : video.codec;
-    tracks.push(
-      pruneUndefined({
-        ...shared,
-        ...registerInitData(initDataList, video.name, video.initData),
-        name: video.name,
-        role: 'video',
-        renderGroup: MEDIA_RENDER_GROUP,
-        codec,
-        width: video.width,
-        height: video.height,
-        framerate: video.framerate,
-        bitrate: video.bitrate,
-      })
-    );
-  }
-
-  if (audio) {
-    tracks.push(
-      pruneUndefined({
-        ...shared,
-        ...registerInitData(initDataList, audio.name, audio.initData),
-        name: audio.name,
-        role: 'audio',
-        renderGroup: MEDIA_RENDER_GROUP,
-        codec: audio.codec,
-        samplerate: audio.codec === 'opus' ? 48000 : audio.samplerate,
-        channelConfig: audio.channelConfig,
-        bitrate: audio.bitrate,
-      })
-    );
+  for (const track of media) {
+    const groups = { renderGroup: track.renderGroup ?? MEDIA_RENDER_GROUP, altGroup: track.altGroup };
+    if (track.role === 'video') {
+      const h264 = /^(avc1|avc3)(\.|$)/.test(track.codec);
+      if (h264 && (track.initData === undefined || track.initData.length === 0)) continue;
+      const codec =
+        h264 && track.initData ? track.codec.slice(0, 4) + avcCodecString(track.initData).slice(4) : track.codec;
+      tracks.push(
+        pruneUndefined({
+          ...shared,
+          ...registerInitData(initDataList, track.name, track.initData),
+          name: track.name,
+          role: 'video',
+          ...groups,
+          codec,
+          width: track.width,
+          height: track.height,
+          framerate: track.framerate,
+          bitrate: track.bitrate,
+        })
+      );
+    } else {
+      tracks.push(
+        pruneUndefined({
+          ...shared,
+          ...registerInitData(initDataList, track.name, track.initData),
+          name: track.name,
+          role: 'audio',
+          ...groups,
+          codec: track.codec,
+          samplerate: track.codec === 'opus' ? 48000 : track.samplerate,
+          channelConfig: track.channelConfig,
+          bitrate: track.bitrate,
+        })
+      );
+    }
   }
 
   const listed = new Set(tracks.map(({ name }) => name));

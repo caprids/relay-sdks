@@ -19,6 +19,7 @@ export {
   buildMsfEndCatalog,
   type DataTrackInfo,
   type MediaTimelineTrackInfo,
+  type MediaTrackInfo,
   MSF_CATALOG_VERSION,
   type MsfCatalogInput,
   type MsfEndCatalogInput,
@@ -70,8 +71,10 @@ export {
   VIDEO_TRACK,
 } from './loc.js';
 export {
+  groupMsfTracks,
   type MsfCatalog,
   type MsfCatalogTrack,
+  type MsfTrackGroup,
   type ParseMsfCatalogOptions,
   parseMsfCatalog,
 } from './parse-catalog.js';

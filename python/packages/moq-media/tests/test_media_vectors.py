@@ -16,9 +16,14 @@ VECTORS = json.loads((SPEC / "vectors/media.json").read_text())
 
 
 def track_input(raw: dict[str, Any]) -> dict[str, Any]:
-    names = {"initData": "init_data", "channelConfig": "channel_config"}
-    result = {names.get(key, key): value for key, value in raw.items()}
-    for key in ("width", "height", "samplerate", "bitrate"):
+    names = {
+        "initData": "init_data",
+        "channelConfig": "channel_config",
+        "renderGroup": "render_group",
+        "altGroup": "alt_group",
+    }
+    result = {names.get(key, key): value for key, value in raw.items() if key != "role"}
+    for key in ("width", "height", "samplerate", "bitrate", "render_group", "alt_group"):
         if key in result:
             result[key] = int(result[key])
     if "framerate" in result:
@@ -28,11 +33,17 @@ def track_input(raw: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def media_track(raw: dict[str, Any]) -> media.VideoTrackInfo | media.AudioTrackInfo:
+    kind = media.VideoTrackInfo if raw["role"] == "video" else media.AudioTrackInfo
+    return kind(**track_input(raw))
+
+
 def build(raw: dict[str, Any]) -> bytes:
     return media.build_msf_catalog(
         raw["namespace"],
         video=media.VideoTrackInfo(**track_input(raw["video"])) if "video" in raw else None,
         audio=media.AudioTrackInfo(**track_input(raw["audio"])) if "audio" in raw else None,
+        media=[media_track(track) for track in raw.get("media", [])],
         data=[media.DataTrackInfo(**track) for track in raw.get("data", [])],
         media_timeline=media.MediaTimelineTrackInfo(**raw["mediaTimeline"]) if "mediaTimeline" in raw else None,
         generated_at_ms=int(raw["generatedAt"]) if "generatedAt" in raw else None,
@@ -57,6 +68,7 @@ def readable(catalog: media.MsfCatalog) -> dict[str, Any]:
         "channel_config": "channelConfig",
         "init_data": "initData",
         "render_group": "renderGroup",
+        "alt_group": "altGroup",
     }
     tracks = []
     for track in catalog.tracks:
@@ -105,7 +117,8 @@ def test_catalog_reads_back_its_inputs(vector: dict[str, Any]) -> None:
     }
     video = media.VideoTrackInfo(**track_input(raw["video"])) if "video" in raw else None
     audio = media.AudioTrackInfo(**track_input(raw["audio"])) if "audio" in raw else None
-    inputs = [track for track in (video, audio) if track is not None and track.name in parsed]
+    listed = [video, audio, *(media_track(track) for track in raw.get("media", []))]
+    inputs = [track for track in listed if track is not None and track.name in parsed]
     for track in inputs:
         read = parsed[track.name]
         assert read.namespace == tuple(raw["namespace"])
@@ -113,6 +126,7 @@ def test_catalog_reads_back_its_inputs(vector: dict[str, Any]) -> None:
         assert (read.packaging, read.is_live, read.role) == ("loc", True, role)
         assert read.bitrate == track.bitrate
         assert read.init_data == (track.init_data or None)
+        assert (read.render_group, read.alt_group) == (track.render_group, track.alt_group)
         if isinstance(track, media.VideoTrackInfo):
             assert (read.width, read.height, read.framerate) == (track.width, track.height, track.framerate)
             if not track.codec.startswith(("avc1", "avc3")):
@@ -128,6 +142,16 @@ def test_catalog_reads_back_its_inputs(vector: dict[str, Any]) -> None:
 def test_catalog_reads(vector: dict[str, Any]) -> None:
     parsed = media.parse_msf_catalog(vector["json"].encode(), catalog_namespace=vector["catalogNamespace"])
     assert readable(parsed) == vector["parsed"]
+    if "groups" in vector:
+        groups = [
+            {"renderGroup": group.render_group, "altGroup": group.alt_group}
+            for group in media.group_msf_tracks(parsed.tracks)
+        ]
+        expected = [{key: group.get(key) for key in ("renderGroup", "altGroup")} for group in vector["groups"]]
+        assert groups == expected
+        assert [[track.name for track in group.tracks] for group in media.group_msf_tracks(parsed.tracks)] == [
+            group["tracks"] for group in vector["groups"]
+        ]
 
 
 @pytest.mark.parametrize("vector", VECTORS["catalogReadErrors"], ids=lambda v: v["name"])

@@ -46,6 +46,25 @@ group, and init data resolved from `initRef` to bytes. It rejects unsupported ve
 updates, ignores unknown fields, and returns non-`loc` packagings (such as moq-rs `cmaf`) as
 declared.
 
+For simulcast layers or a second source, pass `media`: a list of `{ role: 'video', ... }` and
+`{ role: 'audio', ... }` entries, each with an optional `renderGroup` (default 1, tracks played
+together) and `altGroup` (alternate versions of one content, of which a viewer plays one). Members
+of an alternate group share a role and a render group. `parseMsfCatalog` returns both fields, and
+`groupMsfTracks(catalog.tracks)` lists the sets a viewer picks one track from. See
+[several media tracks](../../../spec/media-layer.md#several-media-tracks).
+
+```ts
+const catalog = buildMsfCatalog({
+  namespace,
+  media: [
+    { role: 'video', name: 'video-hi', codec: 'vp8', width: 1280, height: 720, altGroup: 1 },
+    { role: 'video', name: 'video-lo', codec: 'vp8', width: 320, height: 180, altGroup: 1 },
+    { role: 'audio', name: 'audio' },
+    { role: 'video', name: 'screen', codec: 'vp9', renderGroup: 2 },
+  ],
+});
+```
+
 Every media track shares one timeline: LOC timestamps are capture times in microseconds since the
 Unix epoch, with Timescale 1,000,000 declared on each track. `createBroadcastClock()` pins the
 `performance.now()` clock to `Date.now()` once and counts from there, so broadcasts from different
