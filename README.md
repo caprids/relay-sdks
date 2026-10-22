@@ -9,8 +9,8 @@ This is an initial development workspace. Package names are provisional and publ
 | Directory | Contents | Status |
 | --- | --- | --- |
 | `spec/` | Protocol pins, the behavior contract every SDK implements, and language-neutral test vectors | Source of truth |
-| `ts/` | TypeScript SDK `@mux/relay` and the generic `@mux/moq-core` protocol and `@mux/moq-media` format packages, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
-| `python/` | Python SDK `mux-relay` and the generic `mux-moq-core` and `mux-moq-media` packages (imported as `moq_core` and `moq_media`), as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
+| `ts/` | TypeScript SDK `@caprid/relay` and the generic `@caprid/moq-core` protocol and `@caprid/moq-media` format packages, as a pnpm workspace | Working; live-tested against `sjc.relay.mux.global` |
+| `python/` | Python SDK `caprid-relay` and the generic `caprid-moq-core` and `caprid-moq-media` packages (imported as `moq_core` and `moq_media`), as a uv workspace (uv, ruff, ty) | Working; feature-complete with `ts/`; live-tested against `sjc.relay.mux.global` |
 | `tools/` | Hardware measurement rigs, such as the [device latency lab](tools/device-latency/README.md) for microphone and output latency | Run by hand |
 
 Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (browser WebTransport) or
@@ -52,9 +52,9 @@ nothing.
 ### TypeScript live Relay smoke test
 
 This opt-in test publishes and subscribes against a real relay, running the same scenario four
-times: in Node over [`@mux/relay-quic`](ts/packages/relay-quic/README.md)'s native QUIC, in
+times: in Node over [`@caprid/relay-quic`](ts/packages/relay-quic/README.md)'s native QUIC, in
 headless Chromium over WebTransport, then in both over
-[`@mux/relay-websocket`](ts/packages/relay-websocket/README.md)'s QMux over WebSocket. It is excluded from `pnpm check` and needs a token authorized
+[`@caprid/relay-websocket`](ts/packages/relay-websocket/README.md)'s QMux over WebSocket. It is excluded from `pnpm check` and needs a token authorized
 for both operations. The token can be supplied through
 hidden stdin input or the `RELAY_TOKEN` environment variable; it is never written to a file.
 
@@ -71,7 +71,7 @@ RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run ts:tes
 `chromium-websocket` (the default four), and on request `firefox` (WebTransport, Firefox 155 or
 later), `webkit-websocket`, `firefox-websocket` (each needs `playwright install firefox` or
 `webkit`) and `chromium-fallback`, Chromium through `withWebSocketFallback`. The task builds
-`@mux/relay-quic`'s native addon from source first, with the Rust toolchain it brings: the
+`@caprid/relay-quic`'s native addon from source first, with the Rust toolchain it brings: the
 workspace never installs the [prebuilt platform packages](ts/packages/relay-quic/README.md#prebuilt-binaries),
 which are added only when packing.
 
@@ -157,23 +157,23 @@ Alignment comes from `spec/`, not from shared version numbers:
 Each SDK is versioned and released independently and tagged by directory, for example `ts/v0.2.0`
 and `python/v0.1.0`. Lockstep across languages applies to the protocol pin and the behavior
 contract, not to version numbers, so a fix in one language never forces an empty release in
-another. Within a language every package moves at one version: all the `@mux/*` packages together,
-and `mux-relay`, `mux-moq-core` and `mux-moq-media` together. Everything is Apache-2.0
+another. Within a language every package moves at one version: all the `@caprid/*` packages together,
+and `caprid-relay`, `caprid-moq-core` and `caprid-moq-media` together. Everything is Apache-2.0
 ([LICENSE](LICENSE)). [Releasing](docs/releasing.md) has the steps, and
 [ADR 0003](docs/adr/0003-hand-cut-lockstep-releases.md) the reasons. This table records which SDK
 versions speak which draft:
 
 | SDK | Version | MOQT draft |
 | --- | --- | --- |
-| `@mux/relay` (`ts/`) | unreleased | `moqt-22`, falling back to `moqt-20` |
-| `mux-relay` (`python/`) | unreleased | `moqt-22`, falling back to `moqt-20` |
+| `@caprid/relay` (`ts/`) | unreleased | `moqt-22`, falling back to `moqt-20` |
+| `caprid-relay` (`python/`) | unreleased | `moqt-22`, falling back to `moqt-20` |
 
 Publishers end a track with PUBLISH_DONE, which needs moq-relay 0.15.4 or later: on 0.15.1 to
 0.15.3 every track end reaches viewers as an aborted track. For that boundary, the 0.14.17 one, and
 a reproducible local test, see [relay interoperability](spec/relay-interop.md). SDK adoption and
 the relay upgrade must be coordinated.
 
-The package READMEs (`ts/README.md` for npm, `python/packages/mux-relay/README.md` for PyPI) use
+The package READMEs (`ts/README.md` for npm, `python/packages/caprid-relay/README.md` for PyPI) use
 relative links while the repository is private. Those links do not resolve on a registry page, and
 the linked files are not in either package, so each must become an absolute URL before the first
 release:
@@ -181,7 +181,7 @@ release:
 - `ts/README.md`: `GUIDE.md`, `GUIDE.md#first-round-trip`,
   `GUIDE.md#use-the-local-packages-in-your-application`, `GUIDE.md#errors-and-recovery`, and
   `../spec/README.md`.
-- `python/packages/mux-relay/README.md`: `../../README.md`, `../../README.md#first-round-trip`,
+- `python/packages/caprid-relay/README.md`: `../../README.md`, `../../README.md#first-round-trip`,
   `../../README.md#use-the-local-packages-in-your-application`, `../../README.md#errors-and-recovery`,
   and `../../../spec/README.md`.
 
@@ -189,13 +189,13 @@ release:
 
 The same shape applies in every language:
 
-- The optional media format packages (`@mux/moq-media`, `moq-media`) own pure LOC/MSF and H.264
+- The optional media format packages (`@caprid/moq-media`, `moq-media`) own pure LOC/MSF and H.264
   helpers and depend only on the core. They have no transport or encoder dependencies. TypeScript
   accepts native WebCodecs chunks/configuration; start with the
   [live browser example](ts/examples/webcodecs/README.md). Mediabunny is an optional file-input adapter.
-- The product package (`@mux/relay`, `mux-relay`) owns the Relay API and the authentication
+- The product package (`@caprid/relay`, `caprid-relay`) owns the Relay API and the authentication
   convention.
-- The generic MoQ core (`@mux/moq-core`, `moq-core`) is protocol-only: an abstract transport, no
+- The generic MoQ core (`@caprid/moq-core`, `moq-core`) is protocol-only: an abstract transport, no
   runtime dependencies, no knowledge of Relay, and no player, UI, or media engine. Each language
   enforces this in its check task (`ts/scripts/check-boundaries.mjs`; the import-linter contract in
   `python/pyproject.toml`).

@@ -1,5 +1,5 @@
 {
-  "name": "@mux/relay-quic-darwin-x64",
+  "name": "@caprid/relay-quic-darwin-x64",
   "version": "0.0.0",
   "cpu": [
     "x64"

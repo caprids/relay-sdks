@@ -1,9 +1,9 @@
 /**
- * The conformance suite against `@mux/relay-quic`, the Node transport adapter over native QUIC, with the Python
+ * The conformance suite against `@caprid/relay-quic`, the Node transport adapter over native QUIC, with the Python
  * accepting end as its peer (`--framing native-quic`). Not part of `pnpm test`: it needs the built addon and the Python
  * workspace, so `pnpm test:conformance:node` runs it, with `vitest.relay-quic.config.js`.
  */
-import { nativeQuicTransport } from '@mux/relay-quic';
+import { nativeQuicTransport } from '@caprid/relay-quic';
 import { afterAll, describe, expect, it } from 'vitest';
 import { startConformancePeer } from '../scripts/conformance-peer.js';
 import { createRelayQuicTarget } from './targets/relay-quic.js';
@@ -70,7 +70,7 @@ it('keeps reading a stream whose bytes trickle in, as the read and the reset wat
   await transport.closed;
 }, 20_000);
 
-describe('@mux/relay-quic trust', () => {
+describe('@caprid/relay-quic trust', () => {
   it('trusts a ca anchor added to the platform roots', async () => {
     await peer.call('prepare');
     const { transport, ready } = nativeQuicTransport({ ca: peer.certificatePem })(`https://localhost:${peer.port}/`, [
@@ -98,12 +98,12 @@ describe('@mux/relay-quic trust', () => {
   });
 });
 
-describe('@mux/relay/node', () => {
+describe('@caprid/relay/node', () => {
   // The peer accepts the QUIC connection but speaks no MOQT, so a connect that gets as far as SETUP times out: the
   // entry point's default adapter dialled, with the trust it was given. Untrusted, the handshake itself fails.
-  it('dials through @mux/relay-quic by default, with the ca it is given', async () => {
+  it('dials through @caprid/relay-quic by default, with the ca it is given', async () => {
     await peer.call('prepare');
-    const { connectRelaySubscriber } = await import('@mux/relay/node');
+    const { connectRelaySubscriber } = await import('@caprid/relay/node');
     const url = `https://localhost:${peer.port}/`;
     await expect(
       connectRelaySubscriber({ url, ca: peer.certificatePem, connectTimeoutMs: 1_000 }),

@@ -5,8 +5,8 @@ all its packages. [ADR 0003](adr/0003-hand-cut-lockstep-releases.md) records why
 
 | Train | Packages | Tag | Workflow |
 | --- | --- | --- | --- |
-| TypeScript | `@mux/relay`, `@mux/moq-core`, `@mux/moq-media`, `@mux/moq-mediabunny`, `@mux/relay-quic` and its 7 platform packages, `@mux/relay-websocket` | `ts/v<x.y.z>` | `release-ts.yml` |
-| Python | `mux-relay`, `mux-moq-core`, `mux-moq-media` | `python/v<x.y.z>` | `release-python.yml` |
+| TypeScript | `@caprid/relay`, `@caprid/moq-core`, `@caprid/moq-media`, `@caprid/moq-mediabunny`, `@caprid/relay-quic` and its 7 platform packages, `@caprid/relay-websocket` | `ts/v<x.y.z>` | `release-ts.yml` |
+| Python | `caprid-relay`, `caprid-moq-core`, `caprid-moq-media` | `python/v<x.y.z>` | `release-python.yml` |
 
 ## Cut a release
 
@@ -51,7 +51,6 @@ tag ref), always dry-run. A tag push runs the `publish` job in the `release` env
 publishes only when the repository variable `RELEASE_PUBLISH` is `true`. Otherwise it dry-runs and
 creates no GitHub release. Before the first real publish:
 
-- the package names and npm scope are settled;
 - the repository is public, so the package READMEs' links resolve and provenance can be issued;
 - on npmjs.com, each package has a trusted publisher for `muxinc/relay-sdks`, workflow
   `release-ts.yml`, environment `release`. npm can only add one to a package that exists, so the

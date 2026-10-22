@@ -5,7 +5,7 @@ import {
   type RelayGroupWriter,
   type RelayPublisher,
   type RelayTrackWriter,
-} from '@mux/relay';
+} from '@caprid/relay';
 import { Input } from 'mediabunny';
 import { afterEach, expect, it, vi } from 'vitest';
 import { publishVideoFile } from '../examples/mediabunny/publish-video.js';

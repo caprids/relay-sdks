@@ -1,8 +1,8 @@
 # Transport adapter contract
 
 A Relay connection runs over a **transport adapter** (see `CONTEXT.md`): the browser's native
-`WebTransport`, the Python aioquic native QUIC client, the `@mux/relay-quic`
-native QUIC adapter for Node, the `@mux/relay-websocket` QMux-over-WebSocket adapter for browsers and
+`WebTransport`, the Python aioquic native QUIC client, the `@caprid/relay-quic`
+native QUIC adapter for Node, the `@caprid/relay-websocket` QMux-over-WebSocket adapter for browsers and
 Node, and the in-memory pairs the tests use. This document states what every adapter must do
 for the SDK core to behave as `behavior.md` says. Until now that was only the TypeScript
 `MoqtTransport` interface plus behaviour the core relied on without writing it down.
@@ -292,7 +292,7 @@ and request streams.
 `WebTransportSendOptions`): Firefox 155 schedules by it, and Chromium 153 ignores it (see
 [Known deviations](#known-deviations)). `@moq/qmux` 0.3.3 schedules stream data
 highest `sendOrder` first, round-robin among equals (`scheduler.d.ts`). quinn 0.11's
-`SendStream::set_priority` takes an `i32`, higher sent first and 0 by default; `@mux/relay-quic`
+`SendStream::set_priority` takes an `i32`, higher sent first and 0 by default; `@caprid/relay-quic`
 clamps the send order to that range.
 
 ### Error shape
@@ -411,7 +411,7 @@ adapters MUST NOT copy them.
   `new WebTransportError({ message, streamErrorCode: 256 }).streamErrorCode` is 255, and the
   conformance suite's peer sees 255 for a reset or stop sent with 256, 65536 or 2³²−1.
 
-### QMux over WebSocket (`@mux/relay-websocket`)
+### QMux over WebSocket (`@caprid/relay-websocket`)
 
 The adapter wraps `@moq/qmux` 0.3.3 (ADR 0005). It meets every other rule; the conformance suite
 runs it in Node, Chromium, Firefox and WebKit (`conformance/targets/websocket.js`).
@@ -451,12 +451,12 @@ for it:
 long a close takes to arrive.
 
 A test that depends on credit or acknowledgement uses an adapter that has it: Chromium against the
-conformance suite's Python accepting end, the Python loopback server, or `@mux/relay-quic`.
+conformance suite's Python accepting end, the Python loopback server, or `@caprid/relay-quic`.
 
 ## Python mapping (informative)
 
-`moq_core.transport.MoqtTransport` is the same seam spelled for asyncio. `mux_relay` has one aioquic
-adapter for it, `mux_relay.quic` (`connect_quic`): native QUIC, and the default (ADR 0004). The package
+`moq_core.transport.MoqtTransport` is the same seam spelled for asyncio. `caprid_relay` has one aioquic
+adapter for it, `caprid_relay.quic` (`connect_quic`): native QUIC, and the default (ADR 0004). The package
 ships no WebTransport session, so the rules only a WebTransport session has (TA-2, and TA-5's
 `WT-Available-Protocols`) have no Python row; a `create_transport` factory may still declare that framing
 (TA-1). The test suite keeps a WebTransport session as the conformance peer's accepting end, on the same
@@ -476,11 +476,11 @@ stream halves and QUIC plumbing (#232). How the rules map:
 | TA-15 | **Split in two:** `SendStream.close()` returns once the FIN is handed over, and `AcknowledgedSendStream.wait_acknowledged()` returns on acknowledgement. Together they meet the rule. `wait_acknowledged()` also raises when the stream fails between writes, so it stands in for `writer.closed` (TA-12, TA-16, TA-20). A stream without `wait_acknowledged` counts as acknowledged at once, which only test doubles do. |
 | TA-16 | `abort()` resets until the peer acknowledges the FIN, including after the FIN was transmitted, and `wait_acknowledged()` then raises the reason. Once the FIN is acknowledged it does nothing (the stream is in Data Recvd). A settling group's delivery timeout depends on this (#167). |
 | TA-17, TA-18 | `abort(reason)` and `cancel(reason)` take the code from a `stream_error_code` attribute (the write slot's `StreamReset`, or a stream error), else from an integer reason, each within 0 to 2³²−1, else 0. The code goes on the wire as TA-27 encodes it. |
-| TA-19, TA-20, TA-22 | Errors have the TA-22 shape, spelled `source` and `stream_error_code`: `mux_relay.quic` raises a private `QuicTransportError` with them. A peer STOP_SENDING is a `source="stream"` error on the send half, with no subclass of its own. The core and the SDK classify by `source` alone (`moq_core.transport.is_stream_error`, `is_session_error`). An exhausted stream limit (TA-21), and a write to a stream this end already closed or reset, carry `source=None`. |
+| TA-19, TA-20, TA-22 | Errors have the TA-22 shape, spelled `source` and `stream_error_code`: `caprid_relay.quic` raises a private `QuicTransportError` with them. A peer STOP_SENDING is a `source="stream"` error on the send half, with no subclass of its own. The core and the SDK classify by `source` alone (`moq_core.transport.is_stream_error`, `is_session_error`). An exhausted stream limit (TA-21), and a write to a stream this end already closed or reset, carry `source=None`. |
 | TA-21 | A create rejects at once when the peer's MAX_STREAMS is used up, and succeeds again once the peer raises it. |
 | TA-24 | `close_info` carries the peer's application close, and so does the session error an operation raises once it has ended the session (`close_code` and `reason`). The SDK reports `UNAUTHORIZED` from either, in any phase. |
 | TA-25, TA-26 | asyncio holds no process open by itself: the application's own `asyncio.run` decides. |
-| TA-27 | `QuicSession` encodes and decodes stream codes in its `_to_wire_code` and `_from_wire_code` hooks (`mux_relay.quic._errors`). The test suite's native QUIC accepting ends map them the same way, as the relay does. |
+| TA-27 | `QuicSession` encodes and decodes stream codes in its `_to_wire_code` and `_from_wire_code` hooks (`caprid_relay.quic._errors`). The test suite's native QUIC accepting ends map them the same way, as the relay does. |
 | TA-28 | **Not bound:** `create_unidirectional_stream()` takes no options, since the Python publisher sets no send order and aioquic has no stream priorities. |
 
 ## Conformance
@@ -490,16 +490,16 @@ every target:
 
 - the in-memory pair in vitest, as part of `pnpm check`
 - Chromium's native `WebTransport`, in `pnpm test:conformance`, against a scriptable Python
-  accepting end (`python/packages/mux-relay/tests/relay_helpers/conformance_peer.py`) that can
+  accepting end (`python/packages/caprid-relay/tests/relay_helpers/conformance_peer.py`) that can
   reset, stop, close at either layer, withhold acknowledgement and limit stream credit
-- `@mux/relay-quic` in Node, in `pnpm test:conformance:node`, against the same accepting end in its
+- `@caprid/relay-quic` in Node, in `pnpm test:conformance:node`, against the same accepting end in its
   native QUIC mode (`--framing native-quic`)
-- `@mux/relay-websocket` in Node, in `pnpm test:conformance:websocket`, and in Chromium, Firefox and
+- `@caprid/relay-websocket` in Node, in `pnpm test:conformance:websocket`, and in Chromium, Firefox and
   WebKit, in `pnpm test:conformance:websocket:browsers`, against a Node accepting end for QMux over
   WebSocket (`ts/scripts/websocket-peer.js`, `@moq/qmux` over `ws`) that speaks the Python one's
   protocol
 
-A pytest port (`python/packages/mux-relay/tests/test_transport_conformance.py`, #230) runs the same cases
+A pytest port (`python/packages/caprid-relay/tests/test_transport_conformance.py`, #230) runs the same cases
 against `moq_core.transport.MoqtTransport`, spelled as the [Python mapping](#python-mapping-informative) says,
 in the Python SDK's `uv run pytest`. Its target (`tests/relay_helpers/conformance_targets.py`) is the native QUIC
 dialing end (`connect_quic`), against `--framing native-quic`; the cases only a WebTransport session has are

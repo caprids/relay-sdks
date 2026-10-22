@@ -1,5 +1,5 @@
 /** A `MoqtTransport` over one native QUIC dial (spec/transport-adapter.md, "Session lifetime"). */
-import type { BidirectionalStreamLike, MoqtSendStreamOptions, MoqtTransport } from '@mux/moq-core';
+import type { BidirectionalStreamLike, MoqtSendStreamOptions, MoqtTransport } from '@caprid/moq-core';
 import type { Dial, Failure, Session } from './addon.js';
 import { NativeQuicSessionError, safeCode, toError } from './errors.js';
 import { bidirectional, recvReadable, sendWritable } from './streams.js';

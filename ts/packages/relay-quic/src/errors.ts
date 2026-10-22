@@ -3,7 +3,7 @@
  * `MoqtStreamError`, a session error a {@link NativeQuicSessionError}. Codes cross from Rust as decimal strings, since a
  * QUIC varint has 62 bits.
  */
-import { MoqtStreamError } from '@mux/moq-core';
+import { MoqtStreamError } from '@caprid/moq-core';
 import type { Failure } from './addon.js';
 
 /** A session failure (TA-22): the session is over, or the dial failed. */

@@ -1,9 +1,9 @@
 /**
- * `@mux/relay-websocket` as a conformance target: QMux over WebSocket (#321). Runtime-neutral, so the same target runs
+ * `@caprid/relay-websocket` as a conformance target: QMux over WebSocket (#321). Runtime-neutral, so the same target runs
  * in Node (`../websocket.conformance.js`) and in a browser page (`../../scripts/test-conformance-websocket.mjs`). Its
  * peer is the Node accepting end, `scripts/websocket-peer.js`, reached through `call(method, params)`.
  */
-import { createWebSocketTransport } from '@mux/relay-websocket';
+import { createWebSocketTransport } from '@caprid/relay-websocket';
 import { createRemotePeer } from './remote-peer.js';
 
 /** QMux over a WebSocket rides on TCP, which acknowledges nothing an application can see (Known deviations). */

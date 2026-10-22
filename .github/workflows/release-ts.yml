@@ -30,7 +30,7 @@ permissions:
   contents: read
 
 jobs:
-  # Builds, packs and smoke-loads @mux/relay-quic and its seven platform packages, with @mux/moq-core.
+  # Builds, packs and smoke-loads @caprid/relay-quic and its seven platform packages, with @caprid/moq-core.
   binaries:
     uses: ./.github/workflows/relay-quic-binaries.yml
 

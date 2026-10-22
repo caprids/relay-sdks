@@ -80,13 +80,13 @@ location to wall-clock time, for seeking and playlists. On the epoch timeline th
 same, so an entry needs only the timestamp and the group. Announce it with
 `media_timeline=MediaTimelineTrackInfo()` in `build_msf_catalog`. `MediaTimeline` keeps one
 broadcast's records, 512 by default, and returns the document to send each time a keyframe has
-opened a video group; `mux_relay.media.DocumentService` sends it as a new timeline group, and again
+opened a video group; `caprid_relay.media.DocumentService` sends it as a new timeline group, and again
 whenever the relay subscribes. See
 [spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
 
 ```python
 timeline = MediaTimeline()
-service = DocumentService(timeline_track)  # from mux_relay.media; run service.serve() as a task
+service = DocumentService(timeline_track)  # from caprid_relay.media; run service.serve() as a task
 # Once the frame writer reports the keyframe that opened video group `group_id` as sent:
 service.update(timeline.add(timestamp_us, group_id))
 read = parse_media_timeline(timeline_object.payload)
@@ -141,7 +141,7 @@ segment an interrupt cut. A listener reads each with `parse_transcript_segment`,
 
 ## Opus
 
-`pip install "mux-moq-media[opus]"` adds PyAV and `moq_media.opus`: Opus encoding and decoding for a
+`pip install "caprid-moq-media[opus]"` adds PyAV and `moq_media.opus`: Opus encoding and decoding for a
 server-side talker such as a voice bot. `OpusEncoder` takes interleaved s16 PCM (or a PyAV
 `AudioFrame`) at any rate and returns 20 ms `OpusPacket`s stamped on the broadcast timeline. Its
 defaults are for voice: mono, 32 kb/s, libopus's `voip` application. Audio comes in runs. The first
@@ -156,7 +156,7 @@ from moq_media.opus import OpusDecoder, OpusEncoder
 
 encoder = OpusEncoder(input_rate=24_000)  # the TTS engine's rate
 audio_info = AudioTrackInfo(channel_config="1", bitrate=encoder.bitrate)  # for build_msf_catalog
-# An OpusPacket carries its LOC properties, so mux_relay.media.FrameWriter takes it as a frame.
+# An OpusPacket carries its LOC properties, so caprid_relay.media.FrameWriter takes it as a frame.
 for packet in encoder.encode(tts_pcm, timestamp_us=clock.now_us()) + encoder.flush():
     await frame_writer.write(packet)
 
@@ -173,9 +173,9 @@ one packet more than the frames it was given, which carries the look-ahead's tai
 `opus_packet_duration_us(payload)` reads a packet's duration from its TOC byte without PyAV, held to
 the same vectors as TypeScript's `opusPacketDurationUs`. See [ADR 0006](../../../docs/adr/0006-opus-codec-behind-an-extra.md).
 
-The distribution on PyPI is `mux-moq-media`; the import name is `moq_media`.
+The distribution on PyPI is `caprid-moq-media`; the import name is `moq_media`.
 
 ## Stability
 
-Before 1.0, a minor version can break the API. This package releases together with `mux-relay` at
+Before 1.0, a minor version can break the API. This package releases together with `caprid-relay` at
 the same version; see the [changelog](../../CHANGELOG.md).

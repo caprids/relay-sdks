@@ -1,4 +1,4 @@
-import { isStreamError, SESSION_ERROR } from '@mux/moq-core';
+import { isStreamError, SESSION_ERROR } from '@caprid/moq-core';
 
 /** Stable categories for SDK lifecycle failures; messages are diagnostic text only. */
 export type RelayErrorCode =
@@ -36,7 +36,7 @@ export type RelayErrorCode =
   /**
    * The relay refused the connection's credentials: in phase `connecting`, a refusal to connect; in phase
    * `connection`, the end of a live session whose token expired or whose grant was revoked. Over native QUIC
-   * (`@mux/relay/node`) this is always reported, and so it is in a browser against moq-relay 0.17.0 or later, which
+   * (`@caprid/relay/node`) this is always reported, and so it is in a browser against moq-relay 0.17.0 or later, which
    * delivers its CLOSE_WEBTRANSPORT_SESSION (code 2, `unauthorized`). Against older relays a browser loses that close,
    * and it arrives as `TRANSPORT_ERROR` (muxinc/relay-sdks#14).
    */

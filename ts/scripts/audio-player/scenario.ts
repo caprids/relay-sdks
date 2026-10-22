@@ -7,8 +7,8 @@
  * playback and the cut, the input's playback rate is nudged as the Video.js renderer's latency controller does: 0.95
  * for a second, then 1.05 for a second (issue #329).
  */
-import { buildInterrupt, createBroadcastClock, INTERRUPT_TRACK, type Interrupt } from '@mux/moq-media';
-import { connectRelayPublisher, connectRelaySubscriber, type RelayTransportFactory } from '@mux/relay';
+import { buildInterrupt, createBroadcastClock, INTERRUPT_TRACK, type Interrupt } from '@caprid/moq-media';
+import { connectRelayPublisher, connectRelaySubscriber, type RelayTransportFactory } from '@caprid/relay';
 import { captureMicrophone } from '../../examples/webcodecs/capture-microphone.js';
 import { listenAudio } from '../../examples/webcodecs/listen-audio.js';
 import { publishCanvas } from '../../examples/webcodecs/publish-canvas.js';

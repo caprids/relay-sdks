@@ -1,4 +1,4 @@
-// The Node target's run (`pnpm test:conformance:node`): only the @mux/relay-quic conformance file, kept out of
+// The Node target's run (`pnpm test:conformance:node`): only the @caprid/relay-quic conformance file, kept out of
 // `pnpm test` because it needs the native addon and the Python accepting end.
 import { defineConfig } from 'vitest/config';
 

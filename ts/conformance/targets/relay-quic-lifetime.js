@@ -1,5 +1,5 @@
 /**
- * The child process behind the `@mux/relay-quic` target's process lifetime checks:
+ * The child process behind the `@caprid/relay-quic` target's process lifetime checks:
  *
  *     node relay-quic-lifetime.js <origin> <certificate hash hex> <kind>
  *
@@ -10,7 +10,7 @@
  * peer that holds the handshake, and prints `closed` once both have rejected: the cancelled dial (TA-11) must not hold
  * the process either. It reads no incoming stream, unlike the SDK, so only the adapter holds the process.
  */
-import { nativeQuicTransport } from '@mux/relay-quic';
+import { nativeQuicTransport } from '@caprid/relay-quic';
 
 const [origin, certificateHash, kind] = process.argv.slice(2);
 const value = Uint8Array.from(certificateHash.match(/../g), (byte) => Number.parseInt(byte, 16));

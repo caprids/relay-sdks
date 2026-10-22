@@ -1,5 +1,5 @@
 /**
- * `@mux/relay-websocket`: the Relay SDK's transport adapter for QMux over WebSocket. It carries MOQT on QMux
+ * `@caprid/relay-websocket`: the Relay SDK's transport adapter for QMux over WebSocket. It carries MOQT on QMux
  * (draft-ietf-quic-qmux, wire format `qmux-01`) inside one WebSocket connection over TCP, the relay's fallback for
  * networks that block UDP and browsers without a usable `WebTransport`. It follows the transport adapter contract
  * (`spec/transport-adapter.md`), with the deviations the contract records for it.
@@ -11,7 +11,7 @@
  *
  * @packageDocumentation
  */
-import type { MoqtTransport } from '@mux/moq-core';
+import type { MoqtTransport } from '@caprid/moq-core';
 import {
   assertHandshakeTimeout,
   type FallbackCarrier,
@@ -52,8 +52,8 @@ export type WebSocketTransportFactory = (url: string, protocols: string[]) => We
  * browser or in Node:
  *
  * ```ts
- * import { connectRelaySubscriber } from '@mux/relay';
- * import { createWebSocketTransport } from '@mux/relay-websocket';
+ * import { connectRelaySubscriber } from '@caprid/relay';
+ * import { createWebSocketTransport } from '@caprid/relay-websocket';
  *
  * const subscriber = await connectRelaySubscriber({ url, getToken, createTransport: createWebSocketTransport() });
  * ```
@@ -91,8 +91,8 @@ export type FallbackTransportFactory = (url: string, protocols: string[]) => Fal
  * run one after the other, never both at once, and each connection decides afresh.
  *
  * ```ts
- * import { connectRelayPublisher } from '@mux/relay';
- * import { withWebSocketFallback } from '@mux/relay-websocket';
+ * import { connectRelayPublisher } from '@caprid/relay';
+ * import { withWebSocketFallback } from '@caprid/relay-websocket';
  *
  * const publisher = await connectRelayPublisher({ url, getToken, createTransport: withWebSocketFallback() });
  * ```

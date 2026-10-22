@@ -740,7 +740,7 @@ timeout (10 s from moq-relay 0.17.0, 30 s before), waits out the full connect de
 
 Both fleets serve MOQT over QMux over WebSocket on TCP 443, beside QUIC on UDP 443, through
 moq-relay's `[web]` listener (`--web-https-listen`, with `--web-ws` on by default;
-`rs/moq-relay/src/websocket.rs`). The TypeScript SDK reaches it through `@mux/relay-websocket`
+`rs/moq-relay/src/websocket.rs`). The TypeScript SDK reaches it through `@caprid/relay-websocket`
 ([behavior](behavior.md#transport-fallback)). What differs from QUIC, measured on 2026-10-17 against a
 local moq-relay 0.17.5 (the production version) built from tag `moq-relay-v0.17.5`, with QUIC and the
 WebSocket listener on the same port, unless a row says it is read from the source:

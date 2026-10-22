@@ -7,7 +7,7 @@ import { chromium, firefox, webkit } from 'playwright';
 import { startConformancePeer } from './conformance-peer.js';
 import { startModuleServer } from './module-server.js';
 
-// The browser launcher for the transport adapter conformance suite against @mux/relay-websocket (#321). It starts the
+// The browser launcher for the transport adapter conformance suite against @caprid/relay-websocket (#321). It starts the
 // Node accepting end for QMux over WebSocket (websocket-peer.js), serves the suite, the adapter and @moq/qmux to a
 // Playwright page in each browser, runs every case there against the browser's own WebSocket, and prints the per-case
 // results. It exits non-zero when a case fails, or when an expected failure starts to pass.
@@ -55,8 +55,8 @@ const server = await startModuleServer({
     '/conformance/': resolve(root, 'conformance'),
   },
   importMap: {
-    '@mux/moq-core': '/core/index.js',
-    '@mux/relay-websocket': '/websocket/index.js',
+    '@caprid/moq-core': '/core/index.js',
+    '@caprid/relay-websocket': '/websocket/index.js',
     '@moq/qmux': '/qmux/index.js',
     '@moq/web-socket-stream': '/web-socket-stream/index.js',
   },

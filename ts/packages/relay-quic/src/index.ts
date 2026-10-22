@@ -1,11 +1,11 @@
 /**
- * `@mux/relay-quic`: the Relay SDK's transport adapter for Node. It speaks MOQT directly on a QUIC connection (native
+ * `@caprid/relay-quic`: the Relay SDK's transport adapter for Node. It speaks MOQT directly on a QUIC connection (native
  * QUIC, with the MOQT ALPNs it is given: `moqt-22`, then `moqt-20`), over quinn through a napi-rs addon, and follows the transport adapter contract
  * (`spec/transport-adapter.md`). Pass {@link nativeQuicTransport}'s factory as `createTransport`.
  *
  * @packageDocumentation
  */
-import type { MoqtTransport } from '@mux/moq-core';
+import type { MoqtTransport } from '@caprid/moq-core';
 import { loadAddon } from './addon.js';
 import { NativeQuicTransport } from './transport.js';
 
@@ -68,8 +68,8 @@ function bytesOf(value: BufferSource): Uint8Array {
  * A transport factory for the SDK's `createTransport` option that connects over native QUIC from Node:
  *
  * ```ts
- * import { connectRelayPublisher } from '@mux/relay';
- * import { nativeQuicTransport } from '@mux/relay-quic';
+ * import { connectRelayPublisher } from '@caprid/relay';
+ * import { nativeQuicTransport } from '@caprid/relay-quic';
  *
  * const publisher = await connectRelayPublisher({ url, getToken, createTransport: nativeQuicTransport() });
  * ```

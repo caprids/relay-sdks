@@ -28,7 +28,7 @@ dir = "ts"
 run = "pnpm install --frozen-lockfile"
 
 [tasks."ts:build"]
-description = "Build @mux/moq-core, @mux/moq-media, the optional Mediabunny adapter, and @mux/relay"
+description = "Build @caprid/moq-core, @caprid/moq-media, the optional Mediabunny adapter, and @caprid/relay"
 dir = "ts"
 run = "pnpm build"
 
@@ -85,34 +85,34 @@ dir = "ts"
 run = "pnpm test:conformance"
 
 [tasks."ts:test:conformance:websocket"]
-description = "Run the transport adapter conformance suite in Node against @mux/relay-websocket and its Node accepting end"
+description = "Run the transport adapter conformance suite in Node against @caprid/relay-websocket and its Node accepting end"
 depends = ["ts:install"]
 dir = "ts"
 run = "pnpm test:conformance:websocket"
 
 [tasks."ts:test:conformance:websocket:browsers"]
-description = "Run the @mux/relay-websocket conformance suite in Chromium, Firefox and WebKit (BROWSERS to pick)"
+description = "Run the @caprid/relay-websocket conformance suite in Chromium, Firefox and WebKit (BROWSERS to pick)"
 depends = ["ts:install"]
 dir = "ts"
 run = "pnpm test:conformance:websocket:browsers"
 
-# Only @mux/relay-quic's native addon needs Rust, so the tasks that build or lint it (these two, the live smoke test
+# Only @caprid/relay-quic's native addon needs Rust, so the tasks that build or lint it (these two, the live smoke test
 # and the mux-global example) bring their own toolchain and nothing else installs one: `pnpm check` builds no Rust.
 [tasks."ts:test:conformance:node"]
-description = "Build @mux/relay-quic's addon and run the transport adapter conformance suite against it in Node"
+description = "Build @caprid/relay-quic's addon and run the transport adapter conformance suite against it in Node"
 depends = ["ts:install", "python:install"]
 tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts"
 run = "pnpm test:conformance:node"
 
 [tasks."ts:build:native"]
-description = "Build @mux/relay-quic's addon for release; pass napi build options, such as --target <triple> -x, after --"
+description = "Build @caprid/relay-quic's addon for release; pass napi build options, such as --target <triple> -x, after --"
 tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" }, zig = "0.13.0" }
 dir = "ts/packages/relay-quic"
 run = "pnpm build:native"
 
 [tasks."ts:check:native"]
-description = "Format-check, lint and unit-test @mux/relay-quic's Rust crate"
+description = "Format-check, lint and unit-test @caprid/relay-quic's Rust crate"
 tools = { rust = { version = "1.97.1", components = "rustfmt,clippy" } }
 dir = "ts/packages/relay-quic/native"
 run = ["cargo fmt --check", "cargo clippy --release --all-targets -- -D warnings", "cargo test --release"]
@@ -156,7 +156,7 @@ run = [
 [tasks."python:docs"]
 description = "Render the Python API reference with pdoc to python/api-docs/ (open index.html)"
 dir = "python"
-run = "uv run pdoc --docformat restructuredtext --output-directory api-docs mux_relay mux_relay.quic moq_core moq_media"
+run = "uv run pdoc --docformat restructuredtext --output-directory api-docs caprid_relay caprid_relay.quic moq_core moq_media"
 
 [tasks."python:test:relay"]
 description = "Opt-in live smoke test against a real Relay (RELAY_TOKEN or hidden prompt)"

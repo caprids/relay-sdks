@@ -37,9 +37,9 @@ against that file.
 ### Transport fallback
 
 - The connection's transport is the application's choice, through the transport factory. The
-  default stays the browser's WebTransport (TypeScript) or native QUIC (Python, and `@mux/relay/node`):
+  default stays the browser's WebTransport (TypeScript) or native QUIC (Python, and `@caprid/relay/node`):
   the SDK never falls back to another transport by itself.
-- The TypeScript SDK's opt-in `@mux/relay-websocket` package carries MOQT on QMux over a WebSocket,
+- The TypeScript SDK's opt-in `@caprid/relay-websocket` package carries MOQT on QMux over a WebSocket,
   TCP to the same host and port as the endpoint (`https:` becomes `wss:`), for networks that block
   UDP and browsers without a usable WebTransport. `createWebSocketTransport()` always dials it.
 - `withWebSocketFallback()` dials WebTransport first, and QMux over WebSocket when that handshake
@@ -113,8 +113,8 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. It can be group-level: the relay may stop one group's stream while its subscription continues, so check `hasDemand` / `has_demand` rather than assume demand ended. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. In TypeScript, a `connecting`-phase `TRANSPORT_ERROR` usually means the browser abandoned the handshake, so a retry policy should treat it like `CONNECTION_TIMEOUT` (see [browser transport limits](../ts/GUIDE.md#browser-transport-limits)). |
-| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the relay ended a live session because its credential expired or its grant was revoked ([credential lifetime](#credential-lifetime)); connect again with a fresh token. TypeScript reports it in browsers and over native QUIC (`@mux/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the close, so there it arrives as `TRANSPORT_ERROR` (#14). |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed (TypeScript). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the relay ended a live session because its credential expired or its grant was revoked ([credential lifetime](#credential-lifetime)); connect again with a fresh token. TypeScript reports it in browsers and over native QUIC (`@caprid/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the close, so there it arrives as `TRANSPORT_ERROR` (#14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
@@ -1053,8 +1053,8 @@ higher value goes first and every other stream has 0.
   another. The transport decides how equal streams share the uplink, and a later group's stream can
   still finish first.
 - Where it applies ([TA-28](transport-adapter.md#streams)): Firefox's `WebTransport` from 155;
-  `@mux/relay-websocket`, whose QMux scheduler sends highest first, round-robin among equals; and
-  `@mux/relay-quic`, as quinn's stream priority. Chromium's does not: Chromium 153 has no
+  `@caprid/relay-websocket`, whose QMux scheduler sends highest first, round-robin among equals; and
+  `@caprid/relay-quic`, as quinn's stream priority. Chromium's does not: Chromium 153 has no
   `WebTransportSendStream` and drops the option, so a Chromium publisher sends as before. The
   Python SDK sets none: aioquic has no stream priorities.
 - It orders only what the publisher still holds. A backlog already in the network, in a deep
@@ -1201,7 +1201,7 @@ and [frame model](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b
 
 ## Media helpers
 
-The optional `@mux/moq-media` / `moq-media` packages implement pure format helpers. Raw Relay
+The optional `@caprid/moq-media` / `moq-media` packages implement pure format helpers. Raw Relay
 writers keep their existing byte/group behavior; no automatic media packaging is added to them.
 The media pins in `protocol.json` and exact bytes and parsed values in `vectors/media.json` apply
 to both languages.
@@ -1261,12 +1261,12 @@ to both languages.
   is reflected in [FFmpeg's avcC writer](https://patches.ffmpeg.org/doxygen/4.4/avc_8c_source.html).
 - TypeScript consumes encoder/demuxer-provided avcC and length-prefixed packets, and exposes only
   `avcCodecString` for header inspection. It does not expose Annex B parsing or construction APIs.
-  `@mux/moq-media` maps standard WebCodecs decoder configs for four-byte-length AVC and Opus,
+  `@caprid/moq-media` maps standard WebCodecs decoder configs for four-byte-length AVC and Opus,
   copying the exact description buffer/view range. `chunkToLocFrame` accepts native encoded video
   or audio chunks, copies their payload bytes unchanged, preserves microsecond presentation
   timestamps, and attaches supplied configs only to key chunks. Callers preserve encoder output
   order. These helpers require no browser globals at import time.
-  The optional `@mux/moq-mediabunny` file-input adapter borrows public packet payloads and rejects
+  The optional `@caprid/moq-mediabunny` file-input adapter borrows public packet payloads and rejects
   metadata-only packets. Both chunk and packet helpers accept a shared integer timestamp offset
   to normalize negative timestamps; input timestamps must be safe integers and the final timestamp
   follows the LOC nonnegative safe-integer contract. The adapter retains compatibility re-exports
@@ -1391,7 +1391,7 @@ to both languages.
 
 ## Media publishing
 
-The media publishing policy lives in the product package (`@mux/relay/media`, `mux_relay.media`)
+The media publishing policy lives in the product package (`@caprid/relay/media`, `caprid_relay.media`)
 over registered tracks: one tier above the write slot, one below the proposed `register_media`
 handle. It knows no format. A frame carries its own object properties and a catalog is bytes.
 Implemented in both SDKs.
@@ -1527,12 +1527,12 @@ can finish after newer groups have started ([issue #303](https://github.com/muxi
 The raw subscription delivers them as they arrive. A frame sequencer (`createFrameSequencer` /
 `FrameSequencer`, in the format packages) turns one track's objects into frames in decode order and
 drops what is too late against the broadcast's playout clock. A frame reader (`createFrameReader` /
-`FrameReader`, in `@mux/relay/media` and `mux_relay.media`) is a subscription's or a want's handlers
+`FrameReader`, in `@caprid/relay/media` and `caprid_relay.media`) is a subscription's or a want's handlers
 that drive a sequencer and poll it when a wait ends; it knows no format. Implemented in both SDKs.
 
 - A viewer subscribes to a media track with the parameters from
   `mediaSubscribeParameters(kind, overrides)` / `media_subscribe_parameters(kind, overrides)`, in
-  `@mux/relay/media` and `mux_relay.media` ([#337](https://github.com/muxinc/relay-sdks/issues/337)).
+  `@caprid/relay/media` and `caprid_relay.media` ([#337](https://github.com/muxinc/relay-sdks/issues/337)).
   They hold a SUBSCRIBER_PRIORITY that puts audio ahead of video, lower being more urgent: 16 for
   audio and 96 for video, the same values as the [publisher priorities](#media-publishing), pinned
   in `spec/protocol.json` as `mediaSubscribeParameters.subscriberPriority`. The overrides are copied

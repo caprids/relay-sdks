@@ -1,5 +1,5 @@
 {
-  "name": "@mux/relay-quic-linux-x64-gnu",
+  "name": "@caprid/relay-quic-linux-x64-gnu",
   "version": "0.0.0",
   "cpu": [
     "x64"

@@ -28,7 +28,7 @@
  * Tests drive a slot with an in-memory subgroup writer and fake timers; the "Write phases and
  * interruptions" table in spec/behavior.md is the list they cover.
  */
-import { type SubgroupWriter, streamResetReason } from '@mux/moq-core';
+import { type SubgroupWriter, streamResetReason } from '@caprid/moq-core';
 import {
   type DeliveryTimeouts,
   effectiveTimeouts,

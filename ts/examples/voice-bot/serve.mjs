@@ -1,7 +1,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { roomEndpoint } from '@mux/relay';
+import { roomEndpoint } from '@caprid/relay';
 import { startModuleServer } from '../../scripts/module-server.js';
 
 // Serve the voice bot page on http://127.0.0.1 (a secure context, as WebTransport needs). The page talks to the bot
@@ -51,10 +51,10 @@ const server = await startModuleServer({
     '/examples/': resolve(root, 'examples'),
   },
   importMap: {
-    '@mux/relay': '/sdk/index.js',
-    '@mux/relay/media': '/sdk/media.js',
-    '@mux/moq-core': '/packages/moq-core/dist/index.js',
-    '@mux/moq-media': '/packages/moq-media/dist/index.js',
+    '@caprid/relay': '/sdk/index.js',
+    '@caprid/relay/media': '/sdk/media.js',
+    '@caprid/moq-core': '/packages/moq-core/dist/index.js',
+    '@caprid/moq-media': '/packages/moq-media/dist/index.js',
   },
   transpile: true,
   body,

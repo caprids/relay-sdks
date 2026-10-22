@@ -6,7 +6,7 @@ name = "relay-sdks-python"
 version = "0.0.0"
 description = "Development workspace for the Relay Python SDK"
 requires-python = ">=3.11"
-dependencies = ["mux-moq-core", "mux-moq-media[opus]", "mux-relay"]
+dependencies = ["caprid-moq-core", "caprid-moq-media[opus]", "caprid-relay"]
 
 [dependency-groups]
 dev = [
@@ -32,9 +32,9 @@ default-groups = ["dev", "examples"]
 members = ["packages/*"]
 
 [tool.uv.sources]
-mux-moq-core = { workspace = true }
-mux-moq-media = { workspace = true }
-mux-relay = { workspace = true }
+caprid-moq-core = { workspace = true }
+caprid-moq-media = { workspace = true }
+caprid-relay = { workspace = true }
 
 # ---------------------------------------------------------------------------------------------------
 # Astral tooling: ruff lints and formats, ty type-checks. Both read this file from the workspace root.
@@ -43,7 +43,7 @@ mux-relay = { workspace = true }
 [tool.ruff]
 line-length = 120
 target-version = "py311"
-src = ["packages/moq-media/src", "packages/moq-core/src", "packages/mux-relay/src"]
+src = ["packages/moq-media/src", "packages/moq-core/src", "packages/caprid-relay/src"]
 
 [tool.ruff.lint]
 select = [
@@ -81,9 +81,9 @@ python-version = "3.11"
 root = [
   "packages/moq-media/src",
   "packages/moq-core/src",
-  "packages/mux-relay/src",
+  "packages/caprid-relay/src",
   "packages/moq-core/tests",
-  "packages/mux-relay/tests",
+  "packages/caprid-relay/tests",
   "examples",
   "scripts",
 ]
@@ -97,12 +97,12 @@ include = ["packages", "scripts", "examples"]
 testpaths = [
   "packages/moq-media/tests",
   "packages/moq-core/tests",
-  "packages/mux-relay/tests",
+  "packages/caprid-relay/tests",
   "examples/shared/tests",
   "examples/videojs_stream/tests",
   "examples/voice_bot/tests",
 ]
-pythonpath = ["packages/moq-core/tests", "packages/mux-relay/tests"]
+pythonpath = ["packages/moq-core/tests", "packages/caprid-relay/tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
@@ -110,17 +110,17 @@ filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
 # The Python counterpart of ts/scripts/check-boundaries.mjs: the generic core must not know about
 # Relay or any transport library. `include_external_packages` lets the second contract see aioquic.
 [tool.importlinter]
-root_packages = ["moq_core", "moq_media", "mux_relay"]
+root_packages = ["moq_core", "moq_media", "caprid_relay"]
 include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "moq_core imports neither Relay nor media formats"
 type = "forbidden"
 source_modules = ["moq_core"]
-forbidden_modules = ["mux_relay", "moq_media"]
+forbidden_modules = ["caprid_relay", "moq_media"]
 
 [[tool.importlinter.contracts]]
-name = "moq_core has no runtime dependencies; the transport lives in mux_relay"
+name = "moq_core has no runtime dependencies; the transport lives in caprid_relay"
 type = "forbidden"
 source_modules = ["moq_core"]
 forbidden_modules = ["aioquic", "cryptography", "certifi"]
@@ -129,7 +129,7 @@ forbidden_modules = ["aioquic", "cryptography", "certifi"]
 name = "moq_media imports neither Relay nor transport libraries"
 type = "forbidden"
 source_modules = ["moq_media"]
-forbidden_modules = ["mux_relay", "aioquic", "cryptography", "certifi"]
+forbidden_modules = ["caprid_relay", "aioquic", "cryptography", "certifi"]
 
 # PyAV is the opus extra's, so only moq_media.opus may import it. The ignore drops that one edge, so
 # this contract cannot see the package root importing moq_media.opus; test_opus.py checks that.

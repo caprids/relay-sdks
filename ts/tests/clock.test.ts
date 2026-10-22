@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { chunkToLocFrame, createBroadcastClock, createPlayoutClock, type PlayoutDecision } from '@mux/moq-media';
+import { chunkToLocFrame, createBroadcastClock, createPlayoutClock, type PlayoutDecision } from '@caprid/moq-media';
 import { describe, expect, it, vi } from 'vitest';
 
 type Step = {

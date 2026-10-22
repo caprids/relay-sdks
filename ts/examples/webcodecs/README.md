@@ -6,11 +6,11 @@ LOC carries the encoder's chunk bytes directly: no MP4/WebM muxing and no Mediab
 [`publish-canvas.ts`](publish-canvas.ts) samples a canvas at approximately 30 fps and publishes
 AVC/H.264 with native `VideoEncoder` output. Given a microphone from
 [`capture-microphone.ts`](capture-microphone.ts), it also publishes mono Opus on the same broadcast
-timeline. It uses only `@mux/relay`, `@mux/moq-media`, and browser APIs. Copy the files into a
+timeline. It uses only `@caprid/relay`, `@caprid/moq-media`, and browser APIs. Copy the files into a
 browser application whose bundler resolves those workspace packages. Run in a secure context with
 WebCodecs, AVC encoding, and WebTransport support.
 
-The encoders' output goes through `@mux/relay/media`: a frame writer per media track maps chunks
+The encoders' output goes through `@caprid/relay/media`: a frame writer per media track maps chunks
 onto groups (a group per keyframe for video, per frame for audio), and a catalog service and a
 document service serve the catalog and the media timeline on every relay subscription. The output
 callbacks never await a write. When the transport falls behind, the video writer drops its backlog
@@ -18,8 +18,8 @@ and asks for a keyframe, which the capture loop forces on the next frame; it doe
 new relay subscription. Only a track that ends stops the example.
 
 ```ts
-import { composeMoqSource, createBroadcastClock } from '@mux/moq-media';
-import { connectRelayPublisher } from '@mux/relay';
+import { composeMoqSource, createBroadcastClock } from '@caprid/moq-media';
+import { connectRelayPublisher } from '@caprid/relay';
 import { captureMicrophone } from './capture-microphone.js';
 import { publishCanvas } from './publish-canvas.js';
 
@@ -59,7 +59,7 @@ audio track alone; `publishCanvas` encodes its microphone through the same code.
 
 [`listen-audio.ts`](listen-audio.ts) plays a broadcast's `audio` track with no video, as a voice
 listener would: it reads the catalog for the decoder config, gives the playout clock the audio-only
-target latency, and plays the frames a frame reader delivers through `@mux/moq-media`'s audio player.
+target latency, and plays the frames a frame reader delivers through `@caprid/moq-media`'s audio player.
 Pass `echoCancellation: true` in Chromium when the page also captures a microphone. When the
 catalog lists the interrupt track (`INTERRUPT_TRACK`), the listener subscribes to it too and cuts
 the audio each interrupt names; `onInterrupt` hears about each one. When it lists the transcript
@@ -68,7 +68,7 @@ which interrupts cut too; `onTranscript` hears about each segment. `publishCanva
 lists extra data tracks, such as that one, in the catalog it serves.
 
 ```ts
-import { connectRelaySubscriber } from '@mux/relay';
+import { connectRelaySubscriber } from '@caprid/relay';
 import { listenAudio } from './listen-audio.js';
 
 const subscriber = await connectRelaySubscriber({ url, getToken: () => subscriberToken });
@@ -90,7 +90,7 @@ get `clock.now()` when they are captured. The microphone runs through an `AudioC
 `AudioWorklet`, which works in Chromium, Firefox and Safari: no `MediaStreamTrackProcessor`. The
 worklet cuts the input into 20 ms blocks stamped with context time. A source timeline maps them onto
 the broadcast clock. It is calibrated on every block from the context's render clock
-([`createRenderClock`](render-clock.ts) from `@mux/moq-media`): the block that reached the main thread soonest after its
+([`createRenderClock`](render-clock.ts) from `@caprid/moq-media`): the block that reached the main thread soonest after its
 render, over the last second. The catalog lists the audio beside the video in one render group, and
 every Opus frame is its own group.
 
@@ -146,10 +146,10 @@ connection ends, for example after a network outage longer than about 5 s in Chr
 reconnects; see [publisher recovery](../../../spec/publisher-recovery.md).
 
 For your own encoder callback, import `videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`,
-and `chunkToLocFrame` from `@mux/moq-media`. `chunkToLocFrame` accepts native video or audio chunks,
+and `chunkToLocFrame` from `@caprid/moq-media`. `chunkToLocFrame` accepts native video or audio chunks,
 copies the encoded payload without changing its bytes, preserves microsecond timestamps, and adds
 LOC properties. Retain decoder configuration across callbacks, and hand each frame to a
-`createFrameWriter` from `@mux/relay/media`, as this example does: it groups frames, skips them
+`createFrameWriter` from `@caprid/relay/media`, as this example does: it groups frames, skips them
 without demand, bounds the backlog, and says when the next frame must be a keyframe. See the
 [guide](../../GUIDE.md#multi-object-groups-and-relay-demand). The helper itself performs no I/O or
 grouping.

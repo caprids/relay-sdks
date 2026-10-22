@@ -27,6 +27,16 @@ from urllib.parse import urlsplit
 
 import numpy as np
 
+from caprid_relay import (
+    RelayPublisher,
+    RelayTrackWriter,
+    RestartReason,
+    SupervisedSubscriber,
+    connect_relay_publisher,
+    connect_supervised_subscriber,
+    room_endpoint,
+)
+from caprid_relay.media import CatalogService, FrameReader, FrameWriter, media_track_properties
 from moq_media import (
     AUDIO_TRACK,
     CATALOG_TRACK,
@@ -45,16 +55,6 @@ from moq_media import (
     loc_track_properties,
 )
 from moq_media.opus import OpusDecoder, OpusEncoder, OpusPacket
-from mux_relay import (
-    RelayPublisher,
-    RelayTrackWriter,
-    RestartReason,
-    SupervisedSubscriber,
-    connect_relay_publisher,
-    connect_supervised_subscriber,
-    room_endpoint,
-)
-from mux_relay.media import CatalogService, FrameReader, FrameWriter, media_track_properties
 
 DEFAULT_ENDPOINT = "https://sjc.relay.mux.global"
 

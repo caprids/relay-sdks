@@ -1,5 +1,5 @@
-import { createBroadcastClock, type Interrupt, type TranscriptSegment } from '@mux/moq-media';
-import type { RelayPublisher, RelaySubscriber } from '@mux/relay';
+import { createBroadcastClock, type Interrupt, type TranscriptSegment } from '@caprid/moq-media';
+import type { RelayPublisher, RelaySubscriber } from '@caprid/relay';
 import { captureMicrophone } from '../webcodecs/capture-microphone.js';
 import { type AudioListener, listenAudio } from '../webcodecs/listen-audio.js';
 import { publishMicrophone } from '../webcodecs/publish-microphone.js';

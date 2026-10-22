@@ -23,9 +23,9 @@ from videojs_stream.stream import (
     summarize,
 )
 
+from caprid_relay import CancellationToken, Cancelled, RelayError
+from caprid_relay.media import CatalogService, FrameWriter
 from moq_media import loc_properties
-from mux_relay import CancellationToken, Cancelled, RelayError
-from mux_relay.media import CatalogService, FrameWriter
 
 Ended = list[tuple[str, RelayError]]
 

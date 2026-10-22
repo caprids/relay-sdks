@@ -1,5 +1,5 @@
 // Opt-in live check of the publisher's send order (spec/behavior.md, "Send order") against a real relay. Run after
-// `pnpm build` and `pnpm --filter @mux/relay-quic build:native`.
+// `pnpm build` and `pnpm --filter @caprid/relay-quic build:native`.
 //
 // A headless browser page (SEND_ORDER_BROWSER: firefox, the default, or chromium) publishes one audio and one video track, registered with mediaTrackProperties, through
 // frame writers: 20 ms audio frames of SEND_ORDER_AUDIO_BYTES (default 160), one group per frame, and 30 fps video of
@@ -28,7 +28,7 @@
 import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { connectSupervisedSubscriber } from '@mux/relay/node';
+import { connectSupervisedSubscriber } from '@caprid/relay/node';
 import { startModuleServer } from './module-server.js';
 
 const env = process.env;
@@ -52,9 +52,9 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const server = await startModuleServer({
   modules: { '/sdk/': resolve(root, 'dist'), '/packages/': resolve(root, 'packages') },
   importMap: {
-    '@mux/relay': '/sdk/index.js',
-    '@mux/relay/media': '/sdk/media.js',
-    '@mux/moq-core': '/packages/moq-core/dist/index.js',
+    '@caprid/relay': '/sdk/index.js',
+    '@caprid/relay/media': '/sdk/media.js',
+    '@caprid/moq-core': '/packages/moq-core/dist/index.js',
   },
 });
 const browserName = env.SEND_ORDER_BROWSER ?? 'firefox';
@@ -98,8 +98,8 @@ try {
           return create.call(this, rest);
         };
       }
-      const { connectRelayPublisher } = await import('@mux/relay');
-      const { createFrameWriter, mediaTrackProperties } = await import('@mux/relay/media');
+      const { connectRelayPublisher } = await import('@caprid/relay');
+      const { createFrameWriter, mediaTrackProperties } = await import('@caprid/relay/media');
       const publisher = await connectRelayPublisher({ url, namespace, getToken: () => token });
       const audio = createFrameWriter(
         publisher.registerTrack({ track: 'audio', trackProperties: mediaTrackProperties('audio') }),

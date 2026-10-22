@@ -21,9 +21,9 @@ from videojs_stream.stream import (
     stale_for,
 )
 
+from caprid_relay import CancellationToken
+from caprid_relay.media import CatalogService, FrameWriter
 from moq_media import LOC_TIMESTAMP, loc_properties
-from mux_relay import CancellationToken
-from mux_relay.media import CatalogService, FrameWriter
 
 
 def sample(kind: str, timestamp: float, *, key: bool = True, size: int = 4) -> EncodedSample:

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from mux_relay import RelayError, RelayTrackWriter
+from caprid_relay import RelayError, RelayTrackWriter
 
 SENDING_PHASES = frozenset({"opening-stream", "writing", "closing"})
 """The phases after which a failed write may have delivered some or all of its bytes."""

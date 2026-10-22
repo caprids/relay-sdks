@@ -1,8 +1,8 @@
-import type { KeyValuePair, MoqtObject, SubscribeOk } from '@mux/moq-core';
+import type { KeyValuePair, MoqtObject, SubscribeOk } from '@caprid/moq-core';
 import type { WantSwitchedInfo } from './supervised-subscriber.js';
 
 /**
- * What a {@link FrameReader} drives: `@mux/moq-media`'s `FrameSequencer` qualifies. The reader feeds it a
+ * What a {@link FrameReader} drives: `@caprid/moq-media`'s `FrameSequencer` qualifies. The reader feeds it a
  * subscription's events and polls it; the sequencer owns the ordering, the deadlines and the LOC format.
  */
 export interface FrameReaderSequencer<F> {
@@ -35,7 +35,7 @@ export interface FrameReaderOptions<F> {
    */
   onFrame(frame: F): void;
   /**
-   * The sequencer signalled a catch-up (`@mux/moq-media`'s `catchUpAfterUs`): frames keep arriving too late to use.
+   * The sequencer signalled a catch-up (`@caprid/moq-media`'s `catchUpAfterUs`): frames keep arriving too late to use.
    * Replace the subscription at the live edge, which drops what the relay still holds queued for it: a supervised
    * subscriber's `catchUp(key)` does, and its `onRestarted` restarts this reader. Called synchronously, after the
    * frames of the same poll; an exception from it goes to `console.error`.

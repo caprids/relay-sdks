@@ -19,9 +19,9 @@ import {
   parseMsfCatalog,
   type SequencedFrame,
   VIDEO_TRACK,
-} from '@mux/moq-media';
-import type { RelaySubscriber, RelaySubscription } from '@mux/relay';
-import { createFrameReader, type FrameReader } from '@mux/relay/media';
+} from '@caprid/moq-media';
+import type { RelaySubscriber, RelaySubscription } from '@caprid/relay';
+import { createFrameReader, type FrameReader } from '@caprid/relay/media';
 import { createRenderClock, type RenderClock } from '../../examples/webcodecs/render-clock.js';
 import { createOnsetDetector, type HeardBeep, type ShownFlash } from './measure.js';
 

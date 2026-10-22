@@ -1,6 +1,6 @@
 # Relay SDKs
 
-The Relay SDKs (TypeScript `@mux/relay`, Python `mux_relay`) publish to and subscribe from the Mux
+The Relay SDKs (TypeScript `@caprid/relay`, Python `caprid_relay`) publish to and subscribe from the Mux
 MoQ Relay under one shared behaviour contract. Public names live in
 [spec/vocabulary.md](spec/vocabulary.md) and are not repeated here. This glossary holds the
 internal, relay-side and test vocabulary that the code, its tests and its reviews use.
@@ -272,10 +272,10 @@ listener, viewer
 
 **Transport adapter**:
 An implementation of the transport seam a connection runs over: create and accept streams, close,
-observe closure (the core's `MoqtTransport`). The aioquic native QUIC client (`mux_relay.quic`) is the
+observe closure (the core's `MoqtTransport`). The aioquic native QUIC client (`caprid_relay.quic`) is the
 Python product's only adapter (ADR 0004); in TypeScript a runtime's native `WebTransport` is the default
-adapter, and runtimes without one take an adapter the caller supplies: `@mux/relay-quic` or
-`@mux/relay-websocket`. The tests supply in-memory pairs and
+adapter, and runtimes without one take an adapter the caller supplies: `@caprid/relay-quic` or
+`@caprid/relay-websocket`. The tests supply in-memory pairs and
 loopback accepting ends, a WebTransport one among them.
 _Avoid_: polyfill (an adapter satisfies the SDK's seam, not the W3C `WebTransport` API), transport
 layer, transport implementation, WebTransport (the protocol, not the adapter), connection (a Relay
@@ -296,7 +296,7 @@ _Avoid_: WebTransport connection, H3 transport
 **QMux over WebSocket**:
 MOQT carried on QMux (QUIC's streams and flow control over one reliable byte stream) inside a WebSocket,
 over TCP, with the subprotocol `qmux-01.<MOQT version>` and the path and token in the upgrade URL. The
-TypeScript SDK's opt-in `@mux/relay-websocket` adapter speaks it, for networks that block UDP and
+TypeScript SDK's opt-in `@caprid/relay-websocket` adapter speaks it, for networks that block UDP and
 browsers without a usable `WebTransport` (ADR 0005). Its streams share one TCP connection.
 _Avoid_: WebSocket polyfill (the relay's own name for it; the adapter polyfills nothing), TCP fallback
 (the fallback is a policy, `withWebSocketFallback`, not the transport), WebSocket transport (unqualified)

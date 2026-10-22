@@ -5,7 +5,7 @@ import {
   LOC_TIMESTAMP,
   LOC_VIDEO_CONFIG,
   videoTrackFromDecoderConfig,
-} from '@mux/moq-media';
+} from '@caprid/moq-media';
 import { expect, it } from 'vitest';
 
 const avcc = Uint8Array.from(Buffer.from('0142c014ffe1000a6742c014da05067e784001000468ce3c80', 'hex'));

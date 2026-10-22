@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import * as media from '@mux/moq-media';
+import * as media from '@caprid/moq-media';
 import { describe, expect, it } from 'vitest';
 
 interface RawTrack {

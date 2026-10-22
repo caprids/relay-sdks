@@ -3,7 +3,7 @@
  * the bot, and a log of what happens. serve.mjs puts the endpoint, the conversation's namespace and, from RELAY_TOKEN,
  * the token in `window.voiceBot`.
  */
-import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
+import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay';
 import type { AudioListener } from '../webcodecs/listen-audio.js';
 import { talkToBot } from './talk-to-bot.js';
 

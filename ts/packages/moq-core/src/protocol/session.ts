@@ -103,7 +103,7 @@ export interface MoqtTransport {
  * {@link isStreamFailure}).
  */
 export interface RequestError {
-  /** A {@link @mux/moq-core!REQUEST_ERROR_CODE} value; the session uses `INTERNAL_ERROR` or `TIMEOUT` for failures it synthesizes. */
+  /** A {@link @caprid/moq-core!REQUEST_ERROR_CODE} value; the session uses `INTERNAL_ERROR` or `TIMEOUT` for failures it synthesizes. */
   errorCode: number;
   /** REQUEST_ERROR's Retry Interval as received; `0` for failures the session synthesizes. */
   retryInterval: number;
@@ -125,7 +125,7 @@ export interface SubscribeOk {
 
 /** PUBLISH_DONE: the publisher ended a subscription. */
 export interface PublishDone {
-  /** A {@link @mux/moq-core!PUBLISH_DONE_STATUS} value. */
+  /** A {@link @caprid/moq-core!PUBLISH_DONE_STATUS} value. */
   statusCode: number;
   /** Data streams the publisher opened; `undefined` when it could not count them (§9.9). */
   streamCount: number | undefined;
@@ -419,7 +419,7 @@ export interface MoqtSession {
 
 const DEFAULT_UNKNOWN_ALIAS_TIMEOUT_MS = 2000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
-const DEFAULT_IMPLEMENTATION_NAME = '@mux/moq-core';
+const DEFAULT_IMPLEMENTATION_NAME = '@caprid/moq-core';
 
 /**
  * A request failure that arrives as a _stream_ event — FIN before any response, a transport reset, or the response

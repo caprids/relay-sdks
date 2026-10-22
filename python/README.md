@@ -38,7 +38,7 @@ For another deployment, use the endpoint supplied by its operator.
 hand:
 
 ```python
-from mux_relay import room_endpoint
+from caprid_relay import room_endpoint
 
 url = room_endpoint("https://sjc.relay.mux.global", ["acme", "rooms", "42"])
 # 'https://sjc.relay.mux.global/acme/rooms/42'
@@ -117,8 +117,8 @@ demo's round trip.
 
 The workspace installs both packages as editable sources. Put a script in `python/` and run it
 with `mise exec -- uv run --project python python python/your_script.py` from the repository root;
-`from mux_relay import connect_relay_subscriber, connect_relay_publisher` resolves the local packages.
-`mux_relay` re-exports the core types its own signatures use (`MoqtObject`, `MessageParameters`,
+`from caprid_relay import connect_relay_subscriber, connect_relay_publisher` resolves the local packages.
+`caprid_relay` re-exports the core types its own signatures use (`MoqtObject`, `MessageParameters`,
 `SubscribeOk`, `RequestError`, `Closed`, and the rest of the "Protocol types borrowed from the core"
 row in [the vocabulary](../spec/vocabulary.md)); other protocol types, such as the location filters
 for `subscribe(parameters=...)`, come from the core package, which the workspace installs alongside:
@@ -127,12 +127,12 @@ For a separate virtual environment, install **both** local packages together (fr
 
 ```sh
 mise exec -- uv venv /tmp/relay-quickstart-venv
-mise exec -- uv pip install --python /tmp/relay-quickstart-venv/bin/python -e ./python/packages/moq-core -e ./python/packages/mux-relay
-/tmp/relay-quickstart-venv/bin/python -c 'import mux_relay; print("Local Relay SDK ready")'
+mise exec -- uv pip install --python /tmp/relay-quickstart-venv/bin/python -e ./python/packages/moq-core -e ./python/packages/caprid-relay
+/tmp/relay-quickstart-venv/bin/python -c 'import caprid_relay; print("Local Relay SDK ready")'
 ```
 
 Choose your application's environment path in place of the temporary path when adopting the SDK.
-Installing only `mux-relay` would leave its unpublished `mux-moq-core` dependency unresolved.
+Installing only `caprid-relay` would leave its unpublished `caprid-moq-core` dependency unresolved.
 
 ## Subscribe and publish separately
 
@@ -235,7 +235,7 @@ relay always serves Descending), `new_group_request`, both delivery timeouts and
 the relay: an application that needs one sends it to the publisher on a track of its own. See
 [subscription parameters](../spec/relay-interop.md#subscription-parameters).
 
-For media, `mux_relay.media.media_subscribe_parameters(kind)` gives a subscription the subscriber
+For media, `caprid_relay.media.media_subscribe_parameters(kind)` gives a subscription the subscriber
 priority that puts audio ahead of video when the viewer's downlink is congested: 16 for audio, 96
 for video, the values `media_track_properties` gives the publisher. moq-relay orders what it sends a
 viewer by subscriber priority alone and ignores the publisher's, so without it audio waits behind
@@ -243,7 +243,7 @@ video's backlog. Pass other parameters as `overrides`; a `subscriber_priority` t
 default. See [media subscribing](../spec/behavior.md#media-subscribing).
 
 ```python
-from mux_relay.media import media_subscribe_parameters
+from caprid_relay.media import media_subscribe_parameters
 
 audio = subscriber.subscribe(namespace, "audio", handlers, parameters=media_subscribe_parameters("audio"))
 video = subscriber.subscribe(namespace, "video", handlers, parameters=media_subscribe_parameters("video"))
@@ -306,7 +306,7 @@ better.
 ```python
 from datetime import UTC, datetime
 
-from mux_relay import RelayCredential, connect_relay_subscriber
+from caprid_relay import RelayCredential, connect_relay_subscriber
 
 
 async def get_token() -> RelayCredential:
@@ -337,7 +337,7 @@ subscription is active and moves them make-before-break: `switch_to` subscribes 
 while the old one keeps delivering, and cuts over once a new object passes `until`.
 
 ```python
-from mux_relay import CancellationToken, SwitchableHandlers
+from caprid_relay import CancellationToken, SwitchableHandlers
 
 switchable = subscriber.subscribe_switchable(
     namespace,
@@ -427,7 +427,7 @@ application that has to survive network loss can use the supervisors instead. Th
 connection options and return once their first connection is up.
 
 ```python
-from mux_relay import SupervisionBackoff, WantHandlers, connect_supervised_publisher, connect_supervised_subscriber
+from caprid_relay import SupervisionBackoff, WantHandlers, connect_supervised_publisher, connect_supervised_subscriber
 
 publisher = await connect_supervised_publisher(
     url,
@@ -460,7 +460,7 @@ subscriptions to a reconnected publisher, and can keep serving a dead one's cach
 ([publisher recovery](../spec/publisher-recovery.md)). Every registered track is registered again on
 each generation. Writes are never replayed: while no generation is up, a write raises `RECONNECTING`
 at once, and an operation the connection's end interrupted raises it too, so write the next object,
-or the next keyframe, when it is live again. A `mux_relay.media.FrameWriter` on a supervised track
+or the next keyframe, when it is live again. A `caprid_relay.media.FrameWriter` on a supervised track
 treats it as an interruption and resumes at the next keyframe.
 
 `want(key, namespace, track, handlers, ...)` keeps one track subscribed until `unwant(key)`. It
@@ -626,7 +626,7 @@ raises `WRITE_TIMEOUT`; the track stays open for a new group at the next keyfram
 The following is an application sketch, not the data quickstart. The optional
 [moq-media format package](packages/moq-media/README.md) supplies `loc_properties` and
 `loc_track_properties`; the encoded frames, timestamps, and codec configuration come from your
-encoder. Install `mux-moq-media` alongside `mux-relay` when publishing media (the development workspace
+encoder. Install `caprid-moq-media` alongside `caprid-relay` when publishing media (the development workspace
 includes it). It also provides the MSF catalog builder, source URLs, and H.264 configuration helpers
 used by the Video.js example.
 
@@ -668,7 +668,7 @@ written during that first subscription reach no viewer, so do not rely on the fi
 demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and
 [a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay).
 
-Both loops above exist ready-made in `mux_relay.media`, the media publishing policy the Video.js
+Both loops above exist ready-made in `caprid_relay.media`, the media publishing policy the Video.js
 example runs on. `CatalogService(track, document)` re-sends a document on every relay subscription
 and retries a failed send while demand remains; `DocumentService(track)` does the same for a
 document you replace with `update(document)`, such as a media timeline, and also sends each update
@@ -691,7 +691,7 @@ the "Media publishing" section of [behavior.md](../spec/behavior.md#media-publis
 Run the data-only publishing/subscribing integration tests without a live relay:
 
 ```sh
-cd python && mise exec -- uv run pytest packages/mux-relay/tests/test_publish.py
+cd python && mise exec -- uv run pytest packages/caprid-relay/tests/test_publish.py
 ```
 
 ### Text and JSON
@@ -704,7 +704,7 @@ demand, deadline, cancellation, and encoded byte-size limits as `write()`. Group
 Use the exported readers explicitly in subscription callbacks:
 
 ```python
-from mux_relay import RelaySubscriptionHandlers, read_json, read_text
+from caprid_relay import RelaySubscriptionHandlers, read_json, read_text
 
 text_handlers = RelaySubscriptionHandlers(on_object=lambda obj: print(read_text(obj)))
 json_handlers = RelaySubscriptionHandlers(on_object=lambda obj: print(read_json(obj)))
@@ -740,7 +740,7 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `RECONNECTING` | A supervised publisher had no generation up, or the connection ended under the operation; nothing was replayed. Write the next object, or the next keyframe, once it is live. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
-| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed (TypeScript). |
 | `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. TypeScript reports it too, in browsers only against moq-relay 0.17.0 or later (older relays' refusals reach a browser as `TRANSPORT_ERROR`; see #14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
@@ -794,7 +794,7 @@ credential refusal is the relay's application CONNECTION_CLOSE with code 0x2 and
 `asyncio.CancelledError`, is passed through unchanged.
 
 ```python
-from mux_relay import RelayError
+from caprid_relay import RelayError
 
 try:
     await track.write_text("current state")
@@ -807,8 +807,8 @@ except RelayError as error:
 
 ## Transport
 
-`connect_relay_subscriber` and `connect_relay_publisher` default to `mux_relay.quic.connect_quic`,
-native QUIC on aioquic: the wire path `@mux/relay-quic` uses on Node. MOQT runs straight on the QUIC
+`connect_relay_subscriber` and `connect_relay_publisher` default to `caprid_relay.quic.connect_quic`,
+native QUIC on aioquic: the wire path `@caprid/relay-quic` uses on Node. MOQT runs straight on the QUIC
 connection with ALPN `moqt-22` (or `moqt-20`, offered second as a fallback) and no HTTP/3, and SETUP carries the endpoint's path (with the token)
 and authority ([ADR 0004](../docs/adr/0004-python-dialing-end-speaks-native-quic.md)). The connection
 ends with an application CONNECTION_CLOSE. TLS verification uses the system CA bundle that ships with
@@ -817,8 +817,8 @@ any other implementation of the `moq_core.MoqtTransport` seam:
 
 ```python
 from aioquic.quic.configuration import QuicConfiguration
-from mux_relay import connect_relay_subscriber
-from mux_relay.quic import connect_quic
+from caprid_relay import connect_relay_subscriber
+from caprid_relay.quic import connect_quic
 
 configuration = QuicConfiguration(is_client=True, cafile="/path/to/ca.pem")
 subscriber = await connect_relay_subscriber(
@@ -849,18 +849,18 @@ publisher holds about 28 bytes per group it has ever sent until it reconnects: r
 for each group per second it sends, or 2.4 GB a day at 1000 groups/s
 ([#47](https://github.com/muxinc/relay-sdks/issues/47)).
 
-`packages/mux-relay/tests/test_quic.py` runs the full smoke-test assertion list over a real QUIC
+`packages/caprid-relay/tests/test_quic.py` runs the full smoke-test assertion list over a real QUIC
 loopback: native QUIC listeners on `localhost` (aioquic, self-signed certificates) fronting the
 in-memory relay hub (`tests/relay_helpers/quic_hub.py`), so the default transport is exercised end to
 end in `python:check`. It also holds the native QUIC dialing end to the transport adapter rules, one
 test per rule, against the conformance peer's native QUIC mode. `test_quic_session.py` drives the
 session against a loopback server on the same QUIC plumbing (`tests/relay_helpers/quic_server.py`), whose
 inbound link it can impair: backpressure, the drain before close, pruning, the keepalive and the socket.
-The stream halves and the dropped-FIN retry (`mux_relay/quic/_fin_retry.py`) also have in-process
+The stream halves and the dropped-FIN retry (`caprid_relay/quic/_fin_retry.py`) also have in-process
 tests that need no socket
 (`test_quic_streams.py`, which holds the halves to the same expectations as the core's in-memory
 `Pipe`, and `test_quic_fin_retry.py`), and `test_quic_aioquic.py` pins the aioquic internals the adapter
-reaches into, all named in `mux_relay/quic/_aioquic.py`, along with the aioquic behaviour its workarounds
+reaches into, all named in `caprid_relay/quic/_aioquic.py`, along with the aioquic behaviour its workarounds
 exist for. Where a test needs real packets it handshakes a client and
 server `QuicConnection` in memory (`tests/relay_helpers/quic_pair.py`). The package pins
 `aioquic>=1.3,<1.4` until that list is re-verified against a newer minor. The live smoke test dials
@@ -883,15 +883,15 @@ one async function, and the text of each reply goes on the transcript track. Its
 
 ## Package boundaries
 
-- `packages/mux-relay`, `mux_relay`, owns the Relay product API, the authentication convention, and
+- `packages/caprid-relay`, `caprid_relay`, owns the Relay product API, the authentication convention, and
   the aioquic transport.
 - `packages/moq-core`, `moq_core`, is an independently buildable, Apache-2.0 generic protocol
   package. It declares no dependencies and imports no transport, player, UI, or media engine. It
-  works over the abstract `moq_core.transport.MoqtTransport` seam that `mux_relay` supplies.
+  works over the abstract `moq_core.transport.MoqtTransport` seam that `caprid_relay` supplies.
 - `subscriber.track_source` exposes the generic `MoqTrackSource` contract for future integrations:
   track requests in protocol terms (with the core's `on_ok`/`on_done` handler names) and closure
   observation, with no track listing and no operation to close the shared connection.
-- import-linter forbids `moq_core` from importing `mux_relay` or any transport library; the
+- import-linter forbids `moq_core` from importing `caprid_relay` or any transport library; the
   contracts are in `pyproject.toml`. `tests/test_boundaries.py` pins the declared dependency lists.
 - `packages/moq-core/tests/test_spec_protocol.py` and `test_spec_vectors.py` check the core against
   the shared `../spec`, which is how this SDK stays in lockstep with the other languages.
@@ -922,7 +922,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
 | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
 | `roomEndpoint(endpoint, room)` throws `RangeError` | `room_endpoint(endpoint, room)` raises `ValueError` |
-| Browser `WebTransport`, or `@mux/relay-quic` on Node | aioquic native QUIC client (`mux_relay.quic.connect_quic`) |
+| Browser `WebTransport`, or `@caprid/relay-quic` on Node | aioquic native QUIC client (`caprid_relay.quic.connect_quic`) |
 | `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry, until, drainMs }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=..., until=..., drain=seconds)` |
 | `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })`, `onSwitched({ from, to, subscribed })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)`, `on_switched(WantSwitchedInfo)` with `from_namespace`, `from_track`, `to_namespace`, `to_track` |
 | `SupervisionBackoff` in milliseconds (`initialDelayMs`, `maxDelayMs`) | `SupervisionBackoff` in seconds (`initial_delay`, `max_delay`) |

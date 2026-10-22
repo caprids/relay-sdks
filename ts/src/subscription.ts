@@ -22,7 +22,7 @@ import {
   type SubscribeOk,
   type Subscription,
   type SubscriptionHandlers,
-} from '@mux/moq-core';
+} from '@caprid/moq-core';
 import { RelayError } from './errors.js';
 
 /** Delivery order is callback arrival order, with no ordering guarantee across streams. */

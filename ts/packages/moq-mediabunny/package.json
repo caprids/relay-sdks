@@ -1,5 +1,5 @@
 {
-  "name": "@mux/moq-mediabunny",
+  "name": "@caprid/moq-mediabunny",
   "version": "0.0.0",
   "description": "Optional Mediabunny packet adapter for LOC and MSF",
   "license": "Apache-2.0",
@@ -24,7 +24,7 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
-    "@mux/moq-media": "workspace:*"
+    "@caprid/moq-media": "workspace:*"
   },
   "peerDependencies": {
     "mediabunny": "^1.58.1"

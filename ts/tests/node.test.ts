@@ -1,11 +1,11 @@
-import type { NativeQuicTransportOptions } from '@mux/relay-quic';
+import type { NativeQuicTransportOptions } from '@caprid/relay-quic';
 import { afterEach, beforeEach, describe, expect, expectTypeOf, it, type Mock, vi } from 'vitest';
 import type { RelayTransportFactory } from '../src/index.js';
 import type * as NodeEntry from '../src/node.js';
 import { createRelayHub } from './helpers/relay-hub.js';
 
 /**
- * `@mux/relay/node` against a stand-in for `@mux/relay-quic`, so `pnpm check` needs no native addon: the stand-in's
+ * `@caprid/relay/node` against a stand-in for `@caprid/relay-quic`, so `pnpm check` needs no native addon: the stand-in's
  * factories route to an in-memory relay. The real adapter is dialled in `conformance/relay-quic.conformance.js`.
  */
 const quic = {
@@ -32,7 +32,7 @@ function hub() {
 }
 
 beforeEach(() => {
-  vi.doMock('@mux/relay-quic', () => ({
+  vi.doMock('@caprid/relay-quic', () => ({
     nativeQuicTransport: (...args: [object?]) => quic.nativeQuicTransport(...args),
   }));
   quic.nativeQuicTransport = vi.fn(() => vi.fn<RelayTransportFactory>((url, protocols) => quic.route(url, protocols)));
@@ -44,7 +44,7 @@ afterEach(async () => {
   vi.restoreAllMocks();
 });
 
-describe('@mux/relay/node', () => {
+describe('@caprid/relay/node', () => {
   it('connects both roles through one shared native QUIC factory when no transport is given', async () => {
     const { connectRelayPublisher, connectRelaySubscriber } = await entry();
     const relay = hub();
@@ -97,9 +97,9 @@ describe('@mux/relay/node', () => {
     expect(createTransport).not.toHaveBeenCalled();
   });
 
-  it('fails with TRANSPORT_UNAVAILABLE, naming the adapter, when @mux/relay-quic is not installed', async () => {
-    vi.doMock('@mux/relay-quic', () => {
-      throw new Error("Cannot find package '@mux/relay-quic'");
+  it('fails with TRANSPORT_UNAVAILABLE, naming the adapter, when @caprid/relay-quic is not installed', async () => {
+    vi.doMock('@caprid/relay-quic', () => {
+      throw new Error("Cannot find package '@caprid/relay-quic'");
     });
     const { connectRelaySubscriber, RelayError } = await entry();
 
@@ -107,13 +107,13 @@ describe('@mux/relay/node', () => {
 
     expect(failure).toBeInstanceOf(RelayError);
     expect(failure).toMatchObject({ code: 'TRANSPORT_UNAVAILABLE', phase: 'connecting' });
-    expect((failure as Error).message).toContain('@mux/relay-quic');
+    expect((failure as Error).message).toContain('@caprid/relay-quic');
     expect((failure as Error).cause).toBeInstanceOf(Error);
   });
 
   it('fails with TRANSPORT_UNAVAILABLE when the native binary is missing, and tries again on the next call', async () => {
     const { connectRelaySubscriber } = await entry();
-    const missing = new Error('@mux/relay-quic has no native binary for this platform');
+    const missing = new Error('@caprid/relay-quic has no native binary for this platform');
     quic.nativeQuicTransport.mockImplementationOnce(() => {
       throw missing;
     });
@@ -130,8 +130,8 @@ describe('@mux/relay/node', () => {
   });
 
   it('checks its arguments and signal before reporting a missing adapter, as the browser default does', async () => {
-    vi.doMock('@mux/relay-quic', () => {
-      throw new Error("Cannot find package '@mux/relay-quic'");
+    vi.doMock('@caprid/relay-quic', () => {
+      throw new Error("Cannot find package '@caprid/relay-quic'");
     });
     const { connectRelaySubscriber } = await entry();
 
@@ -142,7 +142,7 @@ describe('@mux/relay/node', () => {
   });
 
   it('applies the signal and the deadline while the adapter is still loading', async () => {
-    vi.doMock('@mux/relay-quic', () => new Promise(() => {}));
+    vi.doMock('@caprid/relay-quic', () => new Promise(() => {}));
     const { connectRelaySubscriber } = await entry();
 
     const owner = new AbortController();
@@ -208,7 +208,7 @@ describe('@mux/relay/node', () => {
       expect(emitWarning).toHaveBeenCalledOnce();
       expect(emitWarning).toHaveBeenCalledWith(expect.stringContaining('native WebTransport detected'), {
         type: 'DeprecationWarning',
-        code: 'MUX_RELAY_NODE_NATIVE_WEBTRANSPORT',
+        code: 'CAPRID_RELAY_NODE_NATIVE_WEBTRANSPORT',
       });
       expect(quic.nativeQuicTransport.mock.results[0]!.value).toHaveBeenCalledTimes(2);
     });
@@ -227,8 +227,8 @@ describe('@mux/relay/node', () => {
   });
 });
 
-describe('@mux/relay/node types', () => {
-  it("declares the trust options as @mux/relay-quic's own, without importing them", () => {
+describe('@caprid/relay/node types', () => {
+  it("declares the trust options as @caprid/relay-quic's own, without importing them", () => {
     expectTypeOf<NodeEntry.RelayNodeTrustOptions>().toEqualTypeOf<NativeQuicTransportOptions>();
   });
 

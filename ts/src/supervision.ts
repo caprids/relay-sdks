@@ -4,7 +4,7 @@
  * supervisors are policy the application opts into (spec/behavior.md, "Supervised connections"); everything here is
  * built on the public primitives' facts.
  */
-import type { RequestError } from '@mux/moq-core';
+import type { RequestError } from '@caprid/moq-core';
 import { RelayError } from './errors.js';
 
 /**
