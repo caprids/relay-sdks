@@ -20,7 +20,7 @@ import { startModuleServer } from './module-server.js';
 // sink), which this launcher starts when `pulseaudio` is installed.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const endpoint = process.env.RELAY_URL ?? 'https://sjc.relay.mux.global';
+const endpoint = process.env.RELAY_URL ?? 'https://relay.mux.global';
 assert.equal(new URL(endpoint).protocol, 'https:', 'RELAY_URL must be an https URL');
 const token = process.env.RELAY_TOKEN;
 const prefix = (process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-smoke').split('/').filter(Boolean);

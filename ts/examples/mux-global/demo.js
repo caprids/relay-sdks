@@ -13,7 +13,7 @@ const decoder = new TextDecoder();
 
 /**
  * @param {object} config
- * @param {string} config.url Relay endpoint, e.g. https://sjc.relay.mux.global/acme/rooms/42 (the token's root as its path)
+ * @param {string} config.url Relay endpoint, e.g. https://relay.mux.global/acme/rooms/42 (the token's root as its path)
  * @param {string} config.token Relay JWT authorized for `namespace`
  * @param {string[]} config.namespace Namespace tuple, relative to the endpoint's path (on the bare host, including the
  *   token's root prefix)

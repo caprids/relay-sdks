@@ -27,7 +27,7 @@ const readEndpoint = (name, fallback) => {
   assert(!url.searchParams.has('jwt'), `Supply the token via stdin or RELAY_TOKEN, not ${name}`);
   return endpoint;
 };
-const endpoint = readEndpoint('RELAY_URL', 'https://sjc.relay.mux.global');
+const endpoint = readEndpoint('RELAY_URL', 'https://relay.mux.global');
 // The subscribers' relay, for a cross-relay run.
 const subEndpoint = readEndpoint('RELAY_SUB_URL', endpoint);
 let token = process.env.RELAY_TOKEN;

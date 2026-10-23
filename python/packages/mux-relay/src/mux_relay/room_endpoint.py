@@ -24,8 +24,8 @@ def room_endpoint(endpoint: str, room: Sequence[str]) -> str:
     without its trailing slashes, and with its query kept, a ``jwt`` parameter included. A
     connection to it names namespaces relative to the room::
 
-        room_endpoint("https://sjc.relay.mux.global", ["acme", "rooms", "42"])
-        # 'https://sjc.relay.mux.global/acme/rooms/42'
+        room_endpoint("https://relay.mux.global", ["acme", "rooms", "42"])
+        # 'https://relay.mux.global/acme/rooms/42'
 
     The endpoint follows the connect calls' rules and the room the namespace rules. Nothing is
     percent-encoded: a room field holds only ``A``-``Z``, ``a``-``z``, ``0``-``9`` and

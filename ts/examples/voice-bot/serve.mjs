@@ -16,7 +16,7 @@ const { values } = parseArgs({
 const namespace = (values.namespace ?? `${process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-example'}/voice-bot`)
   .split('/')
   .filter(Boolean);
-const relayUrl = process.env.RELAY_URL ?? 'https://sjc.relay.mux.global';
+const relayUrl = process.env.RELAY_URL ?? 'https://relay.mux.global';
 const config = {
   // --room roots RELAY_URL at its slash-separated fields, as the bot's --room does; --namespace is then relative to them.
   url: values.room === undefined ? relayUrl : roomEndpoint(relayUrl, values.room.split('/').filter(Boolean)),

@@ -203,9 +203,9 @@ Messages are not a compatibility contract; the class and the point of rejection 
 
 - Namespaces are ordered tuples of fields sent verbatim. The SDK adds no prefix and performs no
   normalization. The relay resolves a namespace relative to the endpoint URL's path. With no path
-  (`https://sjc.relay.mux.global`), fields are absolute: the token's root prefix is part of the
+  (`https://relay.mux.global`), fields are absolute: the token's root prefix is part of the
   namespace the application supplies. With a path the token grants, such as a room-rooted endpoint
-  whose path is the token's root (`https://sjc.relay.mux.global/acme/rooms/42`), the path is the
+  whose path is the token's root (`https://relay.mux.global/acme/rooms/42`), the path is the
   prefix and the application supplies only the fields below it: `['p', 'a']` there addresses what
   `['acme', 'rooms', '42', 'p', 'a']` addresses on the bare host. The room-rooted endpoint is the
   recommended form: namespaces leave the token's root out, and a connection is confined to the

@@ -62,7 +62,7 @@ from .supervised_subscriber import (
 )
 from .switchable import SwitchableHandlers, SwitchableSubscription, SwitchedInfo
 
-DEFAULT_ENDPOINT = "https://sjc.relay.mux.global"
+DEFAULT_ENDPOINT = "https://relay.mux.global"
 """The default Relay endpoint pinned in ``spec/protocol.json``."""
 
 __all__ = [
