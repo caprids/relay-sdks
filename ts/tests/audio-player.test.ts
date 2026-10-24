@@ -1062,28 +1062,30 @@ const rms = (samples: number[]) => Math.sqrt(samples.reduce((sum, value) => sum 
 describe('loss concealment (libopus in WebAssembly)', () => {
   it('rebuilds a lost frame from the next frame’s in-band FEC, with no silence and no decoder reset', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
-    const input = player.addInput({ clock, decoderConfig: mono });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
     input.push(opusAt(0));
     input.push(opusAt(1));
+    context.render(30);
+    expect(input.stats.playing).toBe(true);
     // Frame 2 never comes; frame 3 carries its FEC copy.
     input.push(opusAt(3, 'gap'));
     input.push(opusAt(4));
     expect(input.stats).toMatchObject({ decoded: 4, recoveredUs: 20_000, synthesizedUs: 0, decoderResets: 0 });
-    const played = context.render(160).get(nodeOf(context)) ?? [];
-    // The buffer played on through the lost frame's slot: nothing silent was written for it.
-    expect(input.stats.concealedUs).toBe(0);
-    const start = played.findIndex((value) => value !== 0);
-    const lostSlot = played.slice(start + 2 * FRAME_SAMPLES, start + 3 * FRAME_SAMPLES);
-    expect(rms(lostSlot)).toBeGreaterThan(0.01);
+    const played = context.render(80).get(nodeOf(context)) ?? [];
+    // The buffer played on through the lost frame's slot: nothing silent was written for it, and it has sound.
+    expect(input.stats).toMatchObject({ concealedUs: 0, underruns: 0 });
+    expect(rms(played.slice(0, 2 * FRAME_SAMPLES))).toBeGreaterThan(0.01);
   });
 
   it('conceals a lost frame whose next frame carries no FEC, and leaves a long gap to the worklet’s silence', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
-    const input = player.addInput({ clock, decoderConfig: mono });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(2));
     input.push(opusAt(3));
+    context.render(30);
     // Frame 4 is lost and frame 5 has no LBRR: packet-loss concealment fills it.
     input.push(opusAt(5, 'gap'));
-    expect(input.stats).toMatchObject({ decoded: 2, recoveredUs: 0, synthesizedUs: 20_000 });
+    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 20_000 });
     // 400 ms missing: 120 ms synthesized at most, the last frame from FEC; the rest is silence the worklet writes.
     input.push({ timestampUs: BASE_US + 26 * FRAME_US, payload: OPUS_PACKETS[1] as Uint8Array, discontinuity: 'gap' });
     expect(input.stats.synthesizedUs).toBe(20_000 + 120_000);
@@ -1092,14 +1094,29 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats.concealedUs).toBeGreaterThan(0);
   });
 
+  it('fills nothing once the buffer ran dry: the worklet skips that audio rather than play it late', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    context.render(100);
+    expect(input.stats).toMatchObject({ playing: false });
+    expect(input.stats.dryAtUs).not.toBeNull();
+    input.push(opusAt(3, 'gap'));
+    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0 });
+  });
+
   it('leaves audio cut out on purpose out: a gap over a cut is not concealed', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
-    const input = player.addInput({ clock, decoderConfig: mono });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
     input.push(opusAt(0));
-    // An interruption cuts frames 1 to 2 before they arrive; frame 3 comes next, with FEC for frame 2.
-    input.cut({ fromUs: opusAt(1).timestampUs, untilUs: opusAt(3).timestampUs });
-    input.push(opusAt(3, 'gap'));
-    expect(input.stats).toMatchObject({ decoded: 2, recoveredUs: 0, synthesizedUs: 0, decoderResets: 0 });
+    input.push(opusAt(1));
+    context.render(30);
+    expect(input.stats.playing).toBe(true);
+    // An interruption cuts frames 2 and 3 before they arrive; frame 4 comes next.
+    input.cut({ fromUs: opusAt(2).timestampUs, untilUs: opusAt(4).timestampUs });
+    input.push(opusAt(4, 'gap'));
+    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0, decoderResets: 0 });
     context.render(20);
   });
 

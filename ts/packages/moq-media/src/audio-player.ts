@@ -751,7 +751,11 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
         const cutInGap =
           expectedUs !== undefined &&
           arrivalCuts.some((cut) => cut.fromUs < timestampUs && cut.untilUs > (expectedUs as number));
-        if (gapUs > TIMESTAMP_TOLERANCE_US && gapUs <= MAX_FILLED_GAP_US && !cutInGap) gapFromUs = expectedUs;
+        // Only while the buffer plays: once it ran dry, the worklet skips the missing audio rather than playing it
+        // late, so filling it would add its length to the delay (as the worklet fills a gap only inside held audio).
+        const playingNow = stats.playing && stats.dryAtUs === null;
+        if (gapUs > TIMESTAMP_TOLERANCE_US && gapUs <= MAX_FILLED_GAP_US && !cutInGap && playingNow)
+          gapFromUs = expectedUs;
         else if (cutInGap) resampler.reset();
         else if (gapUs > MAX_FILLED_GAP_US) {
           if (stats.decoded > 0) stats.decoderResets++;
