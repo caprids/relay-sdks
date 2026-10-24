@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
+import { loadWasmOpus } from '../packages/moq-media/src/opus-decoder.js';
 import { OPUS_DECODER_WASM_BASE64, OPUS_DECODER_WASM_SHA256 } from '../packages/moq-media/src/opus-decoder-wasm.js';
 
 // The audio player's loss concealment runs libopus compiled to WebAssembly, committed as base64 by
@@ -30,5 +31,17 @@ describe('the WebAssembly Opus decoder', () => {
         'mux_opus_reset',
       ].sort(),
     );
+  });
+
+  it('takes a packet larger than its first input buffer, and conceals without one', async () => {
+    const decoder = (await loadWasmOpus()).createDecoder(48_000, 1);
+    // Larger than the 1,500 bytes it starts with: the buffer grows, and libopus judges the packet (invalid here).
+    const big = new Uint8Array(6_000);
+    big[0] = 0x78;
+    expect(() => decoder.decode(big)).toThrow(/libopus error/);
+    expect(() => decoder.decode(new Uint8Array(70_000))).toThrow(RangeError);
+    expect(decoder.conceal(960)[0]).toHaveLength(960);
+    decoder.close();
+    expect(() => decoder.conceal(960)).toThrow(/closed/);
   });
 });

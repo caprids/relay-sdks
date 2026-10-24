@@ -44,7 +44,10 @@ export interface WasmOpusModule {
 
 /** The most samples per channel one Opus packet decodes to at 48 kHz (120 ms). */
 const MAX_FRAME_SAMPLES = 5760;
-const MAX_PACKET_BYTES = 1500 * 3;
+/** The largest valid Opus packet: 48 frames of at most 1275 bytes, and their framing (RFC 6716 §3.2.5). */
+const MAX_PACKET_BYTES = 48 * 1275 + 100;
+/** The input buffer a decoder starts with; it grows to a larger packet's size. */
+const INITIAL_PACKET_BYTES = 1500;
 
 let loading: Promise<WasmOpusModule> | undefined;
 
@@ -76,13 +79,34 @@ async function instantiate(): Promise<WasmOpusModule> {
 function createDecoder(wasm: OpusExports, sampleRate: number, channels: number): WasmOpusDecoder {
   const handle = wasm.mux_opus_create(sampleRate, channels);
   if (!handle) throw new Error(`libopus refused a decoder at ${sampleRate} Hz, ${channels} channels`);
-  const input = wasm.mux_opus_malloc(MAX_PACKET_BYTES);
-  const output = wasm.mux_opus_malloc(MAX_FRAME_SAMPLES * channels * 4);
-  if (!input || !output) throw new Error('libopus could not allocate its buffers');
+  let input = 0;
+  let inputBytes = 0;
+  let output = 0;
+  const release = () => {
+    if (input) wasm.mux_opus_free(input);
+    if (output) wasm.mux_opus_free(output);
+    wasm.mux_opus_destroy(handle);
+  };
+  try {
+    input = wasm.mux_opus_malloc(INITIAL_PACKET_BYTES);
+    inputBytes = INITIAL_PACKET_BYTES;
+    output = wasm.mux_opus_malloc(MAX_FRAME_SAMPLES * channels * 4);
+    if (!input || !output) throw new Error('libopus could not allocate its buffers');
+  } catch (error) {
+    release();
+    throw error;
+  }
   let closed = false;
 
   const write = (packet: Uint8Array) => {
     if (packet.byteLength > MAX_PACKET_BYTES) throw new RangeError('Opus packet too large');
+    if (packet.byteLength > inputBytes) {
+      const grown = wasm.mux_opus_malloc(packet.byteLength);
+      if (!grown) throw new Error('libopus could not allocate its input buffer');
+      wasm.mux_opus_free(input);
+      input = grown;
+      inputBytes = packet.byteLength;
+    }
     // The memory may have grown since the last call: take a fresh view each time.
     new Uint8Array(wasm.memory.buffer, input, packet.byteLength).set(packet);
   };
@@ -126,9 +150,7 @@ function createDecoder(wasm: OpusExports, sampleRate: number, channels: number):
     close() {
       if (closed) return;
       closed = true;
-      wasm.mux_opus_destroy(handle);
-      wasm.mux_opus_free(input);
-      wasm.mux_opus_free(output);
+      release();
     },
   };
 }

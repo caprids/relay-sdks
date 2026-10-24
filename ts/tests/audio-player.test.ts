@@ -1092,6 +1092,17 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats.concealedUs).toBeGreaterThan(0);
   });
 
+  it('leaves audio cut out on purpose out: a gap over a cut is not concealed', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono });
+    input.push(opusAt(0));
+    // An interruption cuts frames 1 to 2 before they arrive; frame 3 comes next, with FEC for frame 2.
+    input.cut({ fromUs: opusAt(1).timestampUs, untilUs: opusAt(3).timestampUs });
+    input.push(opusAt(3, 'gap'));
+    expect(input.stats).toMatchObject({ decoded: 2, recoveredUs: 0, synthesizedUs: 0, decoderResets: 0 });
+    context.render(20);
+  });
+
   it('starts afresh after a resync instead of concealing across it', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
     const input = player.addInput({ clock, decoderConfig: mono });
