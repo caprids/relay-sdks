@@ -163,7 +163,7 @@ const { tracks } = parseMsfCatalog(catalogObject.payload, { catalogNamespace: ['
 `createAudioPlayer({ context })` plays decoded audio with no UI: each `player.addInput({ clock,
 decoderConfig })` decodes the frames it is pushed with WebCodecs (`audioDecoderConfigFromTrack` reads
 the config from a catalog track), holds them in an adaptive jitter buffer in an `AudioWorklet`
-(60 ms to start, 40–400 ms), reports what is audible to the broadcast's playout clock, and plays
+(60 ms to start, 20–400 ms), reports what is audible to the broadcast's playout clock, and plays
 through its own gain into `player.output`, the one mix the application routes. `input.cut({ fromUs,
 untilUs })` drops received audio in a timeline range; an `Interrupt` read with `parseInterrupt`
 from a talker's interrupt track (`INTERRUPT_TRACK`) is one, so `input.cut(parseInterrupt(object.payload))`

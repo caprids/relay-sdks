@@ -884,7 +884,9 @@ subscriber.subscribe({ namespace, track: 'audio' }, { ...reader, onError });
 ```
 
 The buffer starts at 60 ms, grows by 40 ms after each underrun, shrinks by 10 ms after 2 s of
-smooth playback (never below 20 ms), and trims audio it held but never needed. It stays under 400 ms
+smooth playback (never below 20 ms), and trims audio it held but never needed. Decoded audio reaches the
+worklet from the main thread, so a page whose main thread stalls for tens of milliseconds can underrun at that
+floor; such a page can pass `minJitterTargetUs: 40_000`, the floor before. It stays under 400 ms
 and under the clock's target latency less the output delay. `input.stats` has the underruns, the
 buffer depth and target, the frames dropped as late, and what was trimmed, concealed with silence or
 cut. The decoder resets at every discontinuity and timestamp jump, and a `resync` or `restart`
