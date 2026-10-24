@@ -19,8 +19,8 @@ const ROOM_FIELD = /^[A-Za-z0-9\-._~!$&'()+,;=:@]+$/;
  * parameter included. A connection to it names namespaces relative to the room:
  *
  * ```ts
- * roomEndpoint('https://sjc.relay.mux.global', ['acme', 'rooms', '42']);
- * // 'https://sjc.relay.mux.global/acme/rooms/42'
+ * roomEndpoint('https://relay.mux.global', ['acme', 'rooms', '42']);
+ * // 'https://relay.mux.global/acme/rooms/42'
  * ```
  *
  * The endpoint follows the connect calls' rules and the room the namespace rules. Nothing is

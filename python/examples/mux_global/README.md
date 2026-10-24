@@ -2,7 +2,7 @@
 
 Start with the [Python quickstart](../../README.md#first-round-trip) for a fresh checkout,
 runtime requirements, local package installation, endpoint and credential setup, and a one-object
-round trip. These packages are unpublished. The default endpoint is `https://sjc.relay.mux.global`;
+round trip. These packages are unpublished. The default endpoint is `https://relay.mux.global`;
 use `--url` or `RELAY_URL` for another deployment. Both operations require an authorized Relay JWT.
 
 [demo.py](demo.py) is the complete SDK example with imports, matching namespace and track,
@@ -89,8 +89,8 @@ mise run python:example:mux-global -- --help
 ```
 
 - `--mode`: `both` (default), `publish`, or `subscribe`.
-- `--url`: defaults to `RELAY_URL` or the bare host `https://sjc.relay.mux.global`. Prefer an
-  endpoint whose path is your token's root, such as `https://sjc.relay.mux.global/acme/rooms/42`.
+- `--url`: defaults to `RELAY_URL` or the bare host `https://relay.mux.global`. Prefer an
+  endpoint whose path is your token's root, such as `https://relay.mux.global/acme/rooms/42`.
 - `--room`: slash-separated fields appended to the `--url` path with `room_endpoint`, such as your token's
   root on the bare host (`--room acme/rooms/42`), so `--namespace` is relative to them. Fields that a
   URL path cannot carry unchanged are refused ([room-rooted endpoints](../../../spec/behavior.md#room-rooted-endpoints)).

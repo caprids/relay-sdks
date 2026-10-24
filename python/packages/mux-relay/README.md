@@ -35,7 +35,7 @@ from mux_relay import (
 
 
 async def main(token: str) -> None:
-    url = room_endpoint("https://sjc.relay.mux.global", ["team"])  # your token's root as the path
+    url = room_endpoint("https://relay.mux.global", ["team"])  # your token's root as the path
     namespace = ["quickstart", "unique-run"]  # relative to that root
     arrived: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 

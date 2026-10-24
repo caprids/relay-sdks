@@ -85,7 +85,7 @@ The test waits for the publisher's `announced`, subscribes through a supervised 
 warms each track up until a marker arrives, checks binary and empty payloads plus independent track
 closure, checks that a want follows a supervised publisher's newer generation, then closes every
 connection. It defaults to the bare host
-`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
+`https://relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
 another relay to put the subscribers there. Namespace fields are relative to the endpoint URL's
 path: with the recommended endpoint, whose path is the token's root (as the quickstart prompts
 for), `RELAY_NAMESPACE_PREFIX` leaves the root out; with the bare default it includes it. Either
@@ -127,7 +127,7 @@ RELAY_URL="$RELAY_URL" RELAY_NAMESPACE_PREFIX="$RELAY_NAMESPACE" mise run python
 The test waits for the publisher's `announced`, subscribes through the examples' announce-race
 retry and reports how often it retried, warms each track up until a marker arrives, checks binary,
 empty, and text payloads plus independent track closure, then closes both connections. It defaults to the bare host
-`https://sjc.relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
+`https://relay.mux.global`; override that with `RELAY_URL` if needed. Set `RELAY_SUB_URL` to
 another relay to put the subscribers there. Namespace fields are relative to the endpoint URL's
 path: with the recommended endpoint, whose path is the token's root (as the quickstart prompts
 for), `RELAY_NAMESPACE_PREFIX` leaves the root out; with the bare default it includes it. Either

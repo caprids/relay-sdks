@@ -11,7 +11,7 @@ import { startModuleServer } from './module-server.js';
 // (RELAY_URL, RELAY_TOKEN, RELAY_NAMESPACE_PREFIX). AUDIO_PLAYER_SECONDS sets the steady phase's length.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const endpoint = process.env.RELAY_URL ?? 'https://sjc.relay.mux.global';
+const endpoint = process.env.RELAY_URL ?? 'https://relay.mux.global';
 const token = process.env.RELAY_TOKEN;
 const prefix = (process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-smoke').split('/').filter(Boolean);
 const seconds = Number(process.env.AUDIO_PLAYER_SECONDS ?? 8);
