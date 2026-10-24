@@ -403,14 +403,20 @@ describe('createAudioPlayer', () => {
     feed(4);
     context.render(20);
     expect(input.stats.underruns).toBe(1);
-    expect(input.stats.jitterTargetUs).toBe(80_000);
-    // Then 9 s of steady arrival, a frame per 20 ms: the target steps back down.
+    expect(input.stats.jitterTargetUs).toBe(100_000);
+    // Then 9 s of steady arrival, a frame per 20 ms: the target steps back down 10 ms every 2 s, four times.
     for (let tick = 0; tick < 450; tick++) {
       feed(1);
       context.render(20);
     }
     expect(input.stats.underruns).toBe(1);
-    expect(input.stats.jitterTargetUs).toBe(70_000);
+    expect(input.stats.jitterTargetUs).toBe(60_000);
+    // And on to the 20 ms floor, no lower.
+    for (let tick = 0; tick < 1000; tick++) {
+      feed(1);
+      context.render(20);
+    }
+    expect(input.stats.jitterTargetUs).toBe(20_000);
   });
 
   it('does not count the talker going quiet as an underrun', async () => {
@@ -835,8 +841,8 @@ describe('createAudioPlayer', () => {
     expect(input.stats).toMatchObject({ playing: false, playStarts: 1, heldUntilUs: null });
     expect(input.stats.dryAtUs).toBe(frameAt(4).timestampUs);
     const tail = reports.length;
-    // Back soon enough to count as an underrun: the target grows to 80 ms.
-    for (let index = 9; index <= 12; index++) input.push(frameAt(index));
+    // Back soon enough to count as an underrun: the target grows to 100 ms.
+    for (let index = 9; index <= 13; index++) input.push(frameAt(index));
     await settle();
     context.render(30);
     expect(input.stats).toMatchObject({ playing: true, playStarts: 2, dryAtUs: null });
@@ -846,9 +852,10 @@ describe('createAudioPlayer', () => {
     expect(reports[tail]?.timestampUs).toBeGreaterThanOrEqual(frameAt(9).timestampUs);
     // A cut of everything held is a new start too, and forgets nothing it did not hold.
     input.cut();
-    for (let index = 20; index <= 23; index++) input.push(frameAt(index, index === 20 ? 'resync' : undefined));
+    // Five frames: the 100 ms target the underrun left.
+    for (let index = 20; index <= 24; index++) input.push(frameAt(index, index === 20 ? 'resync' : undefined));
     context.render(30);
-    expect(input.stats).toMatchObject({ playStarts: 3, dryAtUs: null, heldUntilUs: frameAt(24).timestampUs });
+    expect(input.stats).toMatchObject({ playStarts: 3, dryAtUs: null, heldUntilUs: frameAt(25).timestampUs });
   });
 
   it('loads the worklet once per context', async () => {

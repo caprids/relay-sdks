@@ -824,11 +824,11 @@ Huddle's player worklet runs with (`demos/huddle`):
 | Rule | Default | Why |
 | --- | --- | --- |
 | Hold the target before playing, at the start and after running dry | 60 ms | Three 20 ms Opus frames: room for one late frame and a burst of two. Huddle runs on the Relay with this start. The A/V test's fixed 150 ms was sized for video and Firefox's encoder, not for voice |
-| Grow the target after an underrun | +20 ms | One Opus frame per underrun (Huddle) |
+| Grow the target after an underrun | +40 ms | Two Opus frames: react hard, since the shrink below gives it back within seconds when the spike was a one-off (relay-dev relay-3cnp.170; Huddle grew 20 ms and gave it back in 16 s) |
 | Count an underrun only when audio comes back within the ceiling, and not after a flush | | A longer dry spell is the talker going quiet, which no buffer would cover; audio after a flush starts a new timeline |
-| Shrink the target after 8 s with no underrun | −10 ms, to 40 ms | Huddle's floor and cadence; two frames always held |
+| Shrink the target after 2 s with no underrun | −10 ms, to 20 ms | The jitter is measured where it shows, in what the buffer never used (the trim below), so the floor only has to cover a render callback and timing noise. Huddle's 40 ms floor and 8 s cadence held audio 20–60 ms longer than WebRTC's NetEQ on every stage-2 netbench path, from the same arrivals (relay-dev `moq-netbench/docs/moq-optimisation.md`) |
 | Ceiling | 400 ms, and never more than the clock's target latency less the output delay and 40 ms | Huddle's ceiling; a frame further ahead of the clock than its target latency makes the frame sequencer resync forward, which would flush the buffer |
-| Trim, each second, held audio that never dipped to the target | when ≥ 10 ms, and not while the playback rate is below 1 | A burst after a stall would otherwise stay as lasting latency, since audio arrives as fast as it plays; a rate below 1 gains that delay on purpose |
+| Trim, each second, held audio that never dipped to the target | when ≥ 5 ms, and not while the playback rate is below 1 | A burst after a stall would otherwise stay as lasting latency, since audio arrives as fast as it plays; a rate below 1 gains that delay on purpose |
 | Hard bound | 2 × target + 60 ms, under the ceiling | Huddle's backlog bound |
 | A frame that never came, inside held audio | silence for its length, up to 1 s | Keeps later audio on time; WebCodecs exposes no packet-loss concealment |
 

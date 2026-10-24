@@ -67,7 +67,7 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
 - `@mux/moq-media`: a headless audio player ([#314](https://github.com/muxinc/relay-sdks/issues/314)).
   `createAudioPlayer({ context })` mixes any number of inputs into one `output` node; each
   `player.addInput({ clock, decoderConfig })` decodes with WebCodecs, resets its decoder at discontinuities, holds
-  audio in an adaptive `AudioWorklet` jitter buffer (60 ms to start, 40–400 ms, under the clock's target latency), and
+  audio in an adaptive `AudioWorklet` jitter buffer (60 ms to start, 20–400 ms, under the clock's target latency), and
   reports what is audible to the playout clock. `input.push` is a frame reader's `onFrame`; `input.cut({ fromUs,
   untilUs })` drops received audio in a timeline range. Also `createEchoCancellationLoopback` for Chromium's echo
   canceller, `audioDecoderConfigFromTrack`, `opusPacketDurationUs`, and `AUDIO_ONLY_TARGET_LATENCY_US` (500 ms) for
@@ -75,6 +75,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   from the WebCodecs example, which gains an audio-only listener, `listen-audio.ts`. `input.playbackRate` (0.5 to 2)
   nudges latency without cuts or silence, and an input's `clock` is any `AudioInputClock`, which each report hands the
   input's stats, now with `playStarts`, `heldUntilUs` and `dryAtUs` ([#329](https://github.com/muxinc/relay-sdks/issues/329)).
+  The jitter buffer gives back what a delay spike added in seconds rather than a minute: +40 ms per underrun, −10 ms
+  after each 2 s of smooth playback, a 20 ms floor (was +20 ms, −10 ms per 8 s, 40 ms), and trims of 5 ms or more.
+  On stage-2 netbench arrivals replayed offline it held 9–74 ms less (clean 9, busy Wi-Fi 28, LEO 42, LTE 74) at
+  about the same drops, and 1.5 drops a minute more under a bulk download's queue sawtooth; pass
+  `minJitterTargetUs: 40_000` for the old floor.
 - Reading frames in decode order within a latency budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)).
   `@mux/moq-media`'s `createFrameSequencer({ clock, grouping })` orders one track's objects across group streams, waits
   for a late group only while it can still matter, skips to the next keyframe past the deadline, drops late audio, and
