@@ -128,6 +128,8 @@ function createDecoder(wasm: OpusExports, sampleRate: number, channels: number):
     channels,
     decode(packet) {
       live();
+      // The shim reads a zero length as a concealment request: an empty packet is not one.
+      if (packet.byteLength === 0) throw new RangeError('An Opus packet has at least one byte');
       write(packet);
       return planes(wasm.mux_opus_decode(handle, input, packet.byteLength, output, MAX_FRAME_SAMPLES, 0));
     },
@@ -137,6 +139,7 @@ function createDecoder(wasm: OpusExports, sampleRate: number, channels: number):
     },
     recover(next, samples) {
       live();
+      if (next.byteLength === 0) return undefined;
       write(next);
       if (wasm.mux_opus_has_lbrr(input, next.byteLength) !== 1) return undefined;
       return planes(

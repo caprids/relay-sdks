@@ -41,6 +41,9 @@ describe('the WebAssembly Opus decoder', () => {
     expect(() => decoder.decode(big)).toThrow(/libopus error/);
     expect(() => decoder.decode(new Uint8Array(70_000))).toThrow(RangeError);
     expect(decoder.conceal(960)[0]).toHaveLength(960);
+    // An empty packet is not a concealment request (the shim's len 0): refused, and no FEC in it.
+    expect(() => decoder.decode(new Uint8Array(0))).toThrow(RangeError);
+    expect(decoder.recover(new Uint8Array(0), 960)).toBeUndefined();
     decoder.close();
     expect(() => decoder.conceal(960)).toThrow(/closed/);
   });

@@ -565,7 +565,13 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     const fecAtUs = untilUs - opusUs(samples);
     if (fecAtUs !== atUs) resampler.reset();
     atUs = fecAtUs;
-    const recovered = decoderNow.recover(next, samples);
+    // FEC is optional: LBRR that does not decode is concealed instead.
+    let recovered: OpusPlanes | undefined;
+    try {
+      recovered = decoderNow.recover(next, samples);
+    } catch {
+      recovered = undefined;
+    }
     if (recovered) {
       deliverOpus(fecAtUs, recovered);
       stats.recoveredUs += opusUs(samples);
@@ -579,19 +585,27 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     gapFromUs?: number,
     frameUs?: number
   ) => {
-    try {
-      if (gapFromUs !== undefined && frameUs !== undefined) {
-        conceal(decoderNow, gapFromUs, frame.timestampUs, frame.payload, frameUs);
-      }
-      deliverOpus(frame.timestampUs, decoderNow.decode(frame.payload));
-      previousCelt = opusFrameMode(frame.payload) === 'celt';
-      stats.decoded++;
-    } catch (error) {
+    const failed = (error: unknown) => {
       stats.errors++;
       stats.decoderResets++;
       decoderNow.reset();
       resampler.reset();
       options.onError?.(error);
+    };
+    if (gapFromUs !== undefined && frameUs !== undefined) {
+      // A concealment that fails leaves the rest of the gap to the worklet's silence; the frame that came still plays.
+      try {
+        conceal(decoderNow, gapFromUs, frame.timestampUs, frame.payload, frameUs);
+      } catch (error) {
+        failed(error);
+      }
+    }
+    try {
+      deliverOpus(frame.timestampUs, decoderNow.decode(frame.payload));
+      previousCelt = opusFrameMode(frame.payload) === 'celt';
+      stats.decoded++;
+    } catch (error) {
+      failed(error);
     }
   };
 
@@ -742,6 +756,9 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
         return;
       }
       if (wasm) {
+        // An empty payload carries no audio (an Opus packet has at least its TOC byte): treat it as not received,
+        // so the next frame conceals its slot. libopus would read it as a request for 120 ms of concealment.
+        if (payload.byteLength === 0) return;
         const frameUs = opusPacketDurationUs(payload) ?? lastDurationUs;
         // A 'gap' is what concealment fills; a resync or restart flushed above and starts a new timeline.
         const fresh = discontinuity === 'resync' || discontinuity === 'restart';

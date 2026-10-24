@@ -1106,6 +1106,35 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0 });
   });
 
+  it('takes an empty payload as a frame not received: the next frame fills its slot, nothing errs', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    context.render(30);
+    input.push({ timestampUs: opusAt(2).timestampUs, payload: new Uint8Array(0) });
+    input.push(opusAt(3, 'gap'));
+    expect(input.stats).toMatchObject({ decoded: 3, errors: 0, recoveredUs: 20_000, synthesizedUs: 0 });
+    context.render(60);
+    expect(input.stats).toMatchObject({ concealedUs: 0, underruns: 0 });
+  });
+
+  it('fills the slot and decodes the frame that came even when that frame is damaged', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    context.render(30);
+    // Frame 2 is lost; frame 3 comes truncated to two bytes: frame 2's slot is filled (from what LBRR libopus can
+    // read, or by concealment), and frame 3 is still decoded rather than dropped with it.
+    const truncated = (OPUS_PACKETS[3] as Uint8Array).subarray(0, 2);
+    input.push({ timestampUs: opusAt(3).timestampUs, payload: truncated, discontinuity: 'gap' });
+    expect(input.stats.recoveredUs + input.stats.synthesizedUs).toBe(20_000);
+    expect(input.stats).toMatchObject({ decoded: 3, errors: 0 });
+    input.push(opusAt(4));
+    expect(input.stats.decoded).toBe(4);
+  });
+
   it('leaves audio cut out on purpose out: a gap over a cut is not concealed', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
     const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
