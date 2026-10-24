@@ -238,10 +238,12 @@ const frameAt = (index: number, discontinuity?: 'gap' | 'resync' | 'restart') =>
   ...(discontinuity ? { discontinuity } : {}),
 });
 
-async function setUp(options: { sampleRate?: number } = {}) {
+// The fake decoder's payloads are markers, not Opus: these tests decode with WebCodecs (the stand-in), so they turn
+// loss concealment, which decodes Opus itself, off. The concealment tests below play real Opus packets.
+async function setUp(options: { sampleRate?: number; lossConcealment?: boolean } = {}) {
   const context = new FakeContext(options.sampleRate);
   const clock = createPlayoutClock({ now: () => nowUs });
-  const player = await createAudioPlayer({ context });
+  const player = await createAudioPlayer({ context, lossConcealment: options.lossConcealment ?? false });
   return { context, clock, player };
 }
 
@@ -853,7 +855,10 @@ describe('createAudioPlayer', () => {
 
   it('loads the worklet once per context', async () => {
     const context = new FakeContext();
-    const players: AudioPlayer[] = await Promise.all([createAudioPlayer({ context }), createAudioPlayer({ context })]);
+    const players: AudioPlayer[] = await Promise.all([
+      createAudioPlayer({ context, lossConcealment: false }),
+      createAudioPlayer({ context, lossConcealment: false }),
+    ]);
     expect(players).toHaveLength(2);
     expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
   });
@@ -887,7 +892,7 @@ describe('audio helpers', () => {
 // Type-level only, never called: a Web Audio context and its nodes satisfy the structural types, and a playout clock
 // or a clock that takes only a timestamp and a time is an input's clock.
 async function typeCheck(context: AudioContext, input: AudioPlayerInput, clock: PlayoutClock) {
-  const player = await createAudioPlayer({ context });
+  const player = await createAudioPlayer({ context, lossConcealment: false });
   player.addInput({ clock });
   player.addInput({
     clock: {
@@ -1032,5 +1037,78 @@ describe('createEchoCancellationLoopback', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Six consecutive 20 ms Opus packets (SILK, 32 kbit/s, mono) of a 300 Hz tone, from libopus with in-band FEC on and
+// 10% expected loss: the first four carry LBRR, the FEC copy of the frame before them; the last two do not.
+const OPUS_PACKETS = [
+  'eNsq0lbYDhjw3GMFVER1GLNe/OddAMhCpLUNddotogMYjyI+Lqw7/cGB8SUyVzLYYg1p+OhrUr8GRx9EnlvinGV2IKO9G2mTqw==',
+  'eNsq7WglA7LrXjVTAhZx0u/bcYjn2IQ+nZkkmbqtIvM/GUdF096ifK6pJfCiP31rkbzF9I+RIOc5eIcG43G2Lg+9G2mTqw==',
+  'eNsqyzGGB/WI4/gZs/o8XsQJA0SUE8aydrKEZ/l2yDY60kCD8mNSJpMyMiKnR9ho9tnY2k1lWBhoNZrsbpXKJnPrRdc2kh1vW+mTpw==',
+  'eNsqyzGGGB8x8vZN7XpxGSMf/LkvWKgFq+6+0RYrb/bGxwU3ZW65u2NIDiMUQ5vXkRTsudkJIZrXTjS8UxZOz//FKJXciG+9GxPpqw==',
+  'eJjU1c8luahy5ovPmDeqaS1NkregygoGINmSbt1466dHJX/UJ1ltP08T89ZDoDjK8ihpnMj3y70baZOr',
+  'eJjU1c7K1paUCS3NaRLby6IL0bZ79E7/HB4vNHGMPaB+r/PXYwBIodA7cn5T+Zzjf+60Abe9G2mTqw==',
+].map((base64) => new Uint8Array(Buffer.from(base64, 'base64')));
+const opusAt = (index: number, discontinuity?: 'gap' | 'resync' | 'restart') => ({
+  timestampUs: BASE_US + index * FRAME_US,
+  payload: OPUS_PACKETS[index] as Uint8Array,
+  ...(discontinuity ? { discontinuity } : {}),
+});
+const mono = { codec: 'opus', sampleRate: RATE, numberOfChannels: 1 };
+/** RMS of a stretch of output samples. */
+const rms = (samples: number[]) => Math.sqrt(samples.reduce((sum, value) => sum + value * value, 0) / samples.length);
+
+describe('loss concealment (libopus in WebAssembly)', () => {
+  it('rebuilds a lost frame from the next frame’s in-band FEC, with no silence and no decoder reset', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    // Frame 2 never comes; frame 3 carries its FEC copy.
+    input.push(opusAt(3, 'gap'));
+    input.push(opusAt(4));
+    expect(input.stats).toMatchObject({ decoded: 4, recoveredUs: 20_000, synthesizedUs: 0, decoderResets: 0 });
+    const played = context.render(160).get(nodeOf(context)) ?? [];
+    // The buffer played on through the lost frame's slot: nothing silent was written for it.
+    expect(input.stats.concealedUs).toBe(0);
+    const start = played.findIndex((value) => value !== 0);
+    const lostSlot = played.slice(start + 2 * FRAME_SAMPLES, start + 3 * FRAME_SAMPLES);
+    expect(rms(lostSlot)).toBeGreaterThan(0.01);
+  });
+
+  it('conceals a lost frame whose next frame carries no FEC, and leaves a long gap to the worklet’s silence', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono });
+    input.push(opusAt(3));
+    // Frame 4 is lost and frame 5 has no LBRR: packet-loss concealment fills it.
+    input.push(opusAt(5, 'gap'));
+    expect(input.stats).toMatchObject({ decoded: 2, recoveredUs: 0, synthesizedUs: 20_000 });
+    // 400 ms missing: 120 ms synthesized at most, the last frame from FEC; the rest is silence the worklet writes.
+    input.push({ timestampUs: BASE_US + 26 * FRAME_US, payload: OPUS_PACKETS[1] as Uint8Array, discontinuity: 'gap' });
+    expect(input.stats.synthesizedUs).toBe(20_000 + 120_000);
+    expect(input.stats.recoveredUs).toBe(20_000);
+    context.render(100);
+    expect(input.stats.concealedUs).toBeGreaterThan(0);
+  });
+
+  it('starts afresh after a resync instead of concealing across it', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono });
+    input.push(opusAt(0));
+    input.push(opusAt(3, 'resync'));
+    expect(input.stats).toMatchObject({ decoded: 2, recoveredUs: 0, synthesizedUs: 0, decoderResets: 1 });
+    context.render(20);
+  });
+
+  it('decodes with WebCodecs when concealment is off, or for another codec', async () => {
+    const off = await setUp({ lossConcealment: false });
+    off.player.addInput({ clock: off.clock, decoderConfig: mono }).push(opusAt(0));
+    expect(FakeDecoder.instances).toHaveLength(1);
+    const on = await setUp({ lossConcealment: true });
+    on.player
+      .addInput({ clock: on.clock, decoderConfig: { codec: 'flac', sampleRate: RATE, numberOfChannels: 1 } })
+      .push(opusAt(0));
+    expect(FakeDecoder.instances).toHaveLength(2);
   });
 });

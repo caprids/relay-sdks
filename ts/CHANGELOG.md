@@ -75,6 +75,11 @@ The first release. Rename this heading to the version (`## 0.1.0`) in the releas
   from the WebCodecs example, which gains an audio-only listener, `listen-audio.ts`. `input.playbackRate` (0.5 to 2)
   nudges latency without cuts or silence, and an input's `clock` is any `AudioInputClock`, which each report hands the
   input's stats, now with `playStarts`, `heldUntilUs` and `dryAtUs` ([#329](https://github.com/muxinc/relay-sdks/issues/329)).
+  Lost Opus frames are filled rather than played as silence: Opus inputs decode with libopus compiled to WebAssembly
+  (116 KB, embedded), which conceals a missing frame (packet-loss concealment, up to 120 ms a gap) and rebuilds it from
+  the next frame's in-band FEC when the publisher's encoder sent one. Stats `synthesizedUs` and `recoveredUs` count
+  them. `createAudioPlayer({ context, lossConcealment: false })` decodes with WebCodecs as before, as does any input
+  where WebAssembly is unavailable or the codec is not Opus.
 - Reading frames in decode order within a latency budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)).
   `@mux/moq-media`'s `createFrameSequencer({ clock, grouping })` orders one track's objects across group streams, waits
   for a late group only while it can still matter, skips to the next keyframe past the deadline, drops late audio, and

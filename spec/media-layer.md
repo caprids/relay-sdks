@@ -818,6 +818,23 @@ buffer holds, all of which belongs to the replaced timeline. A `restart` also fo
 a `resync` keeps them, because audio a talker interrupted can still arrive behind one. A context at another rate than the decoder's gets linearly resampled
 audio.
 
+**Loss concealment.** WebCodecs' `AudioDecoder` has no packet-loss concealment and cannot decode
+the in-band FEC (LBRR) an Opus encoder puts in the next packet, so a frame that never came would
+play as silence. With `lossConcealment` on (the default), an Opus input decodes instead with libopus
+1.5.2 compiled to WebAssembly (decoder only, 116 KB, imports nothing; built by
+`ts/packages/moq-media/scripts/build-opus-wasm.sh` from pinned sources and committed as base64,
+with its SHA-256 checked by a test). It decodes synchronously on the main thread with one decoder
+for the input's life. At a `gap` (frames skipped: lost, or too late for the sequencer) the next
+frame's FEC rebuilds the frame just before it when that packet carries LBRR, and libopus's
+concealment synthesizes the rest of the gap, up to 120 ms, from the decoder's own state; past that
+the worklet plays silence, as for any gap. The filled audio carries the missing timestamps, so the
+buffer plays on without a hole and no decoder is reset. A gap longer than 1 s, a `resync` or a
+`restart` resets the decoder instead. `synthesizedUs` and `recoveredUs` count what was filled.
+`lossConcealment: false`, a codec other than Opus, or a realm without WebAssembly decodes with
+WebCodecs as described above. Measured offline on stage-2 netbench arrivals at 2% random loss
+(relay-dev `moq-netbench/docs/moq-optimisation.md`): drops from about 56 a minute to 16 with
+concealment alone and 3 with the publisher's in-band FEC, at no added delay.
+
 **Jitter buffer.** A ring in the worklet, in the context's frames, starting from the numbers
 Huddle's player worklet runs with (`demos/huddle`):
 
@@ -830,7 +847,7 @@ Huddle's player worklet runs with (`demos/huddle`):
 | Ceiling | 400 ms, and never more than the clock's target latency less the output delay and 40 ms | Huddle's ceiling; a frame further ahead of the clock than its target latency makes the frame sequencer resync forward, which would flush the buffer |
 | Trim, each second, held audio that never dipped to the target | when ≥ 10 ms, and not while the playback rate is below 1 | A burst after a stall would otherwise stay as lasting latency, since audio arrives as fast as it plays; a rate below 1 gains that delay on purpose |
 | Hard bound | 2 × target + 60 ms, under the ceiling | Huddle's backlog bound |
-| A frame that never came, inside held audio | silence for its length, up to 1 s | Keeps later audio on time; WebCodecs exposes no packet-loss concealment |
+| A frame that never came, inside held audio | silence for its length, up to 1 s | Keeps later audio on time. With loss concealment the main thread fills an Opus gap before it reaches the worklet (above), so this covers what concealment leaves and the WebCodecs path |
 
 **Clock.** About every 20 ms the worklet posts the context frame it is rendering and the timeline
 timestamp of the sample there. The main thread times those posts with a [render clock](#browser-capture),

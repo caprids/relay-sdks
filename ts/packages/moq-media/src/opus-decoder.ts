@@ -1,0 +1,134 @@
+/**
+ * A synchronous Opus decoder that can fill a lost frame: libopus compiled to WebAssembly (src/opus-decoder-wasm.ts,
+ * built by scripts/build-opus-wasm.sh). WebCodecs' AudioDecoder has no packet-loss concealment and no way to decode the
+ * in-band FEC an Opus encoder puts in the next packet, so a player built on it can only play a lost frame as silence.
+ * Internal to the audio player; not exported from the package.
+ */
+import { OPUS_DECODER_WASM_BASE64 } from './opus-decoder-wasm.js';
+
+/** The module's exports. Pointers and sizes are byte offsets into `memory`. */
+interface OpusExports {
+  readonly memory: WebAssembly.Memory;
+  mux_opus_create(sampleRate: number, channels: number): number;
+  mux_opus_decode(decoder: number, data: number, length: number, pcm: number, frameSize: number, fec: number): number;
+  mux_opus_reset(decoder: number): number;
+  mux_opus_has_lbrr(data: number, length: number): number;
+  mux_opus_destroy(decoder: number): void;
+  mux_opus_malloc(size: number): number;
+  mux_opus_free(pointer: number): void;
+}
+
+/** Decoded audio: one plane per channel, at the decoder's sample rate. */
+export type OpusPlanes = Float32Array[];
+
+/** One libopus decoder. Every method is synchronous; a negative libopus result throws. */
+export interface WasmOpusDecoder {
+  readonly sampleRate: number;
+  readonly channels: number;
+  /** Decode a packet. */
+  decode(packet: Uint8Array): OpusPlanes;
+  /** Conceal `samples` of lost audio (libopus PLC), continuing from what was decoded last. */
+  conceal(samples: number): OpusPlanes;
+  /** Rebuild the `samples` before `next` from the in-band FEC `next` carries; `undefined` when it carries none. */
+  recover(next: Uint8Array, samples: number): OpusPlanes | undefined;
+  /** Forget the decoding state, as at a new stream. */
+  reset(): void;
+  /** Free the decoder. */
+  close(): void;
+}
+
+/** Creates decoders on one instance of the module. */
+export interface WasmOpusModule {
+  createDecoder(sampleRate: number, channels: number): WasmOpusDecoder;
+}
+
+/** The most samples per channel one Opus packet decodes to at 48 kHz (120 ms). */
+const MAX_FRAME_SAMPLES = 5760;
+const MAX_PACKET_BYTES = 1500 * 3;
+
+let loading: Promise<WasmOpusModule> | undefined;
+
+/** Compile and instantiate the module, once per realm. Rejects where WebAssembly is unavailable. */
+export function loadWasmOpus(): Promise<WasmOpusModule> {
+  loading ??= instantiate().catch((error: unknown) => {
+    loading = undefined;
+    throw error;
+  });
+  return loading;
+}
+
+function base64Bytes(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+async function instantiate(): Promise<WasmOpusModule> {
+  if (typeof WebAssembly === 'undefined') throw new Error('WebAssembly is unavailable');
+  // Asynchronous compilation: browsers refuse a synchronous compile of a module this size on the main thread.
+  const bytes = base64Bytes(OPUS_DECODER_WASM_BASE64) as Uint8Array<ArrayBuffer>;
+  const { instance } = await WebAssembly.instantiate(bytes, {});
+  const exports = instance.exports as unknown as OpusExports;
+  return { createDecoder: (sampleRate, channels) => createDecoder(exports, sampleRate, channels) };
+}
+
+function createDecoder(wasm: OpusExports, sampleRate: number, channels: number): WasmOpusDecoder {
+  const handle = wasm.mux_opus_create(sampleRate, channels);
+  if (!handle) throw new Error(`libopus refused a decoder at ${sampleRate} Hz, ${channels} channels`);
+  const input = wasm.mux_opus_malloc(MAX_PACKET_BYTES);
+  const output = wasm.mux_opus_malloc(MAX_FRAME_SAMPLES * channels * 4);
+  if (!input || !output) throw new Error('libopus could not allocate its buffers');
+  let closed = false;
+
+  const write = (packet: Uint8Array) => {
+    if (packet.byteLength > MAX_PACKET_BYTES) throw new RangeError('Opus packet too large');
+    // The memory may have grown since the last call: take a fresh view each time.
+    new Uint8Array(wasm.memory.buffer, input, packet.byteLength).set(packet);
+  };
+  const planes = (count: number): OpusPlanes => {
+    if (count < 0) throw new Error(`libopus error ${count}`);
+    const interleaved = new Float32Array(wasm.memory.buffer, output, count * channels);
+    return Array.from({ length: channels }, (_, channel) => {
+      const plane = new Float32Array(count);
+      for (let index = 0; index < count; index++) plane[index] = interleaved[index * channels + channel] as number;
+      return plane;
+    });
+  };
+  const live = () => {
+    if (closed) throw new Error('The Opus decoder is closed');
+  };
+
+  return {
+    sampleRate,
+    channels,
+    decode(packet) {
+      live();
+      write(packet);
+      return planes(wasm.mux_opus_decode(handle, input, packet.byteLength, output, MAX_FRAME_SAMPLES, 0));
+    },
+    conceal(samples) {
+      live();
+      return planes(wasm.mux_opus_decode(handle, 0, 0, output, Math.min(samples, MAX_FRAME_SAMPLES), 0));
+    },
+    recover(next, samples) {
+      live();
+      write(next);
+      if (wasm.mux_opus_has_lbrr(input, next.byteLength) !== 1) return undefined;
+      return planes(
+        wasm.mux_opus_decode(handle, input, next.byteLength, output, Math.min(samples, MAX_FRAME_SAMPLES), 1)
+      );
+    },
+    reset() {
+      live();
+      wasm.mux_opus_reset(handle);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      wasm.mux_opus_destroy(handle);
+      wasm.mux_opus_free(input);
+      wasm.mux_opus_free(output);
+    },
+  };
+}
