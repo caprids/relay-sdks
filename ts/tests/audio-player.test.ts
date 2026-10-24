@@ -1135,6 +1135,31 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats.decoded).toBe(4);
   });
 
+  it('counts and reports a frame that fails once, after it is done, so onError may remove the input', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const errors: unknown[] = [];
+    const input = player.addInput({
+      clock,
+      decoderConfig: mono,
+      jitterTargetUs: 40_000,
+      onError: (error) => {
+        errors.push(error);
+        input.remove();
+      },
+    });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    context.render(30);
+    // Frame 2 is lost and frame 3 is not a valid packet (code 3, no frames): its slot is concealed, it fails to decode.
+    const invalid = new Uint8Array([0x0b, 0x00]);
+    expect(() =>
+      input.push({ timestampUs: opusAt(3).timestampUs, payload: invalid, discontinuity: 'gap' }),
+    ).not.toThrow();
+    expect(errors).toHaveLength(1);
+    expect(input.removed).toBe(true);
+    expect(input.stats).toMatchObject({ decoded: 2, errors: 1, decoderResets: 1, synthesizedUs: 20_000 });
+  });
+
   it('leaves audio cut out on purpose out: a gap over a cut is not concealed', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
     const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });

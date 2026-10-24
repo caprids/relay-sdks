@@ -585,27 +585,35 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     gapFromUs?: number,
     frameUs?: number
   ) => {
-    const failed = (error: unknown) => {
-      stats.errors++;
-      stats.decoderResets++;
-      decoderNow.reset();
-      resampler.reset();
-      options.onError?.(error);
-    };
+    // One frame counts one error and reports it once, after everything it does, since onError may remove the input.
+    let error: unknown;
+    let failed = false;
     if (gapFromUs !== undefined && frameUs !== undefined) {
-      // A concealment that fails leaves the rest of the gap to the worklet's silence; the frame that came still plays.
+      // A concealment that fails leaves the rest of the gap to the worklet's silence; the frame that came still plays,
+      // from a decoder reset out of whatever state the failure left.
       try {
         conceal(decoderNow, gapFromUs, frame.timestampUs, frame.payload, frameUs);
-      } catch (error) {
-        failed(error);
+      } catch (concealError) {
+        failed = true;
+        error = concealError;
+        decoderNow.reset();
+        resampler.reset();
       }
     }
     try {
       deliverOpus(frame.timestampUs, decoderNow.decode(frame.payload));
       previousCelt = opusFrameMode(frame.payload) === 'celt';
       stats.decoded++;
-    } catch (error) {
-      failed(error);
+    } catch (decodeError) {
+      decoderNow.reset();
+      resampler.reset();
+      failed = true;
+      error = decodeError;
+    }
+    if (failed) {
+      stats.errors++;
+      stats.decoderResets++;
+      options.onError?.(error);
     }
   };
 
