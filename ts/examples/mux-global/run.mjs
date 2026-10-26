@@ -27,7 +27,7 @@ const built = [
 ];
 const usage = `Usage: node examples/mux-global/run.mjs [options]
 
-  --url <https url>      Relay endpoint (default RELAY_URL or https://sjc.relay.mux.global)
+  --url <https url>      Relay endpoint (default RELAY_URL or https://relay.mux.global)
   --room <a/b/c>         Root --url at these slash-separated fields with roomEndpoint, such as the
                          token's root on the bare host; --namespace is then relative to them
   --namespace <a/b/c>    Namespace, slash-separated, relative to the --url path (on the bare
@@ -57,7 +57,7 @@ let args;
 try {
   ({ values: args } = parseArgs({
     options: {
-      url: { type: 'string', default: process.env.RELAY_URL ?? 'https://sjc.relay.mux.global' },
+      url: { type: 'string', default: process.env.RELAY_URL ?? 'https://relay.mux.global' },
       room: { type: 'string' },
       namespace: { type: 'string' },
       track: { type: 'string', default: 'ticker' },

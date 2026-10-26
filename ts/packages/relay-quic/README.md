@@ -21,7 +21,7 @@ import { connectRelayPublisher } from '@caprid/relay';
 import { nativeQuicTransport } from '@caprid/relay-quic';
 
 const publisher = await connectRelayPublisher({
-  url: 'https://sjc.relay.mux.global',
+  url: 'https://relay.mux.global',
   getToken: () => process.env.RELAY_TOKEN,
   createTransport: nativeQuicTransport(),
 });

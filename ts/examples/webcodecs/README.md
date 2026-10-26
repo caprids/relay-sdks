@@ -29,7 +29,7 @@ if (!canvas) throw new Error('Missing canvas');
 canvas.width = 640;
 canvas.height = 360;
 const namespace = ['demo', 'live'];
-const url = 'https://sjc.relay.mux.global';
+const url = 'https://relay.mux.global';
 const publisher = await connectRelayPublisher({ url, namespace, getToken: () => publisherToken });
 const stop = new AbortController();
 // Wire your stop button to stop.abort(). Capture/drawing remains owned by your application.

@@ -27,7 +27,7 @@ WebTransport endpoint, your token's root (the namespace prefix it grants), and a
 short-lived Relay JWT authorized to **publish and subscribe** there. The SDK consumes tokens; it
 does not issue them or provide a public token signup flow. Do not use a Mux API access token in
 place of a Relay JWT. Use an endpoint whose path is your token's root (for example
-`https://sjc.relay.mux.global/acme/rooms/42` for a token rooted at `acme/rooms/42`), and name
+`https://relay.mux.global/acme/rooms/42` for a token rooted at `acme/rooms/42`), and name
 namespaces relative to it (`['p', 'a']` rather than `['acme', 'rooms', '42', 'p', 'a']`). The
 connection then cannot reach outside that root, and a path the token does not grant fails at
 connect with `UNAUTHORIZED`. A client that spans several rooms under one grant can use the bare
@@ -35,7 +35,7 @@ host, where namespace fields include the token's root
 ([namespaces](../spec/behavior.md#subscribing)). The Mux relays carry announcements between regions,
 so a publisher and a subscriber can each use their nearest relay
 ([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)). The hosted demo defaults to the bare host
-`https://sjc.relay.mux.global`, which still requires authorized credentials. For another deployment,
+`https://relay.mux.global`, which still requires authorized credentials. For another deployment,
 use the endpoint supplied by its operator.
 
 `roomEndpoint` builds that endpoint from a relay and the token's root, so the URL is not assembled by
@@ -44,8 +44,8 @@ hand:
 ```ts
 import { roomEndpoint } from '@caprid/relay';
 
-const url = roomEndpoint('https://sjc.relay.mux.global', ['acme', 'rooms', '42']);
-// 'https://sjc.relay.mux.global/acme/rooms/42'
+const url = roomEndpoint('https://relay.mux.global', ['acme', 'rooms', '42']);
+// 'https://relay.mux.global/acme/rooms/42'
 ```
 
 It appends each field to the endpoint's path and keeps the endpoint's query. It encodes nothing,

@@ -7,7 +7,7 @@
     "note": "Every SDK implements draft-ietf-moq-transport-22, and draft-ietf-moq-transport-20 as a fallback, and no other version. protocolId is draft-22's wire identifier (draft-22 Section 6.2 rule: \"moqt-\" plus the draft number) and the default. protocolIds is the list a client offers as the WebTransport protocol identifiers (WT-Available-Protocols) or ALPN, in preference order; the connection proceeds on either. The two drafts differ on the wire only in the LOCATION_FILTER parameter (draft-22 Section 9.20.9), which the core encodes for the negotiated one. See docs/research/moqt-22-delta.md."
   },
   "relay": {
-    "defaultEndpoint": "https://sjc.relay.mux.global",
+    "defaultEndpoint": "https://relay.mux.global",
     "authentication": {
       "scheme": "jwt-query-parameter",
       "parameter": "jwt",

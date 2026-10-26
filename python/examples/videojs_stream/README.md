@@ -19,8 +19,8 @@ RELAY_TOKEN=... mise run python:example:videojs -- --namespace mattypoo/relay-sd
 Use a namespace your token authorizes to publish. The script prints two lines worth copying:
 
 ```
-player url             src=moqt://sjc.relay.mux.global/#msf:mattypoo-relay.2dsdk.2dexample-tv--catalog&c4m=<RELAY_TOKEN>
-moqt://sjc.relay.mux.global/#msf:mattypoo-relay.2dsdk.2dexample-tv--catalog&c4m=eyJ...   (only with --show-token)
+player url             src=moqt://relay.mux.global/#msf:mattypoo-relay.2dsdk.2dexample-tv--catalog&c4m=<RELAY_TOKEN>
+moqt://relay.mux.global/#msf:mattypoo-relay.2dsdk.2dexample-tv--catalog&c4m=eyJ...   (only with --show-token)
 ```
 
 The second line is the complete source URL including your token; give it to a Video.js v10 player

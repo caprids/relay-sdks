@@ -31,7 +31,7 @@ and serve it with its `@caprid/moq-core` dependency, as described in
 ```ts
 import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@caprid/relay';
 
-const url = roomEndpoint('https://sjc.relay.mux.global', ['team']); // your token's root as the path
+const url = roomEndpoint('https://relay.mux.global', ['team']); // your token's root as the path
 const namespace = ['quickstart', 'unique-run']; // relative to that root
 const getToken = () => token; // a Relay JWT allowed to publish and subscribe there
 
@@ -82,7 +82,7 @@ The code is the browser example's, with a different import:
 ```ts
 import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@caprid/relay/node';
 
-const url = roomEndpoint('https://sjc.relay.mux.global', ['team']);
+const url = roomEndpoint('https://relay.mux.global', ['team']);
 const namespace = ['quickstart', 'unique-run'];
 const getToken = () => process.env.RELAY_TOKEN;
 
