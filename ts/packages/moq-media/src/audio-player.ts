@@ -542,6 +542,11 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   const opusUs = (samples: number) => Math.round((samples * MICROSECONDS_PER_SECOND) / OPUS_RATE);
   // Whether the last packet decoded was CELT-only, which libopus cannot follow with FEC.
   let previousCelt = false;
+  // Reset the libopus decoder: it holds no CELT state after, so the next gap may use FEC again.
+  const resetWasm = (decoderNow: WasmOpusDecoder) => {
+    decoderNow.reset();
+    previousCelt = false;
+  };
   // Fill the audio missing from `fromUs` up to the frame at `untilUs`, whose packet is `next`. Its in-band FEC rebuilds
   // the last frame before it (one Opus frame of `next`'s duration: LBRR covers no more); packet-loss concealment fills
   // the rest, MAX_SYNTHESIZED_US at most for the whole gap. Past that the worklet plays silence, as for any gap.
@@ -597,7 +602,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       } catch (concealError) {
         failed = true;
         error = concealError;
-        decoderNow.reset();
+        resetWasm(decoderNow);
         resampler.reset();
       }
     }
@@ -606,7 +611,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       previousCelt = opusFrameMode(frame.payload) === 'celt';
       stats.decoded++;
     } catch (decodeError) {
-      decoderNow.reset();
+      resetWasm(decoderNow);
       resampler.reset();
       failed = true;
       error = decodeError;
@@ -629,7 +634,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     if (decoder) stats.decoderResets++;
     if (wasm) {
       if (stats.decoded > 0) stats.decoderResets++;
-      wasm.reset();
+      resetWasm(wasm);
     }
     closeDecoders();
     epoch++;
@@ -785,7 +790,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
         else if (cutInGap) resampler.reset();
         else if (gapUs > MAX_FILLED_GAP_US) {
           if (stats.decoded > 0) stats.decoderResets++;
-          wasm.reset();
+          resetWasm(wasm);
           resampler.reset();
         }
         const fillUs = lastDurationUs ?? frameUs ?? 20_000;

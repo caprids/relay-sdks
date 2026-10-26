@@ -1167,6 +1167,28 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats).toMatchObject({ decoded: 2, errors: 1, decoderResets: 1, synthesizedUs: 20_000 });
   });
 
+  it('uses FEC again after a decoder reset, even when the last packet before it was CELT', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const errors: unknown[] = [];
+    const input = player.addInput({
+      clock,
+      decoderConfig: mono,
+      jitterTargetUs: 40_000,
+      onError: (error) => errors.push(error),
+    });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    context.render(30);
+    // A CELT-only packet (TOC config 31), then one that fails to decode, which resets the decoder.
+    const celt = new Uint8Array(40).map((_, index) => (index === 0 ? 0xf8 : (index * 37) & 0xff));
+    input.push({ timestampUs: opusAt(2).timestampUs, payload: celt });
+    input.push({ timestampUs: opusAt(3).timestampUs, payload: new Uint8Array([0x0b, 0x00]) });
+    expect(errors).toHaveLength(1);
+    // Frame 4 is lost; frame 5 (frame 3's packet, which carries LBRR) rebuilds it.
+    input.push({ timestampUs: opusAt(5).timestampUs, payload: OPUS_PACKETS[3] as Uint8Array, discontinuity: 'gap' });
+    expect(input.stats.recoveredUs).toBe(20_000);
+  });
+
   it('leaves audio cut out on purpose out: a gap over a cut is not concealed', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
     const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
