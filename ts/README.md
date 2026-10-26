@@ -9,7 +9,7 @@ Payloads are bytes the SDK does not interpret; no player, media catalog, or Vide
 - Browser WebTransport in a secure context (HTTPS or localhost). This is the default transport.
   It needs WebTransport protocol negotiation, which the live tests verify against the Relay in
   Chromium and in Firefox 155 or later (Playwright's builds). WebKit cannot open a WebTransport
-  session to the Relay yet ([#296](https://github.com/muxinc/relay-sdks/issues/296)).
+  session to the Relay yet.
 - Node 24+: import from `@caprid/relay/node`, which connects over native QUIC through
   `@caprid/relay-quic` ([Node](#node)). Other runtimes must pass a compatible `createTransport`
   factory.

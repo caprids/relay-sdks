@@ -60,7 +60,7 @@ reports. Browser consumers have an additional [console exposure risk](../ts/GUID
 ### Install and run
 
 ```sh
-git clone https://github.com/muxinc/relay-sdks.git
+git clone https://github.com/caprids/relay-sdks.git
 cd relay-sdks
 mise install
 mise run python:install
@@ -262,8 +262,7 @@ error 3 `FORWARD=0 not supported` through `on_error`, and the connection stays o
 updates only after acceptance, so an update issued before `on_subscribed` is queued in order and
 sent as soon as the relay accepts; at most eight wait, and a further one raises a `RelayError` with
 code `UPDATE_QUEUE_FULL`. Updating an ended subscription raises `RelayError` with code `CLOSED`. A relay
-that refuses an update with REQUEST_ERROR reaches `on_error`, which ends the subscription
-([#94](https://github.com/muxinc/relay-sdks/issues/94)).
+that refuses an update with REQUEST_ERROR reaches `on_error`, which ends the subscription.
 
 Re-subscribing after `on_publisher_done` creates a new request, and it cannot bring back a finished
 track. Once the publisher has gone the relay answers request error 16 `unroutable`; while its
@@ -368,8 +367,7 @@ await switchable.switch_to("video-hi", until=near_playhead, drain=1.0, cancellat
   `parameters` to change a filter or priority. Parameters are not inherited.
 - `until` defaults to `"first-object"`. That is fine where delivery is in order, but it can skip
   media: the relay starts a subscription at its cached latest group, which can be stale, and a
-  subscriber on another relay can lose the first object
-  ([#243](https://github.com/muxinc/relay-sdks/issues/243)). Compare your own timeline, not group IDs:
+  subscriber on another relay can lose the first object. Compare your own timeline, not group IDs:
   each track numbers its own groups.
 - `switch_to` starts at once and returns a `RelayAwaitable`. A timed-out `wait_for` on it leaves the
   switch pending; pass `cancellation=` to abandon it. If the new subscription fails, a newer `switch_to`
@@ -567,8 +565,7 @@ The SDK adds no default timescale, timestamp, or LOC media packaging. Objects ar
 of payload.
 
 Properties are encoded as supplied, but subscribers see the relay's output. moq-relay 0.17.5 and
-earlier strip object properties (fixed upstream in moq #5494, not yet released;
-[#262](https://github.com/muxinc/relay-sdks/issues/262)): only the object Timestamp (`0x10`, or the
+earlier strip object properties (fixed upstream in moq #5494, not yet released): only the object Timestamp (`0x10`, or the
 older `0x06`) survives, rescaled to microseconds by the declared Timescale (`0x08`); every other
 object property, including Video Config, is dropped. Tracks
 without a declared Timescale, and objects without a Timestamp, get relay-clock timestamps. Declaring
@@ -576,7 +573,7 @@ without a declared Timescale, and objects without a Timestamp, get relay-clock t
 `SUBSCRIBE_OK` carries the relay's track properties (`0x08` = 1,000,000, `0x0E` = 128 unless the
 publisher set it, `0x22` = 2), not the publisher's; the relay would refuse every subscriber to a
 track whose `0x0E` or `0x22` is out of range or that has more than 64 track properties, which is why
-`register_track()` refuses those ([#252](https://github.com/muxinc/relay-sdks/issues/252)). A
+`register_track()` refuses those. A
 subscription with
 `MessageParameters(include_properties=0)` gets no track properties and objects with no properties at
 all, not even a Timestamp. Keep
@@ -846,8 +843,7 @@ async consumption limits bound local buffering only (see
 A very long-lived connection also grows slowly in memory: aioquic keeps every finished stream's ID in
 `QuicConnection._streams_finished` for the life of the connection, and no release prunes it, so a
 publisher holds about 28 bytes per group it has ever sent until it reconnects: roughly 2.4 MB a day
-for each group per second it sends, or 2.4 GB a day at 1000 groups/s
-([#47](https://github.com/muxinc/relay-sdks/issues/47)).
+for each group per second it sends, or 2.4 GB a day at 1000 groups/s.
 
 `packages/caprid-relay/tests/test_quic.py` runs the full smoke-test assertion list over a real QUIC
 loopback: native QUIC listeners on `localhost` (aioquic, self-signed certificates) fronting the
