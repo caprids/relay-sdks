@@ -1,11 +1,11 @@
 {
   "name": "@caprid/moq-mediabunny",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Optional Mediabunny packet adapter for LOC and MSF",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "url": "git+https://github.com/caprids/relay-sdks.git",
     "directory": "ts/packages/moq-mediabunny"
   },
   "type": "module",

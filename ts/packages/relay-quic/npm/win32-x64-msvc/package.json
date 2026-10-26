@@ -1,6 +1,6 @@
 {
   "name": "@caprid/relay-quic-win32-x64-msvc",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "cpu": [
     "x64"
   ],
@@ -12,7 +12,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "url": "git+https://github.com/caprids/relay-sdks.git",
     "directory": "ts/packages/relay-quic/npm/win32-x64-msvc"
   },
   "engines": {
