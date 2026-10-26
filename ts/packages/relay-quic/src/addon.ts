@@ -1,7 +1,7 @@
 /**
  * Loads the native addon (`native/`, built by `napi build`) for this platform. A local build,
  * `native/relay-quic.<platform>-<arch>[-<libc>].node`, wins; otherwise the binary comes from the prebuilt platform
- * package `@mux/relay-quic-<platform>-<arch>[-<libc>]`, one of this package's optional dependencies (#195).
+ * package `@caprid/relay-quic-<platform>-<arch>[-<libc>]`, one of this package's optional dependencies (#195).
  */
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +32,10 @@ function hasGlibc(): boolean {
 
 /** Where the addon for a platform suffix may be, in the order {@link loadAddon} tries them. */
 export function addonCandidates(suffix: string = platformSuffix()): [localFile: string, platformPackage: string] {
-  return [fileURLToPath(new URL(`../native/relay-quic.${suffix}.node`, import.meta.url)), `@mux/relay-quic-${suffix}`];
+  return [
+    fileURLToPath(new URL(`../native/relay-quic.${suffix}.node`, import.meta.url)),
+    `@caprid/relay-quic-${suffix}`,
+  ];
 }
 
 /**
@@ -50,9 +53,9 @@ export function loadFirst(candidates: readonly string[], load: (id: string) => u
     }
   }
   throw new Error(
-    `@mux/relay-quic has no native binary for this platform (${suffix}). Install its optional dependency ` +
+    `@caprid/relay-quic has no native binary for this platform (${suffix}). Install its optional dependency ` +
       `${candidates.at(-1)}, which a package manager skips when optional dependencies are off, or build ` +
-      `${candidates[0]} with \`pnpm --filter @mux/relay-quic build:native\`, which needs a Rust toolchain.`,
+      `${candidates[0]} with \`pnpm --filter @caprid/relay-quic build:native\`, which needs a Rust toolchain.`,
     { cause: new AggregateError(missing, 'no candidate was found') },
   );
 }

@@ -12,7 +12,7 @@ import {
   connectSupervisedPublisher,
   connectSupervisedSubscriber,
   roomEndpoint,
-} from '@mux/relay';
+} from '@caprid/relay';
 
 /**
  * @param {object} options

@@ -9,7 +9,7 @@ import {
   MOQT_PROTOCOL_ID,
   type RequestError,
   type SubscriptionHandlers,
-} from '@mux/moq-core';
+} from '@caprid/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CLOSURE_GRACE_MS,
@@ -26,8 +26,8 @@ import {
 /** Failures the core synthesized from a stream event rather than read from a REQUEST_ERROR. */
 const streamFailures = vi.hoisted(() => new WeakSet<object>());
 
-vi.mock('@mux/moq-core', async (importOriginal) => {
-  const core = await importOriginal<typeof import('@mux/moq-core')>();
+vi.mock('@caprid/moq-core', async (importOriginal) => {
+  const core = await importOriginal<typeof import('@caprid/moq-core')>();
   return { ...core, isStreamFailure: (error: RequestError) => streamFailures.has(error) };
 });
 

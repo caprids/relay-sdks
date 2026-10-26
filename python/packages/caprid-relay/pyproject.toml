@@ -1,0 +1,22 @@
+[project]
+name = "caprid-relay"
+version = "0.0.0"
+description = "Relay Python SDK"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+# The product package owns the Relay API, the authentication convention, and the default
+# transport: native QUIC through aioquic, so this SDK runs natively with no browser.
+# caprid-moq-core is released in lockstep, so the pin is exact; scripts/release_version.py moves it.
+dependencies = ["caprid-moq-core==0.0.0", "aioquic>=1.3,<1.4"]
+
+[project.urls]
+Repository = "https://github.com/muxinc/relay-sdks"
+
+[tool.uv.sources]
+caprid-moq-core = { workspace = true }
+
+[build-system]
+requires = ["uv_build>=0.12,<0.13"]
+build-backend = "uv_build"

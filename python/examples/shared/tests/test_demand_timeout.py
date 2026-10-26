@@ -10,9 +10,9 @@ import pytest
 from relay_helpers.fake_track_writer import FakeTrackWriter, closed_error, timeout_error
 from shared.demand_timeout import is_demand_timeout, write_with_retry
 
-from mux_relay import KeyValuePair, RelayError, RelayErrorPhase, RelayTrackWriter
-from mux_relay._settling_groups import SettlingGroups
-from mux_relay._write_slot import WriteSlotDependencies
+from caprid_relay import KeyValuePair, RelayError, RelayErrorPhase, RelayTrackWriter
+from caprid_relay._settling_groups import SettlingGroups
+from caprid_relay._write_slot import WriteSlotDependencies
 
 PAYLOAD = b'{"seq": 1}'
 

@@ -70,10 +70,10 @@ const server = await startModuleServer({
     '/tests/helpers/': resolve(root, 'tests/helpers'),
   },
   importMap: {
-    '@mux/relay': '/sdk/index.js',
-    '@mux/relay/media': '/sdk/media.js',
-    '@mux/moq-core': '/packages/moq-core/dist/index.js',
-    '@mux/moq-media': '/packages/moq-media/dist/index.js',
+    '@caprid/relay': '/sdk/index.js',
+    '@caprid/relay/media': '/sdk/media.js',
+    '@caprid/moq-core': '/packages/moq-core/dist/index.js',
+    '@caprid/moq-media': '/packages/moq-media/dist/index.js',
   },
   transpile: true,
 });

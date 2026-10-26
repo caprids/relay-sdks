@@ -114,7 +114,7 @@ clock and each frame's media timestamp. Old audio is discarded individually. A v
 stale frame resets the current GOP, skips its dependent frames, and resumes at a fresh keyframe.
 Timestamps keep their original timeline; the publisher does not replay an outage at reduced speed.
 
-The group mapping itself is the SDK's: each track has a `FrameWriter` from `mux_relay.media`
+The group mapping itself is the SDK's: each track has a `FrameWriter` from `caprid_relay.media`
 (`grouping="keyframe"` for video, `"frame"` for audio, so audio stays one group per frame on the
 wire), and the queue's age check is handed to it as the `stale` predicate, which the writer consults
 again after a blocked write so what went stale behind it is dropped before it is sent. A five-second

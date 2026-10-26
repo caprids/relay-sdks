@@ -1,5 +1,5 @@
 /**
- * Smoke-tests the packed @mux/relay-quic on the platform it runs on (#195):
+ * Smoke-tests the packed @caprid/relay-quic on the platform it runs on (#195):
  *
  *     node scripts/smoke.mjs <dir of tarballs from pack.mjs>
  *
@@ -29,10 +29,10 @@ function install(tarballs) {
   const sizes = JSON.parse(readFileSync(join(tarballs, 'sizes.json'), 'utf8'));
   const app = mkdtempSync(join(tmpdir(), 'relay-quic-smoke-'));
   const file = (tarball) => `file:${join(tarballs, tarball)}`;
-  const main = Object.keys(sizes).find((name) => name !== 'platforms' && name !== '@mux/moq-core');
-  // The packages are not on the registry, so every @mux name resolves to its tarball.
+  const main = Object.keys(sizes).find((name) => name !== 'platforms' && name !== '@caprid/moq-core');
+  // The packages are not on the registry, so every @caprid name resolves to its tarball.
   const overrides = {
-    '@mux/moq-core': file(sizes['@mux/moq-core'].tarball),
+    '@caprid/moq-core': file(sizes['@caprid/moq-core'].tarball),
     ...Object.fromEntries(
       Object.entries(sizes.platforms).map(([suffix, { tarball }]) => [`${main}-${suffix}`, file(tarball)]),
     ),
@@ -53,9 +53,9 @@ function install(tarballs) {
 
 async function probe() {
   const { createSocket } = await import('node:dgram');
-  const main = '@mux/relay-quic';
+  const main = '@caprid/relay-quic';
 
-  const installed = readdirSync(join('node_modules', '@mux')).filter((name) => name.startsWith('relay-quic-'));
+  const installed = readdirSync(join('node_modules', '@caprid')).filter((name) => name.startsWith('relay-quic-'));
   // Worked out here, not by the package, so a wrong suffix in its loader or manifests can't pass unnoticed.
   const glibc = typeof process.report.getReport().header.glibcVersionRuntime === 'string';
   const { platform, arch } = process;

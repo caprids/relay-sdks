@@ -1,11 +1,11 @@
 /**
- * Packs @mux/relay-quic for release, with its prebuilt platform packages (#195):
+ * Packs @caprid/relay-quic for release, with its prebuilt platform packages (#195):
  *
  *     node scripts/pack.mjs <out dir>
  *
  * Run it after `napi artifacts` has put each target's binary in `npm/<suffix>/`. It packs every platform package, then
  * the main package with an optional dependency on each one at the same version (added only for the pack, so the
- * lockfile never names packages that are not published yet), and `@mux/moq-core`, which the main package depends on
+ * lockfile never names packages that are not published yet), and `@caprid/moq-core`, which the main package depends on
  * and which is not published either. It writes `sizes.json` and a Markdown table of each platform's packed and
  * installed size to `<out dir>`, and appends the table to the GitHub job summary when there is one.
  */
@@ -74,7 +74,7 @@ const kib = (bytes) => `${(bytes / 1024).toFixed(0)} KiB`;
 const mib = (bytes) => `${(bytes / 1024 / 1024).toFixed(2)} MiB`;
 const sizes = {
   [manifest.name]: { tarball: main.filename, packed: main.size, unpacked: main.unpackedSize },
-  '@mux/moq-core': { tarball: core.filename, packed: core.size, unpacked: core.unpackedSize },
+  '@caprid/moq-core': { tarball: core.filename, packed: core.size, unpacked: core.unpackedSize },
   platforms: Object.fromEntries(
     platforms.map((suffix) => {
       const report = packed[suffix];
@@ -84,7 +84,7 @@ const sizes = {
           tarball: report.filename,
           packed: report.size,
           unpacked: report.unpackedSize,
-          // What an install of @mux/relay-quic puts on disk on this platform: it, the core and one binary.
+          // What an install of @caprid/relay-quic puts on disk on this platform: it, the core and one binary.
           installed: report.unpackedSize + main.unpackedSize + core.unpackedSize,
         },
       ];
@@ -96,7 +96,7 @@ writeFileSync(resolve(out, 'sizes.json'), `${JSON.stringify(sizes, null, 2)}\n`)
 const table = [
   `### ${manifest.name} ${manifest.version}: size per platform`,
   '',
-  `The main package packs to ${kib(main.size)} (${kib(main.unpackedSize)} unpacked) and \`@mux/moq-core\` to ` +
+  `The main package packs to ${kib(main.size)} (${kib(main.unpackedSize)} unpacked) and \`@caprid/moq-core\` to ` +
     `${kib(core.size)} (${kib(core.unpackedSize)}). Installed is all three on disk.`,
   '',
   '| Platform package | Packed | Unpacked | Installed |',

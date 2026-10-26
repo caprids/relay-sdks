@@ -22,9 +22,9 @@ import {
   TRANSCRIPT_TRACK,
   type Transcript,
   type TranscriptSegment,
-} from '@mux/moq-media';
-import type { RelaySubscriber, RelaySubscription } from '@mux/relay';
-import { createFrameReader } from '@mux/relay/media';
+} from '@caprid/moq-media';
+import type { RelaySubscriber, RelaySubscription } from '@caprid/relay';
+import { createFrameReader } from '@caprid/relay/media';
 
 /** Options for {@link listenAudio}. */
 export interface ListenAudioOptions {

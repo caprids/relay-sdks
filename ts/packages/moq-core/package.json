@@ -1,5 +1,5 @@
 {
-  "name": "@mux/moq-core",
+  "name": "@caprid/moq-core",
   "version": "0.0.0",
   "description": "Transport-independent MOQT track primitives",
   "license": "Apache-2.0",

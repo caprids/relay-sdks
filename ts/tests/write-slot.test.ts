@@ -4,7 +4,7 @@
  * "Write phases and interruptions" table in spec/behavior.md. Relay behaviour the slot cannot see
  * (demand arriving through the real binding callback, announce-and-serve) stays in publish.test.ts.
  */
-import type { SubgroupWriteOptions, SubgroupWriter } from '@mux/moq-core';
+import type { SubgroupWriteOptions, SubgroupWriter } from '@caprid/moq-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { type DeliveryTimeouts, NO_DELIVERY_TIMEOUTS } from '../src/delivery-timeouts.js';
 import { RelayError } from '../src/errors.js';

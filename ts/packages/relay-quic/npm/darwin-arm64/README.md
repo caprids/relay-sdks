@@ -1,3 +1,3 @@
-# `@mux/relay-quic-darwin-arm64`
+# `@caprid/relay-quic-darwin-arm64`
 
-This is the **aarch64-apple-darwin** binary for `@mux/relay-quic`
+This is the **aarch64-apple-darwin** binary for `@caprid/relay-quic`

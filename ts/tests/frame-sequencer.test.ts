@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
-import type { MoqtObject } from '@mux/moq-core';
-import { createFrameSequencer, createPlayoutClock, LOC_TIMESCALE, LOC_TIMESTAMP } from '@mux/moq-media';
+import type { MoqtObject } from '@caprid/moq-core';
+import { createFrameSequencer, createPlayoutClock, LOC_TIMESCALE, LOC_TIMESTAMP } from '@caprid/moq-media';
 import { describe, expect, it } from 'vitest';
 
 type Step = {

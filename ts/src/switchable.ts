@@ -8,7 +8,7 @@
  * hands the handlers the new one. Each subscription underneath is an ordinary product subscription
  * (`subscription.ts`); this module only routes their events and owns the switchable's own ending.
  */
-import type { Goaway, MessageParameters, MoqtObject, PublishDone, RequestError, SubscribeOk } from '@mux/moq-core';
+import type { Goaway, MessageParameters, MoqtObject, PublishDone, RequestError, SubscribeOk } from '@caprid/moq-core';
 import { MAX_TIMEOUT_MS } from './connect-session.js';
 import { RelayError } from './errors.js';
 import {

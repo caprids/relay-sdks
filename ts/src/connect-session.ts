@@ -5,7 +5,7 @@ import {
   type MoqtSessionCallbacks,
   type MoqtTransport,
   SETUP_OPTION,
-} from '@mux/moq-core';
+} from '@caprid/moq-core';
 
 import { connectedError, connectingError, isCredentialRefusal, RelayError, transportError } from './errors.js';
 
@@ -40,7 +40,7 @@ export type RelayTransportFactory = (
    * What the transport carries. `'webtransport'` (the default) is a WebTransport session, whose
    * CONNECT request carries the URL. `'native-quic'` is MOQT directly on a QUIC connection: the
    * adapter dials only the URL's host and port, and the core sends the path, query and authority
-   * in SETUP. `'websocket'` is QMux over a WebSocket (`@mux/relay-websocket`), whose upgrade
+   * in SETUP. `'websocket'` is QMux over a WebSocket (`@caprid/relay-websocket`), whose upgrade
    * request carries the URL as a CONNECT does. Read once `ready` has resolved.
    */
   framing?: 'webtransport' | 'native-quic' | 'websocket';
@@ -123,7 +123,7 @@ const createBrowserTransport: RelayTransportFactory = (url, protocols) => {
   if (typeof WebTransport === 'undefined') {
     throw new RelayError(
       'TRANSPORT_UNAVAILABLE',
-      'WebTransport is unavailable; in Node, import from @mux/relay/node (needs @mux/relay-quic), or supply createTransport with a transport adapter for this runtime',
+      'WebTransport is unavailable; in Node, import from @caprid/relay/node (needs @caprid/relay-quic), or supply createTransport with a transport adapter for this runtime',
       'connecting',
     );
   }
@@ -188,7 +188,7 @@ function assertNegotiatedProtocol(protocol: unknown): void {
 
 /**
  * Internal to the SDK's entry points, never part of the public options: resolves the transport factory in place of
- * `createTransport`, inside the connection's deadline and signal and after the token. `@mux/relay/node` loads its
+ * `createTransport`, inside the connection's deadline and signal and after the token. `@caprid/relay/node` loads its
  * adapter here. A failure is passed through as it is thrown.
  */
 export const resolveTransport = Symbol('resolveTransport');

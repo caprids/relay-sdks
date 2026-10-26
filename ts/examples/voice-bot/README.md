@@ -1,7 +1,7 @@
 # Talk to a voice bot in the browser
 
 The user's side of the [Python voice bot](../../../python/examples/voice_bot/README.md). The page
-publishes the microphone alone and plays the bot through `@mux/moq-media`'s audio player, showing the
+publishes the microphone alone and plays the bot through `@caprid/moq-media`'s audio player, showing the
 text of each reply as its audio plays. When the bot is talked over and sends an interrupt, the
 player cuts the reply audio it still holds, and the transcript the words it did not say.
 
@@ -9,7 +9,7 @@ player cuts the reply audio it still holds, and the transcript the words it did 
 together:
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
+import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay';
 import { talkToBot } from './talk-to-bot.js';
 
 // In a click handler, so the context may play and the microphone prompt shows.

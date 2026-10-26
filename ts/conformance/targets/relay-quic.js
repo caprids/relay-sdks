@@ -1,10 +1,10 @@
 /**
- * `@mux/relay-quic` as a conformance target: the Node transport adapter over native QUIC. It runs under vitest
+ * `@caprid/relay-quic` as a conformance target: the Node transport adapter over native QUIC. It runs under vitest
  * (`../relay-quic.conformance.js`); its peer is the Python accepting end with `--framing native-quic`, reached through
  * `call(method, params)`. TA-25 and TA-26 run the adapter in a child Node process (`relay-quic-lifetime.js`).
  */
 import { fileURLToPath } from 'node:url';
-import { nativeQuicTransport } from '@mux/relay-quic';
+import { nativeQuicTransport } from '@caprid/relay-quic';
 import { checkProcessLifetime } from './lifetime.js';
 import { createRemotePeer } from './remote-peer.js';
 
@@ -29,7 +29,7 @@ export function createRelayQuicTarget({ port, certificateHash, call }) {
   const factory = nativeQuicTransport({ serverCertificateHashes: [{ algorithm: 'sha-256', value }] });
 
   return {
-    name: '@mux/relay-quic',
+    name: '@caprid/relay-quic',
     framing: 'native-quic',
     host: HOST,
     capabilities: [

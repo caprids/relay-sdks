@@ -1,5 +1,5 @@
 /** LOC draft-04 property helpers, independent of transport and encoders. */
-import type { KeyValuePair } from '@mux/moq-core';
+import type { KeyValuePair } from '@caprid/moq-core';
 
 /** The LOC draft these helpers implement. */
 export const LOC_DOCUMENT = 'draft-ietf-moq-loc-04';

@@ -30,7 +30,7 @@ function report(result) {
 const peer = await startConformancePeer();
 const server = await startModuleServer({
   modules: { '/core/': resolve(root, 'packages/moq-core/dist'), '/conformance/': resolve(root, 'conformance') },
-  importMap: { '@mux/moq-core': '/core/index.js' },
+  importMap: { '@caprid/moq-core': '/core/index.js' },
 });
 let browser;
 try {

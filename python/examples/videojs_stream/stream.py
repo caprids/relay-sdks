@@ -35,6 +35,32 @@ import numpy as np
 from av.codec.context import Flags
 from av.video.frame import PictureType
 
+from caprid_relay import (
+    DEFAULT_ENDPOINT,
+    CancellationToken,
+    Cancelled,
+    Closed,
+    KeyValuePair,
+    MoqtObject,
+    RelayAwaitable,
+    RelayError,
+    RelayPublisher,
+    RelayTrackWriter,
+    SubscriptionRequestError,
+    WantHandlers,
+    connect_relay_publisher,
+    connect_supervised_subscriber,
+    room_endpoint,
+)
+from caprid_relay.media import (
+    CatalogService,
+    DocumentService,
+    FrameOutcome,
+    FrameWriter,
+    MediaKind,
+    media_subscribe_parameters,
+    media_track_properties,
+)
 from moq_media import (
     AUDIO_TRACK,
     CATALOG_TRACK,
@@ -59,32 +85,6 @@ from moq_media import (
     parse_msf_catalog,
 )
 from moq_media.opus import OpusEncoder
-from mux_relay import (
-    DEFAULT_ENDPOINT,
-    CancellationToken,
-    Cancelled,
-    Closed,
-    KeyValuePair,
-    MoqtObject,
-    RelayAwaitable,
-    RelayError,
-    RelayPublisher,
-    RelayTrackWriter,
-    SubscriptionRequestError,
-    WantHandlers,
-    connect_relay_publisher,
-    connect_supervised_subscriber,
-    room_endpoint,
-)
-from mux_relay.media import (
-    CatalogService,
-    DocumentService,
-    FrameOutcome,
-    FrameWriter,
-    MediaKind,
-    media_subscribe_parameters,
-    media_track_properties,
-)
 
 Log = Callable[[str, dict[str, Any]], None]
 
@@ -651,7 +651,7 @@ def _interleave(
 # Publisher side (asyncio)
 # ---------------------------------------------------------------------------------------------------
 #
-# The catalog service and the frame writer come from the SDK (`mux_relay.media`). What stays here is
+# The catalog service and the frame writer come from the SDK (`caprid_relay.media`). What stays here is
 # this program's own policy: the live queue's time-based dropping, what to do when a track ends, how
 # the run's exit code is chosen, and the counters the `finished` line reports.
 

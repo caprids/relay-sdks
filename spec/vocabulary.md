@@ -10,7 +10,7 @@ without a row here is a bug.
 
 ## The names
 
-| Concept | TypeScript (`@mux/relay`) | Python (`mux_relay`) |
+| Concept | TypeScript (`@caprid/relay`) | Python (`caprid_relay`) |
 | --- | --- | --- |
 | Open a connection that can only subscribe | `connectRelaySubscriber(options)` returns `RelaySubscriber` | `connect_relay_subscriber(url, ...)` returns `RelaySubscriber` |
 | Open a connection that can only publish one namespace | `connectRelayPublisher(options)` returns `RelayPublisher` | `connect_relay_publisher(url, namespace=...)` returns `RelayPublisher` |
@@ -48,11 +48,11 @@ without a row here is a bug.
 | When the relay will end a connection for its credential's expiry | `connection.expiresAt` (`Date \| undefined`) | `connection.expires_at` (`datetime \| None`) |
 | Options only a subscriber connection takes | `ConnectRelaySubscriberOptions`: the shared options plus `requestTimeoutMs` | `connect_relay_subscriber`'s shared keyword arguments plus `request_timeout` |
 | Options only a publisher connection takes | `ConnectRelayPublisherOptions`: the shared options plus `namespace`; no request deadline | `connect_relay_publisher`'s shared keyword arguments plus `namespace`; no request deadline |
-| Connect from Node over native QUIC, and the trust options that takes | `@mux/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
-| Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing? }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `mux_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
-| A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@mux/relay-quic` | `mux_relay.quic.connect_quic(url, protocols, configuration=...)`, given as `create_transport`; not the default until #231, and the name stays open to #222 |
-| A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@mux/relay-websocket` | not applicable: the Python SDK ships no WebSocket adapter (#321) |
-| WebTransport first, WebSocket when its handshake fails or takes longer than a timeout, and its options | `withWebSocketFallback(options)` from `@mux/relay-websocket`: `WebSocketFallbackOptions` (`handshakeTimeoutMs`, default 4000; `onFallback`) | not applicable |
+| Connect from Node over native QUIC, and the trust options that takes | `@caprid/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
+| Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing? }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `caprid_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
+| A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
+| A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@caprid/relay-websocket` | not applicable: the Python SDK ships no WebSocket adapter (#321) |
+| WebTransport first, WebSocket when its handshake fails or takes longer than a timeout, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`handshakeTimeoutMs`, default 4000; `onFallback`) | not applicable |
 | Consume one subscription as an async iterator | `subscriber.subscribeEvents(options)` returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
 | One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
@@ -336,7 +336,7 @@ The supervisors are opt-in policy over the primitives ([behavior.md](behavior.md
 Their entry points keep the `connect` verb, because each resolves once a connection is up, and add
 `Supervised` instead of an option on `connectRelay*`: they return different types (a `generation`
 and `want`, which the primitives lack), and one function with two return shapes would hide that.
-They live in `@mux/relay` and `mux_relay` themselves, not in a separate package.
+They live in `@caprid/relay` and `caprid_relay` themselves, not in a separate package.
 
 **Generation** names one supervised publisher connection and the namespace field it serves. Each
 reconnect is a new publisher to the relay, and the word says so: it is not a session, an epoch, or a
@@ -433,15 +433,15 @@ A transport's stream or session failure is classified by its fields, not its cla
 (`spec/transport-adapter.md` TA-22): `source` is `stream` or `session`, a stream error carries the
 peer's code as `streamErrorCode` / `stream_error_code` (`null` / `None` when unknown, never 0), and a
 session error that reports the peer's close carries `closeCode` and `reason` / `close_code` and
-`reason` (TA-24). TypeScript reads them with `isStreamError` from `@mux/moq-core`; Python with
+`reason` (TA-24). TypeScript reads them with `isStreamError` from `@caprid/moq-core`; Python with
 `is_stream_error` and `is_session_error` from `moq_core.transport`. A peer STOP_SENDING is a stream
 error raised on a send stream; where it surfaces makes it a stop.
 
-`QuicTransportError` is the exception `mux_relay.quic` raises with that shape, the counterpart of
-`@mux/relay-quic`'s internal `NativeQuicSessionError` and the core's `MoqtStreamError` in one class:
+`QuicTransportError` is the exception `caprid_relay.quic` raises with that shape, the counterpart of
+`@caprid/relay-quic`'s internal `NativeQuicSessionError` and the core's `MoqtStreamError` in one class:
 the Python core hands its own reset reasons over (`StreamReset`, with `stream_error_code`), so it
 needs no stream error class. It is private
-(`mux_relay.quic._errors`, not in `mux_relay.quic.__all__`), as `NativeQuicSessionError` is: the
+(`caprid_relay.quic._errors`, not in `caprid_relay.quic.__all__`), as `NativeQuicSessionError` is: the
 shape is the contract, and a caller who catches the class instead would be classifying by name. It
 replaced `WebTransportError` and its `StreamStopped` subclass without aliases, under the policy
 above: the package no longer dials WebTransport (#232), so the old name was a misnomer, and the
@@ -457,16 +457,16 @@ subclass made a stop a type rather than a place. Not adopted: `TransportError`, 
   callers only log or branch on once.
 - `RelayTrackWriter`, `RelayGroupWriter`, `write`, `openGroup`, `close`, `abort`: these say what
   they do.
-- Everything in `@mux/moq-core` and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
+- Everything in `@caprid/moq-core` and `moq_core`: protocol vocabulary (`onOk`, `onDone`,
   `registerTrack`, `TrackBinding`) stays as the drafts and the upstream modules spell it. The
   product packages re-export the same short list of core names (the "Protocol types borrowed from
   the core" row; Python adds `Closed`, which TypeScript spells inline) and nothing else;
-  `python/packages/mux-relay/tests/test_exports.py` checks that list against `ts/src/index.ts`.
+  `python/packages/caprid-relay/tests/test_exports.py` checks that list against `ts/src/index.ts`.
 
 ## Media format helpers
 
 Stage 1 media format names. Python exports these from `moq_media`; TypeScript exports them from
-`@mux/moq-media`. The source-URL composer and catalog-generation timestamp retain their language-specific
+`@caprid/moq-media`. The source-URL composer and catalog-generation timestamp retain their language-specific
 names from the original examples; the mappings below are explicit.
 
 | Concept | TypeScript | Python |
@@ -519,17 +519,17 @@ packaging, and live status the builder fixes. The TypeScript parser was internal
 `parseIndependentCatalog` (with `MoqCatalog` / `MoqCatalogTrack` from Video.js); those names are gone,
 with no alias. Media publishing-handle and object-to-frame reader names remain provisional.
 
-The TypeScript-only WebCodecs helpers in `@mux/moq-media` are `videoTrackFromDecoderConfig`,
+The TypeScript-only WebCodecs helpers in `@caprid/moq-media` are `videoTrackFromDecoderConfig`,
 `audioTrackFromDecoderConfig`, `chunkToLocFrame`, `LocFrame`, and `ChunkToLocFrameOptions`.
 They consume standard decoder configs and native encoded video/audio chunks. The optional
-`@mux/moq-mediabunny` file-input integration exports `packetToLocFrame` and
+`@caprid/moq-mediabunny` file-input integration exports `packetToLocFrame` and
 `PacketToLocFrameOptions`; it retains compatibility re-exports of the config mappers and `LocFrame`.
 Python keeps its PyAV Annex B conversion helpers.
 
 ## Shared timeline and playout clock
 
 The broadcast and playout clocks of [media-layer.md](media-layer.md#shared-timeline-and-playout-clock)
-([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), exported from `@mux/moq-media` and
+([issue #285](https://github.com/muxinc/relay-sdks/issues/285)), exported from `@caprid/moq-media` and
 `moq_media`. TypeScript uses factories that return interfaces, like the rest of that package; Python
 uses classes, like `CatalogService` and `FrameWriter`.
 
@@ -570,7 +570,7 @@ instead.
 
 msf-01 §7's Media Timeline track, which maps a broadcast's media time to wall-clock time
 ([media-layer.md](media-layer.md#media-timeline-track),
-[issue #291](https://github.com/muxinc/relay-sdks/issues/291)). Exported from `@mux/moq-media` and
+[issue #291](https://github.com/muxinc/relay-sdks/issues/291)). Exported from `@caprid/moq-media` and
 `moq_media`.
 
 | Concept | TypeScript | Python |
@@ -601,8 +601,8 @@ template, incremental documents, and a reader for MSF_COMPRESSION payloads.
 Reading a track as frames in decode order within the playout clock's target latency
 ([issue #303](https://github.com/muxinc/relay-sdks/issues/303)); its contract is the "Media
 subscribing" section of [behavior.md](behavior.md#media-subscribing). The sequencer is format-aware
-and lives in `@mux/moq-media` and `moq_media`; the reader is transport glue and lives in
-`@mux/relay/media` and `mux_relay.media`, which do not depend on the format packages, so it takes the
+and lives in `@caprid/moq-media` and `moq_media`; the reader is transport glue and lives in
+`@caprid/relay/media` and `caprid_relay.media`, which do not depend on the format packages, so it takes the
 sequencer as an argument.
 
 | Concept | TypeScript | Python |
@@ -640,7 +640,7 @@ a relay can be asked about.
 
 `mediaSubscribeParameters` says what it returns, like `mediaTrackProperties`: the `parameters` that
 `subscribe`, `want` and `switchTo` take, so it pairs with the publisher's helper and lives beside it
-in `@mux/relay/media` and `mux_relay.media`
+in `@caprid/relay/media` and `caprid_relay.media`
 ([#337](https://github.com/muxinc/relay-sdks/issues/337)). It takes the whole parameters as
 overrides rather than a `subscriberPriority` option, so a viewer adds a location filter without
 spreading two objects. Not adopted: reading the publisher's `0x0E` from SUBSCRIBE_OK (the priority
@@ -653,7 +653,7 @@ inside `subscribe` (the product package knows nothing about media kinds); docume
 A headless player for decoded audio: WebCodecs decoding, an adaptive jitter buffer in an
 `AudioWorklet`, a mix, and reports to the playout clock
 ([issue #314](https://github.com/muxinc/relay-sdks/issues/314)); its design is in
-[media-layer.md](media-layer.md#audio-player). TypeScript only, in `@mux/moq-media`: a Python bot has
+[media-layer.md](media-layer.md#audio-player). TypeScript only, in `@caprid/moq-media`: a Python bot has
 no output device. It takes frames, not a subscription, so a frame reader's `onFrame` feeds it and
 the format package still does not depend on the product package.
 
@@ -764,7 +764,7 @@ already says what was cut), and a player method (the transcript is text, not aud
 
 PCM to Opus and back for a server-side talker such as a voice bot
 ([issue #320](https://github.com/muxinc/relay-sdks/issues/320)). Python only, in `moq_media.opus`,
-on PyAV's libopus and installed with the `opus` extra (`mux-moq-media[opus]`, [ADR 0006](../docs/adr/0006-opus-codec-behind-an-extra.md)).
+on PyAV's libopus and installed with the `opus` extra (`caprid-moq-media[opus]`, [ADR 0006](../docs/adr/0006-opus-codec-behind-an-extra.md)).
 A browser has WebCodecs' `AudioEncoder` and `AudioDecoder`, which the TypeScript helpers already
 take.
 
@@ -791,13 +791,13 @@ a resampler's output length varies from packet to packet.
 ## Media publishing: `FrameWriter`, `CatalogService`, `mediaTrackProperties`
 
 The media publishing policy the Video.js example proved, lifted into each product package
-([issue #84](https://github.com/muxinc/relay-sdks/issues/84) for Python as `mux_relay.media`,
+([issue #84](https://github.com/muxinc/relay-sdks/issues/84) for Python as `caprid_relay.media`,
 [issue #263](https://github.com/muxinc/relay-sdks/issues/263) for TypeScript as the
-`@mux/relay/media` subpath); its contract is the "Media publishing" section of
+`@caprid/relay/media` subpath); its contract is the "Media publishing" section of
 [behavior.md](behavior.md#media-publishing). Neither root package exports these names; the
-`media` exports are pinned by `python/packages/mux-relay/tests/test_exports.py` and by the
+`media` exports are pinned by `python/packages/caprid-relay/tests/test_exports.py` and by the
 TypeScript package's export test. TypeScript uses factories that return interfaces, like
-`@mux/moq-media`; Python uses classes.
+`@caprid/moq-media`; Python uses classes.
 
 | Concept | TypeScript | Python |
 | --- | --- | --- |
@@ -809,7 +809,7 @@ TypeScript package's export test. TypeScript uses factories that return interfac
 | Map encoded frames onto a track's groups | `createFrameWriter(track, { grouping, stale, maxBacklog, onKeyframeNeeded })` → `FrameWriter` (`FrameWriterOptions`); `grouping: 'frame'` for one group per frame (`FrameGrouping`) | `FrameWriter(track, grouping="keyframe", stale=None, max_backlog=None, on_keyframe_needed=None)`; `grouping="frame"` for one group per frame |
 | Send one frame if the relay wants it | `writer.write(frame)` → `Promise<FrameOutcome>`, callable without awaiting | `await writer.write(frame)` returns a `FrameOutcome`; concurrent calls are served in order |
 | What became of a frame | `FrameOutcome { kind, error?, groupId? }`, `kind` a `FrameOutcomeKind`: `'sent'`, `'skipped'`, `'stale'`, `'dropped'`, `'interrupted'`, `'ended'` | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `dropped`, `interrupted`, `ended`), `error`, `group_id` |
-| One encoded frame as the writer sees it | `Frame { payload, key, properties?, discontinuity? }`; `@mux/moq-media`'s `LocFrame` qualifies | `Frame`, a protocol: `payload`, `key`, `properties`, `discontinuity` |
+| One encoded frame as the writer sees it | `Frame { payload, key, properties?, discontinuity? }`; `@caprid/moq-media`'s `LocFrame` qualifies | `Frame`, a protocol: `payload`, `key`, `properties`, `discontinuity` |
 | Frames waiting behind the one being written; their bound | `writer.backlog`; `maxBacklog` (default 8, or 25 under frame grouping) | `writer.backlog`; `max_backlog` (same defaults) |
 | The next frame sent must be a keyframe; told on each entry | `writer.keyframeNeeded`; `onKeyframeNeeded()` | `writer.keyframe_needed`; `on_keyframe_needed()` |
 | FIN the open group and refuse further frames | `await writer.close()` | `await writer.close()` |
@@ -841,7 +841,7 @@ supervised publisher's writers outlive its generations, and a move to a new one 
 media tier's part of a media track's properties. "Target latency" is the reader's name for the same
 budget ([#303](https://github.com/muxinc/relay-sdks/issues/303)), so one setting reads the same on
 both sides. Not adopted: a `timescale` option returning the LOC Timescale too (the product package
-does not depend on `@mux/moq-media`, so the caller adds `locTrackProperties()`); an option on
+does not depend on `@caprid/moq-media`, so the caller adds `locTrackProperties()`); an option on
 `registerTrack` (it knows nothing about media); an option on the frame writer (it receives a track
 already registered, and an object-level `0x06` reaches viewers as a Timestamp); `deliveryTimeoutMs`
 (media durations are microseconds, and the budget is what the application knows); an object

@@ -1,12 +1,12 @@
 /**
- * The child process behind the `@mux/relay-websocket` target's process lifetime checks in Node:
+ * The child process behind the `@caprid/relay-websocket` target's process lifetime checks in Node:
  *
  *     node websocket-lifetime.js <origin> <kind>
  *
  * The same checks as `relay-quic-lifetime.js`, which describes `kind`, over QMux over WebSocket. The peer's certificate
  * is trusted through NODE_EXTRA_CA_CERTS, which the child inherits.
  */
-import { createWebSocketTransport } from '@mux/relay-websocket';
+import { createWebSocketTransport } from '@caprid/relay-websocket';
 
 const [origin, kind] = process.argv.slice(2);
 const { transport, ready } = createWebSocketTransport()(`${origin}/conformance`, ['moqt-22']);

@@ -1,4 +1,4 @@
-# @mux/relay
+# @caprid/relay
 
 The Relay TypeScript SDK. `connectRelaySubscriber` subscribes to track objects and
 `connectRelayPublisher` publishes them, through Relay, Mux's Media over QUIC (MoQ) relay service.
@@ -10,11 +10,11 @@ Payloads are bytes the SDK does not interpret; no player, media catalog, or Vide
   It needs WebTransport protocol negotiation, which the live tests verify against the Relay in
   Chromium and in Firefox 155 or later (Playwright's builds). WebKit cannot open a WebTransport
   session to the Relay yet ([#296](https://github.com/muxinc/relay-sdks/issues/296)).
-- Node 24+: import from `@mux/relay/node`, which connects over native QUIC through
-  `@mux/relay-quic` ([Node](#node)). Other runtimes must pass a compatible `createTransport`
+- Node 24+: import from `@caprid/relay/node`, which connects over native QUIC through
+  `@caprid/relay-quic` ([Node](#node)). Other runtimes must pass a compatible `createTransport`
   factory.
 - Where UDP is blocked, or the browser has no usable WebTransport (Safari): pass
-  [`@mux/relay-websocket`](packages/relay-websocket/README.md)'s `withWebSocketFallback()` or
+  [`@caprid/relay-websocket`](packages/relay-websocket/README.md)'s `withWebSocketFallback()` or
   `createWebSocketTransport()` as `createTransport` to connect over QMux over WebSocket on TCP 443
   ([networks without UDP](GUIDE.md#networks-without-udp-qmux-over-websocket)).
 - A Relay endpoint and a short-lived Relay JWT authorized for the namespace you use. The SDK
@@ -23,13 +23,13 @@ Payloads are bytes the SDK does not interpret; no player, media catalog, or Vide
 ## Install
 
 The package is unpublished and its name is provisional. Build it from a checkout of this repository
-and serve it with its `@mux/moq-core` dependency, as described in
+and serve it with its `@caprid/moq-core` dependency, as described in
 [Use the local packages in your application](GUIDE.md#use-the-local-packages-in-your-application).
 
 ## Publish and subscribe
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@mux/relay';
+import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@caprid/relay';
 
 const url = roomEndpoint('https://relay.mux.global', ['team']); // your token's root as the path
 const namespace = ['quickstart', 'unique-run']; // relative to that root
@@ -48,7 +48,7 @@ const subscription = subscriber.subscribe(
 );
 await subscription.subscribed; // a fresh namespace can briefly reject this with error 16; retry it
 
-await ticker.writeText('hello from @mux/relay'); // waits for the subscriber's demand
+await ticker.writeText('hello from @caprid/relay'); // waits for the subscriber's demand
 console.log(await arrived);
 subscriber.close();
 await publisher.close();
@@ -63,15 +63,15 @@ across connections and publisher restarts ([stay connected](GUIDE.md#stay-connec
 
 ## Node
 
-`@mux/relay/node` exports everything `@mux/relay` does. Its `connectRelayPublisher`,
+`@caprid/relay/node` exports everything `@caprid/relay` does. Its `connectRelayPublisher`,
 `connectRelaySubscriber` and both `connectSupervised*` functions connect over native QUIC (MOQT on QUIC, ALPN `moqt-22`, falling back to `moqt-20`) through
-[`@mux/relay-quic`](packages/relay-quic/README.md), Mux's transport adapter for Node. Pass the same
+[`@caprid/relay-quic`](packages/relay-quic/README.md), Mux's transport adapter for Node. Pass the same
 `https://` endpoint you pass in a browser.
 
 ### Install
 
-Add `@mux/relay-quic` next to `@mux/relay`. It is an optional peer dependency, needed only by
-`@mux/relay/node`, and it needs a native binary for your platform:
+Add `@caprid/relay-quic` next to `@caprid/relay`. It is an optional peer dependency, needed only by
+`@caprid/relay/node`, and it needs a native binary for your platform:
 [its README](packages/relay-quic/README.md) says how to get one. Without the package or the
 binary, a connect call fails with `RelayError` code `TRANSPORT_UNAVAILABLE`.
 
@@ -80,7 +80,7 @@ binary, a connect call fails with `RelayError` code `TRANSPORT_UNAVAILABLE`.
 The code is the browser example's, with a different import:
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@mux/relay/node';
+import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@caprid/relay/node';
 
 const url = roomEndpoint('https://relay.mux.global', ['team']);
 const namespace = ['quickstart', 'unique-run'];
@@ -118,7 +118,7 @@ const subscriber = await connectRelaySubscriber({ url, getToken, ca: await readF
 
 Connections without trust options share one adapter. Passing `createTransport` replaces the adapter
 entirely; passing it together with `ca` or `serverCertificateHashes` is a `TypeError`. To combine
-them, build the factory yourself with `nativeQuicTransport({ ca })` from `@mux/relay-quic`.
+them, build the factory yourself with `nativeQuicTransport({ ca })` from `@caprid/relay-quic`.
 
 ### Process lifetime
 
@@ -129,24 +129,24 @@ early without closing them keeps running.
 
 ### Native WebTransport
 
-`@mux/relay/node` uses `@mux/relay-quic` even where a global `WebTransport` exists. If Node gains
+`@caprid/relay/node` uses `@caprid/relay-quic` even where a global `WebTransport` exists. If Node gains
 a `WebTransport` that can negotiate protocols, the first connect emits a `DeprecationWarning`
-(code `MUX_RELAY_NODE_NATIVE_WEBTRANSPORT`) through `process.emitWarning`, once per process: at
-that point `@mux/relay` connects on its own, and this entry point will be retired.
+(code `CAPRID_RELAY_NODE_NATIVE_WEBTRANSPORT`) through `process.emitWarning`, once per process: at
+that point `@caprid/relay` connects on its own, and this entry point will be retired.
 
 ### Deno
 
-Best effort, and untested: Deno can load the entry as `npm:@mux/relay/node` and the addon through
+Best effort, and untested: Deno can load the entry as `npm:@caprid/relay/node` and the addon through
 its npm compatibility layer. Deno's own `WebTransport` cannot negotiate protocols, so plain
-`@mux/relay` fails there with `TRANSPORT_UNAVAILABLE`.
+`@caprid/relay` fails there with `TRANSPORT_UNAVAILABLE`.
 
 ## Stability
 
 Before 1.0, a minor version can break the API, and [CHANGELOG.md](CHANGELOG.md) says what changed.
-`@mux/relay`, `@mux/moq-core`, `@mux/moq-media`, `@mux/moq-mediabunny` and `@mux/relay-quic` always
+`@caprid/relay`, `@caprid/moq-core`, `@caprid/moq-media`, `@caprid/moq-mediabunny` and `@caprid/relay-quic` always
 release together at the same version, so install matching versions. A release supports:
 
-- browsers with WebTransport, and Node 24 or later on the platforms `@mux/relay-quic` ships
+- browsers with WebTransport, and Node 24 or later on the platforms `@caprid/relay-quic` ships
   binaries for (Linux x64 and arm64 with glibc or musl, macOS arm64 and x64, Windows x64);
 - MOQT draft 22 (`moqt-22`), with draft 20 (`moqt-20`) as an offered fallback, against moq-relay
   0.15.4 or later.
