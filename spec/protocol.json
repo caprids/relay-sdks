@@ -25,7 +25,7 @@
     "maxTrackPropertiesBytes": 65525,
     "maxPropertyValueBytes": 65535,
     "maxNamespaceFields": 32,
-    "note": "maxTrackPropertiesBytes is the encoded track property block a publisher's SUBSCRIBE_OK can carry: the 16-bit control message length (65535) less the track alias, a varint of up to 9 bytes that is the peer's request ID and so unknown at registration, and the 1-byte count of the message parameters, of which the SDKs send none. Both SDKs refuse a larger block at registration; the core holds the bound."
+    "note": "maxTrackPropertiesBytes is the encoded track property block a publisher's SUBSCRIBE_OK can carry: the 16-bit control message length (65535) less the track alias, a varint of up to 9 bytes that is the peer's request ID and so unknown at registration, and the 1-byte count of the message parameters, of which the SDKs send none. Both SDKs refuse a larger block at registration; the core holds the bound. The same block rides in TRACK_STATUS_OK (a REQUEST_OK, which has no track alias) beside LARGEST_OBJECT once the track has written an object: it fits while the group and object ID varints take at most 8 bytes together, plus whatever the block leaves under the bound, so only a block within 10 bytes of the bound can overflow it, and that TRACK_STATUS is answered INTERNAL_ERROR."
   },
   "trackProperties": {
     "defaultPublisherPriority": { "type": 14, "max": 255 },

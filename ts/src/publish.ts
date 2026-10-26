@@ -71,7 +71,7 @@ export interface RegisterTrackOptions {
    * add, drop, or rewrite properties before delivery to subscribers. With moq-relay 0.17.0 every
    * SUBSCRIBE_OK carries the relay's track properties, not these, and a Timescale (`0x08`) here is
    * what keeps supplied object Timestamps unchanged. See "Relay property handling" in
-   * spec/behavior.md. The list rides in every SUBSCRIBE_OK, so it must encode to at most 65525
+   * spec/behavior.md. The list rides in every SUBSCRIBE_OK (and TRACK_STATUS_OK), so it must encode to at most 65525
    * bytes, hold at most 64 pairs (the relay's limit) and keep `0x0E` at most 255 and `0x22` at 1
    * or 2 (draft-22); otherwise the relay would refuse every subscriber, so `registerTrack` throws a
    * RangeError instead.

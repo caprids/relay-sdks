@@ -912,6 +912,24 @@ taken over.
   completed just before the relay ended its subscription may reach no viewer, and no error follows.
 - There is no publisher-side retention or replay. Late-subscriber behavior depends on relay caching
   and subscription filters.
+- A publisher connection answers TRACK_STATUS
+  ([draft-22 Section 9.13](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.13))
+  for its tracks, on `moqt-22` and `moqt-20` alike, as the SUBSCRIBE for the same track would be
+  answered, without creating a subscription or sending objects. A registered track that is not
+  closed gets TRACK_STATUS_OK (a REQUEST_OK) with the track's properties, as SUBSCRIBE_OK carries
+  them, and LARGEST_OBJECT once the track has written an object: the largest group and object ID
+  whose write the transport took, across every relay subscription the track has had on this
+  connection. Any other track gets REQUEST_ERROR `DOES_NOT_EXIST` (`unknown track`), as a SUBSCRIBE
+  does; an answer that does not fit its control message (track properties at the size limit
+  together with a long LARGEST_OBJECT) gets `INTERNAL_ERROR`. The publisher then FINs the request
+  stream and reads nothing more from it. Demand, the write slot and every track writer are
+  unaffected, and the application is not told. SUBSCRIBE_OK still carries no LARGEST_OBJECT
+  (see [Draft-22 protocol boundaries](#draft-22-protocol-boundaries)). moq-relay `main` from
+  moq-dev/moq#5991 asks the publisher for a track's status before it subscribes on behalf of
+  another relay, and fails that relay's subscribe when the publisher refuses, so a track crosses
+  two relays there only because the publisher answers
+  ([a viewer on another relay](relay-interop.md#a-viewer-on-another-relay)). Implemented in both
+  SDKs.
 - A failed write may have delivered partial data. There is no automatic retry.
 - The publisher encodes supplied track and object properties as protocol metadata. The raw transport
   API adds no default timescale, timestamp, or LOC media packaging. Subscribers expose the properties received
@@ -954,6 +972,8 @@ taken over.
   no viewer, with or without a
   `SUBSCRIPTION_CHANGED` error; a live publisher cannot rely on its first objects after demand
   begins being delivered ([a viewer on another relay](relay-interop.md#a-viewer-on-another-relay)).
+  That is moq-relay 0.17; `main` asks with TRACK_STATUS instead, which the publisher answers (see
+  above), and subscribes once ([TRACK_STATUS on moq-relay main](relay-interop.md#track_status-on-moq-relay-main)).
   Implemented in both SDKs.
 
 ### Delivery timeouts
@@ -1769,6 +1789,19 @@ and player adapters are not implemented in any SDK and have no contract yet. Add
   The `UNKNOWN_OBJECT_STATUS` stream-reset code has a different meaning: a FETCH publisher cannot
   determine whether an object exists ([Section 12.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-12.5)).
   Ordinary subgroup transport resets remain per-stream delivery events.
+- A publisher connection serves SUBSCRIBE, SUBSCRIBE_NAMESPACE (the announce carrier) and
+  TRACK_STATUS. It answers PUBLISH with REQUEST_ERROR `UNINTERESTED` and every other request
+  (FETCH, PUBLISH_NAMESPACE, SUBSCRIBE_TRACKS) with `NOT_SUPPORTED`: a non-relay endpoint may
+  implement a subset and should answer the rest that way
+  ([Section 1.6](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-1.6)).
+- TRACK_STATUS_OK carries LARGEST_OBJECT once the track has written an object, as
+  [Section 9.20.17](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.20.17)
+  requires ("If Objects have been published on this Track the Publisher MUST include this
+  parameter"); the publisher's SUBSCRIBE_OK still does not, so the two answers differ there,
+  where [Section 9.13](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.13)
+  says they carry the same parameters. Adding it to SUBSCRIBE_OK changes what every relay's
+  upstream subscription sees, and has not been tested against moq-relay
+  ([publisher history](relay-interop.md#draft-22-location_filter-framing)).
 
 ### Relay interop deviations
 

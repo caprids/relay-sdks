@@ -55,7 +55,8 @@ works, Next Object included. Until production runs 0.17.3 or later, a live-edge 
 relative start of 0 (the next group) rather than Next Object, as the live smoke tests do, or leaves
 the filter out ([issue #275](https://github.com/muxinc/relay-sdks/issues/275)).
 
-Publishers still retain no history and advertise no `LARGEST_OBJECT`. The relay's
+Publishers still retain no history and advertise no `LARGEST_OBJECT` in SUBSCRIBE_OK (their
+TRACK_STATUS_OK does carry it, [below](#track_status-on-moq-relay-main)). The relay's
 Next Object + current-group `FILL_PARAMETERS` pull (since 0.14.17, unchanged through 0.17.0, whose
 upstream SUBSCRIBE was observed live on 2026-10-05) therefore has no cached publisher
 content to fill; the publisher serves subsequent writes. Adding publisher retention and
@@ -439,6 +440,38 @@ start media at a keyframe after any change (the frame writer does). The live smo
 warm-up marker on each track until the subscriber receives one before writing what they assert, and
 `RELAY_SUB_URL` puts their subscribers on another relay
 ([issue #244](https://github.com/muxinc/relay-sdks/issues/244)).
+
+#### TRACK_STATUS on moq-relay main
+
+moq-relay `main` from [moq-dev/moq#5991](https://github.com/moq-dev/moq/pull/5991) (`916cd4543`,
+2026-10-20; in no release through 0.17.7) learns the track another relay asks about with
+TRACK_STATUS instead of a SUBSCRIBE: when the publisher's relay has no subscription for the track,
+its IETF subscriber sends the publisher TRACK_STATUS (`track_status` in
+`rs/moq-net/src/ietf/subscriber.rs` at `8810d7365`), answers the downstream relay's TRACK_INFO from
+the TRACK_STATUS_OK, and subscribes only once the downstream relay does. A refusal fails the
+downstream request, and #5991 removed the fallback to SUBSCRIBE that #5409 had added, so the
+downstream relay retries forever. Draft-22 lets a relay do either
+([Section 9.13](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.13):
+relays "MAY forward TRACK_STATUS ... or MAY initiate a subscription"), and lets a non-relay endpoint
+answer it NOT_SUPPORTED ([Section 1.6](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-1.6)),
+which is what both SDKs' publishers did until they answered it
+([behavior](behavior.md#publishing)).
+
+Measured on 2026-10-26 on two local relays built from `main` at `8810d7365` (the voice benchmark's
+relay configuration with its `[cluster.api]` keys renamed by hand, its Switchboard and its CA;
+publisher on one relay, subscriber on the other, over `moqt-22`), with the live smoke tests:
+
+| publisher | one hop | two hops | the publisher's relay logs, per track asked about |
+| --- | --- | --- | --- |
+| refuses TRACK_STATUS (`NOT_SUPPORTED`) | pass | fail in every runtime: Node over native QUIC, Chromium WebTransport, Node and Chromium WebSocket (TypeScript), and aioquic (Python) | `track status refused err=unsupported`, then `track info error ... err=unsupported` to the other relay, which logs `track info failed`, once per retried SUBSCRIBE |
+| answers TRACK_STATUS | pass | pass, in the same five runtimes | `track status known`, then one upstream `subscribe started` under a millisecond later |
+
+On moq-relay 0.17.7 (`e2c5b50`) the relay never sends TRACK_STATUS, and both publishers pass one
+and two hops the same way; the publisher's relay there still subscribes twice per track asked
+about from the other relay (subscribe, cancel, subscribe, as above), where `main` subscribes once
+(32 of 32 tracks each). The early-object loss above is therefore a 0.17 behavior; on `main` with a
+publisher that answers TRACK_STATUS it was not seen, though the smoke tests' warm-up markers would
+hide a single lost object.
 
 Relays before 0.15 held the upstream subscription for about 30 seconds after the last viewer left
 (measured against the same endpoint on 2026-09-15, [issue #24](https://github.com/muxinc/relay-sdks/issues/24));

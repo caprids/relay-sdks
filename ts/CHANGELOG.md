@@ -9,6 +9,13 @@ each section says what changed and what to do about it. How to cut a release is 
 
 The first release. Rename this heading to the version (`## 0.1.0`) in the release PR.
 
+- `@caprid/relay`, `@caprid/moq-core`: a publisher connection answers the relay's TRACK_STATUS (draft-22 §9.13) for its
+  tracks: TRACK_STATUS_OK with the track's properties and, once the track
+  has written an object, LARGEST_OBJECT; an unknown or closed track gets `DOES_NOT_EXIST`, as a SUBSCRIBE does.
+  moq-relay `main` asks a publisher for a track's status before it subscribes on behalf of another relay, and a track
+  whose publisher refuses does not cross two relays there. Nothing changes for an application. In `@caprid/moq-core`,
+  `RegisteredTrack.objectPublished(location)` records what a TRACK_STATUS_OK reports as LARGEST_OBJECT, and
+  `encodeRequestOk` takes the Track Properties as a third argument.
 - `@caprid/relay`: `connectRelayPublisher` and `connectRelaySubscriber` for browsers over WebTransport (Chromium, and
   Firefox 155 or later: [#322](https://github.com/muxinc/relay-sdks/issues/322)), and `@caprid/relay/node` for Node 24+
   over native QUIC.

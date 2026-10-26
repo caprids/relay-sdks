@@ -8,6 +8,13 @@ minor version can break the API; each section says what changed and what to do a
 
 The first release. Rename this heading to the version (`## 0.1.0`) in the release PR.
 
+- `mux-relay`, `mux-moq-core`: a publisher connection answers the relay's TRACK_STATUS (draft-22 §9.13) for its
+  tracks: TRACK_STATUS_OK with the track's properties and, once the track
+  has written an object, LARGEST_OBJECT; an unknown or closed track gets `DOES_NOT_EXIST`, as a SUBSCRIBE does.
+  moq-relay `main` asks a publisher for a track's status before it subscribes on behalf of another relay, and a track
+  whose publisher refuses does not cross two relays there. Nothing changes for an application. In `mux-moq-core`,
+  `RegisteredTrack.object_published(location)` records what a TRACK_STATUS_OK reports as LARGEST_OBJECT, and
+  `encode_request_ok` takes `track_properties`.
 - `mux-relay`: `connect_relay_publisher` and `connect_relay_subscriber` over native QUIC through aioquic,
   and the `mux_relay.media` frame writer and catalog service.
 - `mux_relay.room_endpoint(endpoint, room)` builds the recommended room-rooted endpoint, the endpoint with the
