@@ -9,9 +9,9 @@ import {
   type LocFrame,
   locTrackProperties,
   type SourceTimeline,
-} from '@mux/moq-media';
-import type { RelayPublisher, RelayTrackWriter } from '@mux/relay';
-import { createCatalogService, createFrameWriter, type FrameOutcome, mediaTrackProperties } from '@mux/relay/media';
+} from '@caprid/moq-media';
+import type { RelayPublisher, RelayTrackWriter } from '@caprid/relay';
+import { createCatalogService, createFrameWriter, type FrameOutcome, mediaTrackProperties } from '@caprid/relay/media';
 import type { MicrophoneBlock, MicrophoneCapture } from './capture-microphone.js';
 
 /** A microphone's Opus encoder configuration, and the catalog entry it gives the audio track. */

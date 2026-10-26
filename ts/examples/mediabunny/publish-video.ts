@@ -6,10 +6,10 @@ import {
   locTrackProperties,
   VIDEO_TRACK,
   videoTrackFromDecoderConfig,
-} from '@mux/moq-media';
-import { packetToLocFrame } from '@mux/moq-mediabunny';
-import type { RelayPublisher, RelayTrackWriter } from '@mux/relay';
-import { createCatalogService, createFrameWriter, type FrameWriter } from '@mux/relay/media';
+} from '@caprid/moq-media';
+import { packetToLocFrame } from '@caprid/moq-mediabunny';
+import type { RelayPublisher, RelayTrackWriter } from '@caprid/relay';
+import { createCatalogService, createFrameWriter, type FrameWriter } from '@caprid/relay/media';
 import { BlobSource, EncodedPacketSink, Input, MP4 } from 'mediabunny';
 
 function wait(milliseconds: number, signal: AbortSignal): Promise<void> {
@@ -57,7 +57,7 @@ async function demanded(track: RelayTrackWriter, signal: AbortSignal): Promise<v
 
 /**
  * Publish the primary AVC video track of an MP4 once, paced in real time. No decoding or encoding.
- * A frame writer from `@mux/relay/media` maps packets onto groups and a catalog service serves the catalog on every
+ * A frame writer from `@caprid/relay/media` maps packets onto groups and a catalog service serves the catalog on every
  * relay subscription. The caller owns the connection. Use a fresh publisher/namespace for each run; track names cannot
  * be reused. This deliberately small example stops when a track ends and omits audio and reconnect policy.
  */

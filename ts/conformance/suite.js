@@ -2,7 +2,7 @@
  * The transport adapter conformance suite (`spec/transport-adapter.md`, "Conformance"), runtime-neutral: it uses only
  * APIs that browsers and Node both provide, and gets everything target-specific from the target it is handed. Each
  * case is named after the rule it checks. A runner per runtime turns the cases into that runtime's tests:
- * `pair.test.js` for the in-memory pair and `relay-quic.conformance.js` for `@mux/relay-quic` under vitest, and
+ * `pair.test.js` for the in-memory pair and `relay-quic.conformance.js` for `@caprid/relay-quic` under vitest, and
  * `scripts/test-conformance.mjs` for Chromium. `README.md` describes the target and peer interfaces.
  */
 

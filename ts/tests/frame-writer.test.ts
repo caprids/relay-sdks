@@ -1,4 +1,4 @@
-import type { LocFrame } from '@mux/moq-media';
+import type { LocFrame } from '@caprid/moq-media';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
 import type { RelayTrackWriter } from '../src/index.js';
@@ -531,7 +531,7 @@ describe('closing and arguments', () => {
     expect(onKeyframeNeeded).not.toHaveBeenCalled();
   });
 
-  it("takes @mux/moq-media's LocFrame as a frame", () => {
+  it("takes @caprid/moq-media's LocFrame as a frame", () => {
     const writer = createFrameWriter<LocFrame>(slotTrack().writer);
     expectTypeOf(writer.write).parameter(0).toEqualTypeOf<LocFrame>();
   });

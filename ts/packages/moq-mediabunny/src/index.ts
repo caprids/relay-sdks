@@ -1,8 +1,8 @@
-import { type LocFrame, type LocPropertiesOptions, locProperties } from '@mux/moq-media';
+import { type LocFrame, type LocPropertiesOptions, locProperties } from '@caprid/moq-media';
 import type { EncodedPacket } from 'mediabunny';
 
-// Compatibility exports. New code should import the WebCodecs helpers/types from @mux/moq-media.
-export { audioTrackFromDecoderConfig, type LocFrame, videoTrackFromDecoderConfig } from '@mux/moq-media';
+// Compatibility exports. New code should import the WebCodecs helpers/types from @caprid/moq-media.
+export { audioTrackFromDecoderConfig, type LocFrame, videoTrackFromDecoderConfig } from '@caprid/moq-media';
 
 /** Options for {@link packetToLocFrame}. Decoder configuration is attached to key packets only. */
 export interface PacketToLocFrameOptions extends LocPropertiesOptions {

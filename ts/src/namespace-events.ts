@@ -5,7 +5,7 @@
  * wire's prefix-relative entries into full namespaces, keeps the events edge-triggered, and maps the
  * request's ending onto the subscription error classes.
  */
-import { isStreamFailure, type MoqtSession, REQUEST_ERROR_CODE, type RequestError } from '@mux/moq-core';
+import { isStreamFailure, type MoqtSession, REQUEST_ERROR_CODE, type RequestError } from '@caprid/moq-core';
 import { RelayError } from './errors.js';
 import { CLOSURE_GRACE_MS, SubscriptionConnectionClosedError, SubscriptionRequestError } from './subscription.js';
 import { type BoundedEventSink, createBoundedEvents, type SubscriptionEventOptions } from './subscription-events.js';

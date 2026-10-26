@@ -36,12 +36,8 @@ from typing import Any
 
 from test_relay import read_endpoint, read_token, redact
 
-import mux_relay.publish
-from moq_core import AbsoluteLocationFilter, KeyValuePair, Location, RelativeGroupFilter
-from moq_core.control_messages import Subscribe
-from moq_core.publish_session import IncomingRequestUpdate, MoqtPublishSession, MoqtPublishSessionConfig
-from moq_core.transport import MoqtTransport
-from mux_relay import (
+import caprid_relay.publish
+from caprid_relay import (
     DEFAULT_ENDPOINT,
     CancellationToken,
     MessageParameters,
@@ -52,6 +48,10 @@ from mux_relay import (
     connect_relay_publisher,
     connect_relay_subscriber,
 )
+from moq_core import AbsoluteLocationFilter, KeyValuePair, Location, RelativeGroupFilter
+from moq_core.control_messages import Subscribe
+from moq_core.publish_session import IncomingRequestUpdate, MoqtPublishSession, MoqtPublishSessionConfig
+from moq_core.transport import MoqtTransport
 
 RUN_DEADLINE = 60.0
 RECEIVE_DEADLINE = 10.0
@@ -78,7 +78,7 @@ def observe_publish_session(subscribes: list[Subscribe], updates: list[IncomingR
     The SDK does not surface the relay's upstream requests, so the probe wraps the core session
     factory that ``connect_relay_publisher`` calls and sets two core callbacks the SDK leaves unset.
     """
-    create = mux_relay.publish.create_moqt_publish_session
+    create = caprid_relay.publish.create_moqt_publish_session
 
     def create_observed(transport: MoqtTransport, config: MoqtPublishSessionConfig | None = None) -> MoqtPublishSession:
         assert config is not None
@@ -87,7 +87,7 @@ def observe_publish_session(subscribes: list[Subscribe], updates: list[IncomingR
         return create(transport, config)
 
     # setattr: a module function attribute is not reassignable as far as the type checker knows.
-    setattr(mux_relay.publish, "create_moqt_publish_session", create_observed)  # noqa: B010
+    setattr(caprid_relay.publish, "create_moqt_publish_session", create_observed)  # noqa: B010
 
 
 def stated_group_order(ok: SubscribeOk) -> str | None:
@@ -104,7 +104,7 @@ def stated_group_order(ok: SubscribeOk) -> str | None:
 async def run(endpoint: str, token: str | None, namespace: list[str], report: Any) -> dict[str, Any]:
     from aioquic.quic.configuration import QuicConfiguration
 
-    from mux_relay.quic import connect_quic
+    from caprid_relay.quic import connect_quic
 
     cafile = os.environ.get("RELAY_CA_FILE")
 

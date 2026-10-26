@@ -1,4 +1,4 @@
-# @mux/relay-websocket
+# @caprid/relay-websocket
 
 The Relay SDK's transport adapter for QMux over WebSocket. It carries MOQT on
 [QMux](https://datatracker.ietf.org/doc/draft-ietf-quic-qmux/) (QUIC's streams over a reliable byte stream, wire
@@ -19,8 +19,8 @@ The package is unpublished, like the rest of the SDK.
 Pass one of its factories as the SDK's `createTransport`. Build it once and reuse it for every connection.
 
 ```ts
-import { connectRelaySubscriber } from '@mux/relay';
-import { createWebSocketTransport, withWebSocketFallback } from '@mux/relay-websocket';
+import { connectRelaySubscriber } from '@caprid/relay';
+import { createWebSocketTransport, withWebSocketFallback } from '@caprid/relay-websocket';
 
 // WebTransport first; WebSocket when its handshake fails or takes longer than 4 s.
 const subscriber = await connectRelaySubscriber({ url, getToken, createTransport: withWebSocketFallback() });
@@ -63,5 +63,5 @@ certificate. Node trusts the platform's roots, plus any in `NODE_EXTRA_CA_CERTS`
 
 ## Stability
 
-Before 1.0, a minor version can break the API. This package releases together with `@mux/relay` at the same version;
+Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay` at the same version;
 see the [changelog](../../CHANGELOG.md).

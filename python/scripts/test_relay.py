@@ -50,8 +50,7 @@ from getpass import getpass
 from typing import Any
 from urllib.parse import urlsplit
 
-from moq_core import RelativeGroupFilter
-from mux_relay import (
+from caprid_relay import (
     DEFAULT_ENDPOINT,
     CancellationToken,
     Closed,
@@ -73,6 +72,7 @@ from mux_relay import (
     connect_supervised_subscriber,
     room_endpoint,
 )
+from moq_core import RelativeGroupFilter
 
 RUN_DEADLINE = 60.0
 RECEIVE_DEADLINE = 10.0
@@ -117,7 +117,7 @@ def read_endpoint(name: str, default: str) -> str:
 async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: list[str], report: Any) -> dict[str, Any]:
     from aioquic.quic.configuration import QuicConfiguration
 
-    from mux_relay.quic import connect_quic
+    from caprid_relay.quic import connect_quic
 
     cafile = os.environ.get("RELAY_CA_FILE")
 

@@ -46,7 +46,7 @@ cp "libclang_rt.builtins-wasm32-wasi-$WASI_SDK.0/libclang_rt.builtins-wasm32.a" 
 cp -r "$(clang -print-resource-dir)/include" "$resource/include"
 
 cat > shim.c <<'EOF'
-/* The decoder surface @mux/moq-media uses. */
+/* The decoder surface @caprid/moq-media uses. */
 #include <stdlib.h>
 #include "opus.h"
 

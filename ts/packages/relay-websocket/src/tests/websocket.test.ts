@@ -1,5 +1,5 @@
 /**
- * `@mux/relay-websocket` against an in-process QMux-over-WebSocket accepting end (`@moq/qmux` over `ws`), on plain
+ * `@caprid/relay-websocket` against an in-process QMux-over-WebSocket accepting end (`@moq/qmux` over `ws`), on plain
  * `ws://` so no certificate is involved. The conformance suite covers the contract rule by rule
  * (`conformance/websocket.conformance.js`); these cover the factories, the URL mapping and the fallback policy.
  */

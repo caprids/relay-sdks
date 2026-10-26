@@ -11,7 +11,7 @@
  * mux-global demo, which serves it to the browser next to the SDK. It branches on the error's code
  * and phase, never on its message.
  */
-import { RelayError } from '@mux/relay';
+import { RelayError } from '@caprid/relay';
 
 /** The phases after which a failed write may have delivered some or all of its bytes. */
 export const SENDING_PHASES = Object.freeze(['opening-stream', 'writing', 'closing']);

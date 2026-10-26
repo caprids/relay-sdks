@@ -10,7 +10,7 @@
  *     node scripts/release.mjs smoke <dir>        install the tarballs into an empty project, import and type-check
  *     node scripts/release.mjs publish <dir> [--dry-run] [--provenance]
  *
- * `pack` leaves `@mux/relay-quic` and its platform packages to `packages/relay-quic/scripts/pack.mjs`, which adds the
+ * `pack` leaves `@caprid/relay-quic` and its platform packages to `packages/relay-quic/scripts/pack.mjs`, which adds the
  * optional dependencies on the platform packages and needs their binaries; it fails if their tarballs are missing.
  * `publish` publishes in dependency order (platform packages first), a release to the `latest` dist-tag and a
  * prerelease to `next`, and skips a package whose version the registry already has, so a rerun after a partial publish

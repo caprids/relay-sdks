@@ -1,4 +1,4 @@
-import type { MoqtObject } from '@mux/moq-core';
+import type { MoqtObject } from '@caprid/moq-core';
 
 const encoder = new TextEncoder();
 // Preserve a leading U+FEFF, and reject malformed UTF-8 instead of replacing bytes.

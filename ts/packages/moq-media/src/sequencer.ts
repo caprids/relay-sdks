@@ -3,7 +3,7 @@
  * decode order, and drops what is too late against a playout clock. It is the engine of a frame reader; it has no
  * timers and no transport. See spec/behavior.md, "Media subscribing".
  */
-import type { KeyValuePair, MoqtObject } from '@mux/moq-core';
+import type { KeyValuePair, MoqtObject } from '@caprid/moq-core';
 import type { PlayoutClock } from './clock.js';
 import { locTimestampUs } from './loc.js';
 

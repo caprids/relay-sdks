@@ -8,28 +8,28 @@ importers:
 
   .:
     dependencies:
-      '@mux/moq-core':
+      '@caprid/moq-core':
         specifier: workspace:*
         version: link:packages/moq-core
     devDependencies:
       '@biomejs/biome':
         specifier: 2.5.13
         version: 2.5.13
+      '@caprid/moq-media':
+        specifier: workspace:*
+        version: link:packages/moq-media
+      '@caprid/moq-mediabunny':
+        specifier: workspace:*
+        version: link:packages/moq-mediabunny
+      '@caprid/relay-quic':
+        specifier: workspace:*
+        version: link:packages/relay-quic
+      '@caprid/relay-websocket':
+        specifier: workspace:*
+        version: link:packages/relay-websocket
       '@moq/qmux':
         specifier: 0.3.3
         version: 0.3.3
-      '@mux/moq-media':
-        specifier: workspace:*
-        version: link:packages/moq-media
-      '@mux/moq-mediabunny':
-        specifier: workspace:*
-        version: link:packages/moq-mediabunny
-      '@mux/relay-quic':
-        specifier: workspace:*
-        version: link:packages/relay-quic
-      '@mux/relay-websocket':
-        specifier: workspace:*
-        version: link:packages/relay-websocket
       '@types/node':
         specifier: 24.12.2
         version: 24.12.2
@@ -59,13 +59,13 @@ importers:
 
   packages/moq-media:
     dependencies:
-      '@mux/moq-core':
+      '@caprid/moq-core':
         specifier: workspace:*
         version: link:../moq-core
 
   packages/moq-mediabunny:
     dependencies:
-      '@mux/moq-media':
+      '@caprid/moq-media':
         specifier: workspace:*
         version: link:../moq-media
     devDependencies:
@@ -75,7 +75,7 @@ importers:
 
   packages/relay-quic:
     dependencies:
-      '@mux/moq-core':
+      '@caprid/moq-core':
         specifier: workspace:*
         version: link:../moq-core
     devDependencies:
@@ -88,12 +88,12 @@ importers:
 
   packages/relay-websocket:
     dependencies:
+      '@caprid/moq-core':
+        specifier: workspace:*
+        version: link:../moq-core
       '@moq/qmux':
         specifier: 0.3.3
         version: 0.3.3
-      '@mux/moq-core':
-        specifier: workspace:*
-        version: link:../moq-core
 
 packages:
 

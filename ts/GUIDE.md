@@ -1,9 +1,9 @@
 # Relay JavaScript SDK
 
 Publish and subscribe to arbitrary track objects through Relay without Video.js, a media catalog,
-or a player. `@mux/relay` runs in a browser page: its default transport is **browser WebTransport
-in a secure context** (HTTPS or localhost). In Node 24+, import from `@mux/relay/node`, which
-connects over native QUIC through the optional `@mux/relay-quic` package (see the
+or a player. `@caprid/relay` runs in a browser page: its default transport is **browser WebTransport
+in a secure context** (HTTPS or localhost). In Node 24+, import from `@caprid/relay/node`, which
+connects over native QUIC through the optional `@caprid/relay-quic` package (see the
 [README's Node section](README.md#node)). Other runtimes must supply a compatible
 `createTransport` factory.
 
@@ -15,7 +15,7 @@ are provisional and publication is disabled.
 
 The packages are **unpublished**, so the first round trip runs the repository's example from a
 checkout; there is no registry install step. The example launcher runs the demo in Node, over
-[`@mux/relay-quic`](packages/relay-quic/README.md)'s native QUIC transport, and prints its output in
+[`@caprid/relay-quic`](packages/relay-quic/README.md)'s native QUIC transport, and prints its output in
 the terminal. You need Git and
 [mise](https://mise.jdx.dev/getting-started.html) available on your PATH. Commands below run in Bash
 from the repository root.
@@ -42,7 +42,7 @@ use the endpoint supplied by its operator.
 hand:
 
 ```ts
-import { roomEndpoint } from '@mux/relay';
+import { roomEndpoint } from '@caprid/relay';
 
 const url = roomEndpoint('https://relay.mux.global', ['acme', 'rooms', '42']);
 // 'https://relay.mux.global/acme/rooms/42'
@@ -82,7 +82,7 @@ mise install
 mise run ts:install
 ```
 
-The example task also builds `@mux/relay-quic`'s native addon, which needs Rust until prebuilt binaries
+The example task also builds `@caprid/relay-quic`'s native addon, which needs Rust until prebuilt binaries
 ship ([#195](https://github.com/muxinc/relay-sdks/issues/195)). The mise task brings the pinned
 toolchain; see [the example's setup notes](examples/mux-global/README.md#run-it).
 
@@ -135,12 +135,12 @@ serve `ts/dist/` and `ts/packages/moq-core/dist/` as JavaScript modules and map 
 
 ```html
 <script type="importmap">
-{"imports":{"@mux/relay":"/sdk/index.js","@mux/moq-core":"/core/index.js"}}
+{"imports":{"@caprid/relay":"/sdk/index.js","@caprid/moq-core":"/core/index.js"}}
 </script>
 ```
 
 Here `/sdk/` maps to `ts/dist/` and `/core/` to `ts/packages/moq-core/dist/`; preserve each directory's
-module layout. Import `@mux/relay` from a module script in your secure browser page. Rebuild with
+module layout. Import `@caprid/relay` from a module script in your secure browser page. Rebuild with
 `mise run ts:build` after editing sources. Copying only the Relay build or installing its directory
 in isolation does not resolve its `workspace:*` core dependency.
 
@@ -386,12 +386,12 @@ in [behavior.md](../spec/behavior.md#arguments).
 WebTransport and native QUIC both need UDP. On a network that blocks it, and in a browser without a
 WebTransport that can negotiate protocols (Safari before WebTransport, Firefox before 155), the relay
 is still reachable over TCP 443: both fleets serve MOQT on QMux over a WebSocket there. The optional
-[`@mux/relay-websocket`](packages/relay-websocket/README.md) package is that transport. Nothing
+[`@caprid/relay-websocket`](packages/relay-websocket/README.md) package is that transport. Nothing
 changes unless you pass it, as `createTransport`:
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay';
-import { createWebSocketTransport, withWebSocketFallback } from '@mux/relay-websocket';
+import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay';
+import { createWebSocketTransport, withWebSocketFallback } from '@caprid/relay-websocket';
 
 // WebTransport first; WebSocket when its handshake fails or takes longer than 4 s.
 const subscriber = await connectRelaySubscriber({ url, getToken, createTransport: withWebSocketFallback() });
@@ -514,7 +514,7 @@ connection ends after about 5 s without connectivity ([browser transport limits]
 The supervisors take the same connection options and resolve once their first connection is up.
 
 ```js
-import { connectSupervisedPublisher, connectSupervisedSubscriber } from '@mux/relay';
+import { connectSupervisedPublisher, connectSupervisedSubscriber } from '@caprid/relay';
 
 const publisher = await connectSupervisedPublisher({
   url,
@@ -661,7 +661,7 @@ encoding or serialization errors leave the writer usable.
 Use the exported readers explicitly in an object callback:
 
 ```ts
-import { type MoqtObject, readJSON, readText } from '@mux/relay';
+import { type MoqtObject, readJSON, readText } from '@caprid/relay';
 
 // For a text track:
 const onTextObject = (object: MoqtObject) => console.log(readText(object));
@@ -744,8 +744,8 @@ written during that first subscription reach no viewer, so do not rely on the fi
 demand begins. See [relay demand](../spec/relay-interop.md#relay-demand) and
 [a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay).
 
-Both loops exist ready-made in `@mux/relay/media`, the media publishing policy the
-[WebCodecs example](examples/webcodecs/README.md) runs on, and Python has as `mux_relay.media`.
+Both loops exist ready-made in `@caprid/relay/media`, the media publishing policy the
+[WebCodecs example](examples/webcodecs/README.md) runs on, and Python has as `caprid_relay.media`.
 `createCatalogService(track, document)` re-sends a document on every relay subscription and retries
 a failed send while demand remains; `createDocumentService(track)` does the same for a document you
 replace with `update(document)`, such as a media timeline, and also sends each update while the
@@ -757,11 +757,11 @@ failure. Its `write(frame)` resolves to what became of the frame (`'sent'`, `'sk
 output callback without awaiting: frames are served in call order, and when more than `maxBacklog`
 wait behind the one being written the writer drops rather than queues. `writer.keyframeNeeded` and
 `onKeyframeNeeded` say when the next frame must be a keyframe, after a demand change, a failure, a
-stale frame or a drop, so an encoder can force one. `@mux/moq-media`'s `LocFrame` is a frame as it
+stale frame or a drop, so an encoder can force one. `@caprid/moq-media`'s `LocFrame` is a frame as it
 stands.
 
 ```ts
-import { createFrameWriter } from '@mux/relay/media';
+import { createFrameWriter } from '@caprid/relay/media';
 
 let forceKeyframe = false;
 const writer = createFrameWriter(video, { onKeyframeNeeded: () => (forceKeyframe = true) });
@@ -783,9 +783,9 @@ cd ts && mise exec -- pnpm test tests/publish.test.ts
 
 ## Publishing media
 
-The optional [@mux/moq-media format package](packages/moq-media/README.md) provides LOC properties,
+The optional [@caprid/moq-media format package](packages/moq-media/README.md) provides LOC properties,
 independent MSF catalogs, source URLs, and native WebCodecs chunk/config mapping. It depends only
-on `@mux/moq-core`; install it alongside `@mux/relay` when publishing media. Start with the
+on `@caprid/moq-core`; install it alongside `@caprid/relay` when publishing media. Start with the
 [direct WebCodecs example](examples/webcodecs/README.md) for live browser video: encoded chunks
 become LOC payloads without a muxer or media engine. For existing media files, the optional
 [Mediabunny adapter](packages/moq-mediabunny/README.md) maps demuxed packets; see the
@@ -794,12 +794,12 @@ become LOC payloads without a muxer or media engine. For existing media files, t
 ## Subscribing to media
 
 A player reads the same tracks back. Read the catalog first: `parseMsfCatalog` from
-[@mux/moq-media](packages/moq-media/README.md) lists the tracks and their decoder configurations.
+[@caprid/moq-media](packages/moq-media/README.md) lists the tracks and their decoder configurations.
 After a stall, a track's objects can arrive out of order across group streams, and a raw
-subscription delivers them as they arrive. `createFrameSequencer({ clock })` from `@mux/moq-media`
+subscription delivers them as they arrive. `createFrameSequencer({ clock })` from `@caprid/moq-media`
 turns one track's objects into frames in decode order and drops what is too late against the
 broadcast's playout clock. Pass `grouping: 'frame'` for audio, where every group is one
-independently decodable frame. `createFrameReader(sequencer, { onFrame })` from `@mux/relay/media`
+independently decodable frame. `createFrameReader(sequencer, { onFrame })` from `@caprid/relay/media`
 returns a subscription's handlers that drive the sequencer. It feeds the sequencer each event,
 calls `onFrame` synchronously with each ready frame in decode order, and polls again when a wait
 the sequencer reports ends. Spread it into `subscribe`, or into a supervised `want`, beside your own
@@ -807,8 +807,8 @@ the sequencer reports ends. Spread it into `subscribe`, or into a supervised `wa
 the default. `reader.close()` stops delivery; cancel the subscription as well.
 
 ```ts
-import { createFrameSequencer, createPlayoutClock } from '@mux/moq-media';
-import { createFrameReader, mediaSubscribeParameters } from '@mux/relay/media';
+import { createFrameSequencer, createPlayoutClock } from '@caprid/moq-media';
+import { createFrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
 
 const clock = createPlayoutClock(); // one per broadcast, shared by its tracks
 const video = createFrameReader(createFrameSequencer({ clock }), {
@@ -844,7 +844,7 @@ The reader paces decoding, not display. Audio is the master: report what is audi
 `clock.reportAudio(timestampUs, atUs)`, and before showing each decoded video frame ask
 `clock.due(frame.timestamp)` whether to `wait` (for `waitUs`), `show`, or `drop` it. Until audio is
 reported or `due` is first asked, the clock is idle and nothing is late; with no audio it paces by
-wall clock. The [@mux/moq-media README](packages/moq-media/README.md) shows how to compute the
+wall clock. The [@caprid/moq-media README](packages/moq-media/README.md) shows how to compute the
 audible timestamp. See [media subscribing](../spec/behavior.md#media-subscribing) for the
 sequencer's contract.
 
@@ -855,7 +855,7 @@ an audio-only clock with `createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGE
 
 ### Playing audio
 
-`createAudioPlayer({ context })` from `@mux/moq-media` plays decoded audio, with no UI. Each
+`createAudioPlayer({ context })` from `@caprid/moq-media` plays decoded audio, with no UI. Each
 `player.addInput({ clock, decoderConfig })`, usually one per speaker, decodes the frames it is
 pushed with WebCodecs, holds them in an adaptive jitter buffer in an `AudioWorklet`, and reports
 what is audible to `clock` about every 20 ms, so the clock follows the device and stays the master
@@ -869,8 +869,8 @@ import {
   createAudioPlayer,
   createFrameSequencer,
   createPlayoutClock,
-} from '@mux/moq-media';
-import { createFrameReader } from '@mux/relay/media';
+} from '@caprid/moq-media';
+import { createFrameReader } from '@caprid/relay/media';
 
 const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' }); // in a user gesture
 const player = await createAudioPlayer({ context }); // one per context, shared by every speaker
@@ -898,7 +898,7 @@ voice bot, lists an `interrupt` data track in its catalog and writes an interrup
 apply each one to the input that plays its track:
 
 ```ts
-import { INTERRUPT_TRACK, parseInterrupt } from '@mux/moq-media';
+import { INTERRUPT_TRACK, parseInterrupt } from '@caprid/moq-media';
 
 subscriber.subscribe(
   { namespace, track: INTERRUPT_TRACK },
@@ -915,7 +915,7 @@ A talker can also list a `transcript` track with the text of what it says. Keep 
 `Transcript`, cut it with the same interrupt, and show what playback has reached:
 
 ```ts
-import { createTranscript, parseTranscriptSegment, TRANSCRIPT_TRACK } from '@mux/moq-media';
+import { createTranscript, parseTranscriptSegment, TRANSCRIPT_TRACK } from '@caprid/moq-media';
 
 const transcript = createTranscript();
 subscriber.subscribe(
@@ -936,7 +936,7 @@ other side again through the speakers. In Chromium, route the mix through a loca
 instead of connecting it to the destination:
 
 ```ts
-import { createEchoCancellationLoopback } from '@mux/moq-media';
+import { createEchoCancellationLoopback } from '@caprid/moq-media';
 
 const loopback = await createEchoCancellationLoopback(context, player.output); // rejects if it cannot connect
 // loopback.setSinkId(deviceId) picks the output device; loopback.close() stops it.
@@ -1019,8 +1019,8 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. |
-| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@mux/relay/node` with `@mux/relay-quic` installed (TypeScript). |
-| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the credential of a live session expired or its grant was revoked ([token expiry](#token-expiry)). Reported in browsers and over native QUIC (`@mux/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the refusal, so there it arrives as `TRANSPORT_ERROR` (#14). |
+| `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed (TypeScript). |
+| `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the credential of a live session expired or its grant was revoked ([token expiry](#token-expiry)). Reported in browsers and over native QUIC (`@caprid/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the refusal, so there it arrives as `TRANSPORT_ERROR` (#14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
 failure; it makes no claim about individual writes that were in flight. `subscription` marks an
@@ -1056,11 +1056,11 @@ same failure. Caller cancellation reasons and token-provider exceptions retain t
 Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
 `on_error` callbacks retain the separate MOQT `RequestError` contract and numeric protocol codes.
 
-TypeScript exports `RelayError`, `RelayErrorCode`, and `RelayErrorPhase` from `@mux/relay`.
+TypeScript exports `RelayError`, `RelayErrorCode`, and `RelayErrorPhase` from `@caprid/relay`.
 Wrapped transport/session failures preserve the original error in `cause`.
 
 ```ts
-import { RelayError } from '@mux/relay';
+import { RelayError } from '@caprid/relay';
 
 try {
   await track.writeText('current state');
@@ -1076,11 +1076,11 @@ try {
 
 ## Package boundaries
 
-- The `ts/` root package, `@mux/relay`, owns the Relay product API and authentication convention.
+- The `ts/` root package, `@caprid/relay`, owns the Relay product API and authentication convention.
 - `packages/moq-core` is an independently buildable, Apache-2.0 generic protocol package. It uses
   standard streams, has no runtime dependencies, and imports no player, UI, or media engine.
 - `packages/relay-quic` and `packages/relay-websocket` are transport adapters the application passes
-  as `createTransport`; `@mux/relay` depends on neither. The WebSocket adapter is the one package with
+  as `createTransport`; `@caprid/relay` depends on neither. The WebSocket adapter is the one package with
   a third-party runtime dependency, `@moq/qmux` at an exact version
   ([ADR 0005](../docs/adr/0005-websocket-adapter-wraps-moq-qmux.md)).
 - `subscriber.trackSource` exposes the generic `MoqTrackSource` contract for future player
@@ -1098,7 +1098,7 @@ become a separately maintained protocol fork. See `packages/moq-core/UPSTREAM.js
 
 This slice supports reliable-stream track subscriptions, subscription updates and cancellation,
 [namespace discovery](#discover-namespaces), and publication on a dedicated connection: data, or
-encoded media through `@mux/relay/media`. The [supervisors](#stay-connected-supervised-connections)
+encoded media through `@caprid/relay/media`. The [supervisors](#stay-connected-supervised-connections)
 add reconnection, resubscription and token rotation on a live session. The borrowed generic
 interface also exposes FETCH and TRACK_STATUS.
 The SDK offers `moqt-22`, then `moqt-20` as a fallback, and speaks whichever the relay selects.
@@ -1109,7 +1109,7 @@ callers can open a replacement, which a supervisor does for them. A custom `crea
 factory supports tests or runtimes with a compatible transport; the default uses browser WebTransport.
 A factory whose transport carries MOQT directly on QUIC, not a WebTransport session, returns
 `framing: 'native-quic'`, and the core then sends the endpoint's path, token and authority in SETUP.
-`@mux/relay-websocket`'s factories return `framing: 'websocket'`, which sends neither, as on
+`@caprid/relay-websocket`'s factories return `framing: 'websocket'`, which sends neither, as on
 WebTransport; see [networks without UDP](#networks-without-udp-qmux-over-websocket).
 
 ## Development

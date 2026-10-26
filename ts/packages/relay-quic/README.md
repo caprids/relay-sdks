@@ -1,4 +1,4 @@
-# @mux/relay-quic
+# @caprid/relay-quic
 
 The Relay SDK's transport adapter for Node. It carries MOQT straight on a QUIC connection (native QUIC, with
 the MOQT ALPNs the SDK offers: `moqt-22`, then `moqt-20`), through a napi-rs addon over [quinn](https://github.com/quinn-rs/quinn), so a plain Node script can publish
@@ -10,15 +10,15 @@ The package is private for now: its prebuilt binaries are built and packed in CI
 
 ## Use
 
-Most scripts need no code from this package: `@mux/relay/node` uses it by default, and takes the trust options below
-(see the [SDK README](../../README.md#node)). Install it next to `@mux/relay`.
+Most scripts need no code from this package: `@caprid/relay/node` uses it by default, and takes the trust options below
+(see the [SDK README](../../README.md#node)). Install it next to `@caprid/relay`.
 
-To use it with `@mux/relay` directly, pass the factory as `createTransport`. The URL stays the same `https://` endpoint the browser uses: the adapter dials
+To use it with `@caprid/relay` directly, pass the factory as `createTransport`. The URL stays the same `https://` endpoint the browser uses: the adapter dials
 only its host and port, and the core sends the path, the token and the authority in SETUP.
 
 ```ts
-import { connectRelayPublisher } from '@mux/relay';
-import { nativeQuicTransport } from '@mux/relay-quic';
+import { connectRelayPublisher } from '@caprid/relay';
+import { nativeQuicTransport } from '@caprid/relay-quic';
 
 const publisher = await connectRelayPublisher({
   url: 'https://relay.mux.global',
@@ -47,30 +47,30 @@ the dial and releases its socket.
 
 ## Prebuilt binaries
 
-Each platform's binary ships in its own package, which `@mux/relay-quic` lists as an optional dependency, the napi-rs
+Each platform's binary ships in its own package, which `@caprid/relay-quic` lists as an optional dependency, the napi-rs
 convention. A package manager installs only the one whose `os`, `cpu` and `libc` match, so no Rust is needed.
 
 | Platform package | Built on | Packed | Installed |
 | --- | --- | --- | --- |
-| `@mux/relay-quic-darwin-arm64` | macos-14 | 1.14 MiB | 2.62 MiB |
-| `@mux/relay-quic-darwin-x64` | macos-14, cross | 1.21 MiB | 2.85 MiB |
-| `@mux/relay-quic-linux-arm64-gnu` | ubuntu-latest, zig | 1.19 MiB | 2.67 MiB |
-| `@mux/relay-quic-linux-arm64-musl` | ubuntu-latest, zig | 1.19 MiB | 2.67 MiB |
-| `@mux/relay-quic-linux-x64-gnu` | ubuntu-latest, zig | 1.26 MiB | 3.01 MiB |
-| `@mux/relay-quic-linux-x64-musl` | ubuntu-latest, zig | 1.26 MiB | 3.00 MiB |
-| `@mux/relay-quic-win32-x64-msvc` | windows-latest | 1.26 MiB | 3.33 MiB |
+| `@caprid/relay-quic-darwin-arm64` | macos-14 | 1.14 MiB | 2.62 MiB |
+| `@caprid/relay-quic-darwin-x64` | macos-14, cross | 1.21 MiB | 2.85 MiB |
+| `@caprid/relay-quic-linux-arm64-gnu` | ubuntu-latest, zig | 1.19 MiB | 2.67 MiB |
+| `@caprid/relay-quic-linux-arm64-musl` | ubuntu-latest, zig | 1.19 MiB | 2.67 MiB |
+| `@caprid/relay-quic-linux-x64-gnu` | ubuntu-latest, zig | 1.26 MiB | 3.01 MiB |
+| `@caprid/relay-quic-linux-x64-musl` | ubuntu-latest, zig | 1.26 MiB | 3.00 MiB |
+| `@caprid/relay-quic-win32-x64-msvc` | windows-latest | 1.26 MiB | 3.33 MiB |
 
-Installed is what an install puts on disk on that platform: this package, `@mux/moq-core` and the one binary. The
+Installed is what an install puts on disk on that platform: this package, `@caprid/moq-core` and the one binary. The
 sizes are from the 0.0.0 packages CI packed on 2026-10-01. The glibc builds need glibc 2.28 or later, which Node 24
 needs too.
 
 `src/addon.ts` loads a local build, `native/relay-quic.<platform>.node`, first, so a build from source always wins.
-Without one it loads `@mux/relay-quic-<platform>`. If neither is there, the error names both. A platform package that is
+Without one it loads `@caprid/relay-quic-<platform>`. If neither is there, the error names both. A platform package that is
 installed but cannot load (a wrong libc, say) throws its own error rather than being skipped.
 
 The `relay-quic binaries` workflow (`.github/workflows/relay-quic-binaries.yml`) runs on each PR that touches the crate,
 the loader or the packaging. It builds every target, and `scripts/pack.mjs` packs the main package, the platform
-packages and `@mux/moq-core`, with the sizes in the job summary. `scripts/smoke.mjs` then installs those tarballs with
+packages and `@caprid/moq-core`, with the sizes in the job summary. `scripts/smoke.mjs` then installs those tarballs with
 npm on each platform (musl in Alpine, arm64 Linux under QEMU, darwin-x64 under Rosetta). It checks that npm picked only
 the matching binary, that the loader finds it, and that a dial sends a QUIC Initial and can be cancelled. The
 `Release TypeScript SDK` workflow (`release-ts.yml`) calls this one and publishes the tarballs it packs, with the rest of
@@ -83,7 +83,7 @@ optional dependencies on them are added only when packing, so the lockfile never
 ## Stability
 
 Before 1.0, a minor version can break the API. This package and its platform packages release
-together with `@mux/relay` at the same version; see the [changelog](../../CHANGELOG.md).
+together with `@caprid/relay` at the same version; see the [changelog](../../CHANGELOG.md).
 
 ## Building the addon
 
@@ -96,7 +96,7 @@ mise run ts:check:native            # cargo fmt --check, clippy and the unit tes
 mise run ts:build:native -- --target aarch64-unknown-linux-musl -x   # cross-compiles with zig, as CI does
 ```
 
-With a Rust toolchain of your own, `cd ts && pnpm --filter @mux/relay-quic build:native` writes
+With a Rust toolchain of your own, `cd ts && pnpm --filter @caprid/relay-quic build:native` writes
 `native/relay-quic.<platform>.node`. Cross-compiling with `-x` also needs `cargo-zigbuild` and the target's
 `rustup target add`.
 

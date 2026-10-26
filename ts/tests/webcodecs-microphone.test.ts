@@ -1,5 +1,5 @@
 import { resolveObjectURL } from 'node:buffer';
-import { createBroadcastClock } from '@mux/moq-media';
+import { createBroadcastClock } from '@caprid/moq-media';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import {
   captureMicrophone,

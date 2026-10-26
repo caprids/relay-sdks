@@ -1,5 +1,5 @@
 import { resolveObjectURL } from 'node:buffer';
-import type { MoqtObject } from '@mux/moq-core';
+import type { MoqtObject } from '@caprid/moq-core';
 import {
   AUDIO_ONLY_TARGET_LATENCY_US,
   type AudioInputClock,
@@ -14,7 +14,7 @@ import {
   LOC_TIMESTAMP,
   opusPacketDurationUs,
   type PlayoutClock,
-} from '@mux/moq-media';
+} from '@caprid/moq-media';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFrameReader } from '../src/frame-reader.js';
 

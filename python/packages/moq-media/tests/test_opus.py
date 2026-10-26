@@ -210,4 +210,4 @@ def test_the_opus_module_names_the_extra_without_pyav() -> None:
     blocked = "import sys; sys.modules['av'] = None; import moq_media.opus"
     result = subprocess.run([sys.executable, "-c", blocked], capture_output=True, text=True, check=False)
     assert result.returncode != 0
-    assert "mux-moq-media[opus]" in result.stderr
+    assert "caprid-moq-media[opus]" in result.stderr

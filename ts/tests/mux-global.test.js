@@ -7,7 +7,7 @@ import { createRelayHub } from './helpers/relay-hub.js';
 const connectors = vi.hoisted(() => ({ connectRelaySubscriber: vi.fn(), connectRelayPublisher: vi.fn() }));
 // The demo imports the SDK by its package name; the connectors are replaced, everything else is real. The supervised
 // subscriber the demo opens connects through the replaced subscriber connector.
-vi.mock('@mux/relay', async () => ({
+vi.mock('@caprid/relay', async () => ({
   ...(await vi.importActual('../src/index.js')),
   ...connectors,
   connectSupervisedSubscriber: (options) =>
@@ -64,7 +64,7 @@ it('runs the documented one-object round trip and closes both connections', asyn
 });
 
 it('connects both sides through the transport factory the launcher passes', async () => {
-  // run.mjs passes @mux/relay-quic's factory in Node; the hub stands in for the relay underneath it.
+  // run.mjs passes @caprid/relay-quic's factory in Node; the hub stands in for the relay underneath it.
   const createTransport = vi.fn();
   await expect(runDemo({ ...config, createTransport }, vi.fn())).resolves.toEqual({ published: 1, received: 1 });
   expect(connectors.connectRelayPublisher).toHaveBeenCalledWith(expect.objectContaining({ createTransport }));

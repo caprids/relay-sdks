@@ -6,7 +6,7 @@
  */
 
 /** The processor name `AUDIO_PLAYER_WORKLET_SOURCE` registers. */
-export const AUDIO_PLAYER_PROCESSOR = 'mux-audio-player-input';
+export const AUDIO_PLAYER_PROCESSOR = 'caprid-audio-player-input';
 
 /** The processor's options, in frames of the context's sample rate. */
 export interface AudioPlayerProcessorOptions {

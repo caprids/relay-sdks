@@ -1,4 +1,4 @@
-//! The native QUIC dialing end behind `@mux/relay-quic` (`spec/transport-adapter.md`): MOQT goes
+//! The native QUIC dialing end behind `@caprid/relay-quic` (`spec/transport-adapter.md`): MOQT goes
 //! straight onto a QUIC connection, and ALPN carries the protocol. The JS layer (`../src/`) turns
 //! this into a `MoqtTransport`; nothing here knows MOQT.
 //!

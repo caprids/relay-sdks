@@ -4,7 +4,7 @@
  * See packages/moq-core/LICENSE and packages/moq-core/UPSTREAM.json.
  */
 
-import type { BidirectionalStreamLike, MoqtTransport } from '@mux/moq-core';
+import type { BidirectionalStreamLike, MoqtTransport } from '@caprid/moq-core';
 import { vi } from 'vitest';
 import { ByteWriter, StreamReader } from '../../packages/moq-core/src/protocol/bytes.js';
 import {

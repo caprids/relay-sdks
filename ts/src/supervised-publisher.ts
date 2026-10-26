@@ -156,7 +156,7 @@ function idle(generation: Generation): Promise<void> {
 
 /**
  * Open a supervised publisher with `connect` (`connectRelayPublisher` in the browser entry point, the Node one in
- * `@mux/relay/node`). Resolves once the first generation is up. A first attempt that fails on its arguments or the
+ * `@caprid/relay/node`). Resolves once the first generation is up. A first attempt that fails on its arguments or the
  * relay refusing the credentials rejects with that failure; any other failure is retried with backoff, bounded only
  * by `signal`, whose abort rejects with its reason.
  */

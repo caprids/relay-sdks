@@ -1,11 +1,11 @@
 /**
- * `@mux/relay/node`: the SDK for Node. It exports everything `@mux/relay` does, and its connect functions default
- * `createTransport` to `@mux/relay-quic`, the native QUIC transport adapter, an optional peer dependency installed next
+ * `@caprid/relay/node`: the SDK for Node. It exports everything `@caprid/relay` does, and its connect functions default
+ * `createTransport` to `@caprid/relay-quic`, the native QUIC transport adapter, an optional peer dependency installed next
  * to this package. It uses that adapter even when a global `WebTransport` exists, and warns once when the global
  * could replace it.
  *
  * ```ts
- * import { connectRelayPublisher } from '@mux/relay/node';
+ * import { connectRelayPublisher } from '@caprid/relay/node';
  *
  * const publisher = await connectRelayPublisher({ url, namespace, getToken });
  * ```
@@ -49,8 +49,8 @@ export interface RelayCertificateHash {
 }
 
 /**
- * What a Node connection trusts, passed to `@mux/relay-quic`'s `nativeQuicTransport`. With neither option, the
- * platform's root certificates. Declared here, not imported, so these declarations need no `@mux/relay-quic` installed.
+ * What a Node connection trusts, passed to `@caprid/relay-quic`'s `nativeQuicTransport`. With neither option, the
+ * platform's root certificates. Declared here, not imported, so these declarations need no `@caprid/relay-quic` installed.
  */
 export interface RelayNodeTrustOptions {
   /** Extra trust anchors, PEM encoded, added to the platform's roots: one string or buffer may hold several. */
@@ -67,11 +67,11 @@ export interface RelayNodeTrustOptions {
 export type RelayNodeOptions<T extends ConnectRelayOptions> =
   | (Omit<T, 'createTransport'> &
       RelayNodeTrustOptions & {
-        /** Absent: the connection dials through `@mux/relay-quic`. */
+        /** Absent: the connection dials through `@caprid/relay-quic`. */
         createTransport?: undefined;
       })
   | (T & {
-      /** The caller's own transport, used instead of `@mux/relay-quic`. */
+      /** The caller's own transport, used instead of `@caprid/relay-quic`. */
       createTransport: RelayTransportFactory;
       /** Not taken beside `createTransport`: pass it to the factory instead. */
       ca?: undefined;
@@ -89,21 +89,21 @@ let loading: Promise<Adapter> | undefined;
 let warned = false;
 
 /**
- * Load `@mux/relay-quic` and its native addon on first use; concurrent first calls share the one load. Either one
+ * Load `@caprid/relay-quic` and its native addon on first use; concurrent first calls share the one load. Either one
  * missing is `TRANSPORT_UNAVAILABLE`; a failure is not kept, so a later call tries again.
  */
 function loadAdapter(): Promise<Adapter> {
   loading ??= (async () => {
     try {
-      const { nativeQuicTransport } = await import('@mux/relay-quic');
+      const { nativeQuicTransport } = await import('@caprid/relay-quic');
       // With no options the only thing that can fail is loading the addon.
       return { nativeQuicTransport, shared: nativeQuicTransport() };
     } catch (error) {
       loading = undefined;
       throw new RelayError(
         'TRANSPORT_UNAVAILABLE',
-        '@mux/relay/node needs @mux/relay-quic and its native binary for this platform; install it next to ' +
-          '@mux/relay (see its README)',
+        '@caprid/relay/node needs @caprid/relay-quic and its native binary for this platform; install it next to ' +
+          '@caprid/relay (see its README)',
         'connecting',
         { cause: error },
       );
@@ -126,8 +126,8 @@ function warnIfNativeWebTransport(): void {
     process?: { emitWarning?(message: string, options: { type: string; code: string }): void };
   };
   process?.emitWarning?.(
-    'native WebTransport detected; you can drop this import and use @mux/relay instead of @mux/relay/node',
-    { type: 'DeprecationWarning', code: 'MUX_RELAY_NODE_NATIVE_WEBTRANSPORT' },
+    'native WebTransport detected; you can drop this import and use @caprid/relay instead of @caprid/relay/node',
+    { type: 'DeprecationWarning', code: 'CAPRID_RELAY_NODE_NATIVE_WEBTRANSPORT' },
   );
 }
 
@@ -160,8 +160,8 @@ function withTransport<T extends ConnectRelayOptions>(options: RelayNodeOptions<
 }
 
 /**
- * Open a Relay connection for subscribing to tracks, as `@mux/relay`'s `connectRelaySubscriber` does, over native QUIC
- * through `@mux/relay-quic` unless `createTransport` is given. The caller owns connection shutdown; an open connection
+ * Open a Relay connection for subscribing to tracks, as `@caprid/relay`'s `connectRelaySubscriber` does, over native QUIC
+ * through `@caprid/relay-quic` unless `createTransport` is given. The caller owns connection shutdown; an open connection
  * keeps the process alive until it closes.
  */
 export async function connectRelaySubscriber(
@@ -171,8 +171,8 @@ export async function connectRelaySubscriber(
 }
 
 /**
- * Open a Relay connection that publishes one namespace, as `@mux/relay`'s `connectRelayPublisher` does, over native
- * QUIC through `@mux/relay-quic` unless `createTransport` is given. An open connection keeps the process alive until
+ * Open a Relay connection that publishes one namespace, as `@caprid/relay`'s `connectRelayPublisher` does, over native
+ * QUIC through `@caprid/relay-quic` unless `createTransport` is given. An open connection keeps the process alive until
  * it closes.
  */
 export async function connectRelayPublisher(
@@ -182,8 +182,8 @@ export async function connectRelayPublisher(
 }
 
 /**
- * Open a subscriber that reconnects, as `@mux/relay`'s `connectSupervisedSubscriber` does, with every connection over
- * native QUIC through `@mux/relay-quic` unless `createTransport` is given.
+ * Open a subscriber that reconnects, as `@caprid/relay`'s `connectSupervisedSubscriber` does, with every connection over
+ * native QUIC through `@caprid/relay-quic` unless `createTransport` is given.
  */
 export async function connectSupervisedSubscriber(
   options: RelayNodeOptions<ConnectSupervisedSubscriberOptions>,
@@ -192,8 +192,8 @@ export async function connectSupervisedSubscriber(
 }
 
 /**
- * Open a publisher that reconnects, as `@mux/relay`'s `connectSupervisedPublisher` does, with every generation over
- * native QUIC through `@mux/relay-quic` unless `createTransport` is given.
+ * Open a publisher that reconnects, as `@caprid/relay`'s `connectSupervisedPublisher` does, with every generation over
+ * native QUIC through `@caprid/relay-quic` unless `createTransport` is given.
  */
 export async function connectSupervisedPublisher(
   options: RelayNodeOptions<ConnectSupervisedPublisherOptions>,

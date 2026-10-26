@@ -11,14 +11,14 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
 | `pair.test.js` | The suite against the in-memory pair, in `pnpm test` and so in `pnpm check`. |
 | `targets/pair.js` | The in-memory pair as a target, with an in-process peer. |
 | `targets/chromium.js` | The browser's native `WebTransport` as a target, run in a page. Its peer is the Python accepting end. |
-| `targets/relay-quic.js` | `@mux/relay-quic`, the Node adapter over native QUIC, as a target. Its peer is the Python accepting end with `--framing native-quic`. |
+| `targets/relay-quic.js` | `@caprid/relay-quic`, the Node adapter over native QUIC, as a target. Its peer is the Python accepting end with `--framing native-quic`. |
 | `targets/relay-quic-lifetime.js` | The child Node process behind that target's TA-25 and TA-26 checks, and its check that a cancelled dial (TA-11) lets the process exit. |
-| `targets/websocket.js` | `@mux/relay-websocket`, QMux over WebSocket (#321), as a target. Runtime-neutral: the same target runs in Node and in a browser page. Its peer is the Node accepting end, `scripts/websocket-peer.js`. |
+| `targets/websocket.js` | `@caprid/relay-websocket`, QMux over WebSocket (#321), as a target. Runtime-neutral: the same target runs in Node and in a browser page. Its peer is the Node accepting end, `scripts/websocket-peer.js`. |
 | `targets/websocket-lifetime.js` | The child Node process behind the WebSocket target's TA-25, TA-26 and cancelled-dial checks in Node. |
 | `targets/lifetime.js` | Runs a lifetime child and checks how it ended, for both Node adapters. |
 | `targets/remote-peer.js` | The peer methods as requests to the Python accepting end, for both targets that use it. |
-| `relay-quic.conformance.js` | The suite against `@mux/relay-quic` under vitest, plus its trust checks (`ca`, an untrusted certificate, bad options). |
-| `websocket.conformance.js` | The suite against `@mux/relay-websocket` in Node under vitest, plus `withWebSocketFallback` where Node has no WebTransport. `vitest.websocket.config.js` makes the peer's certificate first, so Node trusts it from the start. |
+| `relay-quic.conformance.js` | The suite against `@caprid/relay-quic` under vitest, plus its trust checks (`ca`, an untrusted certificate, bad options). |
+| `websocket.conformance.js` | The suite against `@caprid/relay-websocket` in Node under vitest, plus `withWebSocketFallback` where Node has no WebTransport. `vitest.websocket.config.js` makes the peer's certificate first, so Node trusts it from the start. |
 | `../scripts/test-conformance-websocket.mjs` | The browser launcher for the WebSocket target: Chromium, Firefox and WebKit through Playwright. |
 | `../scripts/websocket-peer.js` | The accepting end for QMux over WebSocket: `@moq/qmux`'s accepting role over `ws`, over TLS, speaking the Python accepting end's JSON lines. |
 | `../scripts/test-conformance.mjs` | The Chromium launcher: it starts the accepting end, serves the suite to a Playwright page, runs it and prints the results. |
@@ -34,11 +34,11 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
   (`pnpm exec playwright install chromium`). It takes about 15 s. `CONFORMANCE_GREP=TA-15` runs only the cases whose
   name contains the text. CI runs it as the TypeScript workflow's `conformance` job.
 - `pnpm test:conformance:websocket` (`mise run ts:test:conformance:websocket`) runs it in Node against
-  `@mux/relay-websocket` and the Node accepting end. It needs only Node and `openssl`, and takes about 15 s.
+  `@caprid/relay-websocket` and the Node accepting end. It needs only Node and `openssl`, and takes about 15 s.
   `pnpm test:conformance:websocket:browsers` runs it in Chromium, Firefox and WebKit (`BROWSERS=chromium,webkit` picks;
   `CONFORMANCE_GREP` works as above), with Playwright's browsers installed; the pages ignore the peer's self-signed
   certificate, which a page cannot pin for a WebSocket. CI runs both as the `conformance-websocket` job.
-- `pnpm test:conformance:node` (`mise run ts:test:conformance:node`) runs it in Node against `@mux/relay-quic` and the
+- `pnpm test:conformance:node` (`mise run ts:test:conformance:node`) runs it in Node against `@caprid/relay-quic` and the
   Python accepting end in its native QUIC mode. It builds the native addon first, with the Rust toolchain the mise
   task pins, and needs the Python workspace. After the build it takes about 25 s, most of it the TA-9 connection-loss
   case waiting out the idle timeout. With the addon built,
@@ -182,6 +182,6 @@ unless `WEBSOCKET_PEER_CERTIFICATE` and `WEBSOCKET_PEER_KEY` name one. It listen
 
 A target needs a peer that implements the methods above, and a runner for its runtime.
 
-- **Node (`@mux/relay-quic`):** `relay-quic.conformance.js` runs under vitest, as the pair does, with its own config so
+- **Node (`@caprid/relay-quic`):** `relay-quic.conformance.js` runs under vitest, as the pair does, with its own config so
   that `pnpm test` leaves it out. Another Node adapter can reuse `targets/relay-quic.js`'s shape and the native QUIC
   peer as they are.

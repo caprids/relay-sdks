@@ -11,7 +11,7 @@ import {
   SETUP_OPTION,
   type SubscribeOk,
   type SubscriptionHandlers,
-} from '@mux/moq-core';
+} from '@caprid/moq-core';
 import { assertTimeoutMs, type ConnectRelaySubscriberOptions, openRelaySession } from './connect-session.js';
 import { createNamespaceEvents, type NamespaceEventOptions, type NamespaceEvents } from './namespace-events.js';
 import {
@@ -185,7 +185,7 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
     expiresAt,
   } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
-      implementationName: '@mux/relay',
+      implementationName: '@caprid/relay',
       // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
       setupOptions: [...setupOptions, { type: SETUP_OPTION.SOLICIT, value: 1 }],
       requestTimeoutMs: options.requestTimeoutMs,

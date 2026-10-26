@@ -136,15 +136,15 @@ const read = parseMediaTimeline(timelineObject.payload);
 Shared vectors live in `spec/vectors/media.json` and `spec/vectors/clock.json`. See `UPSTREAM.json` for Video.js provenance.
 `createFrameSequencer({ clock })` turns one subscribed track's objects, which can arrive out of
 order across group streams, into frames in decode order, and drops what is too late against the
-playout clock; `@mux/relay/media`'s `createFrameReader` drives it from a subscription (see the
+playout clock; `@caprid/relay/media`'s `createFrameReader` drives it from a subscription (see the
 [guide](../../GUIDE.md#subscribing-to-media)). Per track, `lateDropUs`, `reorderWindowUs` and
 `catchUpAfterUs` tune audio delivery for a listener or for speech-to-text, and `missingGroups` on a
 frame names the groups skipped before it (see [voice delivery](../../GUIDE.md#voice-delivery-per-direction)). The combined `register_media` publishing handle is
-still a proposal in `spec/media-layer.md`; `@mux/relay/media` ships the frame writer and catalog
+still a proposal in `spec/media-layer.md`; `@caprid/relay/media` ships the frame writer and catalog
 service it would compose.
 
 ```ts
-import { buildMsfCatalog, composeMoqSource, locProperties, locTrackProperties, parseMsfCatalog } from '@mux/moq-media';
+import { buildMsfCatalog, composeMoqSource, locProperties, locTrackProperties, parseMsfCatalog } from '@caprid/moq-media';
 
 const catalog = buildMsfCatalog({
   namespace: ['room', 'live'],
@@ -184,5 +184,5 @@ no DOM library and its tests run under a fake context that runs the real worklet
 
 ## Stability
 
-Before 1.0, a minor version can break the API. This package releases together with `@mux/relay`
+Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay`
 at the same version; see the [changelog](../../CHANGELOG.md).

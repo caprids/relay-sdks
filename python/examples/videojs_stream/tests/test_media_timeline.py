@@ -12,9 +12,9 @@ from videojs_stream.stream import (
     timeline_problems,
 )
 
+from caprid_relay import CancellationToken
+from caprid_relay.media import FrameWriter
 from moq_media import MediaTimelineEntry, loc_properties
-from mux_relay import CancellationToken
-from mux_relay.media import FrameWriter
 
 
 def gop(start: int, frames: int) -> list[EncodedSample]:

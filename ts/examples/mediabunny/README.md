@@ -6,7 +6,7 @@ For live browser capture, start with the [direct WebCodecs example](../webcodecs
 MP4 with Mediabunny, takes its AVC decoder configuration and encoded packets, and publishes a paced
 LOC video track plus an independent MSF catalog. It does not decode or re-encode the file.
 
-The packets go through `@mux/relay/media`, as in the [WebCodecs example](../webcodecs/README.md): a
+The packets go through `@caprid/relay/media`, as in the [WebCodecs example](../webcodecs/README.md): a
 frame writer maps them onto groups (a group per keyframe), and a catalog service serves the catalog
 on every relay subscription. The example keeps only its own pacing. Each write is awaited before the
 next packet is read, because file playback has no encoder callback to keep up with, so the frame
@@ -14,11 +14,11 @@ writer's backlog never fills. Only a track that ends stops the example.
 
 After the [workspace setup](../../../README.md#development), run `mise run ts:build`. Import the function
 into a browser application built with a TypeScript-capable bundler, alongside the workspace packages
-`@mux/relay`, `@mux/moq-media`, `@mux/moq-mediabunny`, and `mediabunny`:
+`@caprid/relay`, `@caprid/moq-media`, `@caprid/moq-mediabunny`, and `mediabunny`:
 
 ```ts
-import { connectRelayPublisher } from '@mux/relay';
-import { composeMoqSource } from '@mux/moq-media';
+import { connectRelayPublisher } from '@caprid/relay';
+import { composeMoqSource } from '@caprid/moq-media';
 import { publishVideoFile } from './publish-video.js';
 
 // file: a File from <input type="file">; namespace: authorized string[]; getToken: your auth callback.

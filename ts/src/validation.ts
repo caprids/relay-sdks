@@ -15,7 +15,7 @@ import {
   MAX_NAMESPACE_FIELDS,
   MAX_OBJECT_PAYLOAD_LENGTH,
   MAX_TRACK_PROPERTIES_LENGTH,
-} from '@mux/moq-core';
+} from '@caprid/moq-core';
 import type { PublishProperty } from './publish.js';
 
 /**

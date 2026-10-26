@@ -2,10 +2,10 @@
  * Publish JSON ticks to a Relay namespace and subscribe to them again.
  *
  * This is the part of the example that uses the SDK, and it is runtime-neutral: run.mjs runs it in
- * Node with @mux/relay-quic's `createTransport`, and in a browser with WebTransport it runs as is,
+ * Node with @caprid/relay-quic's `createTransport`, and in a browser with WebTransport it runs as is,
  * on the SDK's default transport. `log` receives one plain object per event so the runner can print it.
  */
-import { connectRelayPublisher, connectSupervisedSubscriber } from '@mux/relay';
+import { connectRelayPublisher, connectSupervisedSubscriber } from '@caprid/relay';
 import { writeWithRetry } from '../shared/demand-timeout.js';
 
 const encoder = new TextEncoder();
@@ -152,7 +152,11 @@ export async function runDemo(
       };
       for (let seq = 1; seq <= count; seq += 1) {
         const bytes = encoder.encode(
-          JSON.stringify({ seq, sentAt: new Date().toISOString(), message: `tick ${seq} from the @mux/relay example` }),
+          JSON.stringify({
+            seq,
+            sentAt: new Date().toISOString(),
+            message: `tick ${seq} from the @caprid/relay example`,
+          }),
         );
         failIfBroken();
         if (!writer.hasDemand) log({ event: 'waiting', detail: 'no relay demand yet; write() waits for a subscriber' });

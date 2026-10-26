@@ -1,4 +1,4 @@
-import type { BroadcastClock, SourceTimeline } from '@mux/moq-media';
+import type { BroadcastClock, SourceTimeline } from '@caprid/moq-media';
 import { createRenderClock, type RenderClock } from './render-clock.js';
 
 const PROCESSOR = 'relay-sdk-microphone-capture';

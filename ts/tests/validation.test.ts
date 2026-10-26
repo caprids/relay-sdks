@@ -5,7 +5,12 @@
  * follow the "Arguments" table in spec/behavior.md.
  */
 import { readFile } from 'node:fs/promises';
-import { ByteWriter, encodeKeyValuePairs, MAX_OBJECT_PAYLOAD_LENGTH, MAX_TRACK_PROPERTIES_LENGTH } from '@mux/moq-core';
+import {
+  ByteWriter,
+  encodeKeyValuePairs,
+  MAX_OBJECT_PAYLOAD_LENGTH,
+  MAX_TRACK_PROPERTIES_LENGTH,
+} from '@caprid/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   connectRelayPublisher,

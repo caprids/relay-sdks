@@ -2,11 +2,11 @@
 /**
  * Run the Relay example (demo.js) against a live Relay in Node.
  *
- * Node has no WebTransport, so the connections use @mux/relay-quic, which carries MOQT over native
+ * Node has no WebTransport, so the connections use @caprid/relay-quic, which carries MOQT over native
  * QUIC. This parses the options, reads the token, and prints demo.js's log entries. The SDK calls
  * live in demo.js.
  *
- *   cd ts && pnpm build && pnpm --filter @mux/relay-quic build:native
+ *   cd ts && pnpm build && pnpm --filter @caprid/relay-quic build:native
  *   # After the README's endpoint/namespace setup; enter the token at the hidden prompt.
  *   node examples/mux-global/run.mjs --url "$RELAY_URL" --namespace "$RELAY_NAMESPACE"
  */
@@ -102,9 +102,9 @@ await Promise.all(built.map((directory) => access(resolve(directory, 'index.js')
 );
 // Imported once the build is known to exist. The factory throws at once, naming the build command, when the
 // native addon has not been built for this platform.
-const { nativeQuicTransport } = await import('@mux/relay-quic');
+const { nativeQuicTransport } = await import('@caprid/relay-quic');
 const { runDemo } = await import('./demo.js');
-const { roomEndpoint } = await import('@mux/relay');
+const { roomEndpoint } = await import('@caprid/relay');
 if (args.room !== undefined) {
   try {
     config.url = roomEndpoint(config.url, args.room.split('/').filter(Boolean));

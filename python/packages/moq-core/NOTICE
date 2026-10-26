@@ -1,5 +1,5 @@
 The protocol implementation and its initial tests are a Python port of the TypeScript
-@mux/moq-core package (ts/packages/moq-core in this repository), which is derived from Video.js.
+@caprid/moq-core package (ts/packages/moq-core in this repository), which is derived from Video.js.
 Copyright 2025-present Video.js contributors.
 Licensed under the Apache License, Version 2.0. See LICENSE.
 

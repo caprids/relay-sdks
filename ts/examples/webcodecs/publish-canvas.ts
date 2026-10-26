@@ -14,8 +14,8 @@ import {
   VIDEO_TRACK,
   type VideoTrackInfo,
   videoTrackFromDecoderConfig,
-} from '@mux/moq-media';
-import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@mux/relay';
+} from '@caprid/moq-media';
+import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@caprid/relay';
 import {
   type CatalogService,
   createCatalogService,
@@ -24,7 +24,7 @@ import {
   type FrameOutcome,
   type FrameWriter,
   mediaTrackProperties,
-} from '@mux/relay/media';
+} from '@caprid/relay/media';
 import type { MicrophoneCapture } from './capture-microphone.js';
 import { encodeMicrophone, type MicrophoneEncoding, microphoneOpus } from './publish-microphone.js';
 
@@ -68,7 +68,7 @@ export interface PublishCanvasOptions {
  * the video track's frame writer needs one. With a microphone, also mono Opus in 20 ms frames, one group per frame.
  * Video is stamped with `clock.now()` at capture and audio through the microphone's calibrated timeline, so both share
  * one broadcast timeline. A media timeline track maps each video group's keyframe to its capture time as Unix-epoch
- * time (msf-01 §7). Frame writers from `@mux/relay/media` map the encoders' output onto groups, and a catalog service
+ * time (msf-01 §7). Frame writers from `@caprid/relay/media` map the encoders' output onto groups, and a catalog service
  * and a document service serve the catalog and the timeline on every relay subscription.
  * The caller owns drawing/capture and the connection. Use a fresh publisher/namespace for each run.
  * Abort stops this example; encoder errors, configuration changes, and a track that ends are fatal. A transport that

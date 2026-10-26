@@ -525,7 +525,7 @@ def test_import_needs_no_transport_or_product() -> None:
         [
             sys.executable,
             "-c",
-            "import sys, moq_media; assert not {'mux_relay', 'aioquic', 'av', 'numpy'} & sys.modules.keys()",
+            "import sys, moq_media; assert not {'caprid_relay', 'aioquic', 'av', 'numpy'} & sys.modules.keys()",
         ],
         check=True,
     )

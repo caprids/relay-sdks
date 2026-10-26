@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from mux_relay import (
+from caprid_relay import (
     DEFAULT_ENDPOINT,
     Closed,
     MoqtObject,
@@ -232,7 +232,7 @@ async def run_demo(config: Config, log: Log) -> dict[str, int]:
                             {
                                 "seq": seq,
                                 "sentAt": datetime.datetime.now(datetime.UTC).isoformat(),
-                                "message": f"tick {seq} from the mux-relay example",
+                                "message": f"tick {seq} from the caprid-relay example",
                             }
                         ).encode("utf-8")
                         fail_if_broken()

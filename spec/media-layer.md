@@ -1,10 +1,10 @@
 # Media layer proposal: LOC packaging and MSF catalogs
 
 Status: stage 1 implemented; stage 2 partly implemented in both SDKs. The format packages
-(`@mux/moq-media`, `moq-media`), shared vectors, protocol pins, and Python example migration are
+(`@caprid/moq-media`, `moq-media`), shared vectors, protocol pins, and Python example migration are
 present, with [behavior.md](behavior.md#media-helpers) as their contract. Of the "Media publishing"
 piece below, the catalog service, a document service for replaceable documents, and the frame
-writer exist in both product packages (`mux_relay.media`; `@mux/relay/media` as
+writer exist in both product packages (`caprid_relay.media`; `@caprid/relay/media` as
 `createCatalogService`, `createDocumentService`, `createFrameWriter`), with
 [behavior.md](behavior.md#media-publishing) as their contract and the Video.js and WebCodecs examples
 as their first callers; the `register_media` handle that would compose them with the catalog builder remains
@@ -34,21 +34,21 @@ updates are not part of this extraction.
 
 ## TypeScript input integration
 
-Stage 1 accepts native WebCodecs chunks and decoder configs through `@mux/moq-media`:
+Stage 1 accepts native WebCodecs chunks and decoder configs through `@caprid/moq-media`:
 `chunkToLocFrame`, `videoTrackFromDecoderConfig`, and `audioTrackFromDecoderConfig`. The
 [direct browser example](../ts/examples/webcodecs/README.md) connects `VideoEncoder` output to
 LOC/MSF and Relay without a media engine. The pure helpers copy chunk bytes without converting
 the bitstream; encoding, callback buffering, and capture remain application concerns.
 
-The optional `@mux/moq-mediabunny` adapter handles file-input packets, demonstrated by the
+The optional `@caprid/moq-mediabunny` adapter handles file-input packets, demonstrated by the
 [MP4 example](../ts/examples/mediabunny/README.md). Mediabunny owns demuxing. Standard decoder
-config mapping, LOC properties, MSF catalogs, and source URLs belong to `@mux/moq-media`, with
+config mapping, LOC properties, MSF catalogs, and source URLs belong to `@caprid/moq-media`, with
 no Mediabunny dependency. The adapter retains compatibility re-exports of the config mappers.
 
 TypeScript consumes supplied AVC configuration and four-byte-length packets; Annex B splitting,
 SPS/PPS reconstruction, and conversion remain Python-only for the PyAV example. Config mappers
 currently support AVC and Opus. Grouping, demand, backlog bounding and catalog serving are SDK
-code in `@mux/relay/media` (`createFrameWriter`, `createCatalogService`, `createDocumentService`),
+code in `@caprid/relay/media` (`createFrameWriter`, `createCatalogService`, `createDocumentService`),
 which both TypeScript examples call. Pacing remains example code: the WebCodecs example skips
 capture while the encoder is busy, the frame writer has a backlog, or video has no demand, and the
 Mediabunny example paces file packets in real time. The stage 2 `register_media` handle that would
@@ -101,8 +101,8 @@ entry is meaningless without an avcC and PyAV hands back Annex B.
 The Python example, with the encoder, test pattern, pacing, and `LiveQueue` unchanged:
 
 ```python
-from mux_relay import connect_relay_publisher
-from mux_relay.media import AudioTrack, VideoTrack, register_media  # provisional
+from caprid_relay import connect_relay_publisher
+from caprid_relay.media import AudioTrack, VideoTrack, register_media  # provisional
 from moq_media.h264 import H264Config  # provisional
 
 publisher = await connect_relay_publisher(url, namespace=namespace, get_token=lambda: token)
@@ -138,8 +138,8 @@ The same in a browser, where WebCodecs reports the avcC with the first encoded c
 front, which is why the catalog has to be updatable:
 
 ```ts
-import { connectRelayPublisher } from '@mux/relay';
-import { registerMedia } from '@mux/relay/media'; // provisional
+import { connectRelayPublisher } from '@caprid/relay';
+import { registerMedia } from '@caprid/relay/media'; // provisional
 
 const publisher = await connectRelayPublisher({ url, namespace, getToken });
 const video = { codec: 'avc1.42E01F', width: 640, height: 360, framerate: 30, bitrate: 1_500_000 };
@@ -164,7 +164,7 @@ encoder.configure({ ...video, avc: { format: 'avc' } });
 
 Pure functions and small records. No I/O, no writer types, usable from a test or a script that
 never opens a connection. Each row names what it replaces in the example and the Video.js module it
-mirrors, so the TypeScript side can start as an attributed snapshot the way `@mux/moq-core` did.
+mirrors, so the TypeScript side can start as an attributed snapshot the way `@caprid/moq-core` did.
 
 | Helper | Replaces in the example | Video.js module |
 | --- | --- | --- |
@@ -698,7 +698,7 @@ Each dropped at most one frame in the whole run. The same day's Firefox run thro
 in 148 and in 155 alike: its player has judged nearly every video frame late since the frame reader
 landed ([issue #339](https://github.com/muxinc/relay-sdks/issues/339)).
 
-Over QMux over WebSocket (`@mux/relay-websocket`), Firefox 148 and Playwright's WebKit both passed
+Over QMux over WebSocket (`@caprid/relay-websocket`), Firefox 148 and Playwright's WebKit both passed
 the live data scenario against a local moq-relay 0.17.5 on 2026-10-17
 ([QMux over WebSocket](relay-interop.md#qmux-over-websocket)); the A/V sync run has not been
 repeated over WebSocket. Firefox also needs an audio server: without one, its `AudioContext` stays
@@ -796,7 +796,7 @@ links the two on the wire.
 ### Audio player
 
 [Issue #314](https://github.com/muxinc/relay-sdks/issues/314). TypeScript only, in
-`@mux/moq-media`: `createAudioPlayer({ context })` plays any number of inputs, usually one per
+`@caprid/moq-media`: `createAudioPlayer({ context })` plays any number of inputs, usually one per
 speaker, into one `AudioContext`. Each `player.addInput({ clock, decoderConfig })` takes frames in
 decode order from a frame reader (`onFrame: input.push`), decodes them with WebCodecs, holds them in
 a jitter buffer in an `AudioWorklet`, and reports what is audible to its broadcast's playout clock.
@@ -1273,19 +1273,19 @@ draft; until then, this repository's answer is its convention.
 
 Recommended: two homes, matching the existing boundary rules.
 
-- A format package per language, `@mux/moq-media` and `moq-media` (module `moq_media`), holding
+- A format package per language, `@caprid/moq-media` and `moq-media` (module `moq_media`), holding
   the format helpers and the readers. It depends on the core only (for `KeyValuePair` and
   `MoqtObject`), has no runtime dependencies, and knows nothing about Relay. The TypeScript package
   starts as an attributed snapshot of the Video.js `media/moq` modules with its own `UPSTREAM.json`,
   intended to migrate back upstream rather than fork, exactly as the core did; Python ports it.
   The boundary checks gain a rule: the format package imports nothing from the product package and
   no transport library, and the core imports nothing from it.
-- The media publishing handle in the product package, as `@mux/relay/media` (a second package
-  entry point) and `mux_relay.media`, because it is built from `RelayTrackWriter`, demand, and the
+- The media publishing handle in the product package, as `@caprid/relay/media` (a second package
+  entry point) and `caprid_relay.media`, because it is built from `RelayTrackWriter`, demand, and the
   write deadline, and because it is where Relay-specific observations such as the dropped
   Video Config property belong.
 
-The alternative is one home, everything under `mux_relay.media` and `@mux/relay/media`. It is one
+The alternative is one home, everything under `caprid_relay.media` and `@caprid/relay/media`. It is one
 package fewer per language and the code in the samples above is identical apart from the import
 lines. It gives up the snapshot-and-migrate story, and it puts a catalog builder that any MoQ
 publisher could use behind a Relay dependency. If the package count is the concern, start there

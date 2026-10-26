@@ -56,11 +56,7 @@ from typing import Any
 
 from test_relay import read_endpoint, read_token, redact
 
-from moq_core import AbsoluteLocationFilter, FetchOk, KeyValuePair, Location, RelativeGroupFilter
-from moq_core.control_messages import RequestError
-from moq_core.object_stream import FetchStreamEntry
-from moq_core.session import FetchHandlers, FetchReset, MoqtSubscribeOptions
-from mux_relay import (
+from caprid_relay import (
     CancellationToken,
     MessageParameters,
     MoqtObject,
@@ -69,6 +65,10 @@ from mux_relay import (
     connect_relay_publisher,
     connect_relay_subscriber,
 )
+from moq_core import AbsoluteLocationFilter, FetchOk, KeyValuePair, Location, RelativeGroupFilter
+from moq_core.control_messages import RequestError
+from moq_core.object_stream import FetchStreamEntry
+from moq_core.session import FetchHandlers, FetchReset, MoqtSubscribeOptions
 
 RUN_DEADLINE_SLACK = 60.0
 ANSWER_DEADLINE = 2.0
@@ -124,7 +124,7 @@ def count_out_of_order(arrivals_in_order: list[int]) -> int:
 async def run(endpoint: str, sub_endpoint: str, token: str | None, namespace: list[str], report: Any) -> dict[str, Any]:
     from aioquic.quic.configuration import QuicConfiguration
 
-    from mux_relay.quic import connect_quic
+    from caprid_relay.quic import connect_quic
 
     run_s = float(os.environ.get("VOICE_RUN_S", "14"))
     payload_size = int(os.environ.get("VOICE_PAYLOAD", "160"))

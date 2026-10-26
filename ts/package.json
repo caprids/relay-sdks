@@ -1,11 +1,11 @@
 {
-  "name": "@mux/relay",
-  "version": "0.0.0",
+  "name": "@caprid/relay",
+  "version": "0.1.0",
   "description": "JavaScript SDK for Relay",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "url": "git+https://github.com/caprids/relay-sdks.git",
     "directory": "ts"
   },
   "type": "module",
@@ -29,9 +29,9 @@
     }
   },
   "scripts": {
-    "build": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && pnpm --filter @mux/relay-websocket build && tsc -p tsconfig.build.json",
-    "test": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && pnpm --filter @mux/relay-websocket build && vitest run",
-    "typecheck": "pnpm --filter @mux/moq-core build && pnpm --filter @mux/moq-media build && pnpm --filter @mux/moq-mediabunny build && pnpm --filter @mux/relay-quic build && pnpm --filter @mux/relay-websocket build && tsc --noEmit -p tsconfig.json",
+    "build": "pnpm --filter @caprid/moq-core build && pnpm --filter @caprid/moq-media build && pnpm --filter @caprid/moq-mediabunny build && pnpm --filter @caprid/relay-quic build && pnpm --filter @caprid/relay-websocket build && tsc -p tsconfig.build.json",
+    "test": "pnpm --filter @caprid/moq-core build && pnpm --filter @caprid/moq-media build && pnpm --filter @caprid/moq-mediabunny build && pnpm --filter @caprid/relay-quic build && pnpm --filter @caprid/relay-websocket build && vitest run",
+    "typecheck": "pnpm --filter @caprid/moq-core build && pnpm --filter @caprid/moq-media build && pnpm --filter @caprid/moq-mediabunny build && pnpm --filter @caprid/relay-quic build && pnpm --filter @caprid/relay-websocket build && tsc --noEmit -p tsconfig.json",
     "lint": "biome check --error-on-warnings .",
     "fix": "biome check --write .",
     "format": "biome format --write .",
@@ -39,34 +39,34 @@
     "check:boundaries": "node scripts/check-boundaries.mjs",
     "check:docs": "typedoc --options typedoc.workspace.json --emit none",
     "docs": "pnpm build && typedoc --options typedoc.workspace.json",
-    "test:relay": "pnpm build && pnpm --filter @mux/relay-quic build:native && node scripts/test-relay.mjs",
+    "test:relay": "pnpm build && pnpm --filter @caprid/relay-quic build:native && node scripts/test-relay.mjs",
     "test:av-sync": "pnpm build && node scripts/test-av-sync.mjs",
     "test:audio-player": "pnpm build && node scripts/test-audio-player.mjs",
     "test:conformance": "pnpm build && node scripts/test-conformance.mjs",
     "example:voice-bot": "pnpm build && node examples/voice-bot/serve.mjs",
-    "example:mux-global": "pnpm build && pnpm --filter @mux/relay-quic build:native && node examples/mux-global/run.mjs",
-    "test:conformance:node": "pnpm build && pnpm --filter @mux/relay-quic build:native && vitest run --config conformance/vitest.relay-quic.config.js",
+    "example:mux-global": "pnpm build && pnpm --filter @caprid/relay-quic build:native && node examples/mux-global/run.mjs",
+    "test:conformance:node": "pnpm build && pnpm --filter @caprid/relay-quic build:native && vitest run --config conformance/vitest.relay-quic.config.js",
     "test:conformance:websocket": "pnpm build && vitest run --config conformance/vitest.websocket.config.js",
     "test:conformance:websocket:browsers": "pnpm build && node scripts/test-conformance-websocket.mjs"
   },
   "dependencies": {
-    "@mux/moq-core": "workspace:*"
+    "@caprid/moq-core": "workspace:*"
   },
   "peerDependencies": {
-    "@mux/relay-quic": "workspace:*"
+    "@caprid/relay-quic": "workspace:*"
   },
   "peerDependenciesMeta": {
-    "@mux/relay-quic": {
+    "@caprid/relay-quic": {
       "optional": true
     }
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.13",
     "@moq/qmux": "0.3.3",
-    "@mux/moq-media": "workspace:*",
-    "@mux/moq-mediabunny": "workspace:*",
-    "@mux/relay-quic": "workspace:*",
-    "@mux/relay-websocket": "workspace:*",
+    "@caprid/moq-media": "workspace:*",
+    "@caprid/moq-mediabunny": "workspace:*",
+    "@caprid/relay-quic": "workspace:*",
+    "@caprid/relay-websocket": "workspace:*",
     "@types/node": "24.12.2",
     "@types/ws": "8.18.2",
     "mediabunny": "1.58.1",
