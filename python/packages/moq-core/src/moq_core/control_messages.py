@@ -1333,17 +1333,23 @@ def encode_goaway(timeout: int = 0) -> bytes:
 
 
 def encode_request_ok(
-    parameters: MessageParameters | None = None, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+    parameters: MessageParameters | None = None,
+    protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
+    *,
+    track_properties: Sequence[KeyValuePair] = (),
 ) -> bytes:
     """REQUEST_OK (§9.3).
 
     The subscriber sends this to accept an incoming PUBLISH (PUBLISH_OK). Track Properties are always
     empty in that role, and since draft-20 so are the parameters: a subscriber changes subscription
     parameters with REQUEST_UPDATE, not in PUBLISH_OK (§9.8). The parameter slot stays for the
-    publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK).
+    publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK). Track Properties are
+    populated only in TRACK_STATUS_OK, which the publish session sends; they are the rest of the
+    message, so an empty sequence adds no bytes.
     """
     body = ByteWriter()
     encode_message_parameters(body, parameters, protocol)
+    encode_key_value_pairs(body, track_properties)
     return _frame_message(MESSAGE_TYPE.REQUEST_OK, body)
 
 

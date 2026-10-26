@@ -1,4 +1,10 @@
-import { createMoqtPublishSession, createSubgroupWriter, type ObjectStatus } from '@caprid/moq-core';
+import {
+  createMoqtPublishSession,
+  createSubgroupWriter,
+  type ObjectStatus,
+  type RegisteredTrack,
+  type SubgroupWriter,
+} from '@caprid/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 import {
   type DeliveryTimeouts,
@@ -11,6 +17,23 @@ import { trackSendOptions } from './send-order.js';
 import { createSettlingGroups } from './settling-groups.js';
 import { namespaceFields, trackName, trackPropertyPairs } from './validation.js';
 import { createWriteSlot, type WriteSlot } from './write-slot.js';
+
+/**
+ * A subgroup writer that tells the core of every object the transport took, so the core answers the
+ * relay's TRACK_STATUS with the track's largest object (draft-22 §9.20.17).
+ */
+function reportingObjects(subgroup: SubgroupWriter, track: RegisteredTrack): SubgroupWriter {
+  return {
+    groupId: subgroup.groupId,
+    async writeObject(object, options) {
+      await subgroup.writeObject(object, options);
+      track.objectPublished({ group: subgroup.groupId, object: object.objectId });
+    },
+    fin: () => subgroup.fin(),
+    handOverFin: () => subgroup.handOverFin(),
+    abort: (reason) => subgroup.abort(reason),
+  };
+}
 
 /**
  * Options for connectRelayPublisher: the shared connection options plus the namespace. There is no
@@ -300,11 +323,14 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
       const sendOptions = trackSendOptions(properties);
       const slot = createWriteSlot({
         openSubgroup: async (trackAlias, groupId) =>
-          createSubgroupWriter(await session.openUniStream(trackAlias, sendOptions), {
-            trackAlias,
-            groupId,
-            hasProperties: true,
-          }),
+          reportingObjects(
+            createSubgroupWriter(await session.openUniStream(trackAlias, sendOptions), {
+              trackAlias,
+              groupId,
+              hasProperties: true,
+            }),
+            registered,
+          ),
         settlingGroups,
         namespaceSolicited: () => session.namespaceSolicited,
         assertOpen: lifetime.assertOpen,
