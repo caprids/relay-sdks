@@ -1,11 +1,11 @@
-import type { MoqtObject } from '@mux/moq-core';
+import type { MoqtObject } from '@caprid/moq-core';
 import {
   createFrameSequencer,
   createPlayoutClock,
   LOC_TIMESCALE,
   LOC_TIMESTAMP,
   type SequencedFrame,
-} from '@mux/moq-media';
+} from '@caprid/moq-media';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   connectRelayPublisher,

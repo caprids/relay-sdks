@@ -10,8 +10,8 @@ import { startModuleServer } from './module-server.js';
 import { summarizeRuns } from './relay-runs.js';
 
 // The launchers for the live-relay scenario in relay-scenario.js. It runs once per runtime, each with a fresh
-// namespace: in Node over @mux/relay-quic's native QUIC, in a headless Chromium page over WebTransport, then both again
-// over @mux/relay-websocket's QMux over WebSocket (#321). RELAY_RUNTIME names the runtimes to run, comma-separated:
+// namespace: in Node over @caprid/relay-quic's native QUIC, in a headless Chromium page over WebTransport, then both again
+// over @caprid/relay-websocket's QMux over WebSocket (#321). RELAY_RUNTIME names the runtimes to run, comma-separated:
 // those four (node, chromium, node-websocket, chromium-websocket), plus firefox (WebTransport, Firefox 155+, #322),
 // webkit-websocket and firefox-websocket, and chromium-fallback, Chromium through withWebSocketFallback. Each runtime's outcome is reported, redacted, and folded
 // into a summary that calls out a scenario passing on one runtime and failing on the other.
@@ -109,7 +109,7 @@ process.exitCode = exitCode;
 /** The scenario in this process, over native QUIC. */
 async function runInNode({ namespace, reportPhase }) {
   const [{ nativeQuicTransport }, { runRelayScenario }] = await Promise.all([
-    import('@mux/relay-quic'),
+    import('@caprid/relay-quic'),
     import('./relay-scenario.js'),
   ]);
   const trust = certificateHash
@@ -124,7 +124,7 @@ async function runInNode({ namespace, reportPhase }) {
 /** The scenario in this process, over QMux over WebSocket. */
 async function runInNodeOverWebSocket({ namespace, reportPhase }) {
   const [{ createWebSocketTransport }, { runRelayScenario }] = await Promise.all([
-    import('@mux/relay-websocket'),
+    import('@caprid/relay-websocket'),
     import('./relay-scenario.js'),
   ]);
   const createTransport = createWebSocketTransport();
@@ -157,9 +157,9 @@ async function runInBrowser(name, transport, { namespace, reportPhase }) {
   const server = await startModuleServer({
     modules,
     importMap: {
-      '@mux/relay': '/sdk/index.js',
-      '@mux/moq-core': '/core/index.js',
-      '@mux/relay-websocket': '/websocket/index.js',
+      '@caprid/relay': '/sdk/index.js',
+      '@caprid/moq-core': '/core/index.js',
+      '@caprid/relay-websocket': '/websocket/index.js',
       '@moq/qmux': '/qmux/index.js',
       '@moq/web-socket-stream': '/web-socket-stream/index.js',
     },
@@ -176,7 +176,7 @@ async function runInBrowser(name, transport, { namespace, reportPhase }) {
         const { runRelayScenario } = await import('/scripts/relay-scenario.js');
         const report = window.reportPhase;
         if (transport !== 'webtransport') {
-          const { createWebSocketTransport, withWebSocketFallback } = await import('@mux/relay-websocket');
+          const { createWebSocketTransport, withWebSocketFallback } = await import('@caprid/relay-websocket');
           const createTransport =
             transport === 'websocket'
               ? createWebSocketTransport()

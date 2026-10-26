@@ -9,7 +9,7 @@ import type { PublishProperty, RelayGroupWriter, RelayTrackWriter } from './publ
 export type FrameGrouping = 'keyframe' | 'frame';
 
 /**
- * One encoded frame as the frame writer sees it. Any object with these fields qualifies, `@mux/moq-media`'s `LocFrame`
+ * One encoded frame as the frame writer sees it. Any object with these fields qualifies, `@caprid/moq-media`'s `LocFrame`
  * among them, so nothing is converted between the encoder and the writer.
  */
 export interface Frame {

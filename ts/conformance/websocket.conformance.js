@@ -1,10 +1,10 @@
 /**
- * The conformance suite against `@mux/relay-websocket` in Node, with the Node accepting end (`scripts/websocket-peer.js`)
+ * The conformance suite against `@caprid/relay-websocket` in Node, with the Node accepting end (`scripts/websocket-peer.js`)
  * as its peer. Not part of `pnpm test`: Node must trust the peer's certificate from the start, so
  * `pnpm test:conformance:websocket` runs it with `vitest.websocket.config.js`, which arranges that.
  */
 import { fileURLToPath } from 'node:url';
-import { createWebSocketTransport, withWebSocketFallback } from '@mux/relay-websocket';
+import { createWebSocketTransport, withWebSocketFallback } from '@caprid/relay-websocket';
 import { afterAll, describe, expect, it } from 'vitest';
 import { startConformancePeer } from '../scripts/conformance-peer.js';
 import { checkProcessLifetime } from './targets/lifetime.js';
@@ -15,7 +15,11 @@ const peer = await startConformancePeer({ framing: 'websocket' });
 afterAll(() => peer.stop());
 
 const lifetimeScript = fileURLToPath(new URL('./targets/websocket-lifetime.js', import.meta.url));
-const browserTarget = createWebSocketTarget({ name: '@mux/relay-websocket in Node', port: peer.port, call: peer.call });
+const browserTarget = createWebSocketTarget({
+  name: '@caprid/relay-websocket in Node',
+  port: peer.port,
+  call: peer.call,
+});
 const target = {
   ...browserTarget,
   capabilities: [...browserTarget.capabilities, 'process'],

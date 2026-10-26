@@ -1,5 +1,5 @@
 // Opt-in live check of a listener's catch-up (spec/behavior.md, "Media subscribing" and "Supervised subscriber")
-// against a real relay, in Node over native QUIC. Run after `pnpm build` and `pnpm --filter @mux/relay-quic
+// against a real relay, in Node over native QUIC. Run after `pnpm build` and `pnpm --filter @caprid/relay-quic
 // build:native`. One process publishes and listens, so capture and arrival times share a clock.
 //
 // The publisher sends one 20 ms audio frame per group, stamped with its capture time on the LOC timeline, to
@@ -31,9 +31,9 @@
 //   at = "11s"                            [[down.steps]] at = "8s", loss = 1.0
 //   loss = 0.0                            [[down.steps]] at = "11s", loss = 0.0
 import { randomUUID } from 'node:crypto';
-import { createFrameSequencer, createPlayoutClock, locProperties, locTrackProperties } from '@mux/moq-media';
-import { createFrameReader } from '@mux/relay/media';
-import { connectRelayPublisher, connectSupervisedSubscriber } from '@mux/relay/node';
+import { createFrameSequencer, createPlayoutClock, locProperties, locTrackProperties } from '@caprid/moq-media';
+import { createFrameReader } from '@caprid/relay/media';
+import { connectRelayPublisher, connectSupervisedSubscriber } from '@caprid/relay/node';
 
 const env = process.env;
 const url = env.RELAY_URL;

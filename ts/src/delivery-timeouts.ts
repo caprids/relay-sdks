@@ -8,7 +8,7 @@
  * otherwise. 0 means no timeout. Nothing here rejects a value: a byte value is ignored, and a value above the timer
  * bound is clamped to it.
  */
-import type { KeyValuePair, MessageParameters } from '@mux/moq-core';
+import type { KeyValuePair, MessageParameters } from '@caprid/moq-core';
 import { MAX_TIMEOUT_MS } from './connect-session.js';
 
 /** One side's delivery timeouts, or a group's effective ones, in milliseconds. 0 means no timeout. */

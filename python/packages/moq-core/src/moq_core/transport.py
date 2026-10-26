@@ -1,6 +1,6 @@
 """The abstract transport seam the session drivers run over.
 
-The core never opens a network connection. A product package (``mux_relay``) supplies an object
+The core never opens a network connection. A product package (``caprid_relay``) supplies an object
 satisfying :class:`MoqtTransport`, and tests supply in-memory fakes. The shape is the structural
 subset of a WebTransport session the drivers need, spelled for asyncio: unidirectional and
 bidirectional streams, incoming-stream acceptance, and closure observation.

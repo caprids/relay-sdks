@@ -1,4 +1,4 @@
-import type { NativeQuicTransportFactory } from '@mux/relay-quic';
+import type { NativeQuicTransportFactory } from '@caprid/relay-quic';
 import { expectTypeOf, it } from 'vitest';
 
 import type { ConnectRelayOptions } from '../src/index.js';

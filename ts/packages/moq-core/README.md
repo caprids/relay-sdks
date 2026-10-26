@@ -23,5 +23,5 @@ For Relay application usage and local installation, start with the [JavaScript q
 
 ## Stability
 
-Before 1.0, a minor version can break the API. This package releases together with `@mux/relay`
+Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay`
 at the same version; see the [changelog](../../CHANGELOG.md).

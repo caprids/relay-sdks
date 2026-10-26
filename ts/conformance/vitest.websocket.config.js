@@ -1,4 +1,4 @@
-// The WebSocket target's Node run (`pnpm test:conformance:websocket`): only the @mux/relay-websocket conformance file,
+// The WebSocket target's Node run (`pnpm test:conformance:websocket`): only the @caprid/relay-websocket conformance file,
 // kept out of `pnpm test` because Node must trust the accepting end's certificate before it starts. The certificate is
 // made here, in the main process, and the test workers inherit NODE_EXTRA_CA_CERTS when they fork.
 import { defineConfig } from 'vitest/config';

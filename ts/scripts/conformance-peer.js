@@ -74,7 +74,7 @@ function spawnPeer(framing, host) {
     ],
     {
       cwd: python,
-      env: { ...process.env, PYTHONPATH: resolve(python, 'packages/mux-relay/tests') },
+      env: { ...process.env, PYTHONPATH: resolve(python, 'packages/caprid-relay/tests') },
       stdio: ['pipe', 'pipe', 'inherit'],
     },
   );

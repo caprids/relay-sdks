@@ -5,8 +5,8 @@ import {
   LOC_TIMESTAMP,
   LOC_VIDEO_CONFIG,
   videoTrackFromDecoderConfig,
-} from '@mux/moq-media';
-import { packetToLocFrame } from '@mux/moq-mediabunny';
+} from '@caprid/moq-media';
+import { packetToLocFrame } from '@caprid/moq-mediabunny';
 import { BufferSource, EncodedPacket, EncodedPacketSink, Input, MP4 } from 'mediabunny';
 import { expect, it } from 'vitest';
 

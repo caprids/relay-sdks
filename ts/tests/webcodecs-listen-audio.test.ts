@@ -5,8 +5,8 @@ import {
   buildTranscriptSegment,
   INTERRUPT_TRACK,
   TRANSCRIPT_TRACK,
-} from '@mux/moq-media';
-import type { RelaySubscriber } from '@mux/relay';
+} from '@caprid/moq-media';
+import type { RelaySubscriber } from '@caprid/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { listenAudio } from '../examples/webcodecs/listen-audio.js';
 

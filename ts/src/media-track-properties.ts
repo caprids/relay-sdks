@@ -1,4 +1,4 @@
-import type { MessageParameters } from '@mux/moq-core';
+import type { MessageParameters } from '@caprid/moq-core';
 import { MAX_TIMEOUT_MS } from './connect-session.js';
 import { SUBGROUP_DELIVERY_TIMEOUT } from './delivery-timeouts.js';
 import type { PublishProperty } from './publish.js';
@@ -39,7 +39,7 @@ const MAX_TIMEOUT_US = MAX_TIMEOUT_MS * 1000;
 /**
  * The track properties that give a media track its default delivery timeout and publisher priority (spec/behavior.md,
  * "Media publishing"), so a stall costs stale frames rather than lasting latency. Pass them to `registerTrack` with the track's format
- * properties, such as `@mux/moq-media`'s `locTrackProperties()`:
+ * properties, such as `@caprid/moq-media`'s `locTrackProperties()`:
  *
  * ```ts
  * const video = publisher.registerTrack({

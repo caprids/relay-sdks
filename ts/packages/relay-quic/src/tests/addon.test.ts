@@ -17,14 +17,14 @@ describe('addonCandidates (#195)', () => {
   it('tries the local build first, then the prebuilt platform package', () => {
     const [local, pkg] = addonCandidates('linux-arm64-musl');
     expect(local).toMatch(/[/\\]native[/\\]relay-quic\.linux-arm64-musl\.node$/);
-    expect(pkg).toBe('@mux/relay-quic-linux-arm64-musl');
+    expect(pkg).toBe('@caprid/relay-quic-linux-arm64-musl');
   });
 });
 
 describe('loadFirst (#195)', () => {
   // Neither exists, whatever was built here: a local build in native/ would otherwise load for real.
   const local = '/nowhere/native/relay-quic.linux-x64-gnu.node';
-  const pkg = '@mux/relay-quic-nowhere-linux-x64-gnu';
+  const pkg = '@caprid/relay-quic-nowhere-linux-x64-gnu';
 
   it('takes a local build over the platform package', () => {
     expect(loadFirst([local, pkg], requireOnly({ [local]: 'local', [pkg]: 'package' }), 'linux-x64-gnu')).toBe('local');
@@ -36,7 +36,7 @@ describe('loadFirst (#195)', () => {
 
   it('names the platform package and the local build when neither is there', () => {
     expect(() => loadFirst([local, pkg], requireOnly({}), 'linux-x64-gnu')).toThrow(
-      /no native binary for this platform \(linux-x64-gnu\)\. Install its optional dependency @mux\/relay-quic-nowhere-linux-x64-gnu.*build:native/s,
+      /no native binary for this platform \(linux-x64-gnu\)\. Install its optional dependency @caprid\/relay-quic-nowhere-linux-x64-gnu.*build:native/s,
     );
   });
 

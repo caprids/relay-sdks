@@ -17,7 +17,7 @@ import {
   type MoqtObject,
   type PublishDone,
   type SubscribeOk,
-} from '@mux/moq-core';
+} from '@caprid/moq-core';
 import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelaySubscriber } from './connect.js';
 import { assertTimeoutMs } from './connect-session.js';
 import { RelayError } from './errors.js';

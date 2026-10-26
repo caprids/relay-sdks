@@ -5,7 +5,7 @@ import { RelayError } from '../src/index.js';
 import { createWriteSlot } from '../src/write-slot.js';
 
 // The policy imports the SDK by its package name, as the demo does; everything is real.
-vi.mock('@mux/relay', () => vi.importActual('../src/index.js'));
+vi.mock('@caprid/relay', () => vi.importActual('../src/index.js'));
 
 const payload = new TextEncoder().encode('{"seq":1}');
 

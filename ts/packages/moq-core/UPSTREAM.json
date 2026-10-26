@@ -16,7 +16,7 @@
   "adaptations": [
     "Relative imports use .js suffixes for native ESM.",
     "Tests use Vitest directly and import protocol modules from their new directory.",
-    "The default SETUP implementation identifier names @mux/moq-core. The existing error identity symbol is retained for interoperability.",
+    "The default SETUP implementation identifier names @caprid/moq-core. The existing error identity symbol is retained for interoperability.",
     "Publish session extraction excludes the SPF actor and accepts explicit track properties instead of imposing the LOC microsecond timescale.",
     "Publish protocol tests exclude media-engine integration and actor tests; raw tracks assert no implicit timescale.",
     "SDK relay-hub test helper is derived from Video.js publish tests and adapted to local protocol imports.",

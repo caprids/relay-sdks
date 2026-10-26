@@ -8,7 +8,7 @@
  * draft's order among themselves. A track without the property gets no send order, so it goes with the control
  * streams: a catalog or a timeline ahead of the media it describes.
  */
-import type { KeyValuePair, MoqtSendStreamOptions } from '@mux/moq-core';
+import type { KeyValuePair, MoqtSendStreamOptions } from '@caprid/moq-core';
 import { DEFAULT_PUBLISHER_PRIORITY } from './validation.js';
 
 /** The send options for each data stream of a track with these properties; the first integer 0x0E counts. */

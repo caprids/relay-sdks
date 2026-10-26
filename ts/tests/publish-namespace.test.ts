@@ -1,4 +1,4 @@
-import { type BidirectionalStreamLike, createMoqtSession, type MoqtObject, type MoqtTransport } from '@mux/moq-core';
+import { type BidirectionalStreamLike, createMoqtSession, type MoqtObject, type MoqtTransport } from '@caprid/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { solicitNamespace } from '../packages/moq-core/src/tests/helpers/raw-peer.js';
 import { createTransportPair, withServerRequestIds } from '../packages/moq-core/src/tests/helpers/transport-pair.js';

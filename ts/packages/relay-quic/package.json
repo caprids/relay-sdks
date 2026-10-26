@@ -1,11 +1,11 @@
 {
-  "name": "@mux/relay-quic",
-  "version": "0.0.0",
+  "name": "@caprid/relay-quic",
+  "version": "0.1.0",
   "description": "Native QUIC transport adapter for the Relay SDK in Node",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/muxinc/relay-sdks.git",
+    "url": "git+https://github.com/caprids/relay-sdks.git",
     "directory": "ts/packages/relay-quic"
   },
   "type": "module",
@@ -37,7 +37,7 @@
     ]
   },
   "dependencies": {
-    "@mux/moq-core": "workspace:*"
+    "@caprid/moq-core": "workspace:*"
   },
   "devDependencies": {
     "@napi-rs/cli": "3.10.5",

@@ -5,8 +5,8 @@ all its packages. [ADR 0003](adr/0003-hand-cut-lockstep-releases.md) records why
 
 | Train | Packages | Tag | Workflow |
 | --- | --- | --- | --- |
-| TypeScript | `@mux/relay`, `@mux/moq-core`, `@mux/moq-media`, `@mux/moq-mediabunny`, `@mux/relay-quic` and its 7 platform packages, `@mux/relay-websocket` | `ts/v<x.y.z>` | `release-ts.yml` |
-| Python | `mux-relay`, `mux-moq-core`, `mux-moq-media` | `python/v<x.y.z>` | `release-python.yml` |
+| TypeScript | `@caprid/relay`, `@caprid/moq-core`, `@caprid/moq-media`, `@caprid/moq-mediabunny`, `@caprid/relay-quic` and its 7 platform packages, `@caprid/relay-websocket` | `ts/v<x.y.z>` | `release-ts.yml` |
+| Python | `caprid-relay`, `caprid-moq-core`, `caprid-moq-media` | `python/v<x.y.z>` | `release-python.yml` |
 
 ## Cut a release
 
@@ -26,10 +26,14 @@ all its packages. [ADR 0003](adr/0003-hand-cut-lockstep-releases.md) records why
    cd python && uv run python scripts/release.py check 0.1.0
    ```
 
-4. After the PR merges, tag the merge commit on `main` and push the tag:
+4. After the PR merges, push `main` to `caprids/relay-sdks`, then tag the merge commit and push the
+   tag there. The packages publish from that repository, not from `muxinc/relay-sdks`, where
+   `RELEASE_PUBLISH` is unset, so a tag pushed there only dry-runs:
 
    ```sh
-   git tag ts/v0.1.0 && git push origin ts/v0.1.0
+   git remote add caprids git@github.com:caprids/relay-sdks.git  # once
+   git push caprids main
+   git tag ts/v0.1.0 && git push caprids ts/v0.1.0
    ```
 
 The workflow checks the tag against every manifest and the changelog, runs the language's full
@@ -51,14 +55,14 @@ tag ref), always dry-run. A tag push runs the `publish` job in the `release` env
 publishes only when the repository variable `RELEASE_PUBLISH` is `true`. Otherwise it dry-runs and
 creates no GitHub release. Before the first real publish:
 
-- the package names and npm scope are settled;
 - the repository is public, so the package READMEs' links resolve and provenance can be issued;
-- on npmjs.com, each package has a trusted publisher for `muxinc/relay-sdks`, workflow
+- on npmjs.com, each package has a trusted publisher for `caprids/relay-sdks`, workflow
   `release-ts.yml`, environment `release`. npm can only add one to a package that exists, so the
   first publish of each package needs a one-off token, or a placeholder publish by the scope owner;
-- on PyPI, a pending trusted publisher for each project: `muxinc/relay-sdks`, workflow
+- on PyPI, a pending trusted publisher for each project: `caprids/relay-sdks`, workflow
   `release-python.yml`, environment `release`;
-- the `release` environment has required reviewers, and only then is `RELEASE_PUBLISH` set.
+- the `release` environment on `caprids/relay-sdks` has required reviewers and admits only `ts/v*`
+  and `python/v*` tags, and only then is `RELEASE_PUBLISH` set there.
 
 ## Try it locally
 

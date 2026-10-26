@@ -1,6 +1,7 @@
 /** A `MoqtTransport` over one QMux-over-WebSocket dial (spec/transport-adapter.md, "Session lifetime"). */
+
+import type { BidirectionalStreamLike, MoqtSendStreamOptions, MoqtTransport } from '@caprid/moq-core';
 import Session from '@moq/qmux';
-import type { BidirectionalStreamLike, MoqtSendStreamOptions, MoqtTransport } from '@mux/moq-core';
 import { type CloseInfo, isStreamError, WebSocketSessionError } from './errors.js';
 import { bidirectional, type MapFailure, recvReadable, type SessionEnd, sendWritable } from './streams.js';
 

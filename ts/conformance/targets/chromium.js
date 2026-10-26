@@ -3,7 +3,7 @@
  * loads it); its peer is the scriptable Python accepting end, reached through `call(method, params)`, which the launcher
  * exposes to the page.
  */
-import { streamResetReason } from '@mux/moq-core';
+import { streamResetReason } from '@caprid/moq-core';
 import { createRemotePeer } from './remote-peer.js';
 
 /** Rules Chromium is known not to meet, each with its Known deviation in `spec/transport-adapter.md`. */

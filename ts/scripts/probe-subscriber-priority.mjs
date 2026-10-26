@@ -1,5 +1,5 @@
 // Opt-in live check of a viewer's subscriber priority (spec/behavior.md, "Media subscribing") against a real relay.
-// Run after `pnpm build` and `pnpm --filter @mux/relay-quic build:native`.
+// Run after `pnpm build` and `pnpm --filter @caprid/relay-quic build:native`.
 //
 // A publisher in this process, on RELAY_URL (give it a clean path), publishes one audio and one video track,
 // registered with mediaTrackProperties, so both carry the default publisher priorities (PRIORITY_TRACK_PROPERTIES=off
@@ -29,9 +29,9 @@
 //   RELAY_URL=https://ord.relay.mux.global RELAY_SUB_URL=https://ord.relay.mux.global:14433 PRIORITY_RESOLVE=127.0.0.1 \
 //     node scripts/probe-subscriber-priority.mjs
 import { randomUUID } from 'node:crypto';
-import { createFrameWriter, mediaSubscribeParameters, mediaTrackProperties } from '@mux/relay/media';
-import { connectRelayPublisher, connectRelaySubscriber } from '@mux/relay/node';
-import { nativeQuicTransport } from '@mux/relay-quic';
+import { createFrameWriter, mediaSubscribeParameters, mediaTrackProperties } from '@caprid/relay/media';
+import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay/node';
+import { nativeQuicTransport } from '@caprid/relay-quic';
 import { ControlMessageDeframer, decodeControlMessage } from '../packages/moq-core/dist/protocol/control-messages.js';
 import { loadAddon } from '../packages/relay-quic/dist/addon.js';
 

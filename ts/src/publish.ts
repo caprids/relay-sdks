@@ -1,4 +1,4 @@
-import { createMoqtPublishSession, createSubgroupWriter, type ObjectStatus } from '@mux/moq-core';
+import { createMoqtPublishSession, createSubgroupWriter, type ObjectStatus } from '@caprid/moq-core';
 import { assertTimeoutMs, type ConnectRelayOptions, openRelaySession } from './connect-session.js';
 import {
   type DeliveryTimeouts,
@@ -240,7 +240,7 @@ export async function connectRelayPublisher(options: ConnectRelayPublisherOption
   void announced.catch(() => {});
   const lifetime = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtPublishSession(transport, {
-      implementationName: '@mux/relay publisher',
+      implementationName: '@caprid/relay publisher',
       setupOptions,
       callbacks: {
         ...callbacks,

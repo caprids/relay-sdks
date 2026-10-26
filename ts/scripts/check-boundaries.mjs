@@ -33,7 +33,7 @@ assert.deepEqual(
   { '@moq/qmux': '0.3.3', [core.name]: 'workspace:*' },
   'The WebSocket adapter depends on the core and an exact @moq/qmux only',
 );
-// `@mux/relay/node` loads the adapter when it is installed (#196): an optional peer, never a dependency.
+// `@caprid/relay/node` loads the adapter when it is installed (#196): an optional peer, never a dependency.
 assert.deepEqual(sdk.peerDependencies, { [quic.name]: 'workspace:*' }, 'The SDK takes only the adapter as a peer');
 assert.deepEqual(sdk.peerDependenciesMeta, { [quic.name]: { optional: true } }, 'The adapter is an optional peer');
 
@@ -142,7 +142,11 @@ assert.deepEqual(Object.keys(sdkExports).sort(), [
 ]);
 // The Node entry point exports what the root does, with its own connect functions (#196).
 const nodeExports = await import('../dist/node.js');
-assert.deepEqual(Object.keys(nodeExports).sort(), Object.keys(sdkExports).sort(), '@mux/relay/node mirrors the root');
+assert.deepEqual(
+  Object.keys(nodeExports).sort(),
+  Object.keys(sdkExports).sort(),
+  '@caprid/relay/node mirrors the root',
+);
 for (const name of Object.keys(sdkExports)) {
   const own = name.startsWith('connect');
   assert.equal(nodeExports[name] === sdkExports[name], !own, `${name} ${own ? 'defaults the transport' : 'is shared'}`);
@@ -159,7 +163,11 @@ assert.deepEqual(Object.keys(mediaPolicy).sort(), [
 ]);
 // Its declarations stand without the optional adapter installed.
 const nodeDeclarations = (await readFile(resolve(root, 'dist/node.d.ts'), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
-assert.doesNotMatch(nodeDeclarations, /['"]@mux\/relay-quic['"]/, 'dist/node.d.ts must not import @mux/relay-quic');
+assert.doesNotMatch(
+  nodeDeclarations,
+  /['"]@caprid\/relay-quic['"]/,
+  'dist/node.d.ts must not import @caprid/relay-quic',
+);
 // Generated declarations name the shared connection options and each role's own (issue #72).
 const declarations = await readFile(resolve(root, 'dist/index.d.ts'), 'utf8');
 for (const name of ['ConnectRelayOptions', 'ConnectRelaySubscriberOptions', 'ConnectRelayPublisherOptions']) {
@@ -167,6 +175,6 @@ for (const name of ['ConnectRelayOptions', 'ConnectRelaySubscriberOptions', 'Con
 }
 console.log(
   'Built SDK and media formats import only the generic core; core has no runtime package imports; ' +
-    'only the native QUIC adapter uses Node built-ins, and only @mux/relay/node loads it; ' +
+    'only the native QUIC adapter uses Node built-ins, and only @caprid/relay/node loads it; ' +
     'only the WebSocket adapter takes a third-party dependency.',
 );

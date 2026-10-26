@@ -1,6 +1,6 @@
 """Opus encoding and decoding on PyAV's libopus, for a server-side talker such as a voice bot.
 
-Install with the ``opus`` extra (``mux-moq-media[opus]``). This is the one module in the package that
+Install with the ``opus`` extra (``caprid-moq-media[opus]``). This is the one module in the package that
 needs PyAV; ``import moq_media`` does not load it.
 """
 
@@ -13,7 +13,7 @@ try:
     import av
     from av.audio.resampler import AudioResampler
 except ImportError as error:  # pragma: no cover - exercised only without the extra
-    raise ImportError("moq_media.opus needs PyAV: install mux-moq-media[opus]") from error
+    raise ImportError("moq_media.opus needs PyAV: install caprid-moq-media[opus]") from error
 
 from moq_core import KeyValuePair
 
@@ -35,7 +35,7 @@ Pcm = bytes | bytearray | memoryview
 class OpusPacket:
     """One encoded Opus packet and where it starts on the broadcast timeline.
 
-    It has the attributes ``mux_relay.media.FrameWriter`` takes, so it can be written as a frame as it is.
+    It has the attributes ``caprid_relay.media.FrameWriter`` takes, so it can be written as a frame as it is.
     """
 
     timestamp_us: int

@@ -9,14 +9,14 @@
  * time known, and lets the scenario switch devices: a second microphone (at another sample rate where the browser
  * allows it), a replaced capture context, a 200 ms step in the player's output delay, and a 3 s audio gap.
  */
-import { createBroadcastClock } from '@mux/moq-media';
+import { createBroadcastClock } from '@caprid/moq-media';
 import {
   connectRelayPublisher,
   connectRelaySubscriber,
   type RelayPublisher,
   type RelaySubscriber,
   type RelayTransportFactory,
-} from '@mux/relay';
+} from '@caprid/relay';
 import { captureMicrophone, type MicrophoneBlock } from '../../examples/webcodecs/capture-microphone.js';
 import { publishCanvas } from '../../examples/webcodecs/publish-canvas.js';
 import { createRenderClock } from '../../examples/webcodecs/render-clock.js';

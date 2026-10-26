@@ -3,7 +3,7 @@
  * product subscription over a fake core, so the tests drive SUBSCRIBE_OK, objects and endings per
  * track. The live switch with no gap is in scripts/relay-scenario.js.
  */
-import type { MessageParameters, MoqtObject, RequestError, SubscribeOk, SubscriptionHandlers } from '@mux/moq-core';
+import type { MessageParameters, MoqtObject, RequestError, SubscribeOk, SubscriptionHandlers } from '@caprid/moq-core';
 import { describe, expect, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
 import { connectRelayPublisher, connectRelaySubscriber } from '../src/index.js';

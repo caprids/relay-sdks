@@ -4,8 +4,8 @@ import {
   LOC_VIDEO_CONFIG,
   parseMediaTimeline,
   type SourceTimeline,
-} from '@mux/moq-media';
-import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@mux/relay';
+} from '@caprid/moq-media';
+import type { PublishProperty, RelayPublisher, RelayTrackWriter } from '@caprid/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import type { MicrophoneCapture } from '../examples/webcodecs/capture-microphone.js';
 import { publishCanvas } from '../examples/webcodecs/publish-canvas.js';
@@ -13,8 +13,8 @@ import { NO_DELIVERY_TIMEOUTS } from '../src/delivery-timeouts.js';
 import { createSettlingGroups } from '../src/settling-groups.js';
 import { createWriteSlot } from '../src/write-slot.js';
 
-vi.mock('@mux/relay', async () => import('../src/index.js'));
-vi.mock('@mux/relay/media', async () => import('../src/media.js'));
+vi.mock('@caprid/relay', async () => import('../src/index.js'));
+vi.mock('@caprid/relay/media', async () => import('../src/media.js'));
 
 const description = Uint8Array.from(Buffer.from('0142c014ffe1000a6742c014da05067e784001000468ce3c80', 'hex'));
 const decoderConfig = { codec: 'avc1.42001f', codedWidth: 640, codedHeight: 360, description };

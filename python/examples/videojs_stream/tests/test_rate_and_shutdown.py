@@ -10,8 +10,8 @@ from typing import Any, cast
 import pytest
 from videojs_stream import stream
 
+from caprid_relay import CancellationToken, Cancelled
 from moq_media import LOC_TIMESTAMP
-from mux_relay import CancellationToken, Cancelled
 
 
 @pytest.mark.parametrize("width,height,bitrate", [(640, 360, 1_500_000), (640, 360, 1_500_600), (1280, 720, 4_000_000)])

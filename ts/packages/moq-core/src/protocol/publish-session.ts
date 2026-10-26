@@ -196,7 +196,7 @@ export interface MoqtPublishSession {
   destroy(error?: unknown): void;
 }
 
-const DEFAULT_IMPLEMENTATION_NAME = '@mux/moq-core publisher';
+const DEFAULT_IMPLEMENTATION_NAME = '@caprid/moq-core publisher';
 
 /**
  * How long `close()` waits for the PUBLISH_DONE + FIN / NAMESPACE_DONE writes to drain before closing the transport out

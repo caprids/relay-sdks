@@ -9,8 +9,8 @@ on:
       - 'mise.toml'
       - '.github/workflows/ts.yml'
       # The conformance job's accepting end and the aioquic stack under it.
-      - 'python/packages/mux-relay/tests/relay_helpers/**'
-      - 'python/packages/mux-relay/src/mux_relay/quic/**'
+      - 'python/packages/caprid-relay/tests/relay_helpers/**'
+      - 'python/packages/caprid-relay/src/caprid_relay/quic/**'
       - 'python/uv.lock'
   pull_request:
     paths:
@@ -18,8 +18,8 @@ on:
       - 'spec/**'
       - 'mise.toml'
       - '.github/workflows/ts.yml'
-      - 'python/packages/mux-relay/tests/relay_helpers/**'
-      - 'python/packages/mux-relay/src/mux_relay/quic/**'
+      - 'python/packages/caprid-relay/tests/relay_helpers/**'
+      - 'python/packages/caprid-relay/src/caprid_relay/quic/**'
       - 'python/uv.lock'
 
 concurrency:
@@ -55,7 +55,7 @@ jobs:
         working-directory: ts
       - run: mise run ts:test:conformance
 
-  # The WebSocket transport adapter (@mux/relay-websocket): in Node, then in Chromium, Firefox and WebKit. Its accepting
+  # The WebSocket transport adapter (@caprid/relay-websocket): in Node, then in Chromium, Firefox and WebKit. Its accepting
   # end is Node's, so it needs no Python.
   conformance-websocket:
     runs-on: ubuntu-latest
@@ -70,7 +70,7 @@ jobs:
       - run: mise run ts:test:conformance:websocket
       - run: mise run ts:test:conformance:websocket:browsers
 
-  # The Node transport adapter (@mux/relay-quic). Its Rust is linted and built only here: the mise tasks below bring the
+  # The Node transport adapter (@caprid/relay-quic). Its Rust is linted and built only here: the mise tasks below bring the
   # Rust toolchain they pin, and `check` builds no Rust.
   conformance-node:
     runs-on: ubuntu-latest

@@ -11,7 +11,7 @@ export type {
   SubscribeOk,
   Subscription,
   SubscriptionHandlers,
-} from '@mux/moq-core';
+} from '@caprid/moq-core';
 export type {
   ConnectRelayOptions,
   ConnectRelaySubscriberOptions,

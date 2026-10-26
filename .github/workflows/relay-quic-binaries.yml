@@ -1,6 +1,6 @@
 name: relay-quic binaries
 
-# Prebuilt binaries for @mux/relay-quic's native addon (#195): one npm package per platform, built, packed and
+# Prebuilt binaries for @caprid/relay-quic's native addon (#195): one npm package per platform, built, packed and
 # smoke-loaded on the platform it is for. Only this workflow builds them; ts.yml's conformance-node job still builds the
 # addon from source for linux-x64-gnu, and `pnpm check` builds no Rust.
 #
@@ -128,7 +128,7 @@ jobs:
         with:
           install_args: node pnpm
       - run: mise run ts:install
-      - run: pnpm --filter @mux/moq-core build && pnpm --filter @mux/relay-quic build
+      - run: pnpm --filter @caprid/moq-core build && pnpm --filter @caprid/relay-quic build
         working-directory: ts
       - uses: actions/download-artifact@v5
         with:
