@@ -12,7 +12,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.urls]
-Repository = "https://github.com/muxinc/relay-sdks"
+Repository = "https://github.com/caprids/relay-sdks"
 
 [build-system]
 requires = ["uv_build>=0.12,<0.13"]
