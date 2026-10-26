@@ -29,6 +29,7 @@ from moq_core.control_messages import (
     RangeFilter,
     RelativeGroupFilter,
     RequestError,
+    RequestOk,
     Setup,
     Subscribe,
     SubscribeOk,
@@ -47,6 +48,7 @@ from moq_core.control_messages import (
     encode_publish_namespace,
     encode_publish_state_notify,
     encode_request_error,
+    encode_request_ok,
     encode_setup,
     encode_subscribe,
     encode_subscribe_ok,
@@ -196,6 +198,33 @@ class TestEncodeRequestError:
         assert message == RequestError(
             error_code=REQUEST_ERROR_CODE.DOES_NOT_EXIST, retry_interval=1500, reason="no such track"
         )
+
+
+class TestEncodeRequestOk:
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    def test_round_trips_track_properties_and_a_largest_object_through_the_decoder(
+        self, protocol: MoqtProtocolId
+    ) -> None:
+        # TRACK_STATUS_OK (§9.13): the parameters carry LARGEST_OBJECT, the properties end the message.
+        properties = [KeyValuePair(13, b"\x01\x02"), KeyValuePair(8, 1_000_000), KeyValuePair(14, 16)]
+        parameters = MessageParameters(largest_object=Location(group=3, object=1))
+
+        encoded = encode_request_ok(parameters, protocol, track_properties=properties)
+
+        frames = ControlMessageDeframer().push(encoded)
+        assert len(frames) == 1
+        decoded = decode_control_message(frames[0], protocol)
+        assert isinstance(decoded, RequestOk)
+        assert decoded.parameters.largest_object == Location(group=3, object=1)
+        # The encoder sorts the pairs by type.
+        assert decoded.track_properties == sorted(properties, key=lambda pair: pair.type)
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    def test_adds_no_bytes_for_empty_track_properties(self, protocol: MoqtProtocolId) -> None:
+        parameters = MessageParameters(largest_object=Location(group=3, object=1))
+
+        assert encode_request_ok(parameters, protocol, track_properties=[]) == encode_request_ok(parameters, protocol)
+        assert decode_all(encode_request_ok(None, protocol)) == [RequestOk()]
 
 
 class TestEncodeSetup:

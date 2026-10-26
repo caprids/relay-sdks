@@ -5,8 +5,13 @@ import { describe, expect, it } from 'vitest';
 
 import { ByteReader, ByteWriter } from '../packages/moq-core/src/protocol/bytes.js';
 import {
+  ControlMessageDeframer,
+  decodeControlMessage,
   decodeMessageParameters,
   encodeMessageParameters,
+  encodeRequestOk,
+  type KeyValuePair,
+  type Location,
   type LocationFilter,
   MOQT_PROTOCOL_IDS,
   type MoqtProtocolId,
@@ -130,6 +135,76 @@ describe('spec/vectors/location-filter.json', () => {
   it('rejects every rejected vector', () => {
     for (const { protocol, bytes } of locationFilters.rejected) {
       expect(() => decodeMessageParameters(new ByteReader(fromHex(bytes)), protocol)).toThrow();
+    }
+  });
+});
+
+interface TrackStatusOkCase {
+  name: string;
+  largestObject?: { group: string; object: string };
+  trackProperties: ({ type: number; value: string } | { type: number; bytes: string })[];
+  bytes: string;
+}
+
+interface TrackStatusOkVectors {
+  protocols: MoqtProtocolId[];
+  cases: TrackStatusOkCase[];
+}
+
+const trackStatusOk = JSON.parse(
+  await readFile(new URL('../../spec/vectors/track-status-ok.json', import.meta.url), 'utf8'),
+) as TrackStatusOkVectors;
+
+/** The vector's track properties as the core's pairs, sorted by type as the encoder emits them. */
+function toTrackProperties(vector: TrackStatusOkCase): KeyValuePair[] {
+  return vector.trackProperties
+    .map(
+      (property): KeyValuePair =>
+        'bytes' in property
+          ? { type: property.type, value: fromHex(property.bytes) }
+          : { type: property.type, value: Number(property.value) },
+    )
+    .sort((a, b) => a.type - b.type);
+}
+
+function toParameters(vector: TrackStatusOkCase): { largestObject?: Location } {
+  return vector.largestObject === undefined
+    ? {}
+    : { largestObject: { group: Number(vector.largestObject.group), object: Number(vector.largestObject.object) } };
+}
+
+describe('spec/vectors/track-status-ok.json', () => {
+  it('lists both negotiated protocols', () => {
+    expect(trackStatusOk.protocols).toEqual([...MOQT_PROTOCOL_IDS]);
+  });
+
+  it.each(MOQT_PROTOCOL_IDS)('encodes every case to its bytes and decodes it back on %s', (protocol) => {
+    expect(trackStatusOk.protocols).toContain(protocol);
+    for (const vector of trackStatusOk.cases) {
+      const parameters = toParameters(vector);
+      const trackProperties = toTrackProperties(vector);
+      const frames = new ControlMessageDeframer().push(fromHex(vector.bytes));
+
+      expect(hex(encodeRequestOk(parameters, protocol, trackProperties)), vector.name).toBe(vector.bytes);
+      expect(frames, vector.name).toHaveLength(1);
+      expect(decodeControlMessage(frames[0]!, protocol), vector.name).toEqual({
+        kind: 'request-ok',
+        parameters,
+        trackProperties,
+      });
+    }
+  });
+
+  it('encodes properties given out of order the same as sorted ones', () => {
+    for (const vector of trackStatusOk.cases) {
+      const given = vector.trackProperties.map(
+        (property): KeyValuePair =>
+          'bytes' in property
+            ? { type: property.type, value: fromHex(property.bytes) }
+            : { type: property.type, value: Number(property.value) },
+      );
+
+      expect(hex(encodeRequestOk(toParameters(vector), 'moqt-22', given)), vector.name).toBe(vector.bytes);
     }
   });
 });

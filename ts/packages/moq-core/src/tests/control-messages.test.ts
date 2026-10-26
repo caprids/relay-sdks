@@ -17,6 +17,7 @@ import {
   encodePublishNamespace,
   encodePublishStateNotify,
   encodeRequestError,
+  encodeRequestOk,
   encodeSetup,
   encodeSubscribe,
   encodeSubscribeOk,
@@ -161,6 +162,27 @@ describe('encodeFetch', () => {
       kind: 'fetch',
       request: { requestId: 6, trackNamespace: ['live'], trackName: 'catalog', parameters: {} },
     });
+  });
+});
+
+describe('encodeRequestOk', () => {
+  it.each(MOQT_PROTOCOL_IDS)('round-trips a LARGEST_OBJECT and Track Properties on %s', (protocol) => {
+    const trackProperties = [
+      { type: 1, value: new Uint8Array([4, 5]) },
+      { type: 8, value: 1_000_000 },
+    ];
+    const parameters = { largestObject: { group: 200, object: 3 } };
+
+    expect(decodeAll(encodeRequestOk(parameters, protocol, trackProperties))).toEqual([
+      { kind: 'request-ok', parameters, trackProperties },
+    ]);
+    expect(decodeAll(encodeRequestOk({}, protocol, trackProperties))).toEqual([
+      { kind: 'request-ok', parameters: {}, trackProperties },
+    ]);
+  });
+
+  it.each(MOQT_PROTOCOL_IDS)('adds no bytes for empty Track Properties on %s', (protocol) => {
+    expect(encodeRequestOk({}, protocol, [])).toEqual(encodeRequestOk({}, protocol));
   });
 });
 

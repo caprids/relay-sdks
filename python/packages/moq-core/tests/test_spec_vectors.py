@@ -10,6 +10,8 @@ from moq_core.bytes import ByteReader, ByteWriter
 from moq_core.control_messages import (
     MOQT_PROTOCOL_IDS,
     AbsoluteLocationFilter,
+    ControlMessageDeframer,
+    KeyValuePair,
     Location,
     LocationFilter,
     MessageParameters,
@@ -17,8 +19,11 @@ from moq_core.control_messages import (
     NextObjectFilter,
     NoLocationFilter,
     RelativeGroupFilter,
+    RequestOk,
+    decode_control_message,
     decode_message_parameters,
     encode_message_parameters,
+    encode_request_ok,
 )
 from moq_core.errors import IncompleteInputError, MoqtProtocolError
 from moq_core.varint import decode_varint, encode_varint
@@ -107,3 +112,38 @@ def test_rejects_every_rejected_location_filter() -> None:
     for vector in LOCATION_FILTERS["rejected"]:
         with pytest.raises((MoqtProtocolError, IncompleteInputError)):
             decode_message_parameters(ByteReader(bytes.fromhex(vector["bytes"])), vector["protocol"])
+
+
+TRACK_STATUS_OK = json.loads((REPOSITORY_ROOT / "spec" / "vectors" / "track-status-ok.json").read_text())
+
+
+def _to_track_property(vector: dict[str, Any]) -> KeyValuePair:
+    """An even type carries a decimal-string varint, an odd one hex bytes."""
+    if "bytes" in vector:
+        return KeyValuePair(vector["type"], bytes.fromhex(vector["bytes"]))
+
+    return KeyValuePair(vector["type"], int(vector["value"]))
+
+
+@pytest.mark.parametrize("protocol", TRACK_STATUS_OK["protocols"])
+def test_encodes_every_track_status_ok_to_its_bytes_and_decodes_it_back(protocol: MoqtProtocolId) -> None:
+    assert set(TRACK_STATUS_OK["protocols"]) == set(MOQT_PROTOCOL_IDS)
+
+    for case in TRACK_STATUS_OK["cases"]:
+        largest = case.get("largestObject")
+        largest_object = None if largest is None else Location(int(largest["group"]), int(largest["object"]))
+        given = [_to_track_property(vector) for vector in case["trackProperties"]]
+        properties = sorted(given, key=lambda p: p.type)  # the encoder sorts, so the vectors' order may differ
+        encoded = bytes.fromhex(case["bytes"])
+
+        assert (
+            encode_request_ok(MessageParameters(largest_object=largest_object), protocol, track_properties=given)
+            == encoded
+        ), case["name"]
+
+        frames = ControlMessageDeframer().push(encoded)
+        assert len(frames) == 1, case["name"]
+        decoded = decode_control_message(frames[0], protocol)
+        assert isinstance(decoded, RequestOk), case["name"]
+        assert decoded.parameters.largest_object == largest_object, case["name"]
+        assert sorted(decoded.track_properties, key=lambda p: p.type) == properties, case["name"]

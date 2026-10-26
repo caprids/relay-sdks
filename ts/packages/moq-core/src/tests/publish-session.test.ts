@@ -12,6 +12,7 @@ import {
   encodeSubscribe,
   encodeSubscribeNamespace,
   encodeSubscribeOk,
+  encodeTrackStatus,
   MOQT_PROTOCOL_IDS,
   type MoqtProtocolId,
   PUBLISH_DONE_STATUS,
@@ -1933,4 +1934,284 @@ describe('createMoqtPublishSession', () => {
   // ---------------------------------------------------------------------------
   // The end-to-end proof: publish session ↔ existing subscribe driver.
   // ---------------------------------------------------------------------------
+});
+
+describe('TRACK_STATUS on the publish session', () => {
+  /** The relay's TRACK_STATUS for a track under the test namespace. */
+  function rawTrackStatus(
+    server: Parameters<typeof rawSubscribeTo>[0],
+    trackName: string,
+    requestId: number,
+    protocol?: MoqtProtocolId
+  ) {
+    return openRawRequest(server, encodeTrackStatus({ requestId, trackNamespace: NAMESPACE, trackName }, protocol));
+  }
+
+  const fullLimitProperties = () => [{ type: 1, value: new Uint8Array(MAX_TRACK_PROPERTIES_LENGTH - 4) }];
+
+  it.each(MOQT_PROTOCOL_IDS)(
+    'answers TRACK_STATUS for a track with no published object with its properties and no LARGEST_OBJECT on %s',
+    async (protocol) => {
+      const subscribes: IncomingSubscribe[] = [];
+      const bindings: unknown[] = [];
+      const ends: unknown[] = [];
+      const { pair, session, subscriber } = makePublishHarness(
+        {
+          onSubscribe: (subscribe) => subscribes.push(subscribe),
+          onTrackBinding: (binding) => bindings.push(binding),
+          onSubscribeEnd: (info) => ends.push(info),
+        },
+        { protocol }
+      );
+
+      await session.ready;
+      const trackProperties = [
+        { type: 1, value: new Uint8Array([7, 8, 9]) },
+        { type: 8, value: 1000 },
+      ];
+      session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video', trackProperties });
+
+      const status = await rawTrackStatus(pair.server, 'video', 51, protocol);
+
+      await vi.waitFor(() => {
+        expect(status.ended()).toBe(true);
+      });
+      expect(status.failure()).toBeUndefined();
+      expect(status.received).toHaveLength(1);
+      expect(status.received[0]).toMatchObject({ kind: 'request-ok', trackProperties });
+      expect(status.received[0]).toHaveProperty('parameters');
+      expect((status.received[0] as { parameters: object }).parameters).not.toHaveProperty('largestObject');
+      expect(subscribes).toEqual([]);
+      expect(bindings).toEqual([]);
+      expect(ends).toEqual([]);
+      // No subscription holds the request id as an alias.
+      await expect(session.openUniStream(51)).rejects.toThrow('no live subscription');
+      session.destroy();
+      subscriber.destroy();
+    }
+  );
+
+  it.each(MOQT_PROTOCOL_IDS)(
+    'reports the largest location objectPublished recorded as LARGEST_OBJECT on %s',
+    async (protocol) => {
+      const { pair, session, subscriber } = makePublishHarness({}, { protocol });
+
+      await session.ready;
+      const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+      const largestObject = async (requestId: number) => {
+        const status = await rawTrackStatus(pair.server, 'video', requestId, protocol);
+
+        await vi.waitFor(() => {
+          expect(status.ended()).toBe(true);
+        });
+        expect(status.failure()).toBeUndefined();
+        expect(status.received).toHaveLength(1);
+        expect(status.received[0]).toMatchObject({ kind: 'request-ok' });
+        return (status.received[0] as { parameters: { largestObject?: unknown } }).parameters.largestObject;
+      };
+
+      track.objectPublished({ group: 3, object: 1 });
+      // A smaller group, then a smaller object in the largest group, are ignored.
+      track.objectPublished({ group: 2, object: 9 });
+      track.objectPublished({ group: 3, object: 0 });
+      expect(await largestObject(61)).toEqual({ group: 3, object: 1 });
+
+      track.objectPublished({ group: 4, object: 0 });
+      expect(await largestObject(63)).toEqual({ group: 4, object: 0 });
+      session.destroy();
+      subscriber.destroy();
+    }
+  );
+
+  it.each(MOQT_PROTOCOL_IDS)(
+    'refuses TRACK_STATUS for an unknown track and for an ended track with DOES_NOT_EXIST on %s',
+    async (protocol) => {
+      const subscribes: IncomingSubscribe[] = [];
+      const { pair, session, subscriber } = makePublishHarness(
+        { onSubscribe: (subscribe) => subscribes.push(subscribe) },
+        { protocol }
+      );
+
+      await session.ready;
+      const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+      const expectRefused = async (request: RawRequest) => {
+        await vi.waitFor(() => {
+          expect(request.ended()).toBe(true);
+        });
+        expect(request.failure()).toBeUndefined();
+        expect(request.received).toHaveLength(1);
+        expect(request.received[0]).toMatchObject({
+          kind: 'request-error',
+          errorCode: REQUEST_ERROR_CODE.DOES_NOT_EXIST,
+          reason: 'unknown track',
+        });
+      };
+
+      await expectRefused(await rawTrackStatus(pair.server, 'nope', 71, protocol));
+
+      track.objectPublished({ group: 1, object: 1 });
+      track.end();
+      await expectRefused(await rawTrackStatus(pair.server, 'video', 73, protocol));
+      expect(subscribes).toEqual([]);
+      session.destroy();
+      subscriber.destroy();
+    }
+  );
+
+  it.each(MOQT_PROTOCOL_IDS)(
+    'refuses a TRACK_STATUS_OK that overflows its frame with INTERNAL_ERROR and keeps the session up on %s',
+    async (protocol) => {
+      const closes: unknown[] = [];
+      const { pair, session, subscriber } = makePublishHarness({ onClosed: (info) => closes.push(info) }, { protocol });
+
+      await session.ready;
+      const full = session.registerTrack({
+        trackNamespace: NAMESPACE,
+        trackName: 'full',
+        trackProperties: fullLimitProperties(),
+      });
+      session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'audio' });
+
+      // Without a LARGEST_OBJECT the properties fit: REQUEST_OK carries no alias.
+      const fits = await rawTrackStatus(pair.server, 'full', 81, protocol);
+
+      await vi.waitFor(() => {
+        expect(fits.ended()).toBe(true);
+      });
+      expect(fits.failure()).toBeUndefined();
+      expect(fits.received).toHaveLength(1);
+      expect(fits.received[0]).toMatchObject({ kind: 'request-ok', trackProperties: fullLimitProperties() });
+
+      // Two 8-byte varints for the location push the same message past the frame limit.
+      full.objectPublished({ group: Number.MAX_SAFE_INTEGER, object: Number.MAX_SAFE_INTEGER });
+      const overflow = await rawTrackStatus(pair.server, 'full', 83, protocol);
+
+      await vi.waitFor(() => {
+        expect(overflow.ended()).toBe(true);
+      });
+      expect(overflow.failure()).toBeUndefined();
+      expect(overflow.received).toHaveLength(1);
+      expect(overflow.received[0]).toMatchObject({
+        kind: 'request-error',
+        errorCode: REQUEST_ERROR_CODE.INTERNAL_ERROR,
+        reason: 'could not encode TRACK_STATUS_OK',
+      });
+
+      // The session stays up and keeps serving: another track still answers SUBSCRIBE_OK.
+      const audio = await rawSubscribe(pair.server, 'audio', 85, protocol);
+
+      await vi.waitFor(() => {
+        expect(audio.received).toHaveLength(1);
+      });
+      expect(audio.received[0]).toMatchObject({ kind: 'subscribe-ok', trackAlias: 85 });
+      expect(closes).toEqual([]);
+      session.destroy();
+      subscriber.destroy();
+    }
+  );
+
+  it.each(MOQT_PROTOCOL_IDS)('leaves a live subscription of the same track untouched on %s', async (protocol) => {
+    const bindings: { trackName: string; trackAlias: number | undefined }[] = [];
+    const ends: unknown[] = [];
+    const { pair, session, subscriber } = makePublishHarness(
+      {
+        onTrackBinding: (binding) => bindings.push(binding),
+        onSubscribeEnd: (info) => ends.push(info),
+      },
+      { protocol }
+    );
+
+    await session.ready;
+    const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+    const subscribe = await rawSubscribe(pair.server, 'video', 91, protocol);
+
+    await vi.waitFor(() => {
+      expect(subscribe.received).toHaveLength(1);
+    });
+    expect(bindings).toEqual([{ trackName: 'video', trackAlias: 91 }]);
+
+    track.objectPublished({ group: 5, object: 2 });
+    const status = await rawTrackStatus(pair.server, 'video', 93, protocol);
+
+    await vi.waitFor(() => {
+      expect(status.ended()).toBe(true);
+    });
+    expect(status.received).toHaveLength(1);
+    expect(status.received[0]).toMatchObject({
+      kind: 'request-ok',
+      parameters: { largestObject: { group: 5, object: 2 } },
+    });
+
+    expect(bindings).toEqual([{ trackName: 'video', trackAlias: 91 }]);
+    expect(ends).toEqual([]);
+    expect(subscribe.ended()).toBe(false);
+    await expect(session.openUniStream(91)).resolves.toBeDefined();
+    await expect(session.openUniStream(93)).rejects.toThrow('no live subscription');
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it.each(MOQT_PROTOCOL_IDS)('answers the subscribe driver’s trackStatus with the status on %s', async (protocol) => {
+    const { session, subscriber } = makePublishHarness({}, { protocol });
+
+    await session.ready;
+    const trackProperties = [{ type: 1, value: new Uint8Array([1, 2]) }];
+    const track = session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video', trackProperties });
+
+    track.objectPublished({ group: 7, object: 3 });
+
+    const oks: { parameters: unknown; trackProperties: unknown }[] = [];
+    const errors: unknown[] = [];
+
+    subscriber.trackStatus(
+      { trackNamespace: NAMESPACE, trackName: 'video' },
+      { onOk: (status) => oks.push(status), onError: (error) => errors.push(error) }
+    );
+    await vi.waitFor(() => {
+      expect(oks).toHaveLength(1);
+    });
+    expect(oks[0]).toMatchObject({ parameters: { largestObject: { group: 7, object: 3 } }, trackProperties });
+    expect(errors).toEqual([]);
+
+    const refusals: number[] = [];
+
+    subscriber.trackStatus(
+      { trackNamespace: NAMESPACE, trackName: 'nope' },
+      { onError: (error) => refusals.push(error.errorCode) }
+    );
+    await vi.waitFor(() => {
+      expect(refusals).toEqual([REQUEST_ERROR_CODE.DOES_NOT_EXIST]);
+    });
+    session.destroy();
+    subscriber.destroy();
+  });
+
+  it.each(MOQT_PROTOCOL_IDS)(
+    'closes the session when a SUBSCRIBE reuses a TRACK_STATUS request id on %s',
+    async (protocol) => {
+      const closes: unknown[] = [];
+      const { pair, session, subscriber } = makePublishHarness({ onClosed: (info) => closes.push(info) }, { protocol });
+
+      await session.ready;
+      session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video' });
+
+      const status = await rawTrackStatus(pair.server, 'video', 101, protocol);
+
+      await vi.waitFor(() => {
+        expect(status.received).toHaveLength(1);
+      });
+      expect(closes).toEqual([]);
+
+      // The TRACK_STATUS claimed the id, so a SUBSCRIBE cannot reuse it as an alias.
+      await rawSubscribe(pair.server, 'video', 101, protocol);
+      await vi.waitFor(() => {
+        expect(closes).toHaveLength(1);
+      });
+      await expect(pair.client.closed).resolves.toEqual({
+        closeCode: SESSION_ERROR.INVALID_REQUEST_ID,
+        reason: 'peer reused request id 101',
+      });
+      subscriber.destroy();
+    }
+  );
 });

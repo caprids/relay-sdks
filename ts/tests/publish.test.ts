@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { StreamReader } from '../packages/moq-core/src/protocol/bytes.js';
-import { decodeControlMessage, encodePublish } from '../packages/moq-core/src/protocol/control-messages.js';
+import {
+  decodeControlMessage,
+  encodePublish,
+  encodeTrackStatus,
+} from '../packages/moq-core/src/protocol/control-messages.js';
+import { openRawRequest } from '../packages/moq-core/src/tests/helpers/raw-peer.js';
 import { createTransportPair, withServerRequestIds } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
 import {
   connectRelayPublisher,
@@ -389,6 +394,56 @@ describe('connectRelayPublisher', () => {
     await vi.waitFor(() => expect(onRaw).toHaveBeenCalled());
     expect(onTimed).toHaveBeenCalledWith(expect.objectContaining({ trackProperties }));
     expect(onRaw).toHaveBeenCalledWith(expect.objectContaining({ trackProperties: [] }));
+  });
+
+  it('answers a relay TRACK_STATUS with the largest object its writers reported', async () => {
+    const pair = createTransportPair();
+    const [publisher, subscriber] = await Promise.all([
+      connectRelayPublisher({
+        url,
+        namespace,
+        createTransport: () => ({ transport: pair.client, ready: Promise.resolve() }),
+      }),
+      connectRelaySubscriber({
+        url,
+        createTransport: () => ({ transport: withServerRequestIds(pair.server), ready: Promise.resolve() }),
+      }),
+    ]);
+    cleanup.push(() => subscriber.close());
+    cleanup.push(() => publisher.close());
+    const track = publisher.registerTrack({ track: 'events' });
+    const status = async (requestId: number) => {
+      const request = await openRawRequest(
+        pair.server,
+        encodeTrackStatus({ requestId, trackNamespace: namespace, trackName: 'events' }),
+      );
+      await vi.waitFor(() => expect(request.ended()).toBe(true));
+      expect(request.failure()).toBeUndefined();
+      expect(request.received).toHaveLength(1);
+      return request.received[0];
+    };
+
+    // Nothing written yet: TRACK_STATUS_OK without LARGEST_OBJECT.
+    const before = await status(1001);
+    expect(before).toMatchObject({ kind: 'request-ok' });
+    expect((before as { parameters: object }).parameters).not.toHaveProperty('largestObject');
+
+    // Writes wait for demand, so a viewer subscribes first; group ids start at 0 per track.
+    const received = receive(subscriber, 'events');
+    await track.write(new Uint8Array([1]));
+    await track.write(new Uint8Array([2]));
+    const group = await track.openGroup();
+    expect(group.groupId).toBe(2);
+    await group.write(new Uint8Array([3]));
+    await group.write(new Uint8Array([4]));
+    await group.write(new Uint8Array([5]));
+    await group.close();
+    await vi.waitFor(() => expect(received.objects).toHaveLength(5));
+
+    expect(await status(1003)).toMatchObject({
+      kind: 'request-ok',
+      parameters: { largestObject: { group: 2, object: 2 } },
+    });
   });
 
   it('closes ahead of an SDK subscriber without waiting out the end-ack bound', async () => {
