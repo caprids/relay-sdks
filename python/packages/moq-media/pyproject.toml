@@ -1,13 +1,13 @@
 [project]
 name = "caprid-moq-media"
-version = "0.0.0"
+version = "0.1.0"
 description = "Transport-independent LOC and MSF media format helpers"
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 requires-python = ">=3.11"
 # Released in lockstep with caprid-moq-core, so the pin is exact; scripts/release_version.py moves it.
-dependencies = ["caprid-moq-core==0.0.0"]
+dependencies = ["caprid-moq-core==0.1.0"]
 
 [project.optional-dependencies]
 # moq_media.opus, the Opus encoder and decoder. Nothing else in the package imports PyAV.
