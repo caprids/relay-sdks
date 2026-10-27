@@ -44,12 +44,14 @@ export type MoqtProtocolId = (typeof MOQT_PROTOCOL_IDS)[number];
 export const MOQT_PROTOCOL_ID: MoqtProtocolId = 'moqt-22';
 
 /**
- * The codec for a transport's negotiated `protocol`. The connecting layer refuses any protocol outside
+ * The codec for a transport's negotiated `protocol`. The SDK's connecting layer refuses any protocol outside
  * `MOQT_PROTOCOL_IDS` before a session starts (spec/transport-adapter.md TA-8), so a value outside it here (a test
- * transport that names none) gets the default.
+ * transport, or an embedder's transport that cannot report one) gets the default, `moqt-22`.
  */
-export function resolveMoqtProtocol(protocol: string): MoqtProtocolId {
-  return (MOQT_PROTOCOL_IDS as readonly string[]).includes(protocol) ? (protocol as MoqtProtocolId) : MOQT_PROTOCOL_ID;
+export function resolveMoqtProtocol(protocol: string | undefined): MoqtProtocolId {
+  return protocol !== undefined && (MOQT_PROTOCOL_IDS as readonly string[]).includes(protocol)
+    ? (protocol as MoqtProtocolId)
+    : MOQT_PROTOCOL_ID;
 }
 
 /** Control/request message type codes (§9, Table 5). */
