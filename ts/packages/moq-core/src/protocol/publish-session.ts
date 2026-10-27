@@ -6,7 +6,8 @@
  * streams (§6.3), and the announce-and-serve ingest flow — answering the peer's SUBSCRIBE_NAMESPACE solicitation with
  * REQUEST_OK and a NAMESPACE entry for the announced namespace (§9.15, §9.16), then serving the per-track SUBSCRIBEs the
  * peer routes back (answered with SUBSCRIBE_OK carrying a publisher-assigned track alias, §9.7) for as long as each
- * subscription's request stream stays open.
+ * subscription's request stream stays open. A TRACK_STATUS for a registered track is answered as its SUBSCRIBE would
+ * be, with TRACK_STATUS_OK and no subscription (§9.13); every other request is refused.
  *
  * Flow choice: the publisher initiates no request streams at all. moq-relay 0.14.7 removed PUBLISH-based ingest
  * (upstream `de336492`: every PUBLISH is answered with a request error), and it solicits namespaces itself — one
@@ -37,6 +38,7 @@
 import { StreamReader, utf8Encode } from './bytes.js';
 import {
   type ControlMessage,
+  compareLocations,
   decodeControlMessage,
   encodeNamespace,
   encodeNamespaceDone,
@@ -174,9 +176,9 @@ export interface RegisteredTrack {
   /** The registered track name. */
   readonly trackName: string;
   /**
-   * End the track: refuse future SUBSCRIBEs with DOES_NOT_EXIST at once, and end every live subscription (its data
-   * streams closed, then PUBLISH_DONE `TRACK_ENDED` and a FIN on its request stream). Idempotent; only the first call's
-   * options apply.
+   * End the track: refuse future SUBSCRIBEs and TRACK_STATUS requests with DOES_NOT_EXIST at once, and end every live
+   * subscription (its data streams closed, then PUBLISH_DONE `TRACK_ENDED` and a FIN on its request stream).
+   * Idempotent; only the first call's options apply.
    *
    * With `options.after`, the subscriptions end once `after` settles (fulfilled or rejected) instead of now, so a last
    * group still being written, such as the MSF end-of-broadcast catalog, reaches them first. Until then they keep their
@@ -185,6 +187,14 @@ export interface RegisteredTrack {
    * its `CLOSE_FLUSH_TIMEOUT_MS` drain window and then ends the subscriptions anyway.
    */
   end(options?: { after?: PromiseLike<unknown> }): void;
+  /**
+   * Record that the object at `location` was handed to the transport. The session keeps the largest location recorded
+   * (group first, then object) and answers TRACK_STATUS with it as LARGEST_OBJECT (draft-22 §9.20.17) when the track
+   * has no {@link RegisterTrackOptions.getLargestObject}; before the first record that answer has none. The session
+   * does not see the data streams' contents, so whoever writes them reports here. Unlike `getLargestObject`, it changes
+   * neither SUBSCRIBE_OK, REQUEST_OK nor the fill ranges.
+   */
+  objectPublished(location: Location): void;
 }
 
 /** A publish-capable MOQT session over an established transport. Created by {@link createMoqtPublishSession}. */
@@ -335,6 +345,8 @@ function trackDataStream(stream: WritableStream<Uint8Array>, subscriber: Subscri
 interface TrackRecord {
   trackProperties: KeyValuePair[];
   getLargestObject: (() => Location | undefined) | undefined;
+  /** The largest object location `objectPublished` recorded: TRACK_STATUS_OK's LARGEST_OBJECT without `getLargestObject`. */
+  largestObject: Location | undefined;
   key: string;
   trackName: string;
   subscribers: SubscriberStream[];
@@ -753,12 +765,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     if (this.#destroyed || this.#closing) {
       // A closed session must not repopulate `#tracks` — hand back an
       // inert handle so late callers still get the RegisteredTrack shape.
-      return { trackName: options.trackName, end: () => {} };
+      return { trackName: options.trackName, end: () => {}, objectPublished: () => {} };
     }
 
     const track: TrackRecord = {
       trackProperties: options.trackProperties ?? [],
       getLargestObject: options.getLargestObject,
+      largestObject: undefined,
       key: trackKey(options.trackNamespace, options.trackName),
       trackName: options.trackName,
       subscribers: [],
@@ -779,6 +792,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     return {
       trackName: options.trackName,
       end: (options) => this.#endTrack(track, options?.after),
+      objectPublished: (location) => {
+        if (track.largestObject === undefined || compareLocations(location, track.largestObject) > 0) {
+          track.largestObject = { group: location.group, object: location.object };
+        }
+      },
     };
   }
 
@@ -1150,6 +1168,11 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       return;
     }
 
+    if (message.kind === 'track-status') {
+      await this.#handleTrackStatus(stream, reader, message);
+      return;
+    }
+
     // Everything else: this endpoint only serves its own published tracks.
     const respond = async (bytes: Uint8Array) => {
       const writer = stream.writable.getWriter();
@@ -1307,6 +1330,61 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     void writer.close().catch(() => {});
 
     if (record.announced.length > 0) await this.#reportAnnounceLoss(cause);
+  }
+
+  /**
+   * TRACK_STATUS (draft-22 §9.13, the same on draft-20): answered as the SUBSCRIBE for the same track would be, without
+   * creating subscription state or sending objects. A registered, live track gets TRACK_STATUS_OK (a REQUEST_OK) with
+   * the track properties SUBSCRIBE_OK carries and LARGEST_OBJECT: the one SUBSCRIBE_OK carries when the track has a
+   * `getLargestObject`, otherwise the largest `objectPublished` recorded, once there is one; any other track
+   * gets the REQUEST_ERROR a SUBSCRIBE would. Either way the response direction FINs and nothing more is read: the
+   * request takes no REQUEST_UPDATE and gets no PUBLISH_DONE. No callback fires and the binding is untouched.
+   *
+   * moq-relay from moq-dev #5991 asks a publisher for a track's status before subscribing on behalf of a relay that
+   * has no subscription, and fails the downstream request on a refusal, so answering it is what lets a track cross two
+   * relays there.
+   */
+  async #handleTrackStatus(
+    stream: BidirectionalStreamLike,
+    reader: StreamReader,
+    request: Extract<ControlMessage, { kind: 'track-status' }>
+  ): Promise<void> {
+    const track = this.#tracks.get(trackKey(request.trackNamespace, request.trackName));
+    const writer = stream.writable.getWriter();
+
+    if (!track || track.done) {
+      await refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, 'unknown track');
+      return;
+    }
+
+    let trackStatusOk: Uint8Array;
+    try {
+      // The Largest Object SUBSCRIBE_OK would carry when the track owner reports one; otherwise what was published.
+      const largestObject = track.getLargestObject ? readLargestObject(track) : track.largestObject;
+      trackStatusOk = encodeRequestOk(
+        largestObject === undefined ? {} : { largestObject },
+        this.#protocol,
+        track.trackProperties
+      );
+    } catch {
+      // The owner's getLargestObject threw, or the answer overflows its frame (properties at the limit and a long
+      // LARGEST_OBJECT); the peer did nothing wrong.
+      await refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, 'could not encode TRACK_STATUS_OK');
+      return;
+    }
+
+    try {
+      await writer.write(trackStatusOk);
+      await writer.close();
+    } catch {
+      // Peer cancelled; nothing to clean up.
+    }
+
+    try {
+      await reader.cancel();
+    } catch {
+      // The stream already errored (the peer reset it first).
+    }
   }
 
   async #handleIncomingSubscribe(

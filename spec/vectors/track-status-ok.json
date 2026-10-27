@@ -1,0 +1,35 @@
+{
+  "description": "TRACK_STATUS_OK as a publisher sends it in answer to TRACK_STATUS (draft-ietf-moq-transport-22 §9.13): a REQUEST_OK (§9.3), whose Type is the varint 0x07, then a 16-bit Length, then the body. The body is Number of Parameters, LARGEST_OBJECT (type 0x09, §9.20.17, a Location: Group then Object, two varints) when the publisher has published an object, then the Track Properties (§8.4: delta-encoded types in ascending order, an even type carrying a varint and an odd one a length-prefixed byte value), which run to the end of the message and add no bytes when empty. The bytes are the same on moqt-22 and moqt-20: the drafts differ only in LOCATION_FILTER, which this message does not carry.",
+  "sources": [
+    "derived from the encoding rules of draft-ietf-moq-transport-22 §9.3, §9.20.17, §8.4 and the §8.1 varint, by hand; the draft text has no TRACK_STATUS_OK example",
+    "the two-byte group 200 (80c8) and the three-byte timescale 1000000 (cf4240) exercise multi-byte varints in the parameter and in a property"
+  ],
+  "protocols": ["moqt-22", "moqt-20"],
+  "cases": [
+    {
+      "name": "no object published, no track properties",
+      "trackProperties": [],
+      "bytes": "07000100"
+    },
+    {
+      "name": "largest object {3, 1}, no track properties",
+      "largestObject": { "group": "3", "object": "1" },
+      "trackProperties": [],
+      "bytes": "07000401090301"
+    },
+    {
+      "name": "largest object {200, 0}, an odd and an even track property (given out of order)",
+      "largestObject": { "group": "200", "object": "0" },
+      "trackProperties": [
+        { "type": 14, "value": "16" },
+        { "type": 13, "bytes": "0102" }
+      ],
+      "bytes": "07000b010980c8000d0201020110"
+    },
+    {
+      "name": "no object published, a timescale track property",
+      "trackProperties": [{ "type": 8, "value": "1000000" }],
+      "bytes": "0700050008cf4240"
+    }
+  ]
+}

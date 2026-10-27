@@ -7,7 +7,8 @@ unidirectional control streams (§6.3), and the announce-and-serve ingest flow. 
 SUBSCRIBE_NAMESPACE solicitation is answered with REQUEST_OK and a NAMESPACE entry for the announced
 namespace (§9.15, §9.16), then the per-track SUBSCRIBEs the peer routes back are served (answered with
 SUBSCRIBE_OK carrying a publisher-assigned track alias, §9.7) for as long as each subscription's
-request stream stays open.
+request stream stays open. A TRACK_STATUS for a registered track is answered as its SUBSCRIBE would
+be, with TRACK_STATUS_OK and no subscription (§9.13); every other request is refused.
 
 Flow choice: the publisher initiates no request streams at all. moq-relay 0.14.7 removed
 PUBLISH-based ingest (every PUBLISH is answered with a request error), and it solicits namespaces
@@ -53,6 +54,7 @@ from .control_messages import (
     Fetch,
     Goaway,
     KeyValuePair,
+    Location,
     MessageParameters,
     MoqtProtocolId,
     Publish,
@@ -63,6 +65,7 @@ from .control_messages import (
     SubscribeNamespace,
     TrackNamespace,
     TrackStatus,
+    compare_locations,
     decode_control_message,
     encode_namespace,
     encode_namespace_done,
@@ -239,19 +242,36 @@ class RegisteredTrack:
     """One servable track.
 
     ``end()`` ends every live subscription (its data streams closed, then PUBLISH_DONE
-    ``TRACK_ENDED`` and a FIN on its request stream) and refuses future SUBSCRIBEs with
-    DOES_NOT_EXIST. Idempotent.
+    ``TRACK_ENDED`` and a FIN on its request stream) and refuses future SUBSCRIBEs and TRACK_STATUS
+    requests with DOES_NOT_EXIST. Idempotent.
     """
 
-    __slots__ = ("_end", "track_name")
+    __slots__ = ("_end", "_object_published", "track_name")
 
-    def __init__(self, track_name: str, end: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        track_name: str,
+        end: Callable[[], None],
+        object_published: Callable[[Location], None] | None = None,
+    ) -> None:
         self.track_name = track_name
         self._end = end
+        self._object_published = object_published
 
     def end(self) -> None:
         """End every live subscription on the track and refuse later SUBSCRIBEs. Idempotent."""
         self._end()
+
+    def object_published(self, location: Location) -> None:
+        """Record that the object at ``location`` was handed to the transport.
+
+        The session keeps the largest location recorded (group first, then object) and answers
+        TRACK_STATUS with it as LARGEST_OBJECT (draft-22 §9.20.17); before the first record the
+        answer has none. The session does not see the data streams' contents, so whoever writes them
+        reports here. SUBSCRIBE_OK does not carry it.
+        """
+        if self._object_published is not None:
+            self._object_published(location)
 
 
 # =============================================================================
@@ -372,6 +392,8 @@ class _TrackRecord:
     """
     done_flushed: asyncio.Task[None] | None = None
     """Settles when the ends queued by ``end()`` land."""
+    largest_object: Location | None = None
+    """The largest object location ``object_published`` recorded: TRACK_STATUS_OK's LARGEST_OBJECT."""
 
 
 @dataclass(slots=True, kw_only=True)
@@ -746,7 +768,11 @@ class MoqtPublishSession:
             for stream in list(self._namespace_streams):
                 self._reconcile_announce(stream)
 
-        return RegisteredTrack(options.track_name, lambda: self._end_track(track))
+        def object_published(location: Location) -> None:
+            if track.largest_object is None or compare_locations(location, track.largest_object) > 0:
+                track.largest_object = Location(group=location.group, object=location.object)
+
+        return RegisteredTrack(options.track_name, lambda: self._end_track(track), object_published)
 
     def _end_track(self, track: _TrackRecord) -> None:
         """End every live subscription with PUBLISH_DONE ``TRACK_ENDED`` and refuse future SUBSCRIBEs.
@@ -986,6 +1012,10 @@ class MoqtPublishSession:
             await self._handle_subscribe_namespace(stream, reader, message)
             return
 
+        if isinstance(message, TrackStatus):
+            await self._handle_track_status(stream, reader, message)
+            return
+
         # Everything else: this endpoint only serves its own published tracks.
         if isinstance(message, Publish):
             error_code: int = REQUEST_ERROR_CODE.UNINTERESTED
@@ -1132,6 +1162,46 @@ class MoqtPublishSession:
 
         if len(record.announced) > 0:
             self._report_announce_loss(cause)
+
+    async def _handle_track_status(
+        self, stream: BidirectionalStream, reader: StreamReader, request: TrackStatus
+    ) -> None:
+        """TRACK_STATUS (draft-22 §9.13, the same on draft-20): answered as the SUBSCRIBE for the track would be.
+
+        No subscription state is created and no objects are sent. A registered, live track gets
+        TRACK_STATUS_OK (a REQUEST_OK) with LARGEST_OBJECT once an object has been published and the
+        track properties SUBSCRIBE_OK carries; any other track gets the REQUEST_ERROR a SUBSCRIBE would.
+        Either way the response direction FINs and nothing more is read: the request takes no
+        REQUEST_UPDATE and gets no PUBLISH_DONE. No callback fires and the binding is untouched.
+
+        moq-relay from moq-dev #5991 asks a publisher for a track's status before subscribing on
+        behalf of a relay that has no subscription, and fails the downstream request on a refusal, so
+        answering it is what lets a track cross two relays there.
+        """
+        track = self._tracks.get(_track_key(request.track_namespace, request.track_name))
+        writer = stream.writable
+
+        if track is None or track.done:
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.DOES_NOT_EXIST, "unknown track")
+            return
+
+        try:
+            track_status_ok = encode_request_ok(
+                MessageParameters(largest_object=track.largest_object),
+                self._protocol,
+                track_properties=track.track_properties,
+            )
+        except Exception:  # the answer overflows its frame; the peer did nothing wrong
+            await _refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, "could not encode TRACK_STATUS_OK")
+            return
+
+        try:
+            await writer.write(track_status_ok)
+            await writer.close()
+        except Exception:  # peer cancelled; nothing to clean up
+            pass
+
+        reader.cancel()
 
     async def _handle_incoming_subscribe(
         self, stream: BidirectionalStream, reader: StreamReader, subscribe: Subscribe

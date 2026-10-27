@@ -7,6 +7,14 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## 0.1.1
 
+- `@caprid/relay`, `@caprid/moq-core`: a publisher connection answers the relay's TRACK_STATUS (draft-22 §9.13) for its
+  tracks instead of refusing it with `NOT_SUPPORTED`: TRACK_STATUS_OK with the track's properties and, once the track
+  has written an object, LARGEST_OBJECT; an unknown or closed track gets `DOES_NOT_EXIST`, as a SUBSCRIBE does.
+  moq-relay `main` asks a publisher for a track's status before it subscribes on behalf of another relay, and a track
+  whose publisher refuses does not cross two relays there. Nothing changes for an application. In `@caprid/moq-core`,
+  `RegisteredTrack.objectPublished(location)` records what a TRACK_STATUS_OK reports as LARGEST_OBJECT (a track with
+  `getLargestObject` reports that instead, as its SUBSCRIBE_OK does), and `encodeRequestOk` takes the Track Properties
+  as a third argument.
 - `@caprid/moq-media`: lost Opus frames are filled rather than played as silence. Opus inputs decode with libopus
   compiled to WebAssembly (116 KB, embedded), which conceals a missing frame (packet-loss concealment, up to 120 ms a
   gap) and rebuilds it from the next frame's in-band FEC when the publisher's encoder sent one. Stats `synthesizedUs`

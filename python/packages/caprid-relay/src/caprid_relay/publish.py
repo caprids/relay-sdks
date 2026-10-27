@@ -22,10 +22,13 @@ from typing import Self
 from moq_core import (
     Closed,
     KeyValuePair,
+    Location,
     MoqtPublishSession,
     MoqtPublishSessionCallbacks,
     MoqtPublishSessionConfig,
     MoqtTransport,
+    ObjectStatus,
+    RegisteredTrack,
     RegisterTrackOptions,
     SubgroupWriter,
     TrackBinding,
@@ -187,7 +190,7 @@ class RelayPublisher:
         No capture starts and no media catalog is published. Track names are unique per publisher
         connection, including after their writer closes.
         ``track_properties`` is encoded as supplied; the SDK adds no default timescale. It rides in
-        every SUBSCRIBE_OK, so it must encode to at most 65525 bytes, hold at most 64 pairs (the
+        every SUBSCRIBE_OK (and TRACK_STATUS_OK), so it must encode to at most 65525 bytes, hold at most 64 pairs (the
         relay's limit) and keep 0x0E at most 255 and 0x22 at 1 or 2 (draft-22); otherwise the relay
         would refuse every subscriber, so ``register_track`` raises ``ValueError`` instead.
         The relay may add, drop, or rewrite properties before delivery to subscribers; see README.
@@ -215,9 +218,10 @@ class RelayPublisher:
             RegisterTrackOptions(track_namespace=self._namespace, track_name=name, track_properties=properties)
         )
 
-        async def open_subgroup(track_alias: int, group_id: int) -> SubgroupWriter:
+        async def open_subgroup(track_alias: int, group_id: int) -> _ReportingObjects:
             stream = await session.open_uni_stream(track_alias)
-            return create_subgroup_writer(stream, track_alias=track_alias, group_id=group_id, has_properties=True)
+            subgroup = create_subgroup_writer(stream, track_alias=track_alias, group_id=group_id, has_properties=True)
+            return _ReportingObjects(subgroup, registered)
 
         writer = RelayTrackWriter(
             name,
@@ -271,6 +275,40 @@ class RelayPublisher:
         self, exc_type: type[BaseException] | None, exc: BaseException | None, tb: TracebackType | None
     ) -> None:
         await self.close()
+
+
+class _ReportingObjects:
+    """A subgroup writer that tells the core of every object the transport took.
+
+    The core answers the relay's TRACK_STATUS with the track's largest object (draft-22 §9.20.17).
+    """
+
+    __slots__ = ("_subgroup", "_track", "group_id")
+
+    def __init__(self, subgroup: SubgroupWriter, track: RegisteredTrack) -> None:
+        self._subgroup = subgroup
+        self._track = track
+        self.group_id = subgroup.group_id
+
+    async def write_object(
+        self,
+        *,
+        object_id: int,
+        payload: bytes,
+        properties: Sequence[KeyValuePair] | None = None,
+        status: ObjectStatus = "normal",
+    ) -> None:
+        await self._subgroup.write_object(object_id=object_id, payload=payload, properties=properties, status=status)
+        self._track.object_published(Location(group=self.group_id, object=object_id))
+
+    async def fin(self) -> None:
+        await self._subgroup.fin()
+
+    async def wait_acknowledged(self) -> None:
+        await self._subgroup.wait_acknowledged()
+
+    def abort(self, reason: object = None) -> None:
+        self._subgroup.abort(reason)
 
 
 def _namespace_ended(cause: BaseException | None) -> RelayError:

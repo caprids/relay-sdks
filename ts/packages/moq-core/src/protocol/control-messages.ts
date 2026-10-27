@@ -1236,16 +1236,19 @@ export function encodeGoaway(timeout = 0): Uint8Array {
  * REQUEST_OK (§9.3). The subscriber sends this to accept an incoming PUBLISH (PUBLISH_OK). Track Properties are always
  * empty in that role, and since draft-20 so are the parameters — a subscriber changes subscription parameters with
  * REQUEST_UPDATE, not in PUBLISH_OK (§9.8); the session driver's `accept()` therefore takes none. The parameter slot
- * stays for the publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK), which the fake peer in tests
- * exercises.
+ * stays for the publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK). Track Properties are
+ * populated only in TRACK_STATUS_OK, which the publish session sends; they are the rest of the message, so an empty
+ * list adds no bytes.
  */
 export function encodeRequestOk(
   parameters: MessageParameters = {},
-  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+  protocol: MoqtProtocolId = MOQT_PROTOCOL_ID,
+  trackProperties: readonly KeyValuePair[] = []
 ): Uint8Array {
   const body = new ByteWriter();
 
   encodeMessageParameters(body, parameters, protocol);
+  encodeKeyValuePairs(body, trackProperties);
   return frameMessage(MESSAGE_TYPE.REQUEST_OK, body);
 }
 

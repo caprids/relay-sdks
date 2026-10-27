@@ -25,6 +25,7 @@ from moq_core.control_messages import (
     REQUEST_ERROR_CODE,
     ControlMessage,
     ControlMessageDeframer,
+    Location,
     MessageParameters,
     MoqtProtocolId,
     Namespace,
@@ -33,9 +34,11 @@ from moq_core.control_messages import (
     PublishDone,
     RelativeGroupFilter,
     RequestError,
+    RequestOk,
     Subscribe,
     SubscribeNamespace,
     SubscribeOk,
+    TrackStatus,
     decode_control_message,
     encode_goaway,
     encode_publish,
@@ -45,6 +48,7 @@ from moq_core.control_messages import (
     encode_subscribe,
     encode_subscribe_namespace,
     encode_subscribe_ok,
+    encode_track_status,
 )
 from moq_core.errors import SESSION_ERROR, MoqtProtocolError
 from moq_core.object_stream import MoqtObject
@@ -64,8 +68,11 @@ from moq_core.session import (
     MoqtSubscribeOptions,
     Subscription,
     SubscriptionHandlers,
+    TrackStatusHandlers,
+    TrackStatusOk,
     create_moqt_session,
 )
+from moq_core.varint import MAX_VARINT_VALUE
 
 NAMESPACE = ["live", "abc123"]
 
@@ -75,6 +82,20 @@ def raw_subscribe(
 ) -> asyncio.Future[RawRequest]:
     """The relay's per-track pull under the test namespace."""
     return raw_subscribe_to(server, NAMESPACE, track_name, request_id, protocol)
+
+
+def raw_track_status(
+    server: PairTransport, track_name: str, request_id: int, protocol: MoqtProtocolId = MOQT_PROTOCOL_ID
+) -> asyncio.Future[RawRequest]:
+    """The relay's TRACK_STATUS for a track under the test namespace."""
+    return asyncio.ensure_future(
+        open_raw_request(
+            server,
+            encode_track_status(
+                TrackStatus(request_id=request_id, track_namespace=NAMESPACE, track_name=track_name), protocol
+            ),
+        )
+    )
 
 
 def register(session: MoqtPublishSession, track_name: str) -> Any:
@@ -1648,4 +1669,222 @@ class TestCreateMoqtPublishSession:
         else:
             raise AssertionError("open_uni_stream should refuse once the session is closing")
 
+        harness.subscriber.destroy()
+
+
+class TestTrackStatus:
+    """TRACK_STATUS (draft-22 §9.13) is answered from the registered track, with no subscription state."""
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_answers_a_registered_track_with_its_properties_and_no_largest_object_before_any_publish(
+        self, protocol: MoqtProtocolId
+    ) -> None:
+        subscribes: list[Subscribe] = []
+        bindings: list[TrackBinding] = []
+        harness = Harness(
+            MoqtPublishSessionCallbacks(on_subscribe=subscribes.append, on_track_binding=bindings.append), protocol
+        )
+
+        await harness.session.ready
+        properties = [KeyValuePair(8, 90_000), KeyValuePair(13, b"\x01\x02")]
+        harness.session.register_track(
+            RegisterTrackOptions(track_namespace=NAMESPACE, track_name="video", track_properties=properties)
+        )
+
+        status = await raw_track_status(harness.pair.server, "video", 51, protocol)
+
+        await wait_for(lambda: status.ended())
+        assert status.failure() is None
+        assert len(status.received) == 1
+        answer = status.received[0]
+        assert isinstance(answer, RequestOk)
+        assert answer.parameters.largest_object is None
+        assert answer.track_properties == properties
+        assert subscribes == []
+        assert bindings == []
+        # No subscription holds the request id as an alias, so no data stream can open on it.
+        with pytest.raises(RuntimeError, match="no live subscription for track alias 51"):
+            await harness.session.open_uni_stream(51)
+        harness.destroy()
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_reports_the_largest_object_published_so_far(self, protocol: MoqtProtocolId) -> None:
+        harness = Harness(protocol_id=protocol)
+
+        await harness.session.ready
+        track = register(harness.session, "video")
+
+        # Group first, then object; a smaller location, even a later call, never lowers it.
+        track.object_published(Location(group=3, object=1))
+        track.object_published(Location(group=2, object=9))
+        track.object_published(Location(group=3, object=0))
+        first = await raw_track_status(harness.pair.server, "video", 51, protocol)
+
+        await wait_for(lambda: first.ended())
+        assert first.received == [RequestOk(parameters=MessageParameters(largest_object=Location(group=3, object=1)))]
+
+        track.object_published(Location(group=4, object=0))
+        second = await raw_track_status(harness.pair.server, "video", 53, protocol)
+
+        await wait_for(lambda: second.ended())
+        assert second.received == [RequestOk(parameters=MessageParameters(largest_object=Location(group=4, object=0)))]
+        harness.destroy()
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_refuses_an_unknown_track_with_does_not_exist(self, protocol: MoqtProtocolId) -> None:
+        harness = Harness(protocol_id=protocol)
+
+        await harness.session.ready
+        register(harness.session, "video")
+
+        status = await raw_track_status(harness.pair.server, "nope", 51, protocol)
+
+        await wait_for(lambda: status.ended())
+        assert status.failure() is None
+        assert status.received == [RequestError(error_code=REQUEST_ERROR_CODE.DOES_NOT_EXIST, reason="unknown track")]
+        harness.destroy()
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_refuses_a_track_that_has_ended_with_does_not_exist(self, protocol: MoqtProtocolId) -> None:
+        harness = Harness(protocol_id=protocol)
+
+        await harness.session.ready
+        track = register(harness.session, "video")
+        track.object_published(Location(group=1, object=1))
+        track.end()
+
+        status = await raw_track_status(harness.pair.server, "video", 51, protocol)
+
+        await wait_for(lambda: status.ended())
+        assert status.failure() is None
+        assert status.received == [RequestError(error_code=REQUEST_ERROR_CODE.DOES_NOT_EXIST, reason="unknown track")]
+        harness.destroy()
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_answers_a_track_whose_properties_fill_the_limit_until_a_largest_object_overflows_the_answer(
+        self, protocol: MoqtProtocolId
+    ) -> None:
+        subscribes: list[Subscribe] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_subscribe=subscribes.append), protocol)
+
+        await harness.session.ready
+        properties = [KeyValuePair(1, bytes(MAX_TRACK_PROPERTIES_LENGTH - 4))]
+        full = harness.session.register_track(
+            RegisterTrackOptions(track_namespace=NAMESPACE, track_name="video", track_properties=properties)
+        )
+        register(harness.session, "audio")
+
+        # Without a LARGEST_OBJECT the answer fits its 16-bit length.
+        fits = await raw_track_status(harness.pair.server, "video", 51, protocol)
+
+        await wait_for(lambda: fits.ended())
+        assert fits.received == [RequestOk(track_properties=properties)]
+
+        # The widest Location adds 18 bytes the registration limit does not leave room for.
+        full.object_published(Location(group=MAX_VARINT_VALUE, object=MAX_VARINT_VALUE))
+        overflows = await raw_track_status(harness.pair.server, "video", 53, protocol)
+
+        # A local failure is not the peer's doing: a prompt REQUEST_ERROR, then the FIN.
+        await wait_for(lambda: overflows.ended())
+        assert overflows.failure() is None
+        assert overflows.received == [
+            RequestError(error_code=REQUEST_ERROR_CODE.INTERNAL_ERROR, reason="could not encode TRACK_STATUS_OK")
+        ]
+
+        # The session stays up and keeps serving.
+        audio = await raw_subscribe(harness.pair.server, "audio", 55, protocol)
+
+        await wait_for(lambda: len(audio.received) == 1)
+        assert audio.received[0] == SubscribeOk(track_alias=55, track_properties=[])
+        assert [subscribe.track_name for subscribe in subscribes] == ["audio"]
+        harness.destroy()
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_leaves_a_live_subscription_on_the_track_undisturbed(self, protocol: MoqtProtocolId) -> None:
+        subscribes: list[Subscribe] = []
+        ended_requests: list[int] = []
+        bindings: list[int | None] = []
+        harness = Harness(
+            MoqtPublishSessionCallbacks(
+                on_subscribe=subscribes.append,
+                on_subscribe_end=ended_requests.append,
+                on_track_binding=lambda binding: bindings.append(binding.track_alias),
+            ),
+            protocol,
+        )
+
+        await harness.session.ready
+        track = register(harness.session, "video")
+        subscription = await raw_subscribe(harness.pair.server, "video", 61, protocol)
+
+        await wait_for(lambda: bindings == [61])
+        track.object_published(Location(group=0, object=4))
+        status = await raw_track_status(harness.pair.server, "video", 63, protocol)
+
+        await wait_for(lambda: status.ended())
+        assert status.received == [RequestOk(parameters=MessageParameters(largest_object=Location(0, 4)))]
+        await settle()
+        assert bindings == [61]
+        assert [subscribe.request_id for subscribe in subscribes] == [61]
+        assert ended_requests == []
+        assert not subscription.ended()
+        assert subscription.kinds() == ["subscribe-ok"]
+        data = await harness.session.open_uni_stream(61)
+        assert data is not None
+        harness.destroy()
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_answers_the_subscribe_driver_with_the_largest_object_and_properties(
+        self, protocol: MoqtProtocolId
+    ) -> None:
+        harness = Harness(protocol_id=protocol)
+
+        await harness.session.ready
+        properties = [KeyValuePair(8, 90_000)]
+        track = harness.session.register_track(
+            RegisterTrackOptions(track_namespace=NAMESPACE, track_name="video", track_properties=properties)
+        )
+        track.object_published(Location(group=7, object=2))
+
+        answers: list[TrackStatusOk] = []
+        errors: list[RequestError] = []
+        harness.subscriber.track_status(
+            MoqtSubscribeOptions(track_namespace=NAMESPACE, track_name="video"),
+            TrackStatusHandlers(on_ok=answers.append, on_error=errors.append),
+        )
+        await wait_for(lambda: len(answers) == 1)
+        assert answers[0].parameters.largest_object == Location(group=7, object=2)
+        assert answers[0].track_properties == properties
+        assert errors == []
+
+        harness.subscriber.track_status(
+            MoqtSubscribeOptions(track_namespace=NAMESPACE, track_name="nope"),
+            TrackStatusHandlers(on_ok=answers.append, on_error=errors.append),
+        )
+        await wait_for(lambda: len(errors) == 1)
+        assert errors[0].error_code == REQUEST_ERROR_CODE.DOES_NOT_EXIST
+        assert len(answers) == 1
+        harness.destroy()
+
+    @pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+    async def test_closes_the_session_when_a_subscribe_reuses_a_track_status_request_id(
+        self, protocol: MoqtProtocolId
+    ) -> None:
+        closes: list[Any] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_closed=closes.append), protocol)
+
+        await harness.session.ready
+        register(harness.session, "video")
+
+        status = await raw_track_status(harness.pair.server, "video", 71, protocol)
+
+        await wait_for(lambda: status.kinds() == ["request-ok"])
+        assert closes == []
+
+        # The request id is claimed even though no subscription holds it: reusing it as an alias is fatal.
+        await raw_subscribe(harness.pair.server, "video", 71, protocol)
+        await wait_for(lambda: len(closes) == 1)
+        assert harness.pair.client._shared.close_info == CloseInfo(
+            SESSION_ERROR.INVALID_REQUEST_ID, "peer reused request id 71"
+        )
         harness.subscriber.destroy()

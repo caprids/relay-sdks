@@ -5,6 +5,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from typing import Any
 
 import pytest
+from core_helpers.raw_peer import open_raw_request
 from core_helpers.transport_pair import create_transport_pair, with_server_request_ids
 from core_helpers.waiting import wait_for
 from relay_helpers.relay_hub import (
@@ -32,7 +33,18 @@ from caprid_relay import (
 from caprid_relay._validation import MAX_RELAY_OBJECT_PROPERTIES_LENGTH
 from moq_core import KeyValuePair, MoqtObject
 from moq_core.bytes import StreamReader
-from moq_core.control_messages import Publish, RequestError, encode_publish
+from moq_core.control_messages import (
+    MOQT_PROTOCOL_IDS,
+    Location,
+    MessageParameters,
+    MoqtProtocolId,
+    Publish,
+    RequestError,
+    RequestOk,
+    TrackStatus,
+    encode_publish,
+    encode_track_status,
+)
 
 NAMESPACE = ["testing", "data"]
 URL = "https://relay.example.com/moq"
@@ -630,3 +642,49 @@ async def test_the_hub_declines_a_proactive_publish_with_not_supported_like_moq_
     message = await read_control_frame(reader, await reader.read_varint())
 
     assert message == RequestError(error_code=0x3, reason="PUBLISH is not supported")
+
+
+@pytest.mark.parametrize("protocol", MOQT_PROTOCOL_IDS)
+async def test_answers_the_relays_track_status_with_the_largest_object_written(
+    cleanup: Cleanup, protocol: MoqtProtocolId
+) -> None:
+    # The hub stands in for the relay but never sends TRACK_STATUS, so the test serves the hub from its
+    # own transport pair and speaks for the relay on the pair's server side.
+    hub = create_relay_hub()
+    cleanup.append(hub.destroy)
+    pair = create_transport_pair(protocol)
+    hub.serve_publisher(pair.server)
+    publisher = await connect_relay_publisher(
+        URL,
+        namespace=NAMESPACE,
+        create_transport=lambda url, protocols: ConnectingTransport(transport=pair.client, ready=completed()),
+    )
+    cleanup.append(publisher.close)
+    events = publisher.register_track("events")
+    hub.subscribe_upstream("events")
+
+    async def track_status(request_id: int) -> Any:
+        status = await open_raw_request(
+            pair.server,
+            encode_track_status(
+                TrackStatus(request_id=request_id, track_namespace=NAMESPACE, track_name="events"), protocol
+            ),
+        )
+        await wait_for(lambda: status.ended())
+        assert status.failure() is None
+        return status.received
+
+    # Nothing written yet: no LARGEST_OBJECT.
+    assert await track_status(101) == [RequestOk()]
+
+    # Two single writes (groups 0 and 1), then a group of three objects (group 2), then its FIN.
+    await events.write(b"one")
+    await events.write(b"two")
+    group = await events.open_group()
+    assert group.group_id == 2
+    await group.write(b"a")
+    await group.write(b"b")
+    await group.write(b"c")
+    await group.close()
+
+    assert await track_status(103) == [RequestOk(parameters=MessageParameters(largest_object=Location(2, 2)))]
