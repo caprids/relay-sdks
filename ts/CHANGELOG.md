@@ -5,6 +5,14 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/moq-media`: lost Opus frames are filled rather than played as silence. Opus inputs decode with libopus
+  compiled to WebAssembly (116 KB, embedded), which conceals a missing frame (packet-loss concealment, up to 120 ms a
+  gap) and rebuilds it from the next frame's in-band FEC when the publisher's encoder sent one. Stats `synthesizedUs`
+  and `recoveredUs` count them. `createAudioPlayer({ context, lossConcealment: false })` decodes with WebCodecs as
+  before, as does any input where WebAssembly is unavailable or the codec is not Opus.
+
 ## 0.1.0
 
 - `@caprid/relay`: `connectRelayPublisher` and `connectRelaySubscriber` for browsers over WebTransport (Chromium, and
