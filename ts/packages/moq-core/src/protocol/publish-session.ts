@@ -15,6 +15,11 @@
  * NAMESPACE entries (suffix-relative, parameterless — the relay treats even an empty parameter count as malformed);
  * data flows only on aliases bound by our own SUBSCRIBE_OKs, per subscription.
  *
+ * The session retains no objects, so it serves no fills (§3.4): a nonempty fill range gets a fill fetch stream that is
+ * reset right after its FETCH_HEADER, the failure signal §3.4.1 requires. The range is nonempty only for a track whose
+ * owner reports a Largest Object (`RegisterTrackOptions.getLargestObject`); without one every fill range is empty and
+ * no stream opens.
+ *
  * Teardown follows draft-22: every end of an Established subscription the publisher chooses resets the subscription's
  * still-open data streams, then writes PUBLISH_DONE (status, the number of data streams opened for it, reason) and FINs
  * the request stream (§6.4.2.2, §9.9). moq-relay 0.15.4 and later require that PUBLISH_DONE, and treat a bare FIN as a
@@ -42,6 +47,8 @@ import {
   encodeRequestOk,
   encodeSetup,
   encodeSubscribeOk,
+  type FillParameters,
+  isEmptyFetchRange,
   type KeyValuePair,
   type Location,
   MAX_CONTROL_MESSAGE_LENGTH,
@@ -56,7 +63,7 @@ import {
   type TrackNamespace,
 } from './control-messages.js';
 import { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './errors.js';
-import { isSubgroupHeaderType, STREAM_TYPE } from './object-stream.js';
+import { encodeFetchHeader, isSubgroupHeaderType, STREAM_TYPE } from './object-stream.js';
 import type { BidirectionalStreamLike } from './request-stream.js';
 import type { Goaway, MoqtSendStreamOptions, MoqtTransport } from './session.js';
 import { streamResetReason } from './stream-reset.js';
@@ -117,7 +124,8 @@ export interface MoqtPublishSessionCallbacks {
    * REQUEST_UPDATE on an inbound request stream. `requestId` is the request being updated (the stream's SUBSCRIBE or
    * SUBSCRIBE_NAMESPACE); `updateRequestId` is the update's own, freshly consumed Request ID (§6.4.2.1). A subscription
    * update may carry Forward State, a subscriber priority and the two delivery timeouts (§5.2), which the session leaves
-   * to its caller; one carrying anything else is answered with REQUEST_ERROR and ends the subscription.
+   * to its caller, and FILL_PARAMETERS, which the session answers itself (§3.4.1); one carrying anything else is
+   * answered with REQUEST_ERROR and ends the subscription.
    */
   onRequestUpdate?(info: { requestId: number; updateRequestId: number; parameters: MessageParameters }): void;
   /** The session ended — transport closed, or a fatal protocol error. */
@@ -139,7 +147,8 @@ export interface MoqtPublishSessionConfig {
  * properties ride in SUBSCRIBE_OK, a control message whose length field is 16 bits (§9). The rest
  * of its body is the track alias, a varint of up to 9 bytes on the wire (it is the peer's request
  * ID, so it is unknown until a subscription arrives), and the count of message parameters, of which
- * this session sends none (1 byte). A longer block registers but can never answer a subscription.
+ * this session sends none (1 byte) unless the track reports a Largest Object (see
+ * {@link RegisterTrackOptions.getLargestObject}). A longer block registers but can never answer a subscription.
  */
 export const MAX_TRACK_PROPERTIES_LENGTH = MAX_CONTROL_MESSAGE_LENGTH - 9 - 1;
 
@@ -151,6 +160,15 @@ export interface RegisterTrackOptions {
   trackNamespace: TrackNamespace;
   /** Track name the peer's SUBSCRIBE must name. */
   trackName: string;
+  /**
+   * The track's Largest Object (§3.1.4), read each time the session answers a SUBSCRIBE (SUBSCRIBE_OK) or a
+   * REQUEST_UPDATE (REQUEST_OK), which then carry it as LARGEST_OBJECT (§9.20.17: a publisher that has published
+   * Objects MUST include it). `undefined`, or omitting this, means nothing has been published, and the parameter is left
+   * off. It also bounds every fill range (§3.4), so only a track that reports one can be asked for a nonempty fill.
+   * LARGEST_OBJECT takes up to 19 bytes of the SUBSCRIBE_OK that {@link MAX_TRACK_PROPERTIES_LENGTH} leaves to the track
+   * properties; a SUBSCRIBE_OK that no longer fits is refused like any other (`onSubscribeFailed`).
+   */
+  getLargestObject?: () => Location | undefined;
 }
 
 /** A track registered with {@link MoqtPublishSession.registerTrack}. */
@@ -158,15 +176,23 @@ export interface RegisteredTrack {
   /** The registered track name. */
   readonly trackName: string;
   /**
-   * End the track: end every live subscription (its data streams closed, then PUBLISH_DONE `TRACK_ENDED` and a FIN on
-   * its request stream) and refuse future SUBSCRIBEs and TRACK_STATUS requests with DOES_NOT_EXIST. Idempotent.
+   * End the track: refuse future SUBSCRIBEs and TRACK_STATUS requests with DOES_NOT_EXIST at once, and end every live
+   * subscription (its data streams closed, then PUBLISH_DONE `TRACK_ENDED` and a FIN on its request stream).
+   * Idempotent; only the first call's options apply.
+   *
+   * With `options.after`, the subscriptions end once `after` settles (fulfilled or rejected) instead of now, so a last
+   * group still being written, such as the MSF end-of-broadcast catalog, reaches them first. Until then they keep their
+   * binding and `openUniStream()` serves them, even while the session is closing. Close the last group's stream before
+   * `after` settles: a stream still open then is reset like any other. An orderly `close()` waits for `after` within
+   * its `CLOSE_FLUSH_TIMEOUT_MS` drain window and then ends the subscriptions anyway.
    */
-  end(): void;
+  end(options?: { after?: PromiseLike<unknown> }): void;
   /**
    * Record that the object at `location` was handed to the transport. The session keeps the largest location recorded
-   * (group first, then object) and answers TRACK_STATUS with it as LARGEST_OBJECT (draft-22 §9.20.17); before the first
-   * record the answer has none. The session does not see the data streams' contents, so whoever writes them reports
-   * here. SUBSCRIBE_OK does not carry it.
+   * (group first, then object) and answers TRACK_STATUS with it as LARGEST_OBJECT (draft-22 §9.20.17) when the track
+   * has no {@link RegisterTrackOptions.getLargestObject}; before the first record that answer has none. The session
+   * does not see the data streams' contents, so whoever writes them reports here. Unlike `getLargestObject`, it changes
+   * neither SUBSCRIBE_OK, REQUEST_OK nor the fill ranges.
    */
   objectPublished(location: Location): void;
 }
@@ -188,15 +214,16 @@ export interface MoqtPublishSession {
   /**
    * Open a unidirectional data stream for the live subscription bound to `trackAlias`. The stream counts toward that
    * subscription's PUBLISH_DONE Stream Count, and a stream still open when the subscription ends is reset before
-   * PUBLISH_DONE is written (§9.9). Rejects once the session is closing, when no live subscription holds the alias,
-   * and when the subscription ends while the stream is opening (the stream is reset first). `options` go to the
+   * PUBLISH_DONE is written (§9.9). Rejects when no live subscription holds the alias, when the subscription ends while
+   * the stream is opening (the stream is reset first), and once the session is closing, except for a track whose
+   * `end({ after })` is still waiting: its last group may open a stream inside the close drain. `options` go to the
    * transport as they are.
    */
   openUniStream(trackAlias: number, options?: MoqtSendStreamOptions): Promise<WritableStream<Uint8Array>>;
   /**
    * Orderly stop: end every live subscription (PUBLISH_DONE `TRACK_ENDED`, then FIN) and retract the announce
    * (NAMESPACE_DONE), give those writes a bounded window to reach the wire (closing a WebTransport discards queued
-   * data), then give the peer a bounded window to close each ended subscription's request stream, which it does once it
+   * data; a track ended with `end({ after })` gets the same window for `after`, then ends regardless), then give the peer a bounded window to close each ended subscription's request stream, which it does once it
    * has consumed the PUBLISH_DONE, and close the transport. Synchronous callers return immediately; the transport closes
    * within `CLOSE_FLUSH_TIMEOUT_MS` (250 ms) plus `CLOSE_END_ACK_TIMEOUT_MS` (2 s), and sooner against a peer that
    * answers promptly.
@@ -241,12 +268,14 @@ interface SubscriberStream {
   forwarding: boolean;
   /** The subscription is ending or over; no new data stream may open on its alias. */
   finished: boolean;
-  /** Data streams opened for this subscription: PUBLISH_DONE's Stream Count (§9.9). */
+  /** Data streams opened for this subscription, fill fetch streams included: PUBLISH_DONE's Stream Count (§9.9). */
   streamCount: number;
   /** Data streams opened for this subscription that the caller has not closed yet; each entry resets its stream. */
   dataStreams: Set<() => void>;
-  /** Data-stream opens in flight; PUBLISH_DONE waits for them to settle (§9.9). */
+  /** Data-stream opens in flight, fill fetch streams' included; PUBLISH_DONE waits for them to settle (§9.9). */
   opening: Set<Promise<void>>;
+  /** The SUBSCRIBE's Location filter: the fill range of a FILL_PARAMETERS that carries none (§3.4). */
+  locationFilter: MessageParameters['locationFilter'];
   /**
    * Settles once the peer's direction of the request stream ends (FIN or reset) or the session tears it down.
    * `close()` waits on it, bounded, before closing the transport: the peer ends its side only after it has consumed our
@@ -261,6 +290,21 @@ interface SubscriberStream {
  */
 function dataStreamReset(): unknown {
   return streamResetReason(STREAM_RESET_CODE.CANCELLED, 'the subscription ended');
+}
+
+/** The reason a fill fetch stream is reset with right after its FETCH_HEADER: the session serves no fills (§3.4.1). */
+function fillReset(): unknown {
+  return streamResetReason(STREAM_RESET_CODE.INTERNAL_ERROR, 'fill fetch streams are not served');
+}
+
+/**
+ * Include what has been written in the reliable prefix of the coming reset, where the writer has WebTransport's
+ * `commit()` (RESET_STREAM_AT). Without it the reset may discard the bytes.
+ */
+function commitWritten(writer: WritableStreamDefaultWriter<Uint8Array>): void {
+  const { commit } = writer as { commit?: unknown };
+
+  if (typeof commit === 'function') commit.call(writer);
 }
 
 function resetDataStreams(subscriber: SubscriberStream): void {
@@ -300,7 +344,8 @@ function trackDataStream(stream: WritableStream<Uint8Array>, subscriber: Subscri
 
 interface TrackRecord {
   trackProperties: KeyValuePair[];
-  /** The largest object location `objectPublished` recorded: TRACK_STATUS_OK's LARGEST_OBJECT. */
+  getLargestObject: (() => Location | undefined) | undefined;
+  /** The largest object location `objectPublished` recorded: TRACK_STATUS_OK's LARGEST_OBJECT without `getLargestObject`. */
   largestObject: Location | undefined;
   key: string;
   trackName: string;
@@ -315,6 +360,11 @@ interface TrackRecord {
   pendingEnds: Promise<void>[];
   /** Settles when the ends queued by `end()` land. */
   doneFlushed?: Promise<void>;
+  /**
+   * Set while an `end({ after })` waits for `after`: ends the track's subscriptions now instead (idempotent, and the
+   * same as `after` settling). `close()` calls it once its flush window is over.
+   */
+  endNow?: () => void;
 }
 
 /** One accepted inbound SUBSCRIBE_NAMESPACE — the announce carrier. */
@@ -336,6 +386,28 @@ async function hasSettled(promise: Promise<unknown>): Promise<boolean> {
     return (await Promise.race([promise, Promise.resolve(PENDING)])) !== PENDING;
   } catch {
     return true;
+  }
+}
+
+/**
+ * A copy of the track's Largest Object, so a caller that updates its object in place cannot change the snapshot a
+ * response advertised before the fill range is checked against it.
+ */
+function readLargestObject(track: TrackRecord): Location | undefined {
+  const largest = track.getLargestObject?.();
+
+  return largest === undefined ? undefined : { group: largest.group, object: largest.object };
+}
+
+/**
+ * The Largest Object for a REQUEST_OK. A callback that throws leaves the parameter off: unlike a SUBSCRIBE, an update
+ * has no failure path that keeps the subscription.
+ */
+function readLargestObjectForUpdate(track: TrackRecord): Location | undefined {
+  try {
+    return readLargestObject(track);
+  } catch {
+    return undefined;
   }
 }
 
@@ -566,6 +638,10 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     if (this.#destroyed) return;
 
+    // A track end still waiting on its `after` has had the flush window: end its subscriptions now, so their
+    // PUBLISH_DONEs go out ahead of the transport close and the wait below covers them.
+    for (const track of this.#tracks.values()) track.endNow?.();
+
     // The writes are on the wire, not yet read: a peer that has not consumed a PUBLISH_DONE when the transport closes
     // aborts the track instead of finishing it (moq-relay 0.15.4 and later report that downstream as status 0). The
     // peer closes its side of the request stream once it has, so wait for that on every subscription still being
@@ -694,6 +770,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     const track: TrackRecord = {
       trackProperties: options.trackProperties ?? [],
+      getLargestObject: options.getLargestObject,
       largestObject: undefined,
       key: trackKey(options.trackNamespace, options.trackName),
       trackName: options.trackName,
@@ -714,7 +791,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     return {
       trackName: options.trackName,
-      end: () => this.#endTrack(track),
+      end: (options) => this.#endTrack(track, options?.after),
       objectPublished: (location) => {
         if (track.largestObject === undefined || compareLocations(location, track.largestObject) > 0) {
           track.largestObject = { group: location.group, object: location.object };
@@ -724,14 +801,33 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   }
 
   /**
-   * End every live subscription with PUBLISH_DONE `TRACK_ENDED` and refuse future SUBSCRIBEs. The aggregated write
-   * completion lands on `track.doneFlushed` so `close()` can hold the transport open until the PUBLISH_DONEs and FINs
-   * reach the wire.
+   * Refuse future SUBSCRIBEs, and end every live subscription with PUBLISH_DONE `TRACK_ENDED`, now or once `after`
+   * settles. The aggregated write completion lands on `track.doneFlushed` so `close()` can hold the transport open
+   * until the PUBLISH_DONEs and FINs reach the wire.
    */
-  #endTrack(track: TrackRecord): void {
+  #endTrack(track: TrackRecord, after?: PromiseLike<unknown>): void {
     if (track.done) return;
 
     track.done = true;
+
+    if (after === undefined) {
+      track.doneFlushed = this.#endSubscriptions(track);
+      return;
+    }
+
+    let ended: Promise<void> | undefined;
+    const endNow = (): Promise<void> => {
+      delete track.endNow;
+      ended ??= this.#endSubscriptions(track);
+      return ended;
+    };
+
+    track.endNow = endNow;
+    track.doneFlushed = Promise.resolve(after).then(endNow, endNow);
+  }
+
+  /** The ending half of `#endTrack`: every live subscription's end, reported at once. Settles when the ends land. */
+  #endSubscriptions(track: TrackRecord): Promise<void> {
     let hadReported = false;
 
     for (const subscriber of track.subscribers) {
@@ -756,7 +852,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: undefined });
     }
 
-    track.doneFlushed = Promise.all([...track.pendingEnds]).then(() => {});
+    return Promise.all([...track.pendingEnds]).then(() => {});
   }
 
   /**
@@ -795,10 +891,12 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     });
   }
 
-  #liveSubscription(trackAlias: number): SubscriberStream | undefined {
+  #liveSubscription(trackAlias: number): { track: TrackRecord; subscriber: SubscriberStream } | undefined {
     for (const track of this.#tracks.values()) {
       for (const subscriber of track.subscribers) {
-        if (subscriber.trackAlias === trackAlias && subscriber.accepted && !subscriber.finished) return subscriber;
+        if (subscriber.trackAlias === trackAlias && subscriber.accepted && !subscriber.finished) {
+          return { track, subscriber };
+        }
       }
     }
 
@@ -811,12 +909,18 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // the session, and hammering createUnidirectionalStream() on a
     // torn-down WebTransport segfaults Chromium's renderer (null deref in
     // the native session teardown race) — observed against a relay that
-    // resets every stream on protocol disagreement.
-    if (this.#destroyed || this.#closing) throw new Error('moq publish session: closed');
+    // resets every stream on protocol disagreement. An orderly close
+    // keeps the transport alive through its drain window, and a track
+    // whose `end({ after })` is waiting there may still need a stream for
+    // its last group; nothing else opens once closing has begun.
+    if (this.#destroyed) throw new Error('moq publish session: closed');
 
-    const subscriber = this.#liveSubscription(trackAlias);
+    const live = this.#liveSubscription(trackAlias);
 
-    if (!subscriber) throw new Error(`moq publish session: no live subscription for track alias ${trackAlias}`);
+    if (this.#closing && live?.track.endNow === undefined) throw new Error('moq publish session: closed');
+    if (!live) throw new Error(`moq publish session: no live subscription for track alias ${trackAlias}`);
+
+    const { subscriber } = live;
 
     let settle!: () => void;
     const opening = new Promise<void>((resolve) => {
@@ -841,6 +945,84 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       subscriber.opening.delete(opening);
       settle();
     }
+  }
+
+  /**
+   * Whether a SUBSCRIBE or REQUEST_UPDATE carrying FILL_PARAMETERS opens a fill fetch stream (§3.4.1): only while the
+   * subscription is live and not paused, and only for a nonempty fill range. The fill range is the filter inside
+   * FILL_PARAMETERS, else the subscription's, evaluated as a fetch against the track's Largest Object; an empty range,
+   * or one starting past Largest Object, opens no stream (§3.4).
+   */
+  #fillRequested(
+    subscriber: SubscriberStream,
+    fill: FillParameters | undefined,
+    largestObject: Location | undefined
+  ): boolean {
+    if (fill === undefined || !subscriber.forwarding || subscriber.finished) return false;
+
+    return !isEmptyFetchRange(fill.locationFilter ?? subscriber.locationFilter ?? { type: 'none' }, largestObject);
+  }
+
+  /**
+   * Fail a requested fill the way §3.4.1 requires of a publisher that cannot serve it: open a fill fetch stream, write
+   * the FETCH_HEADER naming the request that asked for it (`requestId`, the SUBSCRIBE's or the REQUEST_UPDATE's), and
+   * reset the stream. A FIN would claim the whole fill range was delivered. moq-relay (0.14.17 through 0.17.0) asks for
+   * the current group this way on every upstream SUBSCRIBE; refusing the SUBSCRIBE instead would fail every relay pull
+   * of a track that has content.
+   *
+   * The header survives the reset only where the writer has WebTransport's `commit()` (RESET_STREAM_AT's reliable
+   * prefix). Without it the subscriber may see a bare reset, which it cannot attribute to the subscription, and its join
+   * waits for the next group as after any failed fill. The subscription is served either way.
+   *
+   * The stream is a data stream of the subscription in every other respect: PUBLISH_DONE waits for its open, it counts
+   * toward the Stream Count from the step that commits it to its header (§9.9 counts fill fetch streams), so one that
+   * finishes opening after the subscription ended is reset bare and not counted, and the subscription's end resets it if
+   * its header write is still pending.
+   */
+  #failFill(subscriber: SubscriberStream, requestId: number): void {
+    let settle!: () => void;
+    const opening = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+
+    subscriber.opening.add(opening);
+
+    void (async () => {
+      let writer: WritableStreamDefaultWriter<Uint8Array>;
+
+      try {
+        writer = (await this.#transport.createUnidirectionalStream()).getWriter();
+      } catch {
+        // The session is going away; it resets nothing it never opened.
+        return;
+      } finally {
+        subscriber.opening.delete(opening);
+        settle();
+      }
+
+      if (subscriber.finished) {
+        writer.abort(dataStreamReset()).catch(() => {});
+        return;
+      }
+
+      const reset = (reason: unknown): void => {
+        subscriber.dataStreams.delete(sessionReset);
+        writer.abort(reason).catch(() => {});
+      };
+      const sessionReset = (): void => reset(dataStreamReset());
+
+      subscriber.dataStreams.add(sessionReset);
+      subscriber.streamCount += 1;
+
+      try {
+        await writer.write(encodeFetchHeader(requestId));
+        commitWritten(writer);
+      } catch {
+        // Reset by the subscription's end, or the peer stopped it.
+      }
+
+      reset(fillReset());
+    })();
   }
 
   // ---------------------------------------------------------------------------
@@ -1153,7 +1335,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
   /**
    * TRACK_STATUS (draft-22 §9.13, the same on draft-20): answered as the SUBSCRIBE for the same track would be, without
    * creating subscription state or sending objects. A registered, live track gets TRACK_STATUS_OK (a REQUEST_OK) with
-   * LARGEST_OBJECT once an object has been published and the track properties SUBSCRIBE_OK carries; any other track
+   * the track properties SUBSCRIBE_OK carries and LARGEST_OBJECT: the one SUBSCRIBE_OK carries when the track has a
+   * `getLargestObject`, otherwise the largest `objectPublished` recorded, once there is one; any other track
    * gets the REQUEST_ERROR a SUBSCRIBE would. Either way the response direction FINs and nothing more is read: the
    * request takes no REQUEST_UPDATE and gets no PUBLISH_DONE. No callback fires and the binding is untouched.
    *
@@ -1176,13 +1359,16 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     let trackStatusOk: Uint8Array;
     try {
+      // The Largest Object SUBSCRIBE_OK would carry when the track owner reports one; otherwise what was published.
+      const largestObject = track.getLargestObject ? readLargestObject(track) : track.largestObject;
       trackStatusOk = encodeRequestOk(
-        track.largestObject === undefined ? {} : { largestObject: track.largestObject },
+        largestObject === undefined ? {} : { largestObject },
         this.#protocol,
         track.trackProperties
       );
     } catch {
-      // The answer overflows its frame (properties at the limit and a long LARGEST_OBJECT); the peer did nothing wrong.
+      // The owner's getLargestObject threw, or the answer overflows its frame (properties at the limit and a long
+      // LARGEST_OBJECT); the peer did nothing wrong.
       await refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, 'could not encode TRACK_STATUS_OK');
       return;
     }
@@ -1224,8 +1410,16 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // overflow the message, say) is refused promptly, so the peer is not
     // left waiting on a request that never gets an answer.
     let subscribeOk: Uint8Array;
+    // One snapshot answers the SUBSCRIBE and bounds its fill range, however long the response write takes.
+    let largestObject: Location | undefined;
     try {
-      subscribeOk = encodeSubscribeOk(trackAlias, {}, track.trackProperties, this.#protocol);
+      largestObject = readLargestObject(track);
+      subscribeOk = encodeSubscribeOk(
+        trackAlias,
+        largestObject ? { largestObject } : {},
+        track.trackProperties,
+        this.#protocol
+      );
     } catch (error) {
       // The encoder refused the response; the peer did nothing wrong.
       await refuse(writer, reader, REQUEST_ERROR_CODE.INTERNAL_ERROR, 'could not encode SUBSCRIBE_OK');
@@ -1263,6 +1457,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       streamCount: 0,
       dataStreams: new Set(),
       opening: new Set(),
+      locationFilter: subscribe.parameters.locationFilter,
       requestEnded,
     };
 
@@ -1314,6 +1509,10 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       });
     }
 
+    if (this.#fillRequested(subscriber, subscribe.parameters.fillParameters, largestObject)) {
+      this.#failFill(subscriber, subscribe.requestId);
+    }
+
     // Keep serving the request stream: REQUEST_UPDATEs arrive here.
     try {
       while (!(await reader.atEnd())) {
@@ -1323,12 +1522,13 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
         if (message.kind === 'request-update') {
           this.#claimPeerRequestId(message.requestId);
           // The delivery timeouts (§5.2) are applied by the caller, through `onRequestUpdate`, to the groups it opens
-          // afterwards.
+          // afterwards. FILL_PARAMETERS asks for one fill (§3.4.1) and changes nothing about the subscription.
           const {
             forward,
             subscriberPriority: _priority,
             objectDeliveryTimeout: _objectTimeout,
             subgroupDeliveryTimeout: _subgroupTimeout,
+            fillParameters,
             ...unsupported
           } = message.parameters;
 
@@ -1359,7 +1559,8 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
               // peer serving stale expectations (a filter or range it
               // believes is in effect). Forward State is applied above,
               // priority is advisory (the known relays discard ours
-              // too), and the caller applies the delivery timeouts;
+              // too), the caller applies the delivery timeouts, and a fill
+              // is answered below;
               // anything else ends this request honestly: the
               // update's REQUEST_ERROR, then PUBLISH_DONE UPDATE_FAILED
               // (§9.5.1).
@@ -1383,7 +1584,16 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
               // completion (`onUpdateOk`). Strictly reactive: a peer that
               // never sends REQUEST_UPDATE (moq-relay 0.15.8 writes nothing
               // after SUBSCRIBE until it cancels) never sees a trailing byte.
-              void writer.write(encodeRequestOk({}, this.#protocol)).catch(() => {});
+              // LARGEST_OBJECT rides it as in SUBSCRIBE_OK (§9.20.17).
+              const largestObject = readLargestObjectForUpdate(track);
+
+              void writer
+                .write(encodeRequestOk(largestObject ? { largestObject } : {}, this.#protocol))
+                .catch(() => {});
+
+              if (this.#fillRequested(subscriber, fillParameters, largestObject)) {
+                this.#failFill(subscriber, message.requestId);
+              }
             }
           }
         } else if (message.kind === 'goaway') {

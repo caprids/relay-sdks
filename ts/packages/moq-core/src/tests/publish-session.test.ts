@@ -2024,6 +2024,55 @@ describe('TRACK_STATUS on the publish session', () => {
   );
 
   it.each(MOQT_PROTOCOL_IDS)(
+    'answers TRACK_STATUS with the Largest Object SUBSCRIBE_OK carries when the track has getLargestObject on %s',
+    async (protocol) => {
+      const { pair, session, subscriber } = makePublishHarness({}, { protocol });
+
+      await session.ready;
+      let largest: { group: number; object: number } | undefined;
+      const track = session.registerTrack({
+        trackNamespace: NAMESPACE,
+        trackName: 'video',
+        getLargestObject: () => largest,
+      });
+      session.registerTrack({
+        trackNamespace: NAMESPACE,
+        trackName: 'broken',
+        getLargestObject: () => {
+          throw new Error('no largest object');
+        },
+      });
+      const answer = async (trackName: string, requestId: number) => {
+        const status = await rawTrackStatus(pair.server, trackName, requestId, protocol);
+
+        await vi.waitFor(() => {
+          expect(status.ended()).toBe(true);
+        });
+        expect(status.failure()).toBeUndefined();
+        expect(status.received).toHaveLength(1);
+        return status.received[0] as { kind: string; parameters?: { largestObject?: unknown }; errorCode?: number };
+      };
+
+      // objectPublished does not override the owner's answer: nothing published yet, as SUBSCRIBE_OK would say.
+      track.objectPublished({ group: 9, object: 9 });
+      const before = await answer('video', 71);
+      expect(before.kind).toBe('request-ok');
+      expect(before.parameters).not.toHaveProperty('largestObject');
+
+      largest = { group: 5, object: 2 };
+      expect((await answer('video', 73)).parameters?.largestObject).toEqual({ group: 5, object: 2 });
+
+      // A throwing getLargestObject refuses the TRACK_STATUS as it refuses a SUBSCRIBE.
+      expect(await answer('broken', 75)).toMatchObject({
+        kind: 'request-error',
+        errorCode: REQUEST_ERROR_CODE.INTERNAL_ERROR,
+      });
+      session.destroy();
+      subscriber.destroy();
+    }
+  );
+
+  it.each(MOQT_PROTOCOL_IDS)(
     'refuses TRACK_STATUS for an unknown track and for an ended track with DOES_NOT_EXIST on %s',
     async (protocol) => {
       const subscribes: IncomingSubscribe[] = [];

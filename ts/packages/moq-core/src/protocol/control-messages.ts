@@ -44,12 +44,14 @@ export type MoqtProtocolId = (typeof MOQT_PROTOCOL_IDS)[number];
 export const MOQT_PROTOCOL_ID: MoqtProtocolId = 'moqt-22';
 
 /**
- * The codec for a transport's negotiated `protocol`. The connecting layer refuses any protocol outside
+ * The codec for a transport's negotiated `protocol`. The SDK's connecting layer refuses any protocol outside
  * `MOQT_PROTOCOL_IDS` before a session starts (spec/transport-adapter.md TA-8), so a value outside it here (a test
- * transport that names none) gets the default.
+ * transport, or an embedder's transport that cannot report one) gets the default, `moqt-22`.
  */
-export function resolveMoqtProtocol(protocol: string): MoqtProtocolId {
-  return (MOQT_PROTOCOL_IDS as readonly string[]).includes(protocol) ? (protocol as MoqtProtocolId) : MOQT_PROTOCOL_ID;
+export function resolveMoqtProtocol(protocol: string | undefined): MoqtProtocolId {
+  return protocol !== undefined && (MOQT_PROTOCOL_IDS as readonly string[]).includes(protocol)
+    ? (protocol as MoqtProtocolId)
+    : MOQT_PROTOCOL_ID;
 }
 
 /** Control/request message type codes (§9, Table 5). */
@@ -250,7 +252,10 @@ const PERMANENT_PUBLISH_DONE_STATUSES: ReadonlySet<number> = new Set([
   PUBLISH_DONE_STATUS.MALFORMED_TRACK,
 ]);
 
-/** Whether a PUBLISH_DONE'd subscription is worth re-subscribing. */
+/**
+ * Whether a subscription that ended with PUBLISH_DONE `statusCode` is worth re-subscribing. Every status but the
+ * permanent ones (`UNAUTHORIZED`, `EXPIRED`, `MALFORMED_TRACK`) is.
+ */
 export function isRetryablePublishDoneStatus(statusCode: number): boolean {
   return !PERMANENT_PUBLISH_DONE_STATUSES.has(statusCode);
 }
@@ -292,7 +297,10 @@ export interface Location {
   object: number;
 }
 
-/** `A < B` in Location order (group first, then object). */
+/**
+ * Compare two Locations in Location order (§8.2): group first, then object. Negative when `a` precedes `b`, zero when
+ * they are equal, positive when `a` follows `b`, so it sorts with `Array.prototype.sort`.
+ */
 export function compareLocations(a: Location, b: Location): number {
   return a.group - b.group || a.object - b.object;
 }
@@ -662,6 +670,35 @@ function decodeDraft20LocationFields(bytes: Uint8Array): LocationFilter {
   if (endObject !== undefined) filter.endObject = endObject;
 
   return filter;
+}
+
+/**
+ * Whether a Location filter, evaluated with the fetch rules of §9.20.9, selects no Objects. A fetch range, and so a
+ * subscription's fill range (§3.4), never extends beyond Largest Object: with no Largest Object nothing exists to fetch,
+ * the Next Object and the Next Group both lie past it, an absolute start past it selects nothing, and a bounded
+ * absolute range whose end precedes its start is empty. A publisher opens no fill fetch stream for an empty range.
+ *
+ * @param filter - The fill range's filter: the one inside FILL_PARAMETERS, else the subscription's, else `none`.
+ * @param largestObject - The track's Largest Object, `undefined` when nothing has been published yet.
+ */
+export function isEmptyFetchRange(filter: LocationFilter, largestObject: Location | undefined): boolean {
+  if (largestObject === undefined) return true;
+
+  switch (filter.type) {
+    case 'none':
+      return false;
+    case 'next-object':
+      return true;
+    case 'relative-group':
+      return filter.groupsBeforeNext === 0;
+    case 'absolute': {
+      const { start, endGroupDelta, endObject } = filter;
+      if (compareLocations(start, largestObject) > 0) return true;
+
+      // The end group is a non-negative delta from the start group, so only a same-group end can precede the start.
+      return endGroupDelta === 0 && endObject !== undefined && endObject < start.object;
+    }
+  }
 }
 
 // ============================================================================

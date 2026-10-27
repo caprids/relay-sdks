@@ -147,9 +147,12 @@ speak. A silent default fails late, as an obscure SETUP error, instead of at `re
 
 **TA-8.** Once `ready` resolves, `transport.protocol` MUST be the selected identifier: over WebSocket,
 the MOQT protocol without its `qmux-01.` prefix.
-**Why:** `protocol` is a required, read-only member of `MoqtTransport`, and the core fails the
-connection unless it equals `MOQT_PROTOCOL_ID` (#203). That check backs up TA-7; it does not
-replace it.
+**Why:** the core reads `protocol` to pick its codec, and the SDK's connecting layer fails the
+connection unless it is one of `MOQT_PROTOCOL_IDS` (#203). That check backs up TA-7; it does not
+replace it. The TypeScript core's `MoqtTransport` type marks `protocol` optional so an embedder can
+hand the core a browser `WebTransport` whose type, or implementation, lacks it; the core then uses
+`moqt-22`, so such a transport must offer only `moqt-22`. An adapter for these SDKs still MUST
+report it.
 
 ### Session lifetime
 

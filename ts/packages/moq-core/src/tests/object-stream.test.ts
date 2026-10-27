@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import { ByteWriter, StreamReader, utf8Encode } from '../protocol/bytes.js';
 import { MoqtProtocolError } from '../protocol/errors.js';
 import {
+  encodeFetchHeader,
   type FetchStreamEntry,
   isSubgroupHeaderType,
   MAX_OBJECT_PAYLOAD_LENGTH,
@@ -337,6 +338,16 @@ describe('readFetchEntries', () => {
 
     await reader.readVarint();
     expect(await readFetchHeader(reader)).toEqual({ requestId: 8 });
+  });
+
+  it('reads back the FETCH_HEADER a fill fetch stream opens with', async () => {
+    const header = encodeFetchHeader(300);
+    const reader = new StreamReader(streamOf(header));
+
+    expect(header).toEqual(Uint8Array.of(0x05, 0x81, 0x2c));
+    expect(await reader.readVarint()).toBe(0x05);
+    expect(await readFetchHeader(reader)).toEqual({ requestId: 300 });
+    expect(await reader.atEnd()).toBe(true);
   });
 
   it('decodes absolute-first then delta-encoded objects', async () => {

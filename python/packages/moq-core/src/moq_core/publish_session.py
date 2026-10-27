@@ -1418,9 +1418,17 @@ def _binding_of(track: _TrackRecord, subscriber: _SubscriberStream | None) -> Tr
 def _unsupported_update_fields(parameters: MessageParameters) -> list[str]:
     """Parameter names set on a REQUEST_UPDATE that the publish driver does not apply.
 
-    Everything but FORWARD and the two delivery timeouts (applied) and SUBSCRIBER_PRIORITY (advisory).
+    Everything but FORWARD and the two delivery timeouts (applied), SUBSCRIBER_PRIORITY (advisory) and
+    FILL_PARAMETERS. A fill asks for one fill fetch stream and changes nothing about the subscription
+    (§3.4.1). This driver reports no Largest Object, so every fill range is empty and none opens (§3.4).
     """
-    ignored = {"forward", "object_delivery_timeout", "subgroup_delivery_timeout", "subscriber_priority"}
+    ignored = {
+        "fill_parameters",
+        "forward",
+        "object_delivery_timeout",
+        "subgroup_delivery_timeout",
+        "subscriber_priority",
+    }
     return [
         name
         for name in MessageParameters.__dataclass_fields__

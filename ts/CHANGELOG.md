@@ -12,13 +12,25 @@ each section says what changed and what to do about it. How to cut a release is 
   has written an object, LARGEST_OBJECT; an unknown or closed track gets `DOES_NOT_EXIST`, as a SUBSCRIBE does.
   moq-relay `main` asks a publisher for a track's status before it subscribes on behalf of another relay, and a track
   whose publisher refuses does not cross two relays there. Nothing changes for an application. In `@caprid/moq-core`,
-  `RegisteredTrack.objectPublished(location)` records what a TRACK_STATUS_OK reports as LARGEST_OBJECT, and
-  `encodeRequestOk` takes the Track Properties as a third argument.
+  `RegisteredTrack.objectPublished(location)` records what a TRACK_STATUS_OK reports as LARGEST_OBJECT (a track with
+  `getLargestObject` reports that instead, as its SUBSCRIBE_OK does), and `encodeRequestOk` takes the Track Properties
+  as a third argument.
 - `@caprid/moq-media`: lost Opus frames are filled rather than played as silence. Opus inputs decode with libopus
   compiled to WebAssembly (116 KB, embedded), which conceals a missing frame (packet-loss concealment, up to 120 ms a
   gap) and rebuilds it from the next frame's in-band FEC when the publisher's encoder sent one. Stats `synthesizedUs`
   and `recoveredUs` count them. `createAudioPlayer({ context, lossConcealment: false })` decodes with WebCodecs as
   before, as does any input where WebAssembly is unavailable or the codec is not Opus.
+- `@caprid/moq-core`: publish-session hooks for embedders such as Video.js. A registered track's `getLargestObject`
+  puts `LARGEST_OBJECT` in SUBSCRIBE_OK and REQUEST_OK; with it, a nonempty fill request gets a fill fetch stream
+  that is reset after its FETCH_HEADER and counted in PUBLISH_DONE. `RegisteredTrack.end({ after })` holds the
+  subscriptions' end until a last group is written, also during an orderly close. Nothing changes for `@caprid/relay`,
+  which uses neither.
+- `@caprid/moq-core`: a REQUEST_UPDATE carrying `FILL_PARAMETERS` is acknowledged instead of ending the subscription
+  with `UPDATE_FAILED` (Python too). moq-relay sends no REQUEST_UPDATE, so the relay path is unchanged.
+- `@caprid/moq-core`: `MoqtTransport.protocol` is optional; a transport without it gets the `moqt-22` codec. The
+  index also exports `TRACK_PROPERTY`, `compareLocations`, `isEmptyFetchRange`, `encodeFetchHeader`,
+  `isRetryableRequestErrorCode`, `isRetryablePublishDoneStatus`, `utf8Decode`, `CLOSE_FLUSH_TIMEOUT_MS` and
+  `CLOSE_END_ACK_TIMEOUT_MS`.
 
 ## 0.1.0
 

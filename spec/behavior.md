@@ -1789,19 +1789,32 @@ and player adapters are not implemented in any SDK and have no contract yet. Add
   The `UNKNOWN_OBJECT_STATUS` stream-reset code has a different meaning: a FETCH publisher cannot
   determine whether an object exists ([Section 12.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-12.5)).
   Ordinary subgroup transport resets remain per-stream delivery events.
+- A publisher retains no objects, so it serves no fills
+  ([Section 3.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.4)).
+  A SUBSCRIBE or REQUEST_UPDATE with `FILL_PARAMETERS` is answered as if the parameter were absent
+  (SUBSCRIBE_OK, or REQUEST_OK for an update), and nothing about the subscription changes. Neither
+  SDK publisher reports a Largest Object there (only in TRACK_STATUS_OK, below), so every fill range is empty and no fill fetch stream
+  opens. The TypeScript core's publish session can report one (`getLargestObject` on a registered
+  track, for embedders such as Video.js); it then sends `LARGEST_OBJECT` in SUBSCRIBE_OK and
+  REQUEST_OK, and fails a nonempty fill the way
+  [Section 3.4.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.4.1)
+  requires: it opens a fill fetch stream, writes the FETCH_HEADER (committed where the transport has
+  `commit()`), resets it, and counts it in PUBLISH_DONE's Stream Count.
 - A publisher connection serves SUBSCRIBE, SUBSCRIBE_NAMESPACE (the announce carrier) and
   TRACK_STATUS. It answers PUBLISH with REQUEST_ERROR `UNINTERESTED` and every other request
   (FETCH, PUBLISH_NAMESPACE, SUBSCRIBE_TRACKS) with `NOT_SUPPORTED`: a non-relay endpoint may
   implement a subset and should answer the rest that way
   ([Section 1.6](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-1.6)).
-- TRACK_STATUS_OK carries LARGEST_OBJECT once the track has written an object, as
+- TRACK_STATUS_OK from either SDK publisher carries LARGEST_OBJECT once the track has written an object, as
   [Section 9.20.17](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.20.17)
   requires ("If Objects have been published on this Track the Publisher MUST include this
   parameter"); the publisher's SUBSCRIBE_OK still does not, so the two answers differ there,
   where [Section 9.13](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.13)
   says they carry the same parameters. Adding it to SUBSCRIBE_OK changes what every relay's
-  upstream subscription sees, and has not been tested against moq-relay
-  ([publisher history](relay-interop.md#draft-22-location_filter-framing)).
+  upstream subscription sees and turns a fill request into a failed fill (below), and has not been
+  tested against moq-relay ([publisher history](relay-interop.md#draft-22-location_filter-framing)).
+  A TypeScript core track with `getLargestObject` answers TRACK_STATUS with that Largest Object, the
+  same one its SUBSCRIBE_OK carries.
 
 ### Relay interop deviations
 
