@@ -252,7 +252,10 @@ const PERMANENT_PUBLISH_DONE_STATUSES: ReadonlySet<number> = new Set([
   PUBLISH_DONE_STATUS.MALFORMED_TRACK,
 ]);
 
-/** Whether a PUBLISH_DONE'd subscription is worth re-subscribing. */
+/**
+ * Whether a subscription that ended with PUBLISH_DONE `statusCode` is worth re-subscribing. Every status but the
+ * permanent ones (`UNAUTHORIZED`, `EXPIRED`, `MALFORMED_TRACK`) is.
+ */
 export function isRetryablePublishDoneStatus(statusCode: number): boolean {
   return !PERMANENT_PUBLISH_DONE_STATUSES.has(statusCode);
 }
@@ -294,7 +297,10 @@ export interface Location {
   object: number;
 }
 
-/** `A < B` in Location order (group first, then object). */
+/**
+ * Compare two Locations in Location order (§8.2): group first, then object. Negative when `a` precedes `b`, zero when
+ * they are equal, positive when `a` follows `b`, so it sorts with `Array.prototype.sort`.
+ */
 export function compareLocations(a: Location, b: Location): number {
   return a.group - b.group || a.object - b.object;
 }

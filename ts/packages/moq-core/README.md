@@ -19,6 +19,17 @@ The extracted publish driver excludes SPF actors and media dependencies. Track p
 explicit, with no default media timescale. `createSubgroupWriter` writes arbitrary object payloads
 and metadata; the SDK supplies the bounded, single-object-group publishing policy above it.
 
+Two publish-session hooks exist for embedders that track more than the SDK does. A registered
+track's `getLargestObject` puts `LARGEST_OBJECT` in SUBSCRIBE_OK and REQUEST_OK; the session keeps no
+objects, so a nonempty fill request then gets a fill fetch stream that is reset after its
+FETCH_HEADER. `end({ after })` holds a track's end until a last group is written, also during an
+orderly close.
+
+The package index also exports the wire constants and pure helpers an embedder needs around a
+session: `TRACK_PROPERTY`, `compareLocations`, `isEmptyFetchRange`, `encodeFetchHeader`,
+`isRetryableRequestErrorCode`, `isRetryablePublishDoneStatus`, `utf8Decode`, and the close bounds
+`CLOSE_FLUSH_TIMEOUT_MS` and `CLOSE_END_ACK_TIMEOUT_MS`.
+
 For Relay application usage and local installation, start with the [JavaScript quickstart](../../GUIDE.md#first-round-trip).
 
 ## Stability
