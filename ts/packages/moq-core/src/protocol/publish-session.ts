@@ -378,12 +378,22 @@ async function hasSettled(promise: Promise<unknown>): Promise<boolean> {
 }
 
 /**
- * The track's Largest Object for a REQUEST_OK. A callback that throws leaves the parameter off: unlike a SUBSCRIBE, an
- * update has no failure path that keeps the subscription.
+ * A copy of the track's Largest Object, so a caller that updates its object in place cannot change the snapshot a
+ * response advertised before the fill range is checked against it.
  */
 function readLargestObject(track: TrackRecord): Location | undefined {
+  const largest = track.getLargestObject?.();
+
+  return largest === undefined ? undefined : { group: largest.group, object: largest.object };
+}
+
+/**
+ * The Largest Object for a REQUEST_OK. A callback that throws leaves the parameter off: unlike a SUBSCRIBE, an update
+ * has no failure path that keeps the subscription.
+ */
+function readLargestObjectForUpdate(track: TrackRecord): Location | undefined {
   try {
-    return track.getLargestObject?.();
+    return readLargestObject(track);
   } catch {
     return undefined;
   }
@@ -1325,7 +1335,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // One snapshot answers the SUBSCRIBE and bounds its fill range, however long the response write takes.
     let largestObject: Location | undefined;
     try {
-      largestObject = track.getLargestObject?.();
+      largestObject = readLargestObject(track);
       subscribeOk = encodeSubscribeOk(
         trackAlias,
         largestObject ? { largestObject } : {},
@@ -1497,7 +1507,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
               // never sends REQUEST_UPDATE (moq-relay 0.15.8 writes nothing
               // after SUBSCRIBE until it cancels) never sees a trailing byte.
               // LARGEST_OBJECT rides it as in SUBSCRIBE_OK (§9.20.17).
-              const largestObject = readLargestObject(track);
+              const largestObject = readLargestObjectForUpdate(track);
 
               void writer
                 .write(encodeRequestOk(largestObject ? { largestObject } : {}, this.#protocol))

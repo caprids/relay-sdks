@@ -258,6 +258,30 @@ describe('fill fetch streams', () => {
     await finish();
   });
 
+  it('checks the fill range against the Largest Object its SUBSCRIBE_OK advertised, not a later in-place update', async () => {
+    const largest = { group: 4, object: 2 };
+    const { pair, session, fills, finish } = await makeFillHarness({
+      // The track's owner advances its Largest Object in place as the subscription binds and data starts.
+      callbacks: {
+        onTrackBinding: () => {
+          largest.group = 9;
+        },
+      },
+    });
+
+    session.registerTrack({ trackNamespace: NAMESPACE, trackName: 'video', getLargestObject: () => largest });
+    const sub = await subscribeWith(pair.server, 'video', 263, {
+      fillParameters: { locationFilter: { type: 'absolute', start: { group: 5, object: 0 } } },
+    });
+
+    await vi.waitFor(() => expect(sub.received.map((m) => m.kind)).toEqual(['subscribe-ok']));
+    expect(sub.received[0]).toMatchObject({ parameters: { largestObject: { group: 4, object: 2 } } });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // A fill from {5,0} is empty against the advertised {4,2}.
+    expect(fills).toEqual([]);
+    await finish();
+  });
+
   it('opens no fill fetch stream for an empty fill range (§3.4)', async () => {
     const { pair, session, fills, finish } = await makeFillHarness();
     let largest: { group: number; object: number } | undefined;
