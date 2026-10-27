@@ -1769,6 +1769,17 @@ and player adapters are not implemented in any SDK and have no contract yet. Add
   The `UNKNOWN_OBJECT_STATUS` stream-reset code has a different meaning: a FETCH publisher cannot
   determine whether an object exists ([Section 12.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-12.5)).
   Ordinary subgroup transport resets remain per-stream delivery events.
+- A publisher retains no objects, so it serves no fills
+  ([Section 3.4](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.4)).
+  A SUBSCRIBE or REQUEST_UPDATE with `FILL_PARAMETERS` is answered as if the parameter were absent
+  (SUBSCRIBE_OK, or REQUEST_OK for an update), and nothing about the subscription changes. Neither
+  SDK publisher reports a Largest Object, so every fill range is empty and no fill fetch stream
+  opens. The TypeScript core's publish session can report one (`getLargestObject` on a registered
+  track, for embedders such as Video.js); it then sends `LARGEST_OBJECT` in SUBSCRIBE_OK and
+  REQUEST_OK, and fails a nonempty fill the way
+  [Section 3.4.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.4.1)
+  requires: it opens a fill fetch stream, writes the FETCH_HEADER (committed where the transport has
+  `commit()`), resets it, and counts it in PUBLISH_DONE's Stream Count.
 
 ### Relay interop deviations
 

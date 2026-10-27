@@ -60,6 +60,9 @@ Next Object + current-group `FILL_PARAMETERS` pull (since 0.14.17, unchanged thr
 upstream SUBSCRIBE was observed live on 2026-10-05) therefore has no cached publisher
 content to fill; the publisher serves subsequent writes. Adding publisher retention and
 backfill is a separate feature. The test fixtures send the pull parameters of 0.14.17 to 0.17.0.
+An embedder of the TypeScript core that reports a Largest Object makes that fill range nonempty
+once the track has content; the core then fails the fill with a reset fill fetch stream and keeps
+serving the subscription ([behavior](behavior.md#draft-22-protocol-boundaries)).
 
 ## Publisher restarts and resubscription
 
