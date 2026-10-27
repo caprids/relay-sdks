@@ -174,10 +174,17 @@ export interface RegisteredTrack {
   /** The registered track name. */
   readonly trackName: string;
   /**
-   * End the track: end every live subscription (its data streams closed, then PUBLISH_DONE `TRACK_ENDED` and a FIN on
-   * its request stream) and refuse future SUBSCRIBEs with DOES_NOT_EXIST. Idempotent.
+   * End the track: refuse future SUBSCRIBEs with DOES_NOT_EXIST at once, and end every live subscription (its data
+   * streams closed, then PUBLISH_DONE `TRACK_ENDED` and a FIN on its request stream). Idempotent; only the first call's
+   * options apply.
+   *
+   * With `options.after`, the subscriptions end once `after` settles (fulfilled or rejected) instead of now, so a last
+   * group still being written, such as the MSF end-of-broadcast catalog, reaches them first. Until then they keep their
+   * binding and `openUniStream()` serves them, even while the session is closing. Close the last group's stream before
+   * `after` settles: a stream still open then is reset like any other. An orderly `close()` waits for `after` within
+   * its `CLOSE_FLUSH_TIMEOUT_MS` drain window and then ends the subscriptions anyway.
    */
-  end(): void;
+  end(options?: { after?: PromiseLike<unknown> }): void;
 }
 
 /** A publish-capable MOQT session over an established transport. Created by {@link createMoqtPublishSession}. */
@@ -197,15 +204,16 @@ export interface MoqtPublishSession {
   /**
    * Open a unidirectional data stream for the live subscription bound to `trackAlias`. The stream counts toward that
    * subscription's PUBLISH_DONE Stream Count, and a stream still open when the subscription ends is reset before
-   * PUBLISH_DONE is written (§9.9). Rejects once the session is closing, when no live subscription holds the alias,
-   * and when the subscription ends while the stream is opening (the stream is reset first). `options` go to the
+   * PUBLISH_DONE is written (§9.9). Rejects when no live subscription holds the alias, when the subscription ends while
+   * the stream is opening (the stream is reset first), and once the session is closing, except for a track whose
+   * `end({ after })` is still waiting: its last group may open a stream inside the close drain. `options` go to the
    * transport as they are.
    */
   openUniStream(trackAlias: number, options?: MoqtSendStreamOptions): Promise<WritableStream<Uint8Array>>;
   /**
    * Orderly stop: end every live subscription (PUBLISH_DONE `TRACK_ENDED`, then FIN) and retract the announce
    * (NAMESPACE_DONE), give those writes a bounded window to reach the wire (closing a WebTransport discards queued
-   * data), then give the peer a bounded window to close each ended subscription's request stream, which it does once it
+   * data; a track ended with `end({ after })` gets the same window for `after`, then ends regardless), then give the peer a bounded window to close each ended subscription's request stream, which it does once it
    * has consumed the PUBLISH_DONE, and close the transport. Synchronous callers return immediately; the transport closes
    * within `CLOSE_FLUSH_TIMEOUT_MS` (250 ms) plus `CLOSE_END_ACK_TIMEOUT_MS` (2 s), and sooner against a peer that
    * answers promptly.
@@ -340,6 +348,11 @@ interface TrackRecord {
   pendingEnds: Promise<void>[];
   /** Settles when the ends queued by `end()` land. */
   doneFlushed?: Promise<void>;
+  /**
+   * Set while an `end({ after })` waits for `after`: ends the track's subscriptions now instead (idempotent, and the
+   * same as `after` settling). `close()` calls it once its flush window is over.
+   */
+  endNow?: () => void;
 }
 
 /** One accepted inbound SUBSCRIBE_NAMESPACE — the announce carrier. */
@@ -603,6 +616,10 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     if (this.#destroyed) return;
 
+    // A track end still waiting on its `after` has had the flush window: end its subscriptions now, so their
+    // PUBLISH_DONEs go out ahead of the transport close and the wait below covers them.
+    for (const track of this.#tracks.values()) track.endNow?.();
+
     // The writes are on the wire, not yet read: a peer that has not consumed a PUBLISH_DONE when the transport closes
     // aborts the track instead of finishing it (moq-relay 0.15.4 and later report that downstream as status 0). The
     // peer closes its side of the request stream once it has, so wait for that on every subscription still being
@@ -751,19 +768,38 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
 
     return {
       trackName: options.trackName,
-      end: () => this.#endTrack(track),
+      end: (options) => this.#endTrack(track, options?.after),
     };
   }
 
   /**
-   * End every live subscription with PUBLISH_DONE `TRACK_ENDED` and refuse future SUBSCRIBEs. The aggregated write
-   * completion lands on `track.doneFlushed` so `close()` can hold the transport open until the PUBLISH_DONEs and FINs
-   * reach the wire.
+   * Refuse future SUBSCRIBEs, and end every live subscription with PUBLISH_DONE `TRACK_ENDED`, now or once `after`
+   * settles. The aggregated write completion lands on `track.doneFlushed` so `close()` can hold the transport open
+   * until the PUBLISH_DONEs and FINs reach the wire.
    */
-  #endTrack(track: TrackRecord): void {
+  #endTrack(track: TrackRecord, after?: PromiseLike<unknown>): void {
     if (track.done) return;
 
     track.done = true;
+
+    if (after === undefined) {
+      track.doneFlushed = this.#endSubscriptions(track);
+      return;
+    }
+
+    let ended: Promise<void> | undefined;
+    const endNow = (): Promise<void> => {
+      delete track.endNow;
+      ended ??= this.#endSubscriptions(track);
+      return ended;
+    };
+
+    track.endNow = endNow;
+    track.doneFlushed = Promise.resolve(after).then(endNow, endNow);
+  }
+
+  /** The ending half of `#endTrack`: every live subscription's end, reported at once. Settles when the ends land. */
+  #endSubscriptions(track: TrackRecord): Promise<void> {
     let hadReported = false;
 
     for (const subscriber of track.subscribers) {
@@ -788,7 +824,7 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
       this.#callbacks.onTrackBinding?.({ trackName: track.trackName, trackAlias: undefined });
     }
 
-    track.doneFlushed = Promise.all([...track.pendingEnds]).then(() => {});
+    return Promise.all([...track.pendingEnds]).then(() => {});
   }
 
   /**
@@ -827,10 +863,12 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     });
   }
 
-  #liveSubscription(trackAlias: number): SubscriberStream | undefined {
+  #liveSubscription(trackAlias: number): { track: TrackRecord; subscriber: SubscriberStream } | undefined {
     for (const track of this.#tracks.values()) {
       for (const subscriber of track.subscribers) {
-        if (subscriber.trackAlias === trackAlias && subscriber.accepted && !subscriber.finished) return subscriber;
+        if (subscriber.trackAlias === trackAlias && subscriber.accepted && !subscriber.finished) {
+          return { track, subscriber };
+        }
       }
     }
 
@@ -843,12 +881,18 @@ class MoqtPublishSessionImpl implements MoqtPublishSession {
     // the session, and hammering createUnidirectionalStream() on a
     // torn-down WebTransport segfaults Chromium's renderer (null deref in
     // the native session teardown race) — observed against a relay that
-    // resets every stream on protocol disagreement.
-    if (this.#destroyed || this.#closing) throw new Error('moq publish session: closed');
+    // resets every stream on protocol disagreement. An orderly close
+    // keeps the transport alive through its drain window, and a track
+    // whose `end({ after })` is waiting there may still need a stream for
+    // its last group; nothing else opens once closing has begun.
+    if (this.#destroyed) throw new Error('moq publish session: closed');
 
-    const subscriber = this.#liveSubscription(trackAlias);
+    const live = this.#liveSubscription(trackAlias);
 
-    if (!subscriber) throw new Error(`moq publish session: no live subscription for track alias ${trackAlias}`);
+    if (this.#closing && live?.track.endNow === undefined) throw new Error('moq publish session: closed');
+    if (!live) throw new Error(`moq publish session: no live subscription for track alias ${trackAlias}`);
+
+    const { subscriber } = live;
 
     let settle!: () => void;
     const opening = new Promise<void>((resolve) => {
