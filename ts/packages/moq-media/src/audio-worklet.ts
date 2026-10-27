@@ -74,12 +74,12 @@ function audioPlayerWorklet(name: string): void {
   /** A gap inside held audio up to this long is filled with silence; a longer one is joined without it. */
   const MAX_CONCEAL = ms(1000);
   /** After an underrun the target grows this much; after `SHRINK_AFTER` with none it shrinks by `SHRINK_STEP`. */
-  const GROW_STEP = ms(20);
+  const GROW_STEP = ms(40);
   const SHRINK_STEP = ms(10);
-  const SHRINK_AFTER = ms(8000);
+  const SHRINK_AFTER = ms(2000);
   /** Each window, held audio that never dipped to the target is trimmed back to it, when the excess is this much. */
   const TRIM_WINDOW = ms(1000);
-  const MIN_TRIM = ms(10);
+  const MIN_TRIM = ms(5);
   /** The hard bound on held audio: twice the target plus this, and never past the ceiling. */
   const HARD_HEADROOM = ms(60);
   const REPORT_EVERY = ms(20);

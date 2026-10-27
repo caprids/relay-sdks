@@ -23,6 +23,11 @@ each section says what changed and what to do about it. How to cut a release is 
   index also exports `TRACK_PROPERTY`, `compareLocations`, `isEmptyFetchRange`, `encodeFetchHeader`,
   `isRetryableRequestErrorCode`, `isRetryablePublishDoneStatus`, `utf8Decode`, `CLOSE_FLUSH_TIMEOUT_MS` and
   `CLOSE_END_ACK_TIMEOUT_MS`.
+- `@caprid/moq-media`: the audio player's jitter buffer gives back what a delay spike added in seconds rather than a
+  minute: +40 ms per underrun, −10 ms after each 2 s of smooth playback, a 20 ms floor (was +20 ms, −10 ms per 8 s,
+  40 ms), and trims of 5 ms or more. On stage-2 netbench arrivals replayed offline it held 9–74 ms less (clean 9, busy
+  Wi-Fi 28, LEO 42, LTE 74) at about the same drops, and 1.5 drops a minute more under a bulk download's queue
+  sawtooth; pass `minJitterTargetUs: 40_000` for the old floor.
 
 ## 0.1.0
 

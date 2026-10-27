@@ -104,7 +104,7 @@ export interface AudioInputOptions {
   playbackRate?: number;
   /** How much audio to hold before playing, at the start and after each underrun. Default 60,000. */
   jitterTargetUs?: number;
-  /** The least the target shrinks to while playback is smooth. Default 40,000. */
+  /** The least the target shrinks to while playback is smooth. Default 20,000. */
   minJitterTargetUs?: number;
   /**
    * The most the target grows to after underruns. Default 400,000, and never more than the clock's target latency
@@ -437,7 +437,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   const decoderConfig = options.decoderConfig ?? DEFAULT_DECODER_CONFIG;
   const channels = Math.max(1, Math.min(2, decoderConfig.numberOfChannels));
   const startTargetUs = duration(options.jitterTargetUs, 60_000, 'jitterTargetUs');
-  const minTargetUs = duration(options.minJitterTargetUs, 40_000, 'minJitterTargetUs');
+  const minTargetUs = duration(options.minJitterTargetUs, 20_000, 'minJitterTargetUs');
   const maxTargetUs = duration(options.maxJitterTargetUs, 400_000, 'maxJitterTargetUs');
   if (minTargetUs > maxTargetUs) throw new RangeError('minJitterTargetUs must not exceed maxJitterTargetUs');
   let rate = playbackRate(options.playbackRate ?? 1);

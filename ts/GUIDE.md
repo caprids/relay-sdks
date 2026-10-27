@@ -883,8 +883,10 @@ subscriber.subscribe({ namespace, track: 'audio' }, { ...reader, onError });
 // Later: reader.close(), cancel the subscription, input.remove(); player.close() when the call ends.
 ```
 
-The buffer starts at 60 ms, grows by 20 ms after each underrun, shrinks by 10 ms after 8 s of
-smooth playback (never below 40 ms), and trims audio it held but never needed. It stays under 400 ms
+The buffer starts at 60 ms, grows by 40 ms after each underrun, shrinks by 10 ms after 2 s of
+smooth playback (never below 20 ms), and trims audio it held but never needed. Decoded audio reaches the
+worklet from the main thread, so a page whose main thread stalls for tens of milliseconds can underrun at that
+floor; such a page can pass `minJitterTargetUs: 40_000`, the floor before. It stays under 400 ms
 and under the clock's target latency less the output delay. `input.stats` has the underruns, the
 buffer depth and target, the frames dropped as late, and what was trimmed, concealed with silence or
 cut. A lost Opus frame is filled, not played as silence: the player decodes Opus with libopus compiled to
