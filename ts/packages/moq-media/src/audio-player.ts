@@ -12,6 +12,7 @@ import {
   type AudioPlayerProcessorReport,
 } from './audio-worklet.js';
 import { MICROSECONDS_PER_SECOND } from './loc.js';
+import { loadWasmOpus, type OpusPlanes, type WasmOpusDecoder, type WasmOpusModule } from './opus-decoder.js';
 import { createRenderClock, type RenderClock } from './render-clock.js';
 import type { FrameDiscontinuity, SequencedFrame } from './sequencer.js';
 
@@ -53,6 +54,14 @@ export interface AudioPlayerContext {
 export interface AudioPlayerOptions<Context extends AudioPlayerContext> {
   /** The one context every input plays through. Create or resume it from a user gesture. */
   context: Context;
+  /**
+   * Fill lost Opus frames instead of playing silence. Default true: Opus inputs decode with libopus compiled to
+   * WebAssembly, which conceals a missing frame (packet-loss concealment) and rebuilds it from the next frame's in-band
+   * FEC when the encoder sent one; WebCodecs' AudioDecoder can do neither. False, or where WebAssembly is
+   * unavailable: every input decodes with WebCodecs, and a lost frame plays as silence. Other codecs always use
+   * WebCodecs.
+   */
+  lossConcealment?: boolean;
 }
 
 /** One encoded audio frame: a `SequencedFrame` from a frame reader qualifies. */
@@ -149,6 +158,10 @@ export interface AudioInputStats {
   trimmedUs: number;
   /** Silence played in place of frames that never came. */
   concealedUs: number;
+  /** Audio synthesized in place of frames that never came: libopus packet-loss concealment. */
+  synthesizedUs: number;
+  /** Audio rebuilt for frames that never came from the next frame's in-band FEC. */
+  recoveredUs: number;
   /** Audio dropped by `cut()`. */
   cutUs: number;
   /** Clock reports made. */
@@ -212,6 +225,15 @@ const TIMESTAMP_TOLERANCE_US = 1_000;
 const MAX_ARRIVAL_CUTS = 16;
 /** Room kept under the clock's target latency for the frame in flight and the decoder. */
 const BUDGET_MARGIN_US = 40_000;
+/** The rate the WebAssembly Opus decoder decodes at: Opus's own. */
+const OPUS_RATE = 48_000;
+/**
+ * The most audio packet-loss concealment synthesizes for one gap. libopus fades what it synthesizes, so past this the
+ * worklet's silence costs nothing more, and the next frame starts from a decoder still in step.
+ */
+const MAX_SYNTHESIZED_US = 120_000;
+/** A gap longer than this is a new start, not a loss (the worklet's longest silence fill): the decoder resets. */
+const MAX_FILLED_GAP_US = 1_000_000;
 
 interface WorkletPort {
   onmessage: ((event: { data: AudioPlayerProcessorReport }) => void) | null;
@@ -283,6 +305,26 @@ export function opusPacketDurationUs(packet: Uint8Array): number | undefined {
   return count === undefined ? undefined : (count & 0x3f) * frameUs;
 }
 
+/** One Opus frame's duration in a packet, in microseconds, from its TOC byte (RFC 6716 §3.1). */
+function opusFrameUs(packet: Uint8Array): number | undefined {
+  const toc = packet[0];
+  if (toc === undefined) return undefined;
+  const config = toc >> 3;
+  return config < 12
+    ? ([10_000, 20_000, 40_000, 60_000][config % 4] as number)
+    : config < 16
+      ? ([10_000, 20_000][config % 2] as number)
+      : ([2_500, 5_000, 10_000, 20_000][config % 4] as number);
+}
+
+/** A packet's Opus mode from its TOC byte: SILK-only, hybrid or CELT-only. */
+function opusFrameMode(packet: Uint8Array): 'silk' | 'hybrid' | 'celt' | undefined {
+  const toc = packet[0];
+  if (toc === undefined) return undefined;
+  const config = toc >> 3;
+  return config < 12 ? 'silk' : config < 16 ? 'hybrid' : 'celt';
+}
+
 /** A linear resampler, for a context whose rate is not the decoder's. Keeps its phase across frames. */
 function createResampler(channels: number) {
   // The input position of the next output sample, relative to the next frame's first sample: −1 ≤ phase < 0 means
@@ -342,6 +384,8 @@ export async function createAudioPlayer<Context extends AudioPlayerContext>(
 ): Promise<AudioPlayer<ReturnType<Context['createGain']>>> {
   const { context } = options;
   await loadWorklet(context);
+  // Without the module, inputs fall back to WebCodecs: concealment is an improvement, never a requirement.
+  const opus = options.lossConcealment === false ? undefined : await loadWasmOpus().catch(() => undefined);
   const output = context.createGain() as ReturnType<Context['createGain']>;
   const inputs: AudioPlayerInput[] = [];
   let outputDelayUs = 0;
@@ -366,6 +410,7 @@ export async function createAudioPlayer<Context extends AudioPlayerContext>(
         connect: (node) => node.connect(output),
         outputDelayUs: () => outputDelayUs,
         removed: (removed) => inputs.splice(inputs.indexOf(removed), 1),
+        opus,
       });
       inputs.push(input);
       return input;
@@ -383,6 +428,8 @@ interface InputHost {
   connect(node: AudioPlayerNode): void;
   outputDelayUs(): number;
   removed(input: AudioPlayerInput): void;
+  /** The WebAssembly Opus decoder's module, when the player conceals losses. */
+  opus: WasmOpusModule | undefined;
 }
 
 function createInput(context: AudioPlayerContext, options: AudioInputOptions, host: InputHost): AudioPlayerInput {
@@ -438,6 +485,8 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     jitterTargetUs: Math.min(startTargetUs, toUs(ceiling)),
     trimmedUs: 0,
     concealedUs: 0,
+    synthesizedUs: 0,
+    recoveredUs: 0,
     cutUs: 0,
     reports: 0,
   };
@@ -469,6 +518,105 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     else node.port.postMessage(command);
   };
 
+  // Resample decoded planes to the context's rate and hand them to the worklet.
+  const deliver = (timestamp: number, planes: Float32Array[], fromRate: number) => {
+    const { planes: resampled, offset } = resampler.resample(planes, fromRate, sampleRate);
+    const timestampUs = timestamp + Math.round((offset * MICROSECONDS_PER_SECOND) / fromRate);
+    if (resampled[0]?.length) {
+      post(
+        { type: 'pcm', timestampUs, planes: resampled },
+        resampled.map((plane) => plane.buffer as ArrayBuffer)
+      );
+    }
+  };
+  // With loss concealment, Opus decodes here, synchronously, with libopus: one decoder for the input's life, reset
+  // rather than replaced, so a gap is filled from the decoder's own state instead of starting a new one after it.
+  const wasm: WasmOpusDecoder | undefined =
+    host.opus && decoderConfig.codec === 'opus' ? host.opus.createDecoder(OPUS_RATE, channels) : undefined;
+  const opusSamples = (us: number) => {
+    // libopus decodes and conceals whole 2.5 ms steps.
+    const step = OPUS_RATE / 400;
+    return Math.floor(Math.round((us * OPUS_RATE) / MICROSECONDS_PER_SECOND) / step) * step;
+  };
+  const opusUs = (samples: number) => Math.round((samples * MICROSECONDS_PER_SECOND) / OPUS_RATE);
+  // Whether the last packet decoded was CELT-only, which libopus cannot follow with FEC.
+  let previousCelt = false;
+  // Fill the audio missing from `fromUs` up to the frame at `untilUs`, whose packet is `next`. Its in-band FEC rebuilds
+  // the last frame before it (one Opus frame of `next`'s duration: LBRR covers no more); packet-loss concealment fills
+  // the rest, MAX_SYNTHESIZED_US at most for the whole gap. Past that the worklet plays silence, as for any gap.
+  const conceal = (decoderNow: WasmOpusDecoder, fromUs: number, untilUs: number, next: Uint8Array, frameUs: number) => {
+    const gapUs = untilUs - fromUs;
+    // libopus decodes FEC only into a SILK or hybrid decoder, and only from a SILK or hybrid packet.
+    const fecUs = previousCelt || opusFrameMode(next) === 'celt' ? 0 : Math.min(opusFrameUs(next) ?? frameUs, gapUs);
+    let budgetUs = MAX_SYNTHESIZED_US;
+    let atUs = fromUs;
+    const synthesize = (us: number) => {
+      const samples = opusSamples(Math.min(us, budgetUs));
+      if (samples <= 0) return false;
+      deliverOpus(atUs, decoderNow.conceal(samples));
+      stats.synthesizedUs += opusUs(samples);
+      atUs += opusUs(samples);
+      budgetUs -= opusUs(samples);
+      return true;
+    };
+    while (atUs < untilUs - fecUs && synthesize(Math.min(frameUs, untilUs - fecUs - atUs)));
+    const samples = opusSamples(fecUs);
+    if (samples <= 0) return;
+    const fecAtUs = untilUs - opusUs(samples);
+    if (fecAtUs !== atUs) resampler.reset();
+    atUs = fecAtUs;
+    // FEC is optional: LBRR that does not decode is concealed instead.
+    let recovered: OpusPlanes | undefined;
+    try {
+      recovered = decoderNow.recover(next, samples);
+    } catch {
+      recovered = undefined;
+    }
+    if (recovered) {
+      deliverOpus(fecAtUs, recovered);
+      stats.recoveredUs += opusUs(samples);
+    } else synthesize(opusUs(samples));
+  };
+  const deliverOpus = (timestampUs: number, planes: OpusPlanes) => deliver(timestampUs, planes, OPUS_RATE);
+  // Decode a frame with libopus, after filling any gap before it.
+  const sendWasm = (
+    decoderNow: WasmOpusDecoder,
+    frame: { timestampUs: number; payload: Uint8Array },
+    gapFromUs?: number,
+    frameUs?: number
+  ) => {
+    // One frame counts one error and reports it once, after everything it does, since onError may remove the input.
+    let error: unknown;
+    let failed = false;
+    if (gapFromUs !== undefined && frameUs !== undefined) {
+      // A concealment that fails leaves the rest of the gap to the worklet's silence; the frame that came still plays,
+      // from a decoder reset out of whatever state the failure left.
+      try {
+        conceal(decoderNow, gapFromUs, frame.timestampUs, frame.payload, frameUs);
+      } catch (concealError) {
+        failed = true;
+        error = concealError;
+        decoderNow.reset();
+        resampler.reset();
+      }
+    }
+    try {
+      deliverOpus(frame.timestampUs, decoderNow.decode(frame.payload));
+      previousCelt = opusFrameMode(frame.payload) === 'celt';
+      stats.decoded++;
+    } catch (decodeError) {
+      decoderNow.reset();
+      resampler.reset();
+      failed = true;
+      error = decodeError;
+    }
+    if (failed) {
+      stats.errors++;
+      stats.decoderResets++;
+      options.onError?.(error);
+    }
+  };
+
   const closeDecoders = () => {
     for (const each of [decoder, retiring]) if (each && each.state !== 'closed') each.close();
     decoder = undefined;
@@ -478,6 +626,10 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   // Drop what the decoders still hold: it belongs to audio that was dropped, or to a decoder that failed.
   const resetDecoder = () => {
     if (decoder) stats.decoderResets++;
+    if (wasm) {
+      if (stats.decoded > 0) stats.decoderResets++;
+      wasm.reset();
+    }
     closeDecoders();
     epoch++;
     pendingCuts = [];
@@ -504,14 +656,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
             data.copyTo(plane, { planeIndex: channel, format: 'f32-planar' });
             planes.push(plane);
           }
-          const { planes: resampled, offset } = resampler.resample(planes, data.sampleRate, sampleRate);
-          const timestampUs = data.timestamp + Math.round((offset * MICROSECONDS_PER_SECOND) / data.sampleRate);
-          if (resampled[0]?.length) {
-            post(
-              { type: 'pcm', timestampUs, planes: resampled },
-              resampled.map((plane) => plane.buffer as ArrayBuffer)
-            );
-          }
+          deliver(data.timestamp, planes, data.sampleRate);
         } finally {
           data.close();
         }
@@ -618,6 +763,37 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
         stats.late++;
         return;
       }
+      if (wasm) {
+        // An empty payload carries no audio (an Opus packet has at least its TOC byte): treat it as not received,
+        // so the next frame conceals its slot. libopus would read it as a request for 120 ms of concealment.
+        if (payload.byteLength === 0) return;
+        const frameUs = opusPacketDurationUs(payload) ?? lastDurationUs;
+        // A 'gap' is what concealment fills; a resync or restart flushed above and starts a new timeline.
+        const fresh = discontinuity === 'resync' || discontinuity === 'restart';
+        const gapUs = expectedUs === undefined || fresh ? 0 : timestampUs - expectedUs;
+        let gapFromUs: number | undefined;
+        // Audio cut out on purpose (an interruption) stays out: the worklet joins across a cut without silence.
+        const cutInGap =
+          expectedUs !== undefined &&
+          arrivalCuts.some((cut) => cut.fromUs < timestampUs && cut.untilUs > (expectedUs as number));
+        // Only while the buffer plays: once it ran dry, the worklet skips the missing audio rather than playing it
+        // late, so filling it would add its length to the delay (as the worklet fills a gap only inside held audio).
+        const playingNow = stats.playing && stats.dryAtUs === null;
+        if (gapUs > TIMESTAMP_TOLERANCE_US && gapUs <= MAX_FILLED_GAP_US && !cutInGap && playingNow)
+          gapFromUs = expectedUs;
+        else if (cutInGap) resampler.reset();
+        else if (gapUs > MAX_FILLED_GAP_US) {
+          if (stats.decoded > 0) stats.decoderResets++;
+          wasm.reset();
+          resampler.reset();
+        }
+        const fillUs = lastDurationUs ?? frameUs ?? 20_000;
+        if (frameUs !== undefined) lastDurationUs = frameUs;
+        expectedUs = frameUs === undefined ? undefined : timestampUs + frameUs;
+        lastSentUs = timestampUs;
+        sendWasm(wasm, { timestampUs, payload }, gapFromUs, fillUs);
+        return;
+      }
       // Decoders count samples from their first input: a new one starts wherever this frame does not follow the last.
       const jumps =
         discontinuity !== undefined ||
@@ -675,6 +851,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       if (removed) return;
       removed = true;
       closeDecoders();
+      wasm?.close();
       post({ type: 'stop' });
       node.port.onmessage = null;
       node.port.close();

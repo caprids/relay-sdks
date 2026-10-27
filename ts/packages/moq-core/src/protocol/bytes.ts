@@ -14,6 +14,7 @@ export function utf8Encode(value: string): Uint8Array {
   return textEncoder.encode(value);
 }
 
+/** Decode UTF-8 bytes, such as a text object's payload, replacing malformed sequences with U+FFFD. */
 export function utf8Decode(bytes: Uint8Array): string {
   return textDecoder.decode(bytes);
 }

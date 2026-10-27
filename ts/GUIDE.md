@@ -889,7 +889,11 @@ worklet from the main thread, so a page whose main thread stalls for tens of mil
 floor; such a page can pass `minJitterTargetUs: 40_000`, the floor before. It stays under 400 ms
 and under the clock's target latency less the output delay. `input.stats` has the underruns, the
 buffer depth and target, the frames dropped as late, and what was trimmed, concealed with silence or
-cut. The decoder resets at every discontinuity and timestamp jump, and a `resync` or `restart`
+cut. A lost Opus frame is filled, not played as silence: the player decodes Opus with libopus compiled to
+WebAssembly, which rebuilds the frame from the next frame's in-band FEC when the publisher's encoder sent one, and
+otherwise conceals it (`stats.recoveredUs`, `stats.synthesizedUs`). Publish with in-band FEC on, and an expected
+loss above 0, to get the rebuilt frames. `createAudioPlayer({ context, lossConcealment: false })` decodes with
+WebCodecs instead, which resets its decoder at every discontinuity and timestamp jump. A `resync` or `restart`
 flushes the buffer. `input.cut({ fromUs, untilUs })` drops received audio in a timeline range, held
 or arriving later, as when a talker is interrupted. A talker that can stop mid-utterance, such as a
 voice bot, lists an `interrupt` data track in its catalog and writes an interrupt there when it does;

@@ -20,6 +20,7 @@ import {
   encodeSetup,
   encodeSubscribe,
   encodeSubscribeOk,
+  isEmptyFetchRange,
   isRetryablePublishDoneStatus,
   isRetryableRequestErrorCode,
   type LocationFilter,
@@ -576,6 +577,41 @@ describe('encodeLocationFilter', () => {
     writer.writeVarint(0);
     writer.writeVarint(1);
     expect(() => decodeLocationFilter(writer.toBytes(), protocol)).toThrow(MoqtProtocolError);
+  });
+});
+
+describe('isEmptyFetchRange', () => {
+  const largest = { group: 4, object: 2 };
+
+  it('is empty for every filter before the track has content', () => {
+    expect(isEmptyFetchRange({ type: 'none' }, undefined)).toBe(true);
+    expect(isEmptyFetchRange({ type: 'relative-group', groupsBeforeNext: 1 }, undefined)).toBe(true);
+    expect(isEmptyFetchRange({ type: 'absolute', start: { group: 0, object: 0 } }, undefined)).toBe(true);
+  });
+
+  it('is empty when the start lies past Largest Object', () => {
+    expect(isEmptyFetchRange({ type: 'next-object' }, largest)).toBe(true);
+    expect(isEmptyFetchRange({ type: 'relative-group', groupsBeforeNext: 0 }, largest)).toBe(true);
+    expect(isEmptyFetchRange({ type: 'absolute', start: { group: 4, object: 3 } }, largest)).toBe(true);
+    expect(isEmptyFetchRange({ type: 'absolute', start: { group: 5, object: 0 } }, largest)).toBe(true);
+  });
+
+  it('is nonempty when the start is at or before Largest Object', () => {
+    expect(isEmptyFetchRange({ type: 'none' }, largest)).toBe(false);
+    expect(isEmptyFetchRange({ type: 'relative-group', groupsBeforeNext: 1 }, largest)).toBe(false);
+    expect(isEmptyFetchRange({ type: 'relative-group', groupsBeforeNext: 9 }, largest)).toBe(false);
+    expect(isEmptyFetchRange({ type: 'absolute', start: { group: 4, object: 2 } }, largest)).toBe(false);
+    expect(isEmptyFetchRange({ type: 'absolute', start: { group: 1, object: 7 }, endGroupDelta: 0 }, largest)).toBe(
+      false
+    );
+  });
+
+  it('is empty only when a bounded absolute end precedes its start', () => {
+    const start = { group: 2, object: 5 };
+
+    expect(isEmptyFetchRange({ type: 'absolute', start, endGroupDelta: 0, endObject: 4 }, largest)).toBe(true);
+    expect(isEmptyFetchRange({ type: 'absolute', start, endGroupDelta: 0, endObject: 5 }, largest)).toBe(false);
+    expect(isEmptyFetchRange({ type: 'absolute', start, endGroupDelta: 1, endObject: 0 }, largest)).toBe(false);
   });
 });
 

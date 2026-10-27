@@ -7,6 +7,22 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/moq-media`: lost Opus frames are filled rather than played as silence. Opus inputs decode with libopus
+  compiled to WebAssembly (116 KB, embedded), which conceals a missing frame (packet-loss concealment, up to 120 ms a
+  gap) and rebuilds it from the next frame's in-band FEC when the publisher's encoder sent one. Stats `synthesizedUs`
+  and `recoveredUs` count them. `createAudioPlayer({ context, lossConcealment: false })` decodes with WebCodecs as
+  before, as does any input where WebAssembly is unavailable or the codec is not Opus.
+- `@caprid/moq-core`: publish-session hooks for embedders such as Video.js. A registered track's `getLargestObject`
+  puts `LARGEST_OBJECT` in SUBSCRIBE_OK and REQUEST_OK; with it, a nonempty fill request gets a fill fetch stream
+  that is reset after its FETCH_HEADER and counted in PUBLISH_DONE. `RegisteredTrack.end({ after })` holds the
+  subscriptions' end until a last group is written, also during an orderly close. Nothing changes for `@caprid/relay`,
+  which uses neither.
+- `@caprid/moq-core`: a REQUEST_UPDATE carrying `FILL_PARAMETERS` is acknowledged instead of ending the subscription
+  with `UPDATE_FAILED` (Python too). moq-relay sends no REQUEST_UPDATE, so the relay path is unchanged.
+- `@caprid/moq-core`: `MoqtTransport.protocol` is optional; a transport without it gets the `moqt-22` codec. The
+  index also exports `TRACK_PROPERTY`, `compareLocations`, `isEmptyFetchRange`, `encodeFetchHeader`,
+  `isRetryableRequestErrorCode`, `isRetryablePublishDoneStatus`, `utf8Decode`, `CLOSE_FLUSH_TIMEOUT_MS` and
+  `CLOSE_END_ACK_TIMEOUT_MS`.
 - `@caprid/moq-media`: the audio player's jitter buffer gives back what a delay spike added in seconds rather than a
   minute: +40 ms per underrun, −10 ms after each 2 s of smooth playback, a 20 ms floor (was +20 ms, −10 ms per 8 s,
   40 ms), and trims of 5 ms or more. On stage-2 netbench arrivals replayed offline it held 9–74 ms less (clean 9, busy

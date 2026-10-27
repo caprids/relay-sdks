@@ -1,4 +1,4 @@
-export { ByteWriter } from './protocol/bytes.js';
+export { ByteWriter, utf8Decode } from './protocol/bytes.js';
 export type {
   FillParameters,
   GroupOrder,
@@ -11,19 +11,28 @@ export type {
   TrackNamespace,
 } from './protocol/control-messages.js';
 export {
+  compareLocations,
   encodeKeyValuePairs,
   encodeRequestUpdate,
+  isEmptyFetchRange,
+  isRetryablePublishDoneStatus,
+  isRetryableRequestErrorCode,
   MAX_NAMESPACE_FIELDS,
   MOQT_PROTOCOL_ID,
   MOQT_PROTOCOL_IDS,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
   SETUP_OPTION,
+  TRACK_PROPERTY,
 } from './protocol/control-messages.js';
 export type { SessionErrorCode } from './protocol/errors.js';
 export { isMoqtProtocolError, MoqtProtocolError, SESSION_ERROR } from './protocol/errors.js';
 export type { FetchEndOfRangeStatus, FetchStreamEntry, MoqtObject, ObjectStatus } from './protocol/object-stream.js';
-export { MAX_OBJECT_PAYLOAD_LENGTH, MAX_OBJECT_PROPERTIES_LENGTH } from './protocol/object-stream.js';
+export {
+  encodeFetchHeader,
+  MAX_OBJECT_PAYLOAD_LENGTH,
+  MAX_OBJECT_PROPERTIES_LENGTH,
+} from './protocol/object-stream.js';
 export type {
   IncomingSubscribe,
   MoqtPublishSession,
@@ -32,7 +41,12 @@ export type {
   RegisteredTrack,
   RegisterTrackOptions,
 } from './protocol/publish-session.js';
-export { createMoqtPublishSession, MAX_TRACK_PROPERTIES_LENGTH } from './protocol/publish-session.js';
+export {
+  CLOSE_END_ACK_TIMEOUT_MS,
+  CLOSE_FLUSH_TIMEOUT_MS,
+  createMoqtPublishSession,
+  MAX_TRACK_PROPERTIES_LENGTH,
+} from './protocol/publish-session.js';
 export type { BidirectionalStreamLike } from './protocol/request-stream.js';
 export type {
   FetchHandle,

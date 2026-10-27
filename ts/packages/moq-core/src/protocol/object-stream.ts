@@ -13,7 +13,7 @@
  * The parsers are async generators over a `StreamReader`, mirroring how `ChunkedStreamIterable` adapts fetch bodies
  * elsewhere in `network/`.
  */
-import { ByteReader, type StreamReader } from './bytes.js';
+import { ByteReader, ByteWriter, type StreamReader } from './bytes.js';
 import { decodeKeyValuePairs, type KeyValuePair } from './control-messages.js';
 import { MoqtProtocolError } from './errors.js';
 import { MAX_VARINT_VALUE } from './varint.js';
@@ -273,6 +273,18 @@ export type FetchStreamEntry =
 /** Read the FETCH_HEADER's Request ID (the stream-type varint must already be consumed). */
 export async function readFetchHeader(reader: StreamReader): Promise<{ requestId: number }> {
   return { requestId: await reader.readVarint() };
+}
+
+/**
+ * Write a FETCH_HEADER (§11.4.1): the stream-type varint, then the Request ID. A fill fetch stream (§3.4) opens with
+ * this frame carrying the Request ID of the SUBSCRIBE or REQUEST_UPDATE that asked for the fill.
+ */
+export function encodeFetchHeader(requestId: number): Uint8Array {
+  const writer = new ByteWriter(16);
+
+  writer.writeVarint(STREAM_TYPE.FETCH_HEADER);
+  writer.writeVarint(requestId);
+  return writer.toBytes();
 }
 
 /**
