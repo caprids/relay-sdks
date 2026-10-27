@@ -1043,6 +1043,31 @@ class TestCreateMoqtPublishSession:
         assert not sub.ended()
         harness.destroy()
 
+    async def test_acknowledges_a_fill_update_and_opens_no_fill_fetch_stream(self) -> None:
+        # §3.4.1: FILL_PARAMETERS asks for one fill and changes nothing about the subscription. The
+        # driver reports no Largest Object, so the fill range is empty and no stream opens (§3.4).
+        ended_requests: list[int] = []
+        harness = Harness(MoqtPublishSessionCallbacks(on_subscribe_end=ended_requests.append))
+
+        await harness.session.ready
+        register(harness.session, "video")
+
+        sub = await raw_subscribe(harness.pair.server, "video", 141)
+
+        await wait_for(lambda: sub.kinds() == ["subscribe-ok"])
+        await sub.send(
+            encode_request_update(
+                143,
+                MessageParameters(
+                    fill_parameters=MessageParameters(location_filter=RelativeGroupFilter(groups_before_next=1))
+                ),
+            )
+        )
+        await wait_for(lambda: sub.kinds() == ["subscribe-ok", "request-ok"])
+        assert ended_requests == []
+        assert not sub.ended()
+        harness.destroy()
+
     async def test_a_subscription_without_delivery_timeouts_binds_with_none(self) -> None:
         bindings: list[TrackBinding] = []
         harness = Harness(MoqtPublishSessionCallbacks(on_track_binding=bindings.append))

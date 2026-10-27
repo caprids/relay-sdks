@@ -77,9 +77,15 @@ export interface MoqtSendStreamOptions {
 export interface MoqtTransport {
   /**
    * The protocol the peer selected from those offered: the negotiated ALPN on native QUIC, the `WT-Protocol` response
-   * header on a WebTransport session. Read once the transport is ready (TA-8).
+   * header on a WebTransport session. Read once, when a session is created over the ready transport (TA-8); it selects
+   * the parameter codec.
+   *
+   * Optional because a browser `WebTransport` may lack the attribute, and TypeScript's DOM types lack it. A transport
+   * that does not report a protocol in {@link @caprid/moq-core!MOQT_PROTOCOL_IDS} gets the `moqt-22` codec, so one that cannot report it
+   * must offer only `moqt-22`: a peer that selected `moqt-20` would misread every LOCATION_FILTER. The SDK's own
+   * adapters always report it.
    */
-  readonly protocol: string;
+  readonly protocol?: string | undefined;
   /** Unidirectional streams the peer opens: its control stream and data streams. */
   readonly incomingUnidirectionalStreams: ReadableStream<ReadableStream<Uint8Array>>;
   /** Bidirectional streams the peer opens: its request streams. */
