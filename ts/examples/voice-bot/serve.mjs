@@ -1,7 +1,7 @@
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { roomEndpoint } from '@caprid/relay';
+import { DEFAULT_ENDPOINT, roomEndpoint } from '@caprid/relay';
 import { startModuleServer } from '../../scripts/module-server.js';
 
 // Serve the voice bot page on http://127.0.0.1 (a secure context, as WebTransport needs). The page talks to the bot
@@ -16,7 +16,7 @@ const { values } = parseArgs({
 const namespace = (values.namespace ?? `${process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-example'}/voice-bot`)
   .split('/')
   .filter(Boolean);
-const relayUrl = process.env.RELAY_URL ?? 'https://relay.mux.global';
+const relayUrl = process.env.RELAY_URL ?? DEFAULT_ENDPOINT;
 const config = {
   // --room roots RELAY_URL at its slash-separated fields, as the bot's --room does; --namespace is then relative to them.
   url: values.room === undefined ? relayUrl : roomEndpoint(relayUrl, values.room.split('/').filter(Boolean)),

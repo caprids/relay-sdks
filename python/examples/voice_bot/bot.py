@@ -28,6 +28,7 @@ from urllib.parse import urlsplit
 import numpy as np
 
 from caprid_relay import (
+    DEFAULT_ENDPOINT,
     RelayPublisher,
     RelayTrackWriter,
     RestartReason,
@@ -55,8 +56,6 @@ from moq_media import (
     loc_track_properties,
 )
 from moq_media.opus import OpusDecoder, OpusEncoder, OpusPacket
-
-DEFAULT_ENDPOINT = "https://relay.mux.global"
 
 # How long after the end of a reply its audio may still be playing at a listener: the audio-only target latency, the
 # most a listener's jitter buffer holds. Talking over it then still interrupts.

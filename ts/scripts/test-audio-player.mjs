@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_ENDPOINT } from '@caprid/relay';
 import { startModuleServer } from './module-server.js';
 
 // The live audio player test (issue #314): scripts/audio-player/scenario.ts publishes the WebCodecs example's
@@ -11,7 +12,7 @@ import { startModuleServer } from './module-server.js';
 // (RELAY_URL, RELAY_TOKEN, RELAY_NAMESPACE_PREFIX). AUDIO_PLAYER_SECONDS sets the steady phase's length.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const endpoint = process.env.RELAY_URL ?? 'https://relay.mux.global';
+const endpoint = process.env.RELAY_URL ?? DEFAULT_ENDPOINT;
 const token = process.env.RELAY_TOKEN;
 const prefix = (process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-smoke').split('/').filter(Boolean);
 const seconds = Number(process.env.AUDIO_PLAYER_SECONDS ?? 8);
