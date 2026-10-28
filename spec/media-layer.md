@@ -845,8 +845,9 @@ concealment synthesizes the rest of the gap, up to 120 ms, from the decoder's ow
 the worklet plays silence, as for any gap. The filled audio carries the missing timestamps, so the
 buffer plays on without a hole and no decoder is reset. Only while the buffer plays: once it has run dry
 the worklet skips the missing audio rather than playing it late (as its own silence fill works only
-inside held audio), so a gap then is not filled, which would add its length to the delay. A gap longer than 1 s, a `resync` or a
-`restart` resets the decoder instead. `synthesizedUs` and `recoveredUs` count what was filled.
+inside held audio), so a gap then is not filled, which would add its length to the delay. A gap left unfilled (after the
+buffer ran dry, while it fills to its target, over a cut, or longer than 1 s), a `resync` or a `restart` resets the
+decoder instead, so the frame after it is not decoded from state that belongs before the gap. `synthesizedUs` and `recoveredUs` count what was filled.
 `lossConcealment: false`, a codec other than Opus, or a realm without WebAssembly decodes with
 WebCodecs as described above. Measured offline on stage-2 netbench arrivals at 2% random loss
 (relay-dev `moq-netbench/docs/moq-optimisation.md`): drops from about 56 a minute to 16 with

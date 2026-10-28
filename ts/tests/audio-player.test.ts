@@ -1113,6 +1113,47 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0 });
   });
 
+  it('decodes the frame after a short gap it does not fill from a fresh decoder, not from state before the gap', async () => {
+    // What each input sends the worklet for the frame at `timestampUs`: its first channel's samples.
+    const capture = (context: FakeContext, timestampUs: number) => {
+      const port = nodeOf(context).port;
+      const send = port.postMessage.bind(port);
+      const seen: number[][] = [];
+      port.postMessage = (message: unknown, ...rest: unknown[]) => {
+        const pcm = message as { type: string; timestampUs: number; planes: Float32Array[] };
+        if (pcm.type === 'pcm' && pcm.timestampUs === timestampUs) seen.push(Array.from(pcm.planes[0] ?? []));
+        (send as (...args: unknown[]) => void)(message, ...rest);
+      };
+      return seen;
+    };
+    // Buffer dry: frames 0 and 1 played out, frame 2 never came, frame 3 arrives after a 20 ms gap.
+    const dry = await setUp({ lossConcealment: true });
+    const input = dry.player.addInput({ clock: dry.clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    dry.context.render(100);
+    expect(input.stats.dryAtUs).not.toBeNull();
+    const afterDry = capture(dry.context, opusAt(3).timestampUs);
+    input.push(opusAt(3, 'gap'));
+    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0, decoderResets: 1 });
+    // Holding to its target: frame 0 is held, frame 1 never came, frame 3's packet arrives at frame 2's slot.
+    const holding = await setUp({ lossConcealment: true });
+    const held = holding.player.addInput({ clock: holding.clock, decoderConfig: mono });
+    held.push(opusAt(0));
+    expect(held.stats.playing).toBe(false);
+    const afterHold = capture(holding.context, opusAt(2).timestampUs);
+    held.push({ timestampUs: opusAt(2).timestampUs, payload: OPUS_PACKETS[3] as Uint8Array, discontinuity: 'gap' });
+    expect(held.stats).toMatchObject({ decoded: 2, synthesizedUs: 0, decoderResets: 1 });
+    // Both decode exactly what a new decoder makes of that packet.
+    const fresh = await setUp({ lossConcealment: true });
+    const alone = fresh.player.addInput({ clock: fresh.clock, decoderConfig: mono });
+    const first = capture(fresh.context, opusAt(3).timestampUs);
+    alone.push(opusAt(3));
+    expect(first).toHaveLength(1);
+    expect(afterDry).toEqual(first);
+    expect(afterHold).toEqual(first);
+  });
+
   it('takes an empty payload as a frame not received: the next frame fills its slot, nothing errs', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
     const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
@@ -1199,7 +1240,8 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     // An interruption cuts frames 2 and 3 before they arrive; frame 4 comes next.
     input.cut({ fromUs: opusAt(2).timestampUs, untilUs: opusAt(4).timestampUs });
     input.push(opusAt(4, 'gap'));
-    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0, decoderResets: 0 });
+    // Nothing is filled, and frame 4 starts a fresh decoder: it does not follow frame 1.
+    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0, decoderResets: 1 });
     context.render(20);
   });
 
