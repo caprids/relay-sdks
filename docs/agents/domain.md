@@ -1,6 +1,6 @@
-# Domain Docs
+# Domain docs
 
-How the engineering skills should consume this repo's domain documentation when exploring the codebase.
+How skills and agents use this repo's domain documentation when they explore the codebase.
 
 ## This repo
 
@@ -14,29 +14,28 @@ and do not restate them:
   with the rationale for each. `CONTEXT.md` links to it and adds only concepts that are not
   public API (internal terms, relay-side behavior, test vocabulary).
 - **`spec/behavior.md`** is the behavior contract every SDK must exhibit. A decision that changes
-  observable behavior belongs there; an ADR records why it was made.
+  observable behavior belongs there, and an ADR records why it was made.
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root, or
-- **`CONTEXT-MAP.md`** at the repo root if it exists: it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
-- **`docs/adr/`**: read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
+- **`CONTEXT.md`** at the repo root.
+- **`docs/adr/`**: the ADRs that touch the area you are about to work in.
 
-If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The `/domain-modeling` skill (reached via `/grill-with-docs` and `/improve-codebase-architecture`) creates them lazily when terms or decisions actually get resolved.
+The `/domain-modeling` skill adds glossary terms and ADRs when a term or decision gets resolved.
 
 ## File structure
 
 ```
 /
 ├── AGENTS.md
-├── CONTEXT.md                  ← glossary; links spec/vocabulary.md for public names
+├── CONTEXT.md                  ← glossary, links spec/vocabulary.md for public names
 ├── docs/
-│   ├── adr/
-│   │   └── 0001-<decision>.md
+│   ├── adr/                    ← 0001-*.md onward, one decision each
 │   └── agents/                 ← this file and its siblings
 ├── spec/                       ← protocol pins, behavior contract, vocabulary, vectors
 ├── ts/                         ← TypeScript SDK (pnpm workspace)
-└── python/                     ← Python SDK (uv workspace)
+├── python/                     ← Python SDK (uv workspace)
+└── tools/                      ← hardware measurement rigs
 ```
 
 This repo does not use `CONTEXT-MAP.md` or per-context `docs/adr/` directories.
@@ -45,10 +44,10 @@ This repo does not use `CONTEXT-MAP.md` or per-context `docs/adr/` directories.
 
 When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
 
-If the concept you need isn't in the glossary yet, that's a signal: either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/domain-modeling`).
+If the concept you need is not in the glossary yet, either you are inventing language the project does not use (reconsider) or there is a real gap (note it for `/domain-modeling`).
 
 ## Flag ADR conflicts
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
 
-> _Contradicts ADR-0007 (event-sourced orders), but worth reopening because…_
+> _Contradicts ADR 0001 (one relay subscription per track), but worth reopening because…_

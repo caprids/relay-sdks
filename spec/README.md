@@ -5,12 +5,13 @@ lockstep.
 
 | File | Purpose | How it is enforced |
 | --- | --- | --- |
-| `protocol.json` | Machine-readable pins: the MOQT draft (`draft-ietf-moq-transport-22`, wire identifier `moqt-22`, with `moqt-20` as the offered fallback), default Relay endpoint, authentication convention, object size limit, LOC/MSF drafts and media defaults | Every SDK has a test asserting its constants equal these values |
+| `protocol.json` | Machine-readable pins: the MOQT draft (`draft-ietf-moq-transport-22`, wire identifier `moqt-22`, with `moqt-20` as the offered fallback), the default Relay endpoint, the authentication convention, the size limits, the relay's property limits, the LOC and MSF drafts, and the media defaults | Every SDK has a test asserting its constants equal these values |
 | `behavior.md` | The observable semantics every SDK must exhibit, in language-neutral terms | Review, plus the live smoke test assertion list it defines |
 | [vocabulary.md](vocabulary.md) | Public product and media format names across languages, with the rationale for each | Export-surface tests, paired media tests, and API review |
-| [transport-adapter.md](transport-adapter.md) | The transport adapter contract: what every adapter the SDKs run over (browser WebTransport, aioquic, native QUIC, test pairs) must do, as numbered `TA-n` rules under the MOQT and QUIC specifications | The transport adapter conformance suite (#193), whose tests are named after the rules |
-| [publisher-recovery.md](publisher-recovery.md) | Observed publisher replacement limits and application recovery guidance | Relay limitations and application policy, not an automatic SDK guarantee |
-| [media-layer.md](media-layer.md) | Proposal: the LOC packaging, MSF catalog, source URL, and decoder-configuration work the SDKs would take over from media publishers, measured against the Python Video.js example | Stage 1 implemented, plus the catalog reader; publishing handles and the object-to-frame reader remain proposed |
+| [transport-adapter.md](transport-adapter.md) | The transport adapter contract: what every adapter the SDKs run over (browser WebTransport, native QUIC in Node and on aioquic, QMux over WebSocket, test pairs) must do, as numbered `TA-n` rules under the MOQT and QUIC specifications | The transport adapter conformance suite (#193), whose tests are named after the rules |
+| [publisher-recovery.md](publisher-recovery.md) | Observed publisher replacement limits and application recovery guidance | Relay limitations. The opt-in supervised connections implement the recovery policy, and the connection primitives do not |
+| [relay-interop.md](relay-interop.md) | moq-relay's wire encodings, deviations from the draft, and measured behavior, by relay version, with a local reproduction | Measurements and the probe tasks in `mise.toml`, not a contract |
+| [media-layer.md](media-layer.md) | The LOC packaging, MSF catalog, source URL, and decoder-configuration work the SDKs take over from media publishers, measured against the Python Video.js example | Stage 1 implemented. Of stages 2 and 3, the catalog, document, and frame-writer services, the catalog reader, and the frame reader ship. The `register_media` handle remains proposed |
 | `vectors/` | Encoding test vectors every protocol layer must pass | Each SDK's test suite loads the JSON and checks its encoder and decoder |
 
 ## Changing a pin
@@ -29,4 +30,4 @@ it to the smoke test assertion list so every SDK's live test checks it.
 
 Vector files are plain JSON with hex-encoded bytes and decimal-string values, so any language can
 load them without precision loss. See `vectors/README.md`. Prefer vectors taken from the MOQT draft
-text; derive boundary cases from the encoding rules and say so in the file.
+text. Derive boundary cases from the encoding rules and say so in the file.

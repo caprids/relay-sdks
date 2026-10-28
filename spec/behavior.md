@@ -2,7 +2,7 @@
 
 Every Relay SDK, in any language, implements the same protocol pin and the same observable
 semantics. This document states those semantics without reference to any one language. The
-language READMEs describe how each API spells them; this file says what must be true; and
+language READMEs describe how each API spells them. This file says what must be true, and
 `vocabulary.md` fixes the public names every SDK uses for the concepts named here.
 
 `protocol.json` holds the machine-readable pins. Each SDK has a test that checks its constants
@@ -21,13 +21,13 @@ against that file.
   parameter on the endpoint URL. An explicit `jwt` parameter already present on the URL takes
   precedence over a token callback, and the callback is not called. An empty `jwt` parameter
   (`?jwt=` or a bare `?jwt`), including one among several `jwt` parameters, is an argument error
-  (see "Arguments") rather than a way to connect with no credential; the SDK does not treat it as
+  (see "Arguments") rather than a way to connect with no credential. The SDK does not treat it as
   absent. A whitespace-only value is not empty and is sent as given, as a token callback's would be.
 - SDK-generated logs and error text do not include the token, and SDK tooling does not persist it
   to disk. Tooling redacts the supplied token from browser diagnostics it forwards. The browser
   itself is outside that guarantee: Chromium can log the full authenticated WebTransport URL on
   handshake failure. Applications must sanitize captured diagnostics before storing or forwarding
-  them; see `ts/GUIDE.md`, "Browser token exposure".
+  them. See `ts/GUIDE.md`, "Browser token exposure".
 - Connecting has one deadline that covers token resolution and both handshakes, transport and
   MOQT setup.
 - The browser transport may end a silent connection after about 5 s while data is outstanding.
@@ -47,22 +47,22 @@ against that file.
   up on a silent handshake). The two dials run one after the other, never at once, and the abandoned
   WebTransport dial is closed. Where the runtime has no WebTransport that can negotiate protocols, it
   dials WebSocket at once. Each connection, a supervisor's reconnects and rotations included, decides
-  afresh; nothing is remembered between connections. A WebTransport session that comes up and is
+  afresh. Nothing is remembered between connections. A WebTransport session that comes up and is
   then refused (for example over its credentials) is not retried over WebSocket.
-- Both transports run the same session; the differences are the relay's and TCP's
-  ([QMux over WebSocket](relay-interop.md#qmux-over-websocket)): streams share one TCP connection, so
-  a lost packet holds up every stream (head-of-line blocking); datagrams are unavailable; a
+- Both transports run the same session. The differences come from the relay and from TCP
+  ([QMux over WebSocket](relay-interop.md#qmux-over-websocket)). Streams share one TCP connection, so
+  a lost packet holds up every stream (head-of-line blocking). Datagrams are unavailable. A
   credentials refusal arrives as a failed WebSocket handshake, reported as `TRANSPORT_ERROR` in phase
-  `connecting`, not `UNAUTHORIZED`; and a send stream's close resolves once its FIN reaches the socket,
+  `connecting`, not `UNAUTHORIZED`. A send stream's close resolves once its FIN reaches the socket,
   not the relay ([transport adapter](transport-adapter.md#known-deviations)).
 - The application can give the SDK a cancellation primitive, such as an abort signal or a
   cancellation token, that governs the connection's entire lifetime rather than only setup.
 - Every connection exposes a way to observe its closure and the error that caused it, if any.
 - A GOAWAY from the relay ends the connection with an error. The application opens a replacement.
   Subscriptions still awaiting their first response end as terminated by the closure (see
-  "Subscription lifecycle"); accepted or cancelled requests do not receive a second initial
+  "Subscription lifecycle"). Accepted or cancelled requests do not receive a second initial
   response. The core's own track source still fails pending requests through their error callback.
-  Opt-in [supervised connections](#supervised-connections) reconnect; the primitives never do.
+  Opt-in [supervised connections](#supervised-connections) reconnect. The primitives never do.
 
 ### Credential lifetime
 
@@ -75,12 +75,12 @@ against that file.
 - The token provider runs once per connection, while connecting. It returns a token, or a
   `RelayCredential`: the token together with `expiresAt` / `expires_at`, the time the relay stops
   honoring it. An empty token sends none, as before. A credential of the wrong shape is a
-  `TypeError`; an invalid `Date` (TypeScript) or a naive `datetime` (Python) is a `RangeError` /
+  `TypeError`. An invalid `Date` (TypeScript) or a naive `datetime` (Python) is a `RangeError` /
   `ValueError`.
 - Every connection exposes `expiresAt` / `expires_at`: the credential's expiry when the provider
   gave one, otherwise the `exp` claim of the JWT it connected with (a bare token from the provider,
   or a `jwt` already on the URL), read without verifying it. A token that is not a JWT with a
-  numeric `exp` leaves it unknown (`undefined` / `None`). The primitives only report it; they never
+  numeric `exp` leaves it unknown (`undefined` / `None`). The primitives only report it. They never
   replace a connection.
 - At that time the relay closes the session with MOQT session termination code `UNAUTHORIZED`
   (0x2), reason `unauthorized`. Both SDKs report it as `UNAUTHORIZED` in phase `connection` on the
@@ -88,10 +88,10 @@ against that file.
   arrives about 80 ms after `exp`. One exception: a TypeScript publisher in Chromium sees the relay
   abort its control stream before WebTransport reports the close code, and reports
   `TRANSPORT_ERROR` in phase `connection` instead
-  ([issue #279](https://github.com/muxinc/relay-sdks/issues/279)); a Chromium subscriber reports
+  ([issue #279](https://github.com/muxinc/relay-sdks/issues/279)). A Chromium subscriber reports
   `UNAUTHORIZED`.
 - [Supervised connections](#supervised-connections) replace their connection make-before-break
-  before the credential expires; see [rotation](#rotation).
+  before the credential expires. See [rotation](#rotation).
 
 ## Error identities and operation phases
 
@@ -111,24 +111,25 @@ Branch on `code` and `phase`, not message wording. SDK lifecycle errors use thes
 | `PREFIX_OVERLAP` | `namespaceEvents` / `namespace_events` was given a prefix that equals, contains or falls under one this connection is already discovering (draft-22 §9.15). Nothing was sent. Widen one iterator's prefix and filter, end the other iterator first, or use another connection. |
 | `UPDATE_QUEUE_FULL` | More than eight updates were issued before the subscription was accepted; await acceptance (`onSubscribed` / `on_subscribed`) before updating again. Nothing was sent for the refused update. |
 | `SUBSCRIPTION_CHANGED` | Upstream demand ended or changed during an operation; choose fresh data or a new random-access point. It can be group-level: the relay may stop one group's stream while its subscription continues, so check `hasDemand` / `has_demand` rather than assume demand ended. |
+| `RECONNECTING` | A [supervised publisher](#supervised-publisher) had no live generation for the operation, or the connection under it ended (phase `connection`). Nothing is replayed: write the next object once the publisher is live again. |
 | `GOAWAY` | The relay requested migration; open a replacement connection. |
 | `TRANSPORT_ERROR` | Inspect the original cause and connection state before deciding whether to reconnect or publish again. In TypeScript, a `connecting`-phase `TRANSPORT_ERROR` usually means the browser abandoned the handshake, so a retry policy should treat it like `CONNECTION_TIMEOUT` (see [browser transport limits](../ts/GUIDE.md#browser-transport-limits)). |
 | `TRANSPORT_UNAVAILABLE` | Supply a transport implementation in a runtime without browser WebTransport; in Node, import from `@caprid/relay/node` with `@caprid/relay-quic` installed (TypeScript). |
 | `UNAUTHORIZED` | The relay refused the connection's credentials: no token, a bad, malformed or expired one, or an endpoint path the token does not grant. Supply a valid token before connecting again. In phase `connection`, the relay ended a live session because its credential expired or its grant was revoked ([credential lifetime](#credential-lifetime)); connect again with a fresh token. TypeScript reports it in browsers and over native QUIC (`@caprid/relay/node`); against relays before moq-relay 0.17.0 a browser does not see the close, so there it arrives as `TRANSPORT_ERROR` (#14). |
 
 `connecting` covers token resolution and connection setup. `connection` marks a connection-wide
-failure; it makes no claim about individual writes that were in flight. `subscription` marks an
+failure. It makes no claim about individual writes that were in flight. `subscription` marks an
 async subscription request failure or local event-buffer overflow. Publishing records
 `waiting-for-demand`, `opening-stream`, `writing`, or `closing` before entering each step.
 A `WRITE_TIMEOUT` or `DELIVERY_TIMEOUT` in `waiting-for-demand` means this attempt sent no object bytes. For timeouts or transport/subscription failures in a transport
-phase, conservatively allow for partial delivery; `closing` can fail after all object bytes were
+phase, conservatively allow for partial delivery. `closing` can fail after all object bytes were
 sent. Opening a group can start sending its header before the first object write. A phase records
 the failure's origin, and a later call on the failed handle can report that same error.
 
 For `WRITE_PENDING` and calls rejected because a handle is already closed, phase describes the
-refused operation; that call sends nothing. A write or group refused with `CLOSED` because its
+refused operation. That call sends nothing. A write or group refused with `CLOSED` because its
 track or group is already closed reports phase `waiting-for-demand`, the phase that means nothing
-was sent. `CLOSED` can also interrupt an operation already in flight; it then carries that
+was sent. `CLOSED` can also interrupt an operation already in flight. It then carries that
 operation's phase, so the code alone does not rule out partial delivery.
 
 No code or phase promises safe replay. Account for previous attempts, data freshness, and your
@@ -142,12 +143,12 @@ session with it when the session's grant expires or is revoked, so both SDKs map
 `connecting` before the relay's SETUP, `connection` after it (#227, #261). A close in the turn SETUP
 arrives stays `TRANSPORT_ERROR`. From moq-relay 0.17.0 a
 browser sees the relay's close (CLOSE_WEBTRANSPORT_SESSION with code 2 and reason `unauthorized`), so
-TypeScript reports it in browsers as well as over native QUIC; against older relays the browser lost
+TypeScript reports it in browsers as well as over native QUIC. Against older relays the browser lost
 the close, and a refusal arrived as `TRANSPORT_ERROR` (#14). Neither another connection failure nor
 an uncovered namespace proves authentication was denied. A subscription outside the token's grant
 is refused per request, through `onError` / `on_error` (MOQT `UNAUTHORIZED`, 0x1), and leaves the connection open.
 
-Clean connection shutdown still resolves `closed` without an error; subsequent operations fail
+Clean connection shutdown still resolves `closed` without an error. Subsequent operations fail
 with `CLOSED`. After a failed connection, `closed` and subsequent connection operations expose the
 same failure. Caller cancellation reasons and token-provider exceptions retain their identity.
 Argument and serialization errors keep their idiomatic language types. Subscription `onError` /
@@ -155,19 +156,19 @@ Argument and serialization errors keep their idiomatic language types. Subscript
 
 Both SDKs export one Relay error type, `RelayError`, with a stable `code` discriminant and a `phase`
 field, plus the three subscription errors that carry payload (`SubscriptionRequestError`,
-`SubscriptionOverflowError`, `SubscriptionConnectionClosedError`). There are no other subclasses;
-callers branch on `code`. Human-readable messages are not a compatibility contract. Wrapped
+`SubscriptionOverflowError`, `SubscriptionConnectionClosedError`). There are no other subclasses.
+Callers branch on `code`. Human-readable messages are not a compatibility contract. Wrapped
 transport and session failures retain the original cause: TypeScript in `RelayError.cause`, Python
-chained as `__cause__`. Transport-layer exceptions are not Relay errors; a Relay operation that fails
+chained as `__cause__`. Transport-layer exceptions are not Relay errors. A Relay operation that fails
 on the transport raises `TRANSPORT_ERROR` with the transport exception as its cause.
 
 Local argument errors remain `TypeError`/`RangeError` in TypeScript and `TypeError`/`ValueError` in
-Python: a value of the wrong type or shape is a `TypeError` in both languages; a value of the right
+Python: a value of the wrong type or shape is a `TypeError` in both languages. A value of the right
 type outside its bound is a `RangeError` in TypeScript and a `ValueError` in Python. The
 [Arguments](#arguments) table lists the rules. A refused concurrent operation uses `WRITE_PENDING`
 and does not cancel the active operation. Caller-provided cancellation reasons bypass wrapping,
 including non-Error JavaScript values and Python task cancellation. Connection failures are shared
-with pending publishing operations; their connection phase does not establish whether those writes
+with pending publishing operations. Their connection phase does not establish whether those writes
 sent bytes.
 
 ## Arguments
@@ -179,7 +180,7 @@ state at every entry point: a bad argument is reported the same way on a closed 
 track, and it never reaches the token provider, the transport factory, a request id or a stream. The
 portable cases live in `vectors/arguments.json` and run in every SDK's suite. The table also lists
 the local checks that stay where they are consumed (deadlines, track registration, object status,
-event capacity); they follow the same class rule, and only track registration is checked after
+event capacity). They follow the same class rule, and only track registration is checked after
 connection state, because it depends on the connection's registry.
 
 | Argument | Rule | `TypeError` in both languages | `RangeError` (TypeScript) / `ValueError` (Python) | Checked at |
@@ -197,7 +198,7 @@ connection state, because it depends on the connection's registry.
 | Event capacity | A positive integer (a safe integer in TypeScript); defaults to 64. | not a number, including a boolean | zero, negative, fractional, NaN, or infinite | `subscribeEvents` / `subscribe_events`, `namespaceEvents` / `namespace_events` |
 | Payload | A byte sequence: any `ArrayBufferView` in TypeScript; any object supporting the buffer protocol in Python (`bytes`, `bytearray`, `memoryview`, ...). Copied once. At most `limits.maxObjectPayloadBytes`. | a string, an `ArrayBuffer`, a list of integers, anything else | longer than the object payload limit | `write`, `writeText`, `writeJSON` on a track or group writer |
 
-Messages are not a compatibility contract; the class and the point of rejection are.
+Messages are not a compatibility contract. The class and the point of rejection are.
 
 ## Subscribing
 
@@ -215,7 +216,7 @@ Messages are not a compatibility contract; the class and the point of rejection 
   its prefix is. A connection to a room-rooted endpoint cannot address anything outside that room:
   an absolute namespace there names one below the room (`['acme', 'rooms', '42', 'acme', ...]`),
   so a subscribe reaches only a publisher that announced that longer namespace, and is refused as
-  unroutable when there is none; a `..` field is an ordinary field. An endpoint path the token
+  unroutable when there is none. A `..` field is an ordinary field. An endpoint path the token
   does not grant fails the connection with `UNAUTHORIZED`, where on the bare host a namespace
   outside the grant fails only its own subscribe, and its publish never announces
   ([issue #119](https://github.com/muxinc/relay-sdks/issues/119)). The token remains the access
@@ -233,10 +234,10 @@ Messages are not a compatibility contract; the class and the point of rejection 
 - Object callbacks run as the stream layer delivers objects. The callback path adds no application queue, no
   ordering across streams, no automatic payload decoding, no clock synchronization, and no media
   scheduling.
-- Each new subscription is independent; re-subscribing does not resume the preceding request.
+- Each new subscription is independent. Re-subscribing does not resume the preceding request.
   Relay caching and location filters can deliver the same object again across subscriptions,
   including after a publisher restart. Applications own retry backoff and any cross-subscription
-  continuity policy; see [publisher restarts and resubscription](relay-interop.md#publisher-restarts-and-resubscription).
+  continuity policy. See [publisher restarts and resubscription](relay-interop.md#publisher-restarts-and-resubscription).
 - A subscription without a location filter, whether it sends no LOCATION_FILTER or an explicit
   zero-field one, carries the draft's meaning: it passes all Objects published or received via
   upstream subscriptions
@@ -245,7 +246,7 @@ Messages are not a compatibility contract; the class and the point of rejection 
   choice. The Mux relay (moq-relay 0.17.0) starts it at the beginning of its latest group, and
   starts a Next Object filter after its largest object, skipping the rest of that group
   ([late subscribers](relay-interop.md#late-subscribers-and-location-filters)). A subscriber that
-  needs earlier groups asks for them with a relative-group or absolute filter; an absolute start is
+  needs earlier groups asks for them with a relative-group or absolute filter. An absolute start is
   served from the requested group while the relay still caches it. The SDK sends the
   filter it is given and adds none.
 - The SDK sends every subscription parameter the application sets. Which ones take effect is the
@@ -257,18 +258,18 @@ Messages are not a compatibility contract; the class and the point of rejection 
   has no application inactivity deadline. The SDK schedules no application-level keepalive: keeping
   the transport connected is left to peer traffic and the transport's own keepalive, which
   [draft-22 Section 15.6.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-15.6.1)
-  names as one way to keep an idle session open. In TypeScript that is Chromium's own QUIC PING. In
-  Python the aioquic adapter sends a QUIC PING once it has sent nothing for 5 seconds, which also
-  lets a receive-only connection survive a NAT rebinding: the relay learns the new address from
-  that packet. The Python transport uses aioquic's default 60-second local idle timeout, subject to
+  names as one way to keep an idle session open. In a browser that is the browser's own QUIC PING,
+  and `@caprid/relay-quic` has quinn send a keep-alive every 4 seconds. Python's native QUIC
+  transport sends a QUIC PING once it has sent nothing for 5 seconds. That PING also lets a
+  receive-only connection survive a NAT rebinding: the relay learns the new address from it. The Python transport uses aioquic's default 60-second local idle timeout, subject to
   peer negotiation.
 - `update()` sends REQUEST_UPDATE, which the draft allows only on an accepted subscription
   ([draft-22 Section 3.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.1)).
-  An update issued before acceptance is queued in order and sent when SUBSCRIBE_OK arrives; at most
+  An update issued before acceptance is queued in order and sent when SUBSCRIBE_OK arrives. At most
   eight wait, and a further one raises `UPDATE_QUEUE_FULL` without sending anything. A subscription
   that ends before acceptance discards its queue, and its ending is what the application observes.
   An update on an ended subscription raises `CLOSED`. Each update consumes its own Request ID. A
-  relay that acknowledges an update with REQUEST_OK reaches `onUpdateOk` / `on_update_ok`; one that
+  relay that acknowledges an update with REQUEST_OK reaches `onUpdateOk` / `on_update_ok`. One that
   refuses it with REQUEST_ERROR ends the subscription
   ([issue #94](https://github.com/muxinc/relay-sdks/issues/94)).
   Implemented in both SDKs. moq-relay, however, never answers a REQUEST_UPDATE: any byte on the
@@ -303,27 +304,27 @@ Messages are not a compatibility contract; the class and the point of rejection 
 - The publisher's done notification is a control message and may arrive before trailing objects
   still in transit. It does not end the subscription: the request stays open until the application
   cancels it or the connection ends, and the SDK does not resubscribe on its own.
-  It is not a prompt publisher-death detector; the SDK reports it when the relay sends it. On
+  It is not a prompt publisher-death detector. The SDK reports it when the relay sends it. On
   moq-relay 0.17.0 a publisher's clean close, or its connection closing, reaches existing
   subscriptions within 0.1 s, as status 2 after `close()` and as 0 when the connection drops without
-  MoQ cleanup; a crashed publisher's arrives as status 0 only after the relay's QUIC idle timeout,
+  MoQ cleanup. A crashed publisher's arrives as status 0 only after the relay's QUIC idle timeout,
   about 11 s (it was about 30-35 s on 0.15.8, whose idle timeout was 30 s).
 - Replacing a publisher on the same namespace does not hand off existing subscriptions: moq-relay
   0.15.8 and 0.17.0 never move them to the replacement. After a clean end, new subscriptions fail
   with request error 16 `unroutable` until the replacement announces, and are served by it at once
   after that. After a crash, the relay still holds the dead publisher's announcement until its QUIC
   idle timeout (about 11 s on 0.17.0), so new subscriptions are accepted and served only the old
-  publisher's cached last object; on 0.17.0 that can continue after the replacement announces, until
+  publisher's cached last object. On 0.17.0 that can continue after the replacement announces, until
   the timeout, because the relay does not prefer the newer announcement
   ([duplicate announce](relay-interop.md#duplicate-announce)).
   Re-subscribing to a track that finished while its namespace stays announced replays the cached
   last group and another done, one round trip later each time, because the relay keeps a finished
-  track cached by design; once nobody has read it for about 30 s, moq-relay 0.17.0 forgets it and a
+  track cached by design. Once nobody has read it for about 30 s, moq-relay 0.17.0 forgets it and a
   subscribe gets request error 16 `not found`. Do not re-subscribe to a track the publisher ended.
   A done that followed the subscription's own `update()` is different: the track is live, and
   re-subscribing is how to apply the change against moq-relay
   ([publisher restarts](relay-interop.md#publisher-restarts-and-resubscription)).
-  Applications own freshness checks and bounded recovery; see [publisher recovery](publisher-recovery.md).
+  Applications own freshness checks and bounded recovery. See [publisher recovery](publisher-recovery.md).
 - Subscriptions cancel independently of each other. The application owns connection shutdown.
 - `subscribe()` returns a `RelaySubscription`: the request handle plus two awaitables. `subscribed`
   settles when the relay answers, and `ended` settles once when the subscription can no longer
@@ -364,7 +365,7 @@ only through the `closed` promise, and Chromium settles it a task or more after 
 request stream of a connection lost while that stream opens
 ([issue #102](https://github.com/muxinc/relay-sdks/issues/102)). So TypeScript holds a
 pre-acceptance failure the core synthesized from a stream event (FIN before a response, a stream
-reset, a failed stream open; not the response timeout) until the transport's `closed` settles, and
+reset or a failed stream open, but not the response timeout) until the transport's `closed` settles, and
 records it as a rejection only if the connection is still up 250 ms later. A REQUEST_ERROR message
 and the response timeout keep the one-turn hold.
 
@@ -409,16 +410,16 @@ The Relay product API provides `subscriber.subscribeEvents(options, { capacity, 
 and own a new subscription immediately. They yield typed data and lifecycle events, using the same
 payload objects as callbacks. The generic `MoqTrackSource` and existing `subscribe` callbacks remain
 available and retain their synchronous delivery model. The handle's `subscribed` and `ended`
-awaitables (see the subscription lifecycle table above) are the readiness and termination signals;
-the iterator's raise or EOF is its own. It follows the product vocabulary from #63; its explicit
+awaitables (see the subscription lifecycle table above) are the readiness and termination signals.
+The iterator's raise or EOF is its own. It follows the product vocabulary from #63. Its explicit
 `publisherDone` / `publisher_done` event distinguishes publisher completion from final delivery.
 
 - `capacity` defaults to **64 events** and must be a positive integer (a safe integer in TS).
   Every queued object **and lifecycle event** consumes one slot. This is an event-count limit,
   not a byte budget: an object may contain up to 16 MiB of payload and 1 MiB of encoded properties,
   plus decoded metadata overhead. Choose a smaller capacity for large objects. Protocol decoding
-  limits also bound individual control events. The queue owns at most `capacity` event references;
-  objects retained by application code and transport buffers are outside this limit. An event
+  limits also bound individual control events. The queue owns at most `capacity` event references.
+  Objects retained by application code and transport buffers are outside this limit. An event
   handed directly to a waiting reader is delivered and no longer counts against queue capacity,
   even before that reader resumes. Later teardown cannot retract that handoff.
 - Overflow fails immediately with `SubscriptionOverflowError`, discards the whole queue, cancels
@@ -457,9 +458,9 @@ The callback API still receives unwrapped MOQT `RequestError` values.
 
 A failure remains observable on subsequent reads. The first termination wins. Do not close the
 shared connection merely to stop this consumer. Publisher completion never auto-cancels or
-resubscribes; choose a timeout or explicit application policy if no more data is expected.
+resubscribes. Choose a timeout or explicit application policy if no more data is expected.
 
-Only one pending iterator read is supported; a concurrent read fails without disrupting the first.
+Only one pending iterator read is supported. A concurrent read fails without disrupting the first.
 It is a state error, not an argument error: a plain `Error` in TypeScript and a `RuntimeError` in
 Python, and not a `RelayError`.
 There is no background consumer task. TS `for await` calls `return()` on `break` or a
@@ -469,12 +470,12 @@ with events:`** (or `try/finally: events.close()`) around `async for` for determ
 early `break`, consumer exception, or task cancellation in the loop body: Python's loop alone does
 not call `aclose()`. Cancelling a Python task blocked in `anext()` also closes the iterator.
 Consequently, `asyncio.timeout()` or `asyncio.wait_for(anext(events), ...)` expiring cancels the
-subscription; the caller receives `TimeoutError` and subsequent reads return EOF. Use those
+subscription. The caller receives `TimeoutError` and subsequent reads return EOF. Use those
 deadlines to **end** consumption, not to skip an idle interval and resume the same subscription.
 In TS, `Promise.race` does not cancel the losing read: use the iterator's abort signal to end
 consumption, or retain and await that same pending read before requesting another. Consumer
-exceptions propagate to the caller; the SDK never retries or swallows them. Stop using abandoned
-iterators explicitly; garbage collection is not the ownership policy. Connection observation and
+exceptions propagate to the caller. The SDK never retries or swallows them. Stop using abandoned
+iterators explicitly. Garbage collection is not the ownership policy. Connection observation and
 cancellation listeners are removed on teardown, and pending reads settle.
 
 ### Synchronous callback policy
@@ -485,18 +486,18 @@ For a synchronous function that returns an awaitable dynamically, Python emits `
 closes a returned coroutine, or cancels a returned Future/Task and observes its eventual
 exception. Other custom awaitables are diagnosed and discarded without running them. TS reports a
 `TypeError` to `console.error` once per handler per subscription and observes every returned
-promise's rejection; JS promises cannot be cancelled, so already-started work may continue.
+promise's rejection. JS promises cannot be cancelled, so already-started work may continue.
 Delivery never awaits these results, and such callbacks are unsupported. Ordinary synchronous
 return values remain ignored, and ordinary synchronous callback exceptions retain the existing
 callback error behavior. Use the iterator for awaited work. If starting independent work
 deliberately, use a synchronous callback that returns nothing and arrange its task lifetime and
 error handling explicitly.
 
-Handlers are validated and snapshotted when `subscribe` is called; set them all before subscribing.
+Handlers are validated and snapshotted when `subscribe` is called. Set them all before subscribing.
 Later assignments to the original handler object do not change an existing subscription. Request
 rejection and local/session teardown now cancel the request stream and active subgroup readers.
-Teardown suppresses subsequent end/reset callbacks and protocol errors from those cancelled readers;
-it does not report cancellation as a network gap. An actual reset while the subscription is active
+Teardown suppresses subsequent end/reset callbacks and protocol errors from those cancelled readers.
+It does not report cancellation as a network gap. An actual reset while the subscription is active
 still invokes the gap callback. Publisher completion leaves readers active for trailing objects.
 
 ## Switching tracks
@@ -528,10 +529,10 @@ is wanted again with another track or parameters ([moves](#supervised-subscriber
   its group's later objects, subgroup ends and resets. Across relays a later group can arrive before the object that cuts
   over, and the predicate refuses it as too far ahead ([issue #282](https://github.com/muxinc/relay-sdks/issues/282)).
   On the first accepted object:
-  1. the old subscription is cancelled;
+  1. The old subscription is cancelled.
   2. `onSwitched` / `on_switched` runs with the old track, the new track and the new
-     subscription's SUBSCRIBE_OK;
-  3. the accepted object is delivered, then the held events that come after it, in arrival order.
+     subscription's SUBSCRIBE_OK.
+  3. The accepted object is delivered, then the held events that come after it, in arrival order.
 
   `switchTo` resolves with the same record.
 - **Avoiding a gap needs a timeline.** The SDK knows no media time, and group IDs are not one.
@@ -546,7 +547,7 @@ is wanted again with another track or parameters ([moves](#supervised-subscriber
 - **Drain.** Groups arrive out of order across streams, especially through another relay, so an
   older group of the old track can still be in flight at the cutover. `drainMs` / `drain` (default
   0) keeps the old subscription open for that long. It takes 0 up to the bound every SDK deadline
-  has (2147483647 ms, 2147483.647 s), the longest a JavaScript timer holds; beyond it, or negative,
+  has (2147483647 ms, 2147483.647 s), the longest a JavaScript timer holds. Beyond it, or negative,
   is a `RangeError` / `ValueError`, and a non-number a `TypeError`. While it drains, its objects, subgroup ends
   and resets still reach the handlers, with the old track's name, if they belong to a group no
   later than the largest it had delivered. Its later groups and other events are discarded. When
@@ -554,10 +555,10 @@ is wanted again with another track or parameters ([moves](#supervised-subscriber
   once.
 - **A failed switch leaves the active subscription delivering.** A switch fails, reaching no
   handler, when:
-  - the pending subscription ends before its cutover: it fails as `subscribed` would;
-  - a newer `switchTo` supersedes it: `CLOSED`;
-  - the signal or token cancels it: the signal's or token's reason;
-  - the predicate throws: that error.
+  - The pending subscription ends before its cutover. The switch fails as `subscribed` would.
+  - A newer `switchTo` supersedes it. The switch fails with `CLOSED`.
+  - The signal or token cancels it. The switch fails with the signal's or token's reason.
+  - The predicate throws. The switch fails with that error.
 - **Endings.**
   - `subscribed` settles with the SUBSCRIBE_OK of the first subscription to become active. If the
     switchable ends before that, it fails as the first subscription's `subscribed` does.
@@ -592,7 +593,7 @@ The iterator owns the request, never the connection.
   the `announced` set holds the relay's current view. A NAMESPACE_DONE for a namespace the relay
   never named closes the connection with `PROTOCOL_VIOLATION`, as draft-22 §9.15 requires.
 - The prefix follows the namespace argument rules (1 to 32 non-empty fields), checked before
-  connection state. Draft-22 also allows an empty prefix, meaning every namespace; the SDK does
+  connection state. Draft-22 also allows an empty prefix, meaning every namespace. The SDK does
   not. The prefix matches whole fields: `['room', 'a']` does not cover `['room', 'ab']`.
 - One connection discovers each prefix tree once. Draft-22 §9.15 has a relay answer a
   SUBSCRIBE_NAMESPACE whose prefix overlaps one already open on the session (equal, shorter or
@@ -617,7 +618,7 @@ The iterator owns the request, never the connection.
 
   An announce learned from a cluster peer looks the same as a local one. Nothing in the event says
   which relay holds the publisher.
-- A prefix the token does not cover is accepted and stays silent; the relay does not reject it.
+- A prefix the token does not cover is accepted and stays silent. The relay does not reject it.
   An event is about the relay's routing table, not a publisher's health: `announced` does not mean
   any track has content, and a namespace two publishers announce
   ([duplicate announce](relay-interop.md#duplicate-announce)) is reported once.
@@ -627,7 +628,7 @@ The iterator owns the request, never the connection.
   as the publisher's `announced` settled was rejected 6 to 14 of 40 times on the same relay and
   40 of 40 on another ([announce propagation](relay-interop.md#announce-propagation)). This is an
   observation of that relay, not a protocol guarantee. A subscriber that waits for `announced` needs
-  no timed retry for the race. A later `unroutable` means the namespace has gone since; `unannounced`
+  no timed retry for the race. A later `unroutable` means the namespace has gone since. `unannounced`
   follows, and the next `announced` is the cue to subscribe again. `not found` still means the track
   is not there.
 - Endings: a REQUEST_ERROR, the request timeout, or the request's stream failing raises
@@ -638,7 +639,7 @@ The iterator owns the request, never the connection.
   error, after `unannounced` for every namespace still announced (draft-22 §9.15 treats the end
   of the response stream as a withdrawal of each), and after any events still queued, which a
   clean end does not discard. After an error ending, treat every namespace as withdrawn. A GOAWAY
-  on the request stream is not surfaced; the connection's GOAWAY ends the connection.
+  on the request stream is not surfaced. The connection's GOAWAY ends the connection.
 
 ## Supervised connections
 
@@ -681,7 +682,7 @@ taken over.
   expiry is unknown never rotates on its own. `rotate()` rotates now, for an application that
   revokes credentials or wants a fresh token. It is a no-op while no connection is up.
 - **The replacement** connects with the same options, so the token provider runs again. A failed
-  attempt is retried with the reconnection backoff while the old connection lives; if the old one
+  attempt is retried with the reconnection backoff while the old connection lives. If the old one
   ends first, the supervisor reconnects as after any other ending. When a rotation the supervisor
   started on its own gets a credential that expires no later than the live one, it discards the
   replacement and lets the live connection run to its end: two connections the relay ends together
@@ -689,7 +690,7 @@ taken over.
 - **Overlap.** The old connection closes once everything has moved to the new one, after 10 s at
   most, or sooner if it ends on its own.
 - **Publisher.** The replacement is the next generation. Every registered track is registered on it,
-  and `onGeneration` / `on_generation` runs for it once it is up; `generation` names it from then on.
+  and `onGeneration` / `on_generation` runs for it once it is up. `generation` names it from then on.
   Each track's writer keeps writing to the old generation until the track has demand on the new one
   or has none on the old one, and then moves at the start of its next write or group, never under
   one: a group opened on the old generation finishes there. Subscribers following generations move
@@ -819,7 +820,7 @@ taken over.
   newest group. `onRestarted` reports `catch-up`. The replacement opens without delay when the
   cancelled subscription had progressed (delivered an object from a later group than its first),
   and otherwise after the retry backoff, so a link too slow for the track cannot make it spin. It
-  is ignored for an unknown key and while no subscription is accepted; during a move it ends both
+  is ignored for an unknown key and while no subscription is accepted. During a move it ends both
   subscriptions, and the replacement is made for whatever the want asks for then. It exists
   because moq-relay 0.17.5 (measured) and 0.17.7 (read in source) drop nothing for a late
   subscriber, whatever delivery timeout the subscriber sends
@@ -854,9 +855,9 @@ taken over.
 - Publishing uses a dedicated connection with a token authorized to publish the namespace. One
   publisher connection serves one namespace and any number of tracks.
 - Publishing follows the relay's announce-and-serve flow. Connecting a publisher announces its
-  namespace. Registering a track makes it servable and sends nothing; the relay learns of the track
+  namespace. Registering a track makes it servable and sends nothing. The relay learns of the track
   when a subscriber asks for it. A write waits for the relay to subscribe upstream before sending
-  bytes; a subscriber creates that demand.
+  bytes. A subscriber creates that demand.
   If namespace solicitations have arrived but none currently covers the publisher namespace when
   the demand deadline expires, the write reports a namespace coverage error instead of an ordinary
   demand timeout. Check the token and namespace before retrying. This does not prove authorization
@@ -870,42 +871,42 @@ taken over.
 - Two publishers may announce the same namespace, and nothing warns either one or any subscriber.
   On moq-relay 0.17.0 the relay picks one of the two announcing connections for new subscribers,
   effectively at random (a hash of the namespace and each connection's random hop id ranks the
-  routes before their age does); the choice is stable while both stay connected, and the other
+  routes before their age does). The choice is stable while both stay connected, and the other
   publisher gets no demand at all. Existing viewers stay on the publisher that served them, and
   when it retracts they get done status 2 (or, if it crashed, done status 0 about 11 s later) and
-  do not move; new subscribers then go to the remaining one. After a crash, new subscribers may be
+  do not move. New subscribers then go to the remaining one. After a crash, new subscribers may be
   routed to the dead publisher and served its cached last object until the relay's idle timeout.
   moq-relay 0.15.8 instead gave every new subscriber to the newest announcer. Neither SDK can detect
   which publisher serves a viewer
-  ([issue #37](https://github.com/muxinc/relay-sdks/issues/37)); keep one publisher per namespace.
+  ([issue #37](https://github.com/muxinc/relay-sdks/issues/37)). Keep one publisher per namespace.
 - The default write deadline is 10 seconds and covers both waiting for demand and the transport
   write.
 - A timeout, cancellation, transport write failure, or relay subscription change resets the
   affected write's stream and leaves the track open while the publisher connection remains open.
   A stream that opens after cancellation is reset without sending payload bytes. The next explicit
-  write uses a new group ID; failed groups are never reused. After demand disappears, later writes
+  write uses a new group ID. Failed groups are never reused. After demand disappears, later writes
   wait for a new relay subscription. Applications choose fresh data or the next random-access point
-  after a failure; already delivered bytes cannot be withdrawn. There is no automatic retry.
+  after a failure. Already delivered bytes cannot be withdrawn. There is no automatic retry.
 - A write's payload must be a byte sequence in the language's own terms, and its properties must
   follow the [Arguments](#arguments) table. Anything else is rejected before the write starts, which
-  is a local argument error and leaves the track usable; an oversized property is such an error too,
+  is a local argument error and leaves the track usable. An oversized property is such an error too,
   not a transport failure once demand arrives.
 - Each write copies its bytes and sends one independent group containing one object. Only one
-  write may be pending per track; a concurrent write is rejected rather than queued.
+  write may be pending per track. A concurrent write is rejected rather than queued.
 - Write completion means the transport accepted the complete group, not that any viewer received
   it. The transport accepted the group once its FIN was handed to the transport, not once the relay
   acknowledged it, so a track is not limited to one group per round trip. Until that
-  acknowledgment the group is a settling group (see `CONTEXT.md`); closing a track does not wait
+  acknowledgment the group is a settling group (see `CONTEXT.md`). Closing a track does not wait
   for its settling groups. A settling group is never reset when the relay subscription changes or
-  ends; only its own [delivery timeout](#delivery-timeouts) resets it. One that fails later
+  ends. Only its own [delivery timeout](#delivery-timeouts) resets it. One that fails later
   (STOP_SENDING, a reset, its delivery timeout, the session ending) is dropped without an
   error on the track, and frees its place under the limit below: the cause surfaces as demand, a new relay subscription, or the connection's
   closure. While a publisher connection has 64 settling groups, the next write or group waits in
   `opening-stream` under its write deadline before opening its stream, so a stall is a
-  `WRITE_TIMEOUT`, not a transport failure; open groups do not count toward that limit. This also
+  `WRITE_TIMEOUT`, not a transport failure. Open groups do not count toward that limit. This also
   bounds how much a Python publisher accepts into a dead uplink, since its writes complete once
   the transport has sent the FIN. `publisher.close()` waits for the connection's settling groups for
-  up to the largest write deadline among its tracks before it ends the session; in Python the same
+  up to the largest write deadline among its tracks before it ends the session. In Python the same
   wait also covers each ended track's PUBLISH_DONE (see deviation 2). Delivery timeouts end some
   settling groups sooner and leave this bound unchanged. Groups still unacknowledged
   by then may be lost, and the close still succeeds. A write that
@@ -920,7 +921,7 @@ taken over.
   them, and LARGEST_OBJECT once the track has written an object: the largest group and object ID
   whose write the transport took, across every relay subscription the track has had on this
   connection. Any other track gets REQUEST_ERROR `DOES_NOT_EXIST` (`unknown track`), as a SUBSCRIBE
-  does; an answer that does not fit its control message (track properties at the size limit
+  does. An answer that does not fit its control message (track properties at the size limit
   together with a long LARGEST_OBJECT) gets `INTERNAL_ERROR`. The publisher then FINs the request
   stream and reads nothing more from it. Demand, the write slot and every track writer are
   unaffected, and the application is not told. SUBSCRIBE_OK still carries no LARGEST_OBJECT
@@ -933,21 +934,21 @@ taken over.
 - A failed write may have delivered partial data. There is no automatic retry.
 - The publisher encodes supplied track and object properties as protocol metadata. The raw transport
   API adds no default timescale, timestamp, or LOC media packaging. Subscribers expose the properties received
-  from the relay, which may differ from those sent by the publisher; end-to-end preservation of
+  from the relay, which may differ from those sent by the publisher. End-to-end preservation of
   arbitrary properties is not guaranteed. See [Relay property handling](#relay-property-handling).
 - Object payloads, encoded object properties and individual property values are limited to the
   sizes in `protocol.json`.
-- Closing a track writer cancels an outstanding write and ends that track; other tracks continue.
+- Closing a track writer cancels an outstanding write and ends that track. Other tracks continue.
   Closing the publisher ends all tracks, retracts the namespace, and waits for transport shutdown.
   A track's subscription ends with PUBLISH_DONE (`TRACK_ENDED`) after its data streams close, then
-  a FIN, which needs moq-relay 0.15.4 or later; neither connection sends GOAWAY
+  a FIN, which needs moq-relay 0.15.4 or later. Neither connection sends GOAWAY
   ([relay interop deviations](#relay-interop-deviations)).
 - Track names cannot be reused within a publisher connection, including after their writer closes.
 - A track writer may open a multi-object group: objects are appended with object IDs 0, 1, 2, ...
   on one stream, and closing the group FINs the stream. Object 0 is the group's random-access point,
   which is how LOC/MSF media (one GOP per group) is published. A group that fails part-way is reset
-  rather than completed, and the track stays open for the next group; whether a subscriber learns
-  of the reset depends on the relay (see [Subscribing](#subscribing)); only one write or group may
+  rather than completed, and the track stays open for the next group. Whether a subscriber learns
+  of the reset depends on the relay (see [Subscribing](#subscribing)). Only one write or group may
   be pending per track. The write deadline applies separately to opening a group (including demand),
   each object write, and closing the group. Idle time between operations is unrestricted. Aborting a
   group after it closed cleanly has no effect: the FIN already ended the stream, and a reset after
@@ -962,7 +963,7 @@ taken over.
   the relay's single upstream subscription for the track: the relay shares it across every
   downstream viewer, so additional viewers produce no further notification, and when it ends is
   the relay's choice (moq-relay 0.15 and later cancel it about one round trip after the last viewer
-  leaves; earlier relays held it for about 30 seconds). Demand is therefore neither a viewer
+  leaves, and earlier relays held it for about 30 seconds). Demand is therefore neither a viewer
   count nor a liveness signal. A document re-sent on each demanded value reaches the viewers who
   join during one relay subscription from the relay's cache, not as a re-send, so a state-shaped
   track writes only state that is safe to serve from cache and to receive more than once
@@ -970,9 +971,9 @@ taken over.
   is a moq-lite viewer on any relay, the publisher's relay first subscribes briefly to answer a
   track-info query and then subscribes again, so objects written during the first subscription reach
   no viewer, with or without a
-  `SUBSCRIPTION_CHANGED` error; a live publisher cannot rely on its first objects after demand
+  `SUBSCRIPTION_CHANGED` error. A live publisher cannot rely on its first objects after demand
   begins being delivered ([a viewer on another relay](relay-interop.md#a-viewer-on-another-relay)).
-  That is moq-relay 0.17; `main` asks with TRACK_STATUS instead, which the publisher answers (see
+  That is moq-relay 0.17. `main` asks with TRACK_STATUS instead, which the publisher answers (see
   above), and subscribes once ([TRACK_STATUS on moq-relay main](relay-interop.md#track_status-on-moq-relay-main)).
   Implemented in both SDKs.
 
@@ -985,15 +986,15 @@ There are no options for them: an application sets the publisher's values with t
 properties it already passes.
 
 - **The value.** Each group's value is fixed just before its stream opens, after any wait for
-  settling room; for a group opened without its first object, the publisher's side is fixed when
+  settling room. For a group opened without its first object, the publisher's side is fixed when
   that object is written. The publisher's is the property on the group's first object when present,
-  and the track property otherwise; on any later object the property is ignored. The subscriber's is the
+  and the track property otherwise. On any later object the property is ignored. The subscriber's is the
   parameter on the relay subscription's SUBSCRIBE, as updated by any REQUEST_UPDATE so far. When
-  both are non-zero the smaller applies, and otherwise the non-zero one; 0 means no timeout. A value
+  both are non-zero the smaller applies, and otherwise the non-zero one. A value of 0 means no timeout. A value
   above 2147483647 ms is clamped to that bound, and registration refuses neither 0 nor a clamped
   value. Both types are even, so their values are integers: the [Arguments](#arguments) table
   already refuses bytes there. A REQUEST_UPDATE carrying either parameter is acknowledged with
-  REQUEST_OK, and the new value applies to groups whose stream opens after it; groups already open
+  REQUEST_OK, and the new value applies to groups whose stream opens after it. Groups already open
   or settling keep theirs.
 - **The subgroup timeout** starts when the group's FIN is handed to the transport, the moment its
   operation completes and it becomes a settling group. If the relay has not acknowledged the FIN
@@ -1001,7 +1002,7 @@ properties it already passes.
   the stream reaches "all data committed". Nothing is reported to the track: the group leaves the
   settling set like any other late failure and frees its place under the 64-group limit. The timer
   belongs to the group, so it keeps running through a relay subscription change or end and through
-  the track's PUBLISH_DONE; only the connection's end stops it.
+  the track's PUBLISH_DONE. Only the connection's end stops it.
 - **The object timeout** counts from the call that hands the object over (`write()`, `openGroup()`
   / `open_group()` given the group's first object, or the group's `write()`) to the moment the
   transport takes the object, so waiting for demand, for settling room, for the stream and behind
@@ -1014,15 +1015,15 @@ properties it already passes.
   ([#306](https://github.com/muxinc/relay-sdks/issues/306)). Properties without a payload are a
   TypeError. The age is checked again
   just before the object is handed over, as Section 5.2 requires. Until the group's value is fixed
-  only the publisher's value times the wait; an object already older than the fixed value fails
+  only the publisher's value times the wait. An object already older than the fixed value fails
   then, before any stream opens. When it expires the operation fails with `DELIVERY_TIMEOUT`
   in its current phase, and a stream already open is reset with code 0x2. In a group the whole
-  group is reset and its later writes fail with the same error; no stream is opened again for it
+  group is reset and its later writes fail with the same error. No stream is opened again for it
   (Section 5.2: SHOULD NOT). The track stays open and the next write uses a new group ID, as after
   any interruption. The object timeout runs alongside the write deadline: whichever expires first
   fails the write, with `DELIVERY_TIMEOUT` or `WRITE_TIMEOUT`. Once the transport has taken an
   object, its bytes cannot be timed out. In TypeScript the transport has taken an object when its
-  stream write resolves, so an object queued behind stream flow control is still timed; in Python,
+  stream write resolves, so an object queued behind stream flow control is still timed. In Python,
   when the stream write returns, once aioquic has transmitted the bytes.
 - **On moq-relay 0.15.8, 0.17.0 and 0.17.5** (and 0.17.7, read in source) neither value has any
   effect beyond the publisher.
@@ -1043,7 +1044,7 @@ properties it already passes.
   apply, and a track property is the safer way to set the subgroup timeout. The reverse also holds:
   a publisher that still sends timestamps as `0x06` (the draft-ietf-moq-loc-03 id) now gives each
   group a subgroup timeout equal to its first object's timestamp. Applications must not send a
-  timestamp as `0x06`; LOC Timestamp is `0x10`. Evidence:
+  timestamp as `0x06`. LOC Timestamp is `0x10`. Evidence:
   [issue #167](https://github.com/muxinc/relay-sdks/issues/167).
 - **Defaults** belong to the media tier, not the write slot: `registerTrack` sets none, and
   [media publishing](#media-publishing) gives media tracks a subgroup timeout.
@@ -1072,9 +1073,9 @@ higher value goes first and every other stream has 0.
 - Every stream of a track has the same send order, so the mapping prefers no group of a track over
   another. The transport decides how equal streams share the uplink, and a later group's stream can
   still finish first.
-- Where it applies ([TA-28](transport-adapter.md#streams)): Firefox's `WebTransport` from 155;
-  `@caprid/relay-websocket`, whose QMux scheduler sends highest first, round-robin among equals; and
-  `@caprid/relay-quic`, as quinn's stream priority. Chromium's does not: Chromium 153 has no
+- Three transports apply it ([TA-28](transport-adapter.md#streams)): Firefox's `WebTransport` from
+  155, `@caprid/relay-websocket`, whose QMux scheduler sends highest first and round-robin among
+  equals, and `@caprid/relay-quic`, as quinn's stream priority. Chromium's does not: Chromium 153 has no
   `WebTransportSendStream` and drops the option, so a Chromium publisher sends as before. The
   Python SDK sets none: aioquic has no stream priorities.
 - It orders only what the publisher still holds. A backlog already in the network, in a deep
@@ -1131,9 +1132,9 @@ unless stated otherwise.
 | after a clean group close | `abort()` | nothing; `closed` stays true and a repeated `close()` returns | nothing sent | open | §11.3.2: a reset after all data and the FIN is ignorable |
 
 A failed group's ID is never reused, which is stricter than §2.2 (a subgroup may resume on a new
-stream after a premature reset); group IDs increase monotonically and object IDs start at 0 within a
+stream after a premature reset). Group IDs increase monotonically and object IDs start at 0 within a
 group (draft-ietf-moq-msf-01 §6). A group may end without an `END_OF_GROUP` marker (§12.1). There
-is no automatic retry, and the application chooses the next random-access point after a failure;
+is no automatic retry, and the application chooses the next random-access point after a failure.
 MSF and LOC say nothing about an abandoned group. Implemented in both SDKs.
 
 ### Relay property handling
@@ -1165,13 +1166,13 @@ object properties through the relay, but no release has it yet
   with 2, and its other track properties (for example `0x0D`, `0x40`, `0x41`) are dropped.
 - A track registered with a Default Publisher Priority (`0x0E`) above 255 or a Default Publisher
   Group Order (`0x22`) other than 1 or 2 makes the relay refuse **every** subscribe to it with
-  REQUEST_ERROR 18 `invalid value`. The publisher gets no error; its writes time out waiting for
+  REQUEST_ERROR 18 `invalid value`. The publisher gets no error. Its writes time out waiting for
   demand. Draft-22 rules both values out (§10.4, §10.5), so the SDKs refuse them at registration
   ([issue #252](https://github.com/muxinc/relay-sdks/issues/252)).
 - **On 0.17.0**, a track registered with more than 64 track properties makes the relay refuse
   **every** subscribe to it with REQUEST_ERROR 18 `too many` (`MAX_PROPERTIES`, an implementation
-  limit), again with no error to the publisher; 64 pairs, or one byte value filling the rest of a
-  maximal `SUBSCRIBE_OK`, are accepted. The SDKs refuse such a track at registration
+  limit), again with no error to the publisher. The relay accepts 64 pairs, or one byte value filling the
+  rest of a maximal `SUBSCRIBE_OK`. The SDKs refuse such a track at registration
   (`relay.limits.maxTrackProperties`, [issue #252](https://github.com/muxinc/relay-sdks/issues/252)).
 - **From 0.17.0**, an object whose property block is larger than 64 KiB (65,536 bytes) is dropped
   by the relay: it stops that stream, and the subscriber sees a gap with no reset, while the
@@ -1187,9 +1188,9 @@ Compared with the 0.14.17 and 0.15.1 observations, the `0x0E` in `SUBSCRIBE_OK` 
 invalid-value refusal are new.
 
 For publisher-defined media timing, declare a track timescale and put timestamps in that unit on
-objects. To sync a broadcast's tracks, stamp them all from one clock; that convention, and the
+objects. To sync a broadcast's tracks, stamp them all from one clock. That convention, and the
 player's playout clock, are in
-[media-layer.md, Shared timeline and playout clock](media-layer.md#shared-timeline-and-playout-clock). Interpret received timestamps using the received track timescale; a timestamp's presence
+[media-layer.md, Shared timeline and playout clock](media-layer.md#shared-timeline-and-playout-clock). Interpret received timestamps using the received track timescale. A timestamp's presence
 alone does not establish that the publisher supplied it. Do not treat a relay-generated timestamp
 as the application's event time or a synchronized wall clock. Put application metadata that must
 arrive intact in the payload (or a separate metadata track's payload). For the Video.js media
@@ -1207,30 +1208,30 @@ and [frame model](https://github.com/moq-dev/moq/blob/b00be0ffc3734addcdd5e6ad4b
 - Both product SDKs provide opt-in text and JSON writes on track and group writers and standalone
   readers for received objects. The protocol core remains payload-agnostic.
 - Each helper encodes or decodes one complete UTF-8 object. Text readers preserve a leading U+FEFF
-  and reject malformed UTF-8; JSON readers additionally reject invalid JSON, including non-standard
+  and reject malformed UTF-8. JSON readers additionally reject invalid JSON, including non-standard
   `NaN` and `Infinity` tokens. Empty text is valid, but an empty payload is not JSON.
 - Writes delegate to the byte writer, retaining its options, metadata, grouping, demand,
   concurrency, cancellation, deadlines, and size limit (measured in encoded bytes). Serialization
   failures occur before starting a write and leave the writer usable.
 - JSON uses the language's standard serializer and parser, with no schema validation or automatic
-  content-type properties. Unsupported values fail locally; JavaScript also rejects top-level
+  content-type properties. Unsupported values fail locally. JavaScript also rejects top-level
   values for which `JSON.stringify` returns undefined. Runtime-specific number, Unicode, and
-  serialization conversion rules are documented in each SDK's README; this is not canonical JSON.
-- Readers do not mutate payloads or metadata. Decode failures propagate to the caller; applications
+  serialization conversion rules are documented in each SDK's README. This is not canonical JSON.
+- Readers do not mutate payloads or metadata. Decode failures propagate to the caller. Applications
   catch them inside object callbacks when they want to skip malformed objects.
 
 ## Media helpers
 
 The optional `@caprid/moq-media` / `moq-media` packages implement pure format helpers. Raw Relay
-writers keep their existing byte/group behavior; no automatic media packaging is added to them.
+writers keep their existing byte/group behavior. No automatic media packaging is added to them.
 The media pins in `protocol.json` and exact bytes and parsed values in `vectors/media.json` apply
 to both languages.
 
 - LOC track properties declare a timescale (default 1,000,000). Object properties carry Timestamp
   (0x10), Timescale (0x08), and explicitly supplied Video Config (0x0D) / Audio Config (0x0F).
-  Callers supply configs only on keyframes. Timestamps arrive in microseconds; other timescales
+  Callers supply configs only on keyframes. Timestamps arrive in microseconds. Other timescales
   round to the nearest integer tick, ties upward. Inputs and the resulting tick count must be
-  nonnegative safe integers (at most 2^53−1); the timescale must be positive.
+  nonnegative safe integers (at most 2^53−1). The timescale must be positive.
 - The LOC timestamp reader (`locTimestampUs` / `loc_timestamp_us`, issue #290) returns an object's
   Timestamp (0x10) in microseconds, or nothing when the object has no Timestamp that is a
   nonnegative safe integer. It scales by the first Timescale that is a positive safe integer,
@@ -1246,7 +1247,7 @@ to both languages.
   omitted, as is empty init data. Catalog strings must be valid Unicode, with no lone surrogates.
   Entries are ordered `video`, `audio`, the `media` list in caller order, the media timeline, then
   data in caller order. Init-data entries have
-  `<track-name>-init` IDs and inline base64 data. Numbers must be finite; integral values must be safe integers and have no decimal suffix.
+  `<track-name>-init` IDs and inline base64 data. Numbers must be finite. Integral values must be safe integers and have no decimal suffix.
   Fractional values use ECMAScript JSON number spelling, including its exponent threshold.
 - The end-of-broadcast catalog (`buildMsfEndCatalog` / `build_msf_end_catalog`) is msf-01 §11.3's
   final document: `version`, the optional `generatedAt`, `isComplete: true`, and an empty `tracks`
@@ -1254,8 +1255,8 @@ to both languages.
   after every media track has ended (closing a track sends PUBLISH_DONE Track Ended), and never on
   a crash or a lost connection.
 - `avc1` and `avc3` video entries are withheld without non-empty init data. With avcC, the codec
-  suffix comes from the record's profile/constraints/level; the `avc1`/`avc3` prefix is retained.
-  Header inspection rejects truncated/wrong-version headers; it does not decode SPS semantics.
+  suffix comes from the record's profile/constraints/level. The `avc1`/`avc3` prefix is retained.
+  Header inspection rejects truncated/wrong-version headers. It does not decode SPS semantics.
 - Opus always declares 48,000 Hz and defaults to channel configuration `"2"`. Video and audio
   entries carry `renderGroup` (msf-01 §5.2.11), 1 unless the caller names another, and `altGroup`
   (§5.2.12) when the caller names one. Both must be non-negative safe integers, and the members of
@@ -1273,9 +1274,9 @@ to both languages.
   and percent-escapes an optional `c4m` token using RFC 3986 unreserved characters.
 - Python H.264 helpers accept three- or four-byte Annex B start codes, omit Annex B padding zeros,
   extract SPS/PPS, construct a four-byte-length avcC, and convert access units to four-byte NAL
-  lengths. SPS/PPS/AUD are dropped by default; retaining them is an explicit option. avcC creation
+  lengths. SPS/PPS/AUD are dropped by default. Retaining them is an explicit option. avcC creation
   rejects missing/wrong-kind parameter sets, more than 31 SPS or 255 PPS, and NALs over 65,535 bytes.
-  Construction supports Baseline, Main, and Extended profiles (66, 77, 88); other profiles are
+  Construction supports Baseline, Main, and Extended profiles (66, 77, 88). Other profiles are
   rejected until their SPS-derived chroma/bit-depth extension fields are implemented. Encoder-generated
   avcC records of other profiles can still be passed to the catalog builder. The extension requirement
   is reflected in [FFmpeg's avcC writer](https://patches.ffmpeg.org/doxygen/4.4/avc_8c_source.html).
@@ -1288,7 +1289,7 @@ to both languages.
   order. These helpers require no browser globals at import time.
   The optional `@caprid/moq-mediabunny` file-input adapter borrows public packet payloads and rejects
   metadata-only packets. Both chunk and packet helpers accept a shared integer timestamp offset
-  to normalize negative timestamps; input timestamps must be safe integers and the final timestamp
+  to normalize negative timestamps. Input timestamps must be safe integers and the final timestamp
   follows the LOC nonnegative safe-integer contract. The adapter retains compatibility re-exports
   of the config mappers and `LocFrame` type from the media package.
 - The catalog reader (`parseMsfCatalog` / `parse_msf_catalog`) takes a catalog object's payload
@@ -1302,11 +1303,11 @@ to both languages.
   non-integral widths, heights, sample rates, bitrates, render and alternate groups, and generation
   times, track entries that are
   not objects or have no string name, and init entries whose type is not `inline`. A track's
-  slash-joined `namespace` is split back into fields, dropping empty ones (the builder's dialect);
-  a track without one inherits the catalog track's namespace (§5.2.2). Packaging is returned as
+  slash-joined `namespace` is split back into fields, dropping empty ones (the builder's dialect).
+  A track without one inherits the catalog track's namespace (§5.2.2). Packaging is returned as
   declared, `loc` or otherwise, and payloads are not interpreted. Absent packaging reads as the
-  empty string and absent `isLive` as false. `initRef` resolves through `initDataList` to bytes;
-  an unresolved reference leaves the track without init data. Every builder document must read
+  empty string and absent `isLive` as false. `initRef` resolves through `initDataList` to bytes.
+  An unresolved reference leaves the track without init data. Every builder document must read
   back as its vector's `parsed` value. `groupMsfTracks` / `group_msf_tracks` groups parsed tracks
   into the sets a viewer picks one track from: tracks sharing a render group and an alternate group
   form one set, every other track is a set of its own, and sets are ordered by their first track.
@@ -1322,7 +1323,7 @@ to both languages.
   `anchor + round(s − anchor s) − captureLatencyUs`. A calibration pair `(s, at)` re-anchors when
   there is no anchor, or when the anchor (without the capture latency) is off by more than
   `toleranceUs` (5 ms). Uncalibrated, the first timestamp anchors at `now()`. The capture latency
-  defaults to 0, must be a nonnegative safe integer, and can be changed between timestamps; no
+  defaults to 0, must be a nonnegative safe integer, and can be changed between timestamps. No
   helper knows a device's latency. It maps sample index `n` as `first + floor(n × 1,000,000 / rate)`. The playout clock
   (`createPlayoutClock` / `PlayoutClock`) is master-audio: its position is the latest audio report
   plus elapsed local time. It paces by wall clock while idle, after `stopAudio` / `stop_audio`,
@@ -1331,7 +1332,7 @@ to both languages.
   `maxVideoDelayUs`, 1 s), `show` (late by at most `lateDropUs`, 40 ms), or `drop`. A frame further
   ahead is shown at once. Wall pacing re-anchors on a frame more than `maxVideoDelayUs` early or
   more than the target latency late. The target latency (`targetLatencyUs` / `target_latency_us`)
-  is the option when given, a positive number; otherwise twice the longest of the last four
+  is the option when given, a positive number. Otherwise it is twice the longest of the last four
   keyframe intervals reported (`reportKeyframeInterval` / `report_keyframe_interval`, each positive),
   and 2 s before any is. `reset()` keeps the reported intervals and counts itself in `resets`. Both clocks read an injected
   monotonic microsecond source and need no DOM or transport. The decisions are pinned by
@@ -1341,7 +1342,7 @@ to both languages.
   Unix-epoch microseconds: as given, or else read once at creation as the system clock
   (`Date.now()`, `time.time_ns()`) less the source time elapsed since the origin. An entry for a
   timeline timestamp `t`, location `(g, o)` (object defaults to 0) and wall-clock time `w`
-  (defaults to `t`, the epoch-anchored timeline; 0 means unknown) is
+  (defaults to `t`, the epoch-anchored timeline, and 0 means unknown) is
   `[floor(t / 1000), [g, o], floor(w / 1000)]`. Every number must be a nonnegative safe integer.
   The document builder encodes entries in the order given as compact JSON. The reader rejects a
   payload that is not a UTF-8 JSON array (no byte-order mark, no `NaN`/`Infinity`). It reads a
@@ -1358,7 +1359,7 @@ to both languages.
   (`createMediaTimeline` / `MediaTimeline`) holds one broadcast's entries, each built as the entry
   helper builds it (wall-clock time defaulting to the timestamp), and keeps at most `maxEntries` / `max_entries` (a positive
   safe integer, default 512), dropping the oldest. Each add returns the independent document of the
-  retained entries; before the first it is `[]`. A rejected entry leaves the timeline unchanged.
+  retained entries. Before the first it is `[]`. A rejected entry leaves the timeline unchanged.
   Retention is pinned by `vectors/media.json`. Cadence (one entry per video group that was sent)
   and the publishing rules are in media-layer.md. Implemented in both SDKs.
 - The Opus packet duration (`opusPacketDurationUs` / `opus_packet_duration_us`) reads RFC 6716
@@ -1375,7 +1376,7 @@ to both languages.
   payload that is not a UTF-8 JSON object, reads an integral number such as `2e3` as an integer,
   and ignores unknown fields. A listener applies an interrupt for an audio track it plays as a cut
   of that range. Pinned by `vectors/media.json` `interrupts`, `interruptErrors`, `interruptReads`
-  and `interruptReadErrors`; the track name by `protocol.json`.
+  and `interruptReadErrors`. The track name by `protocol.json`.
 - The transcript track (`TRANSCRIPT_TRACK`, `transcript`; [media-layer.md](media-layer.md#transcript-track),
   issue #320) carries one version of one segment per group as compact UTF-8 JSON: `seq`, `track`
   (default `audio`), `fromUs`, the optional `untilUs`, `text` and `final`, in that order, with no
@@ -1386,16 +1387,16 @@ to both languages.
   `fromUs`, and a final segment without `untilUs`. The reader refuses a payload that is not a UTF-8
   JSON object, reads an integral number as an integer, and ignores unknown fields. A cut starts at
   the later of the range's `fromUs` (or 0) and the floored playout position, and changes nothing
-  when that is not before `untilUs`; otherwise a `Transcript` remembers it, drops the segments
+  when that is not before `untilUs`. Otherwise a `Transcript` remembers it, drops the segments
   starting in it, and ends any segment running past its start there, final and marked cut. `apply`
   keeps a segment's latest version, clipped by the remembered cuts in order of start: refused if it
   starts inside one (a final version refused this way also drops the line held for its segment),
   ended at the start of the first it runs into. It refuses any version of a segment the talker sent
-  final, even one a cut dropped, and an interim version of a cut segment; a final version of a cut
-  segment replaces it, clipped. It returns whether the held line changed. Lines are ordered by `fromUs`, then `seq`; at a position, those with
-  `fromUs` at or before it, and none while idle. Pinned by `vectors/media.json`
+  final, even one a cut dropped, and an interim version of a cut segment. A final version of a cut
+  segment replaces it, clipped. It returns whether the held line changed. Lines are ordered by `fromUs`, then `seq`. At a position, the lines are
+  those with `fromUs` at or before it, and there are none while idle. Pinned by `vectors/media.json`
   `transcriptSegments`, `transcriptSegmentErrors`, `transcriptSegmentReads`,
-  `transcriptSegmentReadErrors`, `transcripts` and `transcriptCutErrors`; the track name by
+  `transcriptSegmentReadErrors`, `transcripts` and `transcriptCutErrors`. The track name by
   `protocol.json`.
 - Python's Opus encoder and decoder (`moq_media.opus`, the `opus` extra; issue #320, ADR 0006) are
   PyAV's libopus. The encoder takes signed 16-bit PCM, or a PyAV frame, in runs: the first call of a
@@ -1403,11 +1404,12 @@ to both languages.
   run is stamped at that timestamp plus *k* × 20 ms, and ending the run pads its partial frame with
   silence and drains the encoder. Defaults are voice: mono, 32 kb/s, libopus's `voip` application.
   The decoder returns s16 PCM at the caller's rate and channel count, and resets on request, at a
-  discontinuity. TypeScript uses WebCodecs instead and has no counterpart.
+  discontinuity. TypeScript exports no counterpart: applications encode with WebCodecs, and the
+  audio player decodes with an internal libopus WebAssembly build.
 - Encoding, pacing, and time-based frame dropping remain application responsibilities. Catalog
   serving, GOP grouping and recovery are the [Media publishing](#media-publishing) policy below, and
   reading frames in decode order within a latency budget is [Media subscribing](#media-subscribing),
-  both implemented in both SDKs; a `register_media` publishing handle is not implemented.
+  both implemented in both SDKs. A `register_media` publishing handle is not implemented.
 
 ## Media publishing
 
@@ -1426,16 +1428,16 @@ Implemented in both SDKs.
   what the Video.js player relies on, and MSF-01 §6's one-object-per-stream sentence is treated as
   a draft defect because it contradicts LOC-04 §4.2 and MSF-01 §5.
 - A catalog write that fails while the track stays open is retried after a configurable delay
-  (default one second) for as long as demand remains, keeping only the current document; losing
+  (default one second) for as long as demand remains, keeping only the current document. Losing
   demand ends the retries until the next relay subscription. The service runs until cancelled or
   until the track ends, and raises the failure that ended the track when a write exposed it.
 - A document service serves a state-shaped track whose document the application replaces, such as
   the media timeline. It sends the latest document, each time as a new group, on every relay
   subscription as the catalog service does, and again on every update while the relay is
   subscribed. It sends nothing before the first document. An update without relay demand only
-  replaces the document; an update made during a write is sent after it. Retries follow the
+  replaces the document. An update made during a write is sent after it. Retries follow the
   catalog's rule but always send the latest document. A retirement during a write ends the service
-  with that failure; the track ending otherwise ends it quietly.
+  with that failure. The track ending otherwise ends it quietly.
 - A frame writer maps encoded frames onto one track's groups. Under keyframe grouping, the LOC
   mapping for video, a keyframe FINs the open group and opens a new one, and deltas append to it.
   Under frame grouping, for audio and any other independently decodable frames, every frame is its
@@ -1443,19 +1445,19 @@ Implemented in both SDKs.
 - Writes on one writer are served one at a time, in the order they were called, so an encoder whose
   output callback cannot await may call `write` without waiting for the previous one. Frames waiting
   behind the one being written are the writer's backlog, bounded by `maxBacklog` / `max_backlog` (a
-  positive integer; default 8 under keyframe grouping, 25 under frame grouping). A caller that awaits
-  every write never has a backlog. A waiting write that is cancelled (Python; a TypeScript promise
-  cannot be) leaves the backlog, and under keyframe grouping leaves a gap: the frame after it is
+  positive integer, default 8 under keyframe grouping and 25 under frame grouping). A caller that awaits
+  every write never has a backlog. A waiting write that is cancelled (in Python only, because a TypeScript
+  promise cannot be cancelled) leaves the backlog, and under keyframe grouping leaves a gap: the frame after it is
   treated as following a discontinuity, and a keyframe is needed.
 - A frame that arrives at a full backlog means the transport has fallen behind, and the writer drops
   rather than queues. Under keyframe grouping every waiting frame is dropped and the open group is
-  reset at once; the frame being written into it, if any, is dropped too. The arriving frame then
+  reset at once. The frame being written into it, if any, is dropped too. The arriving frame then
   opens the next group if it is a keyframe, and is dropped otherwise, as is every delta after it
   until the next keyframe. Under frame grouping the oldest waiting frame is dropped and the arriving
   frame takes its place at the back.
-- A frame the relay has no subscription for when its turn comes is skipped at once; the writer never
+- A frame the relay has no subscription for when its turn comes is skipped at once. The writer never
   waits on the write deadline, because an encoder loop cannot block. A relay demand change (a new or
-  replacement subscription, or its end) ends the open group in the write slot at once; the writer
+  replacement subscription, or its end) ends the open group in the write slot at once. The writer
   finds it ended at the next frame, even one written before it has seen the change, and skips deltas
   until the next keyframe. The open group is not replayed.
 - Under keyframe grouping a writer says when it needs a keyframe (`keyframeNeeded` /
@@ -1463,10 +1465,10 @@ Implemented in both SDKs.
   interruption, stale or discontinuous frame, or drop until the next keyframe arrives. A keyframe
   arrives when `write` is called with it, whether or not it is later sent. The optional
   `onKeyframeNeeded` / `on_keyframe_needed` callback runs synchronously on every entry into that
-  state after the start, so an encoder can force a keyframe instead of waiting out its interval; an
-  exception from it is reported (`console.error`; the asyncio loop's exception handler) and does not
+  state after the start, so an encoder can force a keyframe instead of waiting out its interval. An
+  exception from it is reported (to `console.error`, or to the asyncio loop's exception handler) and does not
   touch the writer. The writer watches the track's demand from its creation until it closes or the
-  track ends; in Python it is therefore created with an event loop running. Under frame grouping no
+  track ends. In Python it is therefore created with an event loop running. Under frame grouping no
   keyframe is ever needed.
 - A frame that starts a group (a keyframe, or under frame grouping every frame) opens it as the
   group's first object, so a [delivery timeout](#delivery-timeouts) counts the wait for settling
@@ -1478,9 +1480,9 @@ Implemented in both SDKs.
   keyframe. A frame flagged as following a discontinuity resets the open group the same way.
 - A failure is one of two kinds. It ends the writer (a retirement, see `CONTEXT.md`) exactly when
   the error code is `CLOSED` or the track reports `closed` afterwards, and likewise when the track
-  is already closed as a frame's turn comes; that frame and every later one are reported as ended,
+  is already closed as a frame's turn comes. That frame and every later one are reported as ended,
   with the error, and nothing further touches the track. Any other failure (an interruption) resets
-  the group, leaves the track open, and reports the frame as interrupted with its error; the next
+  the group, leaves the track open, and reports the frame as interrupted with its error. The next
   keyframe, or the next independent frame, opens a new group. The FIN of the previous group that a
   keyframe triggers is part of that keyframe's write: a retirement during it ends the writer, while
   an interruption during it is absorbed, because the previous group's delivered objects stand and
@@ -1492,7 +1494,7 @@ Implemented in both SDKs.
   `locTrackProperties()`): a stall then costs stale frames, not lasting latency. They hold one
   SUBGROUP_DELIVERY_TIMEOUT, in whole milliseconds rounded up from microseconds. Audio's is 500 ms.
   Video's is the [target latency](../CONTEXT.md) less the keyframe interval, and never less than the
-  interval; the target latency defaults to twice the interval, so video's default is one interval.
+  interval. The target latency defaults to twice the interval, so video's default is one interval.
   An explicit subgroup timeout replaces either default. It is a track property because moq-relay
   reads an object's `0x06` as a Timestamp, and because the relay ignores both sides' values only the
   publisher's own enforcement applies.
@@ -1516,7 +1518,7 @@ Implemented in both SDKs.
   - A subgroup timeout resets a settling group the writer has moved past. It reports nothing to the
     writer and raises no keyframe-needed, since the open group decodes without it. Under keyframe
     grouping the open group has no timer until its FIN, at the next keyframe, so its objects can
-    wait out a stall in the transport; dropping late video is then the reader's.
+    wait out a stall in the transport. Dropping late video is then the reader's.
   - A downlink stall is outside the publisher's reach: the relay keeps a stalled viewer's backlog
     whatever these values are.
 - The same properties put audio ahead of video with a Default Publisher Priority (`0x0E`), lower
@@ -1538,7 +1540,7 @@ Implemented in both SDKs.
   writer returns it rather than raising, so a caller keeps counters without catching per frame, and
   the group the frame was written to or that was reset on its behalf travels with it. Closing the
   writer FINs the open group, reports every waiting frame as dropped, and refuses further frames
-  with `CLOSED`; the registered track stays the application's to close.
+  with `CLOSED`. The registered track stays the application's to close.
 
 ## Media subscribing
 
@@ -1548,7 +1550,7 @@ The raw subscription delivers them as they arrive. A frame sequencer (`createFra
 `FrameSequencer`, in the format packages) turns one track's objects into frames in decode order and
 drops what is too late against the broadcast's playout clock. A frame reader (`createFrameReader` /
 `FrameReader`, in `@caprid/relay/media` and `caprid_relay.media`) is a subscription's or a want's handlers
-that drive a sequencer and poll it when a wait ends; it knows no format. Implemented in both SDKs.
+that drive a sequencer and poll it when a wait ends. It knows no format. Implemented in both SDKs.
 
 - A viewer subscribes to a media track with the parameters from
   `mediaSubscribeParameters(kind, overrides)` / `media_subscribe_parameters(kind, overrides)`, in
@@ -1557,7 +1559,7 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   audio and 96 for video, the same values as the [publisher priorities](#media-publishing), pinned
   in `spec/protocol.json` as `mediaSubscribeParameters.subscriberPriority`. The overrides are copied
   onto a new result, and an explicit subscriber priority, an integer from 0 to 255, replaces the
-  default; a kind other than `'audio'` or `'video'`, or a priority outside that range, is refused
+  default. A kind other than `'audio'` or `'video'`, or a priority outside that range, is refused
   like the media track timing [arguments](#arguments).
   - This is the priority that decides delivery on moq-relay 0.17. The relay orders what it sends a
     viewer by subscriber priority alone and ignores the publisher's `0x0E` even when subscriber
@@ -1570,7 +1572,7 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
     about 1 Mbit/s of 30 fps video (a 40 kB keyframe each second), both registered with
     `mediaTrackProperties`, and a Node subscriber behind a downlink capped at 800 kbit/s (100 ms
     queue) timed the audio from capture to arrival, after a 5 s warm-up of a 25 s run. "Off"
-    subscribes with no parameters, as before #337; "inverted" sends audio 96 and video 16. The
+    subscribes with no parameters, as before #337. "Inverted" sends audio 96 and video 16. The
     probe read each SUBSCRIBE off the subscriber's request streams: SUBSCRIBER_PRIORITY 16 and 96
     with the helper, none without. On a clean path every mode delivered audio in 1 to 2 ms.
 
@@ -1595,14 +1597,14 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
 
 - Lateness is measured against the playout clock's position, which advances in real time through a
   stall. While the clock is idle nothing is late. The budget is the clock's target latency, one
-  setting for every track of the broadcast; the sequencer reports the interval between the
+  setting for every track of the broadcast. The sequencer reports the interval between the
   keyframes of consecutive groups to the clock, so the default follows the stream. Only a keyframe
   that can still be delivered reports one: an old duplicate does not move the budget.
 - A frame's timestamp is its LOC Timestamp, scaled by the object's Timescale, then the track
   properties from SUBSCRIBE_OK. An object without one is counted (`untimed`) and ignored. An
   end-of-group status object ends its group. A repeated object is ignored.
 - Keyframe grouping (video): frames go out in order, group by group and object by object, as soon
-  as they are next; in-order delivery adds no delay. A frame more than the target latency behind the
+  as they are next. In-order delivery adds no delay. A frame more than the target latency behind the
   position is past its deadline: its group is abandoned, and so is any group whose keyframe is.
 - When the next frame is missing (a gap inside the group being delivered, a still-open group whose
   next frame has not arrived, or the next group's object 0), later frames wait only while a newer
@@ -1619,15 +1621,15 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   what was delivered or passed over, or below the group being delivered, are dropped as late.
 - Frame grouping (audio): every frame stands alone and goes out at once in group and object order. A
   group may hold several frames, one per object, as a group opened with `openGroup()` /
-  `open_group()` writes them; the position is then a group and an object, so a group's later objects
+  `open_group()` writes them. The position is then a group and an object, so a group's later objects
   are still ahead of its first. A frame whose group ID skips past the last delivered one, whose
   object ID skips within the last delivered group, or that opens a newer group past its object 0,
   carries `gap`. A frame more than the clock's `lateDropUs` behind the position is dropped, so a
-  burst after a stall cannot build a lasting backlog in the player; one behind what was delivered
+  burst after a stall cannot build a lasting backlog in the player. One behind what was delivered
   (an earlier group, or an earlier object of the same group) is dropped too. Nothing waits
   unless a reorder window is set (below).
-- Per-track delivery policy (TypeScript only; Python keeps the defaults). Three sequencer options
-  tune one track without touching the clock its other tracks share; each default leaves the
+- Per-track delivery policy is TypeScript only. Python keeps the defaults. Three sequencer options
+  tune one track without touching the clock its other tracks share. Each default leaves the
   behaviour above unchanged:
   - `lateDropUs`, frame grouping only: the late-drop limit for this track instead of the clock's.
     `Infinity` drops nothing as late, for a reader that wants every frame (speech-to-text).
@@ -1635,7 +1637,7 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
     the last group delivered, dropped or known to be over waits, with every newer one, for the
     missing group (a later object of the last group taken is not held), until
     the window has passed since that frame's group arrived (on the clock's local time). A missing
-    group that arrives in time goes out in order with no `gap`; after the window the waiting frames
+    group that arrives in time goes out in order with no `gap`. After the window the waiting frames
     go out with `gap`. A group that ended or was reset with nothing in it releases the wait at once,
     whenever its end arrived, before the first delivery or after a restart included.
     A frame that turns late while it waits is dropped as late. For a reader that wants every frame
@@ -1654,15 +1656,16 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
 - A delivered frame whose group ID is more than one past the previous delivered frame's carries
   `missingGroups` (TypeScript only): the inclusive range of group IDs of which nothing was
   delivered, whether never received, reset, or dropped as late or behind. It is the gap report an
-  application acts on; nothing in the SDK fetches the missing groups. A trailing loss is reported
+  application acts on. Nothing in the SDK fetches the missing groups. A trailing loss is reported
   only with the next delivered frame, and never across a restart, where group IDs start over.
-- The first frame after anything was skipped carries the discontinuity `gap`; a decoder resets
+- The first frame after anything was skipped carries the discontinuity `gap`. A decoder resets
   there, as at a keyframe it can start from. No gap is marked before the first delivery.
 - Resync: once frames have arrived but none within the budget for one whole target latency of the
-  position, with their lateness steady (within a quarter of the target latency of where it stood
-  when the wait began, judged on every late object, held or arriving; a stall's growing lateness
-  and a draining backlog's shrinking one restart the wait), the sequencer delivers the newest late group that still has its keyframe (or the newest
-  late frame), marks it `resync`, and resets the clock, which re-anchors on the next frame shown.
+  position, with their lateness steady, the sequencer delivers the newest late group that still has
+  its keyframe (or the newest late frame), marks it `resync`, and resets the clock, which
+  re-anchors on the next frame shown. Lateness is steady while it stays within a quarter of the
+  target latency of where it stood when the wait began, judged on every late object, held or
+  arriving. A stall's growing lateness and a draining backlog's shrinking one restart the wait.
   That group keeps collecting its later objects and its end while it waits. The wait is measured on
   the clock's local time (`localNow()` / `local_now_us()`). If another track resets or re-anchors
   the shared clock meanwhile (a reset, or a position that no longer moves with local time, by more
@@ -1679,16 +1682,16 @@ that drive a sequencer and poll it when a wait ends; it knows no format. Impleme
   frame carries `restart`, even when nothing was delivered before and even when that frame comes
   by a resync. A Move also brings the new subscription's track
   properties.
-- `poll()` returns the frames ready now, at most `maxFrames` / `max_frames` (a positive integer;
+- `poll()` returns the frames ready now, at most `maxFrames` / `max_frames` (a positive integer,
   default all), and how long until a wait can end: 0 when more is ready now, nothing when only a new
   object can change it.
   Frames not taken stay held and are judged again at the next poll. While the clock is idle and
   frames are held, it asks to be polled again after 50 ms, since the clock may anchor without any
   new object. At most about 1,024 frames are held: past that, as when nothing polls, everything
   held is dropped as late and the next frame carries `gap`. The TypeScript reader polls after every
-  event, the Python reader while a read is pending; both poll again when that time comes, or after
+  event, the Python reader while a read is pending. Both poll again when that time comes, or after
   50 ms if sooner: another track may reset or re-anchor a shared clock meanwhile, which no event of
-  this track's reports. The TypeScript reader hands each frame to `onFrame`; an event fed from within
+  this track's reports. The TypeScript reader hands each frame to `onFrame`. An event fed from within
   `onFrame` is applied after the frame in hand, and a Restart or Move fed that way drops the rest of
   the batch, which belongs to the replaced subscription. The Python reader is
   iterated and takes one frame per read, so a slow reader gets fresh frames, not a backlog. Both treat
@@ -1795,7 +1798,7 @@ and player adapters are not implemented in any SDK and have no contract yet. Add
   (SUBSCRIBE_OK, or REQUEST_OK for an update), and nothing about the subscription changes. Neither
   SDK publisher reports a Largest Object there (only in TRACK_STATUS_OK, below), so every fill range is empty and no fill fetch stream
   opens. The TypeScript core's publish session can report one (`getLargestObject` on a registered
-  track, for embedders such as Video.js); it then sends `LARGEST_OBJECT` in SUBSCRIBE_OK and
+  track, for embedders such as Video.js). It then sends `LARGEST_OBJECT` in SUBSCRIBE_OK and
   REQUEST_OK, and fails a nonempty fill the way
   [Section 3.4.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.4.1)
   requires: it opens a fill fetch stream, writes the FETCH_HEADER (committed where the transport has
@@ -1808,7 +1811,7 @@ and player adapters are not implemented in any SDK and have no contract yet. Add
 - TRACK_STATUS_OK from either SDK publisher carries LARGEST_OBJECT once the track has written an object, as
   [Section 9.20.17](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.20.17)
   requires ("If Objects have been published on this Track the Publisher MUST include this
-  parameter"); the publisher's SUBSCRIBE_OK still does not, so the two answers differ there,
+  parameter"). The publisher's SUBSCRIBE_OK still does not, so the two answers differ there,
   where [Section 9.13](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.13)
   says they carry the same parameters. Adding it to SUBSCRIBE_OK changes what every relay's
   upstream subscription sees and turns a fill request into a failed fill (below), and has not been
@@ -1819,7 +1822,7 @@ and player adapters are not implemented in any SDK and have no contract yet. Add
 ### Relay interop deviations
 
 Four choices in the generic cores depend on how moq-relay treats the draft's teardown messages,
-track aliases and request updates. All four conform to draft-22 (and draft-20); each is recorded because the
+track aliases and request updates. All four conform to draft-22 (and draft-20). Each is recorded because the
 relay's behavior, and for the first one its version, decides whether it works. The relay behavior,
 the evidence and how to re-test are in [relay
 interoperability](relay-interop.md#draft-22-deviations). Re-test against the relay before changing
@@ -1829,7 +1832,7 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
 
 1. **A subscription ends with PUBLISH_DONE, then FIN, which needs moq-relay 0.15.4 or later.**
    Draft-22 [Section 6.4.2.2](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-6.4.2.2):
-   "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN"; and
+   "the publisher of an Established subscription MUST send PUBLISH_DONE, before sending a FIN", and
    [Section 9.9](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-9.9):
    "A sender MUST NOT send PUBLISH_DONE until it has closed all streams it will ever open". This
    conforms. Every end the publisher chooses resets the subscription's data streams that are still
@@ -1870,21 +1873,21 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    client GOAWAY depends on its version: moq-relay 0.14.17 closes the whole session, and 0.15.1 and
    later record it and keep the session. Closing the publisher ends every subscription with
    PUBLISH_DONE and a FIN (deviation 1). It then waits, for up to the largest write deadline among
-   its tracks, for the relay to acknowledge the connection's settling groups; Python also waits for
+   its tracks, for the relay to acknowledge the connection's settling groups. Python also waits for
    the PUBLISH_DONEs and FINs to be acknowledged, so a short uplink outage at close does not send the
    session close while they are still in flight. After that it retracts the namespace with
    NAMESPACE_DONE, gives those writes a bounded window (250 ms), then waits up to 2 s for the relay
    to FIN its side of each ended subscription's request stream, and ends the session. None of these
-   bounds reports an error when it expires. The 2 s covers the relay's 1 s grace plus a round trip; against moq-relay the wait
+   bounds reports an error when it expires. The 2 s covers the relay's 1 s grace plus a round trip. Against moq-relay the wait
    ends as soon as the relay has finished every track, typically within a round trip. Closing a
    subscriber connection closes the transport and writes nothing more on the control stream. The application observes nothing: the relay learns of the shutdown from the
    transport close, and from a publisher's PUBLISH_DONEs and retraction before it. A GOAWAY the relay sends
    is still received and handled on both connections. Sending GOAWAY becomes useful once the SDK
-   can drain on it, which means giving it time to arrive before the transport closes; on relays
+   can drain on it, which means giving it time to arrive before the transport closes. On relays
    older than 0.15.1 it would still close the session.
 3. **A track alias is the peer's own request ID.** Draft-22
    [Section 3.1](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.1): "A
-   publisher MAY assign the same or different Track Aliases to these subscriptions"; and
+   publisher MAY assign the same or different Track Aliases to these subscriptions", and
    [Section 3.1.3](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-3.1.3):
    "The same Track Alias MUST NOT be used by a publisher to refer to two different Tracks
    simultaneously in the same session." This conforms, and narrows a MAY: every SUBSCRIBE_OK
@@ -1897,7 +1900,7 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    including the ones it rejects, before answering. moq-relay allocates server request IDs odd,
    from 1, so the parity check never fires against it. moq-relay 0.15.1 and 0.15.8 close the session with PROTOCOL_VIOLATION when one
    alias names two different tracks, and cancel the newer subscription when two live subscriptions
-   to one track share an alias; unique aliases avoid both. The application never sees an alias on
+   to one track share an alias. Unique aliases avoid both. The application never sees an alias on
    the Relay surface. Nothing needs to change unless the SDK serves concurrent subscriptions to one
    track, which
    [ADR-0001](../docs/adr/0001-one-relay-subscription-per-track.md) rules out today.
@@ -1907,7 +1910,7 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    REQUEST_UPDATE_ERROR message indicating if the update was successful", per-request names for
    REQUEST_OK and REQUEST_ERROR ([Section 1.5](https://www.ietf.org/archive/id/draft-ietf-moq-transport-22.html#section-1.5)). This conforms: each `update()` on an accepted
    subscription writes one REQUEST_UPDATE, with its own Request ID, on that subscription's request
-   stream; a REQUEST_OK reaches `onUpdateOk` / `on_update_ok`, and a REQUEST_ERROR reaches
+   stream. A REQUEST_OK reaches `onUpdateOk` / `on_update_ok`, and a REQUEST_ERROR reaches
    `onError` / `on_error` and ends the subscription. moq-relay answers neither, from 0.14.17 through
    0.17.0: after SUBSCRIBE_OK it only polls the request stream for closure, any inbound byte counts
    as a close there, and it then takes its normal end path, dropping its upstream demand and
@@ -1921,9 +1924,9 @@ four, and the core module headers (`ts/packages/moq-core/src/protocol/publish-se
    is not an alternative: moq-relay 0.17.0 refuses a SUBSCRIBE with `FORWARD` = 0 with request
    error 3 (`NOT_SUPPORTED`) `FORWARD=0 not supported` and keeps the session open, where 0.15.8
    closed the session. The SDK sends the
-   update anyway and does not warn; whether it should is open in
-   [issue #94](https://github.com/muxinc/relay-sdks/issues/94), and REQUEST_UPDATE support would be
-   an upstream relay feature.
+   update anyway and does not warn, as decided in
+   [issue #94](https://github.com/muxinc/relay-sdks/issues/94). REQUEST_UPDATE support would be an
+   upstream relay feature.
 
 Both cores pin the second choice for each role: after an orderly close, the control stream of a
 publish session and of a subscribe session carries SETUP and nothing else.

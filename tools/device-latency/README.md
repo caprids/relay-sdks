@@ -103,7 +103,7 @@ are in the file, and the raw values allow a different cut.
 ## Limits
 
 - No acoustic reference independent of the computer. Absolute input delay rests on the built-in
-  speakers' reported delay; the relative numbers do not.
+  speakers' reported delay. The relative numbers do not.
 - Safari may refuse to open two microphones at once. The page logs track `mute` and `ended`
   events. The reference run then needs repeating with Reference: None.
 - Firefox and Safari have no `AudioContext.setSinkId`: switch output in the macOS Sound menu and

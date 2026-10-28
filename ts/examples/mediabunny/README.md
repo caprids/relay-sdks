@@ -33,9 +33,9 @@ try {
 }
 ```
 
-Use a browser with WebTransport support on localhost or HTTPS and a fresh authorized namespace.
-The caller owns credentials and connection shutdown. This example contains no UI, server, or player;
-see the [existing browser launcher](../mux-global/README.md) for the repository's WebTransport setup.
+Use a browser with WebTransport support on localhost or HTTPS, and a fresh authorized namespace.
+The caller owns credentials and connection shutdown. This example contains no UI, server, or player.
+For endpoint and credential setup, see the [mux.global example](../mux-global/README.md).
 
 This example does not reconnect after the connection ends, for example after a network outage
 longer than about 5 s in Chromium. See [publisher recovery](../../../spec/publisher-recovery.md)
@@ -44,12 +44,12 @@ for what a replacement publisher can and cannot restore.
 The file must contain AVC video with decoder configuration and four-byte NAL lengths. The example
 publishes its primary video track once and ignores audio. Timestamps must be nonnegative. Each
 keyframe opens a group; deltas append to it. Packets stay in decode order and are paced by their
-durations; LOC properties retain presentation timestamps, including B-frame reordering. Catalog
+durations. LOC properties keep presentation timestamps, including B-frame reordering. Catalog
 objects carry no LOC properties.
 
 Pacing starts when the relay first subscribes to the video track, so the first viewer sees the file
-from its start; until then the example waits, for as long as it takes. After that the clock keeps
-moving: a packet the relay has no subscription for is skipped at once, keyframes included, and
+from its start. Until then the example waits, for as long as it takes. After that the clock keeps
+moving. A packet that the relay has no subscription for is skipped at once, keyframes included, and
 publication resumes at the next keyframe once demand returns. A write that fails while the track
 stays open costs the rest of its group, and publication resumes at the next keyframe too. The catalog
 service re-sends the catalog on every relay subscription and retries a write that fails while the
@@ -62,11 +62,11 @@ writes the end-of-broadcast catalog (`buildMsfEndCatalog`: `isComplete: true`, n
 the catalog track. A failure of that last write fails the run. A failed or aborted run never sends
 the end-of-broadcast catalog.
 
-A track ends on its own only with its publisher connection, and that fails the run with the error
-`publisher.closed` reports. So does a catalog failure that is not a `RelayError`. Abort closes the tracks, cancels pacing, and immediately disposes
-the file input, including during metadata and packet reads. It does not close the caller's
-connection.
+A track ends on its own only with its publisher connection, which fails the run with the error that
+`publisher.closed` reports. A catalog failure that is not a `RelayError` also fails the run. Abort
+closes the tracks, cancels pacing, and disposes the file input at once, including during metadata and
+packet reads. Abort does not close the caller's connection.
 
-The reusable adapter also supports Opus and explicit shared timestamp offsets. This example keeps
-multi-track scheduling, codec changes, and live encoder queues out of its scope; those are application
-policy and the later media-publishing stage in [the proposal](../../../spec/media-layer.md).
+The reusable adapter also supports Opus and explicit shared timestamp offsets. This example leaves
+out multi-track scheduling, codec changes, and live encoder queues. Those belong to application
+policy and to the later media-publishing stage in [the proposal](../../../spec/media-layer.md).

@@ -28,7 +28,8 @@ Measured on mux.global's moq-relay 0.17.0 on 2026-10-05 with the Python SDK
 ([publisher restarts](relay-interop.md#publisher-restarts-and-resubscription)):
 
 - A publisher that closes cleanly ends existing subscriptions within 0.1 s with status 2
-  `track ended`; one whose connection closes without MoQ cleanup, with status 0 `internal error`.
+  `track ended`. A publisher whose connection closes without MoQ cleanup ends them with status 0
+  `internal error`.
 - After a publisher crash, existing subscriptions sit silent for about 11 s, the relay's QUIC idle
   timeout, before done(0) (30-35 s on 0.15.8). The subscriber connection stays open throughout.
   New subscriptions in that interval are accepted but receive only the dead publisher's cached last
@@ -46,7 +47,7 @@ Measured on mux.global's moq-relay 0.17.0 on 2026-10-05 with the Python SDK
   request error 16 `not found`.
 
 See [issue #34](https://github.com/muxinc/relay-sdks/issues/34) and
-[issue #21](https://github.com/muxinc/relay-sdks/issues/21) for the measurements; they do not
+[issue #21](https://github.com/muxinc/relay-sdks/issues/21) for the measurements. They do not
 define a recovery deadline.
 
 An orderly publisher close helps the relay learn about shutdown sooner, but neither graceful
@@ -63,35 +64,36 @@ A useful policy is:
    catalog, sparse event track, paused source, or long GOP is not evidence of failure by itself.
    Where silence is valid, use an application heartbeat or an external publisher-health signal.
 2. When progress stops, report a stalled state and schedule one recovery attempt. Do not wait only
-   for `on_publisher_done`: it can be delayed while the relay detects a dead upstream connection. Keep an
-   overall recovery deadline and a cancellation path; do not create a new loop on every callback.
+   for `onPublisherDone` / `on_publisher_done`: it can be delayed while the relay detects a dead upstream connection. Keep an
+   overall recovery deadline and a cancellation path. Do not create a new loop on every callback.
 3. Retire the old subscription before accumulating replacement attempts. For live playback,
    cancelling it deliberately discards any trailing data so the application can prefer a fresh
    random-access point. A consumer that needs trailing data must choose its own bounded drain
-   policy before cancelling; `on_publisher_done` alone does not prove the data is drained.
-4. Request the desired live track again. The subscriber connection can stay open; if it has closed,
+   policy before cancelling. `onPublisherDone` / `on_publisher_done` alone does not prove the data is drained.
+4. Request the desired live track again. The subscriber connection can stay open. If it has closed,
    open a replacement connection first. A new connection is not a guaranteed bypass for relay state.
    During a known publisher transition, classify the fresh-namespace rejection (16 `unroutable`, or
    `404` on older relays) and initial-response timeouts as potentially transient and retry within
    the recovery budget. After a crash, a subscription accepted before the relay's idle timeout may
-   serve only the old publisher's cached object, even after the replacement announces, so check
-   freshness rather than trusting acceptance, and retry a stale one with backoff until it is served
-   by the new generation. Do not
-   re-subscribe to a track the publisher ended while it is still announced: that only replays the
-   finished track. A status-2 done alone does not prove this, because moq-relay sends one after the
-   subscription's own `update()` too; in that case re-subscribing is the recovery. Authentication, invalid input, and protocol failures need their
+   serve only the old publisher's cached object, even after the replacement announces. Check
+   freshness rather than trusting acceptance, and retry a stale subscription with backoff until the
+   new generation serves it. Do not re-subscribe to a track the publisher ended while it is still
+   announced: that only replays the finished track. A status-2 done alone does not prove the track
+   ended, because moq-relay also sends one after the subscription's own `update()`. In that case
+   re-subscribing is the recovery. Authentication, invalid input, and protocol failures need their
    own handling rather than an unlimited retry loop.
 5. Apply backoff and jitter across failed attempts **and accepted-but-stale attempts**. Cached
-   objects followed by `on_publisher_done` must not reset the budget or create an immediate resubscribe loop.
+   objects followed by `onPublisherDone` / `on_publisher_done` must not reset the budget or create
+   an immediate resubscribe loop.
    Reset only after meaningful fresh progress. See
    [the cached-track resubscription issue](https://github.com/muxinc/relay-sdks/issues/21).
 6. On a media publisher generation change, reacquire the catalog/configuration and resume at a
-   usable keyframe. Group/object IDs can restart; they are not an application continuity identifier.
+   usable keyframe. Group/object IDs can restart. They are not an application continuity identifier.
    If continuity matters, include a publisher generation and sequence in the application payload
    and define how to reject replay, handle gaps, and identify a new generation.
 
 The SDK cannot choose these thresholds or interpret these payloads for a raw byte track. This
-policy belongs in the application or player; changing a request timeout will not implement it.
+policy belongs in the application or player. Changing a request timeout will not implement it.
 A supervised subscriber's `staleAfterMs` is that freshness threshold. It is set per track by the
 application, because only the application knows which tracks may be silent.
 

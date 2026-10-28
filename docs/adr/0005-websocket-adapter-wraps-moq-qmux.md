@@ -5,6 +5,8 @@ date: 2026-10-17
 
 # The WebSocket transport adapter wraps @moq/qmux in its own package, and the fallback is opt-in
 
+> The package names below predate the rename in [#222](https://github.com/muxinc/relay-sdks/issues/222): `@mux/*` is now `@caprid/*` on npm, `mux-*` is now `caprid-*` on PyPI, and `mux_relay` is now `caprid_relay`.
+
 A browser on a network that blocks UDP, or without a WebTransport that can negotiate protocols (Safari), cannot reach
 the relay over WebTransport. Both fleets already serve MOQT on QMux over WebSocket on TCP 443 (moq-relay's
 `[web]` listener, `rs/moq-relay/src/websocket.rs`). For #321 we decided, with Adam on 2026-10-17:

@@ -17,7 +17,7 @@ publisher, which appends one generation field to the application's root. It is n
 _Avoid_: path, prefix, channel, broadcast
 
 **Track name**:
-The string that names one track within a namespace; the two together are the full track name the
+The string that names one track within a namespace. The two together are the full track name the
 relay routes on. Non-empty, in both roles.
 _Avoid_: track id, alias (that is the relay's numeric binding for a track), stream
 
@@ -25,7 +25,7 @@ _Avoid_: track id, alias (that is the relay's numeric binding for a track), stre
 
 **Write slot**:
 A track's single place for a pending operation. Only one write or open group may occupy it at a
-time; a second is refused, never queued.
+time. The SDK refuses a second one and never queues it.
 _Avoid_: in-flight slot, lock, mutex, binding
 
 **Operation**:
@@ -46,7 +46,7 @@ The draft's bound on how long a group stays deliverable: the subgroup timeout ru
 its acknowledgment, the object timeout caps an object's age, counted from when the application hands
 it over, when it reaches the transport. Its value
 is the smaller non-zero of the publisher's (the track property, or the group's first object) and the
-subscriber's; expiry resets the stream.
+subscriber's. Expiry resets the stream.
 _Avoid_: write deadline (the SDK's own bound on one operation), write timeout, TTL, max age
 
 ### Announcing
@@ -62,7 +62,7 @@ message), registration (that is a track's)
 **Announce race**:
 A subscribe that reaches the relay before it has processed the announce of its namespace. The relay
 rejects it (request error 16 with reason `unroutable` from moq-relay 0.15.8, 404 on older relays)
-rather than parking it; the application retries within its own budget, the SDK never does. A
+rather than parking it. The application retries within its own budget, and the SDK never does. A
 subscriber that waits for namespace discovery (`namespaceEvents` / `namespace_events`) to report
 the namespace announced avoids it (measured on moq-relay 0.17.0).
 _Avoid_: startup race, propagation delay, transient 404 (the same rejection after a retract is
@@ -116,7 +116,7 @@ _Avoid_: frame publisher, media writer, GOP mapper, track publisher, sink, media
 
 **Backlog**:
 The frames handed to a frame writer that the transport has not taken yet, in arrival order and
-bounded. An encoder whose output it cannot await fills it; one that awaits each write never does.
+bounded. An encoder whose output it cannot await fills it, and one that awaits each write never does.
 _Avoid_: queue (unqualified), buffer, pending writes
 
 **Drop**:
@@ -173,7 +173,7 @@ timelines), program date time, wall clock track (wall clock is the local monoton
 
 **Playout clock**:
 A player's position on one broadcast timeline, which video frames are scheduled against. Audio
-reports drive it while they arrive; otherwise it follows the local clock (wall pacing). It resets
+reports drive it while they arrive. Otherwise it follows the local clock (wall pacing). It resets
 wherever the decoders reset.
 _Avoid_: playback clock, master clock, sync clock, jitter buffer (the audio player owns that)
 
@@ -208,7 +208,7 @@ _Avoid_: jitter buffer (the audio player owns that), reorder buffer, frame sourc
 The decoded audio an audio player input holds before playing it, so that frames arriving unevenly
 play evenly. It fills to a target before playing, grows the target after an underrun, shrinks it
 while playback is smooth, and trims audio it never needed. It stays under the target latency, less
-the output delay. The frame reader holds nothing for smoothing; this is the only buffer that does.
+the output delay. The frame reader holds nothing for smoothing, so this is the only buffer that does.
 _Avoid_: playout buffer, ring (that is its storage), target latency (that is the clock's budget),
 reorder buffer
 
@@ -247,9 +247,9 @@ _Avoid_: re-anchor (the clock's own act), seek, catch-up
 **Catch-up**:
 Replacing a subscription that keeps delivering too late to use with a new one at the live edge,
 which makes the relay drop the backlog it holds for it. The sequencer asks for it once frames have
-kept arriving late for its `catchUpAfterUs`; a want does it as a restart. Unlike a resync, the delay
+kept arriving late for its `catchUpAfterUs`, and a want does it as a restart. Unlike a resync, the delay
 goes away instead of being accepted. It exists because moq-relay 0.17.5 (measured) and 0.17.7 (read
-in source) drop nothing for a late subscriber; with a relay that honours the subscriber's delivery
+in source) drop nothing for a late subscriber. With a relay that honours the subscriber's delivery
 timeout it still clears what that relay sends late.
 _Avoid_: resync (that keeps the delay), skip, flush, fast-forward
 
@@ -273,7 +273,7 @@ listener, viewer
 **Transport adapter**:
 An implementation of the transport seam a connection runs over: create and accept streams, close,
 observe closure (the core's `MoqtTransport`). The aioquic native QUIC client (`caprid_relay.quic`) is the
-Python product's only adapter (ADR 0004); in TypeScript a runtime's native `WebTransport` is the default
+Python product's only adapter (ADR 0004). In TypeScript a runtime's native `WebTransport` is the default
 adapter, and runtimes without one take an adapter the caller supplies: `@caprid/relay-quic` or
 `@caprid/relay-websocket`. The tests supply in-memory pairs and
 loopback accepting ends, a WebTransport one among them.
@@ -289,7 +289,7 @@ _Avoid_: raw QUIC, direct QUIC, plain QUIC
 
 **WebTransport session**:
 MOQT carried inside a WebTransport session over HTTP/3, with the version negotiated through
-`WT-Available-Protocols` and the path in the URL. Browsers always use this; the Python SDK dials none,
+`WT-Available-Protocols` and the path in the URL. Browsers always use this. The Python SDK dials none,
 and keeps one only as the accepting end its tests run a browser against.
 _Avoid_: WebTransport connection, H3 transport
 
@@ -298,7 +298,7 @@ MOQT carried on QMux (QUIC's streams and flow control over one reliable byte str
 over TCP, with the subprotocol `qmux-01.<MOQT version>` and the path and token in the upgrade URL. The
 TypeScript SDK's opt-in `@caprid/relay-websocket` adapter speaks it, for networks that block UDP and
 browsers without a usable `WebTransport` (ADR 0005). Its streams share one TCP connection.
-_Avoid_: WebSocket polyfill (the relay's own name for it; the adapter polyfills nothing), TCP fallback
+_Avoid_: WebSocket polyfill (the relay's own name for it, but the adapter polyfills nothing), TCP fallback
 (the fallback is a policy, `withWebSocketFallback`, not the transport), WebSocket transport (unqualified)
 
 **Dialing end**:
@@ -308,7 +308,7 @@ _Avoid_: client (pairs with "server", which collides with server-side runtimes),
 (that is where code runs, not which end it is)
 
 **Accepting end**:
-The end of a transport that listens for and accepts connections. The relay is the accepting end; the
+The end of a transport that listens for and accepts connections. The relay is the accepting end. The
 SDKs ship none, and only test helpers play it.
 _Avoid_: server, server role (collides with server-side runtimes)
 
@@ -316,8 +316,8 @@ _Avoid_: server, server role (collides with server-side runtimes)
 
 **Release train**:
 The set of packages that release together at one version under one tag prefix: the TypeScript
-train (`ts/v*`, every npm package) or the Python train (`python/v*`, every PyPI package). The two
-trains never share a version number. See `docs/releasing.md` and ADR 0003.
+train (`ts/v*`, every npm package) or the Python train (`python/v*`, every PyPI package). Each
+train sets its own version, independent of the other. See `docs/releasing.md` and ADR 0003.
 _Avoid_: release channel (that is a dist-tag), monorepo version, lockstep (across languages that
 means the protocol pin and the behaviour contract, not versions)
 
