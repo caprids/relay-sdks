@@ -77,12 +77,12 @@ wheels = [
 
 [[package]]
 name = "caprid-moq-core"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/moq-core" }
 
 [[package]]
 name = "caprid-moq-media"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/moq-media" }
 dependencies = [
     { name = "caprid-moq-core" },
@@ -102,7 +102,7 @@ provides-extras = ["opus"]
 
 [[package]]
 name = "caprid-relay"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "packages/caprid-relay" }
 dependencies = [
     { name = "aioquic" },
