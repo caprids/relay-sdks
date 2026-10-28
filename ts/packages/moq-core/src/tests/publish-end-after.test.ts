@@ -16,7 +16,7 @@ import {
 import { createMoqtSession, type PublishDone, type RequestError } from '../protocol/session.js';
 import { createSubgroupWriter } from '../protocol/subgroup-writer.js';
 import { rawSubscribe } from './helpers/raw-peer.js';
-import { createTransportPair, withServerRequestIds } from './helpers/transport-pair.js';
+import { createTransportPair } from './helpers/transport-pair.js';
 
 const NAMESPACE = ['live', 'abc123'];
 
@@ -24,7 +24,7 @@ function makeHarness(callbacks: MoqtPublishSessionCallbacks = {}) {
   const pair = createTransportPair();
   const subscribes: IncomingSubscribe[] = [];
   const bindings: (number | undefined)[] = [];
-  const subscriber = createMoqtSession(withServerRequestIds(pair.server), { unknownAliasTimeoutMs: 500 });
+  const subscriber = createMoqtSession(pair.server, { perspective: 'server', unknownAliasTimeoutMs: 500 });
   const session = createMoqtPublishSession(pair.client, {
     callbacks: {
       onSubscribe: (subscribe) => subscribes.push(subscribe),

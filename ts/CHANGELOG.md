@@ -5,6 +5,16 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/moq-core`: relay-side test support (#367). `createMoqtSession` takes `perspective: 'client' | 'server'`
+  (default `'client'`, unchanged): a `'server'` session allocates odd Request IDs from 1 and closes with
+  `INVALID_REQUEST_ID` on an odd one from its peer, so it can stand in for the relay against a publish session over an
+  in-memory pair without rewriting Request IDs on the wire. A new `@caprid/moq-core/wire` entry point exports the
+  codec such a test drives the session with (control-message encoders and decoder, the deframer, subgroup and fetch
+  stream readers, varints, `StreamReader`); import from it instead of `dist/protocol/*`. Nothing changes for
+  `@caprid/relay`.
+
 ## 0.1.1
 
 - `@caprid/relay`, `@caprid/moq-core`: a publisher connection answers the relay's TRACK_STATUS (draft-22 §9.13) for its

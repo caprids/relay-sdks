@@ -38,12 +38,7 @@ import {
   rawSubscribe as rawSubscribeTo,
   solicitNamespace,
 } from './helpers/raw-peer.js';
-import {
-  createTransportPair,
-  type PipeEvent,
-  setRequestIdParity,
-  withServerRequestIds,
-} from './helpers/transport-pair.js';
+import { createTransportPair, type PipeEvent, setRequestIdParity } from './helpers/transport-pair.js';
 
 const NAMESPACE = ['live', 'abc123'];
 
@@ -67,7 +62,7 @@ function makePublishHarness(
     ...(bufferBytes === undefined ? {} : { bufferBytes }),
     ...(protocol === undefined ? {} : { protocol }),
   });
-  const subscriber = createMoqtSession(withServerRequestIds(pair.server), { unknownAliasTimeoutMs: 500 });
+  const subscriber = createMoqtSession(pair.server, { perspective: 'server', unknownAliasTimeoutMs: 500 });
   const session = createMoqtPublishSession(pair.client, { callbacks });
 
   return { pair, session, subscriber, events };
@@ -421,8 +416,8 @@ describe('createMoqtPublishSession', () => {
 
     const video = collectTrack(subscriber, 'video');
 
-    // The driver's even id reaches the publisher with its low bit set.
-    const videoRequestId = video.subscription.requestId + 1;
+    // The server-perspective driver's odd id reaches the publisher as is.
+    const videoRequestId = video.subscription.requestId;
 
     await vi.waitFor(() => {
       // The peer's request ids are session-unique, so they double as the
@@ -448,21 +443,21 @@ describe('createMoqtPublishSession', () => {
     await vi.waitFor(() => {
       // The update is attributed to the subscription it rode in on, while
       // consuming a Request ID of its own (§6.4.2.1).
-      expect(updates).toEqual([{ requestId: updated.requestId + 1, updateRequestId: expect.any(Number) }]);
-      expect(updates[0]?.updateRequestId).not.toBe(updated.requestId + 1);
+      expect(updates).toEqual([{ requestId: updated.requestId, updateRequestId: expect.any(Number) }]);
+      expect(updates[0]?.updateRequestId).not.toBe(updated.requestId);
       expect(updateAcks).toHaveLength(1);
     });
     session.destroy();
     subscriber.destroy();
   });
 
-  it('gives the subscribe driver odd request ids past the one-byte varint range', async () => {
+  it("takes the server-perspective driver's odd request ids past the one-byte varint range", async () => {
     const closes: unknown[] = [];
     const { session, subscriber } = makePublishHarness({ onClosed: (info) => closes.push(info) });
 
     await session.ready;
 
-    // 70 subscriptions take the driver's ids 0..138, past 128, the one-byte MOQT varint limit.
+    // 70 subscriptions take the driver's ids 1..139, past 128, the one-byte MOQT varint limit.
     const names = Array.from({ length: 70 }, (_, index) => `track-${index}`);
 
     for (const trackName of names) session.registerTrack({ trackNamespace: NAMESPACE, trackName });
@@ -470,9 +465,9 @@ describe('createMoqtPublishSession', () => {
     const tracks = names.map((trackName) => collectTrack(subscriber, trackName));
 
     await vi.waitFor(() => {
-      expect(tracks.map((track) => track.aliases)).toEqual(tracks.map((track) => [track.subscription.requestId + 1]));
+      expect(tracks.map((track) => track.aliases)).toEqual(tracks.map((track) => [track.subscription.requestId]));
     });
-    expect(tracks.at(-1)?.subscription.requestId).toBe(138);
+    expect(tracks.at(-1)?.subscription.requestId).toBe(139);
     expect(closes).toEqual([]);
     session.destroy();
     subscriber.destroy();

@@ -490,11 +490,11 @@ export function setRequestIdParity(chunk: Uint8Array): Uint8Array {
 }
 
 /**
- * Give the subscribe driver a server's request ids. The driver always allocates client (even) ids, and a publish
- * session is always the client too, so it requires the peer's ids to be odd (§6.4.2.1). A test that stands the driver in
- * for the relay wraps the driver's transport with this: every request stream the driver opens has each Request ID's
- * least significant bit set on the wire (0 becomes 1, 2 becomes 3). Assumes each write carries whole frames, which is
- * how the driver writes them.
+ * Give a subscribe driver a server's request ids when the test cannot reach its config. A publish session is always the
+ * client, so it requires the peer's ids to be odd (§6.4.2.1); a driver the test creates takes `perspective: 'server'`
+ * instead. This is for the SDK's subscriber, which creates its driver as a client: every request stream the driver
+ * opens has each Request ID's least significant bit set on the wire (0 becomes 1, 2 becomes 3). Assumes each write
+ * carries whole frames, which is how the driver writes them.
  */
 export function withServerRequestIds(transport: MoqtTransport): MoqtTransport {
   return {

@@ -161,6 +161,30 @@ assert.deepEqual(Object.keys(mediaPolicy).sort(), [
   'mediaSubscribeParameters',
   'mediaTrackProperties',
 ]);
+// The core's wire entry point exports the codec a test relay drives a session with, and only that (#367).
+assert.deepEqual(core.exports['./wire'], { types: './dist/wire.d.ts', import: './dist/wire.js' });
+const wireExports = await import('../packages/moq-core/dist/wire.js');
+assert.deepEqual(Object.keys(wireExports).sort(), [
+  'ControlMessageDeframer',
+  'STREAM_TYPE',
+  'StreamReader',
+  'decodeControlMessage',
+  'decodeVarint',
+  'encodeGoaway',
+  'encodePublish',
+  'encodePublishDone',
+  'encodeRequestError',
+  'encodeSetup',
+  'encodeSubscribe',
+  'encodeSubscribeNamespace',
+  'encodeSubscribeOk',
+  'encodeVarint',
+  'isSubgroupHeaderType',
+  'readFetchHeader',
+  'readSubgroupHeader',
+  'readSubgroupObjects',
+  'utf8Encode',
+]);
 // Its declarations stand without the optional adapter installed.
 const nodeDeclarations = (await readFile(resolve(root, 'dist/node.d.ts'), 'utf8')).replace(/\/\*[\s\S]*?\*\//g, '');
 assert.doesNotMatch(

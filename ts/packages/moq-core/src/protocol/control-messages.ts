@@ -1043,7 +1043,9 @@ export function encodeAuthTokenUseValue(tokenType: number, value: Uint8Array): U
 
 /** A decoded frame: message type + body bytes (not yet interpreted). */
 export interface ControlMessageFrame {
+  /** The Message Type. */
   type: number;
+  /** The message body, without the type and length. */
   body: Uint8Array;
 }
 
@@ -1069,6 +1071,7 @@ function frameMessage(type: number, body: ByteWriter): Uint8Array {
 export class ControlMessageDeframer {
   #buffer: Uint8Array = new Uint8Array(0);
 
+  /** Append `chunk` and return every frame it completed, in order; a partial frame stays buffered. */
   push(chunk: Uint8Array): ControlMessageFrame[] {
     if (this.#buffer.length === 0) {
       this.#buffer = chunk;
@@ -1144,10 +1147,15 @@ export function encodeSetup(options: readonly KeyValuePair[] = []): Uint8Array {
   return frameMessage(MESSAGE_TYPE.SETUP, body);
 }
 
+/** The body of a SUBSCRIBE, TRACK_STATUS or FETCH: Request ID, Full Track Name, Parameters. */
 export interface SubscribeRequest {
+  /** The sender's Request ID (§6.4.2.1). */
   requestId: number;
+  /** The track's namespace. */
   trackNamespace: TrackNamespace;
+  /** The track's name. */
   trackName: string;
+  /** Message parameters; none when omitted. */
   parameters?: MessageParameters | undefined;
 }
 
@@ -1184,9 +1192,13 @@ export function encodeFetch(request: FetchRequest, protocol: MoqtProtocolId = MO
   return encodeTrackRequest(MESSAGE_TYPE.FETCH, request, protocol);
 }
 
+/** The body of a SUBSCRIBE_NAMESPACE (§9.15). */
 export interface SubscribeNamespaceRequest {
+  /** The sender's Request ID (§6.4.2.1). */
   requestId: number;
+  /** The namespace prefix to hear about. */
   trackNamespacePrefix: TrackNamespace;
+  /** Message parameters; none when omitted. */
   parameters?: MessageParameters | undefined;
 }
 
@@ -1394,62 +1406,180 @@ export interface Redirect {
   trackName: string;
 }
 
+/**
+ * A decoded control message, as `decodeControlMessage` returns it. `kind` names the message; the other fields are its
+ * body, with parameters decoded for the negotiated draft.
+ */
 export type ControlMessage =
-  | { kind: 'setup'; options: KeyValuePair[] }
-  | { kind: 'goaway'; newSessionUri: string; timeout: number }
   | {
+      /** SETUP (§9.1). */
+      kind: 'setup';
+      /** The Setup Options. */
+      options: KeyValuePair[];
+    }
+  | {
+      /** GOAWAY (§9.2). */
+      kind: 'goaway';
+      /** Where to reconnect; empty for the same URI. */
+      newSessionUri: string;
+      /** Milliseconds until the sender closes the session; 0 for none given. */
+      timeout: number;
+    }
+  | {
+      /** SUBSCRIBE (§9.6). */
       kind: 'subscribe';
+      /** The sender's Request ID. */
       requestId: number;
+      /** The track's namespace. */
       trackNamespace: TrackNamespace;
+      /** The track's name. */
       trackName: string;
+      /** The message parameters. */
       parameters: MessageParameters;
     }
   | {
+      /** TRACK_STATUS (§9.13). */
       kind: 'track-status';
+      /** The sender's Request ID. */
       requestId: number;
+      /** The track's namespace. */
       trackNamespace: TrackNamespace;
+      /** The track's name. */
       trackName: string;
+      /** The message parameters. */
       parameters: MessageParameters;
     }
-  | { kind: 'fetch'; request: FetchRequest & { parameters: MessageParameters } }
   | {
+      /** FETCH (§9.11). */
+      kind: 'fetch';
+      /** The FETCH body, which has the SUBSCRIBE shape. */
+      request: FetchRequest & {
+        /** The message parameters, `parameters.locationFilter` giving the range. */
+        parameters: MessageParameters;
+      };
+    }
+  | {
+      /** SUBSCRIBE_NAMESPACE (§9.15). */
       kind: 'subscribe-namespace';
+      /** The sender's Request ID. */
       requestId: number;
+      /** The namespace prefix to hear about. */
       trackNamespacePrefix: TrackNamespace;
+      /** The message parameters. */
       parameters: MessageParameters;
     }
-  | { kind: 'subscribe-ok'; trackAlias: number; parameters: MessageParameters; trackProperties: KeyValuePair[] }
-  | { kind: 'request-ok'; parameters: MessageParameters; trackProperties: KeyValuePair[] }
-  | { kind: 'request-error'; errorCode: number; retryInterval: number; reason: string; redirect?: Redirect }
-  | { kind: 'request-update'; requestId: number; parameters: MessageParameters }
-  | { kind: 'publish-state-notify'; parameters: MessageParameters }
   | {
+      /** SUBSCRIBE_OK (§9.7). */
+      kind: 'subscribe-ok';
+      /** The Track Alias the subscription's data streams carry. */
+      trackAlias: number;
+      /** The message parameters. */
+      parameters: MessageParameters;
+      /** The Track Properties. */
+      trackProperties: KeyValuePair[];
+    }
+  | {
+      /** REQUEST_OK (§9.3). */
+      kind: 'request-ok';
+      /** The message parameters. */
+      parameters: MessageParameters;
+      /** The Track Properties; empty except in TRACK_STATUS_OK. */
+      trackProperties: KeyValuePair[];
+    }
+  | {
+      /** REQUEST_ERROR (§9.4). */
+      kind: 'request-error';
+      /** The error code; see `REQUEST_ERROR_CODE`. */
+      errorCode: number;
+      /** The Retry Interval. */
+      retryInterval: number;
+      /** The reason phrase. */
+      reason: string;
+      /** Where to send the request instead, when the error carries one. */
+      redirect?: Redirect;
+    }
+  | {
+      /** REQUEST_UPDATE (§9.5). */
+      kind: 'request-update';
+      /** The update's own Request ID. */
+      requestId: number;
+      /** The message parameters. */
+      parameters: MessageParameters;
+    }
+  | {
+      /** PUBLISH_STATE_NOTIFY (§9.10). */
+      kind: 'publish-state-notify';
+      /** The subscription parameters that changed. */
+      parameters: MessageParameters;
+    }
+  | {
+      /** PUBLISH_DONE (§9.9). */
       kind: 'publish-done';
+      /** The status code; see `PUBLISH_DONE_STATUS`. */
       statusCode: number;
       /** `undefined` when the publisher could not count its streams (the 2^64−1 sentinel, §9.9). */
       streamCount: number | undefined;
+      /** The reason phrase. */
       reason: string;
     }
   | {
+      /** PUBLISH (§9.8). */
       kind: 'publish';
+      /** The sender's Request ID. */
       requestId: number;
+      /** The track's namespace. */
       trackNamespace: TrackNamespace;
+      /** The track's name. */
       trackName: string;
+      /** The Track Alias the publication's data streams carry. */
       trackAlias: number;
+      /** The message parameters. */
       parameters: MessageParameters;
+      /** The Track Properties. */
       trackProperties: KeyValuePair[];
     }
-  | { kind: 'publish-namespace'; requestId: number; trackNamespace: TrackNamespace; parameters: MessageParameters }
   | {
-      kind: 'fetch-ok';
-      endOfTrack: boolean;
-      endLocation: Location;
+      /** PUBLISH_NAMESPACE (§9.14). */
+      kind: 'publish-namespace';
+      /** The sender's Request ID. */
+      requestId: number;
+      /** The namespace announced. */
+      trackNamespace: TrackNamespace;
+      /** The message parameters. */
       parameters: MessageParameters;
+    }
+  | {
+      /** FETCH_OK (§9.12). */
+      kind: 'fetch-ok';
+      /** Whether the range reaches the end of the track. */
+      endOfTrack: boolean;
+      /** The last location the fetch serves. */
+      endLocation: Location;
+      /** The message parameters. */
+      parameters: MessageParameters;
+      /** The Track Properties. */
       trackProperties: KeyValuePair[];
     }
-  | { kind: 'namespace'; trackNamespaceSuffix: TrackNamespace }
-  | { kind: 'namespace-done'; trackNamespaceSuffix: TrackNamespace }
-  | { kind: 'publish-skipped'; trackNamespaceSuffix: TrackNamespace; trackName: string };
+  | {
+      /** NAMESPACE, on a SUBSCRIBE_NAMESPACE request stream (§9.16). */
+      kind: 'namespace';
+      /** The namespace, after the subscribed prefix. */
+      trackNamespaceSuffix: TrackNamespace;
+    }
+  | {
+      /** NAMESPACE_DONE, on a SUBSCRIBE_NAMESPACE request stream (§9.17). */
+      kind: 'namespace-done';
+      /** The withdrawn namespace, after the subscribed prefix. */
+      trackNamespaceSuffix: TrackNamespace;
+    }
+  | {
+      /** PUBLISH_SKIPPED, on a SUBSCRIBE_NAMESPACE request stream. */
+      kind: 'publish-skipped';
+      /** The track's namespace, after the subscribed prefix. */
+      trackNamespaceSuffix: TrackNamespace;
+      /** The track's name. */
+      trackName: string;
+    };
 
 function readRedirect(reader: ByteReader): Redirect {
   const uriLength = reader.readVarint();

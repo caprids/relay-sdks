@@ -10,6 +10,7 @@ import { decodeVarint, encodeVarintInto, varintByteLength, varintLengthFromFirst
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+/** Encode a string as UTF-8 bytes, as track names and reason phrases go on the wire. */
 export function utf8Encode(value: string): Uint8Array {
   return textEncoder.encode(value);
 }
@@ -221,16 +222,19 @@ export class StreamReader {
     return false;
   }
 
+  /** Read exactly `length` bytes. */
   async readBytes(length: number): Promise<Uint8Array> {
     await this.#fill(length);
     return this.#take(length);
   }
 
+  /** Read one byte. */
   async readUint8(): Promise<number> {
     await this.#fill(1);
     return this.#take(1)[0]!;
   }
 
+  /** Read one MOQT varint (§8.1). */
   async readVarint(): Promise<number> {
     await this.#fill(1);
     const firstByte = this.#chunks[0]![0]!;
@@ -249,6 +253,7 @@ export class StreamReader {
     }
   }
 
+  /** Release the underlying stream's reader lock without cancelling it. */
   releaseLock(): void {
     this.#reader.releaseLock();
   }

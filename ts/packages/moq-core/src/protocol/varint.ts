@@ -11,7 +11,9 @@
  */
 import { MoqtProtocolError } from './errors.js';
 
+/** A decoded varint and how many bytes it took. */
 export interface VarintDecodeResult {
+  /** The decoded value. */
   value: number;
   /** Total encoded size in bytes (1-9). */
   byteLength: number;
@@ -114,6 +116,7 @@ export function encodeVarintInto(target: Uint8Array, offset: number, value: numb
   return byteLength;
 }
 
+/** Encode `value` as a MOQT varint (§8.1) in the fewest bytes. */
 export function encodeVarint(value: number): Uint8Array {
   const bytes = new Uint8Array(varintByteLength(value));
 
