@@ -227,8 +227,8 @@ Messages are not a compatibility contract. The class and the point of rejection 
   follow the [Arguments](#arguments) table in both roles: an invalid one is rejected locally,
   before connecting a publisher or sending a subscription.
 - `roomEndpoint(endpoint, room)` / `room_endpoint(endpoint, room)` builds the room-rooted endpoint,
-  so an application does not assemble the URL itself
-  ([room-rooted endpoints](#room-rooted-endpoints)).
+  so an application does not assemble the URL itself. Given only the room, it roots
+  `DEFAULT_ENDPOINT` ([room-rooted endpoints](#room-rooted-endpoints)).
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The callback path adds no application queue, no
