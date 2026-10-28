@@ -11,7 +11,7 @@ Issues and specs for this repo live as GitHub issues on `muxinc/relay-sdks`. Use
 - **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`
 - **Close**: `gh issue close <number> --comment "..."`
 
-Pass `-R muxinc/relay-sdks` to every `gh` command. A clone set up for releases also has a `caprids` remote (`caprids/relay-sdks`, see `docs/releasing.md`), and `gh` may resolve to it.
+Pass `-R muxinc/relay-sdks` to every `gh issue` and `gh pr` command. `gh api` takes no `-R`, so write `repos/muxinc/relay-sdks/...` in its path. A clone set up for releases also has a `caprids` remote (`caprids/relay-sdks`, see `docs/releasing.md`), and `gh` may resolve to it.
 
 ## Existing labels in this repo
 

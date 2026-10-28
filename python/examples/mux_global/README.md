@@ -50,9 +50,9 @@ combined run reports success only after the requested number of objects comes ba
 subscriber.
 
 The demo logs publisher completion (`on_publisher_done`) on its own line, because trailing objects
-can still arrive afterward. It watches for connection closure, does not treat publisher completion as
-all data received, and does not resubscribe on completion by itself. Additional readiness and
-termination APIs are tracked in [#68](https://github.com/muxinc/relay-sdks/issues/68).
+can still arrive afterward, and does not treat it as all data received. Its subscriber is a supervised
+`want`: it retries the announce race with backoff, resubscribes after a publisher restart, and
+reconnects, until the requested objects arrive or the run's deadline passes.
 
 ## Run it
 

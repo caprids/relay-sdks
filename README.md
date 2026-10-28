@@ -15,8 +15,9 @@ can break the API.
 | `tools/` | Hardware measurement rigs, such as the [device latency lab](tools/device-latency/README.md) for microphone and output latency | Run by hand |
 
 Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (browser WebTransport) or
-[Python quickstart](python/README.md#first-round-trip) (native asyncio). Each one installs the
-published packages, sets up credentials, and runs a bounded publish and subscribe round trip.
+[Python quickstart](python/README.md#first-round-trip) (native asyncio). Each one clones this
+repository, sets up credentials, and runs the repository's demo: a bounded publish and subscribe
+round trip on the workspace packages.
 
 ## Development
 
