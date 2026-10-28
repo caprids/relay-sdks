@@ -13,11 +13,10 @@ describes the suite. The packages are on npm as `@caprid/*` ([install](README.md
 
 ## First round trip
 
-The first round trip runs the repository's example from a checkout. The example launcher runs the
-demo in Node, over [`@caprid/relay-quic`](packages/relay-quic/README.md)'s native QUIC transport, and
-prints its output in the terminal. You need Git and
-[mise](https://mise.jdx.dev/getting-started.html) on your PATH. Run the commands below in Bash from
-the repository root.
+The first round trip publishes one object and receives it back through Relay, from a new Node
+project that installs the packages from npm. You need Node 24 or later. The connections run over
+[`@caprid/relay-quic`](packages/relay-quic/README.md)'s native QUIC transport, so your network must
+allow QUIC traffic over UDP.
 
 ### Endpoint and credentials
 
@@ -40,7 +39,7 @@ one grant can use the bare host, where namespace fields include the token's root
 
 The Mux relays carry announcements between regions, so a publisher and a subscriber can each use
 their nearest relay ([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)).
-The hosted demo defaults to the bare host `https://relay.mux.global`, which still requires
+The SDK's default endpoint is the bare host `https://relay.mux.global`, which still requires
 authorized credentials. For another deployment, use the endpoint its operator supplies.
 
 `roomEndpoint` builds that endpoint from the token's root, so you do not assemble the URL by hand.
@@ -62,10 +61,9 @@ because the relay reads the path without decoding it. A field may hold only lett
 with such a field from the bare host
 ([room-rooted endpoints](../spec/behavior.md#room-rooted-endpoints)).
 
-The runner reads `RELAY_TOKEN` when it is set, and otherwise prompts with hidden input. Prefer the
-prompt for manual runs. Automation can inject the environment variable through its secret manager.
-Do not put tokens in commands, source files, URLs, or committed `.env` files. The demo passes the
-token to `getToken` and redacts it from its output.
+The round trip below reads the token from `RELAY_TOKEN`. Set it with the hidden prompt shown there
+for manual runs. Automation can inject it through its secret manager. Do not put tokens in commands,
+source files, URLs, or committed `.env` files.
 
 ### Browser token exposure
 
@@ -83,6 +81,73 @@ and this SDK does not support it.
 
 ### Install and run
 
+Create a project and install the SDK with its Node transport:
+
+```sh
+mkdir relay-hello && cd relay-hello
+npm init -y
+npm install @caprid/relay @caprid/relay-quic
+```
+
+`@caprid/relay-quic` brings a prebuilt native binary for your platform, so the install needs no
+compiler ([Node](README.md#node)). Save this as `hello.mjs`, with your token's root in place of
+`acme/rooms/42`:
+
+```js
+import { connectRelayPublisher, connectSupervisedSubscriber, readText, roomEndpoint } from '@caprid/relay/node';
+
+const url = roomEndpoint(['acme', 'rooms', '42']); // your token's root, on https://relay.mux.global
+// const url = process.env.RELAY_URL; // or any endpoint whose path is your token's root
+const getToken = () => process.env.RELAY_TOKEN;
+const namespace = ['hello', crypto.randomUUID().slice(0, 8)]; // fresh for each run, relative to the root
+
+// Subscribe first: the publisher's write() waits until someone wants the track.
+const subscriber = await connectSupervisedSubscriber({ url, getToken });
+const received = new Promise((resolve, reject) => {
+  subscriber.want('greeting', { namespace, track: 'greetings' }, {
+    onObject: (object) => resolve(readText(object)),
+    onError: reject,
+  });
+});
+
+const publisher = await connectRelayPublisher({ url, namespace, getToken });
+const track = publisher.registerTrack({ track: 'greetings' });
+await track.writeText('hello, relay');
+
+console.log('received:', await received);
+subscriber.close();
+await publisher.close();
+```
+
+Enter the token at the hidden prompt, then run the script:
+
+```sh
+read -rs -p 'Relay token: ' RELAY_TOKEN && echo && export RELAY_TOKEN
+node hello.mjs
+```
+
+It prints `received: hello, relay`. That line is what proves the round trip. A completed
+`writeText()` only means the transport accepted the object.
+
+`roomEndpoint` puts the token's root in the endpoint's path, so the namespace is relative to it. The
+publisher announces that namespace, and its `writeText()` waits for relay demand before it sends
+anything. The subscriber's `want` creates that demand. A fresh namespace can briefly reject a
+subscription with request error 16 `unroutable` while its announcement propagates, for about a round
+trip, and the want retries it until the subscription succeeds. A rejection that no wait fixes, such
+as an unauthorized track, reaches `onError`. Both connections keep Node running until they close.
+
+This script has no run deadline and no cleanup on failure, and a write that times out waiting for
+demand fails the run. [The full demo](#run-the-full-demo-from-a-checkout) adds those, and runs
+the publisher and subscriber in separate processes.
+
+## Run the full demo from a checkout
+
+The repository's mux-global demo is the same round trip, built to show what a longer-lived program
+handles. It has a run deadline, retries only writes that provably sent nothing, prompts for the
+token and redacts it from its output, and can run either side alone. You need Git and
+[mise](https://mise.jdx.dev/getting-started.html) on your PATH. Run the commands below in Bash from
+the repository root.
+
 ```sh
 git clone https://github.com/caprids/relay-sdks.git
 cd relay-sdks
@@ -93,15 +158,12 @@ mise run ts:install
 The example task builds `@caprid/relay-quic`'s native addon from source, which needs Rust. The mise
 task brings the pinned toolchain. See [the example's setup notes](examples/mux-global/README.md#run-it).
 
-A publisher's `write()` waits for relay demand, so a matching subscriber must be running. Even when
-publishing connects first, a fresh namespace can briefly reject subscriptions with request error 16
-`unroutable` while its announcement propagates, for about a round trip. Relays before 0.15.8 answer
-`404 Broadcast not found` instead. The combined demo starts both sides and logs the publisher's
-`announced`. Its subscriber is a supervised `want`, which retries that rejection with capped backoff,
-resubscribes after a publisher restart, and reconnects. Each write is retried only while it times out
-waiting for demand (`WRITE_TIMEOUT` in phase `waiting-for-demand`), which proves it sent nothing. A
-failure after sending starts stops the run, so the demo never replays bytes that may already have
-been delivered.
+The combined demo starts both sides and logs the publisher's `announced`. Its subscriber is the same
+supervised `want`, which retries request error 16 `unroutable` (`404 Broadcast not found` on relays
+before 0.15.8) with capped backoff, resubscribes after a publisher restart, and reconnects. Each
+write is retried only while it times out waiting for demand (`WRITE_TIMEOUT` in phase
+`waiting-for-demand`), which proves it sent nothing. A failure after sending starts stops the run,
+so the demo never replays bytes that may already have been delivered.
 
 When prompted below, enter the endpoint, ending in your token's root, and a **fresh namespace below
 it**. The CLI splits `quickstart/unique-run` into `['quickstart', 'unique-run']`. The SDK itself sends
@@ -139,23 +201,7 @@ setup, the wait for demand, retries, and reception. An error prints a redacted `
 exits nonzero. A `finally` block closes the connections on success or failure. A completed write
 only means the transport accepted it. The `received` line is what proves this demo's round trip.
 
-### Use the local packages in your application
-
-To try unreleased changes from a checkout in an existing browser app, serve `ts/dist/` and
-`ts/packages/moq-core/dist/` as JavaScript modules and map **both** bare imports:
-
-```html
-<script type="importmap">
-{"imports":{"@caprid/relay":"/sdk/index.js","@caprid/moq-core":"/core/index.js"}}
-</script>
-```
-
-Here `/sdk/` maps to `ts/dist/` and `/core/` to `ts/packages/moq-core/dist/`. Keep each directory's
-module layout. Import `@caprid/relay` from a module script in your secure browser page. Rebuild with
-`mise run ts:build` after you edit sources. If you copy only the Relay build, or install its
-directory on its own, its `workspace:*` dependency on the core does not resolve.
-
-## Subscribe and publish separately
+### Subscribe and publish separately
 
 Use two terminals in the same checkout. In **each** terminal, set `RELAY_URL` and `RELAY_NAMESPACE`
 with the prompts above, to exactly the same values. Each process prompts for its own token. The
@@ -178,6 +224,22 @@ mise run ts:example:mux-global -- --mode publish --url "$RELAY_URL" --namespace 
 Success is `finished published=0 received=1` in the subscriber and `finished published=1 received=0`
 in the publisher. Both modes handle errors and clean up as the combined run does. See
 [demo options](examples/mux-global/README.md) for multiple objects and intervals.
+
+### Use the local packages in your application
+
+To try unreleased changes from a checkout in an existing browser app, serve `ts/dist/` and
+`ts/packages/moq-core/dist/` as JavaScript modules and map **both** bare imports:
+
+```html
+<script type="importmap">
+{"imports":{"@caprid/relay":"/sdk/index.js","@caprid/moq-core":"/core/index.js"}}
+</script>
+```
+
+Here `/sdk/` maps to `ts/dist/` and `/core/` to `ts/packages/moq-core/dist/`. Keep each directory's
+module layout. Import `@caprid/relay` from a module script in your secure browser page. Rebuild with
+`mise run ts:build` after you edit sources. If you copy only the Relay build, or install its
+directory on its own, its `workspace:*` dependency on the core does not resolve.
 
 ## If the run fails
 

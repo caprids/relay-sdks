@@ -58,7 +58,7 @@ async def main(token: str) -> None:
         print(await arrived)
 ```
 
-The [guide's first round trip](https://github.com/caprids/relay-sdks/blob/main/python/README.md#first-round-trip)
+The [guide's full demo](https://github.com/caprids/relay-sdks/blob/main/python/README.md#run-the-full-demo-from-a-checkout)
 runs the complete version of this, with credential handling, the subscribe retry, a deadline, and
 cleanup on failure.
 

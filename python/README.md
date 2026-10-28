@@ -19,10 +19,9 @@ can be ahead of the latest release.
 
 ## First round trip
 
-In this section you run the repository's demo, which publishes one object and receives it back
-through Relay. You need Git and [mise](https://mise.jdx.dev/getting-started.html) on PATH. mise
-installs the repository's pinned Python and uv. Run the commands in Bash from the repository root.
-The SDK dials native QUIC through aioquic, not a browser, HTTP/3, or a WebSocket, so the endpoint and
+In this section you publish one object and receive it back through Relay, from a new project that
+installs the SDK from PyPI. You need Python 3.11 or later and [uv](https://docs.astral.sh/uv/). The
+SDK dials native QUIC through aioquic, not a browser, HTTP/3, or a WebSocket, so the endpoint and
 your network must allow QUIC traffic over UDP.
 
 ### Endpoint and credentials
@@ -43,8 +42,8 @@ the token does not grant fails at connect with `UNAUTHORIZED`. A client that spa
 under one grant can use the bare host instead, where namespace fields include the token's root
 ([namespaces](../spec/behavior.md#subscribing)). The Mux relays carry announcements between regions,
 so a publisher and a subscriber can each use their nearest relay
-([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)). The demo defaults
-to the bare host `https://relay.mux.global`, which still needs authorized credentials. For another
+([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)). The SDK's default
+endpoint is the bare host `https://relay.mux.global`, which still needs authorized credentials. For another
 deployment, use the endpoint its operator gives you.
 
 `room_endpoint` builds that endpoint from the token's root, so you do not assemble the URL by hand.
@@ -66,15 +65,106 @@ because the relay reads the path without decoding it. A field may hold only lett
 with such a field, use the bare host
 ([room-rooted endpoints](../spec/behavior.md#room-rooted-endpoints)).
 
-The demo reads `RELAY_TOKEN` when it is set, and otherwise prompts with hidden input. Use the prompt
-for manual runs. Automation can inject the environment variable through its secret manager. Do not
-put tokens in commands, source files, URLs, or committed `.env` files. The demo passes the token to
-`get_token` and redacts it from output. The SDK sends the token as the `jwt` query parameter of the
+The round trip below reads the token from `RELAY_TOKEN`. Set it with the hidden prompt shown there
+for manual runs. Automation can inject it through its secret manager. Do not put tokens in commands,
+source files, URLs, or committed `.env` files. The SDK sends the token as the `jwt` query parameter of the
 endpoint, so scrub query values and token strings from URLs, traces, and exception reports before
 you collect them. Browser consumers have an additional
 [console exposure risk](../ts/GUIDE.md#browser-token-exposure).
 
 ### Install and run
+
+Create a project and add the SDK:
+
+```sh
+mkdir relay-hello && cd relay-hello
+uv init --bare
+uv add caprid-relay
+```
+
+`pip install caprid-relay` in a virtual environment works too. `caprid-relay` brings
+`caprid-moq-core` with it. Add `caprid-moq-media` as well to publish or read media.
+
+`caprid_relay` re-exports the core types its own signatures use: `MoqtObject`, `MessageParameters`,
+`SubscribeOk`, `RequestError`, `Closed`, and the rest of the "Protocol types borrowed from the core"
+row in [the vocabulary](../spec/vocabulary.md). Import other protocol types from the core package,
+such as the location filters for `subscribe(parameters=...)`:
+`from moq_core import AbsoluteLocationFilter`.
+
+Save this as `hello.py`, with your
+token's root in place of `acme/rooms/42`:
+
+```python
+import asyncio
+import os
+import uuid
+
+from caprid_relay import (
+    WantHandlers,
+    connect_relay_publisher,
+    connect_supervised_subscriber,
+    read_text,
+    room_endpoint,
+)
+
+URL = room_endpoint(["acme", "rooms", "42"])  # your token's root, on https://relay.mux.global
+# URL = os.environ["RELAY_URL"]  # or any endpoint whose path is your token's root
+NAMESPACE = ["hello", uuid.uuid4().hex[:8]]  # fresh for each run, relative to the root
+
+
+def get_token() -> str:
+    return os.environ["RELAY_TOKEN"]
+
+
+async def main() -> None:
+    received: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+
+    # Subscribe first: the publisher's write() waits until someone wants the track.
+    async with await connect_supervised_subscriber(URL, get_token=get_token) as subscriber:
+        subscriber.want(
+            "greeting",
+            NAMESPACE,
+            "greetings",
+            WantHandlers(on_object=lambda obj: received.set_result(read_text(obj)), on_error=received.set_exception),
+        )
+        async with await connect_relay_publisher(URL, namespace=NAMESPACE, get_token=get_token) as publisher:
+            track = publisher.register_track("greetings")
+            await track.write_text("hello, relay")
+            print("received:", await received)
+
+
+asyncio.run(main())
+```
+
+Enter the token at the hidden prompt, then run the script:
+
+```sh
+read -rs -p 'Relay token: ' RELAY_TOKEN && echo && export RELAY_TOKEN
+uv run hello.py
+```
+
+It prints `received: hello, relay`. That line is what proves the round trip. A completed
+`write_text()` only means the transport accepted the object.
+
+`room_endpoint` puts the token's root in the endpoint's path, so the namespace is relative to it.
+The publisher announces that namespace, and its `write_text()` waits for relay demand before it
+sends anything. The subscriber's `want` creates that demand. A fresh namespace can briefly reject a
+subscription with request error 16 `unroutable` while its announcement propagates, for about a round
+trip, and the want retries it until the subscription succeeds. A rejection that no wait fixes, such
+as an unauthorized track, reaches `on_error`. Each `async with` closes its connection when the block
+exits, even on an error.
+
+This script has no run deadline, and a write that times out waiting for demand fails the run.
+[The full demo](#run-the-full-demo-from-a-checkout) adds a deadline and a write retry, and runs the
+publisher and subscriber in separate processes.
+
+## Run the full demo from a checkout
+
+The repository's mux_global demo is the same round trip, built to show what a longer-lived program
+handles. It has a run deadline, retries only writes that provably sent nothing, prompts for the
+token and redacts it from its output, and can run either side alone. You need Git and
+[mise](https://mise.jdx.dev/getting-started.html) on PATH. mise installs the repository's pinned
+Python and uv. Run the commands in Bash from the repository root.
 
 ```sh
 git clone https://github.com/caprids/relay-sdks.git
@@ -83,12 +173,10 @@ mise install
 mise run python:install
 ```
 
-A publisher's `write()` waits for relay demand, so a matching subscriber must be running. The
-combined demo starts both sides in one process. Its subscriber is a
-[supervised subscriber](#stay-connected-supervised-connections), whose `want` retries the brief
-window in which a fresh namespace rejects subscriptions with request error 16 `unroutable` (404
-`Broadcast not found` on relays before 0.15.8) while its announcement propagates, about a round trip.
-The publisher retries a write only when the write deadline expired before any bytes were sent. Once
+The combined demo starts both sides in one process. Its subscriber is the same
+[supervised subscriber](#stay-connected-supervised-connections) `want`, which retries request error
+16 `unroutable` (`404 Broadcast not found` on relays before 0.15.8) with capped backoff. The
+publisher retries a write only when the write deadline expired before any bytes were sent. Once
 a write starts sending, a failure stops the run. The demo never replays bytes the relay may already
 hold.
 
@@ -131,26 +219,7 @@ context exits, even if the second connection fails. Ordinary cleanup needs no `C
 application with a fixed mode can write the same lifecycle as
 `async with await connect_relay_publisher(...) as publisher:`.
 
-### Use the local packages in your application
-
-To use the SDK in your own project, install it from PyPI:
-
-```sh
-uv add caprid-relay
-```
-
-`caprid-relay` brings `caprid-moq-core` with it. Add `caprid-moq-media` as well to publish or read
-media. Inside a checkout, the uv workspace already holds all three packages as editable sources. Put
-a script in `python/` and run it from the repository root with
-`mise exec -- uv run --project python python python/your_script.py`.
-
-`caprid_relay` re-exports the core types its own signatures use: `MoqtObject`, `MessageParameters`,
-`SubscribeOk`, `RequestError`, `Closed`, and the rest of the "Protocol types borrowed from the core"
-row in [the vocabulary](../spec/vocabulary.md). Import other protocol types from the core package,
-such as the location filters for `subscribe(parameters=...)`:
-`from moq_core import AbsoluteLocationFilter`.
-
-## Subscribe and publish separately
+### Subscribe and publish separately
 
 Use two terminals in the same checkout. In **each** terminal, set `RELAY_URL` and `RELAY_NAMESPACE`
 with the prompts above, using exactly the same values. Each process prompts for its own token. The
@@ -173,6 +242,12 @@ mise run python:example:mux-global -- --mode publish --url "$RELAY_URL" --namesp
 The subscriber succeeds with `finished published=0 received=1` and the publisher with
 `finished published=1 received=0`. Both modes handle errors and clean up as the combined run does.
 See [demo options](examples/mux_global/README.md) for more objects and intervals.
+
+### Use the local packages in your application
+
+Inside a checkout, the uv workspace already holds all three packages as editable sources. Put a
+script in `python/` and run it from the repository root with
+`mise exec -- uv run --project python python python/your_script.py`.
 
 ## If the run fails
 

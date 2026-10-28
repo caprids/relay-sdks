@@ -1,8 +1,8 @@
 # Relay example: publish and subscribe on mux.global
 
-Start with the [JavaScript quickstart](../../GUIDE.md#first-round-trip) for a fresh checkout,
-runtime requirements, package installation, endpoint and credential setup, and a one-object round
-trip. The default endpoint is `https://relay.mux.global`. Use `--url` or `RELAY_URL` for another
+Start with the [JavaScript quickstart](../../GUIDE.md#first-round-trip) for runtime requirements and
+endpoint and credential setup, then [the full demo](../../GUIDE.md#run-the-full-demo-from-a-checkout)
+for a fresh checkout and a one-object round trip. The default endpoint is `https://relay.mux.global`. Use `--url` or `RELAY_URL` for another
 deployment. Publishing and subscribing both need an authorized Relay JWT.
 
 [demo.js](demo.js) is the complete SDK example, with imports, a matching namespace and track, byte
@@ -61,7 +61,7 @@ for what a replacement publisher can and cannot restore.
 
 ## Run it
 
-After the quickstart's setup, run from the repository root. The task builds the SDK and builds
+After [the full demo's setup](../../GUIDE.md#run-the-full-demo-from-a-checkout), run from the repository root. The task builds the SDK and builds
 `@caprid/relay-quic`'s native addon from source, because the workspace does not install the prebuilt
 platform packages. The mise task brings the Rust toolchain that `mise.toml` pins. Later runs reuse
 the build.

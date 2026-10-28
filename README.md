@@ -15,9 +15,9 @@ can break the API.
 | `tools/` | Hardware measurement rigs, such as the [device latency lab](tools/device-latency/README.md) for microphone and output latency | Run by hand |
 
 Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (browser WebTransport) or
-[Python quickstart](python/README.md#first-round-trip) (native asyncio). Each one clones this
-repository, sets up credentials, and runs the repository's demo: a bounded publish and subscribe
-round trip on the workspace packages.
+[Python quickstart](python/README.md#first-round-trip) (native asyncio). Each one installs the
+published packages into a new project and runs a short publish and subscribe round trip. Each guide
+then runs the repository's fuller demo from a checkout.
 
 ## Development
 
@@ -60,7 +60,7 @@ headless Chromium over WebTransport, then in both over
 for both operations. Supply the token through hidden stdin input or the `RELAY_TOKEN` environment
 variable. The test never writes it to a file.
 
-Set `RELAY_URL` and `RELAY_NAMESPACE` using the [quickstart prompts](ts/GUIDE.md#install-and-run) first. Your token must
+Set `RELAY_URL` and `RELAY_NAMESPACE` using the [full demo's prompts](ts/GUIDE.md#run-the-full-demo-from-a-checkout) first. Your token must
 authorize both operations under that namespace prefix, including children, because the test
 appends a random UUID. Running this command opts you into contacting that endpoint.
 
@@ -89,7 +89,7 @@ closure, checks that a want follows a supervised publisher's newer generation, t
 connection. It defaults to the bare host `https://relay.mux.global`. Set `RELAY_URL` to use
 another endpoint. Set `RELAY_SUB_URL` to
 another relay to put the subscribers there. Namespace fields are relative to the endpoint URL's
-path. With the recommended endpoint, whose path is the token's root (as the quickstart prompts
+path. With the recommended endpoint, whose path is the token's root (as the full demo prompts
 for), `RELAY_NAMESPACE_PREFIX` leaves the root out. With the bare default, it includes the root.
 Either way, the test also dials an endpoint rooted at its own namespace and checks that the two forms reach
 each other's tracks and discovery ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)).
@@ -118,7 +118,7 @@ This opt-in test publishes and subscribes against a real relay. It is excluded f
 and needs a token authorized for both operations. Supply the token through a hidden prompt or the
 `RELAY_TOKEN` environment variable. The test never writes it to a file and redacts it from output.
 
-Set `RELAY_URL` and `RELAY_NAMESPACE` using the [quickstart prompts](python/README.md#install-and-run) first. Your token must
+Set `RELAY_URL` and `RELAY_NAMESPACE` using the [full demo's prompts](python/README.md#run-the-full-demo-from-a-checkout) first. Your token must
 authorize both operations under that namespace prefix, including children: the test appends a
 random UUID. Running this command explicitly opts into contacting that endpoint.
 
@@ -133,7 +133,7 @@ a want's move to a supervised publisher's newer generation, and a switchable sub
 then closes every connection. `python/scripts/test_relay.py` lists every assertion. It defaults to
 the bare host `https://relay.mux.global`. Set `RELAY_URL` to use another endpoint. Set `RELAY_SUB_URL` to
 another relay to put the subscribers there. Namespace fields are relative to the endpoint URL's
-path. With the recommended endpoint, whose path is the token's root (as the quickstart prompts
+path. With the recommended endpoint, whose path is the token's root (as the full demo prompts
 for), `RELAY_NAMESPACE_PREFIX` leaves the root out. With the bare default, it includes the root.
 Either way, the test also dials an endpoint rooted at its own namespace and checks that the two forms reach
 each other's tracks and discovery ([issue #266](https://github.com/muxinc/relay-sdks/issues/266)).

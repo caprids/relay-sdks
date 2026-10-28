@@ -1,7 +1,8 @@
 # Relay example: publish and subscribe on mux.global (Python)
 
-Start with the [Python quickstart](../../README.md#first-round-trip). It covers a fresh checkout,
-runtime requirements, endpoint and credential setup, and a one-object round trip. The default
+Start with the [Python quickstart](../../README.md#first-round-trip) for runtime requirements and
+endpoint and credential setup, then [the full demo](../../README.md#run-the-full-demo-from-a-checkout)
+for a fresh checkout and a one-object round trip. The default
 endpoint is `https://relay.mux.global`. Use `--url` or `RELAY_URL` for another deployment. Both
 operations need an authorized Relay JWT.
 
@@ -56,7 +57,7 @@ reconnects, until the requested objects arrive or the run's deadline passes.
 
 ## Run it
 
-After the quickstart's setup, run these commands from the repository root. The prompts ask for your
+After [the full demo's setup](../../README.md#run-the-full-demo-from-a-checkout), run these commands from the repository root. The prompts ask for your
 deployment's real values:
 
 ```sh

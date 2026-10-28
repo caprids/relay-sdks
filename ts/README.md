@@ -59,7 +59,7 @@ subscriber.close();
 await publisher.close();
 ```
 
-The [guide's first round trip](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#first-round-trip) runs the complete version of this, with
+The [guide's full demo](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#run-the-full-demo-from-a-checkout) runs the complete version of this, with
 credential handling, the subscribe retry, a deadline, and cleanup on failure.
 
 These connections never reconnect. For a live application, `connectSupervisedPublisher` and
