@@ -8,10 +8,11 @@ from typing import Any
 
 import pytest
 
-from caprid_relay import room_endpoint
+from caprid_relay import DEFAULT_ENDPOINT, room_endpoint
 
 REPO = Path(__file__).resolve().parents[4]
 VECTORS = json.loads((REPO / "spec" / "vectors" / "room-endpoint.json").read_text())
+PROTOCOL = json.loads((REPO / "spec" / "protocol.json").read_text())
 ERROR_CLASS: dict[str, type[Exception]] = {"type": TypeError, "range": ValueError}
 Case = dict[str, Any]
 
@@ -45,3 +46,26 @@ def test_admits_a_tuple() -> None:
 def test_refuses_a_generator_as_a_type_error() -> None:
     with pytest.raises(TypeError):
         room_endpoint("https://relay.example", (field for field in ["acme"]))  # ty: ignore[invalid-argument-type]
+
+
+def test_roots_the_default_endpoint_when_given_only_a_room() -> None:
+    assert room_endpoint(["acme", "rooms", "42"]) == "https://relay.mux.global/acme/rooms/42"
+    assert room_endpoint(["acme"]) == room_endpoint(DEFAULT_ENDPOINT, ["acme"])
+
+
+def test_checks_a_room_given_alone_as_it_checks_one_given_with_an_endpoint() -> None:
+    with pytest.raises(ValueError, match=r"Room field 1"):
+        room_endpoint(["acme", "a b"])
+    with pytest.raises(TypeError):
+        room_endpoint([])
+    with pytest.raises(TypeError):
+        room_endpoint("https://relay.example")  # a lone string is a string room, not an endpoint
+
+
+def test_refuses_more_than_two_arguments() -> None:
+    with pytest.raises(TypeError):
+        room_endpoint("https://relay.example", ["acme"], ["rooms"])  # ty: ignore[no-matching-overload]
+
+
+def test_default_endpoint_is_the_one_spec_protocol_pins() -> None:
+    assert PROTOCOL["relay"]["defaultEndpoint"] == DEFAULT_ENDPOINT

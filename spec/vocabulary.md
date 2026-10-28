@@ -68,8 +68,8 @@ without a row here is a bug.
 | A want moved make-before-break (a newer generation, or another track or parameters) | `until` and `drainMs` on `WantOptions`; `onSwitched(info)` with `WantSwitchedInfo` (`from`, `to`, each a `WantTarget` of `namespace` and `track`; `subscribed`) | `until=` and `drain=` (seconds) on `want`; `on_switched(info)` with `WantSwitchedInfo` (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`) |
 | Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()` |
 | Backoff bounds between attempts | `SupervisionBackoff` (`initialDelayMs`, `maxDelayMs`), given as `reconnect` or `retry` | `SupervisionBackoff` (`initial_delay`, `max_delay`, seconds), as `reconnect=` or `retry=` |
-| Build a room-rooted endpoint: the endpoint with a room's fields appended to its path | `roomEndpoint(endpoint, room)` returns a URL string | `room_endpoint(endpoint, room)` returns a URL `str` |
-| The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
+| Build a room-rooted endpoint: the endpoint with a room's fields appended to its path | `roomEndpoint(room)` or `roomEndpoint(endpoint, room)` returns a URL string | `room_endpoint(room)` or `room_endpoint(endpoint, room)` returns a URL `str` |
+| The hosted Relay endpoint pinned in `spec/protocol.json`, which `roomEndpoint` roots without an endpoint | `DEFAULT_ENDPOINT` | `DEFAULT_ENDPOINT` |
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
@@ -294,8 +294,9 @@ message).
 
 ## Room-rooted endpoints: `roomEndpoint`
 
-`roomEndpoint(endpoint, room)` returns the endpoint with the room's fields appended to its path. A
-connection to that URL names namespaces relative to the room
+`roomEndpoint(endpoint, room)` returns the endpoint with the room's fields appended to its path, and
+`roomEndpoint(room)` does the same for `DEFAULT_ENDPOINT`, the hosted Relay that most applications
+use. A connection to that URL names namespaces relative to the room
 ([Subscribing](behavior.md#subscribing), [issue #348](https://github.com/muxinc/relay-sdks/issues/348)).
 It is a pure function: it builds a string and connects nothing. "Room" is the word the docs already
 use for the path a token grants, and the result is an endpoint, the same noun as `url` on every
@@ -314,7 +315,9 @@ room); `endpointFor` or `withPrefix` (they do not say the prefix becomes the pat
 URL that both the relay and the logs see); percent-encoding as #348 proposed (it is wrong on every
 relay measured; it can be added if the relay starts decoding, without breaking an accepted room);
 keeping the helper in the examples (its value is the validation, which applications need as much as
-the examples do).
+the examples do); a trailing optional endpoint, `roomEndpoint(room, endpoint?)` (it would break every
+existing call, and an endpoint read before its path matches the URL it builds); an options object,
+`roomEndpoint(room, { endpoint })` (one optional value does not need a bag).
 
 ## Switching tracks: `subscribeSwitchable`, `switchTo`, `onSwitched`
 

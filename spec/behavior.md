@@ -376,7 +376,9 @@ it. Awaiting it later still observes the same result.
 
 `roomEndpoint(endpoint, room)` / `room_endpoint(endpoint, room)` returns the room-rooted endpoint
 for a room, the namespace prefix its path names
-([issue #348](https://github.com/muxinc/relay-sdks/issues/348)). It is a pure function: it reads no
+([issue #348](https://github.com/muxinc/relay-sdks/issues/348)). Given only the room,
+`roomEndpoint(room)` / `room_endpoint(room)` roots `DEFAULT_ENDPOINT`, the
+`relay.defaultEndpoint` pinned in `protocol.json`. It is a pure function: it reads no
 token, opens no connection and changes nothing about `connect*`. The cases live in
 `vectors/room-endpoint.json` and run in every SDK's suite.
 

@@ -34,14 +34,17 @@ so a publisher and a subscriber can each use their nearest relay
 The hosted demo defaults to the bare host `https://relay.mux.global`, which still requires authorized credentials.
 For another deployment, use the endpoint supplied by its operator.
 
-`room_endpoint` builds that endpoint from a relay and the token's root, so the URL is not assembled by
-hand:
+`room_endpoint` builds that endpoint from the token's root, so the URL is not assembled by hand.
+Given only the root, it roots `DEFAULT_ENDPOINT`, `https://relay.mux.global`; pass an endpoint first
+for another relay:
 
 ```python
 from caprid_relay import room_endpoint
 
-url = room_endpoint("https://relay.mux.global", ["acme", "rooms", "42"])
+url = room_endpoint(["acme", "rooms", "42"])
 # 'https://relay.mux.global/acme/rooms/42'
+url = room_endpoint("https://ord.relay.mux.global", ["acme", "rooms", "42"])
+# 'https://ord.relay.mux.global/acme/rooms/42'
 ```
 
 It appends each field to the endpoint's path and keeps the endpoint's query. It encodes nothing,
@@ -917,7 +920,7 @@ The observable behavior is the same; the spelling follows Python conventions:
 | `subscriber.trackSource` | `subscriber.track_source` |
 | `writeText()`, `writeJSON()` | `write_text()`, `write_json()` on track and group writers |
 | `readText(object)`, `readJSON(object)` | `read_text(obj)`, `read_json(obj)` |
-| `roomEndpoint(endpoint, room)` throws `RangeError` | `room_endpoint(endpoint, room)` raises `ValueError` |
+| `roomEndpoint([endpoint,] room)` throws `RangeError` | `room_endpoint([endpoint,] room)` raises `ValueError` |
 | Browser `WebTransport`, or `@caprid/relay-quic` on Node | aioquic native QUIC client (`caprid_relay.quic.connect_quic`) |
 | `subscriber.want(key, { namespace, track, generations, staleAfterMs, retry, until, drainMs }, handlers)` | `subscriber.want(key, namespace, track, WantHandlers(...), generations=..., stale_after=seconds, retry=..., until=..., drain=seconds)` |
 | `onSubscribed(info, { namespace })`, `onRestarted({ reason, namespace })`, `onSwitched({ from, to, subscribed })` | `on_subscribed(info, namespace)`, `on_restarted(reason, namespace)`, `on_switched(WantSwitchedInfo)` with `from_namespace`, `from_track`, `to_namespace`, `to_track` |

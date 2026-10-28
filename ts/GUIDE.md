@@ -38,14 +38,17 @@ so a publisher and a subscriber can each use their nearest relay
 `https://relay.mux.global`, which still requires authorized credentials. For another deployment,
 use the endpoint supplied by its operator.
 
-`roomEndpoint` builds that endpoint from a relay and the token's root, so the URL is not assembled by
-hand:
+`roomEndpoint` builds that endpoint from the token's root, so the URL is not assembled by hand.
+Given only the root, it roots `DEFAULT_ENDPOINT`, `https://relay.mux.global`; pass an endpoint first
+for another relay:
 
 ```ts
 import { roomEndpoint } from '@caprid/relay';
 
-const url = roomEndpoint('https://relay.mux.global', ['acme', 'rooms', '42']);
+const url = roomEndpoint(['acme', 'rooms', '42']);
 // 'https://relay.mux.global/acme/rooms/42'
+const nearby = roomEndpoint('https://ord.relay.mux.global', ['acme', 'rooms', '42']);
+// 'https://ord.relay.mux.global/acme/rooms/42'
 ```
 
 It appends each field to the endpoint's path and keeps the endpoint's query. It encodes nothing,

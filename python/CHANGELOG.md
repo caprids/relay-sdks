@@ -6,6 +6,10 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-relay`: `room_endpoint(room)` roots `DEFAULT_ENDPOINT`, the hosted Relay `https://relay.mux.global`, so a
+  quickstart passes only the token's root. `room_endpoint(endpoint, room)` works as before. Both arguments are now
+  positional-only.
+
 - `caprid-relay`, `caprid-moq-core`: a publisher connection answers the relay's TRACK_STATUS (draft-22 §9.13) for its
   tracks instead of refusing it with `NOT_SUPPORTED`: TRACK_STATUS_OK with the track's properties and, once the track
   has written an object, LARGEST_OBJECT; an unknown or closed track gets `DOES_NOT_EXIST`, as a SUBSCRIBE does.

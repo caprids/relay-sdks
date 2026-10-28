@@ -128,6 +128,7 @@ for (const name of ['videoTrackFromDecoderConfig', 'audioTrackFromDecoderConfig'
 }
 const sdkExports = await import('../dist/index.js');
 assert.deepEqual(Object.keys(sdkExports).sort(), [
+  'DEFAULT_ENDPOINT',
   'RelayError',
   'SubscriptionConnectionClosedError',
   'SubscriptionOverflowError',
