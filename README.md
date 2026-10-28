@@ -14,7 +14,7 @@ can break the API.
 | `python/` | Python SDK `caprid-relay` and the generic `caprid-moq-core` and `caprid-moq-media` packages (imported as `caprid_relay`, `moq_core`, and `moq_media`), as a uv workspace (uv, ruff, ty) | Working. Feature-complete with `ts/`, and live-tested against Mux's relays |
 | `tools/` | Hardware measurement rigs, such as the [device latency lab](tools/device-latency/README.md) for microphone and output latency | Run by hand |
 
-Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (browser WebTransport) or
+Start with the [JavaScript quickstart](ts/GUIDE.md#first-round-trip) (Node; browsers use WebTransport) or
 [Python quickstart](python/README.md#first-round-trip) (native asyncio). Each one installs the
 published packages into a new project and runs a short publish and subscribe round trip. Each guide
 then runs the repository's fuller demo from a checkout.

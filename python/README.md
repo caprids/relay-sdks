@@ -139,7 +139,7 @@ asyncio.run(main())
 Enter the token at the hidden prompt, then run the script:
 
 ```sh
-read -rs -p 'Relay token: ' RELAY_TOKEN && echo && export RELAY_TOKEN
+printf 'Relay token: ' && read -rs RELAY_TOKEN && echo && export RELAY_TOKEN
 uv run hello.py
 ```
 
@@ -155,8 +155,8 @@ as an unauthorized track, reaches `on_error`. Each `async with` closes its conne
 exits, even on an error.
 
 This script has no run deadline, and a write that times out waiting for demand fails the run.
-[The full demo](#run-the-full-demo-from-a-checkout) adds a deadline and a write retry, and runs the
-publisher and subscriber in separate processes.
+[The full demo](#run-the-full-demo-from-a-checkout) adds a deadline and a write retry, and can run
+the publisher and subscriber in separate processes.
 
 ## Run the full demo from a checkout
 

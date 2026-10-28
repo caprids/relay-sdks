@@ -122,7 +122,7 @@ await publisher.close();
 Enter the token at the hidden prompt, then run the script:
 
 ```sh
-read -rs -p 'Relay token: ' RELAY_TOKEN && echo && export RELAY_TOKEN
+printf 'Relay token: ' && read -rs RELAY_TOKEN && echo && export RELAY_TOKEN
 node hello.mjs
 ```
 
@@ -137,7 +137,7 @@ trip, and the want retries it until the subscription succeeds. A rejection that 
 as an unauthorized track, reaches `onError`. Both connections keep Node running until they close.
 
 This script has no run deadline and no cleanup on failure, and a write that times out waiting for
-demand fails the run. [The full demo](#run-the-full-demo-from-a-checkout) adds those, and runs
+demand fails the run. [The full demo](#run-the-full-demo-from-a-checkout) adds those, and can run
 the publisher and subscriber in separate processes.
 
 ## Run the full demo from a checkout
