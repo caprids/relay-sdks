@@ -1,12 +1,13 @@
 # Talk to a voice bot in the browser
 
-The user's side of the [Python voice bot](../../../python/examples/voice_bot/README.md). The page
-publishes the microphone alone and plays the bot through `@caprid/moq-media`'s audio player, showing the
-text of each reply as its audio plays. When the bot is talked over and sends an interrupt, the
-player cuts the reply audio it still holds, and the transcript the words it did not say.
+This page is the user's side of the [Python voice bot](../../../python/examples/voice_bot/README.md).
+It publishes the microphone alone and plays the bot through `@caprid/moq-media`'s audio player, and
+shows the text of each reply as its audio plays. When the user talks over the bot, the bot sends an
+interrupt. The player then cuts the reply audio it still holds, and the transcript cuts the words the
+bot did not say.
 
-[`talk-to-bot.ts`](talk-to-bot.ts) is the part to copy. It is the WebCodecs example's pieces put
-together:
+[`talk-to-bot.ts`](talk-to-bot.ts) is the part to copy. It puts together pieces of the WebCodecs
+example:
 
 ```ts
 import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay';
@@ -45,15 +46,21 @@ await talkToBot(publisher, subscriber, {
 
 [`page.ts`](page.ts) wraps `talkToBot` in a page with Talk and Hang up buttons, and
 [`serve.mjs`](serve.mjs) serves it on http://127.0.0.1:8320, a secure context as WebTransport
-needs. Start the bot first or after, with the same namespace:
+needs. Start the bot before or after the page, with the same namespace inside your token's root:
 
 ```sh
-RELAY_TOKEN=... mise run python:example:voice-bot -- --namespace mattypoo/voice-bot
-RELAY_TOKEN=... mise run ts:example:voice-bot -- --namespace mattypoo/voice-bot
+RELAY_TOKEN=... mise run python:example:voice-bot -- --namespace acme/voice-bot
+RELAY_TOKEN=... mise run ts:example:voice-bot -- --namespace acme/voice-bot
 ```
 
-`--port` picks another port, and `--room` roots `RELAY_URL` at the given fields with `roomEndpoint`, as the bot's `--room` does. With `RELAY_TOKEN` set the page holds the token, so the server listens
-on the loopback interface only and never prints it; without it, paste one into the page. The status
-line shows how much of the bot's audio the player has played, its buffer, underruns, interrupts and
-how much they cut; below it, the bot's words appear as they play, with `—` where it was talked over.
-The log says how long after the bot's last audio each interrupt landed.
+Without `--namespace`, both default to `RELAY_NAMESPACE_PREFIX` (or `relay-sdk-example`) plus
+`voice-bot`. `--port` picks another port. `--room` roots `RELAY_URL` at the given fields with
+`roomEndpoint`, as the bot's `--room` does.
+
+With `RELAY_TOKEN` set, the page holds the token. The server listens on the loopback interface only
+and never prints the token. Without `RELAY_TOKEN`, paste a token into the page.
+
+The status line shows how much of the bot's audio the player has played, its buffer, underruns,
+interrupts, and how much they cut. Below it, the bot's words appear as they play, with a dash where
+the user talked over the bot. The log says how long after the bot's last audio each interrupt
+landed.

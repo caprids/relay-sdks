@@ -1,3 +1,3 @@
 # `@caprid/relay-quic-linux-arm64-musl`
 
-This is the **aarch64-unknown-linux-musl** binary for `@caprid/relay-quic`
+The `aarch64-unknown-linux-musl` binary for `@caprid/relay-quic`. Install `@caprid/relay-quic` instead. Your package manager adds this package on a matching platform.

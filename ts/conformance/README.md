@@ -1,7 +1,7 @@
 # Transport adapter conformance suite
 
 The suite checks a transport adapter against the contract in `spec/transport-adapter.md`. It is written once, against
-`MoqtTransport` and the factory result, and run against every target. Each case is named after the rule it checks
+`MoqtTransport` and the factory result, and runs against every target. Each case is named after the rule it checks
 (`TA-n …`), and every MUST in the contract has at least one case.
 
 | File | What it is |
@@ -32,12 +32,12 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
 - `pnpm test:conformance` (`mise run ts:test:conformance`) runs it in headless Chromium against the Python accepting
   end. It needs the Python workspace (`mise run python:install`) and Playwright's Chromium
   (`pnpm exec playwright install chromium`). It takes about 15 s. `CONFORMANCE_GREP=TA-15` runs only the cases whose
-  name contains the text. CI runs it as the TypeScript workflow's `conformance` job.
+  names contain that text. CI runs it as the TypeScript workflow's `conformance` job.
 - `pnpm test:conformance:websocket` (`mise run ts:test:conformance:websocket`) runs it in Node against
   `@caprid/relay-websocket` and the Node accepting end. It needs only Node and `openssl`, and takes about 15 s.
-  `pnpm test:conformance:websocket:browsers` runs it in Chromium, Firefox and WebKit (`BROWSERS=chromium,webkit` picks;
-  `CONFORMANCE_GREP` works as above), with Playwright's browsers installed; the pages ignore the peer's self-signed
-  certificate, which a page cannot pin for a WebSocket. CI runs both as the `conformance-websocket` job.
+  `pnpm test:conformance:websocket:browsers` runs it in Chromium, Firefox, and WebKit, with Playwright's browsers
+  installed. `BROWSERS=chromium,webkit` picks browsers, and `CONFORMANCE_GREP` works as above. The pages ignore the
+  peer's self-signed certificate, because a page cannot pin a certificate for a WebSocket. CI runs both as the `conformance-websocket` job.
 - `pnpm test:conformance:node` (`mise run ts:test:conformance:node`) runs it in Node against `@caprid/relay-quic` and the
   Python accepting end in its native QUIC mode. It builds the native addon first, with the Rust toolchain the mise
   task pins, and needs the Python workspace. After the build it takes about 25 s, most of it the TA-9 connection-loss
@@ -180,8 +180,8 @@ unless `WEBSOCKET_PEER_CERTIFICATE` and `WEBSOCKET_PEER_KEY` name one. It listen
 
 ## Adding a target
 
-A target needs a peer that implements the methods above, and a runner for its runtime.
-
-- **Node (`@caprid/relay-quic`):** `relay-quic.conformance.js` runs under vitest, as the pair does, with its own config so
-  that `pnpm test` leaves it out. Another Node adapter can reuse `targets/relay-quic.js`'s shape and the native QUIC
-  peer as they are.
+A target needs a peer that implements the methods above, and a runner for its runtime. In Node,
+`relay-quic.conformance.js` and `websocket.conformance.js` run under vitest, as the pair does, each with its own config
+so that `pnpm test` leaves them out. Another Node adapter can reuse the shape of `targets/relay-quic.js` and the native
+QUIC peer as they are. In a browser, `../scripts/test-conformance.mjs` and `../scripts/test-conformance-websocket.mjs`
+serve the suite to a Playwright page.
