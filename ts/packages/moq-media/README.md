@@ -57,7 +57,7 @@ entries. Each entry takes an optional `renderGroup` and `altGroup`:
   role and a render group.
 
 `parseMsfCatalog` returns both fields, and `groupMsfTracks(catalog.tracks)` lists the sets that a viewer picks one track
-from. See [several media tracks](../../../spec/media-layer.md#several-media-tracks).
+from. See [several media tracks](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#several-media-tracks).
 
 ```ts
 const catalog = buildMsfCatalog({
@@ -94,9 +94,9 @@ TypeScript takes the decoder config and length-prefixed H.264 packets that an en
 `avcCodecString` inspects the avcC header. It does not parse the SPS or validate a bitstream. TypeScript has no Annex B
 parsing, SPS or PPS reconstruction, or access-unit conversion. Python keeps its Annex B helpers for the PyAV publisher.
 
-See the [direct WebCodecs publishing example](../../examples/webcodecs/README.md) for live browser video, catalog
+See the [direct WebCodecs publishing example](https://github.com/caprids/relay-sdks/blob/main/ts/examples/webcodecs/README.md) for live browser video, catalog
 serving, groups, bounded buffering, and cleanup. For files that need demuxing, use the optional
-[Mediabunny packet adapter](../moq-mediabunny/README.md).
+[Mediabunny packet adapter](https://github.com/caprids/relay-sdks/blob/main/ts/packages/moq-mediabunny/README.md).
 
 ## Shared timeline and playout clock
 
@@ -119,13 +119,13 @@ The publisher path below works in Chromium, Firefox, and Safari:
 - **Microphone latency.** No browser reports a microphone's own input latency. Measured on macOS, it is about 30 ms for
   a MacBook's built-in microphone and 190 ms for AirPods. Set it as `captureLatencyUs` on the source timeline, at
   creation or whenever the device changes, and the timeline subtracts it from every timestamp. See
-  [capture latency](../../../spec/media-layer.md#capture-latency).
+  [capture latency](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#capture-latency).
 
 On the player, `createPlayoutClock()` makes audio the master. Report what is audible with `reportAudio(mediaUs, atUs)`:
 the context time rendered now, less `baseLatency + outputLatency`. Read those two fresh on each report, because the
 output delay changes with the device. Video calls `due(timestampUs)` and gets a `wait`, `show`, or `drop` decision. With
 no audio, the clock paces by wall clock. Neither clock needs the DOM. See
-[shared timeline and playout clock](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
+[shared timeline and playout clock](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#shared-timeline-and-playout-clock).
 
 ```ts
 const clock = createBroadcastClock();
@@ -153,9 +153,9 @@ than assuming that the relay rescaled to microseconds.
 `createFrameSequencer({ clock })` turns one subscribed track's objects into frames in decode order. Objects can arrive
 out of order across group streams, and the sequencer drops what is too late against the playout clock.
 `createFrameReader` in `@caprid/relay/media` drives it from a subscription (see
-[subscribing to media](../../GUIDE.md#subscribing-to-media)). Per track, `lateDropUs`, `reorderWindowUs`, and
+[subscribing to media](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#subscribing-to-media)). Per track, `lateDropUs`, `reorderWindowUs`, and
 `catchUpAfterUs` tune audio delivery for a listener or for speech-to-text. `missingGroups` on a frame names the groups
-skipped before it (see [voice delivery](../../GUIDE.md#voice-delivery-per-direction)).
+skipped before it (see [voice delivery](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#voice-delivery-per-direction)).
 
 The combined `register_media` publishing handle is still a proposal in `spec/media-layer.md`. `@caprid/relay/media`
 ships the frame writer and catalog service that it would compose.
@@ -168,8 +168,8 @@ group. On this timeline, media time is already wall-clock time, so a record's tw
 
 `createMediaTimeline` keeps one broadcast's records, 512 by default. Each time a keyframe has opened a video group,
 `add` returns the document to send. Write it as a new timeline group, and again whenever the relay subscribes. The
-[WebCodecs example](../../examples/webcodecs/README.md) does this. See
-[media timeline track](../../../spec/media-layer.md#media-timeline-track).
+[WebCodecs example](https://github.com/caprids/relay-sdks/blob/main/ts/examples/webcodecs/README.md) does this. See
+[media timeline track](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#media-timeline-track).
 
 ```ts
 const timeline = createMediaTimeline();
@@ -212,10 +212,10 @@ Give an audio-only broadcast's playout clock `AUDIO_ONLY_TARGET_LATENCY_US` (500
 default waits for keyframe intervals.
 
 The player takes structural Web Audio types, so it imports no DOM library. Its tests run under a fake context that runs
-the real worklet. See [playing audio](../../GUIDE.md#playing-audio) and
-[audio player](../../../spec/media-layer.md#audio-player).
+the real worklet. See [playing audio](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#playing-audio) and
+[audio player](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#audio-player).
 
 ## Stability
 
 Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay` at the same version.
-See the [changelog](../../CHANGELOG.md).
+See the [changelog](https://github.com/caprids/relay-sdks/blob/main/ts/CHANGELOG.md).

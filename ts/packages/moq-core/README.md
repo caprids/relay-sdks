@@ -39,9 +39,9 @@ revision, the original file hashes, and every change made since, and `NOTICE` ca
 has its own copy of these modules. Moving Video.js onto this package is a separate step.
 
 For Relay application usage and local installation, start with the
-[JavaScript quickstart](../../GUIDE.md#first-round-trip).
+[JavaScript quickstart](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#first-round-trip).
 
 ## Stability
 
 Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay` at the same version.
-See the [changelog](../../CHANGELOG.md).
+See the [changelog](https://github.com/caprids/relay-sdks/blob/main/ts/CHANGELOG.md).

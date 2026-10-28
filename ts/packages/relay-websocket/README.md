@@ -7,10 +7,10 @@ The Relay SDK's transport adapter for QMux over WebSocket. It carries MOQT on
 adapter reaches the relay where WebTransport cannot: on networks that block UDP, and in browsers whose WebTransport
 cannot negotiate protocols. It works in browsers and in Node 24.
 
-It follows the transport adapter contract in [`spec/transport-adapter.md`](../../../spec/transport-adapter.md), with
+It follows the transport adapter contract in [`spec/transport-adapter.md`](https://github.com/caprids/relay-sdks/blob/main/spec/transport-adapter.md), with
 the deviations recorded there, and passes its conformance suite in Node, Chromium, Firefox and WebKit. QMux comes from
 [`@moq/qmux`](https://www.npmjs.com/package/@moq/qmux), by the author of moq-relay's own QMux, at an exact version;
-[ADR 0005](../../../docs/adr/0005-websocket-adapter-wraps-moq-qmux.md) records why.
+[ADR 0005](https://github.com/caprids/relay-sdks/blob/main/docs/adr/0005-websocket-adapter-wraps-moq-qmux.md) records why.
 
 ## Use
 
@@ -44,7 +44,7 @@ const other = await connectRelaySubscriber({ url, getToken, createTransport: cre
   SDK reports `TRANSPORT_ERROR` in phase `connecting`, not `UNAUTHORIZED`.
 - A send stream's close resolves once the FIN is handed to the socket, not once the relay has it.
 
-The relay's side, with measurements, is in [QMux over WebSocket](../../../spec/relay-interop.md#qmux-over-websocket).
+The relay's side, with measurements, is in [QMux over WebSocket](https://github.com/caprids/relay-sdks/blob/main/spec/relay-interop.md#qmux-over-websocket).
 
 ## Trust
 
@@ -65,4 +65,4 @@ Run these from `ts/` in the repository.
 ## Stability
 
 Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay` at the same version;
-see the [changelog](../../CHANGELOG.md).
+see the [changelog](https://github.com/caprids/relay-sdks/blob/main/ts/CHANGELOG.md).

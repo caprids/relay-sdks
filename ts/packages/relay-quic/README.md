@@ -3,13 +3,13 @@
 The Relay SDK's transport adapter for Node. It carries MOQT straight on a QUIC connection (native QUIC), offering the
 ALPNs `moqt-22`, then `moqt-20`. A napi-rs addon over [quinn](https://github.com/quinn-rs/quinn) does the QUIC work, so
 a plain Node script can publish and subscribe without a browser. The adapter follows the transport adapter contract in
-[`spec/transport-adapter.md`](../../../spec/transport-adapter.md) and passes its conformance suite. The design is
-[ADR 0002](../../../docs/adr/0002-node-adapter-speaks-native-quic.md).
+[`spec/transport-adapter.md`](https://github.com/caprids/relay-sdks/blob/main/spec/transport-adapter.md) and passes its conformance suite. The design is
+[ADR 0002](https://github.com/caprids/relay-sdks/blob/main/docs/adr/0002-node-adapter-speaks-native-quic.md).
 
 ## Use
 
 Install it next to `@caprid/relay`. Most scripts need no code from this package: `@caprid/relay/node` uses it by
-default and takes the trust options below (see the [SDK README](../../README.md#node)).
+default and takes the trust options below (see the [SDK README](https://github.com/caprids/relay-sdks/blob/main/ts/README.md#node)).
 
 To use it with `@caprid/relay` directly, pass the factory as `createTransport`. The URL is the same `https://` endpoint
 the browser uses. The adapter dials only its host and port, and the core sends the path, the token, and the authority in
@@ -74,7 +74,7 @@ packages and `@caprid/moq-core`, with the sizes in the job summary. `scripts/smo
 npm on each platform (musl in Alpine, arm64 Linux under QEMU, darwin-x64 under Rosetta). It checks that npm picked only
 the matching binary, that the loader finds it, and that a dial sends a QUIC Initial and can be cancelled. The
 `Release TypeScript SDK` workflow (`release-ts.yml`) calls this one and publishes the tarballs it packs, with the rest of
-the TypeScript packages ([releasing](../../../docs/releasing.md)).
+the TypeScript packages ([releasing](https://github.com/caprids/relay-sdks/blob/main/docs/releasing.md)).
 
 The platform packages live in `npm/<platform>/`. `napi create-npm-dirs` generates them from `napi.targets` in
 `package.json`. `scripts/pack.mjs` adds the optional dependencies on them only when it packs, so the lockfile never
@@ -83,7 +83,7 @@ names them. `pnpm check:boundaries`, run from `ts/`, checks that `npm/` and `nap
 ## Stability
 
 Before 1.0, a minor version can break the API. This package and its platform packages release
-together with `@caprid/relay` at the same version; see the [changelog](../../CHANGELOG.md).
+together with `@caprid/relay` at the same version; see the [changelog](https://github.com/caprids/relay-sdks/blob/main/ts/CHANGELOG.md).
 
 ## Building the addon
 

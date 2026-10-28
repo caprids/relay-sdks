@@ -8,7 +8,7 @@ Mediabunny parses the file, and this adapter maps its encoded packets. The decod
 `@caprid/moq-media` support length-prefixed AVC (H.264) with four-byte NAL lengths, and Opus. The adapter uses only
 public Mediabunny APIs. It never rebuilds SPS or PPS, converts Annex B, decodes, or re-encodes media. For other codecs,
 use `@caprid/moq-media` directly. For live capture, `@caprid/moq-media` also provides the
-[direct WebCodecs publishing path](../../examples/webcodecs/README.md).
+[direct WebCodecs publishing path](https://github.com/caprids/relay-sdks/blob/main/ts/examples/webcodecs/README.md).
 
 ```ts
 import { packetToLocFrame } from '@caprid/moq-mediabunny';
@@ -32,8 +32,8 @@ try {
 }
 ```
 
-See the [complete publishing function](../../examples/mediabunny/publish-video.ts) and its
-[usage instructions](../../examples/mediabunny/README.md) for demand, pacing, groups, and cleanup.
+See the [complete publishing function](https://github.com/caprids/relay-sdks/blob/main/ts/examples/mediabunny/publish-video.ts) and its
+[usage instructions](https://github.com/caprids/relay-sdks/blob/main/ts/examples/mediabunny/README.md) for demand, pacing, groups, and cleanup.
 
 ## Contract
 
@@ -41,7 +41,7 @@ The config mappers and the `LocFrame` type belong to `@caprid/moq-media`. This p
 `videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`, and `LocFrame` for compatibility. Import them from
 `@caprid/moq-media` in new code.
 
-See the [media package](../moq-media/README.md) for the AVC/Opus config-mapper contract.
+See the [media package](https://github.com/caprids/relay-sdks/blob/main/ts/packages/moq-media/README.md) for the AVC/Opus config-mapper contract.
 
 - `packetToLocFrame(packet, options?)` returns `{ payload, timestampUs, key, properties }`. The payload borrows the
   packet's bytes unchanged, so keep them stable until the write completes. A metadata-only packet throws. The timestamp
@@ -63,4 +63,4 @@ Public upstream APIs: [encoded packets](https://mediabunny.dev/api/EncodedPacket
 ## Stability
 
 Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay` at the same version.
-See the [changelog](../../CHANGELOG.md).
+See the [changelog](https://github.com/caprids/relay-sdks/blob/main/ts/CHANGELOG.md).

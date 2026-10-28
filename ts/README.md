@@ -14,9 +14,9 @@ The SDK does not interpret payloads, so you need no player, media catalog, or Vi
   `@caprid/relay-quic` ([Node](#node)). Other runtimes must pass a compatible `createTransport`
   factory.
 - Where UDP is blocked, or the browser has no usable WebTransport (Safari), pass
-  [`@caprid/relay-websocket`](packages/relay-websocket/README.md)'s `withWebSocketFallback()` or
+  [`@caprid/relay-websocket`](https://github.com/caprids/relay-sdks/blob/main/ts/packages/relay-websocket/README.md)'s `withWebSocketFallback()` or
   `createWebSocketTransport()` as `createTransport`. The connection then runs QMux over WebSocket on
-  TCP 443 ([networks without UDP](GUIDE.md#networks-without-udp-qmux-over-websocket)).
+  TCP 443 ([networks without UDP](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#networks-without-udp-qmux-over-websocket)).
 - A Relay endpoint and a short-lived Relay JWT authorized for the namespace you use. The SDK
   consumes tokens. It does not issue them.
 
@@ -29,7 +29,7 @@ npm install @caprid/relay
 Add `@caprid/relay-quic` for Node ([Node](#node)), `@caprid/relay-websocket` for networks without
 UDP, and `@caprid/moq-media` to publish or play media. To build the packages from a checkout of this
 repository instead, see
-[Use the local packages in your application](GUIDE.md#use-the-local-packages-in-your-application).
+[Use the local packages in your application](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#use-the-local-packages-in-your-application).
 
 ## Publish and subscribe
 
@@ -59,18 +59,18 @@ subscriber.close();
 await publisher.close();
 ```
 
-The [guide's first round trip](GUIDE.md#first-round-trip) runs the complete version of this, with
+The [guide's first round trip](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#first-round-trip) runs the complete version of this, with
 credential handling, the subscribe retry, a deadline, and cleanup on failure.
 
 These connections never reconnect. For a live application, `connectSupervisedPublisher` and
 `connectSupervisedSubscriber` reconnect with backoff. They keep tracks registered and subscribed
-across connections and publisher restarts ([stay connected](GUIDE.md#stay-connected-supervised-connections)).
+across connections and publisher restarts ([stay connected](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#stay-connected-supervised-connections)).
 
 ## Node
 
 `@caprid/relay/node` exports everything `@caprid/relay` does. Its `connectRelayPublisher`,
 `connectRelaySubscriber`, and both `connectSupervised*` functions connect over native QUIC through
-[`@caprid/relay-quic`](packages/relay-quic/README.md), Mux's transport adapter for Node. Native QUIC
+[`@caprid/relay-quic`](https://github.com/caprids/relay-sdks/blob/main/ts/packages/relay-quic/README.md), Mux's transport adapter for Node. Native QUIC
 means MOQT directly on QUIC, with ALPN `moqt-22` and a fallback to `moqt-20`. Pass the same
 `https://` endpoint you pass in a browser.
 
@@ -82,7 +82,7 @@ npm install @caprid/relay @caprid/relay-quic
 
 `@caprid/relay-quic` is an optional peer dependency that only `@caprid/relay/node` needs. It lists
 a prebuilt native binary for each supported platform as an optional dependency, and your package
-manager installs the one that matches ([its README](packages/relay-quic/README.md#prebuilt-binaries)).
+manager installs the one that matches ([its README](https://github.com/caprids/relay-sdks/blob/main/ts/packages/relay-quic/README.md#prebuilt-binaries)).
 Without the package or the binary, a connect call fails with `RelayError` code
 `TRANSPORT_UNAVAILABLE`.
 
@@ -135,7 +135,7 @@ them, build the factory yourself with `nativeQuicTransport({ ca })` from `@capri
 
 An open connection keeps the Node process alive from the start of the dial until the connection
 has closed. After that the adapter holds nothing, so a script exits by itself once it has closed
-its publisher and subscriber ([TA-25, TA-26](../spec/transport-adapter.md)). A script that stops
+its publisher and subscriber ([TA-25, TA-26](https://github.com/caprids/relay-sdks/blob/main/spec/transport-adapter.md)). A script that stops
 early without closing them keeps running.
 
 ### Native WebTransport
@@ -153,7 +153,7 @@ so plain `@caprid/relay` fails there with `TRANSPORT_UNAVAILABLE`.
 
 ## Stability
 
-Before 1.0, a minor version can break the API, and [CHANGELOG.md](CHANGELOG.md) says what changed.
+Before 1.0, a minor version can break the API, and [CHANGELOG.md](https://github.com/caprids/relay-sdks/blob/main/ts/CHANGELOG.md) says what changed.
 `@caprid/relay`, `@caprid/moq-core`, `@caprid/moq-media`, `@caprid/moq-mediabunny`,
 `@caprid/relay-quic`, and `@caprid/relay-websocket` always release together at the same version, so
 install matching versions. A release supports:
@@ -165,11 +165,11 @@ install matching versions. A release supports:
 
 ## Documentation
 
-- [TypeScript guide](GUIDE.md): the quickstart, subscription and publishing lifecycles, async
+- [TypeScript guide](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md): the quickstart, subscription and publishing lifecycles, async
   consumption, and publishing and playing media.
 - API reference: run `mise run ts:docs` from a checkout to build it from the source into
   `ts/docs-api/`.
-- [Errors and recovery](GUIDE.md#errors-and-recovery): stable `RelayError` codes and phases, and
+- [Errors and recovery](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#errors-and-recovery): stable `RelayError` codes and phases, and
   how to recover without assuming delivery or safe replay.
-- [Shared specification](../spec/README.md): the protocol pins, behavior contract, and test vectors
+- [Shared specification](https://github.com/caprids/relay-sdks/blob/main/spec/README.md): the protocol pins, behavior contract, and test vectors
   every Relay SDK implements.

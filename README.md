@@ -176,10 +176,9 @@ Publishers end a track with PUBLISH_DONE, which needs moq-relay 0.15.4 or later.
 a reproducible local test, see [relay interoperability](spec/relay-interop.md). SDK adoption and
 the relay upgrade must be coordinated.
 
-The npm package READMEs, such as `ts/README.md`, still link to the guides and `spec/` with relative
-links. The linked files are not in the packages, so make those links absolute URLs to
-`github.com/caprids/relay-sdks` before the next release. The PyPI package READMEs already use
-absolute links.
+Package READMEs (`ts/README.md`, `ts/packages/*/README.md`, and `python/packages/*/README.md`) link
+to the rest of the repository with absolute URLs to `github.com/caprids/relay-sdks`. npm and PyPI
+show these READMEs without the files around them, so a relative link would break there.
 
 ## Package boundaries
 
