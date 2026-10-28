@@ -253,12 +253,18 @@ example's time-based staleness policy:
   frame. The writer says when it needs a keyframe so the encoder can force one
   ([issue #263](https://github.com/muxinc/relay-sdks/issues/263)). Whether to discard a frame
   because it is late against a clock stays with the application.
-- Counters mirror Video.js's track publisher: groups opened and finished, objects and bytes
-  written, frames skipped for no demand, frames skipped awaiting a keyframe, groups dropped. The
-  example's `finished` line would read them instead of keeping its own.
-- Transient failures are absorbed and counted. A closed track surfaces as `closed` on the writer
-  and as an error on the next call, so an application that wants the example's stop-the-run policy
-  can still have it.
+- Each `write` reports what became of its frame: `sent`, `skipped`, `stale`, `dropped`,
+  `interrupted`, or `ended` (`FrameOutcome.kind` in both SDKs). The writer keeps only
+  `groups`, `objects`, `backlog`, and `keyframeNeeded` / `keyframe_needed`. Video.js's track
+  publisher keeps a fixed set of counters, but the writer does not. An application counts the
+  outcomes it cares about, grouped the way it wants, and adds `frame.payload`'s length if it wants
+  bytes. The Python example's `finished` line does this
+  ([issue #263](https://github.com/muxinc/relay-sdks/issues/263)).
+- An interruption resets the group and leaves the track open. A track that ends on its own is an
+  `ended` outcome, for that frame and every later one, and the writer's `ended` holds the error.
+  It is not an exception, because the encoder keeps producing frames. Only a `write` after the
+  application's own `close()` raises `CLOSED`. An application that wants the example's
+  stop-the-run policy stops on the first `ended` outcome.
 
 ### Reading side
 
