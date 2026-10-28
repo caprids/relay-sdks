@@ -1,20 +1,19 @@
 # @caprid/relay-quic
 
-The Relay SDK's transport adapter for Node. It carries MOQT straight on a QUIC connection (native QUIC, with
-the MOQT ALPNs the SDK offers: `moqt-22`, then `moqt-20`), through a napi-rs addon over [quinn](https://github.com/quinn-rs/quinn), so a plain Node script can publish
-and subscribe without a browser. It follows the transport adapter contract in
-[`spec/transport-adapter.md`](../../../spec/transport-adapter.md) and passes its conformance suite. The design is
-[ADR 0002](../../../docs/adr/0002-node-adapter-speaks-native-quic.md).
-
-The package is private for now: its prebuilt binaries are built and packed in CI, but not yet published (#195).
+The Relay SDK's transport adapter for Node. It carries MOQT straight on a QUIC connection (native QUIC), offering the
+ALPNs `moqt-22`, then `moqt-20`. A napi-rs addon over [quinn](https://github.com/quinn-rs/quinn) does the QUIC work, so
+a plain Node script can publish and subscribe without a browser. The adapter follows the transport adapter contract in
+[`spec/transport-adapter.md`](https://github.com/caprids/relay-sdks/blob/main/spec/transport-adapter.md) and passes its conformance suite. The design is
+[ADR 0002](https://github.com/caprids/relay-sdks/blob/main/docs/adr/0002-node-adapter-speaks-native-quic.md).
 
 ## Use
 
-Most scripts need no code from this package: `@caprid/relay/node` uses it by default, and takes the trust options below
-(see the [SDK README](../../README.md#node)). Install it next to `@caprid/relay`.
+Install it next to `@caprid/relay`. Most scripts need no code from this package: `@caprid/relay/node` uses it by
+default and takes the trust options below (see the [SDK README](https://github.com/caprids/relay-sdks/blob/main/ts/README.md#node)).
 
-To use it with `@caprid/relay` directly, pass the factory as `createTransport`. The URL stays the same `https://` endpoint the browser uses: the adapter dials
-only its host and port, and the core sends the path, the token and the authority in SETUP.
+To use it with `@caprid/relay` directly, pass the factory as `createTransport`. The URL is the same `https://` endpoint
+the browser uses. The adapter dials only its host and port, and the core sends the path, the token, and the authority in
+SETUP.
 
 ```ts
 import { connectRelayPublisher } from '@caprid/relay';
@@ -22,6 +21,7 @@ import { nativeQuicTransport } from '@caprid/relay-quic';
 
 const publisher = await connectRelayPublisher({
   url: 'https://relay.mux.global',
+  namespace: ['acme', 'rooms', '42'],
   getToken: () => process.env.RELAY_TOKEN,
   createTransport: nativeQuicTransport(),
 });
@@ -36,19 +36,19 @@ By default a dial trusts the platform's root certificates.
 
 - `ca`: extra trust anchors, PEM, as a string, bytes, or an array of either. They are added to the platform's roots.
 - `serverCertificateHashes`: `[{ algorithm: 'sha-256', value }]`, in the W3C WebTransport shape. The server's
-  end-entity certificate must match one hash, and its chain is not validated. The handshake signature is still
-  checked. Unlike a browser, the adapter does not require the certificate to be valid for 14 days or less.
+  end-entity certificate must match one hash, and the adapter does not validate its chain. It still checks the
+  handshake signature. Unlike a browser, the adapter does not require the certificate to be valid for 14 days or less.
 
 ## Process lifetime
 
 An open session keeps the Node process alive, from the start of the dial until `closed` settles. After that the
-adapter holds nothing: a script exits once it has closed its connections. Closing before the dial completes cancels
+adapter holds nothing, so a script exits once it has closed its connections. Closing before the dial completes cancels
 the dial and releases its socket.
 
 ## Prebuilt binaries
 
-Each platform's binary ships in its own package, which `@caprid/relay-quic` lists as an optional dependency, the napi-rs
-convention. A package manager installs only the one whose `os`, `cpu` and `libc` match, so no Rust is needed.
+Each platform's binary ships in its own package, which `@caprid/relay-quic` lists as an optional dependency, as napi-rs
+packages do. A package manager installs only the one whose `os`, `cpu`, and `libc` match, so you need no Rust.
 
 | Platform package | Built on | Packed | Installed |
 | --- | --- | --- | --- |
@@ -66,7 +66,7 @@ needs too.
 
 `src/addon.ts` loads a local build, `native/relay-quic.<platform>.node`, first, so a build from source always wins.
 Without one it loads `@caprid/relay-quic-<platform>`. If neither is there, the error names both. A platform package that is
-installed but cannot load (a wrong libc, say) throws its own error rather than being skipped.
+installed but cannot load, such as one built for the wrong libc, throws its own error. The loader does not skip it.
 
 The `relay-quic binaries` workflow (`.github/workflows/relay-quic-binaries.yml`) runs on each PR that touches the crate,
 the loader or the packaging. It builds every target, and `scripts/pack.mjs` packs the main package, the platform
@@ -74,21 +74,21 @@ packages and `@caprid/moq-core`, with the sizes in the job summary. `scripts/smo
 npm on each platform (musl in Alpine, arm64 Linux under QEMU, darwin-x64 under Rosetta). It checks that npm picked only
 the matching binary, that the loader finds it, and that a dial sends a QUIC Initial and can be cancelled. The
 `Release TypeScript SDK` workflow (`release-ts.yml`) calls this one and publishes the tarballs it packs, with the rest of
-the TypeScript packages ([releasing](../../../docs/releasing.md)).
+the TypeScript packages ([releasing](https://github.com/caprids/relay-sdks/blob/main/docs/releasing.md)).
 
-The platform packages live in `npm/<platform>/`, generated by `napi create-npm-dirs` from `napi.targets`. The
-optional dependencies on them are added only when packing, so the lockfile never names unpublished packages.
-`pnpm check:boundaries` checks that the two agree.
+The platform packages live in `npm/<platform>/`. `napi create-npm-dirs` generates them from `napi.targets` in
+`package.json`. `scripts/pack.mjs` adds the optional dependencies on them only when it packs, so the lockfile never
+names them. `pnpm check:boundaries`, run from `ts/`, checks that `npm/` and `napi.targets` agree.
 
 ## Stability
 
 Before 1.0, a minor version can break the API. This package and its platform packages release
-together with `@caprid/relay` at the same version; see the [changelog](../../CHANGELOG.md).
+together with `@caprid/relay` at the same version; see the [changelog](https://github.com/caprids/relay-sdks/blob/main/ts/CHANGELOG.md).
 
 ## Building the addon
 
-To work on the crate, build the addon locally with Rust. The mise tasks bring the toolchain `mise.toml` pins; nothing
-else in the repo installs one.
+To work on the crate, build the addon locally with Rust. The mise tasks bring the toolchain that `mise.toml` pins.
+Nothing else in the repo installs one.
 
 ```sh
 mise run ts:test:conformance:node   # builds the addon, then runs the conformance suite against it
@@ -103,7 +103,7 @@ With a Rust toolchain of your own, `cd ts && pnpm --filter @caprid/relay-quic bu
 `build:native` also regenerates `src/native.d.ts`, the addon's typings, from the Rust. Commit it with any change to
 the crate. CI checks that it matches.
 
-`pnpm check` builds and checks the TypeScript only, so the rest of the workspace needs no Rust.
+`pnpm check`, run from `ts/`, builds and checks the TypeScript only, so the rest of the workspace needs no Rust.
 
 ## Layout
 

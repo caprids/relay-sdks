@@ -5,6 +5,8 @@ date: 2026-10-01
 
 # Releases are hand-cut per language, in lockstep, and dry-run until a variable says otherwise
 
+> The package names below predate the rename in [#222](https://github.com/muxinc/relay-sdks/issues/222): `@mux/*` is now `@caprid/*` on npm, `mux-*` is now `caprid-*` on PyPI, and `mux_relay` is now `caprid_relay`.
+
 Nothing in this repository was installable from a registry. We decided how the SDKs ship (#216):
 
 - **Two release trains.** TypeScript and Python release independently, tagged by directory

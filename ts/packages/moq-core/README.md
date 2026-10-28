@@ -1,38 +1,47 @@
 # Generic MoQ core
 
-An independently buildable package for MOQT sessions and arbitrary track objects. It has no runtime
-dependencies and does not import Relay product code or Video.js.
+`@caprid/moq-core` runs MOQT sessions that carry arbitrary track objects. It has no runtime dependencies and does not
+import Relay product code or Video.js.
 
-`createMoqtSession` owns the supplied established transport. Subscribe, fetch, and track-status
-requests use callback handlers, preserve uninterpreted payloads and object properties, and expose
-protocol lifecycle notifications. `MoqTrackSource` describes borrowed track access without shutdown.
+The core speaks MOQT draft 22, and draft 20 with a peer that selects it. It receives subscription objects over reliable
+streams. It does not implement application timing, decoding, datagram reception, or automatic session recovery.
 
-The implementation and regression tests originate in Video.js under Apache-2.0. This initial
-extraction preserves the wire implementation; ESM imports, test-runner imports, and the default SETUP implementation identifier are adapted.
-See `NOTICE` and `UPSTREAM.json`. The original Video.js modules remain pending dependency migration.
+## Subscribe side
 
-This package follows MOQT draft 22, and draft 20 for a peer that selects it, and receives subscription objects over reliable streams. It does
-not implement application timing, decoding, datagram reception, or automatic session recovery.
+`createMoqtSession` takes an established transport and owns it from then on. Subscribe, fetch, and track-status requests
+take callback handlers. They pass payloads and object properties through uninterpreted and report protocol lifecycle
+notifications. `MoqTrackSource` is borrowed access to a session's `subscribe`, `fetch`, and `trackStatus`: a holder can
+make requests but cannot close the transport.
 
-`createMoqtPublishSession` serves a namespace and its registered tracks over a separate transport.
-The extracted publish driver excludes SPF actors and media dependencies. Track properties are
-explicit, with no default media timescale. `createSubgroupWriter` writes arbitrary object payloads
-and metadata; the SDK supplies the bounded, single-object-group publishing policy above it.
+## Publish side
 
-Two publish-session hooks exist for embedders that track more than the SDK does. A registered
-track's `getLargestObject` puts `LARGEST_OBJECT` in SUBSCRIBE_OK and REQUEST_OK; the session keeps no
-objects, so a nonempty fill request then gets a fill fetch stream that is reset after its
-FETCH_HEADER. `end({ after })` holds a track's end until a last group is written, also during an
-orderly close.
+`createMoqtPublishSession` serves a namespace and its registered tracks over a separate transport. Track properties are
+explicit, so a track has no default media timescale. `createSubgroupWriter` writes arbitrary object payloads and
+metadata. The publishing policy above it, such as `@caprid/relay`'s bounded single-object groups, belongs to the SDK.
 
-The package index also exports the wire constants and pure helpers an embedder needs around a
-session: `TRACK_PROPERTY`, `compareLocations`, `isEmptyFetchRange`, `encodeFetchHeader`,
-`isRetryableRequestErrorCode`, `isRetryablePublishDoneStatus`, `utf8Decode`, and the close bounds
-`CLOSE_FLUSH_TIMEOUT_MS` and `CLOSE_END_ACK_TIMEOUT_MS`.
+Two publish-session hooks serve embedders that track more than the SDK does:
 
-For Relay application usage and local installation, start with the [JavaScript quickstart](../../GUIDE.md#first-round-trip).
+- A registered track's `getLargestObject` puts `LARGEST_OBJECT` in SUBSCRIBE_OK and REQUEST_OK. The session keeps no
+  objects, so it answers a nonempty fill request with a fill fetch stream that it resets after the FETCH_HEADER.
+- `end({ after })` holds a track's end until a last group is written. It also holds during an orderly close.
+
+## Wire helpers
+
+The package index also exports the wire constants and pure helpers that an embedder needs around a session:
+`TRACK_PROPERTY`, `compareLocations`, `isEmptyFetchRange`, `encodeFetchHeader`, `isRetryableRequestErrorCode`,
+`isRetryablePublishDoneStatus`, `utf8Decode`, and the close bounds `CLOSE_FLUSH_TIMEOUT_MS` and
+`CLOSE_END_ACK_TIMEOUT_MS`.
+
+## Provenance
+
+The implementation and its regression tests come from Video.js, under Apache-2.0. `UPSTREAM.json` records the source
+revision, the original file hashes, and every change made since, and `NOTICE` carries the attribution. Video.js still
+has its own copy of these modules. Moving Video.js onto this package is a separate step.
+
+For Relay application usage and local installation, start with the
+[JavaScript quickstart](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#first-round-trip).
 
 ## Stability
 
-Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay`
-at the same version; see the [changelog](../../CHANGELOG.md).
+Before 1.0, a minor version can break the API. This package releases together with `@caprid/relay` at the same version.
+See the [changelog](https://github.com/caprids/relay-sdks/blob/main/ts/CHANGELOG.md).

@@ -1,7 +1,8 @@
 /**
- * A headless audio player: decodes each input's frames with WebCodecs, holds them in an adaptive jitter buffer in an
- * `AudioWorklet`, mixes every input into one output node, and reports what is audible to each input's playout clock.
- * No UI and no transport: frames in, a node and clock reports out. See spec/media-layer.md, "Audio player".
+ * A headless audio player: decodes each input's frames (Opus with libopus WebAssembly, other codecs with WebCodecs),
+ * holds them in an adaptive jitter buffer in an `AudioWorklet`, mixes every input into one output node, and reports
+ * what is audible to each input's playout clock. No UI and no transport: frames in, a node and clock reports out. See
+ * spec/media-layer.md, "Audio player".
  */
 
 import {
