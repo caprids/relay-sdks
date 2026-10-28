@@ -96,10 +96,12 @@ task brings the pinned toolchain. See [the example's setup notes](examples/mux-g
 A publisher's `write()` waits for relay demand, so a matching subscriber must be running. Even when
 publishing connects first, a fresh namespace can briefly reject subscriptions with request error 16
 `unroutable` while its announcement propagates, for about a round trip. Relays before 0.15.8 answer
-`404 Broadcast not found` instead. The combined demo starts both sides and waits for the publisher's
-`announced`. It retries only that subscription rejection, with capped backoff, and waits for demand
-before it writes. Once a write starts, a failure stops the run. The demo never replays bytes that may
-already have been delivered.
+`404 Broadcast not found` instead. The combined demo starts both sides and logs the publisher's
+`announced`. Its subscriber is a supervised `want`, which retries that rejection with capped backoff,
+resubscribes after a publisher restart, and reconnects. Each write is retried only while it times out
+waiting for demand (`WRITE_TIMEOUT` in phase `waiting-for-demand`), which proves it sent nothing. A
+failure after sending starts stops the run, so the demo never replays bytes that may already have
+been delivered.
 
 When prompted below, enter the endpoint, ending in your token's root, and a **fresh namespace below
 it**. The CLI splits `quickstart/unique-run` into `['quickstart', 'unique-run']`. The SDK itself sends
@@ -405,7 +407,7 @@ table in [behavior.md](../spec/behavior.md#arguments).
 
 WebTransport and native QUIC both need UDP. The relay is still reachable over TCP 443 on a network
 that blocks UDP, and from a browser without a WebTransport that can negotiate protocols (Safari, or
-Firefox before 155). Both fleets serve MOQT on QMux over a WebSocket there. The optional
+Firefox before 155). Mux's relays serve MOQT on QMux over a WebSocket there. The optional
 [`@caprid/relay-websocket`](packages/relay-websocket/README.md) package is that transport. Nothing
 changes unless you pass it as `createTransport`:
 
@@ -795,7 +797,9 @@ so do not rely on the first objects after demand begins. See
   after any failure.
 
 A frame writer's `write(frame)` resolves to what became of the frame (`'sent'`, `'skipped'`,
-`'stale'`, `'dropped'`, `'interrupted'`, or `'ended'`) rather than rejecting. You may call it from a
+`'stale'`, `'dropped'`, `'interrupted'`, or `'ended'`) rather than rejecting. It rejects only for a
+caller error, such as a malformed or oversized frame or an exception from your `stale` predicate,
+and with `CLOSED` after your own `close()`. You may call it from a
 WebCodecs output callback without awaiting it. The writer serves frames in call order. When more
 than `maxBacklog` frames wait behind the one being written, it drops frames rather than queueing
 them. `writer.keyframeNeeded` and `onKeyframeNeeded` say when the next frame must be a keyframe, so

@@ -146,7 +146,9 @@ keyframe skipped for lack of demand adds nothing.
 Audio is encoded whether or not it has demand, and sent only with demand. A frame stamped before the
 Unix epoch, possible only on a clock pinned near zero, is not sent.
 
-Write errors, encoder errors, and cancellation close the example's tracks and encoders. The caller
+An `ended` frame outcome, an encoder error, or cancellation closes the example's tracks and
+encoders. An `interrupted` outcome does not: the writer drops that group and resumes at the next
+keyframe. The caller
 closes the connection and the microphone. The example has no automatic reconnection and no adaptive
 bitrate policy. After the connection ends, for example after a network outage longer than about 5 s
 in Chromium, nothing reconnects. See [publisher recovery](../../../spec/publisher-recovery.md).
