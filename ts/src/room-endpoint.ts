@@ -13,14 +13,20 @@ import { namespaceFields } from './validation.js';
  */
 const ROOM_FIELD = /^[A-Za-z0-9\-._~!$&'()+,;=:@]+$/;
 
+/** The hosted Relay endpoint, pinned in spec/protocol.json as `relay.defaultEndpoint`. */
+export const DEFAULT_ENDPOINT = 'https://relay.mux.global';
+
 /**
  * Root an endpoint at a room. The result is the endpoint with each room field appended to its
  * path, after any path it has and without its trailing slashes, and with its query kept, a `jwt`
- * parameter included. A connection to it names namespaces relative to the room:
+ * parameter included. A connection to it names namespaces relative to the room. Without an
+ * endpoint it roots {@link DEFAULT_ENDPOINT}:
  *
  * ```ts
- * roomEndpoint('https://relay.mux.global', ['acme', 'rooms', '42']);
+ * roomEndpoint(['acme', 'rooms', '42']);
  * // 'https://relay.mux.global/acme/rooms/42'
+ * roomEndpoint('https://relay.example', ['acme', 'rooms', '42']);
+ * // 'https://relay.example/acme/rooms/42'
  * ```
  *
  * The endpoint follows the connect calls' rules and the room the namespace rules. Nothing is
@@ -32,7 +38,11 @@ const ROOM_FIELD = /^[A-Za-z0-9\-._~!$&'()+,;=:@]+$/;
  * @throws {RangeError} An endpoint that is not `https`, has a fragment or userinfo, or an empty
  * `jwt`; a room of more than 32 fields; a room field with any other character, or `.` or `..`.
  */
-export function roomEndpoint(endpoint: string, room: readonly string[]): string {
+export function roomEndpoint(room: readonly string[]): string;
+export function roomEndpoint(endpoint: string, room: readonly string[]): string;
+export function roomEndpoint(...args: [room: readonly string[]] | [endpoint: string, room: readonly string[]]): string {
+  // One argument is the room alone; two are the endpoint and the room, as before the default.
+  const [endpoint, room] = args.length === 1 ? [DEFAULT_ENDPOINT, args[0]] : args;
   const url = endpointUrl(endpoint);
   const fields = namespaceFields(room);
   fields.forEach((field, index) => {

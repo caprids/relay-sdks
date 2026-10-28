@@ -4,8 +4,11 @@ Both SDKs offer `moqt-22`, then `moqt-20`, and speak whichever the relay selects
 `moqt-22` from 0.15.0 ([draft-22 LOCATION_FILTER framing](#draft-22-location_filter-framing)).
 Their `LARGEST_OBJECT` message parameter is two bare
 varints (Group, Object), matching draft-22 §9.20 and moq-relay from **0.14.17** through
-**0.17.0**, the production relay since 2026-10-05 (`SubscribeOk` in `rs/moq-net/src/ietf/subscribe.rs`
-at tag `moq-relay-v0.17.0`). [Upstream fix](https://github.com/moq-dev/moq/pull/3561).
+**0.17.0** (`SubscribeOk` in `rs/moq-net/src/ietf/subscribe.rs` at tag `moq-relay-v0.17.0`).
+Production moved to 0.17.0 on 2026-10-05. As of 2026-10-28, every Mux relay is in the OCI fleet
+(`phx`, `ord`, `iad`, and `fra`), which runs 0.17.7. The Fly relays, `sjc` among them, retired on
+2026-10-23.
+[Upstream fix](https://github.com/moq-dev/moq/pull/3561).
 
 Older moq-relay releases used a length prefix for this parameter. That encoding cannot
 be safely auto-detected: coordinate adoption of these SDK builds with the relay upgrade.
@@ -33,8 +36,8 @@ LOCATION_FILTER the draft-20 way on every draft from 20 on (`Filter::is_draft20`
 `Param for Filter` in `rs/moq-net/src/ietf/filter.rs` at tag `moq-relay-v0.17.0`). moq-relay
 0.17.3 fixed this: it frames the filter by the draft-22 rules on `moqt-22`
 ([moq-dev/moq#5080](https://github.com/moq-dev/moq/pull/5080), for
-[moq-dev/moq#4847](https://github.com/moq-dev/moq/issues/4847)). As of 2026-10-20 the OCI relays
-run 0.17.5 and have the fix, but `*.relay.mux.global` and the Fly r1 fleet run 0.17.0 and do not
+[moq-dev/moq#4847](https://github.com/moq-dev/moq/issues/4847)). Every Mux relay runs 0.17.7
+and has the fix. The Fly r1 fleet ran 0.17.0 without it until it retired on 2026-10-23
 ([issue #275](https://github.com/muxinc/relay-sdks/issues/275)). On 0.17.0 the two spellings are
 the same bytes when the field count equals the type and every field is under 128
 (`spec/vectors/location-filter.json`), so most filters work; the ones that do not are:
@@ -51,8 +54,8 @@ delivered on `moqt-22`; Next Object closed the session as above. The relay's own
 to an SDK publisher carries `21 02 00 00` (Next Object, in the draft-20 framing) and a fill of
 `21 01 01`, which read under draft-22 as an absolute start at `{0,0}` and a relative start of 1. No
 SDK publisher acts on a subscription's filter, so that changes nothing. On `moqt-20` every shape
-works, Next Object included. Until production runs 0.17.3 or later, a live-edge subscriber uses a
-relative start of 0 (the next group) rather than Next Object, as the live smoke tests do, or leaves
+works, Next Object included. Every Mux relay now runs 0.17.3 or later. Against an older
+relay, a live-edge subscriber uses a relative start of 0 (the next group) rather than Next Object, as the live smoke tests do, or leaves
 the filter out ([issue #275](https://github.com/muxinc/relay-sdks/issues/275)).
 
 Publishers still retain no history and advertise no `LARGEST_OBJECT` in SUBSCRIBE_OK (their
@@ -521,8 +524,8 @@ receives every group the publisher still retains, in one burst and out of order,
 sent (none, `NextObjectFilter` or `RelativeGroupFilter`, on `moqt-20`; groups 0-8 in 3 of 3 runs
 on 0.17.0, against 2 of 2 correct with the same producer publishing over moqt). Later subscribers are filtered
 as the table says. A subscriber to a third-party moq-lite broadcast that wants the live edge drops
-any group older than the newest it has seen. The fix belongs upstream in moq-relay
-([issue #153](https://github.com/muxinc/relay-sdks/issues/153)).
+any group older than the newest it has seen. The fix belongs upstream in moq-relay.
+[Issue #153](https://github.com/muxinc/relay-sdks/issues/153) records the measurements.
 
 ## Subscription parameters
 
@@ -627,7 +630,7 @@ the relay's raw-QUIC sessions still map codes as for WebTransport: code 1 arrive
 ## Voice delivery on 0.17.5: deadlines, FETCH and group order
 
 What a voice application can tune on the relay's side, measured on a local moq-relay 0.17.5 (tag
-`moq-relay-v0.17.5`, the OCI fleet's image, with no cache settings, as the fleet runs it) on
+`moq-relay-v0.17.5`, the OCI fleet's image at the time, with no cache settings, as the fleet runs it) on
 2026-10-17 with the Python probe below, and read in its source (`rs/moq-net/src/ietf/subscribe.rs`,
 `publisher.rs`). The publisher wrote one-object groups every 20 ms, with track Timescale 1,000,000
 and a LOC Timestamp on every object. For the slow-link rows the subscriber's link went through
@@ -778,7 +781,7 @@ Both fleets serve MOQT over QMux over WebSocket on TCP 443, beside QUIC on UDP 4
 moq-relay's `[web]` listener (`--web-https-listen`, with `--web-ws` on by default;
 `rs/moq-relay/src/websocket.rs`). The TypeScript SDK reaches it through `@caprid/relay-websocket`
 ([behavior](behavior.md#transport-fallback)). What differs from QUIC, measured on 2026-10-17 against a
-local moq-relay 0.17.5 (the production version) built from tag `moq-relay-v0.17.5`, with QUIC and the
+local moq-relay 0.17.5 (the OCI fleet's version at the time) built from tag `moq-relay-v0.17.5`, with QUIC and the
 WebSocket listener on the same port, unless a row says it is read from the source:
 
 | Behaviour | QUIC (WebTransport, native QUIC) | QMux over WebSocket |
@@ -809,7 +812,7 @@ fleets themselves could not be reached from where this was measured.
 
 Requires Docker, OpenSSL, the repository's installed dependencies, and Playwright Chromium
 (`cd ts && pnpm exec playwright install chromium`). Run from the repository root. These commands
-create an anonymous `moqdev/moq-relay:0.17.0` test relay, the production version, on loopback and
+create an anonymous `moqdev/moq-relay:0.17.0` test relay, the version the retired Fly fleet ran, on loopback and
 a short-lived ECDSA certificate trusted explicitly by the test clients. The certificate is copied
 into the container rather than bind-mounted, so the recipe also works when the Docker daemon cannot
 see the local filesystem.

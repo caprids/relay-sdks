@@ -6,6 +6,7 @@ import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_ENDPOINT } from '@caprid/relay';
 import { startModuleServer } from './module-server.js';
 import { summarizeRuns } from './relay-runs.js';
 
@@ -27,7 +28,7 @@ const readEndpoint = (name, fallback) => {
   assert(!url.searchParams.has('jwt'), `Supply the token via stdin or RELAY_TOKEN, not ${name}`);
   return endpoint;
 };
-const endpoint = readEndpoint('RELAY_URL', 'https://relay.mux.global');
+const endpoint = readEndpoint('RELAY_URL', DEFAULT_ENDPOINT);
 // The subscribers' relay, for a cross-relay run.
 const subEndpoint = readEndpoint('RELAY_SUB_URL', endpoint);
 let token = process.env.RELAY_TOKEN;

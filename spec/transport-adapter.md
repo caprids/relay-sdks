@@ -4,8 +4,7 @@ A Relay connection runs over a **transport adapter** (see `CONTEXT.md`): the bro
 `WebTransport`, the Python aioquic native QUIC client, the `@caprid/relay-quic`
 native QUIC adapter for Node, the `@caprid/relay-websocket` QMux-over-WebSocket adapter for browsers and
 Node, and the in-memory pairs the tests use. This document states what every adapter must do
-for the SDK core to behave as `behavior.md` says. Until now that was only the TypeScript
-`MoqtTransport` interface plus behaviour the core relied on without writing it down.
+for the SDK core to behave as `behavior.md` says.
 
 ## Sources of truth
 
@@ -75,7 +74,7 @@ The seam is the factory a connection calls and the transport it returns.
 | Member | Meaning |
 | --- | --- |
 | `createTransport(url, protocols)` | `RelayTransportFactory`. Called once per connection with the endpoint URL (the token already in its `jwt` query parameter) and the MOQT protocol identifiers to offer, in preference order. Returns `{ transport, ready, framing }`. |
-| `ready` | Resolves once the transport can open streams and a protocol was selected; a rejection fails the connect call. |
+| `ready` | Resolves once the transport can open streams and a protocol was selected. A rejection fails the connect call. |
 | `framing` | `'webtransport'`, `'native-quic'` or `'websocket'`: what the transport carries. Optional, default `'webtransport'`. The core reads it once `ready` has resolved. |
 | `transport.protocol` | The protocol identifier the peer selected (TA-8). A browser's `WebTransport` has it. |
 | `transport.incomingUnidirectionalStreams` | `ReadableStream` of the peer's unidirectional streams, each a `ReadableStream<Uint8Array>`. |
@@ -102,7 +101,7 @@ nothing is a WebTransport session.
 
 **TA-2.** On a WebTransport session the adapter MUST send the extended CONNECT to the URL exactly
 as it was given, path and query included, so the token reaches the relay in the `jwt` query
-parameter (draft-22 §6.2.1; draft-ietf-webtrans-http3 §3). Over WebSocket it MUST send the opening
+parameter (draft-22 §6.2.1, draft-ietf-webtrans-http3 §3). Over WebSocket it MUST send the opening
 handshake (RFC 6455 §4.1) to the same URL with the scheme `wss:` in place of `https:`, path and query
 unchanged: moq-relay reads the path and the token from the upgrade request, as it does from a CONNECT.
 
@@ -148,9 +147,9 @@ speak. A silent default fails late, as an obscure SETUP error, instead of at `re
 **TA-8.** Once `ready` resolves, `transport.protocol` MUST be the selected identifier: over WebSocket,
 the MOQT protocol without its `qmux-01.` prefix.
 **Why:** the core reads `protocol` to pick its codec, and the SDK's connecting layer fails the
-connection unless it is one of `MOQT_PROTOCOL_IDS` (#203). That check backs up TA-7; it does not
+connection unless it is one of `MOQT_PROTOCOL_IDS` (#203). That check backs up TA-7. It does not
 replace it. The TypeScript core's `MoqtTransport` type marks `protocol` optional so an embedder can
-hand the core a browser `WebTransport` whose type, or implementation, lacks it; the core then uses
+hand the core a browser `WebTransport` whose type, or implementation, lacks it. The core then uses
 `moqt-22`, so such a transport must offer only `moqt-22`. An adapter for these SDKs still MUST
 report it.
 
@@ -233,7 +232,7 @@ the reason `streamResetReason` builds, not a plain object.
 gives, and end the readable. Later reads MUST NOT deliver more bytes.
 
 **TA-19.** A peer RESET_STREAM MUST error the receive stream with a stream error (TA-22) carrying the
-peer's code. Bytes delivered before the reset stay delivered; bytes that had not been delivered MAY
+peer's code. Bytes delivered before the reset stay delivered. Bytes that had not been delivered MAY
 be discarded (RFC 9000 §3.2).
 
 **TA-20.** A peer STOP_SENDING MUST error the send stream with a stream error (TA-22) carrying the
@@ -286,7 +285,7 @@ the reset with code 1 rather than the publisher's (#156), so subscribers read 1 
 higher value is more urgent and 0 is what every stream opened without one gets, and MUST open the
 stream as it would without it. An adapter whose transport can schedule streams SHOULD hold a stream's
 queued bytes while a stream with a higher send order has bytes queued, as a WebTransport send order
-does within its send group; one that cannot MUST ignore the option.
+does within its send group. An adapter that cannot MUST ignore the option.
 **Why:** the publisher opens each data stream of a track that declares a Default Publisher Priority
 with a send order below 0 ([behavior.md, "Send order"](behavior.md#send-order)), so that under a
 congested uplink the publisher's own transport sends audio before video, and both after the control
@@ -348,25 +347,25 @@ Browsers have no process to keep alive, so TA-25 and TA-26 do not apply to them.
 The contract has two sides. Against an adapter that follows the rules above, the core:
 
 - attaches a handler to `closed` as soon as the factory returns, so TA-9's rejection alongside
-  `ready` is never unhandled;
+  `ready` is never unhandled.
 - sends PATH and AUTHORITY only on native QUIC (TA-6), and fails the connection with
-  `TRANSPORT_ERROR`, closing the transport, when `framing` is none of the values TA-1 allows;
+  `TRANSPORT_ERROR`, closing the transport, when `framing` is none of the values TA-1 allows.
 - checks `protocol` after `ready` and, unless it is one it offered (`moqt-22` or `moqt-20`), fails the connection with
   `TRANSPORT_ERROR` in phase `connecting`, naming the protocol received (or "none"), closes the
-  transport and never sends CLIENT_SETUP (TA-7, TA-8);
+  transport and never sends CLIENT_SETUP (TA-7, TA-8).
 - classifies errors by `source`, not by class or name, and hands over `streamErrorCode` on the
-  reasons it resets and stops with (TA-17, TA-22, `transport-error.ts`);
+  reasons it resets and stops with (TA-17, TA-22, `transport-error.ts`).
 - never concludes the session has ended from a create rejection alone, only from `closed` or a
-  `source: 'session'` error on a stream;
+  `source: 'session'` error on a stream.
 - fails the connection with `UNAUTHORIZED` when the peer closes with MOQT's UNAUTHORIZED (0x2),
   MALFORMED_AUTH_TOKEN (0x16) or EXPIRED_AUTH_TOKEN (0x18) before its SETUP, read from `closed`'s
-  resolution (TA-9) or a session error's `closeCode` (TA-24); the same close after SETUP is not a
-  refusal;
+  resolution (TA-9) or a session error's `closeCode` (TA-24). The same close after SETUP is not a
+  refusal.
 - keeps reading the [Chromium deviations](#known-deviations) below as their conforming equivalents.
 
 ## Known deviations
 
-These are adapters, as they exist, that do not meet a rule. The core tolerates each one; new
+These are adapters, as they exist, that do not meet a rule. The core tolerates each one. New
 adapters MUST NOT copy them.
 
 - **Chromium STOP_SENDING as `NetworkError` (TA-20, TA-22).** Depending on which of its own
@@ -387,8 +386,8 @@ adapters MUST NOT copy them.
   rejected with "Connection lost." and no `closeCode`, and a credentials refusal reached the SDK as
   `TRANSPORT_ERROR` (#14). moq-relay 0.17.0 keeps the session alive until the capsule is delivered
   (upstream `b14a61f17`, moq-dev/moq#4429), so `closed` resolves with code 2 and reason
-  `unauthorized` and the SDK reports `UNAUTHORIZED` in phase `connecting`. The core needs no change;
-  only a browser against an older relay still sees the deviation.
+  `unauthorized` and the SDK reports `UNAUTHORIZED` in phase `connecting`. The core needs no change.
+  Only a browser against an older relay still sees the deviation.
   **Evidence:** Chromium against `sjc.relay.mux.global` on 2026-10-02 (0.15.8): no token, an empty
   token, a tampered signature and a wrong path each gave "Connection lost." in 3/3 runs. On
   2026-10-05 (0.17.0): a missing, malformed, tampered, expired-looking or wrong-path token each gave
@@ -416,7 +415,7 @@ adapters MUST NOT copy them.
 
 ### QMux over WebSocket (`@caprid/relay-websocket`)
 
-The adapter wraps `@moq/qmux` 0.3.3 (ADR 0005). It meets every other rule; the conformance suite
+The adapter wraps `@moq/qmux` 0.3.3 (ADR 0005). It meets every other rule. The conformance suite
 runs it in Node, Chromium, Firefox and WebKit (`conformance/targets/websocket.js`).
 
 - **No acknowledgement (TA-15, and TA-16 while close waits).** QMux runs over TCP and acknowledges
@@ -429,8 +428,8 @@ runs it in Node, Chromium, Firefox and WebKit (`conformance/targets/websocket.js
   the write it already started, when the peer next grants credit.
 - **A peer reset behind an unread chunk (TA-19).** `@moq/qmux` reports a peer RESET_STREAM only to a
   read. The adapter keeps one read outstanding, so a reset lands without a read pending unless a chunk
-  the application has not read is already waiting; then the next read delivers that chunk and the
-  one after rejects. RFC 9000 §3.2 lets the chunk be discarded; here it is delivered.
+  the application has not read is already waiting. In that case the next read delivers that chunk and the
+  one after rejects. RFC 9000 §3.2 lets the chunk be discarded, but here it is delivered.
 - **Long close reasons (TA-10).** A reason is cut to 1024 UTF-8 bytes, on a character boundary:
   `@moq/qmux` refuses to close at all when the close frame would not fit one QMux record. `closed`
   resolves with the reason as sent. The core's own reasons are far shorter.
@@ -472,7 +471,7 @@ stream halves and QUIC plumbing (#232). How the rules map:
 | TA-5 | The ALPN list is exactly `protocols`, with no `h3`. |
 | TA-6 | `open_relay_session` sends PATH and AUTHORITY through moq_core's `setup_options` on native QUIC only (`test_setup_options.py`, against `vectors/setup-options.json`). |
 | TA-7, TA-8 | `protocol_id` is the negotiated ALPN. A handshake that negotiates none, or one that was not offered, fails the dial. |
-| TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. A peer's application close (0x1d) is a clean end whatever its code, and `close_info` holds its `(code, reason)`; a QUIC-layer close, an idle timeout or a failed dial raises. |
+| TA-9 | `wait_closed()` returns after a clean end and raises the error otherwise. A peer's application close (0x1d) is a clean end whatever its code, and `close_info` holds its `(code, reason)`. A QUIC-layer close, an idle timeout or a failed dial raises. |
 | TA-10 | `close(close_code=0, reason="")` is idempotent and ignored after the session ends. It waits, within a bound, for every send stream to be acknowledged first (#209), then ends the connection with an application CONNECTION_CLOSE carrying the code and reason. |
 | TA-11 | `close()` before `ready` cancels the dial: `ready` and `wait_closed()` raise. |
 | TA-12 | The incoming readables are async iterators. After a clean end they raise `StopAsyncIteration`; after any other, they raise the session's error, the same `source="session"` error `wait_closed()` raises. Either way, streams that arrived before the end are yielded first. |
@@ -506,10 +505,10 @@ A pytest port (`python/packages/caprid-relay/tests/test_transport_conformance.py
 against `moq_core.transport.MoqtTransport`, spelled as the [Python mapping](#python-mapping-informative) says,
 in the Python SDK's `uv run pytest`. Its target (`tests/relay_helpers/conformance_targets.py`) is the native QUIC
 dialing end (`connect_quic`), against `--framing native-quic`; the cases only a WebTransport session has are
-skipped, since the package ships none (#232).
+skipped because the package ships none (#232).
 
 The Python mapping has no **Differs** row, so the native QUIC target has no known failure. A Differs row
-added later is a known failure there, naming the issue that closes it. TA-6 and TA-25/TA-26 are skipped,
+added later is a known failure there, naming the issue that closes it. TA-6, TA-25 and TA-26 are skipped,
 with the reasons the mapping gives.
 
 Each MUST has at least one test named after its rule. TA-6 is the exception: it binds the core, not the
@@ -518,7 +517,7 @@ itself after `close()`.
 
 A target declares what it cannot exercise, and which rules it is known to fail. A skip names its
 reason. A known failure names its Known deviation, or the issue that closes the gap, and its test goes
-red once the target starts to pass, so the expectation gets removed. The suite owns the results; this
+red once the target starts to pass, so the expectation gets removed. The suite owns the results, and this
 document does not carry a per-adapter matrix.
 
 A rule that a real adapter cannot meet is either fixed in the adapter or moved, with its evidence,

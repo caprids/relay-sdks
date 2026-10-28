@@ -22,28 +22,28 @@ listenAudio ◀── <namespace>/bot/audio ◀── FrameWriter ◀── Opus
 Start the bot, then the page (in another terminal), with the same namespace:
 
 ```sh
-RELAY_TOKEN=... mise run python:example:voice-bot -- --namespace mattypoo/voice-bot
-RELAY_TOKEN=... mise run ts:example:voice-bot -- --namespace mattypoo/voice-bot
+RELAY_TOKEN=... mise run python:example:voice-bot -- --namespace acme/voice-bot
+RELAY_TOKEN=... mise run ts:example:voice-bot -- --namespace acme/voice-bot
 ```
 
 Open http://127.0.0.1:8320/ in Chromium, press **Talk**, say something and pause. The bot answers
-about 0.7 s after you stop. Talk while it answers and it goes quiet. Use a namespace your token can
-publish and subscribe in; without `--namespace`, both default to `RELAY_NAMESPACE_PREFIX` (or
-`relay-sdk-example`) plus `voice-bot`. Either side can start first, and the bot keeps waiting for
+about 0.7 s after you stop. Talk while it answers and it goes quiet. Replace `acme/voice-bot` with a namespace your token can
+publish and subscribe in. Without `--namespace`, both sides default to `RELAY_NAMESPACE_PREFIX` (or
+`relay-sdk-example`) plus `voice-bot`, for example `relay-sdk-example/voice-bot`. Either side can start first, and the bot keeps waiting for
 the page across reloads. The bot's own publisher is not supervised: if its connection closes, the
 bot exits with the error, and you start it again.
 
 | Flag | Meaning |
 | --- | --- |
-| `--namespace` | The conversation: the page publishes at `<namespace>/user`, the bot at `<namespace>/bot` |
-| `--threshold` | Speech is louder than this, in dBFS (default -45); raise it in a noisy room |
+| `--namespace` | The conversation. The page publishes at `<namespace>/user` and the bot at `<namespace>/bot` |
+| `--threshold` | Speech is louder than this, in dBFS (default -45). Raise it in a noisy room |
 | `--url` | Relay endpoint (default `RELAY_URL` or `https://relay.mux.global`) |
-| `--room` | Fields appended to the `--url` path with `room_endpoint`, such as your token's root on the bare host; `--namespace` is then relative to them. The page's `--room` must match |
+| `--room` | Fields appended to the `--url` path with `room_endpoint`, such as your token's root on the bare host. `--namespace` is then relative to them. The page's `--room` must match |
 
 Its output shows each turn:
 
 ```text
-listening        user=mattypoo/voice-bot/user bot=mattypoo/voice-bot/bot
+listening        user=acme/voice-bot/user bot=acme/voice-bot/bot
 user subscribed
 heard speech
 utterance        ms=1520
@@ -88,7 +88,7 @@ await run_bot(publisher, subscriber, user_namespace=..., bot_namespace=..., resp
   `FrameWriter` maps one packet per group. A reply that comes more than two frames too slowly, as
   from a TTS that stalls, starts a new run at the clock rather than send late audio, and the frame
   writer drops a packet that a stalled write held back more than 100 ms (`stale`). Between replies
-  the bot sends nothing; the player treats the gap as the talker going quiet.
+  the bot sends nothing. The player treats the gap as the talker going quiet.
 - **Barge-in.** Speech that starts while the bot is speaking, or within 500 ms of the end of a reply
   (the most a listener on the audio-only target latency still holds), cancels the reply, discards
   what was encoded and not sent, and writes one interrupt with `until_us` at the end of the last packet
@@ -98,7 +98,7 @@ await run_bot(publisher, subscriber, user_namespace=..., bot_namespace=..., resp
   is cancelled with no interrupt: nothing of it was sent.
 - **Transcript.** Each `str` from `Respond` becomes a transcript segment. The bot sends its interim
   version just before the segment's first audio, so the page has it when that audio plays, and the
-  final one, with where the audio ended, once its last packet is sent; at the boundary it flushes the
+  final one, with where the audio ended, once its last packet is sent. At the boundary it flushes the
   encoder, so each segment ends where its own audio does. Segments go out in order from a queue of
   their own, so a slow transcript write never holds the audio back. An interrupted segment gets no
   final version: the page cuts it with the interrupt, and text whose audio a stall dropped is

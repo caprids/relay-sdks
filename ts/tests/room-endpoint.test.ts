@@ -4,7 +4,7 @@
  */
 import { readFile } from 'node:fs/promises';
 import { describe, expect, it } from 'vitest';
-import { roomEndpoint } from '../src/index.js';
+import { DEFAULT_ENDPOINT, roomEndpoint } from '../src/index.js';
 
 type ErrorKind = 'type' | 'range';
 interface RoomEndpointCase {
@@ -31,6 +31,16 @@ describe('spec/vectors/room-endpoint.json', () => {
 });
 
 describe('roomEndpoint', () => {
+  it('roots the default endpoint when given only a room', () => {
+    expect(roomEndpoint(['acme', 'rooms', '42'])).toBe('https://relay.mux.global/acme/rooms/42');
+    expect(roomEndpoint(['acme'])).toBe(roomEndpoint(DEFAULT_ENDPOINT, ['acme']));
+  });
+
+  it('checks a room given alone as it checks one given with an endpoint', () => {
+    expect(() => roomEndpoint(['acme', 'a b'])).toThrow(/Room field 1/);
+    expect(() => roomEndpoint([])).toThrow(TypeError);
+  });
+
   it('names the refused field and points at the bare host', () => {
     expect(() => roomEndpoint('https://relay.example', ['acme', 'a b'])).toThrow(/Room field 1 \("a b"\).*bare host/);
     expect(() => roomEndpoint('https://relay.example', ['..'])).toThrow(/Room field 0 is "\.\."/);

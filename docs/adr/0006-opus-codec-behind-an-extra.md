@@ -5,6 +5,8 @@ date: 2026-10-19
 
 # The Python Opus encoder and decoder live in moq_media behind an optional extra
 
+> The package names below predate the rename in [#222](https://github.com/muxinc/relay-sdks/issues/222): `@mux/*` is now `@caprid/*` on npm, `mux-*` is now `caprid-*` on PyPI, and `mux_relay` is now `caprid_relay`.
+
 Until now the media format packages owned no encoder. `spec/media-layer.md` said "Encoders stay out of
 both" and `spec/behavior.md` said the format package "owns no encoder". The one Opus encoder was example
 code, a PyAV `libopus` class in the Video.js streaming example. A Python voice bot needs Opus both ways

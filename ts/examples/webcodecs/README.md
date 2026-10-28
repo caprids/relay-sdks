@@ -1,14 +1,14 @@
 # Publish live video and audio with WebCodecs
 
-The primary browser publishing path is capture → WebCodecs → LOC/MSF → MoQ over WebTransport.
-LOC carries the encoder's chunk bytes directly: no MP4/WebM muxing and no Mediabunny dependency.
+The primary browser publishing path runs from capture, through WebCodecs and LOC with an MSF catalog, to MoQ over
+WebTransport. LOC carries the encoder's chunk bytes directly, with no MP4 or WebM muxing and no Mediabunny dependency.
 
 [`publish-canvas.ts`](publish-canvas.ts) samples a canvas at approximately 30 fps and publishes
 AVC/H.264 with native `VideoEncoder` output. Given a microphone from
 [`capture-microphone.ts`](capture-microphone.ts), it also publishes mono Opus on the same broadcast
 timeline. It uses only `@caprid/relay`, `@caprid/moq-media`, and browser APIs. Copy the files into a
-browser application whose bundler resolves those workspace packages. Run in a secure context with
-WebCodecs, AVC encoding, and WebTransport support.
+browser application whose bundler resolves those packages. Run it in a secure context with WebCodecs,
+AVC encoding, and WebTransport support.
 
 The encoders' output goes through `@caprid/relay/media`: a frame writer per media track maps chunks
 onto groups (a group per keyframe for video, per frame for audio), and a catalog service and a
@@ -32,7 +32,7 @@ const namespace = ['demo', 'live'];
 const url = 'https://relay.mux.global';
 const publisher = await connectRelayPublisher({ url, namespace, getToken: () => publisherToken });
 const stop = new AbortController();
-// Wire your stop button to stop.abort(). Capture/drawing remains owned by your application.
+// Wire your stop button to stop.abort(). Your application keeps owning capture and drawing.
 console.log(composeMoqSource(url, namespace)); // supply authorized subscriber credentials in the player
 // Optional audio. Create the context in a user gesture.
 const clock = createBroadcastClock();
@@ -100,17 +100,18 @@ every Opus frame is its own group.
 - **Replacing the context.** `await microphone.useContext(newContext)` moves capture to it. The new
   context's time starts at zero, so it gets its own render clock, timeline and encoder. Close the old
   context yourself.
-- **What the example does not trust.** Not `getOutputTimestamp()`: Firefox returns the render pair
-  shifted back by the output delay, which would stamp audio 40–50 ms early. Not the encoder's
-  timestamps: Chromium's Opus encoder counts samples from its first input, and Firefox's subtracts
-  its lookahead. The example feeds the encoder one contiguous count and maps each chunk back to
-  context time through the block it came from. Not the worklet's first `currentFrame`: Chromium
-  reports 0 on a new node's first call, so a block restarts wherever the frame count jumps.
-- **What nobody can see.** A microphone's own input latency reaches no browser API. The example
-  estimates it from the device label with `estimateCaptureLatencyUs`, 190 ms for a Bluetooth headset
-  and 30 ms otherwise (measured on macOS,
-  [spec/media-layer.md](../../../spec/media-layer.md#capture-latency)), and subtracts it from every
-  audio timestamp; it asks again on every `useStream`. Pass `captureLatencyUs` to
+- **What the example does not trust.** It does not trust `getOutputTimestamp()`, because Firefox
+  returns the render pair shifted back by the output delay, which would stamp audio 40–50 ms early.
+  It does not trust the encoder's timestamps either. Chromium's Opus encoder counts samples from its
+  first input, and Firefox's subtracts its lookahead. Instead, the example feeds the encoder one
+  contiguous count and maps each chunk back to context time through the block it came from. Last, it
+  does not trust the worklet's first `currentFrame`, because Chromium reports 0 on a new node's first
+  call. A block restarts wherever the frame count jumps.
+- **What no browser reports.** A microphone's own input latency reaches no browser API. The example
+  estimates it from the device label with `estimateCaptureLatencyUs`: 190 ms for a label that names
+  AirPods or Bluetooth, and 30 ms otherwise (measured on macOS,
+  [spec/media-layer.md](../../../spec/media-layer.md#capture-latency)). It subtracts the estimate from
+  every audio timestamp and asks again on every `useStream`. Pass `captureLatencyUs` to
   `captureMicrophone` with your own figures.
 
 `mise run ts:test:av-sync` runs this example end to end and measures the A/V offset a player gets,
@@ -118,44 +119,52 @@ with device switches; see [spec/media-layer.md](../../../spec/media-layer.md#mea
 for the results. Firefox's H.264 encoder (148, Linux; 155 too) holds about 1.4 s of video, so a
 player needs an audio buffer that deep to keep video from being dropped as late.
 
-The function keeps the latest decoder configuration when subsequent output callbacks omit it. It
-starts serving the catalog after the first configuration arrives and re-sends it on each catalog
-subscription. Video groups begin with keyframes; configuration appears on keyframes and in the
-catalog. It encodes enough to obtain the initial configuration, then skips capture without video demand.
-Demand loss resets the group; new or replacement demand requests a keyframe.
-Encoded output order and presentation timestamps are preserved.
+## How `publishCanvas` encodes and sends
 
 The example requests length-prefixed AVC (`avc: { format: 'avc' }`) with a fixed encoder
-configuration. A changed decoder configuration stops the example; start a fresh publisher/session
-to change it. It requests keyframes at least every two seconds of active capture. It skips capture
-while two frames wait in the encoder or any encoded chunk waits in the frame writer's backlog.
+configuration. It keeps the latest decoder configuration when later output callbacks omit it. It
+starts serving the catalog once the first configuration arrives, and re-sends it on each catalog
+subscription. Video groups begin with keyframes, and the configuration appears on keyframes and in
+the catalog. A changed decoder configuration stops the example. To change it, start a fresh
+publisher. Encoded output order and presentation timestamps are preserved.
+
+The example encodes enough to obtain the initial configuration, then skips capture while the video
+track has no demand. It also skips capture while two frames wait in the encoder or any encoded chunk
+waits in the frame writer's backlog. It requests a keyframe at least every second of active capture.
+Demand loss resets the group, and new or replacement demand requests a keyframe.
+
 Encoder output goes straight to `createFrameWriter`, which serves writes in call order. When more
 than eight chunks wait behind the one being written, as in a burst of internally buffered encoder
-output, the writer drops them with the open group rather than queue deltas without bound, and
-resumes at the next keyframe, asking the encoder for one.
-Subscription changes reset video to the next keyframe and re-serve the catalog on replacement
-demand. A `timeline` track (msf-01 §7, announced in the catalog) maps each video group to the capture
-time of its keyframe: once a keyframe has opened a group, `createMediaTimeline` adds a record, and the
-document of every retained record goes out as a new group, and again on each new timeline
-subscription. A keyframe skipped for lack of demand adds nothing. Audio is encoded whether or not it
-has demand, and sent only with it; a frame stamped before the Unix epoch (possible only on a clock
-pinned near zero) is not sent. Other write errors, encoder errors, and cancellation close its
-tracks and encoders; the caller closes the connection and the microphone. There is no automatic
-reconnection or adaptive bitrate policy in this example. After the
-connection ends, for example after a network outage longer than about 5 s in Chromium, nothing
-reconnects; see [publisher recovery](../../../spec/publisher-recovery.md).
+output, the writer drops them with the open group rather than queue deltas without bound. It resumes
+at the next keyframe and asks the encoder for one.
+
+A `timeline` track (msf-01 §7, announced in the catalog) maps each video group to the capture time of
+its keyframe. Once a keyframe has opened a group, `createMediaTimeline` adds a record. The document
+of every retained record goes out as a new group, and again on each new timeline subscription. A
+keyframe skipped for lack of demand adds nothing.
+
+Audio is encoded whether or not it has demand, and sent only with demand. A frame stamped before the
+Unix epoch, possible only on a clock pinned near zero, is not sent.
+
+An `ended` frame outcome, an encoder error, or cancellation closes the example's tracks and
+encoders. An `interrupted` outcome does not: the writer drops that group and resumes at the next
+keyframe. The caller
+closes the connection and the microphone. The example has no automatic reconnection and no adaptive
+bitrate policy. After the connection ends, for example after a network outage longer than about 5 s
+in Chromium, nothing reconnects. See [publisher recovery](../../../spec/publisher-recovery.md).
+
+## Use your own encoder
 
 For your own encoder callback, import `videoTrackFromDecoderConfig`, `audioTrackFromDecoderConfig`,
-and `chunkToLocFrame` from `@caprid/moq-media`. `chunkToLocFrame` accepts native video or audio chunks,
-copies the encoded payload without changing its bytes, preserves microsecond timestamps, and adds
-LOC properties. Retain decoder configuration across callbacks, and hand each frame to a
-`createFrameWriter` from `@caprid/relay/media`, as this example does: it groups frames, skips them
-without demand, bounds the backlog, and says when the next frame must be a keyframe. See the
-[guide](../../GUIDE.md#multi-object-groups-and-relay-demand). The helper itself performs no I/O or
-grouping.
+and `chunkToLocFrame` from `@caprid/moq-media`. `chunkToLocFrame` accepts native video or audio
+chunks, copies the encoded payload without changing its bytes, keeps microsecond timestamps, and adds
+LOC properties. It performs no I/O or grouping. Keep the decoder configuration across callbacks, and
+hand each frame to a `createFrameWriter` from `@caprid/relay/media`, as this example does. The writer
+groups frames, skips them without demand, bounds the backlog, and says when the next frame must be a
+keyframe. See [multi-object groups and relay demand](../../GUIDE.md#multi-object-groups-and-relay-demand).
 
-For publishing an existing MP4, use the optional [Mediabunny file example](../mediabunny/README.md)
-to demux encoded packets before passing them to the same media/transport layers.
+To publish an existing MP4, use the optional [Mediabunny file example](../mediabunny/README.md) to
+demux encoded packets, then pass them to the same media and transport layers.
 
 References: [WebCodecs](https://www.w3.org/TR/webcodecs/),
 [AVC configuration](https://www.w3.org/TR/webcodecs-avc-codec-registration/), and

@@ -57,7 +57,7 @@ let args;
 try {
   ({ values: args } = parseArgs({
     options: {
-      url: { type: 'string', default: process.env.RELAY_URL ?? 'https://relay.mux.global' },
+      url: { type: 'string' },
       room: { type: 'string' },
       namespace: { type: 'string' },
       track: { type: 'string', default: 'ticker' },
@@ -76,7 +76,16 @@ if (args.help) {
   process.exit(0);
 }
 
-const endpoint = new URL(args.url);
+await Promise.all(built.map((directory) => access(resolve(directory, 'index.js')))).catch(() =>
+  fail('The SDK is not built yet; run `pnpm build` first'),
+);
+// Imported once the build is known to exist. The factory throws at once, naming the build command, when the
+// native addon has not been built for this platform.
+const { nativeQuicTransport } = await import('@caprid/relay-quic');
+const { runDemo } = await import('./demo.js');
+const { DEFAULT_ENDPOINT, roomEndpoint } = await import('@caprid/relay');
+
+const endpoint = new URL(args.url ?? process.env.RELAY_URL ?? DEFAULT_ENDPOINT);
 if (endpoint.protocol !== 'https:') fail('--url must be an https URL');
 if (endpoint.searchParams.has('jwt')) fail('Supply the token via RELAY_TOKEN or the prompt, not inside --url');
 if (!['both', 'publish', 'subscribe'].includes(args.mode)) fail('--mode must be both, publish, or subscribe');
@@ -97,14 +106,6 @@ const config = {
   timeoutMs: positiveInteger('timeout', args.timeout) * 1000,
 };
 
-await Promise.all(built.map((directory) => access(resolve(directory, 'index.js')))).catch(() =>
-  fail('The SDK is not built yet; run `pnpm build` first'),
-);
-// Imported once the build is known to exist. The factory throws at once, naming the build command, when the
-// native addon has not been built for this platform.
-const { nativeQuicTransport } = await import('@caprid/relay-quic');
-const { runDemo } = await import('./demo.js');
-const { roomEndpoint } = await import('@caprid/relay');
 if (args.room !== undefined) {
   try {
     config.url = roomEndpoint(config.url, args.room.split('/').filter(Boolean));

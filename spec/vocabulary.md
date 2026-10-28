@@ -27,9 +27,9 @@ without a row here is a bug.
 | Protocol notifications on the request stream | `onUpdateOk()`, `onStateNotify(parameters)`, `onGoaway(goaway)` | `on_update_ok()`, `on_state_notify(parameters)`, `on_goaway(goaway)` |
 | Subscribe through a handle that can move to another track make-before-break | `subscriber.subscribeSwitchable(options, SwitchableHandlers)` returns `SwitchableSubscription` | `subscriber.subscribe_switchable(namespace, track, SwitchableHandlers, parameters=...)` returns `SwitchableSubscription` |
 | Move it, and learn of the cutover | `switchable.switchTo(track, SwitchOptions)` (`parameters`, `until`, `drainMs`, `signal`) resolves `SwitchedInfo` (`from`, `to`, `subscribed`); `onSwitched(info)`; `switchable.track`, `switchable.pending` | `switchable.switch_to(track, parameters=..., until=..., drain=..., cancellation=...)` returns `RelayAwaitable[SwitchedInfo]` (`from_track`, `to_track`, `subscribed`); `on_switched(info)`; `switchable.track`, `switchable.pending` |
-| Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
+| Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` (`NamespaceEventOptions`) returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
 | A namespace was announced, or its announce withdrawn | `{ type: 'announced' \| 'unannounced', namespace }` | `NamespaceEvent(type='announced' \| 'unannounced', namespace=...)` |
-| Register a track this publisher will serve | `publisher.registerTrack(options)` returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
+| Register a track this publisher will serve | `publisher.registerTrack(options)` (`RegisterTrackOptions`, each track property a `PublishProperty`) returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
 | Await the namespace announce reaching the wire | `publisher.announced` resolves `void` | `await publisher.announced` returns `None` |
 | Send one object as its own group | `writer.write(bytes, options)` | `await writer.write(payload, properties=...)` |
 | Send one UTF-8 text object | `writer.writeText(text, options)` | `await writer.write_text(text, properties=...)` |
@@ -53,11 +53,11 @@ without a row here is a bug.
 | A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
 | A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@caprid/relay-websocket` | not applicable: the Python SDK ships no WebSocket adapter (#321) |
 | WebTransport first, WebSocket when its handshake fails or takes longer than a timeout, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`handshakeTimeoutMs`, default 4000; `onFallback`) | not applicable |
-| Consume one subscription as an async iterator | `subscriber.subscribeEvents(options)` returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
+| Consume one subscription as an async iterator | `subscriber.subscribeEvents(options, buffer?)` (`buffer`: `SubscriptionEventOptions`) returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
 | One event from the events iterator | `SubscriptionEvent`, discriminated by `type` | `SubscriptionEvent`, the union of `SubscribedEvent`, `ObjectEvent`, `PublisherDoneEvent`, `SubgroupEndEvent`, `SubgroupResetEvent`, `StateNotifyEvent`, `GoawayEvent` and `UpdateOkEvent`, each also carrying `type` |
 | Protocol types borrowed from the core | `Goaway`, `KeyValuePair`, `LocationFilter`, `MessageParameters`, `MoqTrackSource`, `MoqtObject`, `MoqtTransport`, `PublishDone`, `RequestError`, `SubscribeOk`, `Subscription`, `SubscriptionHandlers`, re-exported as types | the same names re-exported from `moq_core`, plus `Closed`; every other core name is imported from `moq_core` |
-| Open a publisher that reconnects, one generation per connection | `connectSupervisedPublisher(options)` returns `SupervisedPublisher` | `connect_supervised_publisher(url, namespace=...)` returns `SupervisedPublisher` |
-| Open a subscriber that reconnects and keeps tracks subscribed | `connectSupervisedSubscriber(options)` returns `SupervisedSubscriber` | `connect_supervised_subscriber(url, ...)` returns `SupervisedSubscriber` |
+| Open a publisher that reconnects, one generation per connection | `connectSupervisedPublisher(options)` (`ConnectSupervisedPublisherOptions`) returns `SupervisedPublisher` | `connect_supervised_publisher(url, namespace=...)` returns `SupervisedPublisher` |
+| Open a subscriber that reconnects and keeps tracks subscribed | `connectSupervisedSubscriber(options)` (`ConnectSupervisedSubscriberOptions`) returns `SupervisedSubscriber` | `connect_supervised_subscriber(url, ...)` returns `SupervisedSubscriber` |
 | One supervised publisher connection and the namespace it serves | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `onGeneration(info)` | `publisher.generation` is a `PublisherGeneration` (`generation`, `namespace`); `on_generation(info)` |
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
@@ -68,8 +68,8 @@ without a row here is a bug.
 | A want moved make-before-break (a newer generation, or another track or parameters) | `until` and `drainMs` on `WantOptions`; `onSwitched(info)` with `WantSwitchedInfo` (`from`, `to`, each a `WantTarget` of `namespace` and `track`; `subscribed`) | `until=` and `drain=` (seconds) on `want`; `on_switched(info)` with `WantSwitchedInfo` (`from_namespace`, `from_track`, `to_namespace`, `to_track`, `subscribed`) |
 | Replace a supervisor's connection make-before-break before its credential expires | `rotateBeforeMs` (default 60 000); `publisher.rotate()`, `subscriber.rotate()` | `rotate_before` (seconds, default 60); `publisher.rotate()`, `subscriber.rotate()` |
 | Backoff bounds between attempts | `SupervisionBackoff` (`initialDelayMs`, `maxDelayMs`), given as `reconnect` or `retry` | `SupervisionBackoff` (`initial_delay`, `max_delay`, seconds), as `reconnect=` or `retry=` |
-| Build a room-rooted endpoint: the endpoint with a room's fields appended to its path | `roomEndpoint(endpoint, room)` returns a URL string | `room_endpoint(endpoint, room)` returns a URL `str` |
-| The hosted Relay endpoint pinned in `spec/protocol.json` | not exported; the example carries it | `DEFAULT_ENDPOINT` |
+| Build a room-rooted endpoint: the endpoint with a room's fields appended to its path | `roomEndpoint(room)` or `roomEndpoint(endpoint, room)` returns a URL string | `room_endpoint(room)` or `room_endpoint(endpoint, room)` returns a URL `str` |
+| The hosted Relay endpoint pinned in `spec/protocol.json`, which `roomEndpoint` roots without an endpoint | `DEFAULT_ENDPOINT` | `DEFAULT_ENDPOINT` |
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
@@ -174,10 +174,11 @@ or the connection ends, and the SDK does not resubscribe on the application's be
 
 The handler used to be `onDone`. That reads as "this subscription is done, nothing more will come",
 which is wrong in both halves: trailing objects can still come, and the subscription is not over.
-`onPublisherDone` names the party that is done. A distinct terminal signal for the subscription
-itself, settling once when it can no longer deliver, is
-[issue #68](https://github.com/muxinc/relay-sdks/issues/68); it must not be named "drained" or
-"complete" because the protocol cannot establish that property.
+`onPublisherDone` names the party that is done. The terminal signal for the subscription itself,
+settling once when it can no longer deliver, is `ended`
+([issue #68](https://github.com/muxinc/relay-sdks/issues/68), and
+[below](#subscription-readiness-and-termination-relaysubscription-subscribed-ended)). It is not
+named "drained" or "complete" because the protocol cannot establish that property.
 
 ## Subscription acceptance: `onSubscribed`
 
@@ -220,12 +221,13 @@ core's handlers one to one, and `subscriber.subscribe()` performs the mapping.
 
 ## Renames without aliases
 
-The old names were removed rather than kept as deprecated aliases. Both packages are unreleased
-and marked provisional, nothing outside this repository imports them, and a deprecated alias would
-keep the misleading name in autocomplete next to the one that replaced it. Consumers inside the
-repository (examples, live smoke tests, the Video.js streaming example) moved in the same change.
-Once a package is published, a rename of this kind needs a deprecation cycle; record that policy
-here when the first release happens.
+The old names were removed rather than kept as deprecated aliases. When these renames were made,
+no package had been released and nothing outside this repository imported them, and a deprecated
+alias would have kept the misleading name in autocomplete next to the one that replaced it.
+Consumers inside the repository (examples, live smoke tests, the Video.js streaming example) moved
+in the same change. The packages have been published since 0.1.0. Before 1.0, a minor version can
+break the API, and the changelogs ([TypeScript](../ts/CHANGELOG.md), [Python](../python/CHANGELOG.md))
+say what each rename changed and what to do about it.
 
 ## One error identity: `RelayError`, `code`, `phase`
 
@@ -294,8 +296,9 @@ message).
 
 ## Room-rooted endpoints: `roomEndpoint`
 
-`roomEndpoint(endpoint, room)` returns the endpoint with the room's fields appended to its path. A
-connection to that URL names namespaces relative to the room
+`roomEndpoint(endpoint, room)` returns the endpoint with the room's fields appended to its path, and
+`roomEndpoint(room)` does the same for `DEFAULT_ENDPOINT`, the hosted Relay that most applications
+use. A connection to that URL names namespaces relative to the room
 ([Subscribing](behavior.md#subscribing), [issue #348](https://github.com/muxinc/relay-sdks/issues/348)).
 It is a pure function: it builds a string and connects nothing. "Room" is the word the docs already
 use for the path a token grants, and the result is an endpoint, the same noun as `url` on every
@@ -314,7 +317,9 @@ room); `endpointFor` or `withPrefix` (they do not say the prefix becomes the pat
 URL that both the relay and the logs see); percent-encoding as #348 proposed (it is wrong on every
 relay measured; it can be added if the relay starts decoding, without breaking an accepted room);
 keeping the helper in the examples (its value is the validation, which applications need as much as
-the examples do).
+the examples do); a trailing optional endpoint, `roomEndpoint(room, endpoint?)` (it would break every
+existing call, and an endpoint read before its path matches the URL it builds); an options object,
+`roomEndpoint(room, { endpoint })` (one optional value does not need a bag).
 
 ## Switching tracks: `subscribeSwitchable`, `switchTo`, `onSwitched`
 
@@ -369,9 +374,9 @@ A want's make-before-break move reuses the switchable's words: `until`, `drainMs
 restart, because nothing was lost in between, so it gets `onSwitched` and not an `onRestarted`
 flag. A want's record is `WantSwitchedInfo` rather than `SwitchedInfo`, because a generation move
 changes the namespace as well as the track. Not adopted: a `want(key).switchTo(...)` verb. `want`
-is declarative, and wanting the key again with another track already states the change. `RECONNECTING` names the publisher's state
-when a write fails between generations, and keeps it apart from `CLOSED`, which retires a frame
-writer.
+is declarative, and wanting the key again with another track already states the change.
+`RECONNECTING` names the publisher's state when a write fails between generations, and keeps it
+apart from `CLOSED`, which retires a frame writer.
 
 ## Subscription readiness and termination: `RelaySubscription`, `subscribed`, `ended`
 
@@ -465,9 +470,9 @@ subclass made a stop a type rather than a place. Not adopted: `TransportError`, 
 
 ## Media format helpers
 
-Stage 1 media format names. Python exports these from `moq_media`; TypeScript exports them from
-`@caprid/moq-media`. The source-URL composer and catalog-generation timestamp retain their language-specific
-names from the original examples; the mappings below are explicit.
+Stage 1 media format names. Python exports these from `moq_media`. TypeScript exports them from
+`@caprid/moq-media`. The source-URL composer and the catalog-generation timestamp keep the
+language-specific names of the original examples, and the table maps them.
 
 | Concept | TypeScript | Python |
 | --- | --- | --- |
@@ -668,7 +673,7 @@ the format package still does not depend on the product package.
 | Drop received audio in a timeline range | `input.cut({ fromUs?, untilUs? })` (`AudioCutRange`, which a parsed `Interrupt` is); `cut()` drops everything held | — |
 | Per-input gain; stop | `input.gain`; `input.remove()`, `input.removed`; `player.close()` | — |
 | Held audio played per output frame, 0.5 to 2 | `input.playbackRate` (settable) | — |
-| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, playStarts, heldUntilUs, dryAtUs, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, cutUs, reports }` | — |
+| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, playStarts, heldUntilUs, dryAtUs, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, synthesizedUs, recoveredUs, cutUs, reports }` | — |
 | What the player needs of Web Audio | `AudioPlayerContext`, `AudioPlayerNode`, `AudioPlayerGainNode` | — |
 | A catalog audio track's decoder config | `audioDecoderConfigFromTrack(track)` | — |
 | An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | `opus_packet_duration_us(packet)` (`moq_media`; see below) |

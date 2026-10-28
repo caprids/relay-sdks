@@ -7,6 +7,9 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/relay`: `roomEndpoint(room)` roots the hosted Relay, `https://relay.mux.global`, so a quickstart passes
+  only the token's root. `roomEndpoint(endpoint, room)` works as before. The endpoint is exported as
+  `DEFAULT_ENDPOINT`, as the Python SDK already did.
 - `@caprid/moq-core`: relay-side test support (#367). `createMoqtSession` takes `perspective: 'client' | 'server'`
   (default `'client'`, unchanged): a `'server'` session allocates odd Request IDs from 1 and closes with
   `INVALID_REQUEST_ID` on an odd one from its peer, so it can stand in for the relay against a publish session over an

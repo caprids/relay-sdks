@@ -1,12 +1,13 @@
 # MoQ media formats
 
 Pure LOC (`draft-ietf-moq-loc-04`) and independent MSF (`draft-ietf-moq-msf-01`) format helpers.
-Depends only on the generic MoQ core. No transport libraries or Relay connection required. The one
-encoder, `moq_media.opus`, needs the `opus` extra (see [Opus](#opus)); `import moq_media` never loads it.
+The package depends only on the generic MoQ core, and needs no transport library or Relay
+connection. The one encoder, `moq_media.opus`, needs the `opus` extra (see [Opus](#opus)).
+`import moq_media` never loads it.
 
-The catalog builder emits compact UTF-8 JSON bytes. It withholds `avc1`/`avc3` until non-empty init
-data exists, derives their profile/constraint/level suffix from avcC (preserving `avc3`), forces Opus
-to 48 kHz, and rejects duplicate names and media roles on data tracks. Catalog namespaces use the
+The catalog builder emits compact UTF-8 JSON bytes. It withholds `avc1` and `avc3` until non-empty init
+data exists, derives their profile, constraint, and level suffix from avcC (keeping `avc3`), forces
+Opus to 48 kHz, and rejects duplicate names and media roles on data tracks. Catalog namespaces use the
 player's slash-joined dialect, so fields containing `/` or empty fields are rejected. Source URLs
 can escape literal slashes in tuple fields. Omitted fields never become JSON nulls. Empty init
 data is omitted for every codec, and catalog strings must be valid Unicode (no lone surrogates).
@@ -17,9 +18,9 @@ on keyframes, declare the same timescale on the track, and keep init data in the
 
 H.264 helpers split Annex B, build avcC from SPS/PPS, and convert access units to four-byte NAL
 length prefixes. Conversion removes SPS, PPS, and AUD by default, as `avc1` requires. Codec-string
-inspection checks the avcC version/header; it does not validate SPS semantics or decode a bitstream.
+inspection checks the avcC version and header. It does not validate SPS semantics or decode a bitstream.
 Construction from SPS/PPS supports Baseline, Main, and Extended profiles. Other profiles require
-extension fields and are rejected; callers can still supply an encoder-generated High-profile avcC
+extension fields and are rejected. Callers can still supply an encoder-generated High-profile avcC
 to the catalog builder.
 
 `build_msf_catalog` describes a live broadcast and leaves `isComplete` out: msf-01 §5.1.3 forbids
@@ -39,7 +40,7 @@ For simulcast layers or a second source, pass `media`: a list of `VideoTrackInfo
 `alt_group` (alternate versions of one content, of which a viewer plays one). Members of an
 alternate group share a role and a render group. `parse_msf_catalog` returns both fields, and
 `group_msf_tracks(catalog.tracks)` lists the sets a viewer picks one track from. See
-[several media tracks](../../../spec/media-layer.md#several-media-tracks).
+[several media tracks](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#several-media-tracks).
 
 ```python
 catalog = build_msf_catalog(
@@ -61,15 +62,16 @@ its own origin and rate, kept in line with `calibrate(source_us, at_us=...)` pai
 reports a microphone's input delay, so pass the one you know as `capture_latency_us=` and set
 `timeline.capture_latency_us` again when the device changes (about 30 ms for a laptop microphone,
 190 ms for AirPods). Use
-`sample_timeline(48_000)` for a sample counter with nothing to calibrate against, such as a file. `PlayoutClock()` is the player side. Audio is the master: report what is
+`sample_timeline(48_000)` for a sample counter with nothing to calibrate against, such as a file.
+`PlayoutClock()` is the player side. Audio is the master: report what is
 audible with `report_audio(timestamp_us)`, and `due(timestamp_us)` returns a `PlayoutDecision` to
 wait, show, or drop a video frame. With no audio it paces by wall clock. A broadcast with no video
-never reports a keyframe interval, so its clock would keep the 2 s default target latency, and a
-lasting delay increase would cost 2 s of silence before a frame sequencer resyncs: create an
-audio-only clock with `PlayoutClock(target_latency_us=AUDIO_ONLY_TARGET_LATENCY_US)` (500 ms), the
+never reports a keyframe interval, so its clock would keep the 2 s default target latency. A lasting
+delay increase would then cost 2 s of silence before a frame sequencer resyncs. Create an audio-only
+clock with `PlayoutClock(target_latency_us=AUDIO_ONLY_TARGET_LATENCY_US)` (500 ms), the
 same constant as TypeScript's. A clock nothing anchors, as in a bot that only decodes, judges
 nothing late and needs none. See
-[spec/media-layer.md](../../../spec/media-layer.md#shared-timeline-and-playout-clock).
+[spec/media-layer.md](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#shared-timeline-and-playout-clock).
 
 On the subscriber side, `loc_timestamp_us(obj.properties, track_properties=ok.track_properties)`
 reads an object's Timestamp in microseconds, applying whichever Timescale the object or the
@@ -80,9 +82,9 @@ location to wall-clock time, for seeking and playlists. On the epoch timeline th
 same, so an entry needs only the timestamp and the group. Announce it with
 `media_timeline=MediaTimelineTrackInfo()` in `build_msf_catalog`. `MediaTimeline` keeps one
 broadcast's records, 512 by default, and returns the document to send each time a keyframe has
-opened a video group; `caprid_relay.media.DocumentService` sends it as a new timeline group, and again
+opened a video group. `caprid_relay.media.DocumentService` sends it as a new timeline group, and again
 whenever the relay subscribes. See
-[spec/media-layer.md](../../../spec/media-layer.md#media-timeline-track).
+[spec/media-layer.md](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#media-timeline-track).
 
 ```python
 timeline = MediaTimeline()
@@ -93,7 +95,10 @@ read = parse_media_timeline(timeline_object.payload)
 ```
 
 Shared vectors live in `spec/vectors/media.json` and `spec/vectors/clock.json`. See `UPSTREAM.json` for Video.js provenance.
-Publishing handles and the object-to-frame reader are later stages of `spec/media-layer.md`.
+The publishing handles (`FrameWriter`, `CatalogService`, `DocumentService`) and the object-to-frame
+reader (`FrameReader`) need a Relay connection, so they live in `caprid_relay.media`. `FrameSequencer`
+here is the reader's transport-free engine: it puts one track's objects in decode order and drops
+what is too late against a `PlayoutClock`.
 
 ```python
 from moq_media import (
@@ -113,7 +118,7 @@ catalog = build_msf_catalog(
     audio=AudioTrackInfo(),
 )
 video = publisher.register_track("video", track_properties=loc_track_properties())
-# The application opens a group at each keyframe and handles demand/recovery.
+# The application opens a group at each keyframe and handles demand and recovery.
 await group.write(h264.to_avcc(access_unit), properties=loc_properties(timestamp_us, video_config=h264.avcc))
 
 tracks = parse_msf_catalog(catalog_object.payload, catalog_namespace=["room", "live"]).tracks
@@ -127,17 +132,17 @@ listeners drop the audio they already hold. List the track in the catalog
 `build_interrupt(until_us=...)` to it, with `until_us` the end of the last audio sent: the last
 `OpusPacket`'s `timestamp_us + duration_us`. Start the next audio at or after it.
 `parse_interrupt(payload)` reads one back as an `Interrupt`. See
-[spec/media-layer.md](../../../spec/media-layer.md#interrupt-track).
+[spec/media-layer.md](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#interrupt-track).
 
 ## Transcripts
 
 A talker publishes the text of its audio on the transcript track, so listeners show it as the audio
 plays. List the track (`DataTrackInfo(name=TRANSCRIPT_TRACK)`), register it, and write
 `build_transcript_segment(seq=, from_us=, text=)` just before the segment's first audio, then the
-same `seq` with `until_us=` and `final=True` once its last audio is sent; send no final version for a
+same `seq` with `until_us=` and `final=True` once its last audio is sent. Send no final version for a
 segment an interrupt cut. A listener reads each with `parse_transcript_segment`, keeps them in a
 `Transcript` (`apply`, and `cut` on each interrupt with the playout position), and shows
-`lines_at(clock.position_us)`. See [spec/media-layer.md](../../../spec/media-layer.md#transcript-track).
+`lines_at(clock.position_us)`. See [spec/media-layer.md](https://github.com/caprids/relay-sdks/blob/main/spec/media-layer.md#transcript-track).
 
 ## Opus
 
@@ -168,14 +173,14 @@ async for frame in frame_reader:
 ```
 
 Packet *k* of a run is stamped at the run's timestamp plus 20 ms per packet before it, as WebCodecs
-stamps its output; decoded audio trails the stamps by libopus's look-ahead: 6.5 ms, or 2.5 ms with `application="lowdelay"`. A flushed run has
-one packet more than the frames it was given, which carries the look-ahead's tail.
+stamps its output. Decoded audio trails the stamps by libopus's look-ahead, which is 6.5 ms, or 2.5 ms with
+`application="lowdelay"`. A flushed run has one packet more than the frames it was given, which carries the look-ahead's tail.
 `opus_packet_duration_us(payload)` reads a packet's duration from its TOC byte without PyAV, held to
-the same vectors as TypeScript's `opusPacketDurationUs`. See [ADR 0006](../../../docs/adr/0006-opus-codec-behind-an-extra.md).
+the same vectors as TypeScript's `opusPacketDurationUs`. See [ADR 0006](https://github.com/caprids/relay-sdks/blob/main/docs/adr/0006-opus-codec-behind-an-extra.md).
 
-The distribution on PyPI is `caprid-moq-media`; the import name is `moq_media`.
+The distribution on PyPI is `caprid-moq-media`, and the import name is `moq_media`.
 
 ## Stability
 
 Before 1.0, a minor version can break the API. This package releases together with `caprid-relay` at
-the same version; see the [changelog](../../CHANGELOG.md).
+the same version. See the [changelog](https://github.com/caprids/relay-sdks/blob/main/python/CHANGELOG.md).
