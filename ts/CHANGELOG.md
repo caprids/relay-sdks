@@ -5,6 +5,12 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/relay`: `roomEndpoint(room)` roots the hosted Relay, `https://relay.mux.global`, so a quickstart passes
+  only the token's root. `roomEndpoint(endpoint, room)` works as before. The endpoint is exported as
+  `DEFAULT_ENDPOINT`, as the Python SDK already did.
+
 ## 0.1.1
 
 - `@caprid/relay`, `@caprid/moq-core`: a publisher connection answers the relay's TRACK_STATUS (draft-22 §9.13) for its

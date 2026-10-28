@@ -11,6 +11,7 @@ import {
   MOQT_PROTOCOL_ID,
   MOQT_PROTOCOL_IDS,
 } from '../packages/moq-core/src/index.js';
+import { DEFAULT_ENDPOINT } from '../src/room-endpoint.js';
 import {
   DEFAULT_PUBLISHER_GROUP_ORDER,
   DEFAULT_PUBLISHER_GROUP_ORDERS,
@@ -23,7 +24,7 @@ import {
 
 interface ProtocolSpec {
   moqt: { document: string; protocolId: string; protocolIds: string[]; fallbackDocument: string };
-  relay: { limits: { maxObjectPropertiesBytes: number; maxTrackProperties: number } };
+  relay: { defaultEndpoint: string; limits: { maxObjectPropertiesBytes: number; maxTrackProperties: number } };
   limits: {
     maxObjectPayloadBytes: number;
     maxObjectPropertiesBytes: number;
@@ -40,6 +41,10 @@ interface ProtocolSpec {
 const spec = JSON.parse(await readFile(new URL('../../spec/protocol.json', import.meta.url), 'utf8')) as ProtocolSpec;
 
 describe('spec/protocol.json', () => {
+  it('pins the hosted Relay endpoint roomEndpoint roots by default', () => {
+    expect(DEFAULT_ENDPOINT).toBe(spec.relay.defaultEndpoint);
+  });
+
   it('pins the MOQT draft the core implements', () => {
     expect(MOQT_PROTOCOL_ID).toBe(spec.moqt.protocolId);
   });

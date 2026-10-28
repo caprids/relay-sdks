@@ -18,6 +18,7 @@ import type { DocumentService, FrameOutcomeKind, FrameWriter, FrameWriterOptions
 describe('public vocabulary', () => {
   it('exports one entry point per connection role and nothing under the old names', () => {
     expect(Object.keys(relay).sort()).toEqual([
+      'DEFAULT_ENDPOINT',
       'RelayError',
       'SubscriptionConnectionClosedError',
       'SubscriptionOverflowError',

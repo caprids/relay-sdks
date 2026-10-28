@@ -43,14 +43,17 @@ their nearest relay ([a viewer on another relay](../spec/relay-interop.md#a-view
 The hosted demo defaults to the bare host `https://relay.mux.global`, which still requires
 authorized credentials. For another deployment, use the endpoint its operator supplies.
 
-`roomEndpoint` builds that endpoint from a relay and the token's root, so you do not assemble the URL
-by hand:
+`roomEndpoint` builds that endpoint from the token's root, so you do not assemble the URL by hand.
+Given only the root, it uses `DEFAULT_ENDPOINT`, `https://relay.mux.global`. Pass an endpoint
+first for another relay:
 
 ```ts
 import { roomEndpoint } from '@caprid/relay';
 
-const url = roomEndpoint('https://relay.mux.global', ['acme', 'rooms', '42']);
+const url = roomEndpoint(['acme', 'rooms', '42']);
 // 'https://relay.mux.global/acme/rooms/42'
+const nearby = roomEndpoint('https://ord.relay.mux.global', ['acme', 'rooms', '42']);
+// 'https://ord.relay.mux.global/acme/rooms/42'
 ```
 
 It appends each field to the endpoint's path and keeps the endpoint's query. It encodes nothing,

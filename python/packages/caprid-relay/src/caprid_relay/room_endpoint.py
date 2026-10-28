@@ -5,6 +5,7 @@ Pure: it builds a string and connects nothing.
 
 import re
 from collections.abc import Sequence
+from typing import overload
 from urllib.parse import urlsplit, urlunsplit
 
 from ._validation import namespace_fields
@@ -16,16 +17,26 @@ from .connect_session import _parse_endpoint
 # "Endpoint paths").
 _ROOM_FIELD = re.compile(r"[A-Za-z0-9\-._~!$&'()+,;=:@]+")
 
+DEFAULT_ENDPOINT = "https://relay.mux.global"
+"""The default Relay endpoint pinned in ``spec/protocol.json``."""
 
-def room_endpoint(endpoint: str, room: Sequence[str]) -> str:
+
+@overload
+def room_endpoint(room: Sequence[str], /) -> str: ...
+@overload
+def room_endpoint(endpoint: str, room: Sequence[str], /) -> str: ...
+def room_endpoint(*args: object) -> str:
     """Root an endpoint at a room.
 
     The result is the endpoint with each room field appended to its path, after any path it has and
     without its trailing slashes, and with its query kept, a ``jwt`` parameter included. A
-    connection to it names namespaces relative to the room::
+    connection to it names namespaces relative to the room. Without an endpoint it roots
+    ``DEFAULT_ENDPOINT``::
 
-        room_endpoint("https://relay.mux.global", ["acme", "rooms", "42"])
+        room_endpoint(["acme", "rooms", "42"])
         # 'https://relay.mux.global/acme/rooms/42'
+        room_endpoint("https://relay.example", ["acme", "rooms", "42"])
+        # 'https://relay.example/acme/rooms/42'
 
     The endpoint follows the connect calls' rules and the room the namespace rules. Nothing is
     percent-encoded: a room field holds only ``A``-``Z``, ``a``-``z``, ``0``-``9`` and
@@ -38,6 +49,13 @@ def room_endpoint(endpoint: str, room: Sequence[str]) -> str:
         ``jwt``; a room of more than 32 fields; a room field with any other character, or ``.`` or
         ``..``.
     """
+    # One argument is the room alone; two are the endpoint and the room, as before the default.
+    if len(args) == 1:
+        endpoint, room = DEFAULT_ENDPOINT, args[0]
+    elif len(args) == 2:
+        endpoint, room = args
+    else:
+        raise TypeError(f"room_endpoint takes a room, or an endpoint and a room, not {len(args)} arguments")
     normalized, _ = _parse_endpoint(endpoint)
     fields = namespace_fields(room)
 

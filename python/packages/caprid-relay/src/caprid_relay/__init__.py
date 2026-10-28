@@ -36,7 +36,7 @@ from .errors import RelayError, RelayErrorCode, RelayErrorPhase
 from .namespace_events import NamespaceEvent, NamespaceEvents
 from .payload import read_json, read_text
 from .publish import RelayGroupWriter, RelayPublisher, RelayTrackWriter, connect_relay_publisher
-from .room_endpoint import room_endpoint
+from .room_endpoint import DEFAULT_ENDPOINT, room_endpoint
 from .subscription_events import (
     GoawayEvent,
     ObjectEvent,
@@ -61,9 +61,6 @@ from .supervised_subscriber import (
     connect_supervised_subscriber,
 )
 from .switchable import SwitchableHandlers, SwitchableSubscription, SwitchedInfo
-
-DEFAULT_ENDPOINT = "https://relay.mux.global"
-"""The default Relay endpoint pinned in ``spec/protocol.json``."""
 
 __all__ = [
     "DEFAULT_ENDPOINT",
