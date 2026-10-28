@@ -794,8 +794,9 @@ so do not rely on the first objects after demand begins. See
   after any failure.
 
 A frame writer's `write(frame)` resolves to what became of the frame (`'sent'`, `'skipped'`,
-`'stale'`, `'dropped'`, `'interrupted'`, or `'ended'`) rather than rejecting. It rejects only with a
-`TypeError` for a malformed frame, and with `CLOSED` after your own `close()`. You may call it from a
+`'stale'`, `'dropped'`, `'interrupted'`, or `'ended'`) rather than rejecting. It rejects only for a
+caller error, such as a malformed or oversized frame or an exception from your `stale` predicate,
+and with `CLOSED` after your own `close()`. You may call it from a
 WebCodecs output callback without awaiting it. The writer serves frames in call order. When more
 than `maxBacklog` frames wait behind the one being written, it drops frames rather than queueing
 them. `writer.keyframeNeeded` and `onKeyframeNeeded` say when the next frame must be a keyframe, so
