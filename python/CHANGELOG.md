@@ -4,12 +4,12 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.2.0
 
 - `caprid-relay`: `room_endpoint(room)` roots `DEFAULT_ENDPOINT`, the hosted Relay `https://relay.mux.global`, so a
   quickstart passes only the token's root. `room_endpoint(endpoint, room)` works as before. Both arguments are now
-  positional-only.
-
+  positional-only: a call that names them, such as `room_endpoint(endpoint=..., room=...)`, must pass them in order
+  instead.
 - `caprid-relay`, `caprid-moq-core`: a publisher connection answers the relay's TRACK_STATUS (draft-22 §9.13) for its
   tracks instead of refusing it with `NOT_SUPPORTED`: TRACK_STATUS_OK with the track's properties and, once the track
   has written an object, LARGEST_OBJECT; an unknown or closed track gets `DOES_NOT_EXIST`, as a SUBSCRIBE does.
@@ -17,6 +17,9 @@ is in [docs/releasing.md](../docs/releasing.md).
   whose publisher refuses does not cross two relays there. Nothing changes for an application. In `caprid-moq-core`,
   `RegisteredTrack.object_published(location)` records what a TRACK_STATUS_OK reports as LARGEST_OBJECT, and
   `encode_request_ok` takes `track_properties`.
+- `caprid-moq-core`: a REQUEST_UPDATE carrying `FILL_PARAMETERS` is acknowledged instead of ending the subscription
+  with `UPDATE_FAILED`, as in TypeScript 0.1.1. The publisher reports no Largest Object, so the fill is always empty
+  and no fill fetch stream opens. moq-relay sends no REQUEST_UPDATE, so the relay path is unchanged.
 
 ## 0.1.0
 

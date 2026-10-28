@@ -1,6 +1,6 @@
 {
   "name": "@caprid/relay-websocket",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "QMux-over-WebSocket transport adapter for the Relay SDK, for networks and browsers without WebTransport",
   "license": "Apache-2.0",
   "repository": {

@@ -5,7 +5,7 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.2.0
 
 - `@caprid/relay`: `roomEndpoint(room)` roots the hosted Relay, `https://relay.mux.global`, so a quickstart passes
   only the token's root. `roomEndpoint(endpoint, room)` works as before. The endpoint is exported as
@@ -17,9 +17,6 @@ each section says what changed and what to do about it. How to cut a release is 
   codec such a test drives the session with (control-message encoders and decoder, the deframer, subgroup and fetch
   stream readers, varints, `StreamReader`); import from it instead of `dist/protocol/*`. Nothing changes for
   `@caprid/relay`.
-
-## 0.1.1
-
 - `@caprid/relay`, `@caprid/moq-core`: a publisher connection answers the relay's TRACK_STATUS (draft-22 §9.13) for its
   tracks instead of refusing it with `NOT_SUPPORTED`: TRACK_STATUS_OK with the track's properties and, once the track
   has written an object, LARGEST_OBJECT; an unknown or closed track gets `DOES_NOT_EXIST`, as a SUBSCRIBE does.
@@ -28,6 +25,14 @@ each section says what changed and what to do about it. How to cut a release is 
   `RegisteredTrack.objectPublished(location)` records what a TRACK_STATUS_OK reports as LARGEST_OBJECT (a track with
   `getLargestObject` reports that instead, as its SUBSCRIBE_OK does), and `encodeRequestOk` takes the Track Properties
   as a third argument.
+- `@caprid/moq-media`: the audio player's jitter buffer gives back what a delay spike added in seconds rather than a
+  minute: +40 ms per underrun, −10 ms after each 2 s of smooth playback, a 20 ms floor (was +20 ms, −10 ms per 8 s,
+  40 ms), and trims of 5 ms or more. On stage-2 netbench arrivals replayed offline it held 9–74 ms less (clean 9, busy
+  Wi-Fi 28, LEO 42, LTE 74) at about the same drops, and 1.5 drops a minute more under a bulk download's queue
+  sawtooth; pass `minJitterTargetUs: 40_000` for the old floor.
+
+## 0.1.1
+
 - `@caprid/moq-media`: lost Opus frames are filled rather than played as silence. Opus inputs decode with libopus
   compiled to WebAssembly (116 KB, embedded), which conceals a missing frame (packet-loss concealment, up to 120 ms a
   gap) and rebuilds it from the next frame's in-band FEC when the publisher's encoder sent one. Stats `synthesizedUs`
@@ -44,11 +49,6 @@ each section says what changed and what to do about it. How to cut a release is 
   index also exports `TRACK_PROPERTY`, `compareLocations`, `isEmptyFetchRange`, `encodeFetchHeader`,
   `isRetryableRequestErrorCode`, `isRetryablePublishDoneStatus`, `utf8Decode`, `CLOSE_FLUSH_TIMEOUT_MS` and
   `CLOSE_END_ACK_TIMEOUT_MS`.
-- `@caprid/moq-media`: the audio player's jitter buffer gives back what a delay spike added in seconds rather than a
-  minute: +40 ms per underrun, −10 ms after each 2 s of smooth playback, a 20 ms floor (was +20 ms, −10 ms per 8 s,
-  40 ms), and trims of 5 ms or more. On stage-2 netbench arrivals replayed offline it held 9–74 ms less (clean 9, busy
-  Wi-Fi 28, LEO 42, LTE 74) at about the same drops, and 1.5 drops a minute more under a bulk download's queue
-  sawtooth; pass `minJitterTargetUs: 40_000` for the old floor.
 
 ## 0.1.0
 
