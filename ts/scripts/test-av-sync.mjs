@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DEFAULT_ENDPOINT } from '@caprid/relay';
 import { startModuleServer } from './module-server.js';
 
 // The live A/V sync test (issue #288): scripts/av-sync/scenario.ts publishes the WebCodecs example's canvas and
@@ -20,7 +21,7 @@ import { startModuleServer } from './module-server.js';
 // sink), which this launcher starts when `pulseaudio` is installed.
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const endpoint = process.env.RELAY_URL ?? 'https://relay.mux.global';
+const endpoint = process.env.RELAY_URL ?? DEFAULT_ENDPOINT;
 assert.equal(new URL(endpoint).protocol, 'https:', 'RELAY_URL must be an https URL');
 const token = process.env.RELAY_TOKEN;
 const prefix = (process.env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-smoke').split('/').filter(Boolean);
