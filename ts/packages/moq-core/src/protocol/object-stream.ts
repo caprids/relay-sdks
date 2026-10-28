@@ -22,9 +22,13 @@ import { MAX_VARINT_VALUE } from './varint.js';
 // Stream types
 // ============================================================================
 
+/** Stream-type varints that open a unidirectional stream, other than a SUBGROUP_HEADER's (see `isSubgroupHeaderType`). */
 export const STREAM_TYPE = {
+  /** FETCH_HEADER (§11.4.1). */
   FETCH_HEADER: 0x05,
+  /** A control stream, which opens with SETUP. */
   SETUP: 0x2f00,
+  /** A padding stream, for bandwidth probing; its contents are ignored. */
   PADDING: 0x132b3e28,
 } as const;
 
@@ -106,12 +110,18 @@ const SUBGROUP_FLAG = {
   FIRST_OBJECT: 0x40,
 } as const;
 
+/** How a SUBGROUP_HEADER gives the Subgroup ID: zero, the first object's ID, or an explicit field. */
 export type SubgroupIdMode = 'zero' | 'first-object-id' | 'explicit';
 
+/** A decoded SUBGROUP_HEADER (§11.3.1). */
 export interface SubgroupHeader {
+  /** The stream-type varint, whose Type Flags give the rest. */
   type: number;
+  /** The Track Alias of the subscription the stream belongs to. */
   trackAlias: number;
+  /** The Group ID. */
   groupId: number;
+  /** How the Subgroup ID is given. */
   subgroupIdMode: SubgroupIdMode;
   /** Present when `subgroupIdMode` is `'explicit'`. */
   subgroupId?: number | undefined;
@@ -271,7 +281,10 @@ export type FetchStreamEntry =
     };
 
 /** Read the FETCH_HEADER's Request ID (the stream-type varint must already be consumed). */
-export async function readFetchHeader(reader: StreamReader): Promise<{ requestId: number }> {
+export async function readFetchHeader(reader: StreamReader): Promise<{
+  /** The Request ID of the FETCH, or of the request that asked for a fill. */
+  requestId: number;
+}> {
   return { requestId: await reader.readVarint() };
 }
 

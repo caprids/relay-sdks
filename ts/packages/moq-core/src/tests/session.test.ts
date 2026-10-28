@@ -31,6 +31,7 @@ import {
   createMoqtSession,
   isStreamFailure,
   type MoqtSessionCallbacks,
+  type MoqtSessionConfig,
   type MoqtTransport,
 } from '../protocol/session.js';
 
@@ -273,9 +274,13 @@ function containsBytes(haystack: Uint8Array, needle: readonly number[]): boolean
 /** The fetch range playback would ask for if it fetched: the current group from its start. */
 const CURRENT_GROUP: LocationFilter = { type: 'relative-group', groupsBeforeNext: 1 };
 
-function createSessionHarness(callbacks?: MoqtSessionCallbacks, protocol?: MoqtProtocolId) {
+function createSessionHarness(
+  callbacks?: MoqtSessionCallbacks,
+  protocol?: MoqtProtocolId,
+  perspective?: MoqtSessionConfig['perspective']
+) {
   const fake = createFakeTransport(protocol);
-  const session = createMoqtSession(fake.transport, { callbacks, unknownAliasTimeoutMs: 200 });
+  const session = createMoqtSession(fake.transport, { callbacks, unknownAliasTimeoutMs: 200, perspective });
 
   return { ...fake, session };
 }
@@ -1424,6 +1429,51 @@ describe('createMoqtSession', () => {
       harness.openIncomingBidi(publish(1));
 
       await expectInvalidRequestId(harness, 'peer reused request id 1');
+    });
+
+    it("allocates odd ids from 1 in the 'server' perspective", async () => {
+      const harness = createSessionHarness(undefined, undefined, 'server');
+
+      harness.sendServerSetup();
+      await harness.session.ready;
+      harness.session.subscribe({ trackNamespace: ['live'], trackName: 'video' }, {});
+      harness.session.trackStatus({ trackNamespace: ['live'], trackName: 'video' }, {});
+      harness.session.fetch({ trackNamespace: ['live'], trackName: 'video' }, {});
+
+      const ids: number[] = [];
+
+      for (let i = 0; i < 3; i++) {
+        const message = await (await harness.nextRequestStream()).firstMessage;
+
+        ids.push(message.kind === 'fetch' ? message.request.requestId : (message as { requestId: number }).requestId);
+      }
+      expect(ids).toEqual([1, 3, 5]);
+      harness.session.destroy();
+    });
+
+    it("closes with INVALID_REQUEST_ID on an odd id in the 'server' perspective, before offering it", async () => {
+      const onIncomingPublish = vi.fn();
+      const harness = createSessionHarness({ onIncomingPublish }, undefined, 'server');
+
+      harness.sendServerSetup();
+      harness.openIncomingBidi(publish(1));
+
+      await expectInvalidRequestId(harness, 'peer sent odd request id 1');
+      expect(onIncomingPublish).not.toHaveBeenCalled();
+    });
+
+    it("answers distinct even ids in the 'server' perspective and stays open", async () => {
+      const onIncomingPublish = vi.fn((_publish, responder) => responder.accept());
+      const harness = createSessionHarness({ onIncomingPublish }, undefined, 'server');
+
+      harness.sendServerSetup();
+      await harness.openIncomingBidi(publish(0)).responses;
+      await harness.openIncomingBidi(publishNamespace(2)).responses;
+      expect(onIncomingPublish).toHaveBeenCalledTimes(1);
+      expect(harness.getCloseInfo()).toBeUndefined();
+
+      harness.openIncomingBidi(publish(2));
+      await expectInvalidRequestId(harness, 'peer reused request id 2');
     });
 
     it('answers distinct odd ids and stays open', async () => {

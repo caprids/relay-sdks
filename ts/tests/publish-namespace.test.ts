@@ -1,7 +1,7 @@
 import { type BidirectionalStreamLike, createMoqtSession, type MoqtObject, type MoqtTransport } from '@caprid/moq-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { solicitNamespace } from '../packages/moq-core/src/tests/helpers/raw-peer.js';
-import { createTransportPair, withServerRequestIds } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
+import { createTransportPair } from '../packages/moq-core/src/tests/helpers/transport-pair.js';
 import { connectRelayPublisher, RelayError } from '../src/index.js';
 
 const namespace = ['live', 'example'];
@@ -13,7 +13,7 @@ afterEach(async () => {
 
 async function connectPublisher() {
   const pair = createTransportPair();
-  const subscriber = createMoqtSession(withServerRequestIds(pair.server));
+  const subscriber = createMoqtSession(pair.server, { perspective: 'server' });
   const publisher = await connectRelayPublisher({
     url: 'https://relay.example.com/moq',
     namespace,
@@ -107,7 +107,7 @@ describe('publisher transport end with a live announce', () => {
   ] as const)('reports TRANSPORT_ERROR when %s, with %s', async (order, streamErrorKind) => {
     const pair = createTransportPair();
     const terminable = terminableTransport(pair.client, order);
-    const subscriber = createMoqtSession(withServerRequestIds(pair.server));
+    const subscriber = createMoqtSession(pair.server, { perspective: 'server' });
     const publisher = await connectRelayPublisher({
       url: 'https://relay.example.com/moq',
       namespace,

@@ -81,7 +81,7 @@ export interface MoqtTransport {
    * the parameter codec.
    *
    * Optional because a browser `WebTransport` may lack the attribute, and TypeScript's DOM types lack it. A transport
-   * that does not report a protocol in {@link @caprid/moq-core!MOQT_PROTOCOL_IDS} gets the `moqt-22` codec, so one that cannot report it
+   * that does not report a protocol in {@link @caprid/moq-core!index.MOQT_PROTOCOL_IDS} gets the `moqt-22` codec, so one that cannot report it
    * must offer only `moqt-22`: a peer that selected `moqt-20` would misread every LOCATION_FILTER. The SDK's own
    * adapters always report it.
    */
@@ -109,7 +109,7 @@ export interface MoqtTransport {
  * {@link isStreamFailure}).
  */
 export interface RequestError {
-  /** A {@link @caprid/moq-core!REQUEST_ERROR_CODE} value; the session uses `INTERNAL_ERROR` or `TIMEOUT` for failures it synthesizes. */
+  /** A {@link @caprid/moq-core!index.REQUEST_ERROR_CODE} value; the session uses `INTERNAL_ERROR` or `TIMEOUT` for failures it synthesizes. */
   errorCode: number;
   /** REQUEST_ERROR's Retry Interval as received; `0` for failures the session synthesizes. */
   retryInterval: number;
@@ -131,7 +131,7 @@ export interface SubscribeOk {
 
 /** PUBLISH_DONE: the publisher ended a subscription. */
 export interface PublishDone {
-  /** A {@link @caprid/moq-core!PUBLISH_DONE_STATUS} value. */
+  /** A {@link @caprid/moq-core!index.PUBLISH_DONE_STATUS} value. */
   statusCode: number;
   /** Data streams the publisher opened; `undefined` when it could not count them (§9.9). */
   streamCount: number | undefined;
@@ -367,6 +367,13 @@ export interface MoqtSessionConfig {
   /** Identifies this implementation in SETUP (§9.1.5). */
   implementationName?: string;
   /**
+   * Which endpoint of the session this one is, for Request IDs (§6.4.2.1). A `'client'` (the default) allocates even
+   * IDs from 0 and requires the peer's to be odd; a `'server'` allocates odd IDs from 1 and requires the peer's to be
+   * even. A subscriber always dials as the client; `'server'` lets a test stand this session in for a relay against a
+   * publish session.
+   */
+  perspective?: 'client' | 'server' | undefined;
+  /**
    * How long to hold an incoming data stream whose Track Alias has no registered subscription yet (objects can outrace
    * SUBSCRIBE_OK). §11.3.1 allows brief buffering; expired streams are dropped. Default 2000ms.
    */
@@ -515,8 +522,9 @@ class MoqtSessionImpl implements MoqtSession {
   #config: MoqtSessionConfig;
   #callbacks: MoqtSessionCallbacks;
 
-  #nextRequestId = 0; // client request IDs: even, starting at 0 (§6.4.2.1)
-  /** Every inbound request ID ever seen. Reuse, or the client's (even) parity, closes the session (§6.4.2.1). */
+  /** Client request IDs are even, starting at 0; a server's are odd, starting at 1 (§6.4.2.1). */
+  #nextRequestId: number;
+  /** Every inbound request ID ever seen. Reuse, or this endpoint's own parity, closes the session (§6.4.2.1). */
   #peerRequestIds = new Set<number>();
   #subscriptions = new Map<number, SubscriptionRecord>();
   #fetches = new Map<number, FetchRecord>();
@@ -537,6 +545,7 @@ class MoqtSessionImpl implements MoqtSession {
     this.#protocol = resolveMoqtProtocol(transport.protocol);
     this.#config = config;
     this.#callbacks = config.callbacks ?? {};
+    this.#nextRequestId = config.perspective === 'server' ? 1 : 0;
     this.ready = new Promise((resolve, reject) => {
       this.#resolveReady = resolve;
       this.#rejectReady = reject;
@@ -689,13 +698,15 @@ class MoqtSessionImpl implements MoqtSession {
   }
 
   /**
-   * Request IDs are consumed once per session (§6.4.2.1), by every request-initiating message, accepted or not. This
-   * endpoint is always the client, so the peer's ids are odd; a reused id or an even one closes the session with
-   * INVALID_REQUEST_ID.
+   * Request IDs are consumed once per session (§6.4.2.1), by every request-initiating message, accepted or not. The
+   * peer's ids have the other parity from this endpoint's own (odd for a client, even for a server); a reused id or
+   * one of this endpoint's parity closes the session with INVALID_REQUEST_ID.
    */
   #claimPeerRequestId(requestId: number): void {
-    if (requestId % 2 !== 1) {
-      throw new MoqtProtocolError(`peer sent even request id ${requestId}`, SESSION_ERROR.INVALID_REQUEST_ID);
+    if (requestId % 2 === this.#nextRequestId % 2) {
+      const parity = requestId % 2 === 0 ? 'even' : 'odd';
+
+      throw new MoqtProtocolError(`peer sent ${parity} request id ${requestId}`, SESSION_ERROR.INVALID_REQUEST_ID);
     }
 
     if (this.#peerRequestIds.has(requestId)) {

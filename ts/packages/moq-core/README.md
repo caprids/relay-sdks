@@ -32,6 +32,31 @@ The package index also exports the wire constants and pure helpers that an embed
 `isRetryablePublishDoneStatus`, `utf8Decode`, and the close bounds `CLOSE_FLUSH_TIMEOUT_MS` and
 `CLOSE_END_ACK_TIMEOUT_MS`.
 
+## Standing in for a relay
+
+A test that plays the relay's end against a publish session needs two things the client surface leaves out.
+
+`createMoqtSession(transport, { perspective: 'server' })` allocates the server's Request IDs, odd and starting at 1,
+and requires the peer's to be even (§6.4.2.1). The default, `'client'`, allocates even IDs from 0 and requires odd
+ones. A publish session is always the client and takes each SUBSCRIBE's Request ID as the subscription's Track Alias,
+so a server-perspective session's first two subscriptions get aliases 1 and 3.
+
+`@caprid/moq-core/wire` exports the codec for driving a session byte by byte, under the same semver as the index:
+`StreamReader` and `utf8Encode`; `ControlMessageDeframer`, `decodeControlMessage` and the `ControlMessage` type;
+`encodeSetup`, `encodeSubscribe`, `encodeSubscribeOk`, `encodeSubscribeNamespace`, `encodePublish`,
+`encodePublishDone`, `encodeRequestError` and `encodeGoaway`; `STREAM_TYPE`, `isSubgroupHeaderType`,
+`readSubgroupHeader`, `readSubgroupObjects` and `readFetchHeader`; `encodeVarint` and `decodeVarint`. Import from it
+rather than from `dist/protocol/*`, whose layout is not part of the API.
+
+```ts
+import { createMoqtPublishSession, createMoqtSession } from '@caprid/moq-core';
+import { encodeSubscribe } from '@caprid/moq-core/wire';
+
+const publisher = createMoqtPublishSession(pair.client);
+const relay = createMoqtSession(pair.server, { perspective: 'server' });
+// relay.subscribe(...) sends Request IDs 1, 3, 5, ...; a raw SUBSCRIBE from encodeSubscribe needs an odd one too.
+```
+
 ## Provenance
 
 The implementation and its regression tests come from Video.js, under Apache-2.0. `UPSTREAM.json` records the source
