@@ -328,6 +328,18 @@ describe('withWebSocketFallback', () => {
     connection.transport.close();
   });
 
+  it('treats a close() from onFallback as a close of the winner, after ready', async () => {
+    fakeWebTransport('fail');
+    let transport: { close(info?: { closeCode?: number; reason?: string }): void } | undefined;
+    const connection = withWebSocketFallback({
+      onFallback: () => transport?.close({ closeCode: 7, reason: 'not on WebSocket' }),
+    })(`${origin}/`, ['moqt-22']);
+    transport = connection.transport;
+    await connection.ready;
+    expect(connection.framing).toBe('websocket');
+    await expect(connection.transport.closed).resolves.toEqual({ closeCode: 7, reason: 'not on WebSocket' });
+  });
+
   it('gives WebTransport a 250 ms head start by default', async () => {
     fakeWebTransport('hang');
     const started = performance.now();

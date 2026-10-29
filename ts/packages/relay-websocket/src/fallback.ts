@@ -153,6 +153,8 @@ export class FallbackTransport implements MoqtTransport {
         end();
         this.#winner = winner;
         this.#carrier = carrier;
+        // Settled before the callback, so a close() from it closes the winner rather than cancelling a dial.
+        resolve(winner);
         if (carrier === 'websocket') {
           const reason = webTransportPending
             ? new WebTransportOutpaced('the WebSocket was ready before the WebTransport handshake completed')
@@ -161,7 +163,6 @@ export class FallbackTransport implements MoqtTransport {
             onFallback?.(reason);
           } catch {}
         }
-        resolve(winner);
       };
       // Neither dial can still win: the connection fails with the WebSocket dial's failure.
       const failIfLost = () => {
