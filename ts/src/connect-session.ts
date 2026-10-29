@@ -494,7 +494,7 @@ function jwtClaims(token: string): JwtClaims | undefined {
   if (parts.length !== 3 || payload === undefined || !BASE64URL.test(payload)) return undefined;
   try {
     const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
-    const json = new TextDecoder('utf-8', { fatal: true }).decode(
+    const json = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(
       Uint8Array.from(atob(base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=')), (c) =>
         c.charCodeAt(0),
       ),
