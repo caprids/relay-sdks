@@ -201,7 +201,8 @@ _Avoid_: output timestamp, audio clock, context clock
 **Frame reader**:
 The module that reads one subscribed track as frames in decode order: it feeds a subscription's or
 a want's events to a frame sequencer and polls it when a wait ends. The sequencer reorders groups,
-waits for what may still come, and drops what is too late. Neither buffers for smoothing.
+waits for what may still come, drops what is too late and, under timestamp playout, holds what is
+early. Neither buffers for smoothing.
 _Avoid_: jitter buffer (the audio player owns that), reorder buffer, frame source, player
 
 **Jitter buffer**:
@@ -225,6 +226,12 @@ the end of the last audio sent, and the talker's next audio starts there or late
 that arrives late or twice drops nothing it should not.
 _Avoid_: flush, barge-in (the cause, not the message), interruption (that is the frame writer's
 failure), stop
+
+**Early frame**:
+A frame that arrives further ahead of its timestamp than the player wants it, as a text-to-speech
+agent's bursts do. Under timestamp playout the sequencer holds it until its timestamp is within the
+lead of the playout clock; otherwise one more than the target latency ahead makes it resync forward.
+_Avoid_: future frame, buffered audio (that is the jitter buffer's)
 
 **Transcript segment**:
 A piece of the text of a talker's audio, on the transcript track, placed on the audio's timeline

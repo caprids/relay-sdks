@@ -5,6 +5,17 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/moq-media`: timestamp playout, off by default. The frame sequencer's
+  `timestampPlayout: { leadUs: () => input.playoutLeadUs }` holds a frame that arrives ahead of its timestamp, as a
+  text-to-speech agent's bursts do, and releases it once its timestamp is within the lead of the playout clock; only a
+  frame more than `horizonUs` (30 s) ahead resyncs forward, where without it one more than the target latency does.
+  Delay that underruns added while a queue built is given back once frames come early again (held frames go out early
+  by it, less 40 ms, and the jitter buffer trims it). `stats.early` counts the frames held, and the audio input's
+  `playoutLeadUs` is the lead that keeps its jitter buffer at its target. In relay-dev's voice benchmark, bursty TTS
+  played 100% with it against 5% without (WebRTC fed the same bursts: 39%); spec/media-layer.md has the numbers.
+
 ## 0.2.0
 
 - `@caprid/relay`: `roomEndpoint(room)` roots the hosted Relay, `https://relay.mux.global`, so a quickstart passes

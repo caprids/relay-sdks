@@ -92,7 +92,9 @@ export interface FrameSequencerOptions {
    * `leadUs` of the position, and only a frame more than `horizonUs` ahead resyncs forward. While the clock has no
    * position, the first frame anchors one of the sequencer's own on the clock's local time, which gives way to the
    * clock's once the player reports. Late drop, resyncs and catch-up are unchanged, so a live talker's frames, which
-   * are never early, play as without it. `true` takes the defaults of {@link TimestampPlayoutOptions}. Default off.
+   * are never early, play as without it. Delay that underruns added (the clock fell behind local time while a queue
+   * built) is given back: held frames go out early by it, less 40 ms, so the jitter buffer trims it, as without this
+   * option. `true` takes the defaults of {@link TimestampPlayoutOptions}. Default off.
    */
   timestampPlayout?: boolean | TimestampPlayoutOptions;
 }
