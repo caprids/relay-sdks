@@ -436,9 +436,10 @@ This holds for `connectRelaySubscriber`, `connectRelayPublisher`, `connectSuperv
   fail locally, before the transport factory runs, by the Token root row of the
   [Arguments](#arguments) table. The message says to pass the endpoint instead.
 - **Supervisors.** A supervised connection given no endpoint keeps the endpoint its first
-  connection dialed, and every reconnect and [rotation](#rotation) dials it with a fresh token. A
-  later token whose grant does not cover that path fails `UNAUTHORIZED` instead of moving the
-  connection to another room.
+  connection dialed once that connection is up, and every reconnect and [rotation](#rotation) dials
+  it with a fresh token. A later token whose grant does not cover that path fails `UNAUTHORIZED`
+  instead of moving the connection to another room. Until the first connection is up, nothing has
+  joined a room, so each attempt roots the endpoint at its own token.
 - **Scope.** `root` is moq-token's claim, which the hosted Relay's tokens carry. Any other relay, or
   a room other than the token's root, takes an explicit endpoint, which the connection uses as given.
 
@@ -708,8 +709,8 @@ Both supervisors:
   nothing: the status stays `live`.
 - Replace their connection before its credential expires, make-before-break ([rotation](#rotation)).
 - Given no endpoint, dial the [token-rooted endpoint](#token-rooted-endpoint) their first connection
-  dialed for every later connection, so a later token whose grant does not cover it fails
-  `UNAUTHORIZED` instead of moving to another room.
+  dialed, once it is up, for every later connection, so a later token whose grant does not cover it
+  fails `UNAUTHORIZED` instead of moving to another room.
 
 ### Rotation
 
