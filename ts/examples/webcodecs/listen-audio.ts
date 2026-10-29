@@ -95,9 +95,9 @@ export interface AudioListener {
 
 /**
  * Catalogs after the first: the listener's handlers once it has started, and the newest one that came before. An error
- * of the catalog subscription after the first catalog, which the listener depends on for replacements, goes to
- * `onError`; before the listener has started it is kept, the first one only, in `pendingError` and reported once
- * the handlers exist, as `pending` is kept.
+ * of the catalog subscription after the first catalog, which the listener depends on for replacements, or a later
+ * catalog that does not parse, goes to `onError`; before the listener has started it is kept, the first one only, in
+ * `pendingError` and reported once the handlers exist, as `pending` is kept.
  */
 interface LaterCatalogs {
   onCatalog?(tracks: MsfCatalogTrack[]): void;
@@ -147,7 +147,8 @@ function readCatalog(
             try {
               tracks = parseMsfCatalog(object.payload, { catalogNamespace: namespace }).tracks;
             } catch (error) {
-              later.onError?.(error);
+              if (later.onError) later.onError(error);
+              else later.pendingError ??= { error };
               return;
             }
             if (later.onCatalog) later.onCatalog(tracks);

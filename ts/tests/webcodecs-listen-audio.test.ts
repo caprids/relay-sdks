@@ -750,6 +750,20 @@ it('reports an error of the catalog subscription that came while the listener wa
   await listener.stop();
 });
 
+it('reports a later catalog that does not parse while the listener was setting up', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(audioCatalog());
+  // Still setting up (the player is not built yet): a second catalog arrives and does not parse.
+  fake.deliverCatalog(new TextEncoder().encode('not json'));
+  expect(onError).not.toHaveBeenCalled();
+  const listener = await listening;
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(listener.track).toBe('audio');
+  await listener.stop();
+});
+
 it('finishes a replacement when onTrackReplaced throws', async () => {
   const fake = fakeSubscriber();
   const error = vi.spyOn(console, 'error').mockImplementation(() => {});
