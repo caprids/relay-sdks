@@ -33,6 +33,12 @@ each section says what changed and what to do about it. How to cut a release is 
   at once and gains `cutId`). The WebCodecs example's `listenAudio` follows a replacement (`onTrackReplaced`, with the
   phases `seen`, `stopped` and `started`, and `listener.track`). spec/media-layer.md has the local and bench
   measurements.
+- `@caprid/moq-core`, `@caprid/relay`: `MessageParameters.maxAge` (milliseconds, 0 to 2^53−1) is the MoQ Timestamp
+  extension's subscriber max age (parameter `0x915C6`): a publisher that honors it skips a group once a newer group has
+  superseded it for that long. A session sends it on SUBSCRIBE and REQUEST_UPDATE only to a relay whose SETUP declared
+  the extension's `SETUP_OPTION.MAX_AGE` (`0x915C4`), never on FETCH, TRACK_STATUS or SUBSCRIBE_NAMESPACE, and leaves it
+  off otherwise: moq-dev main declares it, moq-relay 0.17.x does not. `RelaySubscriber.maxAgeSupported` and
+  `MoqtSession.maxAgeSupported` report whether the relay did. Nothing changes for an application that sets no `maxAge`.
 
 ## 0.2.0
 
