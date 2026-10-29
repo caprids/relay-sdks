@@ -1111,7 +1111,11 @@ subscriber's `catchUp(key)` then replaces the subscription at the live edge, whi
 backlog. The want's `onRestarted` (reason `'catch-up'`) restarts the reader. Keep `catchUpAfterUs`
 below the clock's target latency, or a resync re-anchors on the late audio first. The subscriber's
 own delivery timeout goes on the SUBSCRIBE as well, for a relay that honours it. moq-relay 0.17.5 and
-0.17.7 ignore it.
+0.17.7 ignore it, and so does moq-dev main, which honours `maxAge` instead (the MoQ Timestamp
+extension's subscriber max age, in milliseconds). The SDK sends `maxAge` only to a relay whose SETUP
+declared it (`subscriber.maxAgeSupported`), so it is safe to set against any relay. It bounds what the
+relay still holds for this subscriber (a group it has not sent or not yet had acknowledged once a newer
+group is that old), not a queue further down the path: see spec/relay-interop.md, "Subscriber max age".
 
 ```ts
 // subscriber is a supervised subscriber (connectSupervisedSubscriber).

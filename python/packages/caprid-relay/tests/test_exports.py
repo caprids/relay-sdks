@@ -203,6 +203,7 @@ def test_spells_subscription_events_after_what_happened_not_after_the_protocol_m
 
 def test_names_the_subscriber_the_publisher_and_the_track_writer_by_role_and_by_demand() -> None:
     assert isinstance(RelaySubscriber.track_source, property)
+    assert isinstance(RelaySubscriber.max_age_supported, property)
     assert callable(RelaySubscriber.subscribe_events)
     assert callable(RelaySubscriber.subscribe_switchable)
     assert callable(RelaySubscriber.namespace_events)

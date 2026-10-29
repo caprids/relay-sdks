@@ -110,6 +110,13 @@ class SETUP_OPTION(IntEnum):
     ``1`` asks the peer to advertise namespaces only on a SUBSCRIBE_NAMESPACE, never as unsolicited
     PUBLISH_NAMESPACE. moq-relay honors it from 0.17.0. Even, so the value is a bare varint.
     """
+    MAX_AGE = 0x915C4
+    """Subscriber max age from the MoQ Timestamp extension (draft-lcurley-moq-timestamp), not a draft-22 option.
+
+    The sender understands the :attr:`PARAMETER_TYPE.MAX_AGE` parameter. The value is reserved (sent as ``1``,
+    ignored on receipt): the option's presence is the declaration. moq-dev main declares it; moq-relay 0.17.x does
+    not. A session sends MAX_AGE only to a peer that declared it.
+    """
 
 
 class PARAMETER_TYPE(IntEnum):
@@ -135,6 +142,8 @@ class PARAMETER_TYPE(IntEnum):
     NEW_GROUP_REQUEST = 0x32
     TRACK_NAMESPACE_PREFIX = 0x34
     INCLUDE_PROPERTIES = 0x35
+    MAX_AGE = 0x915C6
+    """MAX_AGE, the MoQ Timestamp extension's subscriber max age (SUBSCRIBE, REQUEST_UPDATE; not a draft-22 type)."""
 
 
 class TRACK_PROPERTY(IntEnum):
@@ -701,6 +710,16 @@ class MessageParameters:
     track_namespace_prefix: TrackNamespace | None = None
     include_properties: int | None = None
     """INCLUDE_PROPERTIES (§9.20.21): ``0`` asks the responder to send empty Track Properties. Default ``1``."""
+    max_age: int | None = None
+    """MAX_AGE (0x915C6, the MoQ Timestamp extension; not a draft-22 parameter).
+
+    The subscriber's max age in milliseconds, 0 to 2^53-1. A publisher that honors it skips, for this subscription
+    only, a group once a newer group supersedes it and either that successor arrived at the publisher's hop at least
+    this long ago or the group's media time trails the live edge by at least this much; the newest group never
+    expires. moq-dev main turns it into the subscription's ``max_delay``. A session sends it on SUBSCRIBE and
+    REQUEST_UPDATE only when the peer's SETUP declared ``SETUP_OPTION.MAX_AGE``, and never on FETCH, TRACK_STATUS or
+    SUBSCRIBE_NAMESPACE; see ``MoqtSession.max_age_supported``.
+    """
 
 
 ParameterScope: TypeAlias = Literal["message", "fill"]
@@ -717,6 +736,9 @@ _FILL_SCOPE_TYPES: frozenset[int] = frozenset(
         PARAMETER_TYPE.OBJECT_PROPERTY_FILTER,
     }
 )
+
+# Largest MAX_AGE value, in milliseconds: the extension calls a larger one malformed.
+_MAX_AGE_LIMIT = 2**53 - 1
 
 _GROUP_ORDER_WIRE: dict[str, int] = {"ascending": 0x1, "descending": 0x2}
 
@@ -800,6 +822,15 @@ def _collect_parameter_entries(
 
     if parameters.include_properties is not None:
         uint8(PARAMETER_TYPE.INCLUDE_PROPERTIES, parameters.include_properties)
+
+    # An even type, so a bare varint.
+    if parameters.max_age is not None:
+        max_age = parameters.max_age
+
+        if not isinstance(max_age, int) or isinstance(max_age, bool) or not 0 <= max_age <= _MAX_AGE_LIMIT:
+            raise ValueError(f"max_age out of range (0 to 2^53-1 milliseconds): {max_age!r}")
+
+        varint(PARAMETER_TYPE.MAX_AGE, max_age)
 
     return entries
 
@@ -911,6 +942,14 @@ def decode_message_parameters(
                 raise MoqtProtocolError(f"invalid INCLUDE_PROPERTIES value {include}")
 
             parameters.include_properties = include
+        elif parameter_type == PARAMETER_TYPE.MAX_AGE:
+            max_age = reader.read_varint()
+
+            # The extension calls a value above 2^53-1 malformed.
+            if max_age > _MAX_AGE_LIMIT:
+                raise MoqtProtocolError(f"MAX_AGE {max_age} exceeds 2^53-1")
+
+            parameters.max_age = max_age
         elif parameter_type in _RANGE_FILTER_TYPES:
             value_bytes = reader.read_bytes(reader.read_varint())
 

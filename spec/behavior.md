@@ -254,6 +254,20 @@ Messages are not a compatibility contract. The class and the point of rejection 
   timeouts on a SUBSCRIBE, and refuses FORWARD = 0 and range filters
   ([subscription parameters](relay-interop.md#subscription-parameters)). The SDK does not warn
   about an ignored parameter.
+- One parameter is the exception: MAX_AGE (`0x915C6`), the MoQ Timestamp extension's subscriber max
+  age, which `maxAge` / `max_age` carries in milliseconds (0 to 2^53-1). The extension forbids
+  sending it to a peer whose SETUP did not declare its MAX_AGE option (`0x915C4`), and on draft 17
+  and later a relay that does not know the parameter fails the SUBSCRIBE. So both SDKs send it on
+  SUBSCRIBE and REQUEST_UPDATE only when the relay's SETUP declared the option (any value: the
+  value is reserved), leave it off otherwise and on a request issued before the relay's SETUP
+  arrived, and never send it on FETCH, TRACK_STATUS or SUBSCRIBE_NAMESPACE, for which it is not
+  defined. The caller's parameters are not changed. `maxAgeSupported` / `max_age_supported` on the
+  subscriber connection says whether the relay declared it; it is known before
+  `connectRelaySubscriber` / `connect_relay_subscriber` returns and does not change. Neither SDK
+  declares the option itself:
+  it would invite a relay to send MAX_AGE to an SDK publisher, which does not act on it. moq-dev
+  main declares it and enforces the budget per subscription; moq-relay 0.17.x does neither
+  ([subscriber max age](relay-interop.md#subscriber-max-age-max_age)). Implemented in both SDKs.
 - The request timeout bounds only the subscription's initial response. An accepted subscription
   has no application inactivity deadline. The SDK schedules no application-level keepalive: keeping
   the transport connected is left to peer traffic and the transport's own keepalive, which
