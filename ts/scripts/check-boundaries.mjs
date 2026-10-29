@@ -159,6 +159,7 @@ assert.deepEqual(Object.keys(mediaPolicy).sort(), [
   'createDocumentService',
   'createFrameReader',
   'createFrameWriter',
+  'createReplaceableTrack',
   'mediaSubscribeParameters',
   'mediaTrackProperties',
 ]);

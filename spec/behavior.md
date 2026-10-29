@@ -1557,6 +1557,23 @@ Implemented in both SDKs.
   the group the frame was written to or that was reset on its behalf travels with it. Closing the
   writer FINs the open group, reports every waiting frame as dropped, and refuses further frames
   with `CLOSED`. The registered track stays the application's to close.
+- A replaceable track (`createReplaceableTrack` / `ReplaceableTrack`) publishes a track the
+  application can replace mid-stream, for interruptions ([track
+  replacement](media-layer.md#track-replacement)). It registers its first track under the given name
+  and lists it in the catalog (`catalog.service.update(catalog.build(name))` /
+  `catalog_service.update(build_catalog(name))`) at creation. Each replacement registers a new track,
+  `<name>-<n + 1>` for replacement `n` from 1 unless the application names it, updates the catalog
+  with that name, drops what the old track has not sent (frames still waiting resolve `dropped`, the
+  old frame writer closes) and closes the old track. The new track takes every frame written from the
+  call on. Registration or a catalog that fails leaves the current track in place, and a new track
+  registered before the catalog failed is closed; the failed attempt uses its name up, and the next
+  asks for the next. Closing retires the current track at once, so nothing waiting on it goes out
+  later, and finishes once every old track still closing has closed. Frames written to a replacement while the relay has
+  not subscribed to it wait, in order, until its first relay subscription or until the demand wait
+  (default 2 s, 0 for none) runs out, then go to the frame writer one at a time, so a listener that
+  subscribes once the new catalog reaches it misses none of the new reply. The first track never
+  waits. Closing drops what has not been sent and closes the current track; writes and replacements
+  are refused after it. Every frame still gets exactly one outcome.
 
 ## Media subscribing
 
@@ -1732,6 +1749,10 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   Move, indistinguishable from the new subscription's. Counters: delivered, late,
   skipped groups, resyncs, untimed, and in TypeScript early. The decisions are pinned by
   `vectors/frame-sequencer.json`.
+- A listener follows a track replacement by the catalog: `findReplacementTrack` /
+  `find_replacement_track` returns nothing while a newer catalog still lists the track playing (its
+  namespace and name), and otherwise the first track listed with that track's namespace, role and
+  render group, or nothing when there is none (a removal, not a replacement).
 
 ## Package boundaries
 

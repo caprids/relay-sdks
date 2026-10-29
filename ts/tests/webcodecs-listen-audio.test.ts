@@ -31,7 +31,15 @@ class FakeNode {
 
 class FakeWorkletNode extends FakeNode {
   static instances: FakeWorkletNode[] = [];
-  port = { onmessage: null, postMessage: vi.fn(), close: vi.fn() };
+  port: {
+    onmessage: ((event: { data: unknown }) => void) | null;
+    postMessage: ReturnType<typeof vi.fn>;
+    close: ReturnType<typeof vi.fn>;
+  } = {
+    onmessage: null,
+    postMessage: vi.fn(),
+    close: vi.fn(),
+  };
   constructor() {
     super();
     FakeWorkletNode.instances.push(this);
@@ -162,7 +170,7 @@ it('releases the player and subscriptions when the audio subscription cannot sta
   expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
 });
 
-it('fails setup when the audio subscription fails before the catalog arrives', async () => {
+it('fails setup when the audio subscription fails before the catalog arrives and the catalog names that track', async () => {
   const fake = fakeSubscriber();
   const onError = vi.fn();
   const failure = new Error('unroutable');
@@ -171,6 +179,8 @@ it('fails setup when the audio subscription fails before the catalog arrives', a
   const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
   expect(audio.request.track).toBe('audio');
   audio.handlers.onError?.(failure as never);
+  // Judged once the catalog has named the track: a broadcast whose track was replaced has another one.
+  fake.deliverCatalog(audioCatalog());
   await expect(listening).rejects.toBe(failure);
   // A setup failure is the rejection, not an onError call.
   expect(onError).not.toHaveBeenCalled();
@@ -497,5 +507,369 @@ it('reports a transcript segment that does not parse', async () => {
 
   expect(onError).toHaveBeenCalledTimes(1);
   expect(listener.transcript.lines).toEqual([]);
+  await listener.stop();
+});
+
+/** The relay ends a subscription with an error. */
+const failWith = (subscription: { handlers: Handlers } | undefined, error: Error) =>
+  subscription?.handlers.onError?.(error as unknown as Parameters<NonNullable<Handlers['onError']>>[0]);
+
+const replacementCatalog = (name: string) =>
+  buildMsfCatalog({ namespace: NAMESPACE, media: [{ role: 'audio', name }] });
+
+it('follows a track replacement: cuts the old track, restarts the sequencer and plays the new track', async () => {
+  const fake = fakeSubscriber();
+  const onTrackReplaced = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onTrackReplaced });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  expect(listener.track).toBe('audio');
+  const cut = vi.spyOn(listener.input, 'cut');
+  const restart = vi.spyOn(listener.sequencer, 'restart');
+
+  // The same catalog again replaces nothing.
+  fake.deliverCatalog(audioCatalog());
+  expect(cut).not.toHaveBeenCalled();
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2']);
+  expect(fake.subscriptions[1]?.cancel).toHaveBeenCalledTimes(1);
+  expect(cut).toHaveBeenCalledWith();
+  expect(restart).toHaveBeenCalledTimes(1);
+  expect(listener.track).toBe('audio-2');
+  expect(onTrackReplaced).toHaveBeenCalledWith({
+    from: 'audio',
+    to: 'audio-2',
+    phase: 'seen',
+    atUs: expect.any(Number),
+  });
+  await listener.stop();
+  expect(fake.subscriptions[2]?.cancel).toHaveBeenCalledTimes(1);
+  // Nothing follows a catalog after stop().
+  fake.deliverCatalog(replacementCatalog('audio-3'));
+  expect(fake.subscriptions).toHaveLength(3);
+});
+
+it('applies interrupts to the track that replaced the audio track', async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  fake.deliverCatalog(interruptCatalog());
+  const listener = await listening;
+  fake.deliverCatalog(
+    buildMsfCatalog({
+      namespace: NAMESPACE,
+      media: [{ role: 'audio', name: 'audio-2' }],
+      data: [{ name: INTERRUPT_TRACK }],
+    }),
+  );
+  const cut = vi.spyOn(listener.input, 'cut');
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ track: 'audio', untilUs: 1_000 }));
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ track: 'audio-2', untilUs: 2_000 }));
+  expect(cut).toHaveBeenCalledTimes(1);
+  expect(cut).toHaveBeenCalledWith({ track: 'audio-2', untilUs: 2_000 });
+  await listener.stop();
+});
+
+it('joins a broadcast whose audio track was replaced already', async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  // The conventional name is subscribed with the catalog; this talker retired that track before the listener joined.
+  const conventional = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  failWith(conventional, new Error('no such track'));
+  fake.deliverCatalog(replacementCatalog('audio-3'));
+  const listener = await listening;
+  expect(listener.track).toBe('audio-3');
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-3']);
+  // Its failure did not fail the setup, and its subscription was dropped for the catalog's track.
+  expect(conventional.cancel).toHaveBeenCalledTimes(1);
+  await listener.stop();
+});
+
+it('reports a later catalog that does not parse and keeps playing', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  fake.deliverCatalog(new TextEncoder().encode('not json'));
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(listener.track).toBe('audio');
+  await listener.stop();
+});
+
+it('follows a replacement that came while the listener was setting up', async () => {
+  const fake = fakeSubscriber();
+  const onTrackReplaced = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onTrackReplaced });
+  fake.deliverCatalog(audioCatalog());
+  // The player is still loading its worklet: the replacement arrives before the listener has started.
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  const listener = await listening;
+  expect(listener.track).toBe('audio-2');
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2']);
+  expect(fake.subscriptions[1]?.cancel).toHaveBeenCalledTimes(1);
+  expect(onTrackReplaced).toHaveBeenCalledWith(
+    expect.objectContaining({ from: 'audio', to: 'audio-2', phase: 'seen' }),
+  );
+  await listener.stop();
+});
+
+it('starts a new transcript for the track that replaced the audio track', async () => {
+  const fake = fakeSubscriber();
+  const onTranscript = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onTranscript });
+  const transcriptCatalog = (name: string) =>
+    buildMsfCatalog({
+      namespace: NAMESPACE,
+      media: [{ role: 'audio', name }],
+      data: [{ name: TRANSCRIPT_TRACK }],
+    });
+  fake.deliverCatalog(transcriptCatalog('audio'));
+  const listener = await listening;
+  deliver(
+    fake,
+    TRANSCRIPT_TRACK,
+    buildTranscriptSegment({ track: 'audio', seq: 0, final: true, fromUs: 1_000, untilUs: 1_500, text: 'old reply' }),
+  );
+  expect(listener.transcript.lines.map((line) => line.text)).toEqual(['old reply']);
+  fake.deliverCatalog(transcriptCatalog('audio-2'));
+  expect(listener.transcript.lines).toEqual([]);
+  // The new track's numbers start over: its segment 0 is not the old track's final.
+  deliver(
+    fake,
+    TRANSCRIPT_TRACK,
+    buildTranscriptSegment({ track: 'audio-2', seq: 0, final: true, fromUs: 2_000, untilUs: 2_500, text: 'new reply' }),
+  );
+  expect(listener.transcript.lines.map((line) => line.text)).toEqual(['new reply']);
+  expect(onTranscript).toHaveBeenCalledTimes(2);
+  await listener.stop();
+});
+
+it('keeps the old track when the replacement cannot be subscribed, and tries again on the next catalog', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const onTrackReplaced = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError, onTrackReplaced });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  const subscribe = fake.subscriber.subscribe as unknown as ReturnType<typeof vi.fn>;
+  const original = subscribe.getMockImplementation() as (request: Request, handlers: Handlers) => unknown;
+  const failure = new Error('The relay is gone');
+  subscribe.mockImplementationOnce(() => {
+    throw failure;
+  });
+  const cut = vi.spyOn(listener.input, 'cut');
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(onError).toHaveBeenCalledWith(failure);
+  expect(listener.track).toBe('audio');
+  expect(fake.subscriptions[1]?.cancel).not.toHaveBeenCalled();
+  expect(cut).not.toHaveBeenCalled();
+  expect(onTrackReplaced).not.toHaveBeenCalled();
+  subscribe.mockImplementation(original);
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(listener.track).toBe('audio-2');
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2']);
+  expect(fake.subscriptions[1]?.cancel).toHaveBeenCalledTimes(1);
+  expect(cut).toHaveBeenCalledTimes(1);
+  await listener.stop();
+});
+
+it('subscribes to a replacement again when the relay rejected its subscription, on the next catalog', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const onTrackReplaced = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError, onTrackReplaced });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  const cut = vi.spyOn(listener.input, 'cut');
+  const restart = vi.spyOn(listener.sequencer, 'restart');
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(listener.track).toBe('audio-2');
+
+  // An error of the replaced track's old subscription does not mark the current one failed.
+  const stale = new Error('late error of the old track');
+  failWith(fake.subscriptions[1], stale);
+  expect(onError).toHaveBeenLastCalledWith(stale);
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(fake.subscriptions).toHaveLength(3);
+
+  // The relay rejects the replacement's subscription, after the old one was closed.
+  const rejected = new Error('The relay rejected audio-2');
+  failWith(fake.subscriptions[2], rejected);
+  expect(onError).toHaveBeenLastCalledWith(rejected);
+  expect(fake.subscriptions).toHaveLength(3);
+  cut.mockClear();
+  restart.mockClear();
+  onTrackReplaced.mockClear();
+
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2', 'audio-2']);
+  expect(fake.subscriptions[2]?.cancel).toHaveBeenCalledTimes(1);
+  expect(cut).toHaveBeenCalledTimes(1);
+  expect(restart).toHaveBeenCalledTimes(1);
+  expect(listener.track).toBe('audio-2');
+  // It is the same track, not a replacement.
+  expect(onTrackReplaced).not.toHaveBeenCalled();
+
+  // The new subscription is healthy: a repeated catalog changes nothing.
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(fake.subscriptions).toHaveLength(4);
+
+  // A failure of the newest subscription marks it failed, but nothing runs after stop().
+  failWith(fake.subscriptions[3], rejected);
+  await listener.stop();
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(fake.subscriptions).toHaveLength(4);
+});
+
+it('reports an error of the catalog subscription after the listener started', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  expect(onError).not.toHaveBeenCalled();
+  const failure = new Error('The catalog subscription ended');
+  failWith(fake.catalog, failure);
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError).toHaveBeenCalledWith(failure);
+  await listener.stop();
+});
+
+it('reports an error of the catalog subscription that came while the listener was setting up', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(audioCatalog());
+  const failure = new Error('The catalog subscription ended');
+  failWith(fake.catalog, failure);
+  failWith(fake.catalog, new Error('a second one is not kept'));
+  const listener = await listening;
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError).toHaveBeenCalledWith(failure);
+  await listener.stop();
+});
+
+it('reports a later catalog that does not parse while the listener was setting up', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(audioCatalog());
+  // Still setting up (the player is not built yet): a second catalog arrives and does not parse.
+  fake.deliverCatalog(new TextEncoder().encode('not json'));
+  expect(onError).not.toHaveBeenCalled();
+  const listener = await listening;
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(listener.track).toBe('audio');
+  await listener.stop();
+});
+
+it('finishes a replacement when onTrackReplaced throws', async () => {
+  const fake = fakeSubscriber();
+  const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const listening = listenAudio(fake.subscriber, NAMESPACE, {
+    onTrackReplaced: () => {
+      throw new Error('the application failed');
+    },
+  });
+  fake.deliverCatalog(audioCatalog());
+  // A replacement during setup is followed once the listener starts; the callback's failure does not stop it.
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  const listener = await listening;
+  expect(listener.track).toBe('audio-2');
+  expect(fake.subscriptions[1]?.cancel).toHaveBeenCalledTimes(1);
+  expect(error).toHaveBeenCalledTimes(1);
+  await listener.stop();
+  expect(fake.subscriptions[2]?.cancel).toHaveBeenCalledTimes(1);
+});
+
+it('keeps a report posted before the cut from re-anchoring the clock for the new track', async () => {
+  FakeWorkletNode.instances.length = 0;
+  const fake = fakeSubscriber();
+  const onTrackReplaced = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onTrackReplaced });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  const node = FakeWorkletNode.instances[0] as FakeWorkletNode;
+  // A worklet report: the old track playing, or (with the cut's id) the first quantum after the cut.
+  const report = (frame: number, timestampUs: number | null, cutId: number | null) =>
+    node.port.onmessage?.({
+      data: {
+        frame,
+        rendered: frame + 128,
+        timestampUs,
+        playing: timestampUs !== null,
+        playStarts: 1,
+        heldUntilUs: null,
+        dryAtUs: null,
+        bufferedFrames: 0,
+        targetFrames: 2880,
+        underruns: 0,
+        trimmedFrames: 0,
+        concealedFrames: 0,
+        cutFrames: 0,
+        cutId,
+        acceleratedFrames: 0,
+        deceleratedFrames: 0,
+        droppedRecoveredFrames: 0,
+        droppedSynthesizedFrames: 0,
+        droppedRedundantFrames: 0,
+      },
+    });
+  report(0, 5_000_000, null);
+  expect(listener.clock.mode).toBe('audio');
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  // The restart reset the clock; a report the worklet posted before it applied the cut leaves it so.
+  expect(listener.clock.mode).toBe('idle');
+  report(960, 5_020_000, null);
+  expect(listener.clock.mode).toBe('idle');
+  expect(onTrackReplaced.mock.calls.map(([event]) => event.phase)).toEqual(['seen']);
+  // The report of the quantum after the cut: the old audio has stopped, and the new audio anchors the clock.
+  report(1920, 9_000_000, 1);
+  expect(onTrackReplaced.mock.calls.map(([event]) => event.phase)).toEqual(['seen', 'stopped', 'started']);
+  expect(listener.clock.mode).toBe('audio');
+  await listener.stop();
+});
+
+it('keeps a report posted before the cut from re-anchoring the clock when a failed subscription is retried', async () => {
+  FakeWorkletNode.instances.length = 0;
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError: () => {} });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  const node = FakeWorkletNode.instances[0] as FakeWorkletNode;
+  const report = (frame: number, timestampUs: number | null, cutId: number | null) =>
+    node.port.onmessage?.({
+      data: {
+        frame,
+        rendered: frame + 128,
+        timestampUs,
+        playing: timestampUs !== null,
+        playStarts: 1,
+        heldUntilUs: null,
+        dryAtUs: null,
+        bufferedFrames: 0,
+        targetFrames: 2880,
+        underruns: 0,
+        trimmedFrames: 0,
+        concealedFrames: 0,
+        cutFrames: 0,
+        cutId,
+      },
+    });
+  report(0, 5_000_000, null);
+  expect(listener.clock.mode).toBe('audio');
+  // The relay ends the audio subscription with an error; the next catalog that lists the track subscribes again.
+  failWith(fake.subscriptions[1], new Error('The relay ended audio'));
+  fake.deliverCatalog(audioCatalog());
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio']);
+  // The restart reset the clock; a report the worklet posted before it applied the cut leaves it so.
+  expect(listener.clock.mode).toBe('idle');
+  report(960, 5_020_000, null);
+  expect(listener.clock.mode).toBe('idle');
+  // The quantum after the cut: from here reports anchor the clock again.
+  report(1920, 9_000_000, 1);
+  expect(listener.clock.mode).toBe('audio');
+  expect(listener.clock.position()).toBeGreaterThanOrEqual(9_000_000);
   await listener.stop();
 });

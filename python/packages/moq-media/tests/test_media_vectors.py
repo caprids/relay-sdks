@@ -548,3 +548,43 @@ def test_namespace_must_not_be_a_bare_string() -> None:
         media.compose_player_url("https://relay.example", "room")
     with pytest.raises(ValueError, match="sequence of fields"):
         media.encode_namespace_name("room", "catalog")
+
+
+def _track(
+    name: str, *, role: str | None = "audio", render_group: int | None = 1, namespace: tuple[str, ...] = ("room",)
+):
+    return media.MsfCatalogTrack(
+        namespace=namespace, name=name, packaging="loc", is_live=True, role=role, render_group=render_group
+    )
+
+
+def test_find_replacement_track_is_none_while_the_catalog_still_lists_the_track() -> None:
+    current = _track("audio")
+    assert media.find_replacement_track(current, [_track("audio"), _track("audio-2")]) is None
+
+
+def test_find_replacement_track_finds_the_same_role_and_render_group_track() -> None:
+    current = _track("audio")
+    replacement = _track("audio-2")
+    assert media.find_replacement_track(current, [_track("video", role="video"), replacement]) is replacement
+
+
+def test_find_replacement_track_takes_the_first_of_several_candidates() -> None:
+    first, second = _track("audio-2"), _track("audio-3")
+    assert media.find_replacement_track(_track("audio"), [first, second]) is first
+
+
+def test_find_replacement_track_ignores_other_roles_render_groups_and_namespaces() -> None:
+    current = _track("audio")
+    assert media.find_replacement_track(current, [_track("video", role="video")]) is None
+    assert media.find_replacement_track(current, [_track("audio-2", render_group=2)]) is None
+    assert media.find_replacement_track(current, [_track("audio-2", render_group=None)]) is None
+    assert media.find_replacement_track(current, [_track("audio-2", namespace=("other",))]) is None
+    assert media.find_replacement_track(current, []) is None
+
+
+def test_find_replacement_track_does_not_count_a_same_named_track_of_another_namespace() -> None:
+    """A track of another namespace with the same name does not count as ``current`` still being listed."""
+    current = _track("audio")
+    replacement = _track("audio-2")
+    assert media.find_replacement_track(current, [_track("audio", namespace=("other",)), replacement]) is replacement

@@ -128,6 +128,11 @@ class FakeTrackWriter:
         for queue in self._watchers:
             queue.put_nowait(None)
 
+    def close(self) -> None:
+        """The application closes the track, as ``RelayTrackWriter.close`` does. Idempotent."""
+        if not self.closed:
+            self.end()
+
     async def _step(self, step: Step, group: FakeGroupWriter | None) -> None:
         index = self.calls[step]
         self.calls[step] += 1
