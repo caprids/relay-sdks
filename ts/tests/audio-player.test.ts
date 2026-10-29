@@ -500,6 +500,15 @@ describe('createAudioPlayer', () => {
     expect(input.stats.decoderResets).toBe(1);
   });
 
+  it('wants frames its output delay plus its jitter target ahead of the clock', async () => {
+    const { context, clock, player } = await setUp();
+    context.baseLatency = 0.01;
+    context.outputLatency = 0.02;
+    player.outputDelayUs = 5_000;
+    const input = player.addInput({ clock, jitterTargetUs: 80_000 });
+    expect(input.playoutLeadUs).toBe(10_000 + 20_000 + 5_000 + 80_000);
+  });
+
   it('keeps a cut through a resync, so interrupted audio arriving behind it stays dropped', async () => {
     const { context, player } = await setUp();
     const input = player.addInput();

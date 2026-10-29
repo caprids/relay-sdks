@@ -890,10 +890,16 @@ describe('createFrameSequencer: missingGroups', () => {
 });
 
 describe('createFrameSequencer: timestampPlayout', () => {
-  const at = (groupId: number, timestampUs: number) => object(groupId, 0, [{ type: LOC_TIMESTAMP, value: timestampUs }]);
+  const at = (groupId: number, timestampUs: number) =>
+    object(groupId, 0, [{ type: LOC_TIMESTAMP, value: timestampUs }]);
   const ids = (frames: { groupId: number }[]) => frames.map((frame) => frame.groupId);
   // A burst: `count` 20 ms frames from timestamp `fromUs`, groups from `firstGroup`, all arriving now.
-  const burst = (sequencer: ReturnType<typeof createFrameSequencer>, firstGroup: number, fromUs: number, count: number) => {
+  const burst = (
+    sequencer: ReturnType<typeof createFrameSequencer>,
+    firstGroup: number,
+    fromUs: number,
+    count: number,
+  ) => {
     for (let index = 0; index < count; index++) sequencer.object(at(firstGroup + index, fromUs + index * 20_000));
   };
 
@@ -1023,10 +1029,56 @@ describe('createFrameSequencer: timestampPlayout', () => {
     expect(sequencer.stats).toMatchObject({ late: 0, skippedGroups: 0 });
   });
 
+  it('gives back delay that underruns added: frames go out early by it, less 40 ms, for the jitter buffer to trim', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 100_000 } });
+    // The least delay: position 0 at local 0.
+    sequencer.object(at(0, 0));
+    expect(ids(sequencer.poll().frames)).toEqual([0]);
+    // 1 s on, the player has fallen 300 ms behind local time (underruns while a queue built), and 2 s of frames
+    // arrive at once as the queue drains.
+    now = 1_000_000;
+    clock.reportAudio(700_000);
+    burst(sequencer, 1, 720_000, 100);
+    const poll = sequencer.poll();
+    // Released up to the position plus the lead plus 260 ms: 700 + 100 + 300 - 40 = 1,060 ms.
+    expect(poll.frames.at(-1)?.timestampUs).toBe(1_060_000);
+    expect(poll.waitUs).toBe(20_000);
+    // Once the buffer's trim has moved the clock up to where it was, frames wait for the lead alone again.
+    clock.reportAudio(1_000_000);
+    const after = sequencer.poll();
+    expect(after.frames.at(-1)?.timestampUs).toBe(1_100_000);
+    expect(after.waitUs).toBe(20_000);
+  });
+
+  it('gives back nothing while the delay stays within 40 ms of the least, nor after a clock reset', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 100_000 } });
+    sequencer.object(at(0, 0));
+    sequencer.poll();
+    now = 1_000_000;
+    clock.reportAudio(970_000);
+    burst(sequencer, 1, 980_000, 50);
+    // 30 ms behind: within the tolerance, so up to 970 + 100 ms.
+    expect(sequencer.poll().frames.at(-1)?.timestampUs).toBe(1_060_000);
+    // A reset forgets the least delay: the delay after it is the new least.
+    clock.reset();
+    now = 2_000_000;
+    clock.reportAudio(1_500_000);
+    burst(sequencer, 51, 1_600_000, 50);
+    expect(sequencer.poll().frames.at(-1)?.timestampUs).toBe(1_600_000);
+  });
+
   it('refuses keyframe grouping and bad options', () => {
     const clock = createPlayoutClock({ now: () => 0 });
-    const make = (timestampPlayout: unknown, grouping: 'frame' | 'keyframe' = 'frame') => () =>
-      createFrameSequencer({ clock, grouping, timestampPlayout: timestampPlayout as boolean });
+    const make =
+      (timestampPlayout: unknown, grouping: 'frame' | 'keyframe' = 'frame') =>
+      () =>
+        createFrameSequencer({ clock, grouping, timestampPlayout: timestampPlayout as boolean });
     expect(make(true, 'keyframe')).toThrow(RangeError);
     expect(make({ horizonUs: 0 })).toThrow(RangeError);
     expect(make({ horizonUs: Number.POSITIVE_INFINITY })).toThrow(RangeError);
