@@ -206,6 +206,10 @@ Inputs and helpers:
 - `input.playbackRate`, from 0.5 to 2, lets a player that owns its latency nudge it.
 - An input's clock can be the player's own `AudioInputClock`. Each report passes it the input's stats, including
   `playStarts`, `heldUntilUs`, and `dryAtUs`.
+- For a quick join, `warmAudioPlayer(context)` loads what the player waits for (the worklet module and libopus) ahead of
+  it, and `createFrameHold()` keeps a frame reader's frames until the input exists, so the audio can be subscribed with
+  the catalog. `input.joinPhases` and `player.joinPhases` record when each step of the start happened. The WebCodecs
+  example's `listenAudio` joins this way.
 - `createRenderClock` times an `AudioContext`'s renders on the `performance.now()` clock, for capture and playout alike.
 
 Give an audio-only broadcast's playout clock `AUDIO_ONLY_TARGET_LATENCY_US` (500 ms) as its `targetLatencyUs`. The 2 s

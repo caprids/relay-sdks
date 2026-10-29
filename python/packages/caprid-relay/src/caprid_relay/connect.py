@@ -249,6 +249,18 @@ class RelaySubscriber:
         return self._lifetime.expires_at
 
     @property
+    def max_age_supported(self) -> bool:
+        """Whether the relay's SETUP declared subscriber max age (the MoQ Timestamp extension's MAX_AGE, 0x915C4).
+
+        When it did, a ``parameters.max_age`` on ``subscribe``, ``subscribe_switchable``, ``subscribe_events``,
+        ``update()`` or ``track_source.subscribe`` reaches it. While ``False`` the SDK leaves ``max_age`` off every
+        request, as the extension requires. moq-dev main declares it; moq-relay 0.17.x does not. Fixed for the
+        connection's life.
+        """
+        # The relay's SETUP arrived before the connection was returned, so this never changes.
+        return self._lifetime.session.max_age_supported
+
+    @property
     def track_source(self) -> MoqTrackSource:
         """This connection seen through the generic ``MoqTrackSource`` contract, for integrations such as players.
 

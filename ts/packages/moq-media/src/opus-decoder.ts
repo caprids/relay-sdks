@@ -51,9 +51,19 @@ const INITIAL_PACKET_BYTES = 1500;
 
 let loading: Promise<WasmOpusModule> | undefined;
 
+/** Options for {@link loadWasmOpus}. */
+export interface LoadWasmOpusOptions {
+  /**
+   * Decode the embedded module's base64 with the engine's own `Uint8Array.fromBase64` where it exists, instead of a
+   * JavaScript loop that holds the main thread for several milliseconds (tens on a busy page). Same bytes either way.
+   * Only the first load in a realm decodes; later calls share it. Default false.
+   */
+  nativeBase64?: boolean;
+}
+
 /** Compile and instantiate the module, once per realm. Rejects where WebAssembly is unavailable. */
-export function loadWasmOpus(): Promise<WasmOpusModule> {
-  loading ??= instantiate().catch((error: unknown) => {
+export function loadWasmOpus(options: LoadWasmOpusOptions = {}): Promise<WasmOpusModule> {
+  loading ??= instantiate(options.nativeBase64 === true).catch((error: unknown) => {
     loading = undefined;
     throw error;
   });
@@ -67,10 +77,21 @@ function base64Bytes(base64: string): Uint8Array {
   return bytes;
 }
 
-async function instantiate(): Promise<WasmOpusModule> {
+/** The engine's own base64 decoder (`Uint8Array.fromBase64`), where it has one. */
+const nativeBase64Decoder = (): ((base64: string) => Uint8Array) | undefined => {
+  const typed = Uint8Array as unknown as { fromBase64?: (base64: string) => Uint8Array };
+  return typeof typed.fromBase64 === 'function'
+    ? (base64) => (typed.fromBase64 as (b: string) => Uint8Array)(base64)
+    : undefined;
+};
+
+async function instantiate(nativeBase64: boolean): Promise<WasmOpusModule> {
   if (typeof WebAssembly === 'undefined') throw new Error('WebAssembly is unavailable');
+  const native = nativeBase64 ? nativeBase64Decoder() : undefined;
   // Asynchronous compilation: browsers refuse a synchronous compile of a module this size on the main thread.
-  const bytes = base64Bytes(OPUS_DECODER_WASM_BASE64) as Uint8Array<ArrayBuffer>;
+  const bytes = (
+    native ? native(OPUS_DECODER_WASM_BASE64) : base64Bytes(OPUS_DECODER_WASM_BASE64)
+  ) as Uint8Array<ArrayBuffer>;
   const { instance } = await WebAssembly.instantiate(bytes, {});
   const exports = instance.exports as unknown as OpusExports;
   return { createDecoder: (sampleRate, channels) => createDecoder(exports, sampleRate, channels) };

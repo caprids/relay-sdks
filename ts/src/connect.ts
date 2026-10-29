@@ -166,6 +166,13 @@ export interface RelaySubscriber {
    * with `UNAUTHORIZED` in phase `connection`; open a replacement before it. Supervised connections do.
    */
   readonly expiresAt: Date | undefined;
+  /**
+   * Whether the relay's SETUP declared subscriber max age (the MoQ Timestamp extension's MAX_AGE option, `0x915C4`), so
+   * a `parameters.maxAge` on `subscribe`, `subscribeSwitchable`, `subscribeEvents`, `update()` or `trackSource.subscribe`
+   * reaches it. While false the SDK leaves `maxAge` off every request, as the extension requires. moq-dev main declares
+   * it; moq-relay 0.17.x does not. Fixed for the connection's life.
+   */
+  readonly maxAgeSupported: boolean;
   /** Close this connection and all requests on it. Idempotent. */
   close(): void;
 }
@@ -236,6 +243,8 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
   return {
     closed,
     expiresAt: expiresAt === undefined ? undefined : new Date(expiresAt.getTime()),
+    // The relay's SETUP arrived before the connection was returned, so this never changes.
+    maxAgeSupported: connected.maxAgeSupported,
     trackSource,
     subscribe: (options, handlers) => {
       // Every argument (the handlers' shape included) before connection state.

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { loadWasmOpus } from '../packages/moq-media/src/opus-decoder.js';
 import { OPUS_DECODER_WASM_BASE64, OPUS_DECODER_WASM_SHA256 } from '../packages/moq-media/src/opus-decoder-wasm.js';
 
@@ -46,5 +46,37 @@ describe('the WebAssembly Opus decoder', () => {
     expect(decoder.recover(new Uint8Array(0), 960)).toBeUndefined();
     decoder.close();
     expect(() => decoder.conceal(960)).toThrow(/closed/);
+  });
+});
+
+describe('loadWasmOpus({ nativeBase64 })', () => {
+  it("decodes the module with the engine's Uint8Array.fromBase64 where it exists, once per realm", async () => {
+    const target = Uint8Array as unknown as { fromBase64?: (base64: string) => Uint8Array };
+    const had = Object.hasOwn(target, 'fromBase64');
+    const original = target.fromBase64;
+    const calls: number[] = [];
+    target.fromBase64 = (base64: string) => {
+      calls.push(base64.length);
+      return new Uint8Array(Buffer.from(base64, 'base64'));
+    };
+    try {
+      vi.resetModules();
+      const fresh = await import('../packages/moq-media/src/opus-decoder.js');
+      const decoder = (await fresh.loadWasmOpus({ nativeBase64: true })).createDecoder(48_000, 1);
+      expect(decoder.conceal(960)[0]).toHaveLength(960);
+      decoder.close();
+      expect(calls).toHaveLength(1);
+      // Later loads share the first.
+      await fresh.loadWasmOpus({ nativeBase64: true });
+      expect(calls).toHaveLength(1);
+      // Without the option, the loop decodes the same module.
+      vi.resetModules();
+      const plain = await import('../packages/moq-media/src/opus-decoder.js');
+      (await plain.loadWasmOpus()).createDecoder(48_000, 1).close();
+      expect(calls).toHaveLength(1);
+    } finally {
+      if (had && original) target.fromBase64 = original;
+      else delete target.fromBase64;
+    }
   });
 });

@@ -205,8 +205,11 @@ function resolveStart(filter: LocationFilter | undefined, largest: Location | un
  */
 export function createRelayHub({
   protocols = MOQT_PROTOCOL_IDS,
+  subscriberSetupOptions = [],
 }: {
   protocols?: readonly MoqtProtocolId[];
+  /** Options the hub's SETUP declares to subscriber connections (default none), such as `SETUP_OPTION.MAX_AGE`. */
+  subscriberSetupOptions?: readonly KeyValuePair[];
 } = {}): RelayHub {
   let destroyed = false;
   let nextSubscriberAlias = 1;
@@ -761,7 +764,7 @@ export function createRelayHub({
       try {
         const control = await server.createUnidirectionalStream();
 
-        await control.getWriter().write(encodeSetup());
+        await control.getWriter().write(encodeSetup(subscriberSetupOptions));
       } catch {
         // Closed before SETUP could land.
       }

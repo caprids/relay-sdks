@@ -59,6 +59,7 @@ describe('public vocabulary', () => {
       trackSource: true,
       closed: true,
       expiresAt: true,
+      maxAgeSupported: true,
       close: true,
     } satisfies Record<keyof RelaySubscriber, true>;
     const publisher = {
