@@ -191,6 +191,13 @@ export interface AudioPlayerInput {
   playbackRate: number;
   /** Counters, refreshed with each report from the worklet. */
   readonly stats: Readonly<AudioInputStats>;
+  /**
+   * How far ahead of the playout clock's position the input wants frames, in microseconds: the output delay (the
+   * context's `baseLatency` and `outputLatency` and the player's `outputDelayUs`) plus the jitter target now. A frame
+   * sequencer under timestamp playout releases held frames this far ahead (`timestampPlayout: { leadUs: () =>
+   * input.playoutLeadUs }`), so the input holds about its target of audio and nothing is trimmed.
+   */
+  readonly playoutLeadUs: number;
   /** Stop: the decoder closes, the worklet stops, and the clock goes to wall pacing. */
   remove(): void;
   /** Whether `remove()` or the player's `close()` was called. */
@@ -844,6 +851,9 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     },
     get stats() {
       return stats;
+    },
+    get playoutLeadUs() {
+      return Math.round(outputLatencyUs() + stats.jitterTargetUs);
     },
     get removed() {
       return removed;
