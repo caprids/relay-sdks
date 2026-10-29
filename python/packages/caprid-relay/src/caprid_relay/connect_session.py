@@ -13,6 +13,7 @@ import binascii
 import inspect
 import json
 import math
+import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -64,6 +65,10 @@ reads the JWT's ``exp`` claim, without verifying it. The provider runs once per 
 """
 
 
+_BASE64URL = re.compile(r"[A-Za-z0-9_-]+")
+"""A JWT part: unpadded base64url (RFC 7515 §2)."""
+
+
 def _not_json(constant: str) -> object:
     raise ValueError(f"{constant} is not JSON")
 
@@ -72,16 +77,16 @@ def _jwt_claims(token: str) -> dict[str, object] | None:
     """A JWT's claims, read without verifying the token.
 
     The relay verifies the token; the SDK only reads when the session will end and, with no endpoint,
-    where to dial. Anything that is not a JWT with a JSON object payload has none. Decoding is as
-    strict as the TypeScript SDK's: no characters outside base64, and no ``NaN`` or ``Infinity``.
+    where to dial. Anything that is not a JWT whose payload is a JSON object in unpadded base64url has
+    none, as in the TypeScript SDK: ``NaN`` and ``Infinity`` are not JSON.
     """
     parts = token.split(".")
 
-    if len(parts) != 3 or not parts[1]:
+    if len(parts) != 3 or not _BASE64URL.fullmatch(parts[1]):
         return None
 
     try:
-        payload = base64.b64decode(parts[1] + "=" * (-len(parts[1]) % 4), altchars=b"-_", validate=True)
+        payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
         claims = json.loads(payload.decode("utf-8"), parse_constant=_not_json)
     except (ValueError, binascii.Error, UnicodeDecodeError):
         return None

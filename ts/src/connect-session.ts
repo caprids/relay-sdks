@@ -475,6 +475,9 @@ function tokenRootedEndpoint(token: string, claims: JwtClaims | undefined): URL 
   }
 }
 
+/** A JWT part: unpadded base64url (RFC 7515 §2). */
+const BASE64URL = /^[A-Za-z0-9_-]+$/;
+
 /** The claims the SDK reads, unchecked. */
 interface JwtClaims {
   exp?: unknown;
@@ -487,9 +490,10 @@ interface JwtClaims {
  */
 function jwtClaims(token: string): JwtClaims | undefined {
   const parts = token.split('.');
-  if (parts.length !== 3 || !parts[1]) return undefined;
+  const payload = parts[1];
+  if (parts.length !== 3 || payload === undefined || !BASE64URL.test(payload)) return undefined;
   try {
-    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const base64 = payload.replace(/-/g, '+').replace(/_/g, '/');
     const json = new TextDecoder('utf-8', { fatal: true }).decode(
       Uint8Array.from(atob(base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=')), (c) =>
         c.charCodeAt(0),
