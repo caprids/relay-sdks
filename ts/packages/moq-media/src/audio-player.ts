@@ -159,9 +159,12 @@ export interface AudioInputStats {
   trimmedUs: number;
   /** Silence played in place of frames that never came. */
   concealedUs: number;
-  /** Audio synthesized in place of frames that never came: libopus packet-loss concealment. */
+  /**
+   * Audio synthesized in place of frames that never came: libopus packet-loss concealment. Counted as it is decoded,
+   * less, from the next report, what the jitter buffer dropped because it had run dry by the time it came.
+   */
   synthesizedUs: number;
-  /** Audio rebuilt for frames that never came from the next frame's in-band FEC. */
+  /** Audio rebuilt for frames that never came from the next frame's in-band FEC; counted as `synthesizedUs` is. */
   recoveredUs: number;
   /** Audio dropped by `cut()`. */
   cutUs: number;
@@ -195,6 +198,33 @@ export interface AudioPlayerInput {
   remove(): void;
   /** Whether `remove()` or the player's `close()` was called. */
   readonly removed: boolean;
+  /** When each step of this input's start happened, for measuring a join. */
+  readonly joinPhases: Readonly<AudioInputJoinPhases>;
+}
+
+/**
+ * When each step of an input's start happened, in microseconds on its clock's time source (`performance.now()` without
+ * a clock, or with a playout clock left at its default); `null` until it happens. The object is updated in place.
+ */
+export interface AudioInputJoinPhases {
+  /** `addInput` returned: the worklet node exists, and with loss concealment the libopus decoder. */
+  addedUs: number;
+  /** The first frame was pushed. */
+  firstPushUs: number | null;
+  /** The first decoded audio was handed to the worklet. */
+  firstDecodedUs: number | null;
+  /** When the worklet started playing for the first time: the render time of that quantum's first sample. */
+  firstPlayUs: number | null;
+  /** When that first sample reaches the speaker: `firstPlayUs` plus the output delay (as clock reports count it). */
+  firstAudibleUs: number | null;
+}
+
+/** When a player's shared parts were ready, in `performance.now()` microseconds. */
+export interface AudioPlayerJoinPhases {
+  /** The jitter buffer's worklet module was loaded on the context (by `warmAudioPlayer` or by the player). */
+  workletLoadedUs: number;
+  /** The libopus WebAssembly module was compiled; `null` when the player decodes with WebCodecs only. */
+  opusLoadedUs: number | null;
 }
 
 /** Plays any number of inputs into one output node. */
@@ -217,6 +247,8 @@ export interface AudioPlayer<Output extends AudioPlayerGainNode = AudioPlayerGai
   readonly inputs: readonly AudioPlayerInput[];
   /** Remove every input and disconnect the output. The context stays the caller's to close. */
   close(): void;
+  /** When the worklet module and the libopus module were ready, for measuring a join. */
+  readonly joinPhases: Readonly<AudioPlayerJoinPhases>;
 }
 
 const DEFAULT_DECODER_CONFIG: AudioDecoderConfig = { codec: 'opus', sampleRate: 48_000, numberOfChannels: 2 };
@@ -255,14 +287,18 @@ type WorkletNodeConstructor = new (
   }
 ) => WorkletNode;
 
-// A processor name registers once per context: a second module defining it would throw.
-const loaded = new WeakMap<AudioPlayerContext, Promise<void>>();
-function loadWorklet(context: AudioPlayerContext): Promise<void> {
+const performanceUs = () => Math.round(performance.now() * 1000);
+
+// A processor name registers once per context: a second module defining it would throw. Each load resolves with when
+// it finished, in performance.now() microseconds.
+const loaded = new WeakMap<AudioPlayerContext, Promise<number>>();
+function loadWorklet(context: AudioPlayerContext): Promise<number> {
   let loading = loaded.get(context);
   if (!loading) {
     const url = URL.createObjectURL(new Blob([AUDIO_PLAYER_WORKLET_SOURCE], { type: 'text/javascript' }));
     loading = context.audioWorklet
       .addModule(url)
+      .then(performanceUs)
       .catch((error: unknown) => {
         loaded.delete(context);
         throw error;
@@ -271,6 +307,43 @@ function loadWorklet(context: AudioPlayerContext): Promise<void> {
     loaded.set(context, loading);
   }
   return loading;
+}
+
+// The libopus module, once per realm, with when it was first ready; a failure is not kept, so a later call tries again.
+let opusLoaded: Promise<{ module: WasmOpusModule; atUs: number }> | undefined;
+function loadOpus(nativeBase64 = false): Promise<{ module: WasmOpusModule; atUs: number }> {
+  opusLoaded ??= loadWasmOpus({ nativeBase64 }).then(
+    (module) => ({ module, atUs: performanceUs() }),
+    (error: unknown) => {
+      opusLoaded = undefined;
+      throw error;
+    }
+  );
+  return opusLoaded;
+}
+
+/** Options for {@link warmAudioPlayer}. */
+export interface WarmAudioPlayerOptions {
+  /** As {@link AudioPlayerOptions.lossConcealment}: false skips the libopus module. Default true. */
+  lossConcealment?: boolean;
+}
+
+/**
+ * Start loading what {@link createAudioPlayer} waits for, both at once: the jitter buffer's worklet module on `context`
+ * and, with loss concealment, the libopus WebAssembly module. A player created on the context later finds them loaded
+ * or loading, and loads neither again. Call it as soon as the context exists, for example while the connection or the
+ * catalog is on its way, so a join does not wait for them after the catalog. Resolves once both are ready; rejects
+ * only when the worklet module fails (without libopus a player decodes with WebCodecs, as `createAudioPlayer` does).
+ * Optional: a player created without it loads both itself, as before.
+ */
+export async function warmAudioPlayer(
+  context: AudioPlayerContext,
+  options: WarmAudioPlayerOptions = {}
+): Promise<void> {
+  // The worklet module first: its load runs off the main thread, while the libopus module's decode and compile start.
+  const worklet = loadWorklet(context);
+  const opus = options.lossConcealment === false ? undefined : loadOpus(true).catch(() => undefined);
+  await Promise.all([worklet, opus]);
 }
 
 function duration(value: number | undefined, fallback: number, name: string): number {
@@ -384,9 +457,11 @@ export async function createAudioPlayer<Context extends AudioPlayerContext>(
   options: AudioPlayerOptions<Context>
 ): Promise<AudioPlayer<ReturnType<Context['createGain']>>> {
   const { context } = options;
-  await loadWorklet(context);
+  const workletLoadedUs = await loadWorklet(context);
   // Without the module, inputs fall back to WebCodecs: concealment is an improvement, never a requirement.
-  const opus = options.lossConcealment === false ? undefined : await loadWasmOpus().catch(() => undefined);
+  const loadedOpus = options.lossConcealment === false ? undefined : await loadOpus().catch(() => undefined);
+  const opus = loadedOpus?.module;
+  const joinPhases: AudioPlayerJoinPhases = { workletLoadedUs, opusLoadedUs: loadedOpus?.atUs ?? null };
   const output = context.createGain() as ReturnType<Context['createGain']>;
   const inputs: AudioPlayerInput[] = [];
   let outputDelayUs = 0;
@@ -421,6 +496,7 @@ export async function createAudioPlayer<Context extends AudioPlayerContext>(
       for (const input of [...inputs]) input.remove();
       output.disconnect();
     },
+    joinPhases,
   };
   return player;
 }
@@ -493,6 +569,13 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   };
   const renders: RenderClock = createRenderClock();
   const localNow = () => (clock ? clock.localNow() : performance.now() * 1000);
+  const joinPhases: AudioInputJoinPhases = {
+    addedUs: 0,
+    firstPushUs: null,
+    firstDecodedUs: null,
+    firstPlayUs: null,
+    firstAudibleUs: null,
+  };
   const resampler = createResampler(channels);
   let removed = false;
   let decoder: AudioDecoder | undefined;
@@ -519,17 +602,28 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     else node.port.postMessage(command);
   };
 
-  // Resample decoded planes to the context's rate and hand them to the worklet.
-  const deliver = (timestamp: number, planes: Float32Array[], fromRate: number) => {
+  // Resample decoded planes to the context's rate and hand them to the worklet. `source`: the frame that arrived, or
+  // audio filled in for a lost one, which the worklet holds only where it continues held audio or playback.
+  type Source = 'arrival' | 'recovered' | 'synthesized';
+  const deliver = (timestamp: number, planes: Float32Array[], fromRate: number, source: Source) => {
     const { planes: resampled, offset } = resampler.resample(planes, fromRate, sampleRate);
     const timestampUs = timestamp + Math.round((offset * MICROSECONDS_PER_SECOND) / fromRate);
     if (resampled[0]?.length) {
+      joinPhases.firstDecodedUs ??= localNow();
+      if (source === 'synthesized') synthesizedSentFrames += resampled[0].length;
+      else if (source === 'recovered') recoveredSentFrames += resampled[0].length;
       post(
-        { type: 'pcm', timestampUs, planes: resampled },
+        source === 'arrival'
+          ? { type: 'pcm', timestampUs, planes: resampled }
+          : { type: 'pcm', timestampUs, planes: resampled, fill: source },
         resampled.map((plane) => plane.buffer as ArrayBuffer)
       );
     }
   };
+  // Filled audio sent to the worklet, in the context's frames as the worklet counts what it drops: the stats subtract
+  // that at each report.
+  let synthesizedSentFrames = 0;
+  let recoveredSentFrames = 0;
   // With loss concealment, Opus decodes here, synchronously, with libopus: one decoder for the input's life, reset
   // rather than replaced, so a gap is filled from the decoder's own state instead of starting a new one after it.
   const wasm: WasmOpusDecoder | undefined =
@@ -542,6 +636,11 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   const opusUs = (samples: number) => Math.round((samples * MICROSECONDS_PER_SECOND) / OPUS_RATE);
   // Whether the last packet decoded was CELT-only, which libopus cannot follow with FEC.
   let previousCelt = false;
+  // Reset the libopus decoder: it holds no CELT state after, so the next gap may use FEC again.
+  const resetWasm = (decoderNow: WasmOpusDecoder) => {
+    decoderNow.reset();
+    previousCelt = false;
+  };
   // Fill the audio missing from `fromUs` up to the frame at `untilUs`, whose packet is `next`. Its in-band FEC rebuilds
   // the last frame before it (one Opus frame of `next`'s duration: LBRR covers no more); packet-loss concealment fills
   // the rest, MAX_SYNTHESIZED_US at most for the whole gap. Past that the worklet plays silence, as for any gap.
@@ -554,7 +653,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     const synthesize = (us: number) => {
       const samples = opusSamples(Math.min(us, budgetUs));
       if (samples <= 0) return false;
-      deliverOpus(atUs, decoderNow.conceal(samples));
+      deliverOpus(atUs, decoderNow.conceal(samples), 'synthesized');
       stats.synthesizedUs += opusUs(samples);
       atUs += opusUs(samples);
       budgetUs -= opusUs(samples);
@@ -574,11 +673,12 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       recovered = undefined;
     }
     if (recovered) {
-      deliverOpus(fecAtUs, recovered);
+      deliverOpus(fecAtUs, recovered, 'recovered');
       stats.recoveredUs += opusUs(samples);
     } else synthesize(opusUs(samples));
   };
-  const deliverOpus = (timestampUs: number, planes: OpusPlanes) => deliver(timestampUs, planes, OPUS_RATE);
+  const deliverOpus = (timestampUs: number, planes: OpusPlanes, source: Source) =>
+    deliver(timestampUs, planes, OPUS_RATE, source);
   // Decode a frame with libopus, after filling any gap before it.
   const sendWasm = (
     decoderNow: WasmOpusDecoder,
@@ -597,16 +697,16 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       } catch (concealError) {
         failed = true;
         error = concealError;
-        decoderNow.reset();
+        resetWasm(decoderNow);
         resampler.reset();
       }
     }
     try {
-      deliverOpus(frame.timestampUs, decoderNow.decode(frame.payload));
+      deliverOpus(frame.timestampUs, decoderNow.decode(frame.payload), 'arrival');
       previousCelt = opusFrameMode(frame.payload) === 'celt';
       stats.decoded++;
     } catch (decodeError) {
-      decoderNow.reset();
+      resetWasm(decoderNow);
       resampler.reset();
       failed = true;
       error = decodeError;
@@ -629,7 +729,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     if (decoder) stats.decoderResets++;
     if (wasm) {
       if (stats.decoded > 0) stats.decoderResets++;
-      wasm.reset();
+      resetWasm(wasm);
     }
     closeDecoders();
     epoch++;
@@ -657,7 +757,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
             data.copyTo(plane, { planeIndex: channel, format: 'f32-planar' });
             planes.push(plane);
           }
-          deliver(data.timestamp, planes, data.sampleRate);
+          deliver(data.timestamp, planes, data.sampleRate, 'arrival');
         } finally {
           data.close();
         }
@@ -736,12 +836,21 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     stats.underruns = report.underruns;
     stats.trimmedUs = toUs(report.trimmedFrames);
     stats.concealedUs = toUs(report.concealedFrames);
+    stats.synthesizedUs = toUs(synthesizedSentFrames - report.droppedSynthesizedFrames);
+    stats.recoveredUs = toUs(recoveredSentFrames - report.droppedRecoveredFrames);
     workletCutUs = toUs(report.cutFrames);
     stats.cutUs = workletCutUs + cutOnArrivalUs;
     const next = toFrames(ceilingUs());
     if (Math.abs(next - ceiling) >= toFrames(5_000)) {
       ceiling = next;
       post({ type: 'ceiling', maxTargetFrames: ceiling });
+    }
+    if (report.firstPlayFrame !== null && joinPhases.firstPlayUs === null) {
+      const firstPlayUs = renders.renderedAtUs((report.firstPlayFrame * MICROSECONDS_PER_SECOND) / sampleRate);
+      if (firstPlayUs !== undefined) {
+        joinPhases.firstPlayUs = firstPlayUs;
+        joinPhases.firstAudibleUs = firstPlayUs + outputLatencyUs();
+      }
     }
     if (clock && report.timestampUs !== null) {
       // When that sample renders, on the clock's own time source, and then reaches the speaker.
@@ -756,6 +865,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   const input: AudioPlayerInput = {
     push(frame) {
       if (removed) return;
+      joinPhases.firstPushUs ??= localNow();
       const { timestampUs, payload, discontinuity } = frame;
       if (discontinuity === 'resync' || discontinuity === 'restart') flush();
       if (discontinuity === 'restart') arrivalCuts = [];
@@ -777,15 +887,17 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
         const cutInGap =
           expectedUs !== undefined &&
           arrivalCuts.some((cut) => cut.fromUs < timestampUs && cut.untilUs > (expectedUs as number));
-        // Only while the buffer plays: once it ran dry, the worklet skips the missing audio rather than playing it
-        // late, so filling it would add its length to the delay (as the worklet fills a gap only inside held audio).
-        const playingNow = stats.playing && stats.dryAtUs === null;
-        if (gapUs > TIMESTAMP_TOLERANCE_US && gapUs <= MAX_FILLED_GAP_US && !cutInGap && playingNow)
-          gapFromUs = expectedUs;
-        else if (cutInGap) resampler.reset();
-        else if (gapUs > MAX_FILLED_GAP_US) {
+        // Filled whatever the buffer's state: the worklet holds the fill only where it continues held audio or playback,
+        // and drops it once the buffer ran dry, where it would add its length to the delay. Only the worklet knows
+        // which in time; the main thread's reports are up to one interval old. The decoder synthesized the gap either
+        // way, so its state follows on.
+        const skipped = gapUs > TIMESTAMP_TOLERANCE_US;
+        if (skipped && gapUs <= MAX_FILLED_GAP_US && !cutInGap) gapFromUs = expectedUs;
+        else if (skipped || cutInGap) {
+          // A gap left unfilled (over a cut, or over 1 s): the frame does not follow the last one decoded, so the
+          // decoder starts afresh rather than decode it from state that belongs before the gap.
           if (stats.decoded > 0) stats.decoderResets++;
-          wasm.reset();
+          resetWasm(wasm);
           resampler.reset();
         }
         const fillUs = lastDurationUs ?? frameUs ?? 20_000;
@@ -848,6 +960,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     get removed() {
       return removed;
     },
+    joinPhases,
     remove() {
       if (removed) return;
       removed = true;
@@ -864,5 +977,6 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   };
   // A frame reader's onFrame can be the method itself.
   input.push = input.push.bind(input);
+  joinPhases.addedUs = localNow();
   return input;
 }

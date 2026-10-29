@@ -229,6 +229,7 @@ export function fakeSubscriber(expiresAt?: Date): FakeSubscriber {
     subscriptions: [],
     discoveries: [],
     expiresAt,
+    maxAgeSupported: false,
     closed: ended.promise,
     trackSource: undefined as never,
     end(error) {

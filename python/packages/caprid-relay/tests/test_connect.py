@@ -38,6 +38,8 @@ from moq_core import (
     SubscriptionHandlers,
 )
 from moq_core.control_messages import (
+    SETUP_OPTION,
+    KeyValuePair,
     Subscribe,
     encode_goaway,
     encode_publish_done,
@@ -745,6 +747,19 @@ class TestCredentialExpiry:
         _, connection, factory = await connect_fake(connections, get_token=get_token)
         assert factory.calls[0][0] == f"{ENDPOINT}?jwt=opaque"
         assert connection.expires_at == expires_at
+
+    async def test_reports_whether_the_relays_setup_declared_subscriber_max_age(
+        self, connections: list[RelaySubscriber]
+    ) -> None:
+        _, without, _ = await connect_fake(connections)
+        assert without.max_age_supported is False
+
+        fake = create_fake_transport()
+        connecting = asyncio.ensure_future(connect_relay_subscriber(ENDPOINT, create_transport=Factory(fake)))
+        fake.send_server_setup([KeyValuePair(SETUP_OPTION.MAX_AGE, 1)])
+        declared = await connecting
+        connections.append(declared)
+        assert declared.max_age_supported is True
 
     async def test_reads_a_bare_jwts_exp_claim_without_verifying_it(self, connections: list[RelaySubscriber]) -> None:
         _, connection, _ = await connect_fake(connections, get_token=lambda: _jwt({"exp": 1_900_000_000}))

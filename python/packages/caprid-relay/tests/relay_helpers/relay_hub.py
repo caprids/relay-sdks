@@ -238,6 +238,8 @@ class RelayHub:
         """OBJECT_DELIVERY_TIMEOUT to put on upstream SUBSCRIBEs; moq-relay 0.15.8 sends none (#167)."""
         self.upstream_subgroup_delivery_timeout: int | None = None
         """SUBGROUP_DELIVERY_TIMEOUT to put on upstream SUBSCRIBEs; moq-relay 0.15.8 sends none (#167)."""
+        self.subscriber_setup_options: Sequence[KeyValuePair] = ()
+        """Setup Options the hub's SETUP carries on a subscriber connection (e.g. ``SETUP_OPTION.MAX_AGE``)."""
         self.updates_acknowledged: list[str] = []
         """Tracks whose upstream REQUEST_UPDATE the publisher answered with REQUEST_OK, in order."""
         self._update_upstream: Callable[[str, MessageParameters], Coroutine[Any, Any, None]] | None = None
@@ -782,7 +784,7 @@ class RelayHub:
         async def start() -> None:
             try:
                 control = await server.create_unidirectional_stream()
-                await control.write(encode_setup())
+                await control.write(encode_setup(self.subscriber_setup_options))
             except Exception:
                 pass
 

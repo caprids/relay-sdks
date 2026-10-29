@@ -18,6 +18,7 @@ import {
   encodePublishStateNotify,
   encodeRequestError,
   encodeRequestOk,
+  encodeRequestUpdate,
   encodeSetup,
   encodeSubscribe,
   encodeSubscribeOk,
@@ -129,6 +130,15 @@ describe('encodeSubscribe', () => {
     expect(message).toMatchObject({ kind: 'subscribe', parameters });
   });
 
+  it('round-trips a subscriber max age', () => {
+    const parameters: MessageParameters = { subscriberPriority: 16, maxAge: 500 };
+    const [message] = decodeAll(
+      encodeSubscribe({ requestId: 4, trackNamespace: ['live'], trackName: 'audio', parameters })
+    );
+
+    expect(message).toMatchObject({ kind: 'subscribe', requestId: 4, parameters });
+  });
+
   it('rejects empty namespace fields', () => {
     expect(() => encodeSubscribe({ requestId: 0, trackNamespace: [''], trackName: 't' })).toThrow(MoqtProtocolError);
   });
@@ -184,6 +194,16 @@ describe('encodeRequestOk', () => {
 
   it.each(MOQT_PROTOCOL_IDS)('adds no bytes for empty Track Properties on %s', (protocol) => {
     expect(encodeRequestOk({}, protocol, [])).toEqual(encodeRequestOk({}, protocol));
+  });
+});
+
+describe('encodeRequestUpdate', () => {
+  it('round-trips a subscriber max age', () => {
+    const parameters: MessageParameters = { forward: 1, maxAge: 900 };
+
+    expect(decodeAll(encodeRequestUpdate(6, parameters))).toEqual([
+      { kind: 'request-update', requestId: 6, parameters },
+    ]);
   });
 });
 
@@ -358,6 +378,7 @@ describe('encodeMessageParameters', () => {
       },
       newGroupRequest: 42,
       includeProperties: 0,
+      maxAge: 250,
     };
     const decoded = decodeMessageParameters(new ByteReader(encodeParameters(parameters)));
 
@@ -428,6 +449,56 @@ describe('encodeMessageParameters', () => {
     expect(() => decodeMessageParameters(new ByteReader(Uint8Array.of(0x01, 0x35, 0x02)))).toThrow(
       /INCLUDE_PROPERTIES/
     );
+  });
+
+  // The MoQ Timestamp extension's MAX_AGE (0x915C6): an even type, so a bare varint, in the delta-typed list.
+  it('frames MAX_AGE as a bare varint after a 3-byte type delta', () => {
+    const bytes = Uint8Array.of(0x01, 0xc9, 0x15, 0xc6, 0x81, 0xf4);
+    const reader = new ByteReader(bytes);
+
+    expect(PARAMETER_TYPE.MAX_AGE).toBe(0x915c6);
+    expect(encodeParameters({ maxAge: 500 })).toEqual(bytes);
+    expect(decodeMessageParameters(reader)).toEqual({ maxAge: 500 });
+    expect(reader.remaining).toBe(0);
+  });
+
+  it('writes MAX_AGE last, its type as a delta from the one before', () => {
+    // SUBSCRIBER_PRIORITY is 0x20: count 2, type 0x20, value 16, then delta 0x915c6 - 0x20 = 0x915a6, then 500.
+    const bytes = Uint8Array.of(0x02, 0x20, 0x10, 0xc9, 0x15, 0xa6, 0x81, 0xf4);
+    const parameters = { subscriberPriority: 16, maxAge: 500 };
+
+    expect(0x915c6 - 0x20).toBe(0x915a6);
+    expect(encodeParameters(parameters)).toEqual(bytes);
+    expect(decodeMessageParameters(new ByteReader(bytes))).toEqual(parameters);
+  });
+
+  it.each([0, 1, 2 ** 53 - 1])('round-trips a MAX_AGE of %d', (maxAge) => {
+    expect(decodeMessageParameters(new ByteReader(encodeParameters({ maxAge })))).toEqual({ maxAge });
+  });
+
+  it.each([-1, 1.5, 2 ** 53, Number.NaN])('refuses to encode a MAX_AGE of %d', (maxAge) => {
+    expect(() => encodeParameters({ maxAge })).toThrow(RangeError);
+  });
+
+  it.each([
+    ['8-byte', [0xfe, 0x20, 0, 0, 0, 0, 0, 0]],
+    ['9-byte', [0xff, 0, 0x20, 0, 0, 0, 0, 0, 0]],
+  ])('rejects a MAX_AGE of 2^53 in the %s varint form', (_form, varint) => {
+    const writer = new ByteWriter();
+
+    writer.writeVarint(1);
+    writer.writeVarint(PARAMETER_TYPE.MAX_AGE);
+    writer.writeBytes(Uint8Array.from(varint));
+    expect(() => decodeMessageParameters(new ByteReader(writer.toBytes()))).toThrow(MoqtProtocolError);
+  });
+
+  it('accepts a MAX_AGE of 2^53 - 1 in the 8-byte varint form', () => {
+    const writer = new ByteWriter();
+
+    writer.writeVarint(1);
+    writer.writeVarint(PARAMETER_TYPE.MAX_AGE);
+    writer.writeBytes(Uint8Array.of(0xfe, 0x1f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff));
+    expect(decodeMessageParameters(new ByteReader(writer.toBytes()))).toEqual({ maxAge: 2 ** 53 - 1 });
   });
 
   it('encodes FILL_PARAMETERS as a nested parameter list', () => {

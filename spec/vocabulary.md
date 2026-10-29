@@ -46,6 +46,7 @@ without a row here is a bug.
 | Options every connection takes: endpoint, token provider, lifetime cancellation, connection deadline, transport | `ConnectRelayOptions` (`url`, `getToken`, `signal`, `connectTimeoutMs`, `createTransport`) | the shared keyword arguments of both entry points (`url`, `get_token`, `cancellation`, `connect_timeout`, `create_transport`) |
 | A token with the time the relay stops honoring it, which a token provider may return | `RelayCredential` (`token`, `expiresAt`: a `Date`) | `RelayCredential` (`token`, `expires_at`: an aware `datetime`) |
 | When the relay will end a connection for its credential's expiry | `connection.expiresAt` (`Date \| undefined`) | `connection.expires_at` (`datetime \| None`) |
+| A subscriber's max age on its SUBSCRIBE (the MoQ Timestamp extension's MAX_AGE, `0x915C6`, in milliseconds), and whether the relay declared it so the SDK sends it | `parameters.maxAge` (`MessageParameters`); `subscriber.maxAgeSupported` (`boolean`) | `parameters.max_age` (`MessageParameters`); `subscriber.max_age_supported` (`bool`) |
 | Options only a subscriber connection takes | `ConnectRelaySubscriberOptions`: the shared options plus `requestTimeoutMs` | `connect_relay_subscriber`'s shared keyword arguments plus `request_timeout` |
 | Options only a publisher connection takes | `ConnectRelayPublisherOptions`: the shared options plus `namespace`; no request deadline | `connect_relay_publisher`'s shared keyword arguments plus `namespace`; no request deadline |
 | Connect from Node over native QUIC, and the trust options that takes | `@caprid/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
@@ -665,6 +666,9 @@ the format package still does not depend on the product package.
 | Concept | TypeScript | Python |
 | --- | --- | --- |
 | One player per `AudioContext` | `await createAudioPlayer({ context })` → `AudioPlayer` (`AudioPlayerOptions`) | — |
+| Load what a player waits for ahead of it, both at once | `await warmAudioPlayer(context, { lossConcealment? })` (`WarmAudioPlayerOptions`) | — |
+| When a join's steps happened | `input.joinPhases`: `AudioInputJoinPhases { addedUs, firstPushUs, firstDecodedUs, firstPlayUs, firstAudibleUs }`; `player.joinPhases`: `AudioPlayerJoinPhases { workletLoadedUs, opusLoadedUs }` | — |
+| Frames kept for a consumer not ready yet, passed on in order | `createFrameHold()` → `FrameHold { push(frame), release(consumer), clear(), isReleased, stats }` (`FrameHoldStats { held, maxHeld, released }`) | — |
 | The mix, which the application routes | `player.output` (the context's own gain node type) | — |
 | Delay after the output that the context does not report | `player.outputDelayUs` (settable) | — |
 | One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, playbackRate, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
