@@ -20,7 +20,9 @@ the relay over WebTransport. Both fleets already serve MOQT on QMux over WebSock
   application passes the adapter as `createTransport`, as it does `@mux/relay-quic`'s.
 - **The fallback is opt-in.** The default transport stays the browser's WebTransport, and nothing falls back unless
   the application passes `withWebSocketFallback()`. It dials WebTransport first and WebSocket after a failed handshake
-  or one that outlasts a timeout (4 s by default), one dial after the other.
+  or one that outlasts a timeout (4 s by default), one dial after the other. Superseded in part by #392: the WebSocket
+  now races WebTransport after a 250 ms head start (`webSocketDelayMs`), and the first ready wins, so a network that
+  drops UDP no longer costs every connect 4 s.
 - **The factory declares a third framing, `'websocket'`**, which sends the same SETUP as `'webtransport'` (no PATH or
   AUTHORITY: the upgrade request carries the URL), rather than passing itself off as a WebTransport session.
 

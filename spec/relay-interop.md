@@ -800,8 +800,10 @@ The crash rows had the subscriber on WebSocket in every run; only the publisher'
 A dial that falls back to WebSocket costs the time the WebTransport attempt took: in Chromium 147
 against the local relay, a connect took 8–14 ms over WebTransport, 48–60 ms straight over WebSocket,
 64–72 ms through `withWebSocketFallback` when UDP to the port was rejected (ICMP port unreachable),
-and 4.05–4.08 s when it was silently dropped, the default `handshakeTimeoutMs` plus the WebSocket
-connect (3 of 3 each, UDP filtered with nftables on the relay host).
+and 4.05–4.08 s when it was silently dropped, the then-default 4 s handshake timeout plus the
+WebSocket connect (3 of 3 each, UDP filtered with nftables on the relay host). Since #392 the
+WebSocket dial races WebTransport after a 250 ms head start, so a silently dropped UDP path should
+cost about 250 ms plus the WebSocket connect; that has not been measured yet.
 
 The live scenario ([behavior](behavior.md#live-smoke-test)) passed over WebSocket in Node 24,
 Chromium 147, Firefox 148 and Playwright's WebKit (Safari 26.4's engine, on Linux), and through the

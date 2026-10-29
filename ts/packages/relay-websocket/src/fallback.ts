@@ -1,6 +1,6 @@
 /**
- * WebTransport first, then QMux over WebSocket: the fallback policy (spec/behavior.md, "Transport fallback"). One
- * transport stands for whichever dial wins, so the SDK's connect call sees a single factory.
+ * WebTransport first, then QMux over WebSocket racing it: the fallback policy (spec/behavior.md, "Transport
+ * fallback"). One transport stands for whichever dial wins, so the SDK's connect call sees a single factory.
  */
 import type { BidirectionalStreamLike, MoqtSendStreamOptions, MoqtTransport } from '@caprid/moq-core';
 import { type CloseInfo, WebSocketSessionError } from './errors.js';
@@ -15,15 +15,16 @@ export type FallbackCarrier = 'webtransport' | 'websocket';
 /** Options for {@link withWebSocketFallback}. */
 export interface WebSocketFallbackOptions {
   /**
-   * How long the WebTransport handshake may take before the dial gives up on it and opens a WebSocket instead, in
-   * milliseconds. Default 4000: Chromium itself gives up on an unanswered handshake after about 4 seconds. Keep it
-   * well inside the connection's `connectTimeoutMs`, which covers both handshakes and SETUP.
+   * The WebTransport dial's head start, in milliseconds: if its handshake has not completed by then, the WebSocket dial
+   * starts too and the first to be ready carries the session. Default 250, the Connection Attempt Delay of Happy
+   * Eyeballs (RFC 8305). 0 starts both dials at once. A WebTransport handshake that fails sooner starts the WebSocket
+   * dial straight away.
    */
-  handshakeTimeoutMs?: number;
+  webSocketDelayMs?: number;
   /**
-   * Called once when a dial falls back to WebSocket, with why WebTransport was not used: its handshake failed or timed
-   * out (the error), or the runtime has no usable `WebTransport` (`undefined`). For logging; it cannot stop the
-   * fallback.
+   * Called once when a connection ends up on WebSocket, with why WebTransport was not used: its handshake failed, the
+   * WebSocket was ready first (both an error), or the runtime has no usable `WebTransport` (`undefined`). For logging;
+   * it cannot change the outcome.
    */
   onFallback?: (reason: unknown) => void;
 }
@@ -34,22 +35,39 @@ function usableWebTransport(): typeof WebTransport | undefined {
   return 'protocol' in WebTransport.prototype ? WebTransport : undefined;
 }
 
-/** The handshake timeout `value` gives, 4 s when it is undefined; a TypeError or RangeError for one a timer cannot hold. */
-export function assertHandshakeTimeout(value: unknown): number {
-  if (value === undefined) return 4_000;
-  if (typeof value !== 'number') throw new TypeError('handshakeTimeoutMs must be a number of milliseconds');
-  if (!Number.isFinite(value) || value <= 0 || value > 2_147_483_647)
-    throw new RangeError('handshakeTimeoutMs must be between 0 (exclusive) and 2147483647 milliseconds');
+/**
+ * The WebSocket delay the options give, 250 ms when unset; a TypeError or RangeError for one a timer cannot hold, or
+ * for `handshakeTimeoutMs`, which it replaced.
+ */
+export function assertFallbackOptions(options: WebSocketFallbackOptions): number {
+  if ('handshakeTimeoutMs' in options)
+    throw new TypeError(
+      'handshakeTimeoutMs was replaced by webSocketDelayMs: the WebSocket dial now races WebTransport',
+    );
+  const value: unknown = options.webSocketDelayMs;
+  if (value === undefined) return 250;
+  if (typeof value !== 'number') throw new TypeError('webSocketDelayMs must be a number of milliseconds');
+  if (!Number.isFinite(value) || value < 0 || value > 2_147_483_647)
+    throw new RangeError('webSocketDelayMs must be between 0 and 2147483647 milliseconds');
   return value;
 }
 
-class HandshakeTimeout extends Error {
-  override readonly name = 'HandshakeTimeout';
+class WebTransportOutpaced extends Error {
+  override readonly name = 'WebTransportOutpaced';
+}
+
+function closeQuietly(transport: Carrier, info?: { closeCode?: number; reason?: string }): void {
+  try {
+    transport.close(info);
+  } catch {
+    // A failed handshake may leave a transport that already refuses close().
+  }
 }
 
 /**
- * A transport that dials WebTransport and falls back to QMux over WebSocket when that handshake fails or takes longer
- * than the timeout. Before `ready` it stands in for whichever dial is in progress; after, it is the winner's.
+ * A transport that dials WebTransport and, unless that is ready within the WebSocket delay, QMux over WebSocket
+ * alongside it: the first ready carries the session and the other is closed. Before `ready` it stands in for the dials
+ * in progress; after, it is the winner's.
  */
 export class FallbackTransport implements MoqtTransport {
   /** Resolves once one of the dials is ready; rejects with the WebSocket dial's failure, or when closed first. */
@@ -61,16 +79,18 @@ export class FallbackTransport implements MoqtTransport {
   /** The winner's incoming bidirectional streams. */
   readonly incomingBidirectionalStreams: ReadableStream<BidirectionalStreamLike>;
 
-  #current: Carrier | undefined;
-  #carrier: FallbackCarrier | undefined;
+  /** The dials still in progress. */
+  readonly #dials = new Set<Carrier>();
   #winner: Carrier | undefined;
-  #cancelled = false;
+  #carrier: FallbackCarrier | undefined;
+  /** Ends the race without a winner; unset once it has ended. */
+  #cancel: ((info?: { closeCode?: number; reason?: string }) => void) | undefined;
   readonly #won: Promise<Carrier>;
 
   constructor(url: string, protocols: readonly string[], options: WebSocketFallbackOptions = {}) {
-    const timeoutMs = assertHandshakeTimeout(options.handshakeTimeoutMs);
+    const delayMs = assertFallbackOptions(options);
 
-    this.#won = this.#dial(url, protocols, timeoutMs, options.onFallback);
+    this.#won = this.#race(url, protocols, delayMs, options.onFallback);
     this.#won.catch(() => {});
     this.ready = this.#won.then(() => undefined);
     this.closed = this.#won.then((winner) => winner.closed as Promise<CloseInfo>);
@@ -79,7 +99,7 @@ export class FallbackTransport implements MoqtTransport {
     this.incomingBidirectionalStreams = this.#incoming((winner) => winner.incomingBidirectionalStreams);
   }
 
-  /** The transport the session runs on: the one in progress before `ready`, the winner after. */
+  /** The transport the session runs on; undefined until `ready`. */
   get carrier(): FallbackCarrier | undefined {
     return this.#carrier;
   }
@@ -97,81 +117,107 @@ export class FallbackTransport implements MoqtTransport {
     return (await this.#won).createBidirectionalStream();
   }
 
-  /** Close the winner (TA-10); before `ready`, cancel whichever dial is in progress (TA-11). */
+  /** Close the winner (TA-10); before `ready`, cancel every dial in progress (TA-11). */
   close(info: { closeCode?: number; reason?: string } = {}): void {
-    if (!this.#winner) this.#cancelled = true;
-    try {
-      this.#current?.close(info);
-    } catch {
-      // A failed handshake may leave a transport that already refuses close().
-    }
+    if (this.#winner) closeQuietly(this.#winner, info);
+    else this.#cancel?.(info);
   }
 
-  async #dial(
+  #race(
     url: string,
     protocols: readonly string[],
-    timeoutMs: number,
+    delayMs: number,
     onFallback: ((reason: unknown) => void) | undefined,
   ): Promise<Carrier> {
-    const NativeWebTransport = usableWebTransport();
-    let fallbackReason: unknown;
-    let webTransport: (WebTransport & { readonly protocol: string }) | undefined;
-    if (NativeWebTransport) {
-      try {
-        webTransport = new NativeWebTransport(url, { protocols: [...protocols] }) as WebTransport & {
-          readonly protocol: string;
-        };
-      } catch (error) {
-        // A runtime that refuses the dial outright (a policy, a URL it will not take) falls back too.
-        fallbackReason = error;
-      }
-    }
-    if (webTransport) {
-      webTransport.closed.catch(() => {});
-      this.#current = webTransport as Carrier;
-      this.#carrier = 'webtransport';
+    return new Promise<Carrier>((resolve, reject) => {
       let timer: ReturnType<typeof setTimeout> | undefined;
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new HandshakeTimeout(`the WebTransport handshake took longer than ${timeoutMs} ms`)),
-          timeoutMs,
-        );
-      });
-      try {
-        await Promise.race([webTransport.ready, timeout]);
-        this.#cancelIfClosed();
-        this.#winner = webTransport as Carrier;
-        return this.#winner;
-      } catch (error) {
-        this.#cancelIfClosed();
-        fallbackReason = error;
-        try {
-          webTransport.close();
-        } catch {}
-      } finally {
+      let webTransportPending = false;
+      let webTransportFailure: unknown;
+      let webSocketStarted = false;
+      let webSocketFailure: { error: unknown } | undefined;
+
+      const end = (info?: { closeCode?: number; reason?: string }) => {
+        this.#cancel = undefined;
         clearTimeout(timer);
+        for (const dial of this.#dials) closeQuietly(dial, info);
+        this.#dials.clear();
+      };
+      this.#cancel = (info) => {
+        end(info);
+        reject(new WebSocketSessionError('the dial was cancelled'));
+      };
+      const win = (winner: Carrier, carrier: FallbackCarrier) => {
+        // A dial ready after the race ended lost it, or was cancelled.
+        if (!this.#cancel) return closeQuietly(winner);
+        this.#dials.delete(winner);
+        end();
+        this.#winner = winner;
+        this.#carrier = carrier;
+        if (carrier === 'websocket') {
+          const reason = webTransportPending
+            ? new WebTransportOutpaced('the WebSocket was ready before the WebTransport handshake completed')
+            : webTransportFailure;
+          try {
+            onFallback?.(reason);
+          } catch {}
+        }
+        resolve(winner);
+      };
+      // Neither dial can still win: the connection fails with the WebSocket dial's failure.
+      const failIfLost = () => {
+        if (!this.#cancel || webTransportPending || !webSocketFailure) return;
+        end();
+        reject(webSocketFailure.error);
+      };
+      const dialWebSocket = () => {
+        if (!this.#cancel || webSocketStarted) return;
+        webSocketStarted = true;
+        clearTimeout(timer);
+        let webSocket: WebSocketTransport;
+        try {
+          webSocket = new WebSocketTransport(toWebSocketUrl(url), protocols);
+        } catch (error) {
+          webSocketFailure = { error };
+          return failIfLost();
+        }
+        this.#dials.add(webSocket);
+        webSocket.ready.then(
+          () => win(webSocket, 'websocket'),
+          (error: unknown) => {
+            this.#dials.delete(webSocket);
+            webSocketFailure = { error };
+            failIfLost();
+          },
+        );
+      };
+
+      const NativeWebTransport = usableWebTransport();
+      let webTransport: Carrier | undefined;
+      if (NativeWebTransport) {
+        try {
+          webTransport = new NativeWebTransport(url, { protocols: [...protocols] }) as unknown as Carrier;
+        } catch (error) {
+          // A runtime that refuses the dial outright (a policy, a URL it will not take) falls back too.
+          webTransportFailure = error;
+        }
       }
-    }
-
-    try {
-      onFallback?.(fallbackReason);
-    } catch {}
-    const webSocket = new WebSocketTransport(toWebSocketUrl(url), protocols);
-    this.#current = webSocket;
-    this.#carrier = 'websocket';
-    await webSocket.ready;
-    this.#cancelIfClosed();
-    this.#winner = webSocket;
-    return webSocket;
-  }
-
-  /** Throws once close() came while a dial was in progress (TA-11). */
-  #cancelIfClosed(): void {
-    if (!this.#cancelled) return;
-    try {
-      this.#current?.close();
-    } catch {}
-    throw new WebSocketSessionError('the dial was cancelled');
+      if (!webTransport) return dialWebSocket();
+      const dial = webTransport;
+      dial.closed.catch(() => {});
+      this.#dials.add(dial);
+      webTransportPending = true;
+      timer = setTimeout(dialWebSocket, delayMs);
+      dial.ready.then(
+        () => win(dial, 'webtransport'),
+        (error: unknown) => {
+          webTransportPending = false;
+          webTransportFailure = error;
+          if (this.#dials.delete(dial)) closeQuietly(dial);
+          dialWebSocket();
+          failIfLost();
+        },
+      );
+    });
   }
 
   /** The winner's incoming streams, one at a time; the readable ends with the winner's (TA-12). */

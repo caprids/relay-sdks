@@ -71,8 +71,9 @@ describe('withWebSocketFallback', () => {
     await peer.call('releaseHandshake');
   });
 
-  it('rejects a handshake timeout a timer cannot hold', () => {
-    expect(() => withWebSocketFallback({ handshakeTimeoutMs: 0 })).toThrow(RangeError);
-    expect(() => withWebSocketFallback({ handshakeTimeoutMs: '4000' })).toThrow(TypeError);
+  it('rejects a WebSocket delay a timer cannot hold, and the handshake timeout it replaced', () => {
+    expect(() => withWebSocketFallback({ webSocketDelayMs: -1 })).toThrow(RangeError);
+    expect(() => withWebSocketFallback({ webSocketDelayMs: '250' })).toThrow(TypeError);
+    expect(() => withWebSocketFallback({ handshakeTimeoutMs: 4000 })).toThrow(TypeError);
   });
 });

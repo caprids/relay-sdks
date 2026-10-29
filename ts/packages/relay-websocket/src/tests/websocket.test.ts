@@ -3,13 +3,13 @@
  * `ws://` so no certificate is involved. The conformance suite covers the contract rule by rule
  * (`conformance/websocket.conformance.js`); these cover the factories, the URL mapping and the fallback policy.
  */
-import type { AddressInfo } from 'node:net';
+import { type AddressInfo, createServer, type Server, type Socket } from 'node:net';
 import Session, { StreamError } from '@moq/qmux';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { type WebSocket, WebSocketServer } from 'ws';
 import { resetCode, resetReason, WebSocketSessionError } from '../errors.js';
-import { assertHandshakeTimeout, toWebSocketUrl } from '../fallback.js';
-import { createWebSocketTransport, withWebSocketFallback } from '../index.js';
+import { assertFallbackOptions, toWebSocketUrl } from '../fallback.js';
+import { createWebSocketTransport, type WebSocketFallbackOptions, withWebSocketFallback } from '../index.js';
 
 interface Accepted {
   session: Session;
@@ -160,24 +160,32 @@ describe('createWebSocketTransport', () => {
 });
 
 /** A stand-in for the runtime's WebTransport whose handshake does what `handshake` says. */
-function fakeWebTransport(handshake: 'fail' | 'hang' | 'succeed') {
+/** A runtime WebTransport whose handshake fails, hangs, succeeds, or completes when the test calls `complete`. */
+function fakeWebTransport(handshake: 'fail' | 'hang' | 'succeed' | 'manual') {
   const dialled: string[] = [];
+  const control = { dialled, closed: 0, complete: () => {} };
   class FakeWebTransport {
     // On the prototype, as in a runtime whose WebTransport negotiates protocols.
     get protocol() {
-      return handshake === 'succeed' ? 'moqt-22' : '';
+      return this.#ready ? 'moqt-22' : '';
     }
     readonly ready: Promise<void>;
     readonly closed: Promise<{ closeCode: number; reason: string }>;
     readonly incomingUnidirectionalStreams = new ReadableStream();
     readonly incomingBidirectionalStreams = new ReadableStream();
+    #ready = false;
     #reject!: (error: unknown) => void;
     #resolveClosed!: (info: { closeCode: number; reason: string }) => void;
     constructor(url: string) {
       dialled.push(url);
       this.ready = new Promise<void>((resolve, reject) => {
         this.#reject = reject;
-        if (handshake === 'succeed') resolve();
+        const succeed = () => {
+          this.#ready = true;
+          resolve();
+        };
+        if (handshake === 'succeed') succeed();
+        if (handshake === 'manual') control.complete = succeed;
         if (handshake === 'fail') reject(new Error('Opening handshake failed.'));
       });
       this.ready.catch(() => {});
@@ -186,6 +194,7 @@ function fakeWebTransport(handshake: 'fail' | 'hang' | 'succeed') {
       });
     }
     close(info: { closeCode?: number; reason?: string } = {}) {
+      control.closed += 1;
       this.#reject(new Error('closed'));
       this.#resolveClosed({ closeCode: info.closeCode ?? 0, reason: info.reason ?? '' });
     }
@@ -197,7 +206,28 @@ function fakeWebTransport(handshake: 'fail' | 'hang' | 'succeed') {
     }
   }
   vi.stubGlobal('WebTransport', FakeWebTransport);
-  return dialled;
+  return control;
+}
+
+/** A TCP server that accepts and never answers, so a WebSocket dial to it stays in progress until closed. */
+async function silentServer(): Promise<{ origin: string; sockets: Socket[]; ended: number; server: Server }> {
+  const silent = { origin: '', sockets: [] as Socket[], ended: 0, server: createServer() };
+  silent.server.on('connection', (socket) => {
+    silent.sockets.push(socket);
+    socket.on('error', () => {});
+    socket.on('close', () => {
+      silent.ended += 1;
+    });
+    socket.resume();
+  });
+  await new Promise<void>((resolve) => silent.server.listen(0, '127.0.0.1', resolve));
+  silent.origin = `http://127.0.0.1:${(silent.server.address() as AddressInfo).port}`;
+  return silent;
+}
+
+async function stop({ server, sockets }: { server: Server; sockets: Socket[] }): Promise<void> {
+  for (const socket of sockets) socket.destroy();
+  await new Promise<void>((resolve) => server.close(() => resolve()));
 }
 
 describe('withWebSocketFallback', () => {
@@ -249,7 +279,7 @@ describe('withWebSocketFallback', () => {
   });
 
   it('keeps a WebTransport session that comes up, and never dials WebSocket', async () => {
-    const dialled = fakeWebTransport('succeed');
+    const { dialled } = fakeWebTransport('succeed');
     const onFallback = vi.fn();
     const connection = withWebSocketFallback({ onFallback })(`${origin}/moq`, ['moqt-22']);
     await connection.ready;
@@ -284,16 +314,84 @@ describe('withWebSocketFallback', () => {
     await expect(connection.transport.closed).resolves.toEqual({ closeCode: 0, reason: '' });
   });
 
-  it('falls back to WebSocket once the WebTransport handshake outlasts the timeout', async () => {
-    fakeWebTransport('hang');
+  it('dials WebSocket once WebTransport has had its head start, and closes WebTransport when WebSocket wins', async () => {
+    const webTransport = fakeWebTransport('hang');
     const onFallback = vi.fn();
     const started = performance.now();
-    const connection = withWebSocketFallback({ handshakeTimeoutMs: 200, onFallback })(`${origin}/`, ['moqt-22']);
+    const connection = withWebSocketFallback({ webSocketDelayMs: 200, onFallback })(`${origin}/`, ['moqt-22']);
     await connection.ready;
     expect(performance.now() - started).toBeGreaterThanOrEqual(190);
     expect(connection.framing).toBe('websocket');
-    expect(String(onFallback.mock.calls[0]?.[0])).toMatch(/longer than 200 ms/);
+    expect(webTransport.closed).toBe(1);
+    expect(onFallback).toHaveBeenCalledOnce();
+    expect(String(onFallback.mock.calls[0]?.[0])).toMatch(/ready before the WebTransport handshake completed/);
     connection.transport.close();
+  });
+
+  it('gives WebTransport a 250 ms head start by default', async () => {
+    fakeWebTransport('hang');
+    const started = performance.now();
+    const connection = withWebSocketFallback()(`${origin}/`, ['moqt-22']);
+    await connection.ready;
+    const elapsed = performance.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(240);
+    expect(elapsed).toBeLessThan(2_000);
+    expect(connection.framing).toBe('websocket');
+    connection.transport.close();
+  });
+
+  it('keeps a WebTransport session ready during the race and closes the WebSocket dial', async () => {
+    const silent = await silentServer();
+    try {
+      const webTransport = fakeWebTransport('manual');
+      const onFallback = vi.fn();
+      const connection = withWebSocketFallback({ webSocketDelayMs: 0, onFallback })(`${silent.origin}/`, ['moqt-22']);
+      await vi.waitFor(() => expect(silent.sockets.length).toBe(1));
+      webTransport.complete();
+      await connection.ready;
+      expect(connection.framing).toBe('webtransport');
+      expect(connection.transport.protocol).toBe('moqt-22');
+      expect(onFallback).not.toHaveBeenCalled();
+      await vi.waitFor(() => expect(silent.ended).toBe(silent.sockets.length));
+      connection.transport.close();
+    } finally {
+      await stop(silent);
+    }
+  });
+
+  it('waits for WebTransport when the WebSocket dial fails first', async () => {
+    const webTransport = fakeWebTransport('manual');
+    const connection = withWebSocketFallback({ webSocketDelayMs: 0 })('http://127.0.0.1:1/', ['moqt-22']);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    webTransport.complete();
+    await connection.ready;
+    expect(connection.framing).toBe('webtransport');
+    connection.transport.close();
+  });
+
+  it("fails with the WebSocket dial's failure once both dials have failed", async () => {
+    fakeWebTransport('fail');
+    const onFallback = vi.fn();
+    const connection = withWebSocketFallback({ onFallback })('http://127.0.0.1:1/', ['moqt-22']);
+    await expect(connection.ready).rejects.toMatchObject({ source: 'session' });
+    expect(onFallback).not.toHaveBeenCalled();
+  });
+
+  it('cancels both dials when closed during the race', async () => {
+    const silent = await silentServer();
+    try {
+      const webTransport = fakeWebTransport('hang');
+      const onFallback = vi.fn();
+      const connection = withWebSocketFallback({ webSocketDelayMs: 0, onFallback })(`${silent.origin}/`, ['moqt-22']);
+      await vi.waitFor(() => expect(silent.sockets.length).toBe(1));
+      connection.transport.close();
+      await expect(connection.ready).rejects.toMatchObject({ source: 'session' });
+      expect(webTransport.closed).toBe(1);
+      await vi.waitFor(() => expect(silent.ended).toBe(silent.sockets.length));
+      expect(onFallback).not.toHaveBeenCalled();
+    } finally {
+      await stop(silent);
+    }
   });
 
   it('cancels a dial closed during the WebTransport handshake without dialing WebSocket', async () => {
@@ -316,10 +414,14 @@ describe('withWebSocketFallback', () => {
     });
   });
 
-  it('checks the handshake timeout when the factory is made', () => {
-    expect(assertHandshakeTimeout(undefined)).toBe(4_000);
-    expect(() => withWebSocketFallback({ handshakeTimeoutMs: 0 })).toThrow(RangeError);
-    expect(() => withWebSocketFallback({ handshakeTimeoutMs: 2_147_483_648 })).toThrow(RangeError);
-    expect(() => withWebSocketFallback({ handshakeTimeoutMs: '4000' as unknown as number })).toThrow(TypeError);
+  it('checks the WebSocket delay when the factory is made', () => {
+    expect(assertFallbackOptions({})).toBe(250);
+    expect(assertFallbackOptions({ webSocketDelayMs: 0 })).toBe(0);
+    expect(() => withWebSocketFallback({ webSocketDelayMs: -1 })).toThrow(RangeError);
+    expect(() => withWebSocketFallback({ webSocketDelayMs: 2_147_483_648 })).toThrow(RangeError);
+    expect(() => withWebSocketFallback({ webSocketDelayMs: '250' as unknown as number })).toThrow(TypeError);
+    expect(() => withWebSocketFallback({ handshakeTimeoutMs: 4000 } as WebSocketFallbackOptions)).toThrow(
+      /replaced by webSocketDelayMs/,
+    );
   });
 });

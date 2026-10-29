@@ -20,7 +20,7 @@ Pass one of its factories as the SDK's `createTransport`. Build it once and reus
 import { connectRelaySubscriber } from '@caprid/relay';
 import { createWebSocketTransport, withWebSocketFallback } from '@caprid/relay-websocket';
 
-// WebTransport first; WebSocket when its handshake fails or takes longer than 4 s.
+// WebTransport first; WebSocket races it once WebTransport has had 250 ms.
 const subscriber = await connectRelaySubscriber({ url, getToken, createTransport: withWebSocketFallback() });
 
 // Always WebSocket.
@@ -30,11 +30,13 @@ const other = await connectRelaySubscriber({ url, getToken, createTransport: cre
 - `createWebSocketTransport()` dials the endpoint's `wss:` URL and offers `qmux-01.moqt-22`, then `qmux-01.moqt-20`.
   `https:` becomes `wss:` with the path and query unchanged, so the token travels in the upgrade request. The factory
   declares `framing: 'websocket'`.
-- `withWebSocketFallback({ handshakeTimeoutMs, onFallback })` dials the runtime's `WebTransport` first. It falls back
-  to WebSocket when that handshake fails or has not completed within `handshakeTimeoutMs` (default 4000). Where the
-  runtime has no usable `WebTransport`, as in Node or a Safari without it, it dials WebSocket at once. The adapter calls
-  `onFallback(reason)` each time a connection falls back. The dials run one after the other, and every connection
-  decides afresh. The factory's `framing` and the transport's `carrier` say which transport is in use.
+- `withWebSocketFallback({ webSocketDelayMs, onFallback })` dials the runtime's `WebTransport` first. If that
+  handshake has not completed within `webSocketDelayMs` (default 250, as Happy Eyeballs), it dials WebSocket alongside
+  it; a WebTransport handshake that fails sooner starts the WebSocket at once. The first ready carries the session and
+  the other dial is closed. Where the runtime has no usable `WebTransport`, as in Node or a Safari without it, it dials
+  WebSocket at once. The adapter calls `onFallback(reason)` each time a connection ends up on WebSocket, and every
+  connection decides afresh. After `ready`, the factory's `framing` and the transport's `carrier` say which transport
+  won.
 
 ## What differs from WebTransport
 

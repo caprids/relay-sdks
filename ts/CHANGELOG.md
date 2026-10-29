@@ -5,6 +5,15 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/relay-websocket`: `withWebSocketFallback()` races the two transports instead of waiting out WebTransport
+  (#392). WebTransport dials first; if its handshake has not completed within the new `webSocketDelayMs` (default
+  250 ms, as Happy Eyeballs, RFC 8305), the WebSocket dial starts alongside it, the first ready carries the session,
+  and the other is closed. On a network that silently drops UDP, a connect no longer waits 4 s. **Breaking:**
+  `handshakeTimeoutMs` is gone, and passing it throws a `TypeError`; use `webSocketDelayMs`. `onFallback` now runs when
+  a connection ends up on WebSocket, and the transport's `carrier` is undefined until a dial wins.
+
 ## 0.2.0
 
 - `@caprid/relay`: `roomEndpoint(room)` roots the hosted Relay, `https://relay.mux.global`, so a quickstart passes
