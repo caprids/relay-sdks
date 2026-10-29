@@ -22,7 +22,14 @@ export interface AudioPlayerProcessorOptions {
 
 /** What the main thread sends. Timestamps are on the broadcast timeline, in microseconds. */
 export type AudioPlayerProcessorCommand =
-  | { type: 'pcm'; timestampUs: number; planes: Float32Array[] }
+  /**
+   * Decoded audio. `fill` marks audio rebuilt from in-band FEC (`recovered`) or synthesized by concealment
+   * (`synthesized`) in place of a lost frame: held only when it continues held audio or playback (a quantum may have
+   * just taken the last sample), since after the buffer ran dry it would play late and add its length to the delay (as
+   * the worklet's own silence fill applies only inside held audio). The main thread cannot tell: it learns the
+   * buffer's state a report later.
+   */
+  | { type: 'pcm'; timestampUs: number; planes: Float32Array[]; fill?: 'recovered' | 'synthesized' }
   /** Drop everything held. `id`, when set, is reported back as `cutId` at once (the input's `cut()`). */
   | { type: 'flush'; id?: number }
   /** Drop held audio in a range; `id` as for `flush`. */
@@ -57,6 +64,11 @@ export interface AudioPlayerProcessorReport {
    * command is reported at once, so `frame` is where the cut is first heard.
    */
   cutId: number | null;
+  /** Fill audio dropped because nothing was held when it came, by kind. */
+  droppedRecoveredFrames: number;
+  droppedSynthesizedFrames: number;
+  /** The context frame where playback first started, or `null` before it has. */
+  firstPlayFrame: number | null;
 }
 
 declare const sampleRate: number;
@@ -124,6 +136,10 @@ function audioPlayerWorklet(name: string): void {
     trimmed = 0;
     concealed = 0;
     cut = 0;
+    droppedRecovered = 0;
+    droppedSynthesized = 0;
+    /** The context frame where playback first started. */
+    firstPlayFrame: number | null = null;
     /**
      * Cuts that no audio from their start on has arrived after yet, disjoint and in order. The hole before that audio
      * is the range cut out where it falls in a cut, and joins without silence there. Audio still decoding from before
@@ -147,7 +163,7 @@ function audioPlayerWorklet(name: string): void {
     }
 
     command(command: AudioPlayerProcessorCommand) {
-      if (command.type === 'pcm') this.push(command.timestampUs, command.planes);
+      if (command.type === 'pcm') this.push(command.timestampUs, command.planes, command.fill);
       else if (command.type === 'flush' || command.type === 'cut') {
         if (command.type === 'flush') this.flush();
         else this.cutRange(command.fromUs, command.untilUs);
@@ -198,9 +214,17 @@ function audioPlayerWorklet(name: string): void {
       this.written += frames;
     }
 
-    push(timestampUs: number, planes: Float32Array[]) {
+    push(timestampUs: number, planes: Float32Array[], fill?: 'recovered' | 'synthesized') {
       const frames = planes[0]?.length ?? 0;
       if (frames === 0) return;
+      if (fill !== undefined && this.buffered === 0 && !this.playing) {
+        // Nothing held to continue: the buffer ran dry, was flushed or never filled, and this would only play late.
+        // Still playing with nothing held (a quantum took the last sample, and the next has not run dry yet), the fill
+        // is on time.
+        if (fill === 'recovered') this.droppedRecovered += frames;
+        else this.droppedSynthesized += frames;
+        return;
+      }
       if (this.dry !== undefined) {
         // Audio came back after the buffer ran dry. Soon enough, and a deeper buffer would have covered it; later, it
         // was the sender's silence, which no buffer covers.
@@ -312,6 +336,7 @@ function audioPlayerWorklet(name: string): void {
       if (!this.playing && this.buffered >= this.target) {
         this.playing = true;
         this.playStarts++;
+        if (this.firstPlayFrame === null) this.firstPlayFrame = currentFrame;
         this.dryAtUs = null;
         this.lowWater = this.buffered;
         this.window = 0;
@@ -402,6 +427,9 @@ function audioPlayerWorklet(name: string): void {
           concealedFrames: this.concealed,
           cutFrames: this.cut,
           cutId: this.cutId,
+          droppedRecoveredFrames: this.droppedRecovered,
+          droppedSynthesizedFrames: this.droppedSynthesized,
+          firstPlayFrame: this.firstPlayFrame,
         };
         this.port.postMessage(report);
       }

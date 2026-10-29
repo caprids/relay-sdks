@@ -3,6 +3,7 @@
  * the bot, and a log of what happens. serve.mjs puts the endpoint, the conversation's namespace and, from RELAY_TOKEN,
  * the token in `window.voiceBot`.
  */
+import { warmAudioPlayer } from '@caprid/moq-media';
 import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay';
 import type { AudioListener } from '../webcodecs/listen-audio.js';
 import { talkToBot } from './talk-to-bot.js';
@@ -46,6 +47,9 @@ talk.addEventListener('click', async () => {
   call = stop;
   // Created in the click, so the browser lets it play.
   const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
+  // Load the player's worklet module and libopus while the microphone prompt and the connects go on; the listener finds
+  // them loaded. A failure shows when the listener creates its player.
+  warmAudioPlayer(context).catch(() => {});
   let stats: ReturnType<typeof setInterval> | undefined;
   const release: (() => unknown)[] = [() => context.close()];
   try {

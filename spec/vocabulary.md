@@ -666,6 +666,9 @@ the format package still does not depend on the product package.
 | Concept | TypeScript | Python |
 | --- | --- | --- |
 | One player per `AudioContext` | `await createAudioPlayer({ context })` → `AudioPlayer` (`AudioPlayerOptions`) | — |
+| Load what a player waits for ahead of it, both at once | `await warmAudioPlayer(context, { lossConcealment? })` (`WarmAudioPlayerOptions`) | — |
+| When a join's steps happened | `input.joinPhases`: `AudioInputJoinPhases { addedUs, firstPushUs, firstDecodedUs, firstPlayUs, firstAudibleUs }`; `player.joinPhases`: `AudioPlayerJoinPhases { workletLoadedUs, opusLoadedUs }` | — |
+| Frames kept for a consumer not ready yet, passed on in order | `createFrameHold()` → `FrameHold { push(frame), release(consumer), clear(), isReleased, stats }` (`FrameHoldStats { held, maxHeld, released }`) | — |
 | The mix, which the application routes | `player.output` (the context's own gain node type) | — |
 | Delay after the output that the context does not report | `player.outputDelayUs` (settable) | — |
 | One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, playbackRate, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError, onCutHeard })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |

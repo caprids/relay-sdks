@@ -1,16 +1,27 @@
 import { resolveObjectURL } from 'node:buffer';
+import type { MoqtObject } from '@caprid/moq-core';
 import {
   buildInterrupt,
   buildMsfCatalog,
   buildTranscriptSegment,
   INTERRUPT_TRACK,
+  LOC_TIMESTAMP,
   TRANSCRIPT_TRACK,
+  warmAudioPlayer,
 } from '@caprid/moq-media';
 import type { RelaySubscriber } from '@caprid/relay';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { listenAudio } from '../examples/webcodecs/listen-audio.js';
 
 const NAMESPACE = ['room', 'mic'];
+
+// Consecutive 20 ms Opus packets (SILK, mono, a 300 Hz tone), as the audio player's tests use.
+const OPUS_PACKETS = [
+  'eNsq0lbYDhjw3GMFVER1GLNe/OddAMhCpLUNddotogMYjyI+Lqw7/cGB8SUyVzLYYg1p+OhrUr8GRx9EnlvinGV2IKO9G2mTqw==',
+  'eNsq7WglA7LrXjVTAhZx0u/bcYjn2IQ+nZkkmbqtIvM/GUdF096ifK6pJfCiP31rkbzF9I+RIOc5eIcG43G2Lg+9G2mTqw==',
+  'eNsqyzGGB/WI4/gZs/o8XsQJA0SUE8aydrKEZ/l2yDY60kCD8mNSJpMyMiKnR9ho9tnY2k1lWBhoNZrsbpXKJnPrRdc2kh1vW+mTpw==',
+  'eNsqyzGGGB8x8vZN7XpxGSMf/LkvWKgFq+6+0RYrb/bGxwU3ZW65u2NIDiMUQ5vXkRTsudkJIZrXTjS8UxZOz//FKJXciG+9GxPpqw==',
+].map((base64) => new Uint8Array(Buffer.from(base64, 'base64')));
 
 class FakeNode {
   gain = { value: 1 };
@@ -37,6 +48,8 @@ class FakeWorkletNode extends FakeNode {
 
 class FakeContext {
   static instances: FakeContext[] = [];
+  /** Fails the worklet module's load, from the context's construction on. */
+  static moduleFailure: Error | undefined;
   readonly sampleRate = 48_000;
   readonly baseLatency = 0;
   readonly outputLatency = 0;
@@ -44,6 +57,7 @@ class FakeContext {
   close = vi.fn(async () => {});
   audioWorklet = {
     addModule: vi.fn(async (url: string) => {
+      if (FakeContext.moduleFailure) throw FakeContext.moduleFailure;
       if (!resolveObjectURL(url)) throw new Error('Not a blob URL');
     }),
   };
@@ -103,6 +117,8 @@ function listen(
 
 beforeEach(() => {
   FakeContext.instances.length = 0;
+  FakeContext.moduleFailure = undefined;
+  FakeWorkletNode.instances.length = 0;
   vi.stubGlobal('AudioContext', FakeContext);
   vi.stubGlobal('AudioWorkletNode', FakeWorkletNode);
 });
@@ -123,18 +139,20 @@ it('closes the context and cancels the catalog when the catalog lists no audio t
   await expect(listen(fake, videoOnlyCatalog())).rejects.toThrow(/lists no audio track/);
   expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
   expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
-  expect(fake.subscriptions).toHaveLength(1);
+  // The audio track was subscribed with the catalog, before it arrived: it is cancelled too.
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio']);
+  expect(fake.subscriptions[1]?.cancel).toHaveBeenCalledTimes(1);
 });
 
 it('closes the context and cancels the catalog when the audio player cannot load', async () => {
   const fake = fakeSubscriber();
   const failure = new Error('The worklet module failed to load');
-  const listening = listen(fake, audioCatalog());
-  // The context exists as soon as listenAudio has started; make its worklet fail before the player asks.
-  (FakeContext.instances[0] as FakeContext).audioWorklet.addModule.mockRejectedValue(failure);
-  await expect(listening).rejects.toBe(failure);
+  // The warm starts as soon as listenAudio does, and fails; the player loads again, fails the same, and reports it.
+  FakeContext.moduleFailure = failure;
+  await expect(listen(fake, audioCatalog())).rejects.toBe(failure);
   expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
   expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
+  expect(fake.subscriptions[1]?.cancel).toHaveBeenCalledTimes(1);
 });
 
 it('releases the player and subscriptions when the audio subscription cannot start', async () => {
@@ -148,7 +166,69 @@ it('releases the player and subscriptions when the audio subscription cannot sta
   });
   await expect(listen(fake, audioCatalog())).rejects.toBe(failure);
   expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
+  // The catalog was subscribed first and is still pending: the failure ends its read and cancels it.
   expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
+});
+
+it('fails setup when the audio subscription fails before the catalog arrives and the catalog names that track', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const failure = new Error('unroutable');
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  listening.catch(() => {});
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  expect(audio.request.track).toBe('audio');
+  audio.handlers.onError?.(failure as never);
+  // Judged once the catalog has named the track: a broadcast whose track was replaced has another one.
+  fake.deliverCatalog(audioCatalog());
+  await expect(listening).rejects.toBe(failure);
+  // A setup failure is the rejection, not an onError call.
+  expect(onError).not.toHaveBeenCalled();
+  expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
+  expect(audio.cancel).toHaveBeenCalledTimes(1);
+  expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
+});
+
+it('fails setup when the audio subscription failed by the time the catalog arrives', async () => {
+  const fake = fakeSubscriber();
+  const failure = new Error('ended');
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  listening.catch(() => {});
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  fake.deliverCatalog(audioCatalog());
+  audio.handlers.onError?.(failure as never);
+  await expect(listening).rejects.toBe(failure);
+  expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
+  expect(audio.cancel).toHaveBeenCalledTimes(1);
+});
+
+it('reports an audio subscription failure after it started to onError', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listener = await listen(fake, audioCatalog(), { onError });
+  const failure = new Error('later');
+  fake.subscriptions[1]?.handlers.onError?.(failure as never);
+  expect(onError).toHaveBeenCalledWith(failure);
+  await listener.stop();
+});
+
+it('cancels a catalog that came at once when the audio subscribe then throws', async () => {
+  const fake = fakeSubscriber();
+  const failure = new Error('The relay is gone');
+  const subscribe = fake.subscriber.subscribe as unknown as ReturnType<typeof vi.fn>;
+  const original = subscribe.getMockImplementation() as (request: Request, handlers: Handlers) => unknown;
+  subscribe.mockImplementation((request: Request, handlers: Handlers) => {
+    if (request.track === 'audio') throw failure;
+    const subscription = original(request, handlers);
+    // The catalog's first object arrives before subscribe() returns.
+    handlers.onObject?.({ status: 'normal', payload: audioCatalog() } as never);
+    return subscription;
+  });
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  await expect(listening).rejects.toBe(failure);
+  await Promise.resolve();
+  expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
+  expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
 });
 
 it('does not close a context the caller supplied when setup fails', async () => {
@@ -171,6 +251,78 @@ it('keeps the original error when cleanup fails too', async () => {
   });
   await expect(listening).rejects.toThrow(/lists no audio track/);
   expect(context.close).toHaveBeenCalledTimes(1);
+});
+
+it('starts warming the player on the context before the catalog arrives', async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  const context = FakeContext.instances[0] as FakeContext;
+  // Nothing has arrived: the worklet module is already loading, and the audio is already subscribed.
+  expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio']);
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  // The player found the module loaded or loading: it did not load it again.
+  expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+  await listener.stop();
+});
+
+it('does not load again a context the page already warmed', async () => {
+  const fake = fakeSubscriber();
+  const context = new FakeContext();
+  await warmAudioPlayer(context as unknown as AudioContext);
+  expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { context: context as unknown as AudioContext });
+  fake.deliverCatalog(audioCatalog());
+  await (await listening).stop();
+  expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+});
+
+it('cancels both subscriptions and closes its context when aborted before the catalog arrives', async () => {
+  const fake = fakeSubscriber();
+  const controller = new AbortController();
+  const reason = new Error('Hung up');
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { signal: controller.signal });
+  listening.catch(() => {});
+  controller.abort(reason);
+  await expect(listening).rejects.toBe(reason);
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio']);
+  expect(fake.subscriptions[0]?.cancel).toHaveBeenCalledTimes(1);
+  expect(fake.subscriptions[1]?.cancel).toHaveBeenCalledTimes(1);
+  expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
+});
+
+it('holds the frames that arrive before the player exists and passes them to the input in order', async () => {
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  const object = (index: number) =>
+    ({
+      groupId: index,
+      objectId: 0,
+      subgroupId: 0,
+      status: 'normal',
+      properties: [{ type: LOC_TIMESTAMP, value: 1_000_000 + index * 20_000 }],
+      payload: OPUS_PACKETS[index] as Uint8Array,
+    }) as MoqtObject;
+  // Three frames, before the catalog: no player, no input.
+  for (const index of [0, 1, 2]) audio.handlers.onObject?.(object(index));
+  expect(FakeWorkletNode.instances).toHaveLength(0);
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  const phases = listener.input.joinPhases;
+  expect(phases.firstPushUs).not.toBeNull();
+  expect(listener.input.stats.decoded).toBe(3);
+  // They reached the worklet in order, and a frame that arrives now follows them straight on.
+  audio.handlers.onObject?.(object(3));
+  expect(listener.input.stats.decoded).toBe(4);
+  const timestamps = (FakeWorkletNode.instances[0] as FakeWorkletNode).port.postMessage.mock.calls
+    .map(([message]) => message as { type: string; timestampUs?: number })
+    .filter((message) => message.type === 'pcm')
+    .map((message) => message.timestampUs as number);
+  expect(timestamps).toHaveLength(4);
+  expect(timestamps).toEqual([...timestamps].sort((a, b) => a - b));
+  await listener.stop();
 });
 
 it('plays through a new context and stop() closes it and cancels both subscriptions', async () => {
@@ -233,6 +385,49 @@ it('cuts the audio an interrupt for the audio track names, and ignores one for a
   expect(cut).toHaveBeenCalledTimes(1);
   expect(cut).toHaveBeenCalledWith({ track: 'audio', fromUs: 500, untilUs: 2_000 });
   expect(onInterrupt).toHaveBeenCalledWith({ track: 'audio', fromUs: 500, untilUs: 2_000 });
+  await listener.stop();
+});
+
+it('subscribes to interrupts at the catalog and cuts held audio with one that comes before the player exists', async () => {
+  const fake = fakeSubscriber();
+  const onInterrupt = vi.fn();
+  let ready: () => void = () => {};
+  // The worklet module loads only when the test says so: the player cannot exist before then.
+  const loaded = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  const context = new FakeContext();
+  context.audioWorklet.addModule.mockImplementation(async () => loaded);
+  const listening = listenAudio(fake.subscriber, NAMESPACE, {
+    onInterrupt,
+    context: context as unknown as AudioContext,
+  });
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  const object = (index: number) =>
+    ({
+      groupId: index,
+      objectId: 0,
+      subgroupId: 0,
+      status: 'normal',
+      properties: [{ type: LOC_TIMESTAMP, value: 1_000_000 + index * 20_000 }],
+      payload: OPUS_PACKETS[index] as Uint8Array,
+    }) as MoqtObject;
+  for (const index of [0, 1, 2]) audio.handlers.onObject?.(object(index));
+  fake.deliverCatalog(interruptCatalog());
+  // The interrupt track is subscribed once the catalog lists it, while the player is still being built.
+  await vi.waitFor(() => expect(fake.subscriptions.map(({ request }) => request.track)).toContain(INTERRUPT_TRACK));
+  expect(FakeWorkletNode.instances).toHaveLength(0);
+  // The talker cut everything it had sent.
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ track: 'audio', untilUs: 1_060_000 }));
+  ready();
+  const listener = await listening;
+  expect(onInterrupt).toHaveBeenCalledWith({ track: 'audio', untilUs: 1_060_000 });
+  // The held frames were inside the cut: none of them reached the worklet.
+  const pcm = (FakeWorkletNode.instances[0] as FakeWorkletNode).port.postMessage.mock.calls.filter(
+    ([message]) => (message as { type: string }).type === 'pcm',
+  );
+  expect(pcm).toHaveLength(0);
+  expect(listener.input.stats.decoded).toBe(0);
   await listener.stop();
 });
 
@@ -378,10 +573,15 @@ it('applies interrupts to the track that replaced the audio track', async () => 
 it('joins a broadcast whose audio track was replaced already', async () => {
   const fake = fakeSubscriber();
   const listening = listenAudio(fake.subscriber, NAMESPACE);
+  // The conventional name is subscribed with the catalog; this talker retired that track before the listener joined.
+  const conventional = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  failWith(conventional, new Error('no such track'));
   fake.deliverCatalog(replacementCatalog('audio-3'));
   const listener = await listening;
   expect(listener.track).toBe('audio-3');
-  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio-3']);
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-3']);
+  // Its failure did not fail the setup, and its subscription was dropped for the catalog's track.
+  expect(conventional.cancel).toHaveBeenCalledTimes(1);
   await listener.stop();
 });
 
