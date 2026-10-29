@@ -7,6 +7,23 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/moq-media`: fixes to the Opus loss concealment that 0.1.1 turned on. A decoder reset clears the
+  record that the last packet was CELT-only, so the next gap can use in-band FEC again (it stayed off until a
+  non-CELT packet decoded). The audio worklet, not the main thread's report of the buffer, which is up to about 20 ms
+  old, decides whether a fill is held: a loss while the buffer fills to its target is now concealed (it was left as
+  silence), and a fill that came after the buffer ran dry is dropped (it played late, adding its length to the delay).
+  A gap that spans a cut resets the decoder, as a gap over 1 s already did, so the frame after it is not decoded from
+  libopus state that belongs before the gap. `synthesizedUs` and `recoveredUs` no longer count fills the buffer
+  dropped. Nothing to change in an application.
+- `@caprid/moq-media`: parts for a quicker join. `warmAudioPlayer(context)` loads the jitter buffer's worklet module and
+  compiles libopus at once, ahead of `createAudioPlayer`, which then loads neither again (libopus's base64 is decoded
+  with `Uint8Array.fromBase64` where the engine has it: `loadWasmOpus({ nativeBase64: true })`). `createFrameHold()`
+  keeps a frame reader's frames until the player's input exists, so a listener can subscribe to the audio before the
+  player is built. `input.joinPhases` and `player.joinPhases` record when each step of the start happened. Nothing
+  changes for a player that uses none of them. The WebCodecs example's `listenAudio` now joins this way: it warms the
+  player at the start, subscribes to the audio with the catalog and holds the frames until the input exists. In
+  relay-dev's voice benchmark, time to first audio on a clean path went from 627 to 249 ms (WebRTC 419; spec/media-layer.md,
+  "Joining sooner").
 - `@caprid/moq-media`: timestamp playout, off by default. The frame sequencer's
   `timestampPlayout: { leadUs: () => input.playoutLeadUs }` holds a frame that arrives ahead of its timestamp, as a
   text-to-speech agent's bursts do, and releases it once its timestamp is within the lead of the playout clock; only a

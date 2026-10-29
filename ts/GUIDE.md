@@ -1003,6 +1003,39 @@ To get rebuilt frames, publish with in-band FEC on and an expected loss above 0.
 `createAudioPlayer({ context, lossConcealment: false })` decodes with WebCodecs instead, which resets
 its decoder at every discontinuity and timestamp jump. A `resync` or `restart` flushes the buffer.
 
+To join quickly, which is how the WebCodecs example's `listenAudio` starts, build the audio side while the
+connection and the catalog are on their way, and subscribe to the audio track before the player exists. Create the
+`AudioContext` inside the user's click and call `warmAudioPlayer(context)` there, before the connect: an
+`AudioContext` created outside a gesture stays suspended, and the warm loads the worklet module and libopus while the
+handshake runs, so `createAudioPlayer` later loads neither again. Subscribe to the audio track at once with the
+catalog, by its conventional name `audio`, with the frame reader delivering into a frame hold, which keeps what arrives
+until the input exists and then passes it on, in order, with nothing dropped:
+
+```ts
+import { createFrameHold, type SequencedFrame, warmAudioPlayer } from '@caprid/moq-media';
+
+// In the click handler:
+const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
+const warm = warmAudioPlayer(context); // worklet module and libopus at once; the handshake runs meanwhile
+warm.catch(() => {}); // createAudioPlayer reports a failed load below
+const subscriber = await connectRelaySubscriber({ url, getToken });
+
+const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
+const hold = createFrameHold<SequencedFrame>();
+const reader = createFrameReader(createFrameSequencer({ clock, grouping: 'frame' }), { onFrame: hold.push });
+subscriber.subscribe({ namespace, track: 'audio' }, { ...reader, onError }); // before the catalog arrives
+const audioTrack = await readCatalogAudioTrack(subscriber); // yours: subscribe to the catalog, take its audio entry
+
+await warm;
+const player = await createAudioPlayer({ context }); // loads nothing again
+player.output.connect(context.destination);
+const input = player.addInput({ clock, decoderConfig: audioDecoderConfigFromTrack(audioTrack) });
+hold.release(input.push); // what arrived meanwhile, in order, then every frame as it comes
+```
+
+`input.joinPhases` records when the input was added, got its first frame, decoded it, first played and was first
+audible, and `player.joinPhases` when the worklet module and libopus were ready.
+
 `input.cut({ fromUs, untilUs })` drops received audio in a timeline range, whether held or arriving
 later, as when a talker is interrupted. A talker that can stop mid-utterance, such as a voice bot,
 lists an `interrupt` data track in its catalog, and writes an interrupt there when it stops. Apply

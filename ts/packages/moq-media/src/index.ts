@@ -1,6 +1,7 @@
 export {
   type AudioCutRange,
   type AudioInputClock,
+  type AudioInputJoinPhases,
   type AudioInputOptions,
   type AudioInputStats,
   type AudioPlayer,
@@ -8,10 +9,13 @@ export {
   type AudioPlayerFrame,
   type AudioPlayerGainNode,
   type AudioPlayerInput,
+  type AudioPlayerJoinPhases,
   type AudioPlayerNode,
   type AudioPlayerOptions,
   createAudioPlayer,
   opusPacketDurationUs,
+  type WarmAudioPlayerOptions,
+  warmAudioPlayer,
 } from './audio-player.js';
 export {
   type AudioTrackInfo,
@@ -50,6 +54,7 @@ export {
   type EchoCancellationLoopback,
   type EchoCancellationLoopbackOptions,
 } from './echo-loopback.js';
+export { createFrameHold, type FrameHold, type FrameHoldStats } from './frame-hold.js';
 export { avcCodecString } from './h264.js';
 export { buildInterrupt, INTERRUPT_TRACK, type Interrupt, type InterruptInput, parseInterrupt } from './interrupt.js';
 export {
