@@ -226,6 +226,13 @@ that arrives late or twice drops nothing it should not.
 _Avoid_: flush, barge-in (the cause, not the message), interruption (that is the frame writer's
 failure), stop
 
+**Track replacement**:
+A talker's switch of a track to a new one with a new name, listed in the catalog in the old one's
+place, as a voice agent does when it is talked over: the old track's unsent frames are dropped and it
+is closed, and a listener drops what it holds of it and plays the new track from its first frame.
+_Avoid_: generation (a supervised publisher's connection), move (a want's), rotation, interruption
+(that is the frame writer's failure)
+
 **Transcript segment**:
 A piece of the text of a talker's audio, on the transcript track, placed on the audio's timeline
 from where its audio starts. It is sent in versions, interim then final, that share its number. A

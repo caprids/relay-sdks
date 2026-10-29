@@ -4,6 +4,14 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `caprid-relay`, `caprid-moq-media`: track replacement for barge-in, as in the TypeScript SDK.
+  `caprid_relay.media.ReplaceableTrack(publisher, track=..., catalog_service=..., build_catalog=...)` publishes a track
+  whose `replace()` registers `audio-2`, `audio-3`, ..., lists it in the catalog in the old one's place, drops what the
+  old track has not sent and closes it; frames written to a replacement wait for the relay's first subscription
+  (`demand_wait`, 2 s). `moq_media.find_replacement_track(current, tracks)` finds the replacement in a newer catalog.
+
 ## 0.2.0
 
 - `caprid-relay`: `room_endpoint(room)` roots `DEFAULT_ENDPOINT`, the hosted Relay `https://relay.mux.global`, so a
