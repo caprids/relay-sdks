@@ -19,7 +19,7 @@ import {
   type SubscribeOk,
 } from '@caprid/moq-core';
 import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelaySubscriber } from './connect.js';
-import { assertTimeoutMs } from './connect-session.js';
+import { assertTimeoutMs, type RelaySessionHooks, reportEndpoint } from './connect-session.js';
 import { RelayError } from './errors.js';
 import type { NamespaceEvents } from './namespace-events.js';
 import type { ProductSubscription, RelaySubscription, SubscriptionEnd } from './subscription.js';
@@ -227,7 +227,9 @@ export function connectSupervisedSubscriber(
 }
 
 /** How a supervisor opens one subscriber connection. */
-export type ConnectSubscriber = (options: ConnectRelaySubscriberOptions) => Promise<RelaySubscriber>;
+export type ConnectSubscriber = (
+  options: ConnectRelaySubscriberOptions & RelaySessionHooks,
+) => Promise<RelaySubscriber>;
 
 /** One live subscriber connection and the discovery it runs for followed roots. */
 interface Connection {
@@ -397,6 +399,9 @@ export async function superviseRelaySubscriber(
       subscriber = await connect({
         ...connection,
         signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
+        [reportEndpoint]: (endpoint) => {
+          connection.url ??= endpoint;
+        },
       });
     } finally {
       attemptInProgress = undefined;

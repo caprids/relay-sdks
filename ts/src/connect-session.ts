@@ -8,6 +8,7 @@ import {
 } from '@caprid/moq-core';
 
 import { connectedError, connectingError, isCredentialRefusal, RelayError, transportError } from './errors.js';
+import { DEFAULT_ENDPOINT, endpointUrl, roomEndpoint } from './room-endpoint.js';
 
 /** setTimeout stores its delay in a signed 32-bit integer; a larger one wraps and fires at once. */
 export const MAX_TIMEOUT_MS = 2_147_483_647;
@@ -64,8 +65,13 @@ export interface RelayCredential {
  * `ConnectRelayPublisherOptions`.
  */
 export interface ConnectRelayOptions {
-  /** Relay's HTTPS WebTransport endpoint, including any endpoint path. */
-  url: string;
+  /**
+   * Relay's HTTPS WebTransport endpoint, including any endpoint path. Left out, the connection dials
+   * {@link DEFAULT_ENDPOINT} rooted at the token's `root` claim, read without verifying the token: the URL `roomEndpoint`
+   * builds from that root. `getToken` is then required, and a token that names no usable root is a TypeError or
+   * RangeError before the transport is used. Pass `url` for another relay, region or room.
+   */
+  url?: string;
   /**
    * Resolve a connection token. Relay carries it in the endpoint's jwt query parameter.
    * An explicit jwt in the URL wins, and the provider is not called in that case. An empty jwt
@@ -193,32 +199,20 @@ function assertNegotiatedProtocol(protocol: unknown): void {
  */
 export const resolveTransport = Symbol('resolveTransport');
 
-/** The options {@link openRelaySession} reads: the public ones, plus an entry point's {@link resolveTransport}. */
-export type RelaySessionOptions = ConnectRelayOptions & { [resolveTransport]?: () => Promise<RelayTransportFactory> };
-
 /**
- * Check an endpoint by the Endpoint rule in spec/behavior.md and return it parsed. Not a string, or
- * not a URL at all (including an https URL with no host), is a TypeError: the wrong shape. A URL
- * that parses but is not one Relay accepts is a RangeError: a disallowed value.
+ * Internal to the supervisors, never part of the public options: told the endpoint a connection dialed, before the
+ * provider's token was added, once the connection is up. A supervisor given no `url` dials it from then on.
  */
-export function endpointUrl(endpoint: unknown): URL {
-  if (typeof endpoint !== 'string') throw new TypeError('Relay endpoints must be a URL string');
-  let url: URL;
-  try {
-    url = new URL(endpoint);
-  } catch (error) {
-    throw new TypeError('Relay endpoints must be a valid absolute URL', { cause: error });
-  }
-  if (url.protocol !== 'https:') throw new RangeError('Relay endpoints must use HTTPS');
-  if (url.hash || url.username || url.password)
-    throw new RangeError('Relay endpoints cannot contain fragments or userinfo');
-  // A present jwt wins over getToken, so an empty one would connect with no credential at all.
-  if (url.searchParams.getAll('jwt').some((value) => value.length === 0))
-    throw new RangeError(
-      'Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply getToken',
-    );
-  return url;
+export const reportEndpoint = Symbol('reportEndpoint');
+
+/** The options only the SDK's own entry points and supervisors pass: see {@link resolveTransport}, {@link reportEndpoint}. */
+export interface RelaySessionHooks {
+  [resolveTransport]?: () => Promise<RelayTransportFactory>;
+  [reportEndpoint]?: (endpoint: string) => void;
 }
+
+/** The options {@link openRelaySession} reads: the public ones, plus the internal hooks. */
+export type RelaySessionOptions = ConnectRelayOptions & RelaySessionHooks;
 
 /**
  * Shared transport/auth lifetime for the subscribe and publish session drivers. It validates only
@@ -232,7 +226,8 @@ export async function openRelaySession<T extends Session>(
     setupOptions: KeyValuePair[],
   ) => T,
 ): Promise<RelaySessionLifetime<T>> {
-  const url = endpointUrl(options.url);
+  const given = options.url === undefined ? undefined : endpointUrl(options.url);
+  if (!given && !options.getToken) throw new TypeError(noRoot('there is no getToken'));
 
   const timeoutMs = options.connectTimeoutMs ?? 10_000;
   assertTimeoutMs('connectTimeoutMs', timeoutMs);
@@ -304,17 +299,16 @@ export async function openRelaySession<T extends Session>(
   let setupReceived = false;
   const connectFailure = (error: unknown): RelayError =>
     setupReceived ? transportError(error, 'connecting') : connectingError(error, peerClose);
-  const establish = async (): Promise<{ session: T; transport: MoqtTransport }> => {
-    if (!url.searchParams.has('jwt') && options.getToken) {
+  const establish = async (): Promise<{ session: T; transport: MoqtTransport; endpoint: string }> => {
+    let issued: Issued | undefined;
+    if (!given?.searchParams.has('jwt') && options.getToken) {
       const resolved = await options.getToken();
 
       assertOpen();
-      const { token, expiresAt: given } = credential(resolved);
-      if (token.length > 0) url.searchParams.set('jwt', token);
-      expiresAt = given ?? jwtExpiry(token);
-    } else {
-      expiresAt = jwtExpiry(url.searchParams.get('jwt') ?? '');
+      issued = credential(resolved);
     }
+    const { url, endpoint, expiresAt: expiry } = dialTarget(given, issued);
+    expiresAt = expiry;
 
     let createTransport = options.createTransport ?? createBrowserTransport;
     const resolve = options[resolveTransport];
@@ -382,10 +376,10 @@ export async function openRelaySession<T extends Session>(
 
     await session.ready;
     assertOpen();
-    return { session, transport };
+    return { session, transport, endpoint };
   };
 
-  let connected: { session: T; transport: MoqtTransport };
+  let connected: Awaited<ReturnType<typeof establish>>;
 
   try {
     connected = await Promise.race([establish(), interrupted]);
@@ -398,6 +392,7 @@ export async function openRelaySession<T extends Session>(
 
   clearTimeout(timer);
   established = true;
+  options[reportEndpoint]?.(connected.endpoint);
 
   return {
     session: connected.session,
@@ -421,8 +416,14 @@ export async function openRelaySession<T extends Session>(
   };
 }
 
+/** A token the provider returned, and its expiry if the provider gave one. */
+interface Issued {
+  token: string;
+  expiresAt?: Date;
+}
+
 /** Check what `getToken` returned and split it into the token and its expiry, if given. */
-function credential(resolved: unknown): { token: string; expiresAt?: Date } {
+function credential(resolved: unknown): Issued {
   if (resolved === undefined) return { token: '' };
   if (typeof resolved === 'string') return { token: resolved };
   if (typeof resolved !== 'object' || resolved === null)
@@ -435,10 +436,56 @@ function credential(resolved: unknown): { token: string; expiresAt?: Date } {
 }
 
 /**
- * The `exp` claim of a JWT, read without verifying the token: the relay verifies it, and the SDK only needs to know
- * when the session will end. Anything that is not a JWT with a numeric `exp` has no known expiry.
+ * Where a connection dials: the endpoint as given, or with none DEFAULT_ENDPOINT rooted at the token's `root` claim
+ * ("Token-rooted endpoint" in spec/behavior.md). `url` carries the provider's token in `jwt`, and `endpoint` is the URL
+ * before it was added. Without `issued`, the token is the `jwt` already on the endpoint, if any.
  */
-export function jwtExpiry(token: string): Date | undefined {
+function dialTarget(
+  given: URL | undefined,
+  issued: Issued | undefined,
+): { url: URL; endpoint: string; expiresAt: Date | undefined } {
+  const token = issued ? issued.token : (given?.searchParams.get('jwt') ?? '');
+  const claims = jwtClaims(token);
+  const url = given ?? tokenRootedEndpoint(token, claims);
+  const endpoint = url.href;
+  if (issued && token.length > 0) url.searchParams.set('jwt', token);
+  return { url, endpoint, expiresAt: issued?.expiresAt ?? claimsExpiry(claims) };
+}
+
+/** Why a connection given no endpoint has none to dial, and what to do instead. */
+const noRoot = (reason: string): string =>
+  `With no url, the endpoint is rooted at the token's root claim, but ${reason}; pass url to choose the endpoint yourself`;
+
+/**
+ * DEFAULT_ENDPOINT rooted at the token's `root` claim, for a connection given no endpoint. The root's fields, without
+ * its leading and trailing `/`, follow roomEndpoint's rule, and an empty root is the whole relay.
+ */
+function tokenRootedEndpoint(token: string, claims: JwtClaims | undefined): URL {
+  if (token.length === 0) throw new TypeError(noRoot('getToken returned no token'));
+  if (!claims) throw new TypeError(noRoot('the token is not a JWT with a JSON object payload'));
+  const { root } = claims;
+  if (typeof root !== 'string') throw new TypeError(noRoot('the token has no string root claim'));
+  const room = root.replace(/^\/+|\/+$/g, '');
+  if (room.length === 0) return new URL(DEFAULT_ENDPOINT);
+  try {
+    return new URL(roomEndpoint(DEFAULT_ENDPOINT, room.split('/')));
+  } catch (error) {
+    const Refusal = error instanceof RangeError ? RangeError : TypeError;
+    throw new Refusal(noRoot(`its root cannot be an endpoint path: ${(error as Error).message}`), { cause: error });
+  }
+}
+
+/** The claims the SDK reads, unchecked. */
+interface JwtClaims {
+  exp?: unknown;
+  root?: unknown;
+}
+
+/**
+ * A JWT's claims, read without verifying the token: the relay verifies it, and the SDK only reads when the session will
+ * end and, with no endpoint, where to dial. Anything that is not a JWT with a JSON object payload has none.
+ */
+function jwtClaims(token: string): JwtClaims | undefined {
   const parts = token.split('.');
   if (parts.length !== 3 || !parts[1]) return undefined;
   try {
@@ -449,12 +496,16 @@ export function jwtExpiry(token: string): Date | undefined {
       ),
     );
     const claims: unknown = JSON.parse(json);
-    if (typeof claims !== 'object' || claims === null) return undefined;
-    const { exp } = claims as { exp?: unknown };
-    if (typeof exp !== 'number' || !Number.isFinite(exp)) return undefined;
-    const expiresAt = new Date(exp * 1000);
-    return Number.isNaN(expiresAt.getTime()) ? undefined : expiresAt;
+    return typeof claims === 'object' && claims !== null && !Array.isArray(claims) ? (claims as JwtClaims) : undefined;
   } catch {
     return undefined;
   }
+}
+
+/** When the token expires: its numeric `exp` claim. Anything else has no known expiry. */
+function claimsExpiry(claims: JwtClaims | undefined): Date | undefined {
+  const exp = claims?.exp;
+  if (typeof exp !== 'number' || !Number.isFinite(exp)) return undefined;
+  const expiresAt = new Date(exp * 1000);
+  return Number.isNaN(expiresAt.getTime()) ? undefined : expiresAt;
 }
