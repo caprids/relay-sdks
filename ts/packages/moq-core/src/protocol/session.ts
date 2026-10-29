@@ -575,10 +575,7 @@ class MoqtSessionImpl implements MoqtSession {
    * peer that declared it (the MoQ Timestamp extension: an endpoint MUST NOT send it to one that did not; on draft-17
    * and later a peer that does not know it fails the message).
    */
-  #outgoingParameters(
-    parameters: MessageParameters | undefined,
-    subscription: boolean
-  ): MessageParameters | undefined {
+  #outgoingParameters(parameters: MessageParameters | undefined, subscription: boolean): MessageParameters | undefined {
     if (parameters?.maxAge === undefined || (subscription && this.#maxAgeSupported)) return parameters;
 
     const { maxAge: _omitted, ...rest } = parameters;
@@ -805,7 +802,11 @@ class MoqtSessionImpl implements MoqtSession {
 
     this.#fetches.set(requestId, record);
 
-    const request: FetchRequest = { requestId, ...options, parameters: this.#outgoingParameters(options.parameters, false) };
+    const request: FetchRequest = {
+      requestId,
+      ...options,
+      parameters: this.#outgoingParameters(options.parameters, false),
+    };
 
     void this.#openRequest(
       encodeFetch(request, this.#protocol),

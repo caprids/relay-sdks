@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -16,6 +16,7 @@ from moq_core.control_messages import (
     MOQT_PROTOCOL_ID,
     ControlMessage,
     ControlMessageDeframer,
+    KeyValuePair,
     MoqtProtocolId,
     decode_control_message,
     encode_setup,
@@ -173,11 +174,11 @@ class FakeTransport:
         self._request_waiters.append(waiter)
         return await waiter
 
-    def send_server_setup(self) -> None:
-        """Open the server's control stream and send its SETUP."""
+    def send_server_setup(self, options: Sequence[KeyValuePair] = ()) -> None:
+        """Open the server's control stream and send its SETUP, carrying ``options``."""
         pipe = self._pipe()
         self._incoming_uni.push(pipe)
-        asyncio.get_running_loop().create_task(self._write_quietly(pipe, encode_setup([])))
+        asyncio.get_running_loop().create_task(self._write_quietly(pipe, encode_setup(options)))
 
     def open_data_stream(self, data: bytes) -> None:
         """Open a unidirectional data stream to the client carrying ``data`` then FIN."""

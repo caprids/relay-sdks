@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 
 from moq_core.bytes import ByteReader, ByteWriter, utf8_encode
@@ -56,6 +58,7 @@ from moq_core.control_messages import (
     is_retryable_request_error_code,
 )
 from moq_core.errors import IncompleteInputError, MoqtProtocolError
+from moq_core.varint import encode_varint
 
 
 def decode_all(data: bytes) -> list[ControlMessage]:
@@ -246,6 +249,12 @@ class TestEncodeSetup:
         ]
         assert message.options[1].value == 3
 
+    def test_names_the_max_age_setup_option_in_the_extension_range(self) -> None:
+        assert SETUP_OPTION.MAX_AGE == 0x915C4
+        [message] = decode_all(encode_setup([KeyValuePair(SETUP_OPTION.MAX_AGE, 1)]))
+        assert isinstance(message, Setup)
+        assert message.options == [KeyValuePair(SETUP_OPTION.MAX_AGE, 1)]
+
 
 class TestEncodeGoaway:
     def test_encodes_a_zero_length_uri_and_round_trips_the_timeout(self) -> None:
@@ -309,6 +318,46 @@ class TestEncodeMessageParameters:
         )
 
         assert decode_message_parameters(ByteReader(encode_parameters(parameters))) == parameters
+
+    def test_encodes_max_age_as_a_bare_varint_after_a_three_byte_type(self) -> None:
+        # 0x915C6 is a 3-byte varint (leading ones: 110xxxxx), 500 a 2-byte one.
+        assert encode_varint(PARAMETER_TYPE.MAX_AGE) == bytes([0xC9, 0x15, 0xC6])
+        assert encode_varint(500) == bytes([0x81, 0xF4])
+
+        wire = bytes([0x01, 0xC9, 0x15, 0xC6, 0x81, 0xF4])
+        parameters = MessageParameters(max_age=500)
+        assert encode_parameters(parameters) == wire
+        assert decode_message_parameters(ByteReader(wire)) == parameters
+
+    def test_sorts_max_age_after_the_draft_22_parameters(self) -> None:
+        parameters = MessageParameters(max_age=7, subscriber_priority=9, include_properties=0)
+        assert decode_message_parameters(ByteReader(encode_parameters(parameters))) == parameters
+
+        reader = ByteReader(encode_parameters(parameters))
+        assert reader.read_varint() == 3
+        assert [reader.read_varint(), reader.read_uint8()] == [PARAMETER_TYPE.SUBSCRIBER_PRIORITY, 9]
+        assert [reader.read_varint(), reader.read_uint8()] == [PARAMETER_TYPE.INCLUDE_PROPERTIES - 0x20, 0]
+        assert [reader.read_varint(), reader.read_varint()] == [PARAMETER_TYPE.MAX_AGE - 0x35, 7]
+
+    @pytest.mark.parametrize("max_age", [0, 1, 2**53 - 1])
+    def test_round_trips_max_age_across_its_range(self, max_age: int) -> None:
+        parameters = MessageParameters(max_age=max_age)
+        assert decode_message_parameters(ByteReader(encode_parameters(parameters))) == parameters
+
+    @pytest.mark.parametrize("max_age", [2**53, 2**64 - 1, -1, True, 1.5, "500"])
+    def test_refuses_to_encode_a_max_age_outside_0_to_2_53_minus_1(self, max_age: object) -> None:
+        with pytest.raises(ValueError, match="max_age"):
+            encode_parameters(MessageParameters(max_age=cast(Any, max_age)))
+
+    @pytest.mark.parametrize("value", [2**53, 2**64 - 1])
+    def test_rejects_a_decoded_max_age_above_2_53_minus_1_as_a_protocol_error(self, value: int) -> None:
+        writer = ByteWriter()
+        writer.write_varint(1)
+        writer.write_varint(PARAMETER_TYPE.MAX_AGE)
+        writer.write_varint(value)
+
+        with pytest.raises(MoqtProtocolError, match="MAX_AGE"):
+            decode_message_parameters(ByteReader(writer.to_bytes()))
 
     def test_raises_on_an_unknown_parameter_type(self) -> None:
         # Hand-craft: 1 parameter, type 0x99 (unknown).

@@ -105,7 +105,7 @@ export const SETUP_OPTION = {
   SOLICIT: 0x40b5a,
   /**
    * Subscriber max age from the MoQ Timestamp extension (draft-lcurley-moq-timestamp, as moq-dev main carries it in
-   * `drafts/`), not a draft-22 option: the sender understands the {@link PARAMETER_TYPE.MAX_AGE} parameter. The value is
+   * `drafts/`), not a draft-22 option: the sender understands the `PARAMETER_TYPE.MAX_AGE` parameter. The value is
    * reserved (sent as 1, ignored on receipt). moq-dev main declares it; moq-relay 0.17.x does not. A session sends
    * MAX_AGE only to a peer that declared it.
    */
@@ -770,7 +770,7 @@ export interface MessageParameters {
    * supersedes it and either that successor arrived at the publisher's hop at least this long ago or the group's media
    * time trails the live edge by at least this much; the newest group never expires. moq-dev main turns it into the
    * subscription's `max_delay`. A session sends it on SUBSCRIBE and REQUEST_UPDATE only when the peer's SETUP declared
-   * {@link SETUP_OPTION.MAX_AGE}, and never on FETCH or TRACK_STATUS; see `MoqtSession.maxAgeSupported`.
+   * `SETUP_OPTION.MAX_AGE`, and never on FETCH or TRACK_STATUS; see `MoqtSession.maxAgeSupported`.
    */
   maxAge?: number;
 }

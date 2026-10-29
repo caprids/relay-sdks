@@ -16,6 +16,7 @@ import {
   encodeSetup,
   encodeSubscribe,
   encodeSubscribeOk,
+  type KeyValuePair,
   type LocationFilter,
   type MessageParameters,
   MOQT_PROTOCOL_ID,
@@ -23,6 +24,7 @@ import {
   type MoqtProtocolId,
   PUBLISH_DONE_STATUS,
   REQUEST_ERROR_CODE,
+  SETUP_OPTION,
 } from '../protocol/control-messages.js';
 import { SESSION_ERROR } from '../protocol/errors.js';
 import type { MoqtObject } from '../protocol/object-stream.js';
@@ -182,11 +184,11 @@ function createFakeTransport(protocol: MoqtProtocolId = MOQT_PROTOCOL_ID) {
       return new Promise((resolve) => requestWaiters.push(resolve));
     },
     /** Open the server's control stream and send its SETUP. */
-    sendServerSetup(): void {
+    sendServerSetup(options: KeyValuePair[] = []): void {
       const pipe = new TransformStream<Uint8Array, Uint8Array>();
       const writer = pipe.writable.getWriter();
 
-      void writer.write(encodeSetup([]));
+      void writer.write(encodeSetup(options));
       incomingUni.push(pipe.readable);
     },
     /** Open a unidirectional data stream to the client. */
@@ -1613,6 +1615,149 @@ describe('createMoqtSession', () => {
       expect.objectContaining({ statusCode: PUBLISH_DONE_STATUS.TRACK_ENDED, streamCount: undefined, reason: '' })
     );
     expect(onClosed).not.toHaveBeenCalled();
+    harness.session.destroy();
+  });
+});
+
+describe('subscriber max age (MAX_AGE)', () => {
+  const declared: KeyValuePair[] = [{ type: SETUP_OPTION.MAX_AGE, value: 1 }];
+  const parameters: MessageParameters = { maxAge: 500, subscriberPriority: 16 };
+  const track = { trackNamespace: ['live'], trackName: 'audio' };
+
+  it('is not supported before the server SETUP arrives', () => {
+    const harness = createSessionHarness();
+
+    expect(harness.session.maxAgeSupported).toBe(false);
+    harness.session.destroy();
+  });
+
+  it('is supported once a server SETUP declares it, and sends maxAge on SUBSCRIBE', async () => {
+    const harness = createSessionHarness();
+
+    harness.sendServerSetup(declared);
+    await harness.session.ready;
+    expect(harness.session.maxAgeSupported).toBe(true);
+
+    harness.session.subscribe({ ...track, parameters }, {});
+    const request = await harness.nextRequestStream();
+
+    expect(await request.firstMessage).toMatchObject({
+      kind: 'subscribe',
+      parameters: { maxAge: 500, subscriberPriority: 16 },
+    });
+    harness.session.destroy();
+  });
+
+  it('counts the option as declared whatever its value', async () => {
+    const harness = createSessionHarness();
+
+    harness.sendServerSetup([{ type: SETUP_OPTION.MAX_AGE, value: 0 }]);
+    await harness.session.ready;
+    expect(harness.session.maxAgeSupported).toBe(true);
+
+    harness.session.subscribe({ ...track, parameters }, {});
+    expect(await (await harness.nextRequestStream()).firstMessage).toMatchObject({
+      kind: 'subscribe',
+      parameters: { maxAge: 500 },
+    });
+    harness.session.destroy();
+  });
+
+  it('leaves maxAge off SUBSCRIBE when the server SETUP did not declare it', async () => {
+    const harness = createSessionHarness();
+
+    harness.sendServerSetup([{ type: SETUP_OPTION.SOLICIT, value: 1 }]);
+    await harness.session.ready;
+    expect(harness.session.maxAgeSupported).toBe(false);
+
+    harness.session.subscribe({ ...track, parameters }, {});
+    const message = await (await harness.nextRequestStream()).firstMessage;
+
+    expect(message).toMatchObject({ kind: 'subscribe', parameters: { subscriberPriority: 16 } });
+    expect(message.kind === 'subscribe' && 'maxAge' in message.parameters).toBe(false);
+    harness.session.destroy();
+  });
+
+  it('omits maxAge from a SUBSCRIBE issued before the server SETUP arrives', async () => {
+    const harness = createSessionHarness();
+
+    harness.session.subscribe({ ...track, parameters }, {});
+    const request = await harness.nextRequestStream();
+    const message = await request.firstMessage;
+
+    expect(message).toMatchObject({ kind: 'subscribe', parameters: { subscriberPriority: 16 } });
+    expect(message.kind === 'subscribe' && 'maxAge' in message.parameters).toBe(false);
+
+    harness.sendServerSetup(declared);
+    await harness.session.ready;
+    expect(harness.session.maxAgeSupported).toBe(true);
+    harness.session.destroy();
+  });
+
+  it.each([
+    { name: 'declared', setup: declared, sent: true },
+    { name: 'not declared', setup: [], sent: false },
+  ])('sends maxAge on REQUEST_UPDATE only when $name', async ({ setup, sent }) => {
+    const harness = createSessionHarness();
+
+    harness.sendServerSetup(setup);
+    await harness.session.ready;
+
+    const subscription = harness.session.subscribe({ ...track, parameters: { subscriberPriority: 16 } }, {});
+    const request = await harness.nextRequestStream();
+
+    await request.firstMessage;
+    await request.send(encodeSubscribeOk(7));
+    subscription.update({ maxAge: 900, forward: 1 });
+
+    await vi.waitFor(() => expect(request.messages).toHaveLength(2));
+    expect(request.messages[1]).toMatchObject({ kind: 'request-update', parameters: { forward: 1 } });
+    expect(request.messages[1]!.kind === 'request-update' && request.messages[1]!.parameters.maxAge).toBe(
+      sent ? 900 : undefined
+    );
+    harness.session.destroy();
+  });
+
+  it('never sends maxAge on FETCH or TRACK_STATUS, even when declared', async () => {
+    const harness = createSessionHarness();
+
+    harness.sendServerSetup(declared);
+    await harness.session.ready;
+    expect(harness.session.maxAgeSupported).toBe(true);
+
+    harness.session.fetch({ ...track, parameters: { maxAge: 500, locationFilter: CURRENT_GROUP } }, {});
+    const fetchMessage = await (await harness.nextRequestStream()).firstMessage;
+
+    expect(fetchMessage).toMatchObject({ kind: 'fetch', request: { parameters: { locationFilter: CURRENT_GROUP } } });
+    expect(fetchMessage.kind === 'fetch' && 'maxAge' in (fetchMessage.request.parameters ?? {})).toBe(false);
+
+    harness.session.trackStatus({ ...track, parameters: { maxAge: 500, subscriberPriority: 16 } }, {});
+    const statusMessage = await (await harness.nextRequestStream()).firstMessage;
+
+    expect(statusMessage).toMatchObject({ kind: 'track-status', parameters: { subscriberPriority: 16 } });
+    expect(statusMessage.kind === 'track-status' && 'maxAge' in statusMessage.parameters).toBe(false);
+    harness.session.destroy();
+  });
+
+  it("does not change the caller's parameters", async () => {
+    const harness = createSessionHarness();
+    const caller: MessageParameters = { maxAge: 500, subscriberPriority: 16 };
+    const update: MessageParameters = { maxAge: 900 };
+
+    harness.sendServerSetup([]);
+    await harness.session.ready;
+
+    const subscription = harness.session.subscribe({ ...track, parameters: caller }, {});
+
+    await (await harness.nextRequestStream()).firstMessage;
+    subscription.update(update);
+    harness.session.fetch({ ...track, parameters: caller }, {});
+    await harness.nextRequestStream();
+    harness.session.trackStatus({ ...track, parameters: caller }, {});
+    await harness.nextRequestStream();
+
+    expect(caller).toEqual({ maxAge: 500, subscriberPriority: 16 });
+    expect(update).toEqual({ maxAge: 900 });
     harness.session.destroy();
   });
 });

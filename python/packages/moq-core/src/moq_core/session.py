@@ -25,7 +25,7 @@ import inspect
 import warnings
 from collections.abc import Callable, Sequence
 from contextlib import aclosing
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, replace
 from typing import TypeAlias
 
 from ._tasks import call_later, observe, spawn
@@ -466,6 +466,7 @@ class Subscription:
         # close on.
         stream = self._record.stream
         if stream is not None:
+            parameters = self._session._outgoing_parameters(parameters, subscription=True)
             spawn(
                 stream.send(
                     encode_request_update(self._session._allocate_request_id(), parameters, self._session._protocol)
@@ -549,10 +550,37 @@ class MoqtSession:
 
         self._control_writer = None
         self._received_server_setup = False
+        self._max_age_supported = False
         self._received_control_goaway = False
         self._destroyed = False
 
         spawn(self._start())
+
+    @property
+    def max_age_supported(self) -> bool:
+        """Whether the server's SETUP declared subscriber max age (the MoQ Timestamp extension's ``MAX_AGE`` option).
+
+        When it did, ``parameters.max_age`` goes out on SUBSCRIBE and REQUEST_UPDATE. While it is false, and before
+        the server's SETUP has arrived, the session leaves ``max_age`` off them, as the extension requires; it never
+        sends it on FETCH or TRACK_STATUS. moq-dev main declares it; moq-relay 0.17.x does not, and on draft-17 and
+        later would fail a SUBSCRIBE that carried the parameter.
+        """
+        return self._max_age_supported
+
+    def _outgoing_parameters(self, parameters: MessageParameters | None, *, subscription: bool) -> MessageParameters:
+        """``parameters`` as this session may send them, never mutating the caller's object.
+
+        MAX_AGE goes only on a SUBSCRIBE or REQUEST_UPDATE (``subscription``) to a peer that declared it: the
+        extension forbids sending it to one that did not, and on draft-17 and later a peer that does not know it
+        fails the message.
+        """
+        if parameters is None:
+            return MessageParameters()
+
+        if parameters.max_age is None or (subscription and self._max_age_supported):
+            return parameters
+
+        return replace(parameters, max_age=None)
 
     # --------------------------------------------------------------------------
     # Session lifecycle
@@ -722,7 +750,7 @@ class MoqtSession:
                 request_id=request_id,
                 track_namespace=list(options.track_namespace),
                 track_name=options.track_name,
-                parameters=options.parameters or MessageParameters(),
+                parameters=self._outgoing_parameters(options.parameters, subscription=True),
             ),
             self._protocol,
         )
@@ -755,7 +783,7 @@ class MoqtSession:
         """
         handlers = handlers or FetchHandlers()
         request_id = self._allocate_request_id()
-        parameters = options.parameters or MessageParameters()
+        parameters = self._outgoing_parameters(options.parameters, subscription=False)
         message = encode_fetch(
             Fetch(
                 request_id=request_id,
@@ -787,7 +815,7 @@ class MoqtSession:
                 request_id=request_id,
                 track_namespace=list(options.track_namespace),
                 track_name=options.track_name,
-                parameters=options.parameters or MessageParameters(),
+                parameters=self._outgoing_parameters(options.parameters, subscription=False),
             ),
             self._protocol,
         )
@@ -1201,6 +1229,8 @@ class MoqtSession:
             raise MoqtProtocolError("received a second control stream")
 
         self._received_server_setup = True
+        # The option's value is reserved and ignored on receipt: its presence is the declaration.
+        self._max_age_supported = any(option.type == SETUP_OPTION.MAX_AGE for option in setup.options)
         if not self.ready.done():
             self.ready.set_result(None)
         _call(self._callbacks.on_ready, setup.options)
