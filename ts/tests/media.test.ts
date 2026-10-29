@@ -445,3 +445,59 @@ it('pins every media constant', () => {
     },
   });
 });
+
+describe('findReplacementTrack', () => {
+  const track = (name: string, extra: Partial<media.MsfCatalogTrack> = {}): media.MsfCatalogTrack => ({
+    namespace: ['room'],
+    name,
+    packaging: 'loc',
+    isLive: true,
+    role: 'audio',
+    renderGroup: 1,
+    ...extra,
+  });
+  const ungrouped = (name: string): media.MsfCatalogTrack => ({
+    namespace: ['room'],
+    name,
+    packaging: 'loc',
+    isLive: true,
+    role: 'audio',
+  });
+  const current = track('audio');
+
+  it('finds nothing while the catalog still lists the track', () => {
+    expect(media.findReplacementTrack(current, [track('audio'), track('audio-2')])).toBeUndefined();
+  });
+
+  it('finds the track listed in its place, with the same role and render group', () => {
+    const replacement = track('audio-2');
+    expect(media.findReplacementTrack(current, [track('video', { role: 'video' }), replacement])).toBe(replacement);
+  });
+
+  it('takes the first of several candidates', () => {
+    const [first, second] = [track('audio-2'), track('audio-3')];
+    expect(media.findReplacementTrack(current, [first, second])).toBe(first);
+  });
+
+  it('finds nothing when the other tracks differ in role, render group or namespace, or there are none', () => {
+    expect(media.findReplacementTrack(current, [track('video', { role: 'video' })])).toBeUndefined();
+    expect(media.findReplacementTrack(current, [track('audio-2', { renderGroup: 2 })])).toBeUndefined();
+    expect(media.findReplacementTrack(current, [ungrouped('audio-2')])).toBeUndefined();
+    expect(media.findReplacementTrack(current, [track('audio-2', { namespace: ['other'] })])).toBeUndefined();
+    expect(media.findReplacementTrack(current, [track('audio-2', { namespace: ['room', 'x'] })])).toBeUndefined();
+    expect(media.findReplacementTrack(current, [])).toBeUndefined();
+  });
+
+  it('does not count a track of the same name in another namespace as the current track still listed', () => {
+    const replacement = track('audio-2');
+    expect(media.findReplacementTrack(current, [track('audio', { namespace: ['other'] }), replacement])).toBe(
+      replacement,
+    );
+  });
+
+  it('matches a track without a render group to another without one', () => {
+    const noGroup = ungrouped('audio');
+    const replacement = ungrouped('audio-2');
+    expect(media.findReplacementTrack(noGroup, [replacement])).toBe(replacement);
+  });
+});

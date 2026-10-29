@@ -115,6 +115,12 @@ export interface AudioInputOptions {
   maxJitterTargetUs?: number;
   /** A decoder error. The input decodes again from the next frame, with a new decoder. */
   onError?(error: unknown): void;
+  /**
+   * The latest `cut()` is heard: called once per cut, with {@link AudioInputStats.cutHeardAtUs}, when the jitter buffer's
+   * report says it applied it. A cut that a newer one overtook before it was applied is not reported. An exception from
+   * it goes to `console.error`.
+   */
+  onCutHeard?(atUs: number): void;
 }
 
 /** Which audio {@link AudioPlayerInput.cut} drops, by timeline timestamp in microseconds. */
@@ -165,6 +171,13 @@ export interface AudioInputStats {
   recoveredUs: number;
   /** Audio dropped by `cut()`. */
   cutUs: number;
+  /**
+   * When the latest `cut()` is heard: the time, on the clock's time source (`performance.now()` µs without a clock),
+   * at which the first output rendered after the jitter buffer applied it reaches the speaker, so the cut audio has
+   * stopped. `null` before any cut, and from each `cut()` until the buffer has applied it. How an interruption is
+   * timed: from the talker's request to here is how long its old audio kept playing.
+   */
+  cutHeardAtUs: number | null;
   /** Clock reports made. */
   reports: number;
 }
@@ -489,6 +502,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     synthesizedUs: 0,
     recoveredUs: 0,
     cutUs: 0,
+    cutHeardAtUs: null,
     reports: 0,
   };
   const renders: RenderClock = createRenderClock();
@@ -513,6 +527,9 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
   let lastSentUs: number | undefined;
   let cutOnArrivalUs = 0;
   let workletCutUs = 0;
+  // The id the latest cut() posted, until a report says the worklet applied it.
+  let cutIds = 0;
+  let unheardCut: number | undefined;
 
   const post = (command: AudioPlayerProcessorCommand, transfer?: Transferable[]) => {
     if (transfer) node.port.postMessage(command, transfer);
@@ -717,10 +734,10 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     }
   };
 
-  const flush = () => {
+  const flush = (id?: number) => {
     resetDecoder();
     expectedUs = undefined;
-    post({ type: 'flush' });
+    post(id === undefined ? { type: 'flush' } : { type: 'flush', id });
   };
 
   node.port.onmessage = ({ data: report }) => {
@@ -738,6 +755,17 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     stats.concealedUs = toUs(report.concealedFrames);
     workletCutUs = toUs(report.cutFrames);
     stats.cutUs = workletCutUs + cutOnArrivalUs;
+    if (unheardCut !== undefined && report.cutId === unheardCut) {
+      unheardCut = undefined;
+      const renderedAtUs = renders.renderedAtUs((report.frame * MICROSECONDS_PER_SECOND) / sampleRate) ?? nowUs;
+      stats.cutHeardAtUs = Math.round(renderedAtUs + outputLatencyUs());
+      try {
+        options.onCutHeard?.(stats.cutHeardAtUs);
+      } catch (error) {
+        // biome-ignore lint/suspicious/noConsole: the application's callback failed and has no caller to report to
+        console.error(new Error('onCutHeard threw; the audio player carries on', { cause: error }));
+      }
+    }
     const next = toFrames(ceilingUs());
     if (Math.abs(next - ceiling) >= toFrames(5_000)) {
       ceiling = next;
@@ -807,8 +835,10 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     cut(range = {}) {
       if (removed) return;
       const { fromUs, untilUs } = range;
+      unheardCut = ++cutIds;
+      stats.cutHeardAtUs = null;
       if (fromUs === undefined && untilUs === undefined) {
-        flush();
+        flush(unheardCut);
         return;
       }
       if (untilUs !== undefined) {
@@ -826,7 +856,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
           throughUs: lastSentUs,
         });
       }
-      post({ type: 'cut', fromUs: fromUs ?? null, untilUs: untilUs ?? null });
+      post({ type: 'cut', fromUs: fromUs ?? null, untilUs: untilUs ?? null, id: unheardCut });
     },
     get gain() {
       return gain.gain.value;

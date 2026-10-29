@@ -23,8 +23,10 @@ export interface AudioPlayerProcessorOptions {
 /** What the main thread sends. Timestamps are on the broadcast timeline, in microseconds. */
 export type AudioPlayerProcessorCommand =
   | { type: 'pcm'; timestampUs: number; planes: Float32Array[] }
-  | { type: 'flush' }
-  | { type: 'cut'; fromUs: number | null; untilUs: number | null }
+  /** Drop everything held. `id`, when set, is reported back as `cutId` at once (the input's `cut()`). */
+  | { type: 'flush'; id?: number }
+  /** Drop held audio in a range; `id` as for `flush`. */
+  | { type: 'cut'; fromUs: number | null; untilUs: number | null; id?: number }
   | { type: 'ceiling'; maxTargetFrames: number }
   | { type: 'rate'; playbackRate: number }
   | { type: 'stop' };
@@ -50,6 +52,11 @@ export interface AudioPlayerProcessorReport {
   trimmedFrames: number;
   concealedFrames: number;
   cutFrames: number;
+  /**
+   * The `id` of the latest `cut` or `flush` command that carried one, or `null` before any. The quantum after such a
+   * command is reported at once, so `frame` is where the cut is first heard.
+   */
+  cutId: number | null;
 }
 
 declare const sampleRate: number;
@@ -109,6 +116,9 @@ function audioPlayerWorklet(name: string): void {
     window = 0;
     lowWater = Number.POSITIVE_INFINITY;
     sinceReport = 0;
+    /** The latest cut's `id`, and whether the next quantum reports at once because one just came. */
+    cutId: number | null = null;
+    reportNow = false;
     stopped = false;
     underruns = 0;
     trimmed = 0;
@@ -138,9 +148,14 @@ function audioPlayerWorklet(name: string): void {
 
     command(command: AudioPlayerProcessorCommand) {
       if (command.type === 'pcm') this.push(command.timestampUs, command.planes);
-      else if (command.type === 'flush') this.flush();
-      else if (command.type === 'cut') this.cutRange(command.fromUs, command.untilUs);
-      else if (command.type === 'ceiling') {
+      else if (command.type === 'flush' || command.type === 'cut') {
+        if (command.type === 'flush') this.flush();
+        else this.cutRange(command.fromUs, command.untilUs);
+        if (command.id !== undefined) {
+          this.cutId = command.id;
+          this.reportNow = true;
+        }
+      } else if (command.type === 'ceiling') {
         this.maxTarget = Math.max(this.minTarget, command.maxTargetFrames);
         this.target = Math.min(this.target, this.maxTarget);
       } else if (command.type === 'rate') this.rate = command.playbackRate;
@@ -369,8 +384,9 @@ function audioPlayerWorklet(name: string): void {
         if (this.dry !== undefined) this.dry += frames;
       }
       this.sinceReport += frames;
-      if (this.sinceReport >= REPORT_EVERY) {
+      if (this.sinceReport >= REPORT_EVERY || this.reportNow) {
         this.sinceReport = 0;
+        this.reportNow = false;
         const report: AudioPlayerProcessorReport = {
           frame: currentFrame,
           rendered: currentFrame + frames,
@@ -385,6 +401,7 @@ function audioPlayerWorklet(name: string): void {
           trimmedFrames: this.trimmed,
           concealedFrames: this.concealed,
           cutFrames: this.cut,
+          cutId: this.cutId,
         };
         this.port.postMessage(report);
       }
