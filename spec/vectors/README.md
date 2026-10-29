@@ -22,6 +22,7 @@ Conventions:
 | `track-status-ok.json` | TRACK_STATUS_OK as a publisher sends it (a REQUEST_OK with LARGEST_OBJECT when present and the Track Properties), draft-ietf-moq-transport-22 §9.3 and §9.13, the same on both drafts |
 | `frame-sequencer.json` | Frame sequencer step sequences over a playout clock: ordering, waits, late drops, resyncs, restarts, and stats, per "Media subscribing" in `../behavior.md` |
 | `room-endpoint.json` | Room-rooted endpoint URLs `roomEndpoint` / `room_endpoint` builds, and the endpoints and rooms it refuses, per "Room-rooted endpoints" in `../behavior.md` |
+| `token-rooted-endpoint.json` | The endpoint a connect call given no endpoint dials for a token, and the tokens it refuses, per "Token-rooted endpoint" in `../behavior.md` |
 
 Planned: the rest of control message framing (`track-status-ok.json` is the first), parameters,
 subgroup and fetch stream headers, and object status markers. The regression tests under `ts/packages/moq-core/src/tests` are the seed for those.

@@ -321,6 +321,19 @@ the examples do); a trailing optional endpoint, `roomEndpoint(room, endpoint?)` 
 existing call, and an endpoint read before its path matches the URL it builds); an options object,
 `roomEndpoint(room, { endpoint })` (one optional value does not need a bag).
 
+A connect call given no `url` dials `DEFAULT_ENDPOINT` rooted at the token's `root` claim, the URL
+`roomEndpoint` builds from that root ([token-rooted endpoint](behavior.md#token-rooted-endpoint),
+[issue #374](https://github.com/muxinc/relay-sdks/issues/374)). It adds no name: `url` becomes
+optional. Like the rejected `room` option, it takes the URL out of application code. It was taken
+anyway because it removes the step quickstart users get wrong, copying their token's root into
+`roomEndpoint`, and the shortest call stays the recommended room-rooted form, with relative
+namespaces unchanged. A token that names no usable root fails before dialing with a message that
+says to pass `url`, and the relay still verifies the token. Not adopted: defaulting `url` to the bare
+`DEFAULT_ENDPOINT` (the shortest call would be the less recommended endpoint, and room-relative
+namespaces there fail far from the cause, as in
+[issue #119](https://github.com/muxinc/relay-sdks/issues/119)); the `room` option (the user would
+still copy the root in by hand).
+
 ## Switching tracks: `subscribeSwitchable`, `switchTo`, `onSwitched`
 
 A switchable subscription is the primitive for changing what a viewer receives
