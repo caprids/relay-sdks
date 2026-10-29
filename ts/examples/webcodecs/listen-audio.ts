@@ -90,11 +90,17 @@ export interface AudioListener {
   stop(): Promise<void>;
 }
 
-/** Catalogs after the first: the listener's handlers once it has started, and the newest one that came before. */
+/**
+ * Catalogs after the first: the listener's handlers once it has started, and the newest one that came before. An error
+ * of the catalog subscription after the first catalog, which the listener depends on for replacements, goes to
+ * `onError`; before the listener has started it is kept, the first one only, in `pendingError` and reported once
+ * the handlers exist, as `pending` is kept.
+ */
 interface LaterCatalogs {
   onCatalog?(tracks: MsfCatalogTrack[]): void;
   onError?(error: unknown): void;
   pending?: MsfCatalogTrack[];
+  pendingError?: { error: unknown };
 }
 
 function readCatalog(
@@ -153,7 +159,14 @@ function readCatalog(
           settle();
         },
         onError(error) {
-          if (outcome) return;
+          if (outcome) {
+            // The catalog subscription ended after its first catalog: no replacement can follow, which is reported.
+            if ('tracks' in outcome) {
+              if (later.onError) later.onError(error);
+              else later.pendingError ??= { error };
+            }
+            return;
+          }
           outcome = { error, ended: true };
           settle();
         },
@@ -245,15 +258,32 @@ export async function listenAudio(
       },
     });
     const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
-    const subscribeAudio = (name: string) => {
+    interface Audio {
+      reader: FrameReader;
+      subscription: RelaySubscription;
+      /** The relay ended this subscription with an error, a rejected replacement for one. */
+      failed: boolean;
+    }
+    const subscribeAudio = (name: string): Audio => {
       const reader = createFrameReader(sequencer, { onFrame: input.push });
-      const subscription = subscriber.subscribe(
+      // The error belongs to this subscription: one of an old, replaced subscription does not mark the current one.
+      const subscribed: { reader: FrameReader; subscription?: RelaySubscription; failed: boolean } = {
+        reader,
+        failed: false,
+      };
+      subscribed.subscription = subscriber.subscribe(
         { namespace: [...namespace], track: name },
-        { ...reader, onError: (error) => options.onError?.(error) },
+        {
+          ...reader,
+          onError: (error) => {
+            subscribed.failed = true;
+            options.onError?.(error);
+          },
+        },
       );
-      return { reader, subscription };
+      return subscribed as Audio;
     };
-    let audio: { reader: FrameReader; subscription: RelaySubscription } = subscribeAudio(track.name);
+    let audio: Audio = subscribeAudio(track.name);
     release.push(() => audio.reader.close());
     release.push(() => audio.subscription.cancel());
     const listed = (name: string) => tracks.some((candidate) => candidate.name === name);
@@ -308,14 +338,19 @@ export async function listenAudio(
     // A track replacement: stop the old track's subscription and drop what the sequencer and the player hold of it, then
     // play the new track from its first frame, on a clock the sequencer's restart has reset. The new track is subscribed
     // first: if that fails, nothing changes, the old track plays on, and the next catalog that lists the replacement
-    // tries again.
+    // tries again. A relay that rejects the subscription later, through its `onError`, leaves the new track current
+    // and silent: the next catalog that still lists it subscribes to it again, the same steps without a replacement.
     let stopped = false;
-    later.onError = (error) => options.onError?.(error);
+    later.onError = (error) => {
+      if (!stopped) options.onError?.(error);
+    };
     later.onCatalog = (tracks) => {
       if (stopped) return;
-      const next = findReplacementTrack(current, tracks);
+      const replacement = findReplacementTrack(current, tracks);
+      const next =
+        replacement ?? (audio.failed ? tracks.find((candidate) => candidate.name === current.name) : undefined);
       if (!next) return;
-      let subscribed: typeof audio;
+      let subscribed: Audio;
       try {
         subscribed = subscribeAudio(next.name);
       } catch (error) {
@@ -328,14 +363,17 @@ export async function listenAudio(
       sequencer.restart();
       input.cut();
       audio = subscribed;
+      if (!replacement) return;
       replacing = { from: current.name, to: next.name, stopped: false };
       current = next;
       transcript = createTranscript();
       replaced('seen', clock.localNow());
     };
-    // A replacement that came while the listener was setting up.
-    const pending = later.pending;
+    // A replacement and a catalog error that came while the listener was setting up.
+    const { pending, pendingError } = later;
     delete later.pending;
+    delete later.pendingError;
+    if (pendingError) later.onError(pendingError.error);
     if (pending) later.onCatalog(pending);
 
     return {

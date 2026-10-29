@@ -315,6 +315,10 @@ it('reports a transcript segment that does not parse', async () => {
   await listener.stop();
 });
 
+/** The relay ends a subscription with an error. */
+const failWith = (subscription: { handlers: Handlers } | undefined, error: Error) =>
+  subscription?.handlers.onError?.(error as unknown as Parameters<NonNullable<Handlers['onError']>>[0]);
+
 const replacementCatalog = (name: string) =>
   buildMsfCatalog({ namespace: NAMESPACE, media: [{ role: 'audio', name }] });
 
@@ -467,6 +471,82 @@ it('keeps the old track when the replacement cannot be subscribed, and tries aga
   expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2']);
   expect(fake.subscriptions[1]?.cancel).toHaveBeenCalledTimes(1);
   expect(cut).toHaveBeenCalledTimes(1);
+  await listener.stop();
+});
+
+it('subscribes to a replacement again when the relay rejected its subscription, on the next catalog', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const onTrackReplaced = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError, onTrackReplaced });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  const cut = vi.spyOn(listener.input, 'cut');
+  const restart = vi.spyOn(listener.sequencer, 'restart');
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(listener.track).toBe('audio-2');
+
+  // An error of the replaced track's old subscription does not mark the current one failed.
+  const stale = new Error('late error of the old track');
+  failWith(fake.subscriptions[1], stale);
+  expect(onError).toHaveBeenLastCalledWith(stale);
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(fake.subscriptions).toHaveLength(3);
+
+  // The relay rejects the replacement's subscription, after the old one was closed.
+  const rejected = new Error('The relay rejected audio-2');
+  failWith(fake.subscriptions[2], rejected);
+  expect(onError).toHaveBeenLastCalledWith(rejected);
+  expect(fake.subscriptions).toHaveLength(3);
+  cut.mockClear();
+  restart.mockClear();
+  onTrackReplaced.mockClear();
+
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio-2', 'audio-2']);
+  expect(fake.subscriptions[2]?.cancel).toHaveBeenCalledTimes(1);
+  expect(cut).toHaveBeenCalledTimes(1);
+  expect(restart).toHaveBeenCalledTimes(1);
+  expect(listener.track).toBe('audio-2');
+  // It is the same track, not a replacement.
+  expect(onTrackReplaced).not.toHaveBeenCalled();
+
+  // The new subscription is healthy: a repeated catalog changes nothing.
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(fake.subscriptions).toHaveLength(4);
+
+  // A failure of the newest subscription marks it failed, but nothing runs after stop().
+  failWith(fake.subscriptions[3], rejected);
+  await listener.stop();
+  fake.deliverCatalog(replacementCatalog('audio-2'));
+  expect(fake.subscriptions).toHaveLength(4);
+});
+
+it('reports an error of the catalog subscription after the listener started', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  expect(onError).not.toHaveBeenCalled();
+  const failure = new Error('The catalog subscription ended');
+  failWith(fake.catalog, failure);
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError).toHaveBeenCalledWith(failure);
+  await listener.stop();
+});
+
+it('reports an error of the catalog subscription that came while the listener was setting up', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  fake.deliverCatalog(audioCatalog());
+  const failure = new Error('The catalog subscription ended');
+  failWith(fake.catalog, failure);
+  failWith(fake.catalog, new Error('a second one is not kept'));
+  const listener = await listening;
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(onError).toHaveBeenCalledWith(failure);
   await listener.stop();
 });
 

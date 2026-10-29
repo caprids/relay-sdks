@@ -379,6 +379,44 @@ class TestReplaceDropsUnsentFrames:
         assert old.closed
         assert b"queued" not in payloads(old)
 
+    async def test_a_write_whose_turn_comes_as_the_replacement_starts_is_dropped_and_never_sent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The first write is held in the old track; the second waits in the writer's backlog. When the first
+        # finishes, the backlog hands the second its turn, and replace() runs before that write resumes.
+        publisher = Publisher()
+        block = asyncio.Event()
+        reply = create(publisher, Catalog())
+        old = publisher.tracks["audio"]
+        old.block = block
+        replacing: list[asyncio.Task[TrackReplacement]] = []
+        open_group = old.open_group
+
+        async def open_then_replace(payload: bytes | None = None, **options: Any) -> Any:
+            group = await open_group(payload, **options)
+
+            if payload == b"flying":
+                # Scheduled before the queued write's resumption, which the end of this write schedules next.
+                replacing.append(asyncio.ensure_future(reply.replace()))
+
+            return group
+
+        monkeypatch.setattr(old, "open_group", open_then_replace)
+        in_flight = asyncio.ensure_future(reply.write(frame("flying")))
+        queued = asyncio.ensure_future(reply.write(frame("queued")))
+        await wait_for(lambda: old.blocked.is_set())
+        await settle()
+
+        block.set()
+
+        assert (await in_flight).kind == "sent"
+        assert (await queued).kind == "dropped"
+        assert replacing
+        await replacing[0]
+        assert reply.track == "audio-2"
+        assert payloads(old) == [b"flying"]
+        assert old.closed
+
 
 class TestClose:
     async def test_close_closes_the_current_track_and_write_and_replace_raise_afterwards(self) -> None:

@@ -1050,7 +1050,8 @@ listener follows it.
 `@caprid/relay/media`, `ReplaceableTrack(publisher, track=..., catalog_service=..., build_catalog=...)`
 in `caprid_relay.media`, wraps a frame writer (frame grouping by default) over the current track.
 `replace()` registers the next track, `audio-2`, `audio-3` and so on (or the application's `name(n)`),
-lists it in the catalog in the old one's place, drops what the old track has not sent and closes it.
+lists it in the catalog in the old one's place, drops what the old track has not sent and closes it. The
+drop happens synchronously in the call, before anything else runs, so no frame of the old track goes out after the switch.
 msf-01 §5.3 makes a changed track a new name, and a name is not reused on a connection, so a new
 track is the conforming way. A supervised publisher's new generation would replace the whole
 connection, so the track name it is. The listener subscribes to the new track once the new catalog
@@ -1064,7 +1065,11 @@ plays and lists another of the same role, render group and namespace (`findRepla
 frame sequencer (dropping every frame it holds; the clock resets), cuts everything the player
 holds (`input.cut()`), starts a new transcript (sequence numbers belong to one track), and subscribes
 to the new track, whose first frame then anchors the clock: the switch is by timestamp. A replacement
-that comes while the listener is still setting up is followed once it has started. A listener that joins later takes the catalog's audio track whatever its
+that comes while the listener is still setting up is followed once it has started. The listener depends on
+the catalog subscription for this, so an error of it after the first catalog is reported (`onError`). A
+replacement whose subscription the relay rejects, which arrives asynchronously after the old track was
+closed, leaves the new track current and silent: the next catalog that still lists it subscribes to it
+again, the same steps without a replacement event. A listener that joins later takes the catalog's audio track whatever its
 name. The new track must have the old one's codec, since the input keeps its decoder. The example's
 `onTrackReplaced` reports three steps on the clock's time source: `seen` (the catalog arrived and the
 old audio was cut), `stopped` (`onCutHeard`: the old audio has stopped at the speaker) and `started`

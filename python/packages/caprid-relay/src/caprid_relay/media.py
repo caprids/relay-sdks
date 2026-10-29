@@ -386,17 +386,21 @@ class FrameWriter(Generic[F]):
         application's to close.
         """
         if self._closing is None:
-            self._closed = True
-
-            while self._backlog:
-                _, turn = self._backlog.popleft()
-                self._gap_turns.discard(turn)
-                _settle(turn, FrameOutcome("dropped"))
+            self._drop_backlog()
 
             # One cleanup for every caller, which a cancelled caller cannot cut short.
             self._closing = self._loop.create_task(self._finish_closing())
 
         await asyncio.shield(self._closing)
+
+    def _drop_backlog(self) -> None:
+        """Refuse further frames and settle every waiting one as ``dropped``, all before anything else runs."""
+        self._closed = True
+
+        while self._backlog:
+            _, turn = self._backlog.popleft()
+            self._gap_turns.discard(turn)
+            _settle(turn, FrameOutcome("dropped"))
 
     async def _finish_closing(self) -> None:
         if self._watch is not None:
@@ -510,6 +514,10 @@ class FrameWriter(Generic[F]):
     # ------------------------------------------------------------------ one frame's turn
 
     async def _take_turn(self, frame: F, *, gap: bool = False) -> FrameOutcome:
+        if self._closed:
+            # The turn was handed over before close() ran but this frame had not started: it is part of the backlog.
+            return FrameOutcome("dropped")
+
         if self._ended is not None:
             return FrameOutcome("ended", error=self._ended)
 
@@ -1135,6 +1143,8 @@ class ReplaceableTrack(Generic[F]):
             await self._discard(replacement)
             raise
 
+        # The old track's unsent frames are dropped before anything else runs, so none goes out after the switch.
+        self._begin_retire(old)
         self._current = replacement
         retiring = asyncio.ensure_future(self._retire(old))
         self._retiring.add(retiring)
@@ -1151,6 +1161,7 @@ class ReplaceableTrack(Generic[F]):
         """
         if self._closing is None:
             self._closed = True
+            self._begin_retire(self._current)
             self._closing = asyncio.ensure_future(self._finish_closing())
 
         await asyncio.shield(self._closing)
@@ -1229,12 +1240,16 @@ class ReplaceableTrack(Generic[F]):
 
         incarnation.waiting = None
 
-    async def _retire(self, incarnation: _Incarnation[F]) -> None:
+    def _begin_retire(self, incarnation: _Incarnation[F]) -> None:
+        """The synchronous start of retiring a track: what it has not sent is dropped, with no await in between.
+
+        A frame waiting for demand or in the writer's backlog could otherwise go out after the switch.
+        Safe to repeat.
+        """
         incarnation.retired = True
 
         if incarnation.watcher is not None:
             incarnation.watcher.cancel()
-            await asyncio.wait([incarnation.watcher])
 
         for _, turn in incarnation.waiting or ():
             if not turn.done():
@@ -1242,6 +1257,14 @@ class ReplaceableTrack(Generic[F]):
 
         if incarnation.waiting is not None:
             incarnation.waiting.clear()
+
+        incarnation.writer._drop_backlog()
+
+    async def _retire(self, incarnation: _Incarnation[F]) -> None:
+        self._begin_retire(incarnation)
+
+        if incarnation.watcher is not None:
+            await asyncio.wait([incarnation.watcher])
 
         try:
             await incarnation.writer.close()
