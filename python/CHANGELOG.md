@@ -6,6 +6,11 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-relay`, `caprid-moq-media`: track replacement for barge-in, as in the TypeScript SDK.
+  `caprid_relay.media.ReplaceableTrack(publisher, track=..., catalog_service=..., build_catalog=...)` publishes a track
+  whose `replace()` registers `audio-2`, `audio-3`, ..., lists it in the catalog in the old one's place, drops what the
+  old track has not sent and closes it; frames written to a replacement wait for the relay's first subscription
+  (`demand_wait`, 2 s). `moq_media.find_replacement_track(current, tracks)` finds the replacement in a newer catalog.
 - `caprid-relay`, `caprid-moq-core`: `MessageParameters.max_age` (milliseconds, 0 to 2^53-1) is the MoQ Timestamp
   extension's subscriber max age (parameter `0x915C6`, as in the TypeScript SDK): a publisher that honors it skips a
   group once a newer group has superseded it for that long. A session sends it on SUBSCRIBE and REQUEST_UPDATE only to

@@ -501,6 +501,34 @@ describe('createAudioPlayer', () => {
     expect(input.stats.decoderResets).toBe(1);
   });
 
+  it('says when a cut is heard: the first output rendered after the buffer applied it, plus the output delay', async () => {
+    const { context, clock, player } = await setUp();
+    context.outputLatency = 0.03;
+    const onCutHeard = vi.fn();
+    const input = player.addInput({ clock, onCutHeard });
+    expect(input.stats.cutHeardAtUs).toBeNull();
+    for (let index = 1; index <= 10; index++) input.push(frameAt(index));
+    context.render(100);
+    // A report came 20 ms ago at most; the cut is applied before the next quantum, which reports at once.
+    const cutAt = nowUs;
+    input.cut();
+    expect(input.stats.cutHeardAtUs).toBeNull();
+    context.render(3);
+    const heard = input.stats.cutHeardAtUs as number;
+    // Rendered at the next quantum (within 2.7 ms), heard 30 ms later.
+    expect(heard - cutAt).toBeGreaterThanOrEqual(30_000 - 1_000);
+    expect(heard - cutAt).toBeLessThanOrEqual(30_000 + 3_000);
+    expect(onCutHeard).toHaveBeenCalledTimes(1);
+    expect(onCutHeard).toHaveBeenCalledWith(heard);
+    // A ranged cut too, and a new cut clears the old time until it is applied.
+    for (let index = 11; index <= 20; index++) input.push(frameAt(index));
+    context.render(100);
+    input.cut({ fromUs: frameAt(15).timestampUs });
+    expect(input.stats.cutHeardAtUs).toBeNull();
+    context.render(3);
+    expect(input.stats.cutHeardAtUs).toBeGreaterThan(heard);
+  });
+
   it('keeps a cut through a resync, so interrupted audio arriving behind it stays dropped', async () => {
     const { context, player } = await setUp();
     const input = player.addInput();

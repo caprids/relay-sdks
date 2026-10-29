@@ -24,6 +24,15 @@ each section says what changed and what to do about it. How to cut a release is 
   player at the start, subscribes to the audio with the catalog and holds the frames until the input exists. In
   relay-dev's voice benchmark, time to first audio on a clean path went from 627 to 249 ms (WebRTC 419; spec/media-layer.md,
   "Joining sooner").
+- `@caprid/relay`, `@caprid/moq-media`: track replacement for barge-in. `createReplaceableTrack(publisher, { track,
+  catalog: { service, build } })` in `@caprid/relay/media` publishes a track whose `replace()` registers `audio-2`,
+  `audio-3`, ..., lists it in the catalog in the old one's place, drops what the old track has not sent and closes it;
+  frames written to a replacement wait for the relay's first subscription (`demandWaitMs`, 2 s).
+  `findReplacementTrack(current, tracks)` finds the replacement in a newer catalog. The audio input's
+  `stats.cutHeardAtUs` and `onCutHeard(atUs)` say when a cut reaches the speaker (the worklet's report after a cut comes
+  at once and gains `cutId`). The WebCodecs example's `listenAudio` follows a replacement (`onTrackReplaced`, with the
+  phases `seen`, `stopped` and `started`, and `listener.track`). spec/media-layer.md has the local and bench
+  measurements.
 - `@caprid/moq-core`, `@caprid/relay`: `MessageParameters.maxAge` (milliseconds, 0 to 2^53−1) is the MoQ Timestamp
   extension's subscriber max age (parameter `0x915C6`): a publisher that honors it skips a group once a newer group has
   superseded it for that long. A session sends it on SUBSCRIBE and REQUEST_UPDATE only to a relay whose SETUP declared

@@ -489,6 +489,7 @@ language-specific names of the original examples, and the table maps them.
 | Catalog as read | `MsfCatalog` | `MsfCatalog` |
 | Track description as read | `MsfCatalogTrack` | `MsfCatalogTrack` |
 | Sets of tracks a viewer picks one of | `groupMsfTracks` / `MsfTrackGroup` | `group_msf_tracks` / `MsfTrackGroup` |
+| The track a newer catalog lists in place of one playing (a track replacement) | `findReplacementTrack(current, tracks)` → `MsfCatalogTrack \| undefined` | `find_replacement_track(current, tracks)` → `MsfCatalogTrack \| None` |
 | Reader options | `ParseMsfCatalogOptions` | `parse_msf_catalog` keyword arguments |
 | LOC track properties | `locTrackProperties` | `loc_track_properties` |
 | LOC object properties from microseconds | `locProperties` / `LocPropertiesOptions` | `loc_properties` keyword arguments |
@@ -671,13 +672,14 @@ the format package still does not depend on the product package.
 | Frames kept for a consumer not ready yet, passed on in order | `createFrameHold()` → `FrameHold { push(frame), release(consumer), clear(), isReleased, stats }` (`FrameHoldStats { held, maxHeld, released }`) | — |
 | The mix, which the application routes | `player.output` (the context's own gain node type) | — |
 | Delay after the output that the context does not report | `player.outputDelayUs` (settable) | — |
-| One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, playbackRate, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
+| One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, playbackRate, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError, onCutHeard })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
 | What an input calls on its clock; a `PlayoutClock` qualifies | `AudioInputClock { targetLatencyUs, localNow(), reportAudio(timestampUs, atUs, stats), stopAudio() }` | — |
 | Hand it a frame in decode order | `input.push(frame)` (`AudioPlayerFrame`: `timestampUs`, `payload`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
 | Drop received audio in a timeline range | `input.cut({ fromUs?, untilUs? })` (`AudioCutRange`, which a parsed `Interrupt` is); `cut()` drops everything held | — |
+| When the latest cut is heard at the speaker | `input.stats.cutHeardAtUs`; `onCutHeard(atUs)` on `AudioInputOptions` | — |
 | Per-input gain; stop | `input.gain`; `input.remove()`, `input.removed`; `player.close()` | — |
 | Held audio played per output frame, 0.5 to 2 | `input.playbackRate` (settable) | — |
-| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, playStarts, heldUntilUs, dryAtUs, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, synthesizedUs, recoveredUs, cutUs, reports }` | — |
+| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, playStarts, heldUntilUs, dryAtUs, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, synthesizedUs, recoveredUs, cutUs, cutHeardAtUs, reports }` | — |
 | What the player needs of Web Audio | `AudioPlayerContext`, `AudioPlayerNode`, `AudioPlayerGainNode` | — |
 | A catalog audio track's decoder config | `audioDecoderConfigFromTrack(track)` | — |
 | An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | `opus_packet_duration_us(packet)` (`moq_media`; see below) |
@@ -815,6 +817,7 @@ TypeScript package's export test. TypeScript uses factories that return interfac
 | Documents accepted, and failures that were retried | `service.sends`, `service.failures` | `service.sends`, `service.failures` |
 | Serve a state-shaped track whose document the application replaces | `createDocumentService(track, document?, { retryDelayMs })` → `DocumentService` (`DocumentServiceOptions`); `serve`, `sends`, `failures` as above | `DocumentService(track, document=None, retry_delay=1.0)`; `serve()`, `sends`, `failures` as above |
 | Replace the document and send it while the relay is subscribed; the latest | `service.update(document)`; `service.document` | `service.update(document)`; `service.document` |
+| A track the publisher replaces mid-stream, listed in the catalog in the old one's place | `createReplaceableTrack(publisher, { track, catalog: { service, build }, name?, trackProperties?, writeTimeoutMs?, writer?, demandWaitMs? })` → `ReplaceableTrack { track, replacements, closed, write(frame), replace(), close() }` (`ReplaceableTrackOptions`, `ReplaceableTrackCatalog`); `replace()` → `TrackReplacement { from, to, replacements }` | `ReplaceableTrack(publisher, *, track, catalog_service, build_catalog, name=None, track_properties=None, write_timeout=None, writer_options=None, demand_wait=2.0)`: `track`, `replacements`, `closed`, `await write(frame)`, `await replace()` → `TrackReplacement(from_track, to_track, replacements)`, `await close()` |
 | Map encoded frames onto a track's groups | `createFrameWriter(track, { grouping, stale, maxBacklog, onKeyframeNeeded })` → `FrameWriter` (`FrameWriterOptions`); `grouping: 'frame'` for one group per frame (`FrameGrouping`) | `FrameWriter(track, grouping="keyframe", stale=None, max_backlog=None, on_keyframe_needed=None)`; `grouping="frame"` for one group per frame |
 | Send one frame if the relay wants it | `writer.write(frame)` → `Promise<FrameOutcome>`, callable without awaiting | `await writer.write(frame)` returns a `FrameOutcome`; concurrent calls are served in order |
 | What became of a frame | `FrameOutcome { kind, error?, groupId? }`, `kind` a `FrameOutcomeKind`: `'sent'`, `'skipped'`, `'stale'`, `'dropped'`, `'interrupted'`, `'ended'` | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `dropped`, `interrupted`, `ended`), `error`, `group_id` |

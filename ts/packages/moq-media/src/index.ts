@@ -76,6 +76,7 @@ export {
   VIDEO_TRACK,
 } from './loc.js';
 export {
+  findReplacementTrack,
   groupMsfTracks,
   type MsfCatalog,
   type MsfCatalogTrack,

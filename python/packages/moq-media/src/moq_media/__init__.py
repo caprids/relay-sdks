@@ -15,6 +15,7 @@ from .catalog import (
     VideoTrackInfo,
     build_msf_catalog,
     build_msf_end_catalog,
+    find_replacement_track,
     group_msf_tracks,
     parse_msf_catalog,
 )
@@ -140,6 +141,7 @@ __all__ = [
     "encode_name_component",
     "encode_namespace_name",
     "extract_parameter_sets",
+    "find_replacement_track",
     "group_msf_tracks",
     "iter_annexb_nal_units",
     "loc_properties",
