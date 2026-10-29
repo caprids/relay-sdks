@@ -28,9 +28,9 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Sequence
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Generic, Literal, Protocol, TypeVar
+from typing import Any, Generic, Literal, Protocol, TypeVar
 
 from moq_core import KeyValuePair, MessageParameters, ObjectStatus
 
@@ -931,6 +931,335 @@ class DocumentService:
                 self._sends += 1
 
 
+class _RegisteredTrack(_TrackWriter, Protocol):
+    """What a replaceable track needs from a track it registered: a writer the application can close."""
+
+    def close(self) -> None: ...
+
+
+class _TrackPublisher(Protocol):
+    """What a replaceable track needs from the publisher: the shape of ``RelayPublisher.register_track``."""
+
+    def register_track(
+        self,
+        track: str,
+        *,
+        track_properties: Sequence[KeyValuePair] | None = None,
+        write_timeout: float = ...,
+    ) -> _RegisteredTrack: ...
+
+
+class _CatalogService(Protocol):
+    """Where the catalog is served: the shape of :class:`DocumentService`."""
+
+    def update(self, document: bytes) -> None: ...
+
+
+@dataclass(frozen=True, slots=True)
+class TrackReplacement:
+    """What :meth:`ReplaceableTrack.replace` did."""
+
+    from_track: str
+    """The track replaced, now closed."""
+    to_track: str
+    """The new track, listed in the catalog in its place."""
+    replacements: int
+    """How many times the track has been replaced, this time included: 1 for the first replacement."""
+
+
+@dataclass(slots=True)
+class _Incarnation(Generic[F]):
+    """One track of a replaceable track, with its writer and the frames waiting for the relay's first subscription."""
+
+    name: str
+    replacements: int
+    track: _RegisteredTrack
+    writer: FrameWriter[F]
+    waiting: list[tuple[F, asyncio.Future[FrameOutcome]]] | None = None
+    """Frames that wait for the relay's first subscription, in order; ``None`` once they go to the writer."""
+    watcher: asyncio.Task[None] | None = None
+    pump: asyncio.Task[None] | None = None
+    retired: bool = False
+
+
+class ReplaceableTrack(Generic[F]):
+    """A track the publisher can replace mid-stream, for barge-in.
+
+    A voice agent that is talked over replaces its reply track, and listeners drop the old reply's
+    audio and play the new track. msf-01 §5.3 makes a changed track a new name, so :meth:`replace`
+    registers the next track (``{track}-{n + 1}`` for replacement ``n`` from 1, so ``audio-2`` first, or
+    ``name(n)``) and lists it in the catalog
+    in the current track's place; a listener that sees that (``moq_media.find_replacement_track``)
+    plays the new track. The old track's frames that have not been sent are dropped, and the track is
+    closed. The catalog is whatever ``build_catalog(name)`` returns for the track that is current,
+    handed to ``catalog_service.update`` at creation and at each replacement.
+
+    Frames go through a :class:`FrameWriter` per track, built with ``writer_options`` (default
+    ``grouping="frame"``, the mapping for audio). A listener subscribes to a replacement only once the
+    new catalog has reached it, about a round trip, and a frame writer skips what it is handed before
+    then: the first words of the new reply. So frames written to a replacement before the relay
+    subscribes wait, in order, and go out once it does; any still waiting after ``demand_wait`` seconds
+    go to the writer, which skips them. ``demand_wait=0`` waits for nothing. The first track never
+    waits.
+
+    Create one with an event loop running: the frame writers need it. The first track is registered at
+    once, and the publisher's track name rules apply to every name: they are unique per publisher
+    connection, including after a track closes.
+    """
+
+    __slots__ = (
+        "_attempts",
+        "_build_catalog",
+        "_catalog_service",
+        "_closed",
+        "_closing",
+        "_current",
+        "_demand_wait",
+        "_name",
+        "_publisher",
+        "_retiring",
+        "_track_properties",
+        "_write_timeout",
+        "_writer_options",
+    )
+
+    def __init__(
+        self,
+        publisher: _TrackPublisher,
+        *,
+        track: str,
+        catalog_service: _CatalogService,
+        build_catalog: Callable[[str], bytes],
+        name: Callable[[int], str] | None = None,
+        track_properties: Sequence[KeyValuePair] | None = None,
+        write_timeout: float | None = None,
+        writer_options: Mapping[str, Any] | None = None,
+        demand_wait: float = 2.0,
+    ) -> None:
+        if not isinstance(track, str) or not track:
+            raise TypeError("track must be a non-empty string")
+
+        if name is not None and not callable(name):
+            raise TypeError("name must be callable")
+
+        if not callable(getattr(catalog_service, "update", None)) or not callable(build_catalog):
+            raise TypeError("catalog_service must have update() and build_catalog must be callable")
+
+        if isinstance(demand_wait, bool) or not isinstance(demand_wait, int | float):
+            raise TypeError("demand_wait must be a number of seconds")
+
+        if demand_wait != demand_wait or demand_wait < 0:
+            raise ValueError("demand_wait must be zero or more seconds")
+
+        self._publisher = publisher
+        self._name: Callable[[int], str] = (
+            name if name is not None else (lambda replacement: f"{track}-{replacement + 1}")
+        )
+        self._track_properties = track_properties
+        self._write_timeout = write_timeout
+        self._writer_options: dict[str, Any] = {"grouping": "frame", **(writer_options or {})}
+        self._catalog_service = catalog_service
+        self._build_catalog = build_catalog
+        self._demand_wait = demand_wait
+        self._closed = False
+        # Names asked for so far: a failed attempt uses its name up, since the publisher may hold it.
+        self._attempts = 0
+        self._closing: asyncio.Task[None] | None = None
+        self._retiring: set[asyncio.Task[None]] = set()
+        self._current = self._register(track, 0, wait=False)
+
+        try:
+            self._catalog_service.update(self._build_catalog(track))
+        except BaseException:
+            self._current.track.close()
+            raise
+
+    @property
+    def track(self) -> str:
+        """The current track's name."""
+        return self._current.name
+
+    @property
+    def replacements(self) -> int:
+        """How many times the track has been replaced: 0 while the first track plays."""
+        return self._current.replacements
+
+    @property
+    def closed(self) -> bool:
+        """True once :meth:`close` ran."""
+        return self._closed
+
+    async def write(self, frame: F) -> FrameOutcome:
+        """Send one frame on the current track and say what happened, as :meth:`FrameWriter.write` does.
+
+        A frame written to a replacement before the relay has subscribed to it waits (``demand_wait``).
+        A frame of a track that is replaced before it went out is ``dropped``. Raises ``RelayError``
+        with code ``CLOSED`` after :meth:`close`.
+        """
+        if self._closed:
+            raise RelayError("Replaceable track is closed", code="CLOSED", phase="waiting-for-demand")
+
+        target = self._current
+
+        if target.waiting is None:
+            return await target.writer.write(frame)
+
+        turn: asyncio.Future[FrameOutcome] = asyncio.get_running_loop().create_future()
+        target.waiting.append((frame, turn))
+        return await turn
+
+    async def replace(self) -> TrackReplacement:
+        """Replace the track: register the next track, list it in the catalog, then drop and close the old one.
+
+        What the current track has not sent is dropped. Returns once the old track is closed. Frames
+        written from the call on go to the new track. A failure to register the new track or to update
+        the catalog is raised and leaves the current track in place. Raises ``RelayError`` with code
+        ``CLOSED`` after :meth:`close`.
+        """
+        if self._closed:
+            raise RelayError("Replaceable track is closed", code="CLOSED", phase="waiting-for-demand")
+
+        old = self._current
+        replacements = old.replacements + 1
+        self._attempts += 1
+        name = self._name(self._attempts)
+
+        if not isinstance(name, str) or not name:
+            raise TypeError("name() must return a non-empty string")
+
+        replacement = self._register(name, replacements, wait=True)
+
+        try:
+            self._catalog_service.update(self._build_catalog(name))
+        except BaseException:
+            await self._discard(replacement)
+            raise
+
+        self._current = replacement
+        retiring = asyncio.ensure_future(self._retire(old))
+        self._retiring.add(retiring)
+        retiring.add_done_callback(self._retiring.discard)
+
+        # A cancelled caller does not stop the old track's closing.
+        await asyncio.shield(retiring)
+        return TrackReplacement(old.name, name, replacements)
+
+    async def close(self) -> None:
+        """Drop what has not been sent and close the current track. Idempotent.
+
+        :meth:`write` and :meth:`replace` raise after it.
+        """
+        if self._closing is None:
+            self._closed = True
+            self._closing = asyncio.ensure_future(self._finish_closing())
+
+        await asyncio.shield(self._closing)
+
+    async def _finish_closing(self) -> None:
+        # The current track retires at once, so nothing waiting on it goes out, beside every old track still closing.
+        await asyncio.gather(self._retire(self._current), *self._retiring, return_exceptions=True)
+
+    def _register(self, name: str, replacements: int, *, wait: bool) -> _Incarnation[F]:
+        options: dict[str, Any] = {}
+
+        if self._track_properties is not None:
+            options["track_properties"] = self._track_properties
+
+        if self._write_timeout is not None:
+            options["write_timeout"] = self._write_timeout
+
+        track = self._publisher.register_track(name, **options)
+
+        try:
+            writer: FrameWriter[F] = FrameWriter(track, **self._writer_options)
+        except BaseException:
+            track.close()
+            raise
+
+        incarnation = _Incarnation(name, replacements, track, writer)
+
+        if wait and self._demand_wait > 0 and not track.has_demand:
+            incarnation.waiting = []
+            incarnation.watcher = asyncio.get_running_loop().create_task(self._release_at_demand(incarnation))
+
+        return incarnation
+
+    async def _release_at_demand(self, incarnation: _Incarnation[F]) -> None:
+        """Wait for the relay's first subscription to the track, or for ``demand_wait`` to run out, then release."""
+        changes = incarnation.track.demand_changes()
+
+        try:
+            async with asyncio.timeout(self._demand_wait):
+                async for demand in changes:
+                    if demand:
+                        break
+        except TimeoutError:
+            pass
+        finally:
+            # An async generator, as the SDK's is, releases its demand watcher when closed.
+            if (aclose := getattr(changes, "aclose", None)) is not None:
+                await aclose()
+
+        # The track ending ends the iterator too: the writer reports it for each frame.
+        incarnation.pump = asyncio.get_running_loop().create_task(self._pump(incarnation))
+
+    async def _pump(self, incarnation: _Incarnation[F]) -> None:
+        """Hand the waiting frames to the writer one at a time, in order, so its backlog never overflows.
+
+        Frames written meanwhile join the end. Then later frames go straight to the writer.
+        """
+        while incarnation.waiting:
+            frame, turn = incarnation.waiting.pop(0)
+
+            if turn.done():
+                continue
+
+            if incarnation.retired:
+                turn.set_result(FrameOutcome("dropped"))
+                continue
+
+            try:
+                outcome = await incarnation.writer.write(frame)
+            except Exception as error:
+                if not turn.done():
+                    turn.set_exception(error)
+            else:
+                if not turn.done():
+                    turn.set_result(outcome)
+
+        incarnation.waiting = None
+
+    async def _retire(self, incarnation: _Incarnation[F]) -> None:
+        incarnation.retired = True
+
+        if incarnation.watcher is not None:
+            incarnation.watcher.cancel()
+            await asyncio.wait([incarnation.watcher])
+
+        for _, turn in incarnation.waiting or ():
+            if not turn.done():
+                turn.set_result(FrameOutcome("dropped"))
+
+        if incarnation.waiting is not None:
+            incarnation.waiting.clear()
+
+        try:
+            await incarnation.writer.close()
+        finally:
+            incarnation.track.close()
+
+    async def _discard(self, incarnation: _Incarnation[F]) -> None:
+        """Close a track that never became current."""
+        incarnation.retired = True
+
+        if incarnation.watcher is not None:
+            incarnation.watcher.cancel()
+            await asyncio.wait([incarnation.watcher])
+
+        incarnation.track.close()
+        await incarnation.writer.close()
+
+
 MediaKind = Literal["audio", "video"]
 """What a media track carries, which decides its default delivery timeout and priorities."""
 
@@ -1071,6 +1400,8 @@ __all__ = [
     "FrameReaderSequencer",
     "FrameWriter",
     "MediaKind",
+    "ReplaceableTrack",
+    "TrackReplacement",
     "media_subscribe_parameters",
     "media_track_properties",
 ]
