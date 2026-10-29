@@ -7,11 +7,14 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
-- `@caprid/moq-media`: two fixes to the Opus loss concealment that 0.1.1 turned on. A decoder reset clears the
+- `@caprid/moq-media`: fixes to the Opus loss concealment that 0.1.1 turned on. A decoder reset clears the
   record that the last packet was CELT-only, so the next gap can use in-band FEC again (it stayed off until a
-  non-CELT packet decoded). A gap the player leaves unfilled (the buffer ran dry, it is filling to its target, or the
-  gap spans a cut) resets the decoder, as a gap over 1 s already did, so the frame after it is not decoded from libopus
-  state that belongs before the gap. Nothing to change in an application.
+  non-CELT packet decoded). The audio worklet, not the main thread's report of the buffer, which is up to about 20 ms
+  old, decides whether a fill is held: a loss while the buffer fills to its target is now concealed (it was left as
+  silence), and a fill that came after the buffer ran dry is dropped (it played late, adding its length to the delay).
+  A gap that spans a cut resets the decoder, as a gap over 1 s already did, so the frame after it is not decoded from
+  libopus state that belongs before the gap. `synthesizedUs` and `recoveredUs` no longer count fills the buffer
+  dropped. Nothing to change in an application.
 
 ## 0.2.0
 

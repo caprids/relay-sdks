@@ -159,9 +159,12 @@ export interface AudioInputStats {
   trimmedUs: number;
   /** Silence played in place of frames that never came. */
   concealedUs: number;
-  /** Audio synthesized in place of frames that never came: libopus packet-loss concealment. */
+  /**
+   * Audio synthesized in place of frames that never came: libopus packet-loss concealment. Counted as it is decoded,
+   * less, from the next report, what the jitter buffer dropped because it had run dry by the time it came.
+   */
   synthesizedUs: number;
-  /** Audio rebuilt for frames that never came from the next frame's in-band FEC. */
+  /** Audio rebuilt for frames that never came from the next frame's in-band FEC; counted as `synthesizedUs` is. */
   recoveredUs: number;
   /** Audio dropped by `cut()`. */
   cutUs: number;
@@ -519,17 +522,24 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     else node.port.postMessage(command);
   };
 
-  // Resample decoded planes to the context's rate and hand them to the worklet.
-  const deliver = (timestamp: number, planes: Float32Array[], fromRate: number) => {
+  // Resample decoded planes to the context's rate and hand them to the worklet. `source`: the frame that arrived, or
+  // audio filled in for a lost one, which the worklet holds only where it continues held audio or playback.
+  type Source = 'arrival' | 'recovered' | 'synthesized';
+  const deliver = (timestamp: number, planes: Float32Array[], fromRate: number, source: Source) => {
     const { planes: resampled, offset } = resampler.resample(planes, fromRate, sampleRate);
     const timestampUs = timestamp + Math.round((offset * MICROSECONDS_PER_SECOND) / fromRate);
     if (resampled[0]?.length) {
       post(
-        { type: 'pcm', timestampUs, planes: resampled },
+        source === 'arrival'
+          ? { type: 'pcm', timestampUs, planes: resampled }
+          : { type: 'pcm', timestampUs, planes: resampled, fill: source },
         resampled.map((plane) => plane.buffer as ArrayBuffer)
       );
     }
   };
+  // Filled audio sent to the worklet; the stats subtract what it reports it dropped.
+  let synthesizedSentUs = 0;
+  let recoveredSentUs = 0;
   // With loss concealment, Opus decodes here, synchronously, with libopus: one decoder for the input's life, reset
   // rather than replaced, so a gap is filled from the decoder's own state instead of starting a new one after it.
   const wasm: WasmOpusDecoder | undefined =
@@ -559,7 +569,8 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     const synthesize = (us: number) => {
       const samples = opusSamples(Math.min(us, budgetUs));
       if (samples <= 0) return false;
-      deliverOpus(atUs, decoderNow.conceal(samples));
+      deliverOpus(atUs, decoderNow.conceal(samples), 'synthesized');
+      synthesizedSentUs += opusUs(samples);
       stats.synthesizedUs += opusUs(samples);
       atUs += opusUs(samples);
       budgetUs -= opusUs(samples);
@@ -579,11 +590,13 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       recovered = undefined;
     }
     if (recovered) {
-      deliverOpus(fecAtUs, recovered);
+      deliverOpus(fecAtUs, recovered, 'recovered');
+      recoveredSentUs += opusUs(samples);
       stats.recoveredUs += opusUs(samples);
     } else synthesize(opusUs(samples));
   };
-  const deliverOpus = (timestampUs: number, planes: OpusPlanes) => deliver(timestampUs, planes, OPUS_RATE);
+  const deliverOpus = (timestampUs: number, planes: OpusPlanes, source: Source) =>
+    deliver(timestampUs, planes, OPUS_RATE, source);
   // Decode a frame with libopus, after filling any gap before it.
   const sendWasm = (
     decoderNow: WasmOpusDecoder,
@@ -607,7 +620,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       }
     }
     try {
-      deliverOpus(frame.timestampUs, decoderNow.decode(frame.payload));
+      deliverOpus(frame.timestampUs, decoderNow.decode(frame.payload), 'arrival');
       previousCelt = opusFrameMode(frame.payload) === 'celt';
       stats.decoded++;
     } catch (decodeError) {
@@ -662,7 +675,7 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
             data.copyTo(plane, { planeIndex: channel, format: 'f32-planar' });
             planes.push(plane);
           }
-          deliver(data.timestamp, planes, data.sampleRate);
+          deliver(data.timestamp, planes, data.sampleRate, 'arrival');
         } finally {
           data.close();
         }
@@ -741,6 +754,8 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     stats.underruns = report.underruns;
     stats.trimmedUs = toUs(report.trimmedFrames);
     stats.concealedUs = toUs(report.concealedFrames);
+    stats.synthesizedUs = synthesizedSentUs - toUs(report.droppedSynthesizedFrames);
+    stats.recoveredUs = recoveredSentUs - toUs(report.droppedRecoveredFrames);
     workletCutUs = toUs(report.cutFrames);
     stats.cutUs = workletCutUs + cutOnArrivalUs;
     const next = toFrames(ceilingUs());
@@ -782,15 +797,15 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
         const cutInGap =
           expectedUs !== undefined &&
           arrivalCuts.some((cut) => cut.fromUs < timestampUs && cut.untilUs > (expectedUs as number));
-        // Only while the buffer plays: once it ran dry, the worklet skips the missing audio rather than playing it
-        // late, so filling it would add its length to the delay (as the worklet fills a gap only inside held audio).
-        const playingNow = stats.playing && stats.dryAtUs === null;
+        // Filled whatever the buffer's state: the worklet holds the fill only where it continues held audio or playback,
+        // and drops it once the buffer ran dry, where it would add its length to the delay. Only the worklet knows
+        // which in time; the main thread's reports are up to one interval old. The decoder synthesized the gap either
+        // way, so its state follows on.
         const skipped = gapUs > TIMESTAMP_TOLERANCE_US;
-        if (skipped && gapUs <= MAX_FILLED_GAP_US && !cutInGap && playingNow) gapFromUs = expectedUs;
+        if (skipped && gapUs <= MAX_FILLED_GAP_US && !cutInGap) gapFromUs = expectedUs;
         else if (skipped || cutInGap) {
-          // A gap left unfilled (over a cut, after the buffer ran dry or while it fills to its target, or over 1 s):
-          // the frame does not follow the last one decoded, so the decoder starts afresh rather than decode it as if
-          // it did, from state that belongs before the gap.
+          // A gap left unfilled (over a cut, or over 1 s): the frame does not follow the last one decoded, so the
+          // decoder starts afresh rather than decode it from state that belongs before the gap.
           if (stats.decoded > 0) stats.decoderResets++;
           resetWasm(wasm);
           resampler.reset();
