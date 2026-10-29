@@ -378,6 +378,49 @@ it('cuts the audio an interrupt for the audio track names, and ignores one for a
   await listener.stop();
 });
 
+it('subscribes to interrupts at the catalog and cuts held audio with one that comes before the player exists', async () => {
+  const fake = fakeSubscriber();
+  const onInterrupt = vi.fn();
+  let ready: () => void = () => {};
+  // The worklet module loads only when the test says so: the player cannot exist before then.
+  const loaded = new Promise<void>((resolve) => {
+    ready = resolve;
+  });
+  const context = new FakeContext();
+  context.audioWorklet.addModule.mockImplementation(async () => loaded);
+  const listening = listenAudio(fake.subscriber, NAMESPACE, {
+    onInterrupt,
+    context: context as unknown as AudioContext,
+  });
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  const object = (index: number) =>
+    ({
+      groupId: index,
+      objectId: 0,
+      subgroupId: 0,
+      status: 'normal',
+      properties: [{ type: LOC_TIMESTAMP, value: 1_000_000 + index * 20_000 }],
+      payload: OPUS_PACKETS[index] as Uint8Array,
+    }) as MoqtObject;
+  for (const index of [0, 1, 2]) audio.handlers.onObject?.(object(index));
+  fake.deliverCatalog(interruptCatalog());
+  // The interrupt track is subscribed once the catalog lists it, while the player is still being built.
+  await vi.waitFor(() => expect(fake.subscriptions.map(({ request }) => request.track)).toContain(INTERRUPT_TRACK));
+  expect(FakeWorkletNode.instances).toHaveLength(0);
+  // The talker cut everything it had sent.
+  deliver(fake, INTERRUPT_TRACK, buildInterrupt({ track: 'audio', untilUs: 1_060_000 }));
+  ready();
+  const listener = await listening;
+  expect(onInterrupt).toHaveBeenCalledWith({ track: 'audio', untilUs: 1_060_000 });
+  // The held frames were inside the cut: none of them reached the worklet.
+  const pcm = (FakeWorkletNode.instances[0] as FakeWorkletNode).port.postMessage.mock.calls.filter(
+    ([message]) => (message as { type: string }).type === 'pcm',
+  );
+  expect(pcm).toHaveLength(0);
+  expect(listener.input.stats.decoded).toBe(0);
+  await listener.stop();
+});
+
 it('reports an interrupt that does not parse and cuts nothing', async () => {
   const fake = fakeSubscriber();
   const onError = vi.fn();

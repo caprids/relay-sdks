@@ -128,7 +128,9 @@ function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[], 
  * catalog is on its way (create the context in the user's gesture, as the click that connects, so the warm happens
  * there; a context the page already warmed is not loaded again). It subscribes to the audio track by its conventional
  * name together with the catalog, before the catalog arrives, and a frame hold keeps the frames until the player's
- * input exists. When the catalog names the track, it adds the input and passes the held frames to it, in order.
+ * input exists. When the catalog names the track, it adds the input and passes the held frames to it, in order. The
+ * interrupt track is subscribed when the catalog lists it, before the player exists, and interrupts that come
+ * meanwhile cut the held audio before it is released.
  */
 export async function listenAudio(
   subscriber: RelaySubscriber,
@@ -191,6 +193,45 @@ export async function listenAudio(
     throwIfAudioFailed();
     const track = tracks.find((candidate) => candidate.name === AUDIO_TRACK);
     if (!track) throw new Error(`The catalog at ${namespace.join('/')} lists no ${AUDIO_TRACK} track`);
+    const listed = (name: string) => tracks.some((candidate) => candidate.name === name);
+    const transcript = createTranscript();
+    // A talker that can stop mid-utterance lists the interrupt track; each interrupt cuts what the player holds, and
+    // the transcript of what was not heard. It is subscribed as soon as the catalog lists it, before the player
+    // exists: audio is already arriving into the hold, and an interrupt sent meanwhile must cut it. Interrupts that
+    // come before the input exists wait, and are applied before the held audio is released. One sent before this
+    // subscription is handed over as the track's latest object (a relay cache), and drops only older audio.
+    let cutTarget: AudioPlayerInput | undefined;
+    const waitingInterrupts: Interrupt[] = [];
+    const applyInterrupt = (interrupt: Interrupt) => {
+      if (!cutTarget) {
+        waitingInterrupts.push(interrupt);
+        return;
+      }
+      cutTarget.cut(interrupt);
+      transcript.cut(interrupt, clock.position());
+      options.onInterrupt?.(interrupt);
+    };
+    const interrupts = listed(INTERRUPT_TRACK)
+      ? subscriber.subscribe(
+          { namespace: [...namespace], track: INTERRUPT_TRACK },
+          {
+            onObject(object) {
+              if (object.status !== 'normal') return;
+              let interrupt: Interrupt;
+              try {
+                interrupt = parseInterrupt(object.payload);
+              } catch (error) {
+                options.onError?.(error);
+                return;
+              }
+              if (interrupt.track !== AUDIO_TRACK) return;
+              applyInterrupt(interrupt);
+            },
+            onError: (error) => options.onError?.(error),
+          },
+        )
+      : undefined;
+    if (interrupts) release.push(() => interrupts.cancel());
 
     await warm;
     const player = await createAudioPlayer({ context });
@@ -210,35 +251,11 @@ export async function listenAudio(
       decoderConfig: audioDecoderConfigFromTrack(track),
       ...(options.onError ? { onError: options.onError } : {}),
     });
-    // What arrived while the player was built, in order, then every frame as it comes.
+    cutTarget = input;
+    // Interrupts that came while the player was built cut first, then what arrived meanwhile plays, in order, then
+    // every frame as it comes.
+    for (const interrupt of waitingInterrupts.splice(0)) applyInterrupt(interrupt);
     hold.release(input.push);
-    const listed = (name: string) => tracks.some((candidate) => candidate.name === name);
-    const transcript = createTranscript();
-    // A talker that can stop mid-utterance lists the interrupt track; each interrupt cuts what the player holds, and
-    // the transcript of what was not heard.
-    const interrupts = listed(INTERRUPT_TRACK)
-      ? subscriber.subscribe(
-          { namespace: [...namespace], track: INTERRUPT_TRACK },
-          {
-            onObject(object) {
-              if (object.status !== 'normal') return;
-              let interrupt: Interrupt;
-              try {
-                interrupt = parseInterrupt(object.payload);
-              } catch (error) {
-                options.onError?.(error);
-                return;
-              }
-              if (interrupt.track !== AUDIO_TRACK) return;
-              input.cut(interrupt);
-              transcript.cut(interrupt, clock.position());
-              options.onInterrupt?.(interrupt);
-            },
-            onError: (error) => options.onError?.(error),
-          },
-        )
-      : undefined;
-    if (interrupts) release.push(() => interrupts.cancel());
     const transcripts = listed(TRANSCRIPT_TRACK)
       ? subscriber.subscribe(
           { namespace: [...namespace], track: TRANSCRIPT_TRACK },

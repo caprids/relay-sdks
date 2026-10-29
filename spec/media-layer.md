@@ -902,6 +902,10 @@ for the catalog. A join that is quick:
    convention (`audio`) subscribes at once with the catalog's subscription, saving the catalog's
    round trips (the fastest row below); the catalog still decides the decoder, so the input is
    added when it arrives. One that waits for the catalog to name the track subscribes after it.
+   A talker's [interrupt track](#interrupt-track) is subscribed as soon as the catalog lists it, not
+   after the player exists: audio already waits in the hold, and an interrupt sent meanwhile must
+   cut it. Interrupts that come before the input exists are applied (`input.cut`) before the hold is
+   released, so audio the talker had cut never plays.
 
 A shorter hold before the first audio (`joinJitterTargetUs`, 40 ms against the 60 ms target) was
 measured in relay-dev's benchmark (stage 4.3b, finding R-43B-01) and left out: first audio at 242 ms
