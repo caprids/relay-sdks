@@ -873,6 +873,83 @@ Huddle's player worklet runs with (`demos/huddle`):
 | Hard bound | 2 × target + 60 ms, under the ceiling | Huddle's backlog bound |
 | A frame that never came, inside held audio | silence for its length, up to 1 s | Keeps later audio on time. With loss concealment the main thread fills an Opus gap before it reaches the worklet (above), so this covers what concealment leaves and the WebCodecs path |
 
+**Joining sooner.** The recommended join for a listener whose time to first audio matters, such as a voice
+conversation; the WebCodecs example's `listenAudio` joins this way. The parts are optional API, and a
+player that uses none of them joins as the sections above describe. They exist for relay-dev's voice
+benchmark (relay-3cnp.351, stage 4.3), which found MoQ's first audio about 200 ms behind WebRTC's on
+a clean path, all of it between the catalog and the audio SUBSCRIBE. Profiled in Chromium, that time
+is the listener's own: the benchmark page waited for its diagnostic tap's first block plus 200 ms
+(about 285 ms) before subscribing, and the page built the `AudioContext` (about 30 ms,
+synchronous), loaded the tap's and the player's worklet modules and libopus one after another after
+the catalog (about 25 ms more). The relay's part, SUBSCRIBE to SUBSCRIBE_OK, was two round trips, as
+for the catalog. A join that is quick:
+
+1. Starts the connect, then builds the audio side while the handshake and the catalog are on their
+   way: the `AudioContext`, `context.resume()` and `warmAudioPlayer(context)`, which loads the
+   jitter buffer's worklet module and compiles libopus at once. A player created on that context
+   later loads neither again. Its libopus load decodes the embedded module with the engine's
+   `Uint8Array.fromBase64` where there is one (`loadWasmOpus({ nativeBase64: true })`), instead of
+   a JavaScript loop that holds the main thread for several milliseconds, tens on a busy page.
+   Order matters: the context's constructor blocks the main thread, so built after the catalog it
+   also delays the SUBSCRIBE_OK and the first objects behind it (measured: 55 ms later). The warm
+   belongs inside the user's gesture at the connect: an `AudioContext` created outside a gesture
+   stays suspended, so the page creates the context in the click and warms it there. Warming at page
+   load measured no faster (289 ms audible against 284 for warming at the connect).
+2. Subscribes to the audio track before the player exists, with the frame reader delivering into
+   `createFrameHold()`. When the input exists, `hold.release(input.push)` passes every frame kept,
+   in order, and every later one straight on. Nothing is dropped or judged by the hold: the
+   sequencer has already delivered those frames. A listener that knows the track's name by
+   convention (`audio`) subscribes at once with the catalog's subscription, saving the catalog's
+   round trips (the fastest row below); the catalog still decides the decoder, so the input is
+   added when it arrives. One that waits for the catalog to name the track subscribes after it.
+
+A shorter hold before the first audio (`joinJitterTargetUs`, 40 ms against the 60 ms target) was
+measured in relay-dev's benchmark (stage 4.3b, finding R-43B-01) and left out: first audio at 242 ms
+against 249 clean, but 2 drops in the first 10 s on clean, and 8 against 0 at 2% loss. The play
+start stays at the jitter target.
+
+The input records its start in `input.joinPhases` (`AudioInputJoinPhases`), on its clock's time
+source: `addedUs`, `firstPushUs`, `firstDecodedUs` (the first decoded audio handed to the
+worklet), `firstPlayUs` (when the worklet's first play start renders: each report carries the
+context frame where it happened) and `firstAudibleUs` (that plus the output delay clock reports
+add). `player.joinPhases` (`AudioPlayerJoinPhases`) has when the worklet module and libopus were
+ready, on `performance.now()`. The rest of a join, the transport's ready, the catalog, the SUBSCRIBE
+sent, its SUBSCRIBE_OK and the first object, the application sees in its own callbacks.
+
+Measured on a Sprite (relay-3cnp.351): headless Chromium 153 joining a moq-relay at moq-dev main
+`6298cbcdf` 20 ms round trip away (a network namespace with 10 ms of netem each way; the talker,
+the bench's own, reaches the relay over the same path, as a near cell's does), the benchmark's
+shipped player, the benchmark page's order and the joins above, 8 cold joins each (16 for the first row), a fresh browser each. Milliseconds from
+the connect's start, medians; "audible" is `firstAudibleUs` or, for the page's own order, the
+first clock report's audible time:
+
+| Join | SUBSCRIBE sent | SUBSCRIBE_OK | First object | Audible | Range |
+| --- | --- | --- | --- | --- | --- |
+| The page's order (73de7ab) | 481 | 525 | 536 | 624 | 599–650 |
+| The page's order without the tap's wait | 206 | 249 | 258 | 349 | 327–360 |
+| Built after the catalog, subscribed at it, held | 140 | 239 | 256 | 354 | 311–406 |
+| Warmed at the connect, subscribed at the catalog, held | 140 | 184 | 193 | 284 | 272–290 |
+| Warmed when the page loaded, before the join (24 joins) | 139 | 184 | 193 | 289 | 270–291 |
+| Warmed, subscribed at once with the catalog's subscription | 94 | 140 | 144 | 234 | 216–254 |
+
+The transport was ready at 67 ms and the catalog parsed at 139–140 in every row. The first row
+matches the benchmark's stage 4.3 cells on a clean near path (connect to audible 634, catalog
+161, subscribe 492, first object 554), where WebRTC was audible at 422. The hold held nothing in
+these runs: the warmed player was ready before the first object came. Three of about 155 joins that
+built the audio side at the connect had an `AudioContext` constructor that took 1.2–6.8 s; none of
+about 100 that built it after the catalog, nor 24 that built it when the page loaded, nor 24 more
+at the connect in a repeat. With no added delay (the relay on loopback) the page's order was
+audible at 470 ms and the warmed join at 164; there the audio side cannot hide under the network:
+built at the connect it delayed the transport's ready from 6 to about 55 ms, and built after the
+catalog the join was audible at 175.
+
+On relay-dev's voice benchmark, stage 4.3b (run `run-20261028-194400-949931`, relay-sdks build tag
+`netbench/stage4-ttfa` = `8eb9246`, moq-relay 0.17.9, 4 rounds per cell), the median time from the
+connect's start to the first audible audio, shipped player against quick join: clean 627 ms
+against 249 (WebRTC 419; MoQ over WebSocket with the quick join 399); at 2% random loss 957
+against 503 (WebRTC 861); at a handover 880 against 456. The quick join had 0 drops in the first
+10 s on clean (finding R-43B-01, relay-dev `moq-netbench/results/voice/FINDINGS.md`).
+
 **Clock.** About every 20 ms the worklet posts the context frame it is rendering and the timeline
 timestamp of the sample there. The main thread times those posts with a [render clock](#browser-capture),
 on the playout clock's own time source, and reports `reportAudio(timestamp, renderedAt +
