@@ -14,6 +14,7 @@ import {
   LOC_TIMESTAMP,
   opusPacketDurationUs,
   type PlayoutClock,
+  warmAudioPlayer,
 } from '@caprid/moq-media';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFrameReader } from '../src/frame-reader.js';
@@ -1101,7 +1102,20 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats.concealedUs).toBeGreaterThan(0);
   });
 
-  it('fills nothing once the buffer ran dry: the worklet skips that audio rather than play it late', async () => {
+  it('counts a dropped fill out exactly at a context rate where a frame is not a whole number of samples', async () => {
+    const { context, clock, player } = await setUp({ sampleRate: 11_025, lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    context.render(100);
+    expect(input.stats).toMatchObject({ playing: false });
+    // Dry: the fill for frame 2 is dropped by the worklet, so nothing filled is counted, not a few µs either way.
+    input.push(opusAt(3, 'gap'));
+    context.render(20);
+    expect(input.stats).toMatchObject({ recoveredUs: 0, synthesizedUs: 0 });
+  });
+
+  it('drops a fill once the buffer ran dry: the worklet skips that audio rather than play it late', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
     const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
     input.push(opusAt(0));
@@ -1110,7 +1124,107 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats).toMatchObject({ playing: false });
     expect(input.stats.dryAtUs).not.toBeNull();
     input.push(opusAt(3, 'gap'));
-    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0 });
+    context.render(20);
+    // Filled on the main thread (the decoder follows on, no reset), dropped by the worklet, which holds nothing to
+    // continue: only frame 3 is held.
+    expect(input.stats).toMatchObject({
+      decoded: 3,
+      recoveredUs: 0,
+      synthesizedUs: 0,
+      decoderResets: 0,
+      bufferedUs: 20_000,
+    });
+  });
+
+  it('drops a fill when the buffer ran dry after the last report, though the main thread still saw it playing', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 60_000 });
+    for (let index = 0; index < 3; index++) input.push(opusAt(index));
+    // 60 ms plays out and runs dry in the 23rd quantum; the last report, after the 16th, said it was playing.
+    context.render(61.4);
+    expect(input.stats).toMatchObject({ playing: true, dryAtUs: null });
+    input.push(opusAt(4, 'gap'));
+    context.render(20);
+    // Frame 3's slot is not played late: held audio starts at frame 4, with no delay added.
+    expect(input.stats).toMatchObject({ playing: false, recoveredUs: 0, synthesizedUs: 0, bufferedUs: 20_000 });
+    expect((input.stats.heldUntilUs as number) - input.stats.bufferedUs).toBe(opusAt(4).timestampUs);
+  });
+
+  it('holds a fill that comes just as a quantum took the last held sample: playback is still on time', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    // 15 quanta play exactly the 40 ms held: nothing is held, but it has not run dry.
+    context.render(40);
+    input.push(opusAt(3, 'gap'));
+    context.render(25);
+    // Frame 2's slot, rebuilt from frame 3's FEC, plays on time: no underrun, no new start, nothing dropped.
+    expect(input.stats).toMatchObject({ recoveredUs: 20_000, underruns: 0, playStarts: 1, playing: true });
+  });
+
+  it('conceals a loss while the buffer fills to its target: the slot is held audio, so it costs no delay', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 100_000 });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    // Not playing yet (40 ms of a 100 ms target): frame 2 is lost, and frame 3's FEC rebuilds it.
+    input.push(opusAt(3, 'gap'));
+    context.render(25);
+    expect(input.stats).toMatchObject({
+      playing: false,
+      recoveredUs: 20_000,
+      concealedUs: 0,
+      bufferedUs: 80_000,
+      decoderResets: 0,
+    });
+  });
+
+  it('decodes the frame after a gap it leaves unfilled (over a cut, or over 1 s) from a fresh decoder', async () => {
+    // What each input sends the worklet for the frame at `timestampUs`: its first channel's samples.
+    const capture = (context: FakeContext, timestampUs: number) => {
+      const port = nodeOf(context).port;
+      const send = port.postMessage.bind(port);
+      const seen: number[][] = [];
+      port.postMessage = (message: unknown, ...rest: unknown[]) => {
+        const pcm = message as { type: string; timestampUs: number; planes: Float32Array[] };
+        if (pcm.type === 'pcm' && pcm.timestampUs === timestampUs) seen.push(Array.from(pcm.planes[0] ?? []));
+        (send as (...args: unknown[]) => void)(message, ...rest);
+      };
+      return seen;
+    };
+    // Playing: frames 0 and 1 are held; frames 2 and 3 are cut out before they arrive, and frame 3's packet comes at
+    // frame 4's slot.
+    const cutOut = await setUp({ lossConcealment: true });
+    const cutInput = cutOut.player.addInput({ clock: cutOut.clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    cutInput.push(opusAt(0));
+    cutInput.push(opusAt(1));
+    cutOut.context.render(30);
+    cutInput.cut({ fromUs: opusAt(2).timestampUs, untilUs: opusAt(4).timestampUs });
+    const afterCut = capture(cutOut.context, opusAt(4).timestampUs);
+    cutInput.push({ timestampUs: opusAt(4).timestampUs, payload: OPUS_PACKETS[3] as Uint8Array, discontinuity: 'gap' });
+    expect(cutInput.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0, decoderResets: 1 });
+    // Playing, with a gap of 1.16 s: past what concealment fills.
+    const long = await setUp({ lossConcealment: true });
+    const longInput = long.player.addInput({ clock: long.clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    longInput.push(opusAt(0));
+    longInput.push(opusAt(1));
+    long.context.render(30);
+    const afterLong = capture(long.context, BASE_US + 60 * FRAME_US);
+    longInput.push({
+      timestampUs: BASE_US + 60 * FRAME_US,
+      payload: OPUS_PACKETS[3] as Uint8Array,
+      discontinuity: 'gap',
+    });
+    expect(longInput.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0, decoderResets: 1 });
+    // Both decode exactly what a new decoder makes of that packet.
+    const fresh = await setUp({ lossConcealment: true });
+    const alone = fresh.player.addInput({ clock: fresh.clock, decoderConfig: mono });
+    const first = capture(fresh.context, opusAt(3).timestampUs);
+    alone.push(opusAt(3));
+    expect(first).toHaveLength(1);
+    expect(afterCut).toEqual(first);
+    expect(afterLong).toEqual(first);
   });
 
   it('takes an empty payload as a frame not received: the next frame fills its slot, nothing errs', async () => {
@@ -1167,6 +1281,28 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats).toMatchObject({ decoded: 2, errors: 1, decoderResets: 1, synthesizedUs: 20_000 });
   });
 
+  it('uses FEC again after a decoder reset, even when the last packet before it was CELT', async () => {
+    const { context, clock, player } = await setUp({ lossConcealment: true });
+    const errors: unknown[] = [];
+    const input = player.addInput({
+      clock,
+      decoderConfig: mono,
+      jitterTargetUs: 40_000,
+      onError: (error) => errors.push(error),
+    });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    context.render(30);
+    // A CELT-only packet (TOC config 31), then one that fails to decode, which resets the decoder.
+    const celt = new Uint8Array(40).map((_, index) => (index === 0 ? 0xf8 : (index * 37) & 0xff));
+    input.push({ timestampUs: opusAt(2).timestampUs, payload: celt });
+    input.push({ timestampUs: opusAt(3).timestampUs, payload: new Uint8Array([0x0b, 0x00]) });
+    expect(errors).toHaveLength(1);
+    // Frame 4 is lost; frame 5 (frame 3's packet, which carries LBRR) rebuilds it.
+    input.push({ timestampUs: opusAt(5).timestampUs, payload: OPUS_PACKETS[3] as Uint8Array, discontinuity: 'gap' });
+    expect(input.stats.recoveredUs).toBe(20_000);
+  });
+
   it('leaves audio cut out on purpose out: a gap over a cut is not concealed', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
     const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
@@ -1177,7 +1313,8 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     // An interruption cuts frames 2 and 3 before they arrive; frame 4 comes next.
     input.cut({ fromUs: opusAt(2).timestampUs, untilUs: opusAt(4).timestampUs });
     input.push(opusAt(4, 'gap'));
-    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0, decoderResets: 0 });
+    // Nothing is filled, and frame 4 starts a fresh decoder: it does not follow frame 1.
+    expect(input.stats).toMatchObject({ decoded: 3, recoveredUs: 0, synthesizedUs: 0, decoderResets: 1 });
     context.render(20);
   });
 
@@ -1199,5 +1336,68 @@ describe('loss concealment (libopus in WebAssembly)', () => {
       .addInput({ clock: on.clock, decoderConfig: { codec: 'flac', sampleRate: RATE, numberOfChannels: 1 } })
       .push(opusAt(0));
     expect(FakeDecoder.instances).toHaveLength(2);
+  });
+});
+
+describe('joining sooner (opt-in parts)', () => {
+  it('records when the input was added, got its first frame, decoded it, and first played and was audible', async () => {
+    const { context, clock, player } = await setUp();
+    context.baseLatency = 0.01;
+    context.outputLatency = 0.03;
+    nowUs = 5_000;
+    const input = player.addInput({ clock });
+    expect(input.joinPhases).toEqual({
+      addedUs: 5_000,
+      firstPushUs: null,
+      firstDecodedUs: null,
+      firstPlayUs: null,
+      firstAudibleUs: null,
+    });
+    nowUs = 7_000;
+    input.push(frameAt(1));
+    expect(input.joinPhases).toMatchObject({ firstPushUs: 7_000, firstDecodedUs: 7_000, firstPlayUs: null });
+    input.push(frameAt(2));
+    context.render(20);
+    expect(input.joinPhases.firstPlayUs).toBeNull();
+    input.push(frameAt(3));
+    context.render(40);
+    // Playback started in the quantum after 60 ms of frames were held, at context time 20 ms (the third frame came
+    // then), rendered on the clock's time source at that time; audible 40 ms later (base plus output latency).
+    const { firstPlayUs, firstAudibleUs } = input.joinPhases;
+    expect(firstPlayUs).not.toBeNull();
+    expect(Math.abs((firstPlayUs as number) - 20_000)).toBeLessThanOrEqual(3_000);
+    expect((firstAudibleUs as number) - (firstPlayUs as number)).toBeCloseTo(40_000, 3);
+    // Set once: later starts leave them.
+    context.render(200);
+    for (let index = 20; index <= 25; index++) input.push(frameAt(index, index === 20 ? 'gap' : undefined));
+    await settle();
+    context.render(40);
+    expect(input.joinPhases.firstPlayUs).toBe(firstPlayUs);
+    expect(player.joinPhases.opusLoadedUs).toBeNull();
+    expect(typeof player.joinPhases.workletLoadedUs).toBe('number');
+  });
+
+  it('warms the worklet module and libopus ahead of the player, which then loads neither again', async () => {
+    const context = new FakeContext();
+    await warmAudioPlayer(context);
+    expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+    const player = await createAudioPlayer({ context });
+    expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+    expect(typeof player.joinPhases.opusLoadedUs).toBe('number');
+    // libopus decodes: the input conceals with it.
+    const input = player.addInput({ decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    expect(FakeDecoder.instances).toHaveLength(0);
+    expect(input.stats.decoded).toBe(1);
+    // Without concealment the warm loads the worklet module only, and fails as the module does.
+    const other = new FakeContext();
+    await warmAudioPlayer(other, { lossConcealment: false });
+    expect(other.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+    const broken = new FakeContext();
+    broken.audioWorklet.addModule.mockRejectedValueOnce(new Error('no worklet'));
+    await expect(warmAudioPlayer(broken)).rejects.toThrow('no worklet');
+    // A failed load is not kept: the player loads it again.
+    await createAudioPlayer({ context: broken, lossConcealment: false });
+    expect(broken.audioWorklet.addModule).toHaveBeenCalledTimes(2);
   });
 });

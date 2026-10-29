@@ -204,6 +204,12 @@ a want's events to a frame sequencer and polls it when a wait ends. The sequence
 waits for what may still come, and drops what is too late. Neither buffers for smoothing.
 _Avoid_: jitter buffer (the audio player owns that), reorder buffer, frame source, player
 
+**Frame hold**:
+The frames a frame reader has delivered for an audio player input that does not exist yet, kept in order and
+passed on, then every later frame straight on, once the input is added. It is what lets a join subscribe to the audio
+before the player is built. It drops and judges nothing: the sequencer already decided which frames arrive.
+_Avoid_: jitter buffer (that smooths playback and judges lateness), queue, pre-roll
+
 **Jitter buffer**:
 The decoded audio an audio player input holds before playing it, so that frames arriving unevenly
 play evenly. It fills to a target before playing, grows the target after an underrun, shrinks it
