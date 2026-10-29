@@ -655,7 +655,9 @@ timeouts are still advisory by design (`doc/concept/standard.md` at 7a13b8f8b: t
 objects or reset subgroups"), and nothing maps an IETF subscriber's budget onto the relay's
 presentation-time `max_delay`: asked for in
 [moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881), and a bench relay that honours the
-timeout is being built for the voice benchmark. The SDK's delivery options
+timeout is being built for the voice benchmark. Main since then maps the MoQ Timestamp extension's
+MAX_AGE onto it instead, per subscriber, and still ignores the timeouts
+([subscriber max age](#subscriber-max-age-max_age)). The SDK's delivery options
 ([behavior.md](behavior.md#media-subscribing)) are meant to work with and without such a relay: the
 subscriber's timeout goes on the SUBSCRIBE either way, and the late drop, reorder window and
 catch-up act on whatever the relay sends.
@@ -668,6 +670,83 @@ script's docstring lists them):
 ```sh
 RELAY_URL="$RELAY_URL" mise run python:probe:voice-delivery
 ```
+
+## Subscriber max age (MAX_AGE)
+
+moq-dev main enforces one per-subscriber latency budget on SUBSCRIBE: MAX_AGE (`0x915C6`), the subscriber
+max age of the MoQ Timestamp extension (`drafts/draft-lcurley-moq-timestamp.md` in moq-dev's tree, "Subscriber
+Max Age"; not in the published -00 or -01). The draft-22 delivery timeouts are not that budget on any relay
+named here. Read at moq-dev commit `6298cbcdf` (2026-10-26), in `rs/moq-net/src/`:
+
+- **Encoding.** An even type, so the value is a bare varint of milliseconds; at most 2^53-1, a larger value
+  fails to decode (`ietf/max_age.rs:6-7`, `:17-22`; `ietf/parameters.rs:334-343`). On draft-16 and later it
+  sits in the delta-typed parameter list like any other (`ietf/parameters.rs:504-560`); its type is the
+  highest, so it is last.
+- **Negotiation.** The Setup Option MAX_AGE (`0x915C4`, value reserved, sent as 1) declares support
+  (`ietf/max_age.rs:5`, `:9-15`). The relay always sends it (`ietf/session.rs:845`). The extension says an
+  endpoint MUST NOT send the parameter to a peer that did not declare the option; the relay itself does not
+  check that a subscriber declared it before reading the parameter.
+- **Versions.** Decoded on SUBSCRIBE for every draft the relay speaks (`ietf/subscribe.rs:89` for draft 14,
+  `:131` for the rest, with no version gate) and on REQUEST_UPDATE (`ietf/request_stream.rs:414`, `:455`). Main
+  speaks moq-00 (draft 14) and moqt-15 to moqt-18 and moqt-22, not moqt-20 (`ietf/version.rs:6-13`,
+  `version.rs:45-50`), so both SDKs negotiate moqt-22 with it. Not decoded on FETCH or TRACK_STATUS.
+- **What the relay does with it.** The SUBSCRIBE's value becomes that downstream subscription's `max_delay`
+  (`ietf/publisher.rs:2029-2031`); a REQUEST_UPDATE replaces it (`:2316-2320`). The budget is per
+  subscription: a relay asks upstream for its most tolerant subscriber's budget, and only from a peer that
+  declared the option (`ietf/subscriber.rs:3225-3229`), so one subscriber's short budget never tightens
+  another's. A group goes stale for that subscriber once a newer group supersedes it and either its
+  successor arrived at this relay at least `max_delay` ago or, on a timed track (TIMESCALE, as both SDKs'
+  media tracks are), its media time trails the live edge by that much; the newest group never goes stale
+  (`model/subscription.rs:56-75`). The budget is capped by the publisher's MAX_CACHE_DURATION and the
+  relay's cache duration (`model/track.rs:1138-1145`, `:3644-3649`). A stale group the relay has not begun is
+  skipped (no stream: a missing group ID), and a group stream still being written or not yet acknowledged
+  when it goes stale is reset (`ietf/publisher.rs:5468-5476`, `:5862-5868`); the reset arrives as code 1.
+- **The delivery timeouts.** OBJECT_DELIVERY_TIMEOUT (`0x02`) and SUBGROUP_DELIVERY_TIMEOUT (`0x06`) are
+  decoded into unused bindings (`ietf/subscribe.rs:113`, `:118`), as on moq-relay 0.17.9 (tag commit
+  `30fd9d450`). moq-relay 0.17.x has no MAX_AGE: it does not declare the option, and on moqt-20 and moqt-22
+  a SUBSCRIBE carrying the parameter fails to decode (an unlisted type; `ietf/subscribe.rs:86-101` at
+  `30fd9d450`). The SDKs therefore send `maxAge` / `max_age` only when the relay declared the option
+  ([behavior.md](behavior.md#subscribing)).
+
+Measured on a Sprite on 2026-10-29 in moq-netbench's local two-namespace rig (relay-dev, relay-3cnp.416):
+moq-relay built from `6298cbcdf`, one TypeScript talker (90 s, one 80-byte object per 20 ms group, LOC
+timestamps) beside the relay, and two TypeScript subscribers over native QUIC behind one shaped access link,
+one asking 500 ms and one 5 s, each its own connection. The relay logged both values as decoded
+(`max_age: Some(500)`, `Some(5000)`). "Missing" frames are ones the talker sent that never reached that
+subscriber; lateness is arrival minus the frame's capture time (one host clock). The control asks
+OBJECT_DELIVERY_TIMEOUT and SUBGROUP_DELIVERY_TIMEOUT 500 ms and 5 s instead.
+
+| link (runs) | asked | frames delivered | missing | late p50 | late max | over 500 ms | over 1 s |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| narrow (2/1 Mbps, 30 ms added RTT, 500 ms FIFO) with one CUBIC download, 419-428 ms of queueing (3) | max age 500 ms | 13,487 of 13,500 | 13 | 405-427 ms | 526-538 ms | 1,212 | 0 |
+| | max age 5 s | 13,500 of 13,500 | 0 | 405-427 ms | 1,009-1,578 ms | 1,213 | 8 |
+| | delivery timeouts 500 ms | 13,500 of 13,500 | 0 | 394-427 ms | 513-1,100 ms | 1,115 | 8 |
+| | delivery timeouts 5 s | 13,500 of 13,500 | 0 | 393-427 ms | 513-1,087 ms | 1,120 | 5 |
+| loss-burst-10 (100% loss 2% of the time, in bursts of 200 ms mean) (5) | max age 500 ms | 22,444 of 22,500 | 56 | 27 ms | 339-538 ms | 15 | 0 |
+| | max age 5 s | 22,500 of 22,500 | 0 | 27 ms | 339-918 ms | 76 | 0 |
+| | delivery timeouts 500 ms | 22,500 of 22,500 | 0 | 27 ms | 477-817 ms | 37 | 0 |
+| | delivery timeouts 5 s | 22,500 of 22,500 | 0 | 27 ms | 477-817 ms | 37 | 0 |
+| narrow with a download (2) | max age 200 ms | 8,992 of 9,000 | 8 | 428-429 ms | 534-552 ms | 800 | 0 |
+| | max age 5 s | 9,000 of 9,000 | 0 | 427-429 ms | 1,052-1,065 ms | 796 | 3 |
+
+- **Per subscriber, at the relay.** Every frame the 500 ms subscriber lacked, the 5 s subscriber on the same
+  link received, 557 to 918 ms after capture under loss bursts and 504 to 1,065 ms on the narrow link. The
+  relay's log shows it began serving every one of those groups to the 500 ms subscriber: it gave up
+  resending them when they went stale (lost on that connection, then reset), and skipped none outright. The
+  5 s subscriber got every frame. Loss bursts that resend within about 500 ms drop nothing (2 of the 5 loss
+  runs).
+- **Only what the relay still holds.** On the narrow link the delay is the downstream FIFO's: the relay sends
+  each frame at once and it waits in the queue. A 200 ms or 500 ms budget leaves that delay as it is (p50
+  about 428 ms against 427 ms for 5 s); it cuts only resends, so it caps the worst case (about 550 ms against
+  1 to 1.6 s) at the price of a frame in about a thousand. A budget below the path's own queueing delay does
+  not make audio fresher.
+- **Resets are not a reliable trace.** The subscribers saw 10 subgroup resets on the narrow link, where 21
+  frames were lost this way, and none under loss bursts, where 56 were: a reset for a stream whose first
+  packet never arrived reaches no handler.
+  A missing group ID is the trace, as for any [subgroup reset](#subgroup-resets).
+- **The control.** Delivery timeouts changed nothing: nothing was dropped, the two control subscribers'
+  lateness matched (p50 to 0.1 ms, the worst frame within 16 ms) in every run, and the relay logged
+  `max_age: None` for them.
 
 ## Draft-22 deviations
 

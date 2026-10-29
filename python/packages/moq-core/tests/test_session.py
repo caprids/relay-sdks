@@ -13,11 +13,13 @@ from moq_core.control_messages import (
     MOQT_PROTOCOL_IDS,
     PUBLISH_DONE_STATUS,
     REQUEST_ERROR_CODE,
+    SETUP_OPTION,
     AbsoluteLocationFilter,
     ControlMessage,
     ControlMessageDeframer,
     ControlMessageFrame,
     Fetch,
+    KeyValuePair,
     Location,
     MessageParameters,
     MoqtProtocolId,
@@ -31,6 +33,7 @@ from moq_core.control_messages import (
     Subscribe,
     SubscribeNamespace,
     SubscribeOk,
+    TrackStatus,
     decode_control_message,
     encode_namespace,
     encode_namespace_done,
@@ -1275,3 +1278,118 @@ class TestSubscribeNamespace:
         harness.fake.drop_transport()
 
         await wait_for(lambda: on_error.called)
+
+
+MAX_AGE_SETUP = [KeyValuePair(SETUP_OPTION.MAX_AGE, 1)]
+SUBSCRIBER_PARAMETERS = MessageParameters(subscriber_priority=7, max_age=500)
+
+
+class TestMaxAge:
+    async def test_is_unsupported_until_the_server_setup_arrives(self) -> None:
+        harness = create_session_harness()
+        assert harness.session.max_age_supported is False
+        harness.fake.send_server_setup(MAX_AGE_SETUP)
+        await harness.session.ready
+        assert harness.session.max_age_supported is True
+        harness.session.destroy()
+
+    async def test_sends_max_age_on_subscribe_when_the_setup_declared_it(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup(MAX_AGE_SETUP)
+        await harness.session.ready
+
+        harness.session.subscribe(options(["live"], "video", SUBSCRIBER_PARAMETERS))
+        request = await harness.fake.next_request_stream()
+
+        assert await request.first_message == Subscribe(
+            request_id=0, track_namespace=["live"], track_name="video", parameters=SUBSCRIBER_PARAMETERS
+        )
+        assert harness.session.max_age_supported is True
+        harness.session.destroy()
+
+    async def test_takes_the_declaration_from_the_options_presence_whatever_its_value(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup([KeyValuePair(SETUP_OPTION.MAX_AGE, 0)])
+        await harness.session.ready
+        assert harness.session.max_age_supported is True
+        harness.session.destroy()
+
+    async def test_leaves_max_age_off_subscribe_when_the_setup_did_not_declare_it(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup([KeyValuePair(SETUP_OPTION.MAX_REQUEST_UPDATES, 3)])
+        await harness.session.ready
+        parameters = MessageParameters(subscriber_priority=7, max_age=500)
+
+        harness.session.subscribe(options(["live"], "video", parameters))
+        request = await harness.fake.next_request_stream()
+
+        assert await request.first_message == Subscribe(
+            request_id=0,
+            track_namespace=["live"],
+            track_name="video",
+            parameters=MessageParameters(subscriber_priority=7),
+        )
+        assert harness.session.max_age_supported is False
+        # The caller's object is not touched.
+        assert parameters == MessageParameters(subscriber_priority=7, max_age=500)
+        harness.session.destroy()
+
+    @pytest.mark.parametrize("declared", [True, False])
+    async def test_gates_max_age_on_update_the_same_way(self, declared: bool) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup(MAX_AGE_SETUP if declared else [])
+        await harness.session.ready
+        update = MessageParameters(forward=0, max_age=250)
+
+        subscription = harness.session.subscribe(options(["live"], "video"))
+        request = await harness.fake.next_request_stream()
+        await request.first_message
+        subscription.update(update)
+
+        await wait_for(lambda: len(request.messages) == 2)
+        sent = update if declared else MessageParameters(forward=0)
+        assert request.messages[1] == RequestUpdate(request_id=2, parameters=sent)
+        assert update == MessageParameters(forward=0, max_age=250)
+        harness.session.destroy()
+
+    async def test_never_sends_max_age_on_fetch_or_track_status_even_when_declared(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup(MAX_AGE_SETUP)
+        await harness.session.ready
+        parameters = MessageParameters(location_filter=CURRENT_GROUP, subscriber_priority=7, max_age=500)
+        expected = MessageParameters(location_filter=CURRENT_GROUP, subscriber_priority=7)
+
+        harness.session.fetch(options(["live"], "catalog", parameters))
+        fetch_stream = await harness.fake.next_request_stream()
+        harness.session.track_status(options(["live"], "catalog", parameters))
+        status_stream = await harness.fake.next_request_stream()
+
+        assert await fetch_stream.first_message == Fetch(
+            request_id=0, track_namespace=["live"], track_name="catalog", parameters=expected
+        )
+        assert await status_stream.first_message == TrackStatus(
+            request_id=2, track_namespace=["live"], track_name="catalog", parameters=expected
+        )
+        assert parameters.max_age == 500
+        harness.session.destroy()
+
+    async def test_never_sends_max_age_on_subscribe_namespace_even_when_declared(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup(MAX_AGE_SETUP)
+        await harness.session.ready
+        parameters = MessageParameters(include_properties=0, max_age=500)
+
+        harness.session.subscribe_namespace(
+            MoqtSubscribeNamespaceOptions(track_namespace_prefix=["room"], parameters=parameters)
+        )
+        request = await harness.fake.next_request_stream()
+
+        assert harness.session.max_age_supported is True
+        assert await request.first_message == SubscribeNamespace(
+            request_id=0,
+            track_namespace_prefix=["room"],
+            parameters=MessageParameters(include_properties=0),
+        )
+        # The caller's object is not touched.
+        assert parameters == MessageParameters(include_properties=0, max_age=500)
+        harness.session.destroy()

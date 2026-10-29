@@ -103,6 +103,13 @@ export const SETUP_OPTION = {
    * Even, so the value is a bare varint.
    */
   SOLICIT: 0x40b5a,
+  /**
+   * Subscriber max age from the MoQ Timestamp extension (draft-lcurley-moq-timestamp, as moq-dev main carries it in
+   * `drafts/`), not a draft-22 option: the sender understands the `PARAMETER_TYPE.MAX_AGE` parameter. The value is
+   * reserved (sent as 1, ignored on receipt). moq-dev main declares it; moq-relay 0.17.x does not. A session sends
+   * MAX_AGE only to a peer that declared it.
+   */
+  MAX_AGE: 0x915c4,
 } as const;
 
 /** Message parameter types (§9.20, §16.7). */
@@ -127,6 +134,8 @@ export const PARAMETER_TYPE = {
   NEW_GROUP_REQUEST: 0x32,
   TRACK_NAMESPACE_PREFIX: 0x34,
   INCLUDE_PROPERTIES: 0x35,
+  /** MAX_AGE, the MoQ Timestamp extension's subscriber max age on SUBSCRIBE and REQUEST_UPDATE (not a draft-22 type). */
+  MAX_AGE: 0x915c6,
 } as const;
 
 /**
@@ -755,6 +764,15 @@ export interface MessageParameters {
   trackNamespacePrefix?: TrackNamespace;
   /** INCLUDE_PROPERTIES (§9.20.21): `0` asks the responder to send empty Track Properties. Default `1`. */
   includeProperties?: 0 | 1;
+  /**
+   * MAX_AGE (`0x915C6`, the MoQ Timestamp extension; not a draft-22 parameter): the subscriber's max age in
+   * milliseconds, 0 to 2^53−1. A publisher that honors it skips, for this subscription only, a group once a newer group
+   * supersedes it and either that successor arrived at the publisher's hop at least this long ago or the group's media
+   * time trails the live edge by at least this much; the newest group never expires. moq-dev main turns it into the
+   * subscription's `max_delay`. A session sends it on SUBSCRIBE and REQUEST_UPDATE only when the peer's SETUP declared
+   * `SETUP_OPTION.MAX_AGE`, and never on FETCH, TRACK_STATUS or SUBSCRIBE_NAMESPACE; see `MoqtSession.maxAgeSupported`.
+   */
+  maxAge?: number;
 }
 
 /** The parameters FILL_PARAMETERS may carry (§9.20.15, Table 7). */
@@ -857,6 +875,11 @@ function collectParameterEntries(parameters: MessageParameters, protocol: MoqtPr
 
   if (parameters.includeProperties !== undefined) {
     push(PARAMETER_TYPE.INCLUDE_PROPERTIES, (w) => w.writeUint8(parameters.includeProperties!));
+  }
+
+  // An even type, so a bare varint; this codec's 2^53−1 ceiling is the extension's own bound.
+  if (parameters.maxAge !== undefined) {
+    push(PARAMETER_TYPE.MAX_AGE, (w) => w.writeVarint(parameters.maxAge!));
   }
 
   return entries;
@@ -1001,6 +1024,10 @@ export function decodeMessageParameters(
         parameters.includeProperties = include;
         break;
       }
+      case PARAMETER_TYPE.MAX_AGE:
+        // A value above 2^53−1 is malformed by the extension, and readVarint already refuses it.
+        parameters.maxAge = reader.readVarint();
+        break;
       default: {
         if (RANGE_FILTER_TYPES.includes(type)) {
           const value = reader.readBytes(reader.readVarint());

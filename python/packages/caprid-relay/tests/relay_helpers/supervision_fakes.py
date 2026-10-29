@@ -298,6 +298,7 @@ class FakeSubscriber:
 
     def __init__(self, expires_at: datetime | None = None) -> None:
         self.expires_at = expires_at
+        self.max_age_supported = False
         self.subscriptions: list[FakeSubscription] = []
         self.discoveries: list[FakeDiscovery] = []
         self._ended = False
