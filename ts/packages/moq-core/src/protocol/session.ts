@@ -416,6 +416,14 @@ export interface MoqtSession {
   /** Send TRACK_STATUS (§9.13) on a new request stream and report its one response through `handlers`. */
   trackStatus(options: MoqtSubscribeOptions, handlers?: TrackStatusHandlers): void;
   /**
+   * Whether the server's SETUP declared subscriber max age (`SETUP_OPTION.MAX_AGE`, the MoQ Timestamp extension), so
+   * `parameters.maxAge` goes out on SUBSCRIBE and REQUEST_UPDATE. While false, and before the server's SETUP has
+   * arrived, the session leaves `maxAge` off them, as the extension requires; it never sends it on FETCH or
+   * TRACK_STATUS. moq-dev main declares it; moq-relay 0.17.x does not, and on draft-17 and later would fail a
+   * SUBSCRIBE that carried the parameter.
+   */
+  readonly maxAgeSupported: boolean;
+  /**
    * Send SUBSCRIBE_NAMESPACE (§9.15) on a new request stream: the peer answers REQUEST_OK, then names the namespaces
    * under the prefix with NAMESPACE / NAMESPACE_DONE on the same stream. A relay that pushes unsolicited
    * PUBLISH_NAMESPACE instead only stops doing so when SETUP carried `SETUP_OPTION.SOLICIT`.
@@ -537,6 +545,8 @@ class MoqtSessionImpl implements MoqtSession {
   #rejectReady!: (error: unknown) => void;
   #controlWriter: WritableStreamDefaultWriter<Uint8Array> | undefined;
   #receivedServerSetup = false;
+  /** The server's SETUP declared SETUP_OPTION.MAX_AGE. */
+  #maxAgeSupported = false;
   #receivedControlGoaway = false;
   #destroyed = false;
 
@@ -554,6 +564,25 @@ class MoqtSessionImpl implements MoqtSession {
     this.ready.catch(() => {});
 
     void this.#start();
+  }
+
+  get maxAgeSupported(): boolean {
+    return this.#maxAgeSupported;
+  }
+
+  /**
+   * `parameters` as this session may send them: MAX_AGE only on a SUBSCRIBE or REQUEST_UPDATE (`subscription`) to a
+   * peer that declared it (the MoQ Timestamp extension: an endpoint MUST NOT send it to one that did not; on draft-17
+   * and later a peer that does not know it fails the message).
+   */
+  #outgoingParameters(
+    parameters: MessageParameters | undefined,
+    subscription: boolean
+  ): MessageParameters | undefined {
+    if (parameters?.maxAge === undefined || (subscription && this.#maxAgeSupported)) return parameters;
+
+    const { maxAge: _omitted, ...rest } = parameters;
+    return rest;
   }
 
   // --------------------------------------------------------------------------
@@ -728,7 +757,7 @@ class MoqtSessionImpl implements MoqtSession {
         requestId,
         trackNamespace: options.trackNamespace,
         trackName: options.trackName,
-        parameters: options.parameters,
+        parameters: this.#outgoingParameters(options.parameters, true),
       },
       this.#protocol
     );
@@ -754,7 +783,11 @@ class MoqtSessionImpl implements MoqtSession {
         // REQUEST_UPDATE consumes a Request ID of its own (§6.4.2.1); the stream
         // it travels on is what names the subscription. Reusing the
         // subscription's id would be a duplicate the peer MUST close on.
-        record.stream?.send(encodeRequestUpdate(this.#allocateRequestId(), parameters, this.#protocol)).catch(() => {});
+        record.stream
+          ?.send(
+            encodeRequestUpdate(this.#allocateRequestId(), this.#outgoingParameters(parameters, true), this.#protocol)
+          )
+          .catch(() => {});
       },
       cancel: (reason) => this.#cancelSubscription(record, reason),
     };
@@ -772,7 +805,7 @@ class MoqtSessionImpl implements MoqtSession {
 
     this.#fetches.set(requestId, record);
 
-    const request: FetchRequest = { requestId, ...options };
+    const request: FetchRequest = { requestId, ...options, parameters: this.#outgoingParameters(options.parameters, false) };
 
     void this.#openRequest(
       encodeFetch(request, this.#protocol),
@@ -804,7 +837,7 @@ class MoqtSessionImpl implements MoqtSession {
         requestId,
         trackNamespace: options.trackNamespace,
         trackName: options.trackName,
-        parameters: options.parameters,
+        parameters: this.#outgoingParameters(options.parameters, false),
       },
       this.#protocol
     );
@@ -1257,6 +1290,8 @@ class MoqtSessionImpl implements MoqtSession {
     }
 
     this.#receivedServerSetup = true;
+    // The option's value is reserved and ignored on receipt: its presence is the declaration.
+    this.#maxAgeSupported = setup.options.some((option) => option.type === SETUP_OPTION.MAX_AGE);
     this.#resolveReady();
     this.#callbacks.onReady?.(setup.options);
 
