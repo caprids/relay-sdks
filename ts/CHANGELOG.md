@@ -5,6 +5,14 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/moq-media`: two fixes to the Opus loss concealment that 0.1.1 turned on. A decoder reset clears the
+  record that the last packet was CELT-only, so the next gap can use in-band FEC again (it stayed off until a
+  non-CELT packet decoded). A gap the player leaves unfilled (the buffer ran dry, it is filling to its target, or the
+  gap spans a cut) resets the decoder, as a gap over 1 s already did, so the frame after it is not decoded from libopus
+  state that belongs before the gap. Nothing to change in an application.
+
 ## 0.2.0
 
 - `@caprid/relay`: `roomEndpoint(room)` roots the hosted Relay, `https://relay.mux.global`, so a quickstart passes
