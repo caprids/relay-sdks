@@ -20,31 +20,32 @@ allow QUIC traffic over UDP.
 
 ### Endpoint and credentials
 
-Ask the team that operates your Relay deployment, or your application's backend owner, for three
-things:
-
-- an HTTPS WebTransport endpoint.
-- your token's root, the namespace prefix the token grants.
-- a short-lived Relay JWT authorized to **publish and subscribe** there.
+For the hosted Relay, you need one thing: a short-lived Relay JWT authorized to **publish and
+subscribe** under its root, the namespace prefix the token grants. Ask your application's backend
+owner for it. For another Relay deployment, also ask its operator for an HTTPS WebTransport
+endpoint.
 
 The SDK consumes tokens. It does not issue them, and there is no public token signup flow. Do not
 use a Mux API access token in place of a Relay JWT.
 
-Use an endpoint whose path is your token's root, for example `https://relay.mux.global/acme/rooms/42`
-for a token rooted at `acme/rooms/42`. Then name namespaces relative to it: `['p', 'a']`, not
-`['acme', 'rooms', '42', 'p', 'a']`. The connection cannot reach outside that root, and a path the
-token does not grant fails at connect with `UNAUTHORIZED`. A client that spans several rooms under
-one grant can use the bare host, where namespace fields include the token's root
-([namespaces](../spec/behavior.md#subscribing)).
+A connect call with no `url` dials the hosted Relay, `https://relay.mux.global`, with the token's
+root as the path. A token rooted at `acme/rooms/42` connects to
+`https://relay.mux.global/acme/rooms/42`. The SDK reads the root from the token without verifying
+it, and the relay verifies the token. Name namespaces relative to the root: `['p', 'a']`, not
+`['acme', 'rooms', '42', 'p', 'a']`. The connection cannot reach outside that root. A token that is
+not a JWT, or has no `root` claim, throws before anything connects and tells you to pass `url`
+([token-rooted endpoint](../spec/behavior.md#token-rooted-endpoint)).
 
 The Mux relays carry announcements between regions, so a publisher and a subscriber can each use
 their nearest relay ([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)).
-The SDK's default endpoint is the bare host `https://relay.mux.global`, which still requires
-authorized credentials. For another deployment, use the endpoint its operator supplies.
+Pass `url` to choose the endpoint yourself: a nearby region, a room below the token's root, or
+another deployment. A path the token does not grant fails at connect with `UNAUTHORIZED`. A client
+that spans several rooms under one grant can use the bare host, where namespace fields include the
+token's root ([namespaces](../spec/behavior.md#subscribing)).
 
-`roomEndpoint` builds that endpoint from the token's root, so you do not assemble the URL by hand.
-Given only the root, it uses `DEFAULT_ENDPOINT`, `https://relay.mux.global`. Pass an endpoint
-first for another relay:
+`roomEndpoint` builds a room-rooted endpoint, so you do not assemble the URL by hand. Given only the
+room, it uses `DEFAULT_ENDPOINT`, `https://relay.mux.global`. Pass an endpoint first for another
+relay:
 
 ```ts
 import { roomEndpoint } from '@caprid/relay';
@@ -90,19 +91,16 @@ npm install @caprid/relay @caprid/relay-quic
 ```
 
 `@caprid/relay-quic` brings a prebuilt native binary for your platform, so the install needs no
-compiler ([Node](README.md#node)). Save this as `hello.mjs`, with your token's root in place of
-`acme/rooms/42`:
+compiler ([Node](README.md#node)). Save this as `hello.mjs`:
 
 ```js
-import { connectRelayPublisher, connectSupervisedSubscriber, readText, roomEndpoint } from '@caprid/relay/node';
+import { connectRelayPublisher, connectSupervisedSubscriber, readText } from '@caprid/relay/node';
 
-const url = roomEndpoint(['acme', 'rooms', '42']); // your token's root, on https://relay.mux.global
-// const url = process.env.RELAY_URL; // or any endpoint whose path is your token's root
 const getToken = () => process.env.RELAY_TOKEN;
-const namespace = ['hello', crypto.randomUUID().slice(0, 8)]; // fresh for each run, relative to the root
+const namespace = ['hello', crypto.randomUUID().slice(0, 8)]; // fresh for each run, relative to the token's root
 
 // Subscribe first: the publisher's write() waits until someone wants the track.
-const subscriber = await connectSupervisedSubscriber({ url, getToken });
+const subscriber = await connectSupervisedSubscriber({ getToken });
 const received = new Promise((resolve, reject) => {
   subscriber.want('greeting', { namespace, track: 'greetings' }, {
     onObject: (object) => resolve(readText(object)),
@@ -110,7 +108,7 @@ const received = new Promise((resolve, reject) => {
   });
 });
 
-const publisher = await connectRelayPublisher({ url, namespace, getToken });
+const publisher = await connectRelayPublisher({ namespace, getToken });
 const track = publisher.registerTrack({ track: 'greetings' });
 await track.writeText('hello, relay');
 
@@ -129,7 +127,8 @@ node hello.mjs
 It prints `received: hello, relay`. That line is what proves the round trip. A completed
 `writeText()` only means the transport accepted the object.
 
-`roomEndpoint` puts the token's root in the endpoint's path, so the namespace is relative to it. The
+With no `url`, both connections dial the hosted Relay with the token's root as the path, so the
+namespace is relative to the root. To use another endpoint, pass `url` to both calls. The
 publisher announces that namespace, and its `writeText()` waits for relay demand before it sends
 anything. The subscriber's `want` creates that demand. A fresh namespace can briefly reject a
 subscription with request error 16 `unroutable` while its announcement propagates, for about a round
@@ -351,7 +350,9 @@ takes precedence over `getToken`, which matches the current Relay connection aut
 convention. An empty one (`?jwt=`) throws a `RangeError` before anything connects. Put a token in
 it, or drop it and use `getToken`. An endpoint with another scheme, a fragment, or userinfo also
 throws a `RangeError`. An endpoint that is not a string holding an absolute URL throws a
-`TypeError`. Every deadline (`connectTimeoutMs`, `requestTimeoutMs`, and `writeTimeoutMs`) must be
+`TypeError`. With no `url`, a missing `getToken`, or a token that names no root, throws a
+`TypeError`, and a root that cannot be a URL path throws a `RangeError`, all before the transport is
+used. Every deadline (`connectTimeoutMs`, `requestTimeoutMs`, and `writeTimeoutMs`) must be
 greater than 0 and at most 2147483647 milliseconds, the largest delay a JavaScript timer holds. A
 larger value throws a `RangeError` rather than becoming a deadline that fires at once. A value that
 is not a number throws a `TypeError`.
@@ -379,8 +380,8 @@ do not prevent it, so open a replacement before then. The
 [supervised connections](#stay-connected-supervised-connections) do it for you, make-before-break,
 a minute before expiry by default (`rotateBeforeMs`).
 
-Both roles take the same connection options, `ConnectRelayOptions`: `url`, `getToken`, `signal`,
-`connectTimeoutMs`, and `createTransport`. `ConnectRelaySubscriberOptions` adds `requestTimeoutMs`,
+Both roles take the same connection options, `ConnectRelayOptions`: `url` (optional), `getToken`,
+`signal`, `connectTimeoutMs`, and `createTransport`. `ConnectRelaySubscriberOptions` adds `requestTimeoutMs`,
 the deadline for a subscription's initial response. `ConnectRelayPublisherOptions` adds `namespace`
 and has no request deadline. Instead, each track's `writeTimeoutMs` bounds its wait for demand and
 its writes. Passing `requestTimeoutMs` to `connectRelayPublisher` is a type error. Untyped JavaScript
@@ -599,6 +600,9 @@ namespace has gone since. Wait for its next `announced` rather than retrying on 
 application that has to survive network loss can use the supervisors instead. A browser's QUIC
 connection ends after about 5 s without connectivity ([browser transport limits](#browser-transport-limits)).
 The supervisors take the same connection options and resolve once their first connection is up.
+With no `url`, every later connection dials the endpoint the first one rooted at its token's root,
+so a later token that does not grant that path fails with `UNAUTHORIZED` rather than moving the
+connection.
 
 ```js
 import { connectSupervisedPublisher, connectSupervisedSubscriber } from '@caprid/relay';

@@ -26,29 +26,32 @@ your network must allow QUIC traffic over UDP.
 
 ### Endpoint and credentials
 
-Ask the team that operates your Relay deployment, or your application's backend owner, for these:
-
-- an HTTPS Relay endpoint
-- your token's root, which is the namespace prefix the token grants
-- a short-lived Relay JWT that can **publish and subscribe** under that root
+For the hosted Relay, you need one thing: a short-lived Relay JWT that can **publish and
+subscribe** under its root, which is the namespace prefix the token grants. Ask your application's
+backend owner for it. For another Relay deployment, also ask its operator for an HTTPS Relay
+endpoint.
 
 The SDK uses tokens but does not issue them, and there is no public token signup. A Mux API access
 token is not a Relay JWT.
 
-Use an endpoint whose path is your token's root, for example `https://relay.mux.global/acme/rooms/42`
-for a token rooted at `acme/rooms/42`. Name namespaces relative to it: `["p", "a"]`, not
-`["acme", "rooms", "42", "p", "a"]`. The connection then cannot reach outside that root, and a path
-the token does not grant fails at connect with `UNAUTHORIZED`. A client that spans several rooms
-under one grant can use the bare host instead, where namespace fields include the token's root
-([namespaces](../spec/behavior.md#subscribing)). The Mux relays carry announcements between regions,
-so a publisher and a subscriber can each use their nearest relay
-([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)). The SDK's default
-endpoint is the bare host `https://relay.mux.global`, which still needs authorized credentials. For another
-deployment, use the endpoint its operator gives you.
+A connect call with no `url` dials the hosted Relay, `https://relay.mux.global`, with the token's
+root as the path. A token rooted at `acme/rooms/42` connects to
+`https://relay.mux.global/acme/rooms/42`. The SDK reads the root from the token without verifying
+it, and the relay verifies the token. Name namespaces relative to the root: `["p", "a"]`, not
+`["acme", "rooms", "42", "p", "a"]`. The connection cannot reach outside that root. A token that is
+not a JWT, or has no `root` claim, raises `TypeError` before anything connects and tells you to pass
+`url` ([token-rooted endpoint](../spec/behavior.md#token-rooted-endpoint)).
 
-`room_endpoint` builds that endpoint from the token's root, so you do not assemble the URL by hand.
-Given only the root, it uses `DEFAULT_ENDPOINT`, `https://relay.mux.global`. Pass an endpoint
-first for another relay:
+The Mux relays carry announcements between regions, so a publisher and a subscriber can each use
+their nearest relay ([a viewer on another relay](../spec/relay-interop.md#a-viewer-on-another-relay)).
+Pass `url` to choose the endpoint yourself: a nearby region, a room below the token's root, or
+another deployment. A path the token does not grant fails at connect with `UNAUTHORIZED`. A client
+that spans several rooms under one grant can use the bare host, where namespace fields include the
+token's root ([namespaces](../spec/behavior.md#subscribing)).
+
+`room_endpoint` builds a room-rooted endpoint, so you do not assemble the URL by hand. Given only the
+room, it uses `DEFAULT_ENDPOINT`, `https://relay.mux.global`. Pass an endpoint first for another
+relay:
 
 ```python
 from caprid_relay import room_endpoint
@@ -91,25 +94,16 @@ row in [the vocabulary](../spec/vocabulary.md). Import other protocol types from
 such as the location filters for `subscribe(parameters=...)`:
 `from moq_core import AbsoluteLocationFilter`.
 
-Save this as `hello.py`, with your
-token's root in place of `acme/rooms/42`:
+Save this as `hello.py`:
 
 ```python
 import asyncio
 import os
 import uuid
 
-from caprid_relay import (
-    WantHandlers,
-    connect_relay_publisher,
-    connect_supervised_subscriber,
-    read_text,
-    room_endpoint,
-)
+from caprid_relay import WantHandlers, connect_relay_publisher, connect_supervised_subscriber, read_text
 
-URL = room_endpoint(["acme", "rooms", "42"])  # your token's root, on https://relay.mux.global
-# URL = os.environ["RELAY_URL"]  # or any endpoint whose path is your token's root
-NAMESPACE = ["hello", uuid.uuid4().hex[:8]]  # fresh for each run, relative to the root
+NAMESPACE = ["hello", uuid.uuid4().hex[:8]]  # fresh for each run, relative to the token's root
 
 
 def get_token() -> str:
@@ -120,14 +114,14 @@ async def main() -> None:
     received: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
     # Subscribe first: the publisher's write() waits until someone wants the track.
-    async with await connect_supervised_subscriber(URL, get_token=get_token) as subscriber:
+    async with await connect_supervised_subscriber(get_token=get_token) as subscriber:
         subscriber.want(
             "greeting",
             NAMESPACE,
             "greetings",
             WantHandlers(on_object=lambda obj: received.set_result(read_text(obj)), on_error=received.set_exception),
         )
-        async with await connect_relay_publisher(URL, namespace=NAMESPACE, get_token=get_token) as publisher:
+        async with await connect_relay_publisher(namespace=NAMESPACE, get_token=get_token) as publisher:
             track = publisher.register_track("greetings")
             await track.write_text("hello, relay")
             print("received:", await received)
@@ -146,8 +140,9 @@ uv run hello.py
 It prints `received: hello, relay`. That line is what proves the round trip. A completed
 `write_text()` only means the transport accepted the object.
 
-`room_endpoint` puts the token's root in the endpoint's path, so the namespace is relative to it.
-The publisher announces that namespace, and its `write_text()` waits for relay demand before it
+With no `url`, both connections dial the hosted Relay with the token's root as the path, so the
+namespace is relative to the root. To use another endpoint, pass it as the first argument to both
+calls. The publisher announces that namespace, and its `write_text()` waits for relay demand before it
 sends anything. The subscriber's `want` creates that demand. A fresh namespace can briefly reject a
 subscription with request error 16 `unroutable` while its announcement propagates, for about a round
 trip, and the want retries it until the subscription succeeds. A rejection that no wait fixes, such
@@ -389,6 +384,8 @@ endpoint takes precedence over `get_token`, matching the Relay authentication co
 one (`?jwt=`) is a `ValueError` before anything connects: put a token in it, or drop it and use
 `get_token`. An endpoint with another scheme than `https`, a fragment, or userinfo is also a
 `ValueError`. An endpoint that is not a string holding an absolute URL with a host is a `TypeError`.
+With no `url`, a missing `get_token`, or a token that names no root, is a `TypeError`, and a root
+that cannot be a URL path is a `ValueError`, all before the transport is used.
 
 Every deadline (`connect_timeout`, `request_timeout`, and `write_timeout`) must be greater than 0 and
 at most 2147483.647 seconds, the same bound the TypeScript SDK's timers impose. A value outside that
@@ -533,7 +530,9 @@ so later assignments to the handler object do not change that subscription.
 
 `connect_relay_publisher` and `connect_relay_subscriber` never reconnect or resubscribe. A live
 application that has to survive network loss can use the supervisors instead. They take the same
-connection options and return once their first connection is up.
+connection options and return once their first connection is up. With no `url`, every later
+connection dials the endpoint the first one rooted at its token's root, so a later token that does
+not grant that path fails with `UNAUTHORIZED` rather than moving the connection.
 
 ```python
 from caprid_relay import SupervisionBackoff, WantHandlers, connect_supervised_publisher, connect_supervised_subscriber

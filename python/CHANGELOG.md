@@ -4,6 +4,17 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `caprid-relay`: `url` is optional on every connect call: `connect_relay_subscriber`, `connect_relay_publisher`,
+  `connect_supervised_subscriber` and `connect_supervised_publisher`. Left out, the connection dials
+  `DEFAULT_ENDPOINT` rooted at the token's `root` claim, which it reads without verifying the token: the URL
+  `room_endpoint` would build from that root (#374). A quickstart is now `connect_supervised_subscriber(get_token=...)`,
+  with namespaces relative to the token's root. `get_token` is then required. A token that is not a JWT, has no string
+  `root` claim, or has a root `room_endpoint` refuses raises `TypeError` or `ValueError` before the transport is used.
+  A supervisor keeps the endpoint its first connection dialed for every reconnect and rotation. A call that passes
+  `url` is unchanged.
+
 ## 0.2.0
 
 - `caprid-relay`: `room_endpoint(room)` roots `DEFAULT_ENDPOINT`, the hosted Relay `https://relay.mux.global`, so a

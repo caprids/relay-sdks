@@ -10,8 +10,8 @@ Payloads are bytes the SDK does not interpret. You need no browser, player, or m
 - Network access to the relay over QUIC on UDP. The default transport is native QUIC (MOQT directly
   on QUIC) through aioquic, which installs as a dependency. To use another transport, pass
   `create_transport`.
-- A Relay endpoint and a short-lived Relay JWT authorized for the namespace you use. The SDK uses
-  tokens but does not issue them.
+- A short-lived Relay JWT authorized for the namespace you use, and the endpoint of any relay other
+  than the hosted one. The SDK uses tokens but does not issue them.
 
 ## Install
 
@@ -33,13 +33,11 @@ from caprid_relay import (
     connect_relay_publisher,
     connect_relay_subscriber,
     read_text,
-    room_endpoint,
 )
 
 
 async def main(token: str) -> None:
-    url = room_endpoint(["team"])  # your token's root as the path
-    namespace = ["quickstart", "unique-run"]  # relative to that root
+    namespace = ["quickstart", "unique-run"]  # relative to the token's root
     arrived: asyncio.Future[str] = asyncio.get_running_loop().create_future()
 
     def on_object(obj: MoqtObject) -> None:
@@ -47,8 +45,8 @@ async def main(token: str) -> None:
             arrived.set_result(read_text(obj))
 
     async with (
-        await connect_relay_publisher(url, namespace=namespace, get_token=lambda: token) as publisher,
-        await connect_relay_subscriber(url, get_token=lambda: token) as subscriber,
+        await connect_relay_publisher(namespace=namespace, get_token=lambda: token) as publisher,
+        await connect_relay_subscriber(get_token=lambda: token) as subscriber,
     ):
         ticker = publisher.register_track("ticker")
         await publisher.announced
@@ -57,6 +55,10 @@ async def main(token: str) -> None:
         await ticker.write_text("hello from caprid-relay")  # waits for the subscriber's demand
         print(await arrived)
 ```
+
+With no `url`, each connection dials the hosted Relay, `https://relay.mux.global`, with the token's
+root as the path, so namespaces are relative to that root. Pass `url` first for another relay,
+region or room; `room_endpoint` builds one.
 
 The [guide's full demo](https://github.com/caprids/relay-sdks/blob/main/python/README.md#run-the-full-demo-from-a-checkout)
 runs the complete version of this, with credential handling, the subscribe retry, a deadline, and
