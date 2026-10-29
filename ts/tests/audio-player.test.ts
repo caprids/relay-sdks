@@ -1101,6 +1101,19 @@ describe('loss concealment (libopus in WebAssembly)', () => {
     expect(input.stats.concealedUs).toBeGreaterThan(0);
   });
 
+  it('counts a dropped fill out exactly at a context rate where a frame is not a whole number of samples', async () => {
+    const { context, clock, player } = await setUp({ sampleRate: 11_025, lossConcealment: true });
+    const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    input.push(opusAt(1));
+    context.render(100);
+    expect(input.stats).toMatchObject({ playing: false });
+    // Dry: the fill for frame 2 is dropped by the worklet, so nothing filled is counted, not a few µs either way.
+    input.push(opusAt(3, 'gap'));
+    context.render(20);
+    expect(input.stats).toMatchObject({ recoveredUs: 0, synthesizedUs: 0 });
+  });
+
   it('drops a fill once the buffer ran dry: the worklet skips that audio rather than play it late', async () => {
     const { context, clock, player } = await setUp({ lossConcealment: true });
     const input = player.addInput({ clock, decoderConfig: mono, jitterTargetUs: 40_000 });

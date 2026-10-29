@@ -529,6 +529,8 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     const { planes: resampled, offset } = resampler.resample(planes, fromRate, sampleRate);
     const timestampUs = timestamp + Math.round((offset * MICROSECONDS_PER_SECOND) / fromRate);
     if (resampled[0]?.length) {
+      if (source === 'synthesized') synthesizedSentFrames += resampled[0].length;
+      else if (source === 'recovered') recoveredSentFrames += resampled[0].length;
       post(
         source === 'arrival'
           ? { type: 'pcm', timestampUs, planes: resampled }
@@ -537,9 +539,10 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       );
     }
   };
-  // Filled audio sent to the worklet; the stats subtract what it reports it dropped.
-  let synthesizedSentUs = 0;
-  let recoveredSentUs = 0;
+  // Filled audio sent to the worklet, in the context's frames as the worklet counts what it drops: the stats subtract
+  // that at each report.
+  let synthesizedSentFrames = 0;
+  let recoveredSentFrames = 0;
   // With loss concealment, Opus decodes here, synchronously, with libopus: one decoder for the input's life, reset
   // rather than replaced, so a gap is filled from the decoder's own state instead of starting a new one after it.
   const wasm: WasmOpusDecoder | undefined =
@@ -570,7 +573,6 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
       const samples = opusSamples(Math.min(us, budgetUs));
       if (samples <= 0) return false;
       deliverOpus(atUs, decoderNow.conceal(samples), 'synthesized');
-      synthesizedSentUs += opusUs(samples);
       stats.synthesizedUs += opusUs(samples);
       atUs += opusUs(samples);
       budgetUs -= opusUs(samples);
@@ -591,7 +593,6 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     }
     if (recovered) {
       deliverOpus(fecAtUs, recovered, 'recovered');
-      recoveredSentUs += opusUs(samples);
       stats.recoveredUs += opusUs(samples);
     } else synthesize(opusUs(samples));
   };
@@ -754,8 +755,8 @@ function createInput(context: AudioPlayerContext, options: AudioInputOptions, ho
     stats.underruns = report.underruns;
     stats.trimmedUs = toUs(report.trimmedFrames);
     stats.concealedUs = toUs(report.concealedFrames);
-    stats.synthesizedUs = synthesizedSentUs - toUs(report.droppedSynthesizedFrames);
-    stats.recoveredUs = recoveredSentUs - toUs(report.droppedRecoveredFrames);
+    stats.synthesizedUs = toUs(synthesizedSentFrames - report.droppedSynthesizedFrames);
+    stats.recoveredUs = toUs(recoveredSentFrames - report.droppedRecoveredFrames);
     workletCutUs = toUs(report.cutFrames);
     stats.cutUs = workletCutUs + cutOnArrivalUs;
     const next = toFrames(ceilingUs());
