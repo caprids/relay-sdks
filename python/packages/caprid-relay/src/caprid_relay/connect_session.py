@@ -88,7 +88,7 @@ def _jwt_claims(token: str) -> dict[str, object] | None:
     try:
         payload = base64.urlsafe_b64decode(parts[1] + "=" * (-len(parts[1]) % 4))
         claims = json.loads(payload.decode("utf-8"), parse_constant=_not_json)
-    except (ValueError, binascii.Error, UnicodeDecodeError):
+    except (ValueError, binascii.Error, UnicodeDecodeError, RecursionError):
         return None
 
     return claims if isinstance(claims, dict) else None

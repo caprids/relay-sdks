@@ -218,3 +218,20 @@ async def test_a_supervisor_keeps_its_first_endpoint_across_a_reconnect_and_a_ro
         f"https://relay.mux.global/acme?jwt={MOVED}",
         f"https://relay.mux.global/acme?jwt={MOVED}",
     ]
+
+
+async def test_a_payload_nested_past_the_recursion_limit_has_no_claims(cleanup: list[Callable[[], object]]) -> None:
+    deep = _jwt("[" * 100_000)
+    with pytest.raises(TypeError, match="pass url"):
+        await connect_relay_subscriber(get_token=lambda: deep, create_transport=Relay())
+
+    relay = Relay()
+    expires_at = datetime(2030, 1, 1, tzinfo=UTC)
+    subscriber = await connect_relay_subscriber(
+        "https://relay.example/acme",
+        get_token=lambda: RelayCredential(deep, expires_at),
+        create_transport=relay,
+    )
+    cleanup.append(subscriber.close)
+    assert relay.urls == [f"https://relay.example/acme?jwt={deep}"]
+    assert subscriber.expires_at == expires_at
