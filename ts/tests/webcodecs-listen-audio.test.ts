@@ -162,6 +162,65 @@ it('releases the player and subscriptions when the audio subscription cannot sta
   expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
 });
 
+it('fails setup when the audio subscription fails before the catalog arrives', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const failure = new Error('unroutable');
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError });
+  listening.catch(() => {});
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  expect(audio.request.track).toBe('audio');
+  audio.handlers.onError?.(failure as never);
+  await expect(listening).rejects.toBe(failure);
+  // A setup failure is the rejection, not an onError call.
+  expect(onError).not.toHaveBeenCalled();
+  expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
+  expect(audio.cancel).toHaveBeenCalledTimes(1);
+  expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
+});
+
+it('fails setup when the audio subscription failed by the time the catalog arrives', async () => {
+  const fake = fakeSubscriber();
+  const failure = new Error('ended');
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  listening.catch(() => {});
+  const audio = fake.subscriptions[1] as (typeof fake.subscriptions)[number];
+  fake.deliverCatalog(audioCatalog());
+  audio.handlers.onError?.(failure as never);
+  await expect(listening).rejects.toBe(failure);
+  expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
+  expect(audio.cancel).toHaveBeenCalledTimes(1);
+});
+
+it('reports an audio subscription failure after it started to onError', async () => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const listener = await listen(fake, audioCatalog(), { onError });
+  const failure = new Error('later');
+  fake.subscriptions[1]?.handlers.onError?.(failure as never);
+  expect(onError).toHaveBeenCalledWith(failure);
+  await listener.stop();
+});
+
+it('cancels a catalog that came at once when the audio subscribe then throws', async () => {
+  const fake = fakeSubscriber();
+  const failure = new Error('The relay is gone');
+  const subscribe = fake.subscriber.subscribe as unknown as ReturnType<typeof vi.fn>;
+  const original = subscribe.getMockImplementation() as (request: Request, handlers: Handlers) => unknown;
+  subscribe.mockImplementation((request: Request, handlers: Handlers) => {
+    if (request.track === 'audio') throw failure;
+    const subscription = original(request, handlers);
+    // The catalog's first object arrives before subscribe() returns.
+    handlers.onObject?.({ status: 'normal', payload: audioCatalog() } as never);
+    return subscription;
+  });
+  const listening = listenAudio(fake.subscriber, NAMESPACE);
+  await expect(listening).rejects.toBe(failure);
+  await Promise.resolve();
+  expect(fake.catalog.cancel).toHaveBeenCalledTimes(1);
+  expect(FakeContext.instances[0]?.close).toHaveBeenCalledTimes(1);
+});
+
 it('does not close a context the caller supplied when setup fails', async () => {
   const fake = fakeSubscriber();
   const context = new FakeContext();

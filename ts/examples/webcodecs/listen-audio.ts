@@ -147,6 +147,17 @@ export async function listenAudio(
   const setup = new AbortController();
   const abortSetup = () => setup.abort(options.signal?.reason);
   options.signal?.addEventListener('abort', abortSetup, { once: true });
+  // The audio subscription's failure while setting up fails the setup (the relay refused it, or it ended before the
+  // listener started); once started, it goes to onError.
+  let started = false;
+  let audioFailure: { error: unknown } | undefined;
+  const throwIfAudioFailed = () => {
+    if (audioFailure) throw audioFailure.error;
+  };
+  // Whether the catalog's subscription is in `release` yet: a catalog that came before a later step failed is
+  // cancelled here otherwise.
+  let catalogReleased = false;
+  let reading: ReturnType<typeof readCatalog> | undefined;
   try {
     options.signal?.throwIfAborted();
     const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
@@ -155,16 +166,29 @@ export async function listenAudio(
     const reader = createFrameReader(sequencer, { onFrame: hold.push });
     release.push(() => reader.close());
     // Subscribe to the catalog and the audio track at once: the audio does not wait for the catalog's round trips.
-    const reading = readCatalog(subscriber, namespace, setup.signal);
+    reading = readCatalog(subscriber, namespace, setup.signal);
     // A failure of the audio subscription below ends the read through the setup signal; the rejection is awaited later.
     reading.catch(() => {});
     const audio = subscriber.subscribe(
       { namespace: [...namespace], track: AUDIO_TRACK },
-      { ...reader, onError: (error) => options.onError?.(error) },
+      {
+        ...reader,
+        onError(error) {
+          if (started) {
+            options.onError?.(error);
+            return;
+          }
+          audioFailure ??= { error };
+          // Before the catalog came, this ends its read.
+          setup.abort(error);
+        },
+      },
     );
     release.push(() => audio.cancel());
     const { tracks, subscription: catalog } = await reading;
     release.push(() => catalog.cancel());
+    catalogReleased = true;
+    throwIfAudioFailed();
     const track = tracks.find((candidate) => candidate.name === AUDIO_TRACK);
     if (!track) throw new Error(`The catalog at ${namespace.join('/')} lists no ${AUDIO_TRACK} track`);
 
@@ -172,11 +196,13 @@ export async function listenAudio(
     const player = await createAudioPlayer({ context });
     release.push(() => player.close());
     options.signal?.throwIfAborted();
+    throwIfAudioFailed();
     let loopback: EchoCancellationLoopback | undefined;
     if (options.echoCancellation) {
       loopback = await createEchoCancellationLoopback(context, player.output);
       release.push(() => loopback?.close());
       options.signal?.throwIfAborted();
+      throwIfAudioFailed();
     } else player.output.connect(context.destination);
 
     const input = player.addInput({
@@ -233,6 +259,8 @@ export async function listenAudio(
         )
       : undefined;
 
+    throwIfAudioFailed();
+    started = true;
     return {
       context,
       player,
@@ -252,8 +280,14 @@ export async function listenAudio(
       },
     };
   } catch (error) {
-    // A failure before the catalog arrived ends its read too: it cancels its own subscription.
+    // A failure before the catalog arrived ends its read too: it cancels its own subscription. One that came already,
+    // before the step that failed could take it, is cancelled here.
     setup.abort(error);
+    if (!catalogReleased)
+      reading?.then(
+        ({ subscription }) => subscription.cancel(),
+        () => {},
+      );
     // A failure while cleaning up must not hide the one that stopped the setup.
     for (const undo of release.reverse()) {
       try {
