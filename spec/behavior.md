@@ -1710,6 +1710,22 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   frame `resync`, so the backlog does not become lasting latency. It does so in a poll of its own:
   frames before it in the same poll are returned first, with a wait of 0.
   A lasting increase in delay therefore costs one target latency, not a black or silent player.
+- Timestamp playout (TypeScript only, frame grouping only, off by default): `timestampPlayout`
+  holds a frame that arrives ahead of its timestamp, for a talker that sends faster than real time
+  (a text-to-speech agent). A frame, and every one after it, waits until its timestamp is within
+  the lead (`leadUs`, default 100 ms; a function is read at every poll, and a value it returns that
+  is not a finite number from 0 up counts as the default) of the position; the poll's wait says when.
+  While the clock has no position, the first frame considered anchors one of the sequencer's own,
+  that frame's timestamp at the clock's local time, until the clock has a position or is reset. Only
+  a frame more than `horizonUs` (default 30 s) ahead of the position (or, before the clock has one, of
+  the sequencer's own) resyncs forward; one within it is held instead. Late drop, resync and catch-up are unchanged. The held bound grows to cover the
+  horizon at 2.5 ms frames. A frame held is counted once (`early`). The audio player input's
+  `playoutLeadUs` is the lead that keeps its jitter buffer at its target. The sequencer keeps the
+  least delay seen from the clock's position to its local time since the clock was last reset, with
+  the lead in force then; when the delay now exceeds it, less any growth of the lead since, by more
+  than 40 ms (underruns left the clock behind), held frames are released early by the excess beyond
+  those 40 ms, so the player's jitter buffer holds it and trims it back. A lead that changes while
+  the delay does not releases nothing early.
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
   over, the clock is reset so the new timeline is not judged against the old anchor, and the next
   frame carries `restart`, even when nothing was delivered before and even when that frame comes
@@ -1731,7 +1747,8 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   each group as one subgroup, as the frame writer sends it. A want read through a reader keeps
   `drainMs` / `drain` at 0, the default: a drained old subscription's groups would arrive after the
   Move, indistinguishable from the new subscription's. Counters: delivered, late,
-  skipped groups, resyncs, untimed. The decisions are pinned by `vectors/frame-sequencer.json`.
+  skipped groups, resyncs, untimed, and in TypeScript early. The decisions are pinned by
+  `vectors/frame-sequencer.json`.
 - A listener follows a track replacement by the catalog: `findReplacementTrack` /
   `find_replacement_track` returns nothing while a newer catalog still lists the track playing (its
   namespace and name), and otherwise the first track listed with that track's namespace, role and

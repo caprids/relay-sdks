@@ -84,6 +84,36 @@ export interface FrameSequencerOptions {
    * the late frames first. Default: never. Positive and finite.
    */
   catchUpAfterUs?: number;
+  /**
+   * Frame grouping only: hold frames that arrive early and release each at its timestamp, for a talker that sends
+   * faster than real time, such as a text-to-speech agent handing over a reply in bursts. Without it, a frame more than
+   * the clock's target latency ahead of the position makes the sequencer resync forward, as after a stall, which drops
+   * what the player holds and re-anchors on the newest frame. With it, a frame is held until its timestamp is within
+   * `leadUs` of the position, and only a frame more than `horizonUs` ahead resyncs forward. While the clock has no
+   * position, the first frame anchors one of the sequencer's own on the clock's local time, which gives way to the
+   * clock's once the player reports. Late drop, resyncs and catch-up are unchanged, so a live talker's frames, which
+   * are never early, play as without it. Delay that underruns added (the clock fell behind local time while a queue
+   * built) is given back: held frames go out early by it, less 40 ms, so the jitter buffer trims it, as without this
+   * option. `true` takes the defaults of {@link TimestampPlayoutOptions}. Default off.
+   */
+  timestampPlayout?: boolean | TimestampPlayoutOptions;
+}
+
+/** Options for {@link FrameSequencerOptions.timestampPlayout}. Durations are microseconds. */
+export interface TimestampPlayoutOptions {
+  /**
+   * The furthest ahead of the position a frame is held; a frame further ahead resyncs forward, as a timeline jump.
+   * Positive and finite. Default 30,000,000.
+   */
+  horizonUs?: number;
+  /**
+   * How far ahead of the position a held frame is released: what the player wants to hold beyond what is audible. For
+   * the audio player, pass `() => input.playoutLeadUs`, its output delay plus its jitter target: a lead longer than
+   * that leaves more audio held than the jitter buffer's target, and the buffer trims the excess every second. A
+   * function is read at every poll; a value it returns that is not a finite number from 0 up counts as the default.
+   * Not negative. Default 100,000: the audio player's default 60 ms jitter target and a 40 ms output delay.
+   */
+  leadUs?: number | (() => number);
 }
 
 /** What {@link FrameSequencer.poll} returns. */
@@ -111,6 +141,8 @@ export interface FrameSequencerStats {
   resyncs: number;
   /** Objects without a LOC timestamp, which cannot be sequenced. */
   untimed: number;
+  /** Frames held because they arrived ahead of their timestamp: see {@link FrameSequencerOptions.timestampPlayout}. */
+  early: number;
 }
 
 /** One track's frame sequencer. Feed it the subscription's events, then `poll()` for frames. */
@@ -150,6 +182,13 @@ const KEYFRAMES_KEPT = 8;
 const IDLE_RECHECK_US = 50_000;
 /** At most this many frames are held, about 20 s of audio; beyond it everything held is dropped as a gap. */
 const MAX_HELD_FRAMES = 1024;
+/** Under timestamp playout, the held bound covers the horizon at this frame duration, the shortest Opus frame. */
+const SHORTEST_FRAME_US = 2_500;
+/** Timestamp playout's defaults. */
+const DEFAULT_HORIZON_US = 30_000_000;
+const DEFAULT_LEAD_US = 100_000;
+/** Under timestamp playout, added delay up to this much is noise in the clock's reports, not given back. */
+const ADDED_DELAY_TOLERANCE_US = 40_000;
 
 /** Create a frame sequencer for one track. */
 export function createFrameSequencer(options: FrameSequencerOptions): FrameSequencer {
@@ -164,7 +203,47 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
     throw new RangeError('lateDropUs and reorderWindowUs apply to frame grouping only');
   }
   const lateDropUs = () => lateDropOption ?? clock.lateDropUs;
-  const stats: FrameSequencerStats = { delivered: 0, late: 0, skippedGroups: 0, resyncs: 0, untimed: 0 };
+  const playout = timestampPlayout(options.timestampPlayout);
+  if (keyframeGrouping && playout) throw new RangeError('timestampPlayout applies to frame grouping only');
+  // How far ahead of the position a frame may arrive before the sequencer resyncs forward.
+  const aheadUs = () => (playout ? playout.horizonUs : clock.targetLatencyUs);
+  const maxHeld = playout
+    ? Math.max(MAX_HELD_FRAMES, Math.ceil(playout.horizonUs / SHORTEST_FRAME_US))
+    : MAX_HELD_FRAMES;
+  // Under timestamp playout while the clock has no position: the sequencer's own, the first frame's timestamp at the
+  // local time it was polled, until the clock has one or is reset.
+  let ownAnchor: { mediaUs: number; atUs: number; resets: number } | undefined;
+  // Frames already counted as early.
+  const counted = new WeakSet<SequencedFrame>();
+  // The newest timestamp a frame may have to be delivered now, under timestamp playout; anchors the sequencer's own
+  // position on `frame` while the clock has none.
+  // Under timestamp playout, the least delay seen from the clock's position to local time since the clock was last
+  // reset, with the lead in force then: what the player's delay was before underruns added to it.
+  let leastDelay: { delayUs: number; leadUs: number; resets: number } | undefined;
+  const releaseBefore = (frame: SequencedFrame) => {
+    const lead = (playout as { leadUs: () => number }).leadUs();
+    const positionUs = clock.position();
+    if (positionUs !== undefined) {
+      ownAnchor = undefined;
+      // Each underrun leaves the clock further behind local time, and a jitter buffer holding only its target never
+      // trims that back. So release frames early by the delay added since the least seen, less what a longer lead
+      // accounts for (a jitter target that grew holds more) and a frame or two of report noise: the buffer then holds
+      // the excess and its trim gives it back, as it does for frames that arrive late. A talker whose frames were early
+      // all along adds nothing, so its audio still plays at its timestamps. A lead that changes while the delay does
+      // not moves nothing: the least delay is the clock's alone.
+      const delayUs = clock.localNow() - positionUs;
+      if (leastDelay === undefined || leastDelay.resets !== clock.resets || delayUs < leastDelay.delayUs) {
+        leastDelay = { delayUs, leadUs: lead, resets: clock.resets };
+      }
+      const addedUs = delayUs - leastDelay.delayUs - Math.max(0, lead - leastDelay.leadUs);
+      return positionUs + lead + Math.max(0, addedUs - ADDED_DELAY_TOLERANCE_US);
+    }
+    if (ownAnchor === undefined || ownAnchor.resets !== clock.resets) {
+      ownAnchor = { mediaUs: frame.timestampUs, atUs: clock.localNow(), resets: clock.resets };
+    }
+    return ownAnchor.mediaUs + (clock.localNow() - ownAnchor.atUs) + lead;
+  };
+  const stats: FrameSequencerStats = { delivered: 0, late: 0, skippedGroups: 0, resyncs: 0, untimed: 0, early: 0 };
 
   // Groups above `floor` that have not been delivered or abandoned.
   const groups = new Map<number, Group>();
@@ -447,13 +526,33 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       for (const objectId of [...group.frames.keys()].sort((a, b) => a - b)) {
         if (out.length >= limit) return 0;
         const frame = group.frames.get(objectId) as SequencedFrame;
-        if (positionUs !== undefined && frame.timestampUs - positionUs > clock.targetLatencyUs) {
+        if (positionUs !== undefined && frame.timestampUs - positionUs > aheadUs()) {
           // The clock is behind what arrives, anchored on a backlog: resync forward on this frame, in a poll of its
           // own so the frames before it are handled on the clock they were judged on.
           if (out.length > 0) return 0;
           resyncForward();
           positionUs = undefined;
           lateBefore = Number.NEGATIVE_INFINITY;
+        }
+        // Before the player reports, the horizon applies to the sequencer's own position as well.
+        const ownPositionUs =
+          playout && positionUs === undefined && ownAnchor !== undefined && ownAnchor.resets === clock.resets
+            ? ownAnchor.mediaUs + clock.localNow() - ownAnchor.atUs
+            : undefined;
+        if (playout && ownPositionUs !== undefined && frame.timestampUs - ownPositionUs > playout.horizonUs) {
+          if (out.length > 0) return 0;
+          resyncForward();
+        }
+        if (playout) {
+          // Early: hold it, and every frame after it, until its timestamp is within the lead.
+          const waitUs = frame.timestampUs - releaseBefore(frame);
+          if (waitUs > 0) {
+            if (!counted.has(frame)) {
+              counted.add(frame);
+              stats.early++;
+            }
+            return waitUs;
+          }
         }
         group.frames.delete(objectId);
         floor = id - 1;
@@ -494,7 +593,7 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       held += group.frames.size;
       highest = highest === undefined ? id : Math.max(highest, id);
     }
-    if ((held <= MAX_HELD_FRAMES && groups.size <= MAX_HELD_FRAMES) || highest === undefined) return;
+    if ((held <= maxHeld && groups.size <= maxHeld) || highest === undefined) return;
     // The resync candidate's frames were counted as late when they arrived.
     stats.late += held - candidate;
     stats.skippedGroups += groups.size;
@@ -674,6 +773,9 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       lateSinceUs = undefined;
       starve = undefined;
       newestLate = undefined;
+      // The new subscription's timestamps need not continue the old one's.
+      ownAnchor = undefined;
+      leastDelay = undefined;
       // Always marked: the clock was reset, and whatever else plays on it must hear of that.
       pending = 'restart';
       deliveredSinceRestart = false;
@@ -711,6 +813,28 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
       return result;
     },
   };
+}
+
+/** The timestamp playout options with their defaults; `undefined` when off. */
+function timestampPlayout(value: boolean | TimestampPlayoutOptions | undefined) {
+  if (value === undefined || value === false) return undefined;
+  if (value !== true && (typeof value !== 'object' || value === null))
+    throw new TypeError('timestampPlayout must be a boolean or an options object');
+  const given = value === true ? {} : value;
+  const horizonUs = optionalDuration(given.horizonUs, 'timestampPlayout.horizonUs') ?? DEFAULT_HORIZON_US;
+  if (horizonUs === 0) throw new RangeError('timestampPlayout.horizonUs must be positive');
+  const lead = given.leadUs;
+  let leadUs: () => number;
+  if (typeof lead === 'function') {
+    leadUs = () => {
+      const read = lead();
+      return typeof read === 'number' && Number.isFinite(read) && read >= 0 ? read : DEFAULT_LEAD_US;
+    };
+  } else {
+    const fixed = optionalDuration(lead, 'timestampPlayout.leadUs') ?? DEFAULT_LEAD_US;
+    leadUs = () => fixed;
+  }
+  return { horizonUs, leadUs };
 }
 
 /** An optional duration option in microseconds: not negative, and finite unless `infinite` allows it. */

@@ -24,6 +24,14 @@ each section says what changed and what to do about it. How to cut a release is 
   player at the start, subscribes to the audio with the catalog and holds the frames until the input exists. In
   relay-dev's voice benchmark, time to first audio on a clean path went from 627 to 249 ms (WebRTC 419; spec/media-layer.md,
   "Joining sooner").
+- `@caprid/moq-media`: timestamp playout, off by default. The frame sequencer's
+  `timestampPlayout: { leadUs: () => input.playoutLeadUs }` holds a frame that arrives ahead of its timestamp, as a
+  text-to-speech agent's bursts do, and releases it once its timestamp is within the lead of the playout clock; only a
+  frame more than `horizonUs` (30 s) ahead resyncs forward, where without it one more than the target latency does.
+  Delay that underruns added while a queue built is given back once frames come early again (held frames go out early
+  by it, less 40 ms, and the jitter buffer trims it). `stats.early` counts the frames held, and the audio input's
+  `playoutLeadUs` is the lead that keeps its jitter buffer at its target. In relay-dev's voice benchmark, bursty TTS
+  played 100% with it against 5% without (WebRTC fed the same bursts: 39%); spec/media-layer.md has the numbers.
 - `@caprid/relay`, `@caprid/moq-media`: track replacement for barge-in. `createReplaceableTrack(publisher, { track,
   catalog: { service, build } })` in `@caprid/relay/media` publishes a track whose `replace()` registers `audio-2`,
   `audio-3`, ..., lists it in the catalog in the old one's place, drops what the old track has not sent and closes it;

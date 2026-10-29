@@ -808,6 +808,101 @@ delivery timeouts. They derive from the same keyframe interval, about one interv
 the reader's two, so a publisher stops spending bandwidth on frames the reader would drop. Nothing
 links the two on the wire.
 
+#### Timestamp playout
+
+TypeScript only (the frame sequencer's `timestampPlayout`), off by default. A text-to-speech agent
+generates its reply faster than real time, and MoQ lets it send each frame as it is generated,
+stamped with its slot on the timeline, rather than pace it as WebRTC must. A player then has to hold
+what arrives early and play each frame at its timestamp. The sequencer without it does not: a frame
+more than the clock's target latency ahead of the position (`AUDIO_ONLY_TARGET_LATENCY_US`, 500 ms,
+for audio) resyncs it forward, as after a stall, which drops what the player holds and re-anchors on
+the newest frame, and the jitter buffer trims what it holds beyond its target. relay-dev's offline
+replay of bursty TTS traces through it discarded about 90% of the clip (moq-netbench
+`plans/README.md`, "Stage 4 wave 2's agent cells").
+
+```ts
+const input = player.addInput({ clock, decoderConfig });
+const sequencer = createFrameSequencer({
+  clock,
+  grouping: 'frame',
+  timestampPlayout: { leadUs: () => input.playoutLeadUs },
+});
+```
+
+- A frame, and every frame after it, waits until its timestamp is within `leadUs` of the clock's
+  position. The poll's `waitUs` says when, so a frame reader releases each frame on time.
+- The lead is what the player holds beyond what is audible: `input.playoutLeadUs`, the output delay
+  (`baseLatency + outputLatency + player.outputDelayUs`) plus the jitter target now, keeps the
+  jitter buffer at its target. A longer constant lead leaves more held than the target, and the
+  buffer's trim drops the excess every second; a shorter one leaves the buffer short of its target.
+  Default 100 ms, the player's default target and a 40 ms output delay.
+- While the clock has no position (nothing has played yet, or after a reset), the first frame
+  anchors a position of the sequencer's own on the clock's local time. The clock's takes over as
+  soon as the player reports.
+- Only a frame more than `horizonUs` (default 30 s) ahead of the position, the clock's or the
+  sequencer's own, resyncs forward, as a timeline jump. The
+  sequencer holds up to a horizon of frames (at 2.5 ms each), beyond the 1,024 it holds otherwise.
+- A live talker's frames are never early, so they play as without it: late drop, resync and
+  catch-up are unchanged. `stats.early` counts the frames held. A restart (a want's Restart or Move)
+  drops every frame held.
+- **Delay added by underruns is given back.** Each underrun leaves the clock further behind local
+  time, by the silence it played. Without timestamp playout, frames that then arrive early fill the
+  jitter buffer past its target and its trim gives that delay back. With it, frames reach the buffer
+  only a lead ahead, so the buffer never holds more than its target and never trims: a queue that
+  built and drained would leave its delay for good. So the sequencer keeps the least delay seen from
+  the clock's position to its local time since the clock was last reset, with the lead in force then,
+  and releases held frames early by however much the delay now exceeds it, less any growth of the
+  lead since (a jitter target that grew holds more on purpose), beyond 40 ms (a frame or two of report
+  noise). The buffer then holds that excess and trims it, as it does without timestamp playout. A TTS
+  talker whose frames came early all along has added nothing, and plays at its timestamps as before.
+
+**Measured on relay-dev's voice benchmark.** Stage 4ai-tts (relay-sdks build tag
+`netbench/stage4-ai`, 5a4bd33, the same code without the give-back above; moq-relay 0.17.9; runs
+run-20261029-054413-95db41, run-20261029-102627-5276c7, run-20261029-105904-7de8ee and
+run-20261029-112630-e14a13; finding C-3 in relay-dev `moq-netbench/results/voice/FINDINGS.md`): the
+agent's TTS fed at four times real time, each frame stamped with its slot. With timestamp playout
+the listener played 100% of the audio on a clean path, 99.7% with 60 ms loss bursts and 98.1% on
+LTE with a download (R 89.2, 87.9 and 71.6). Without it, the same player played 5% (R 11.2 clean):
+it resyncs on early frames. WebRTC fed the same bursts played 39.2% clean (38.3% on LTE) and dropped
+the rest, whatever its jitter buffer target; paced, it played 100%. Wave 2's agent cells (finding
+R-AG-01) had shown the player without it failing the same feed live: every clean round suspect, and
+on LTE 2,497 and 2,159 ms mouth-to-ear with 41.4 and 24.1 drops a minute, R 0.
+
+The same runs found the give-back's reason (finding A-16): on LTE with a download, a paced talker
+through timestamp playout sat at 960 ms mouth-to-ear (R 43.5), against 378 ms for the bursty talker
+and 540 ms for paced WebRTC; with 60 ms loss bursts, 252 against 146 ms. A simulation of the
+sequencer and the playout clock with a model of the jitter buffer (its grow, shrink, trim and hard
+bound; a paced 20 ms talker; a queue growing to 700 ms over 30 s, then draining) reproduces it: the
+median mouth-to-ear 10 to 30 s after the drain was 120 ms without timestamp playout and 840 ms with
+it, as the clock never caught up. With the give-back it is 140 ms. The bursty talker through the
+same queue played 98.1% at 300 ms after the drain without the give-back, 97.4% at 120 ms with it;
+on a path without a queue neither talker changed (bursty 100% played, paced 100 ms). The bench has
+not run the give-back yet.
+
+Measured locally on 2026-10-29 (relay-3cnp.399, before the give-back): moq-relay 0.17.9
+(`30fd9d450`) built from source and the talker in one network namespace of relay-dev's moq-netbench
+rig (`rig local`), the listener in the other behind the rig's profile (`rig apply`, the downlink
+shaped on the peer), both on this SDK over native QUIC. The listener is relay-sdks' own receive chain
+composed as the example listener (frame reader, frame sequencer, audio input, its worklet and the
+WASM Opus decoder), with Web Audio stood in for in real time (558-frame render callbacks, a 20 ms
+output delay); a frame counts as played when its decoded audio reaches the output. A TTS agent sends
+six 8 s turns, 2 s apart, each handed over at four times real time from its first frame's slot
+(2,400 frames of 20 ms), with and without `timestampPlayout` (`leadUs: () => input.playoutLeadUs`).
+Without it the player discarded about 91% of the clip on every link: the sequencer dropped most
+frames as late and the jitter buffer trimmed about 6 s, and what it did play came up to 5.9 s before
+its slot. With it, every frame that arrived played, at a constant delay from its slot within each
+turn (the listener's own delay plus the lead), with no trim and no resync; QUIC's resends on the
+lossy link arrived while their frames were still held. The one frame lost in a second lossy run was
+100 ms into the first turn, sent 75 ms ahead of its slot: too little lead for a resend over a 50 ms
+round trip, as for any frame a live talker sends.
+
+| Link (rig profile) | Played without it | Its losses | Played with it | Mouth-to-ear from the slot, with it |
+| --- | --- | --- | --- | --- |
+| Clean | 203 of 2,400 (91.5% dropped) | 1,938 late, 6.18 s trimmed | 2,400 of 2,400 | 40 ms (53 ms max) |
+| `loss-random-2` (50 ms RTT, 2% loss) | 206 (91.4%) | 1,942 late, 6.20 s trimmed | 2,400; 2,399 in a second run | 64 ms (77 ms) |
+| `narrow` (30 ms RTT, 2/1 Mbit/s, 500 ms FIFO) | 210 (91.2%) | 1,935 late, 6.16 s trimmed | 2,400 | 47 ms (60 ms) |
+| `narrow`, a bulk CUBIC download filling the FIFO | 215 (91.0%) | 1,921 late, 6.61 s trimmed, 12 resyncs | 2,398 (2 late, 1 underrun) | 473 ms (513 ms) |
+
 ### Audio player
 
 [Issue #314](https://github.com/muxinc/relay-sdks/issues/314). TypeScript only, in

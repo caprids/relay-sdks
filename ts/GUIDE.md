@@ -1150,6 +1150,22 @@ const words = createFrameReader(
 );
 ```
 
+**From a text-to-speech agent** that sends its reply faster than real time, each frame stamped with
+its slot, hold what arrives early and play it at its timestamp. Without `timestampPlayout` a frame more
+than the clock's target latency ahead resyncs the clock forward and the player drops most of the reply.
+The lead is how far ahead of the clock the player wants frames: pass the input's own.
+
+```ts
+const input = player.addInput({ clock, decoderConfig: audioDecoderConfigFromTrack(audioTrack) });
+const reply = createFrameReader(
+  createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: () => input.playoutLeadUs } }),
+  { onFrame: input.push },
+);
+```
+
+A live talker's frames are never early, so they play as without it. Delay that underruns add while a
+queue builds is given back once frames come early again, as without it.
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not on message wording. SDK lifecycle errors use these stable codes:

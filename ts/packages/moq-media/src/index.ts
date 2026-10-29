@@ -99,6 +99,7 @@ export {
   type MissingGroups,
   type SequencedFrame,
   type SequencerPoll,
+  type TimestampPlayoutOptions,
 } from './sequencer.js';
 export { type ComposeMoqSourceOptions, composeMoqSource, encodeNameComponent, encodeNamespaceName } from './source.js';
 export {

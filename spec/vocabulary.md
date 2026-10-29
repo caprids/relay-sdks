@@ -620,9 +620,10 @@ sequencer as an argument.
 | One frame in decode order | `SequencedFrame { groupId, objectId, timestampUs, key, payload, properties, discontinuity?, missingGroups? }` | `SequencedFrame(group_id, object_id, timestamp_us, key, payload, properties, discontinuity)` |
 | Groups of which nothing was delivered before this frame | `missingGroups`: `MissingGroups { firstGroupId, lastGroupId }`, inclusive | not yet (TypeScript only) |
 | One track's delivery policy | `lateDropUs`, `reorderWindowUs`, `catchUpAfterUs` on `FrameSequencerOptions` | not yet (TypeScript only) |
+| Hold early frames and release each at its timestamp, off unless used | `timestampPlayout: true` or `TimestampPlayoutOptions { horizonUs?, leadUs? }` on `FrameSequencerOptions` (frame grouping; `leadUs` a number or a function read at every poll) | — |
 | The sequencer asks for its subscription to be replaced | `SequencerPoll.catchUp`; the reader's `onCatchUp()` on `FrameReaderOptions` | not yet (TypeScript only) |
 | Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
-| Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
+| Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed, early }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
 | A media track's subscriber priority, as subscription parameters | `mediaSubscribeParameters(kind, overrides?)` → `MessageParameters` (`MediaKind`) | `media_subscribe_parameters(kind, overrides=None)` → `MessageParameters` (`MediaKind`) |
 | A subscription's or a want's handlers that read frames | `createFrameReader(sequencer, { onFrame })` → `FrameReader` (`FrameReaderOptions`); spread into `subscribe` or `want` handlers | `FrameReader(sequencer)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)`; `async for frame in reader` |
 | What a reader drives | `FrameReaderSequencer<F>` | `FrameReaderSequencer`, `FrameReaderPoll` (protocols) |
@@ -676,6 +677,7 @@ the format package still does not depend on the product package.
 | What an input calls on its clock; a `PlayoutClock` qualifies | `AudioInputClock { targetLatencyUs, localNow(), reportAudio(timestampUs, atUs, stats), stopAudio() }` | — |
 | Hand it a frame in decode order | `input.push(frame)` (`AudioPlayerFrame`: `timestampUs`, `payload`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
 | Drop received audio in a timeline range | `input.cut({ fromUs?, untilUs? })` (`AudioCutRange`, which a parsed `Interrupt` is); `cut()` drops everything held | — |
+| How far ahead of the clock an input wants frames: a timestamp-playout sequencer's lead | `input.playoutLeadUs` (output delay plus jitter target) | — |
 | When the latest cut is heard at the speaker | `input.stats.cutHeardAtUs`; `onCutHeard(atUs)` on `AudioInputOptions` | — |
 | Per-input gain; stop | `input.gain`; `input.remove()`, `input.removed`; `player.close()` | — |
 | Held audio played per output frame, 0.5 to 2 | `input.playbackRate` (settable) | — |
