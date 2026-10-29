@@ -67,12 +67,23 @@ track (`TRANSCRIPT_TRACK`), the listener keeps the audio track's transcript as `
 which interrupts cut too; `onTranscript` hears about each segment. `publishCanvas`'s `data` option
 lists extra data tracks, such as that one, in the catalog it serves.
 
+The listener joins quickly. The audio side builds while the handshake and the catalog are on their
+way: `warmAudioPlayer(context)` loads the player's worklet module and libopus at once, so start it in
+the click that connects, right after creating the context (a context created outside a gesture stays
+suspended, and `listenAudio` also warms it, which costs nothing when the page already has). The
+audio track is subscribed together with the catalog, by its conventional name, and the frames are held
+until the player exists, then passed on in order. On relay-dev's benchmark this took the first audio
+from 627 to 249 ms after the connect started ([spec](../../../spec/media-layer.md), "Joining sooner").
+
 ```ts
+import { warmAudioPlayer } from '@caprid/moq-media';
 import { connectRelaySubscriber } from '@caprid/relay';
 import { listenAudio } from './listen-audio.js';
 
+// In the user's click: create the context there, and start the player's parts loading before the connect.
+const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' });
+warmAudioPlayer(context).catch(() => {});
 const subscriber = await connectRelaySubscriber({ url, getToken: () => subscriberToken });
-const context = new AudioContext({ sampleRate: 48_000, latencyHint: 'interactive' }); // in a user gesture
 const listener = await listenAudio(subscriber, ['demo', 'live'], { context, onError: console.error });
 console.log(listener.input.stats); // underruns, buffer depth and target, frames dropped as late
 await listener.stop();

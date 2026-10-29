@@ -7,6 +7,7 @@ import {
   CATALOG_TRACK,
   createAudioPlayer,
   createEchoCancellationLoopback,
+  createFrameHold,
   createFrameSequencer,
   createPlayoutClock,
   createTranscript,
@@ -19,9 +20,11 @@ import {
   parseInterrupt,
   parseMsfCatalog,
   parseTranscriptSegment,
+  type SequencedFrame,
   TRANSCRIPT_TRACK,
   type Transcript,
   type TranscriptSegment,
+  warmAudioPlayer,
 } from '@caprid/moq-media';
 import type { RelaySubscriber, RelaySubscription } from '@caprid/relay';
 import { createFrameReader } from '@caprid/relay/media';
@@ -67,16 +70,16 @@ export interface AudioListener {
   stop(): Promise<void>;
 }
 
-function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[], signal: AbortSignal | undefined) {
+function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[], signal: AbortSignal) {
   return new Promise<{ tracks: MsfCatalogTrack[]; subscription: RelaySubscription }>((resolve, reject) => {
-    signal?.throwIfAborted();
+    signal.throwIfAborted();
     let subscription: RelaySubscription | undefined;
     // The first catalog object, or the first error, decides; later ones change nothing.
     let outcome: { tracks: MsfCatalogTrack[] } | { error: unknown; ended: boolean } | undefined;
     // An object may arrive before subscribe() returns, so the outcome waits until the subscription is in hand.
     const settle = () => {
       if (!outcome || !subscription) return;
-      signal?.removeEventListener('abort', abort);
+      signal.removeEventListener('abort', abort);
       if ('tracks' in outcome) resolve({ tracks: outcome.tracks, subscription });
       else {
         // An error ends the subscription; a catalog that does not parse leaves it open.
@@ -87,10 +90,10 @@ function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[], 
     // Aborted before the catalog came: cancel the subscription and reject.
     const abort = () => {
       if (outcome) return;
-      outcome = { error: signal?.reason, ended: false };
+      outcome = { error: signal.reason, ended: false };
       settle();
     };
-    signal?.addEventListener('abort', abort, { once: true });
+    signal.addEventListener('abort', abort, { once: true });
     subscription = subscriber.subscribe(
       { namespace: [...namespace], track: CATALOG_TRACK },
       {
@@ -120,6 +123,12 @@ function readCatalog(subscriber: RelaySubscriber, namespace: readonly string[], 
  * them. The playout clock is created for audio only, so it does not wait 2 s for keyframes that never come. When the
  * catalog lists the interrupt track, each interrupt for the audio track cuts the audio the player holds; when it lists
  * the transcript track, the listener keeps the audio track's transcript, which interrupts cut too.
+ *
+ * It joins quickly. It starts `warmAudioPlayer(context)` at once, so the worklet module and libopus load while the
+ * catalog is on its way (create the context in the user's gesture, as the click that connects, so the warm happens
+ * there; a context the page already warmed is not loaded again). It subscribes to the audio track by its conventional
+ * name together with the catalog, before the catalog arrives, and a frame hold keeps the frames until the player's
+ * input exists. When the catalog names the track, it adds the input and passes the held frames to it, in order.
  */
 export async function listenAudio(
   subscriber: RelaySubscriber,
@@ -131,12 +140,35 @@ export async function listenAudio(
   // What setup has created so far, released in reverse order if a later step fails.
   const release: (() => void | Promise<void>)[] = [];
   if (ownsContext) release.push(() => context.close());
+  // Load the worklet module and libopus while the catalog is on its way. A failure is not lost: createAudioPlayer
+  // loads again and reports it.
+  const warm = warmAudioPlayer(context).catch(() => {});
+  // The setup's own signal: the caller's abort, or a failure of a later step that must end the catalog read.
+  const setup = new AbortController();
+  const abortSetup = () => setup.abort(options.signal?.reason);
+  options.signal?.addEventListener('abort', abortSetup, { once: true });
   try {
-    const { tracks, subscription: catalog } = await readCatalog(subscriber, namespace, options.signal);
+    options.signal?.throwIfAborted();
+    const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
+    const hold = createFrameHold<SequencedFrame>();
+    const reader = createFrameReader(sequencer, { onFrame: hold.push });
+    release.push(() => reader.close());
+    // Subscribe to the catalog and the audio track at once: the audio does not wait for the catalog's round trips.
+    const reading = readCatalog(subscriber, namespace, setup.signal);
+    // A failure of the audio subscription below ends the read through the setup signal; the rejection is awaited later.
+    reading.catch(() => {});
+    const audio = subscriber.subscribe(
+      { namespace: [...namespace], track: AUDIO_TRACK },
+      { ...reader, onError: (error) => options.onError?.(error) },
+    );
+    release.push(() => audio.cancel());
+    const { tracks, subscription: catalog } = await reading;
     release.push(() => catalog.cancel());
     const track = tracks.find((candidate) => candidate.name === AUDIO_TRACK);
     if (!track) throw new Error(`The catalog at ${namespace.join('/')} lists no ${AUDIO_TRACK} track`);
 
+    await warm;
     const player = await createAudioPlayer({ context });
     release.push(() => player.close());
     options.signal?.throwIfAborted();
@@ -147,20 +179,13 @@ export async function listenAudio(
       options.signal?.throwIfAborted();
     } else player.output.connect(context.destination);
 
-    const clock = createPlayoutClock({ targetLatencyUs: AUDIO_ONLY_TARGET_LATENCY_US });
     const input = player.addInput({
       clock,
       decoderConfig: audioDecoderConfigFromTrack(track),
       ...(options.onError ? { onError: options.onError } : {}),
     });
-    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
-    const reader = createFrameReader(sequencer, { onFrame: input.push });
-    release.push(() => reader.close());
-    const audio = subscriber.subscribe(
-      { namespace: [...namespace], track: AUDIO_TRACK },
-      { ...reader, onError: (error) => options.onError?.(error) },
-    );
-    release.push(() => audio.cancel());
+    // What arrived while the player was built, in order, then every frame as it comes.
+    hold.release(input.push);
     const listed = (name: string) => tracks.some((candidate) => candidate.name === name);
     const transcript = createTranscript();
     // A talker that can stop mid-utterance lists the interrupt track; each interrupt cuts what the player holds, and
@@ -227,6 +252,8 @@ export async function listenAudio(
       },
     };
   } catch (error) {
+    // A failure before the catalog arrived ends its read too: it cancels its own subscription.
+    setup.abort(error);
     // A failure while cleaning up must not hide the one that stopped the setup.
     for (const undo of release.reverse()) {
       try {
@@ -234,5 +261,8 @@ export async function listenAudio(
       } catch {}
     }
     throw error;
+  } finally {
+    // Once started, the listener stops with stop(), not with the signal.
+    options.signal?.removeEventListener('abort', abortSetup);
   }
 }
