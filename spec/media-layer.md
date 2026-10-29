@@ -1073,8 +1073,8 @@ again, the same steps without a replacement event. A listener that joins later t
 name. The new track must have the old one's codec, since the input keeps its decoder. The example's
 `onTrackReplaced` reports three steps on the clock's time source: `seen` (the catalog arrived and the
 old audio was cut), `stopped` (`onCutHeard`: the old audio has stopped at the speaker) and `started`
-(the first clock report of the new track's audio, after the cut is heard). Until the cut is heard, the
-listener passes no report to the clock: one the worklet posted before it applied the cut describes the
+(the first clock report of the new track's audio, after the cut is heard). Until the cut is heard, after a
+replacement or a retried subscription alike, the listener passes no report to the clock: one the worklet posted before it applied the cut describes the
 old track's audio and would re-anchor the clock the restart reset.
 
 **Against the interrupt track.** An interrupt cuts a range of one track and leaves it open, so

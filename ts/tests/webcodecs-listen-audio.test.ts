@@ -616,3 +616,46 @@ it('keeps a report posted before the cut from re-anchoring the clock for the new
   expect(listener.clock.mode).toBe('audio');
   await listener.stop();
 });
+
+it('keeps a report posted before the cut from re-anchoring the clock when a failed subscription is retried', async () => {
+  FakeWorkletNode.instances.length = 0;
+  const fake = fakeSubscriber();
+  const listening = listenAudio(fake.subscriber, NAMESPACE, { onError: () => {} });
+  fake.deliverCatalog(audioCatalog());
+  const listener = await listening;
+  const node = FakeWorkletNode.instances[0] as FakeWorkletNode;
+  const report = (frame: number, timestampUs: number | null, cutId: number | null) =>
+    node.port.onmessage?.({
+      data: {
+        frame,
+        rendered: frame + 128,
+        timestampUs,
+        playing: timestampUs !== null,
+        playStarts: 1,
+        heldUntilUs: null,
+        dryAtUs: null,
+        bufferedFrames: 0,
+        targetFrames: 2880,
+        underruns: 0,
+        trimmedFrames: 0,
+        concealedFrames: 0,
+        cutFrames: 0,
+        cutId,
+      },
+    });
+  report(0, 5_000_000, null);
+  expect(listener.clock.mode).toBe('audio');
+  // The relay ends the audio subscription with an error; the next catalog that lists the track subscribes again.
+  failWith(fake.subscriptions[1], new Error('The relay ended audio'));
+  fake.deliverCatalog(audioCatalog());
+  expect(fake.subscriptions.map(({ request }) => request.track)).toEqual(['catalog', 'audio', 'audio']);
+  // The restart reset the clock; a report the worklet posted before it applied the cut leaves it so.
+  expect(listener.clock.mode).toBe('idle');
+  report(960, 5_020_000, null);
+  expect(listener.clock.mode).toBe('idle');
+  // The quantum after the cut: from here reports anchor the clock again.
+  report(1920, 9_000_000, 1);
+  expect(listener.clock.mode).toBe('audio');
+  expect(listener.clock.position()).toBeGreaterThanOrEqual(9_000_000);
+  await listener.stop();
+});

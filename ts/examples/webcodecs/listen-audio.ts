@@ -222,6 +222,9 @@ export async function listenAudio(
     // is not passed to the clock either.
     let current = track;
     let replacing: { from: string; to: string; stopped: boolean } | undefined;
+    // From a restart's cut (a replacement, or a retried subscription) until the cut is heard: reports describe audio
+    // from before the restart and are not passed to the clock the restart reset.
+    let cutUnheard = false;
     const replaced = (phase: AudioTrackReplacedEvent['phase'], atUs: number) => {
       if (!replacing) return;
       // The application's callback must not leave a replacement half done.
@@ -238,9 +241,9 @@ export async function listenAudio(
         },
         localNow: () => clock.localNow(),
         reportAudio(timestampUs, atUs) {
-          // Until the cut is heard, a report describes the replaced track's audio, posted before the cut reached the
-          // jitter buffer: it must not re-anchor the clock the sequencer's restart reset for the new track.
-          if (replacing && !replacing.stopped) return;
+          // Until the cut is heard, a report describes the audio from before the restart, posted before the cut reached
+          // the jitter buffer: it must not re-anchor the clock the sequencer's restart reset for the new subscription.
+          if (cutUnheard) return;
           clock.reportAudio(timestampUs, atUs);
           if (replacing?.stopped) {
             replaced('started', atUs);
@@ -252,6 +255,7 @@ export async function listenAudio(
       decoderConfig: audioDecoderConfigFromTrack(track),
       ...(options.onError ? { onError: options.onError } : {}),
       onCutHeard(atUs) {
+        cutUnheard = false;
         if (!replacing || replacing.stopped) return;
         replacing.stopped = true;
         replaced('stopped', atUs);
@@ -362,6 +366,7 @@ export async function listenAudio(
       audio.subscription.cancel();
       sequencer.restart();
       input.cut();
+      cutUnheard = true;
       audio = subscribed;
       if (!replacement) return;
       replacing = { from: current.name, to: next.name, stopped: false };
