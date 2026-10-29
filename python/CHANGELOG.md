@@ -9,10 +9,10 @@ is in [docs/releasing.md](../docs/releasing.md).
 - `caprid-relay`, `caprid-moq-core`: `MessageParameters.max_age` (milliseconds, 0 to 2^53-1) is the MoQ Timestamp
   extension's subscriber max age (parameter `0x915C6`, as in the TypeScript SDK): a publisher that honors it skips a
   group once a newer group has superseded it for that long. A session sends it on SUBSCRIBE and REQUEST_UPDATE only to
-  a relay whose SETUP declared the extension's `SETUP_OPTION.MAX_AGE` (`0x915C4`), never on FETCH or TRACK_STATUS, and
-  leaves it off otherwise: moq-dev main declares it, moq-relay 0.17.x does not. `RelaySubscriber.max_age_supported`
-  and `MoqtSession.max_age_supported` report whether the relay did. Nothing changes for an application that sets no
-  `max_age`.
+  a relay whose SETUP declared the extension's `SETUP_OPTION.MAX_AGE` (`0x915C4`), never on FETCH, TRACK_STATUS or
+  SUBSCRIBE_NAMESPACE, and leaves it off otherwise: moq-dev main declares it, moq-relay 0.17.x does not.
+  `RelaySubscriber.max_age_supported` and `MoqtSession.max_age_supported` report whether the relay did. Nothing changes
+  for an application that sets no `max_age`.
 
 ## 0.2.0
 

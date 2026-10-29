@@ -717,8 +717,8 @@ class MessageParameters:
     only, a group once a newer group supersedes it and either that successor arrived at the publisher's hop at least
     this long ago or the group's media time trails the live edge by at least this much; the newest group never
     expires. moq-dev main turns it into the subscription's ``max_delay``. A session sends it on SUBSCRIBE and
-    REQUEST_UPDATE only when the peer's SETUP declared ``SETUP_OPTION.MAX_AGE``, and never on FETCH or TRACK_STATUS;
-    see ``MoqtSession.max_age_supported``.
+    REQUEST_UPDATE only when the peer's SETUP declared ``SETUP_OPTION.MAX_AGE``, and never on FETCH, TRACK_STATUS or
+    SUBSCRIBE_NAMESPACE; see ``MoqtSession.max_age_supported``.
     """
 
 

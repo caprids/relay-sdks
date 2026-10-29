@@ -260,10 +260,11 @@ Messages are not a compatibility contract. The class and the point of rejection 
   and later a relay that does not know the parameter fails the SUBSCRIBE. So both SDKs send it on
   SUBSCRIBE and REQUEST_UPDATE only when the relay's SETUP declared the option (any value: the
   value is reserved), leave it off otherwise and on a request issued before the relay's SETUP
-  arrived, and never send it on FETCH or TRACK_STATUS, for which it is not defined. The caller's
-  parameters are not changed. `maxAgeSupported` / `max_age_supported` on the subscriber connection
-  says whether the relay declared it; it is known before `connectRelaySubscriber` /
-  `connect_relay_subscriber` returns and does not change. Neither SDK declares the option itself:
+  arrived, and never send it on FETCH, TRACK_STATUS or SUBSCRIBE_NAMESPACE, for which it is not
+  defined. The caller's parameters are not changed. `maxAgeSupported` / `max_age_supported` on the
+  subscriber connection says whether the relay declared it; it is known before
+  `connectRelaySubscriber` / `connect_relay_subscriber` returns and does not change. Neither SDK
+  declares the option itself:
   it would invite a relay to send MAX_AGE to an SDK publisher, which does not act on it. moq-dev
   main declares it and enforces the budget per subscription; moq-relay 0.17.x does neither
   ([subscriber max age](relay-interop.md#subscriber-max-age-max_age)). Implemented in both SDKs.

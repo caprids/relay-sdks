@@ -1372,3 +1372,24 @@ class TestMaxAge:
         )
         assert parameters.max_age == 500
         harness.session.destroy()
+
+    async def test_never_sends_max_age_on_subscribe_namespace_even_when_declared(self) -> None:
+        harness = create_session_harness()
+        harness.fake.send_server_setup(MAX_AGE_SETUP)
+        await harness.session.ready
+        parameters = MessageParameters(include_properties=0, max_age=500)
+
+        harness.session.subscribe_namespace(
+            MoqtSubscribeNamespaceOptions(track_namespace_prefix=["room"], parameters=parameters)
+        )
+        request = await harness.fake.next_request_stream()
+
+        assert harness.session.max_age_supported is True
+        assert await request.first_message == SubscribeNamespace(
+            request_id=0,
+            track_namespace_prefix=["room"],
+            parameters=MessageParameters(include_properties=0),
+        )
+        # The caller's object is not touched.
+        assert parameters == MessageParameters(include_properties=0, max_age=500)
+        harness.session.destroy()

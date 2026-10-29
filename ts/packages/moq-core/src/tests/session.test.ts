@@ -1739,6 +1739,27 @@ describe('subscriber max age (MAX_AGE)', () => {
     harness.session.destroy();
   });
 
+  it('never sends maxAge on SUBSCRIBE_NAMESPACE, even when declared, and keeps the other parameters', async () => {
+    const harness = createSessionHarness();
+    const caller: MessageParameters = { maxAge: 500, includeProperties: 0 };
+
+    harness.sendServerSetup(declared);
+    await harness.session.ready;
+    expect(harness.session.maxAgeSupported).toBe(true);
+
+    harness.session.subscribeNamespace({ trackNamespacePrefix: ['room'], parameters: caller }, {});
+    const message = await (await harness.nextRequestStream()).firstMessage;
+
+    expect(message).toMatchObject({
+      kind: 'subscribe-namespace',
+      trackNamespacePrefix: ['room'],
+      parameters: { includeProperties: 0 },
+    });
+    expect(message.kind === 'subscribe-namespace' && 'maxAge' in (message.parameters ?? {})).toBe(false);
+    expect(caller).toEqual({ maxAge: 500, includeProperties: 0 });
+    harness.session.destroy();
+  });
+
   it("does not change the caller's parameters", async () => {
     const harness = createSessionHarness();
     const caller: MessageParameters = { maxAge: 500, subscriberPriority: 16 };

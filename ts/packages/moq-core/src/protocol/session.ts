@@ -418,9 +418,9 @@ export interface MoqtSession {
   /**
    * Whether the server's SETUP declared subscriber max age (`SETUP_OPTION.MAX_AGE`, the MoQ Timestamp extension), so
    * `parameters.maxAge` goes out on SUBSCRIBE and REQUEST_UPDATE. While false, and before the server's SETUP has
-   * arrived, the session leaves `maxAge` off them, as the extension requires; it never sends it on FETCH or
-   * TRACK_STATUS. moq-dev main declares it; moq-relay 0.17.x does not, and on draft-17 and later would fail a
-   * SUBSCRIBE that carried the parameter.
+   * arrived, the session leaves `maxAge` off them, as the extension requires; it never sends it on FETCH,
+   * TRACK_STATUS or SUBSCRIBE_NAMESPACE. moq-dev main declares it; moq-relay 0.17.x does not, and on draft-17 and later
+   * would fail a SUBSCRIBE that carried the parameter.
    */
   readonly maxAgeSupported: boolean;
   /**
@@ -882,7 +882,7 @@ class MoqtSessionImpl implements MoqtSession {
       {
         requestId,
         trackNamespacePrefix: options.trackNamespacePrefix,
-        parameters: options.parameters,
+        parameters: this.#outgoingParameters(options.parameters, false),
       },
       this.#protocol
     );

@@ -562,8 +562,8 @@ class MoqtSession:
 
         When it did, ``parameters.max_age`` goes out on SUBSCRIBE and REQUEST_UPDATE. While it is false, and before
         the server's SETUP has arrived, the session leaves ``max_age`` off them, as the extension requires; it never
-        sends it on FETCH or TRACK_STATUS. moq-dev main declares it; moq-relay 0.17.x does not, and on draft-17 and
-        later would fail a SUBSCRIBE that carried the parameter.
+        sends it on FETCH, TRACK_STATUS or SUBSCRIBE_NAMESPACE. moq-dev main declares it; moq-relay 0.17.x does not, and
+        on draft-17 and later would fail a SUBSCRIBE that carried the parameter.
         """
         return self._max_age_supported
 
@@ -861,7 +861,7 @@ class MoqtSession:
             SubscribeNamespace(
                 request_id=request_id,
                 track_namespace_prefix=list(options.track_namespace_prefix),
-                parameters=options.parameters or MessageParameters(),
+                parameters=self._outgoing_parameters(options.parameters, subscription=False),
             ),
             self._protocol,
         )
