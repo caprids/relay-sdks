@@ -14,6 +14,7 @@ import {
   LOC_TIMESTAMP,
   opusPacketDurationUs,
   type PlayoutClock,
+  warmAudioPlayer,
 } from '@caprid/moq-media';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createFrameReader } from '../src/frame-reader.js';
@@ -1335,5 +1336,68 @@ describe('loss concealment (libopus in WebAssembly)', () => {
       .addInput({ clock: on.clock, decoderConfig: { codec: 'flac', sampleRate: RATE, numberOfChannels: 1 } })
       .push(opusAt(0));
     expect(FakeDecoder.instances).toHaveLength(2);
+  });
+});
+
+describe('joining sooner (opt-in parts)', () => {
+  it('records when the input was added, got its first frame, decoded it, and first played and was audible', async () => {
+    const { context, clock, player } = await setUp();
+    context.baseLatency = 0.01;
+    context.outputLatency = 0.03;
+    nowUs = 5_000;
+    const input = player.addInput({ clock });
+    expect(input.joinPhases).toEqual({
+      addedUs: 5_000,
+      firstPushUs: null,
+      firstDecodedUs: null,
+      firstPlayUs: null,
+      firstAudibleUs: null,
+    });
+    nowUs = 7_000;
+    input.push(frameAt(1));
+    expect(input.joinPhases).toMatchObject({ firstPushUs: 7_000, firstDecodedUs: 7_000, firstPlayUs: null });
+    input.push(frameAt(2));
+    context.render(20);
+    expect(input.joinPhases.firstPlayUs).toBeNull();
+    input.push(frameAt(3));
+    context.render(40);
+    // Playback started in the quantum after 60 ms of frames were held, at context time 20 ms (the third frame came
+    // then), rendered on the clock's time source at that time; audible 40 ms later (base plus output latency).
+    const { firstPlayUs, firstAudibleUs } = input.joinPhases;
+    expect(firstPlayUs).not.toBeNull();
+    expect(Math.abs((firstPlayUs as number) - 20_000)).toBeLessThanOrEqual(3_000);
+    expect((firstAudibleUs as number) - (firstPlayUs as number)).toBeCloseTo(40_000, 3);
+    // Set once: later starts leave them.
+    context.render(200);
+    for (let index = 20; index <= 25; index++) input.push(frameAt(index, index === 20 ? 'gap' : undefined));
+    await settle();
+    context.render(40);
+    expect(input.joinPhases.firstPlayUs).toBe(firstPlayUs);
+    expect(player.joinPhases.opusLoadedUs).toBeNull();
+    expect(typeof player.joinPhases.workletLoadedUs).toBe('number');
+  });
+
+  it('warms the worklet module and libopus ahead of the player, which then loads neither again', async () => {
+    const context = new FakeContext();
+    await warmAudioPlayer(context);
+    expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+    const player = await createAudioPlayer({ context });
+    expect(context.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+    expect(typeof player.joinPhases.opusLoadedUs).toBe('number');
+    // libopus decodes: the input conceals with it.
+    const input = player.addInput({ decoderConfig: mono, jitterTargetUs: 40_000 });
+    input.push(opusAt(0));
+    expect(FakeDecoder.instances).toHaveLength(0);
+    expect(input.stats.decoded).toBe(1);
+    // Without concealment the warm loads the worklet module only, and fails as the module does.
+    const other = new FakeContext();
+    await warmAudioPlayer(other, { lossConcealment: false });
+    expect(other.audioWorklet.addModule).toHaveBeenCalledTimes(1);
+    const broken = new FakeContext();
+    broken.audioWorklet.addModule.mockRejectedValueOnce(new Error('no worklet'));
+    await expect(warmAudioPlayer(broken)).rejects.toThrow('no worklet');
+    // A failed load is not kept: the player loads it again.
+    await createAudioPlayer({ context: broken, lossConcealment: false });
+    expect(broken.audioWorklet.addModule).toHaveBeenCalledTimes(2);
   });
 });

@@ -60,6 +60,8 @@ export interface AudioPlayerProcessorReport {
   /** Fill audio dropped because nothing was held when it came, by kind. */
   droppedRecoveredFrames: number;
   droppedSynthesizedFrames: number;
+  /** The context frame where playback first started, or `null` before it has. */
+  firstPlayFrame: number | null;
 }
 
 declare const sampleRate: number;
@@ -126,6 +128,8 @@ function audioPlayerWorklet(name: string): void {
     cut = 0;
     droppedRecovered = 0;
     droppedSynthesized = 0;
+    /** The context frame where playback first started. */
+    firstPlayFrame: number | null = null;
     /**
      * Cuts that no audio from their start on has arrived after yet, disjoint and in order. The hole before that audio
      * is the range cut out where it falls in a cut, and joins without silence there. Audio still decoding from before
@@ -317,6 +321,7 @@ function audioPlayerWorklet(name: string): void {
       if (!this.playing && this.buffered >= this.target) {
         this.playing = true;
         this.playStarts++;
+        if (this.firstPlayFrame === null) this.firstPlayFrame = currentFrame;
         this.dryAtUs = null;
         this.lowWater = this.buffered;
         this.window = 0;
@@ -407,6 +412,7 @@ function audioPlayerWorklet(name: string): void {
           cutFrames: this.cut,
           droppedRecoveredFrames: this.droppedRecovered,
           droppedSynthesizedFrames: this.droppedSynthesized,
+          firstPlayFrame: this.firstPlayFrame,
         };
         this.port.postMessage(report);
       }
