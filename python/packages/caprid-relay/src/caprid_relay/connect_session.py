@@ -16,7 +16,7 @@ import math
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Generic, Literal, Protocol, TypeAlias, TypeVar
+from typing import Generic, Literal, NamedTuple, Protocol, TypeAlias, TypeVar
 from urllib.parse import parse_qs, parse_qsl, urlencode, urlsplit, urlunsplit
 
 from moq_core import MOQT_PROTOCOL_IDS, Closed, Goaway, KeyValuePair, MoqtProtocolId, MoqtTransport
@@ -26,6 +26,7 @@ from moq_core.transport import transport_ended
 
 from .cancellation import CancellationToken
 from .errors import RelayError, RelayErrorPhase, _peer_close, _refusal, _transport_error, _unauthorized
+from .room_endpoint import DEFAULT_ENDPOINT, _parse_endpoint, room_endpoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,11 +64,11 @@ reads the JWT's ``exp`` claim, without verifying it. The provider runs once per 
 """
 
 
-def jwt_expiry(token: str) -> datetime | None:
-    """The ``exp`` claim of a JWT as an aware UTC datetime, read without verifying the token.
+def _jwt_claims(token: str) -> dict[str, object] | None:
+    """A JWT's claims, read without verifying the token.
 
-    The relay verifies the token; the SDK only needs to know when the session will end. Anything
-    that is not a JWT with a numeric ``exp`` has no known expiry.
+    The relay verifies the token; the SDK only reads when the session will end and, with no endpoint,
+    where to dial. Anything that is not a JWT with a JSON object payload has none.
     """
     parts = token.split(".")
 
@@ -80,7 +81,12 @@ def jwt_expiry(token: str) -> datetime | None:
     except (ValueError, binascii.Error, UnicodeDecodeError):
         return None
 
-    exp = claims.get("exp") if isinstance(claims, dict) else None
+    return claims if isinstance(claims, dict) else None
+
+
+def _claims_expiry(claims: dict[str, object] | None) -> datetime | None:
+    """The numeric ``exp`` claim as an aware UTC datetime; anything else has no known expiry."""
+    exp = claims.get("exp") if claims is not None else None
 
     if not isinstance(exp, int | float) or isinstance(exp, bool):
         return None
@@ -92,6 +98,74 @@ def jwt_expiry(token: str) -> datetime | None:
         return datetime.fromtimestamp(exp, UTC)
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def _no_root(reason: str) -> str:
+    """Why a connection given no endpoint has none to dial, and what to do instead."""
+    return (
+        f"With no url, the endpoint is rooted at the token's root claim, but {reason}; "
+        "pass url to choose the endpoint yourself"
+    )
+
+
+def _token_rooted_endpoint(token: str, claims: dict[str, object] | None) -> str:
+    """``DEFAULT_ENDPOINT`` rooted at the token's ``root`` claim, for a connection given no endpoint.
+
+    The root's fields, without its leading and trailing ``/``, follow ``room_endpoint``'s rule, and an
+    empty root is the whole relay.
+    """
+    if not token:
+        raise TypeError(_no_root("get_token returned no token"))
+
+    if claims is None:
+        raise TypeError(_no_root("the token is not a JWT with a JSON object payload"))
+
+    root = claims.get("root")
+
+    if not isinstance(root, str):
+        raise TypeError(_no_root("the token has no string root claim"))
+
+    room = root.strip("/")
+
+    if not room:
+        return _parse_endpoint(DEFAULT_ENDPOINT)[0]
+
+    try:
+        return room_endpoint(DEFAULT_ENDPOINT, room.split("/"))
+    except (TypeError, ValueError) as error:
+        raise type(error)(_no_root(f"its root cannot be an endpoint path: {error}")) from error
+
+
+@dataclass(frozen=True, slots=True)
+class _DialTarget:
+    """Where a connection dials, and when its token expires."""
+
+    endpoint: str
+    """The endpoint before the provider's token was added."""
+    url: str
+    """The endpoint with the provider's token in ``jwt``."""
+    expires_at: datetime | None
+
+
+class _Issued(NamedTuple):
+    """A token the provider returned, and the expiry it gave, if any."""
+
+    token: str
+    expires_at: datetime | None
+
+
+def _dial_target(given: str | None, issued: _Issued | None) -> _DialTarget:
+    """The endpoint as given, or with none ``DEFAULT_ENDPOINT`` rooted at the token's ``root`` claim.
+
+    ``issued`` is the provider's token and the expiry it gave, if it ran; without it, the token is the
+    ``jwt`` already on the endpoint, if any ("Token-rooted endpoint" in ``spec/behavior.md``).
+    """
+    token = issued.token if issued is not None else parse_qs(urlsplit(given or "").query).get("jwt", [""])[0]
+    claims = _jwt_claims(token)
+    endpoint = given if given is not None else _token_rooted_endpoint(token, claims)
+    url = _with_token(endpoint, token) if issued is not None and token else endpoint
+    expires_at = issued.expires_at if issued is not None else None
+    return _DialTarget(endpoint, url, expires_at if expires_at is not None else _claims_expiry(claims))
 
 
 Framing: TypeAlias = Literal["webtransport", "native-quic", "websocket"]
@@ -124,8 +198,13 @@ DEFAULT_REQUEST_TIMEOUT = 10.0
 
 @dataclass(frozen=True, slots=True, kw_only=True)
 class ConnectRelayOptions:
-    url: str
-    """Relay's ``https:`` endpoint, including any endpoint path, which SETUP carries on native QUIC."""
+    url: str | None = None
+    """Relay's ``https:`` endpoint, including any endpoint path, which SETUP carries on native QUIC.
+
+    ``None`` dials ``DEFAULT_ENDPOINT`` rooted at the token's ``root`` claim, read without verifying the
+    token: the URL ``room_endpoint`` builds from that root. ``get_token`` is then required, and a token
+    that names no usable root is a ``TypeError`` or ``ValueError`` before the transport is used.
+    """
     get_token: TokenProvider | None = None
     """Resolve a connection token. Relay carries it in the endpoint's ``jwt`` query parameter.
 
@@ -171,7 +250,16 @@ class LifetimeCallbacks:
 class RelaySessionLifetime(Generic[T]):
     """An established session plus the shutdown plumbing both connection kinds share."""
 
-    __slots__ = ("_assert_open", "_close", "_observe_closed", "_transport", "closed", "expires_at", "session")
+    __slots__ = (
+        "_assert_open",
+        "_close",
+        "_observe_closed",
+        "_transport",
+        "closed",
+        "endpoint",
+        "expires_at",
+        "session",
+    )
 
     def __init__(
         self,
@@ -181,11 +269,17 @@ class RelaySessionLifetime(Generic[T]):
         transport: MoqtTransport,
         assert_open: Callable[[], None],
         close: Callable[[], None],
-        expires_at: datetime | None = None,
+        expires_at: datetime | None,
+        endpoint: str,
     ) -> None:
         self.session = session
         self.expires_at = expires_at
         """When the relay ends the session for the credential's expiry, if known."""
+        self.endpoint = endpoint
+        """The endpoint the connection dialed, before the provider's token was added.
+
+        A supervisor given no ``url`` dials it for every later connection.
+        """
         self.closed = closed
         self._observe_closed = observe_closed
         self._transport = transport
@@ -242,52 +336,6 @@ def validate_timeout(name: str, value: object) -> None:
         raise ValueError(f"{name} must be between 0 (exclusive) and {MAX_TIMEOUT} seconds")
 
 
-def _parse_endpoint(url: object) -> tuple[str, bool]:
-    """Validate the endpoint and return it normalized, plus whether it already carries a ``jwt``.
-
-    Not a string, or not an absolute URL (no scheme, or an ``https`` URL with no host), is a
-    ``TypeError``: the wrong shape, as the TypeScript URL parser reports it. A URL that parses but
-    is not one Relay accepts is a ``ValueError``: a disallowed value.
-    """
-    if not isinstance(url, str):
-        raise TypeError("Relay endpoints must be a URL string")
-
-    try:
-        parts = urlsplit(url)
-        hostname = parts.hostname
-    except ValueError as error:
-        raise TypeError("Relay endpoints must be a valid absolute URL") from error
-
-    if not parts.scheme:
-        raise TypeError("Relay endpoints must be a valid absolute URL")
-
-    if parts.scheme != "https":
-        raise ValueError("Relay endpoints must use HTTPS")
-
-    if parts.fragment or "@" in parts.netloc:
-        raise ValueError("Relay endpoints cannot contain fragments or userinfo")
-
-    if not hostname:
-        raise TypeError("Relay endpoints must name a host")
-
-    jwts = [value for key, value in parse_qsl(parts.query, keep_blank_values=True) if key == "jwt"]
-
-    # A present jwt wins over get_token, so an empty one would connect with no credential at all.
-    if "" in jwts:
-        raise ValueError(
-            "Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply get_token"
-        )
-
-    has_jwt = bool(jwts)
-    normalized = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
-
-    # urlunsplit drops an empty query, but `?` with nothing after it is a present query that PATH keeps (TA-6).
-    if not parts.query and "?" in url:
-        normalized += "?"
-
-    return normalized, has_jwt
-
-
 def _with_token(url: str, token: str) -> str:
     parts = urlsplit(url)
     query = [*parse_qsl(parts.query, keep_blank_values=True), ("jwt", token)]
@@ -342,7 +390,9 @@ async def open_relay_session(
     create_session: Callable[[MoqtTransport, LifetimeCallbacks, Sequence[KeyValuePair]], T],
 ) -> RelaySessionLifetime[T]:
     """Resolve the token, connect the transport, run SETUP, and bind the session to the lifetime."""
-    url, has_jwt = _parse_endpoint(options.url)
+    url, has_jwt = (None, False) if options.url is None else _parse_endpoint(options.url)
+    if url is None and options.get_token is None:
+        raise TypeError(_no_root("there is no get_token"))
     validate_timeout("connect_timeout", options.connect_timeout)
 
     cancellation = options.cancellation
@@ -354,7 +404,7 @@ async def open_relay_session(
     stopped = False
     established = False
     using_transport = False
-    expires_at: datetime | None = None
+    target: _DialTarget | None = None
     stop_error: BaseException | None = None
     interrupted: asyncio.Future[None] = loop.create_future()
     observe(interrupted)
@@ -444,8 +494,8 @@ async def open_relay_session(
         return remove
 
     async def establish() -> T:
-        nonlocal using_transport, expires_at
-        connect_url = url
+        nonlocal using_transport, target
+        issued: _Issued | None = None
 
         if not has_jwt and options.get_token is not None:
             resolved = options.get_token()
@@ -456,20 +506,14 @@ async def open_relay_session(
             assert_open()
 
             if isinstance(resolved, RelayCredential):
-                token, given = resolved.token, resolved.expires_at.astimezone(UTC)
+                issued = _Issued(resolved.token, resolved.expires_at.astimezone(UTC))
             elif resolved is None or isinstance(resolved, str):
-                token, given = resolved or "", None
+                issued = _Issued(resolved or "", None)
             else:
                 raise TypeError("get_token must return a string, a RelayCredential or None")
 
-            if token:
-                connect_url = _with_token(connect_url, token)
-
-            expires_at = given if given is not None else jwt_expiry(token)
-        else:
-            explicit = parse_qs(urlsplit(url).query).get("jwt", [""])[0]
-            expires_at = jwt_expiry(explicit)
-
+        target = _dial_target(url, issued)
+        connect_url = target.url
         assert_open()
         using_transport = True
         created = (options.create_transport or _default_transport)(connect_url, list(MOQT_PROTOCOL_IDS))
@@ -539,9 +583,17 @@ async def open_relay_session(
     timer.cancel()
     established = True
     assert state.transport is not None
+    assert target is not None
 
     return RelaySessionLifetime(
-        connected, closed, observe_closed, state.transport, assert_open, lambda: finish(), expires_at
+        connected,
+        closed,
+        observe_closed,
+        state.transport,
+        assert_open,
+        lambda: finish(),
+        target.expires_at,
+        target.endpoint,
     )
 
 
@@ -557,7 +609,6 @@ __all__ = [
     "RelaySessionLifetime",
     "RelayTransportFactory",
     "TokenProvider",
-    "jwt_expiry",
     "open_relay_session",
     "validate_timeout",
 ]
