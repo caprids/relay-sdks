@@ -839,7 +839,8 @@ const sequencer = createFrameSequencer({
 - While the clock has no position (nothing has played yet, or after a reset), the first frame
   anchors a position of the sequencer's own on the clock's local time. The clock's takes over as
   soon as the player reports.
-- Only a frame more than `horizonUs` (default 30 s) ahead resyncs forward, as a timeline jump. The
+- Only a frame more than `horizonUs` (default 30 s) ahead of the position, the clock's or the
+  sequencer's own, resyncs forward, as a timeline jump. The
   sequencer holds up to a horizon of frames (at 2.5 ms each), beyond the 1,024 it holds otherwise.
 - A live talker's frames are never early, so they play as without it: late drop, resync and
   catch-up are unchanged. `stats.early` counts the frames held. A restart (a want's Restart or Move)
@@ -849,8 +850,9 @@ const sequencer = createFrameSequencer({
   jitter buffer past its target and its trim gives that delay back. With it, frames reach the buffer
   only a lead ahead, so the buffer never holds more than its target and never trims: a queue that
   built and drained would leave its delay for good. So the sequencer keeps the least delay seen from
-  the clock's position to its local time, less the lead, since the clock was last reset, and releases
-  held frames early by however much the delay now exceeds it beyond 40 ms (a frame or two of report
+  the clock's position to its local time since the clock was last reset, with the lead in force then,
+  and releases held frames early by however much the delay now exceeds it, less any growth of the
+  lead since (a jitter target that grew holds more on purpose), beyond 40 ms (a frame or two of report
   noise). The buffer then holds that excess and trims it, as it does without timestamp playout. A TTS
   talker whose frames came early all along has added nothing, and plays at its timestamps as before.
 

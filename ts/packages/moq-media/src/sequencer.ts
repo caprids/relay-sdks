@@ -217,23 +217,26 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
   const counted = new WeakSet<SequencedFrame>();
   // The newest timestamp a frame may have to be delivered now, under timestamp playout; anchors the sequencer's own
   // position on `frame` while the clock has none.
-  // Under timestamp playout, the least delay seen from the clock's position to local time beyond the lead, since the
-  // clock was last reset: what the player's delay was before underruns added to it.
-  let leastDelay: { delayUs: number; resets: number } | undefined;
+  // Under timestamp playout, the least delay seen from the clock's position to local time since the clock was last
+  // reset, with the lead in force then: what the player's delay was before underruns added to it.
+  let leastDelay: { delayUs: number; leadUs: number; resets: number } | undefined;
   const releaseBefore = (frame: SequencedFrame) => {
     const lead = (playout as { leadUs: () => number }).leadUs();
     const positionUs = clock.position();
     if (positionUs !== undefined) {
       ownAnchor = undefined;
       // Each underrun leaves the clock further behind local time, and a jitter buffer holding only its target never
-      // trims that back. So release frames early by the delay added since the least seen (less a frame of noise): the
-      // buffer then holds the excess and its trim gives it back, as it does for frames that arrive late. A talker whose
-      // frames were early all along adds nothing, so its audio still plays at its timestamps.
-      const delayUs = clock.localNow() - positionUs - lead;
+      // trims that back. So release frames early by the delay added since the least seen, less what a longer lead
+      // accounts for (a jitter target that grew holds more) and a frame or two of report noise: the buffer then holds
+      // the excess and its trim gives it back, as it does for frames that arrive late. A talker whose frames were early
+      // all along adds nothing, so its audio still plays at its timestamps. A lead that changes while the delay does
+      // not moves nothing: the least delay is the clock's alone.
+      const delayUs = clock.localNow() - positionUs;
       if (leastDelay === undefined || leastDelay.resets !== clock.resets || delayUs < leastDelay.delayUs) {
-        leastDelay = { delayUs, resets: clock.resets };
+        leastDelay = { delayUs, leadUs: lead, resets: clock.resets };
       }
-      return positionUs + lead + Math.max(0, delayUs - leastDelay.delayUs - ADDED_DELAY_TOLERANCE_US);
+      const addedUs = delayUs - leastDelay.delayUs - Math.max(0, lead - leastDelay.leadUs);
+      return positionUs + lead + Math.max(0, addedUs - ADDED_DELAY_TOLERANCE_US);
     }
     if (ownAnchor === undefined || ownAnchor.resets !== clock.resets) {
       ownAnchor = { mediaUs: frame.timestampUs, atUs: clock.localNow(), resets: clock.resets };
@@ -530,6 +533,15 @@ export function createFrameSequencer(options: FrameSequencerOptions): FrameSeque
           resyncForward();
           positionUs = undefined;
           lateBefore = Number.NEGATIVE_INFINITY;
+        }
+        // Before the player reports, the horizon applies to the sequencer's own position as well.
+        const ownPositionUs =
+          playout && positionUs === undefined && ownAnchor !== undefined && ownAnchor.resets === clock.resets
+            ? ownAnchor.mediaUs + clock.localNow() - ownAnchor.atUs
+            : undefined;
+        if (playout && ownPositionUs !== undefined && frame.timestampUs - ownPositionUs > playout.horizonUs) {
+          if (out.length > 0) return 0;
+          resyncForward();
         }
         if (playout) {
           // Early: hold it, and every frame after it, until its timestamp is within the lead.

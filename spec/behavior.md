@@ -1686,14 +1686,15 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   is not a finite number from 0 up counts as the default) of the position; the poll's wait says when.
   While the clock has no position, the first frame considered anchors one of the sequencer's own,
   that frame's timestamp at the clock's local time, until the clock has a position or is reset. Only
-  a frame more than `horizonUs` (default 30 s) ahead of the position resyncs forward; one within it is
-  held instead. Late drop, resync and catch-up are unchanged. The held bound grows to cover the
+  a frame more than `horizonUs` (default 30 s) ahead of the position (or, before the clock has one, of
+  the sequencer's own) resyncs forward; one within it is held instead. Late drop, resync and catch-up are unchanged. The held bound grows to cover the
   horizon at 2.5 ms frames. A frame held is counted once (`early`). The audio player input's
   `playoutLeadUs` is the lead that keeps its jitter buffer at its target. The sequencer keeps the
-  least delay seen from the clock's position to its local time, less the lead, since the clock was
-  last reset; when the delay now exceeds it by more than 40 ms (underruns left the clock behind), held
-  frames are released early by the excess beyond those 40 ms, so the player's jitter buffer holds it
-  and trims it back.
+  least delay seen from the clock's position to its local time since the clock was last reset, with
+  the lead in force then; when the delay now exceeds it, less any growth of the lead since, by more
+  than 40 ms (underruns left the clock behind), held frames are released early by the excess beyond
+  those 40 ms, so the player's jitter buffer holds it and trims it back. A lead that changes while
+  the delay does not releases nothing early.
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
   over, the clock is reset so the new timeline is not judged against the old anchor, and the next
   frame carries `restart`, even when nothing was delivered before and even when that frame comes
