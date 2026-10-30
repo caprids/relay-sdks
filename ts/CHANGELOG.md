@@ -7,6 +7,13 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/relay-quic`: a native QUIC connection now lets the relay have 1000 unidirectional streams open at once, up
+  from quinn's default of 100, and the new `nativeQuicTransport` option
+  `anticipatedConcurrentIncomingUnidirectionalStreams` sets it. The relay sends each group on a stream of its own, and
+  the credit for a closed stream returns over the client's uplink: in relay-dev's voice benchmark (P-06), a subscriber
+  whose upload queued its uplink for about 2 s starved of stream credit at 100, and with more credit the median delay
+  went from 2865 ms to 21.5 ms locally. The option is the exact limit, an integer from 1 to 65535; any other value
+  throws a `RangeError` at once. Nothing to change in an application.
 - `@caprid/moq-media`: fixes to the Opus loss concealment that 0.1.1 turned on. A decoder reset clears the
   record that the last packet was CELT-only, so the next gap can use in-band FEC again (it stayed off until a
   non-CELT packet decoded). The audio worklet, not the main thread's report of the buffer, which is up to about 20 ms
