@@ -3,6 +3,9 @@
  * accepting end as its peer (`--framing native-quic`). Not part of `pnpm test`: it needs the built addon and the Python
  * workspace, so `pnpm test:conformance:node` runs it, with `vitest.relay-quic.config.js`.
  */
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { nativeQuicTransport } from '@caprid/relay-quic';
 import { afterAll, describe, expect, it } from 'vitest';
 import { startConformancePeer } from '../scripts/conformance-peer.js';
@@ -119,6 +122,34 @@ describe('@caprid/relay-quic incoming stream credit', () => {
     transport.close();
     await transport.closed;
   }, 15_000);
+});
+
+describe('@caprid/relay-quic qlog', () => {
+  it('writes one qlog file per connection into qlogDir', async () => {
+    const dir = join(mkdtempSync(join(tmpdir(), 'relay-quic-qlog-')), 'traces');
+    try {
+      await peer.call('prepare');
+      const value = Uint8Array.from(peer.certificateHash.match(/../g), (byte) => Number.parseInt(byte, 16));
+      const factory = nativeQuicTransport({ qlogDir: dir, serverCertificateHashes: [{ algorithm: 'sha-256', value }] });
+      // One address, so one connection attempt: `localhost` could take a second one under load.
+      const { transport, ready } = factory(`https://127.0.0.1:${peer.port}/`, ['moqt-22']);
+      transport.closed.catch(() => {});
+      await ready;
+      transport.close();
+      await transport.closed;
+      const files = readdirSync(dir);
+      expect(files).toHaveLength(1);
+      expect(files[0]).toMatch(/^relay-quic-\d+-\d+-\d+\.sqlog$/);
+      // JSON text sequences (RFC 7464): each record starts with a record separator.
+      const records = readFileSync(join(dir, files[0]), 'utf8')
+        .split('\x1e')
+        .filter((record) => record.trim());
+      expect(JSON.parse(records[0])).toHaveProperty('qlog_version');
+      expect(records.length).toBeGreaterThan(1);
+    } finally {
+      rmSync(dirname(dir), { recursive: true, force: true });
+    }
+  });
 });
 
 describe('@caprid/relay-quic trust', () => {

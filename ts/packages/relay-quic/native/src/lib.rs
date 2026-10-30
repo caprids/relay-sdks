@@ -11,9 +11,13 @@ mod stream;
 mod tls;
 
 use std::collections::VecDeque;
+use std::fs::File;
+use std::io::LineWriter;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use futures_util::FutureExt;
@@ -52,6 +56,8 @@ pub struct ClientOptions {
     /// How many unidirectional streams the peer may have open to a session at once (the MAX_STREAMS
     /// credit it is granted); 1,000 when absent.
     pub max_concurrent_uni_streams: Option<u32>,
+    /// A directory to write one qlog file per connection attempt into; none when absent.
+    pub qlog_dir: Option<String>,
 }
 
 /// One `nativeQuicTransport`'s TLS and stream configuration. Every dial gets its own endpoint and
@@ -60,12 +66,13 @@ pub struct ClientOptions {
 pub struct Client {
     tls: Arc<rustls::ClientConfig>,
     incoming_uni_streams: u32,
+    qlog_dir: Option<Arc<PathBuf>>,
 }
 
 #[napi]
 impl Client {
-    /// Throws when a `ca` entry is not a PEM certificate, a hash is not 32 bytes, or
-    /// `max_concurrent_uni_streams` is 0.
+    /// Throws when a `ca` entry is not a PEM certificate, a hash is not 32 bytes,
+    /// `max_concurrent_uni_streams` is 0, or `qlog_dir` cannot be created.
     #[napi(constructor)]
     pub fn new(options: ClientOptions) -> Result<Self> {
         let incoming_uni_streams = options.max_concurrent_uni_streams.unwrap_or(INCOMING_UNI_STREAMS);
@@ -81,9 +88,15 @@ impl Client {
             .map(|hash| hash.to_vec())
             .collect();
         let tls = tls::client_config(&options.ca, &hashes).map_err(|error| Error::new(Status::InvalidArg, error))?;
+        let qlog_dir = options
+            .qlog_dir
+            .map(qlog_directory)
+            .transpose()
+            .map_err(|error| Error::new(Status::InvalidArg, error))?;
         Ok(Self {
             tls: Arc::new(tls),
             incoming_uni_streams,
+            qlog_dir,
         })
     }
 
@@ -98,6 +111,7 @@ impl Client {
         Ok(Dial {
             tls,
             incoming_uni_streams: self.incoming_uni_streams,
+            qlog_dir: self.qlog_dir.clone(),
             host,
             port,
             server_name,
@@ -111,6 +125,7 @@ impl Client {
 pub struct Dial {
     tls: rustls::ClientConfig,
     incoming_uni_streams: u32,
+    qlog_dir: Option<Arc<PathBuf>>,
     host: String,
     port: u16,
     server_name: String,
@@ -152,7 +167,10 @@ impl Dial {
             .map_err(|error| dial_failure(format!("could not resolve {}: {error}", self.host)))?
             .collect();
         let mut waiting: VecDeque<SocketAddr> = interleave_families(addresses).into();
-        let client = self.client_config()?;
+        let crypto = Arc::new(
+            quinn::crypto::rustls::QuicClientConfig::try_from(self.tls.clone())
+                .map_err(|error| dial_failure(error.to_string()))?,
+        );
 
         let mut attempts = FuturesUnordered::new();
         let mut failure = dial_failure(format!("{} has no addresses", self.host));
@@ -171,7 +189,7 @@ impl Dial {
                 },
                 _ = &mut stagger, if !waiting.is_empty() => {
                     let address = waiting.pop_front().expect("an address is waiting");
-                    attempts.push(self.attempt(address, client.clone()));
+                    attempts.push(self.attempt(address, self.client_config(crypto.clone(), address)));
                     stagger.as_mut().reset(tokio::time::Instant::now() + ATTEMPT_STAGGER);
                 },
                 else => return Err(failure),
@@ -179,16 +197,22 @@ impl Dial {
         }
     }
 
-    fn client_config(&self) -> std::result::Result<quinn::ClientConfig, Failure> {
-        let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(self.tls.clone())
-            .map_err(|error| dial_failure(error.to_string()))?;
-        let mut client = quinn::ClientConfig::new(Arc::new(crypto));
+    /// One attempt's configuration: each has its own qlog file.
+    fn client_config(
+        &self,
+        crypto: Arc<quinn::crypto::rustls::QuicClientConfig>,
+        address: SocketAddr,
+    ) -> quinn::ClientConfig {
+        let mut client = quinn::ClientConfig::new(crypto);
         let mut transport = quinn::TransportConfig::default();
         transport.keep_alive_interval(Some(KEEP_ALIVE));
         transport.max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(IDLE_TIMEOUT_MS))));
         transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(self.incoming_uni_streams));
+        if let Some(dir) = &self.qlog_dir {
+            transport.qlog_stream(qlog_stream(dir, &self.server_name, address));
+        }
         client.transport_config(Arc::new(transport));
-        Ok(client)
+        client
     }
 
     /// One handshake to `address`, on an endpoint of its own.
@@ -222,6 +246,33 @@ impl Dial {
     }
 }
 
+/// `dir`, created if it is missing: the one qlog failure that throws, since the option asked for it.
+fn qlog_directory(dir: String) -> std::result::Result<Arc<PathBuf>, String> {
+    let dir = PathBuf::from(dir);
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("could not create the qlog directory {}: {error}", dir.display()))?;
+    Ok(Arc::new(dir))
+}
+
+/// A qlog stream into a new file in `dir`, or none if the file cannot be created: a debugging aid never fails a dial.
+fn qlog_stream(dir: &Path, server_name: &str, address: SocketAddr) -> Option<quinn::QlogStream> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let millis = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis();
+    let name = format!(
+        "relay-quic-{millis}-{}-{}.sqlog",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let file = File::create(dir.join(name)).ok()?;
+    let mut config = quinn::QlogConfig::default();
+    // A line per event, so a process that is killed leaves a readable file.
+    config
+        .writer(Box::new(LineWriter::new(file)))
+        .title(Some(format!("relay-quic to {server_name} at {address}")))
+        .start_time(Instant::now());
+    config.into_stream()
+}
+
 fn dial_failure(reason: String) -> Failure {
     Failure::session("dial", None, reason)
 }
@@ -244,6 +295,27 @@ fn interleave_families(addresses: Vec<SocketAddr>) -> Vec<SocketAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_qlog_file_goes_into_the_directory_and_one_that_cannot_be_created_is_skipped() {
+        let dir = std::env::temp_dir().join(format!("relay-quic-qlog-test-{}", std::process::id()));
+        let created = qlog_directory(dir.join("traces").display().to_string()).unwrap();
+        let address = "127.0.0.1:443".parse().unwrap();
+        assert!(qlog_stream(&created, "relay.example", address).is_some());
+        let files: Vec<_> = std::fs::read_dir(created.as_path()).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        // A directory that has gone away: no stream, and no error for the dial.
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(qlog_stream(&created, "relay.example", address).is_none());
+    }
+
+    #[test]
+    fn a_qlog_directory_that_cannot_be_created_throws() {
+        let file = std::env::temp_dir().join(format!("relay-quic-qlog-file-{}", std::process::id()));
+        std::fs::write(&file, b"").unwrap();
+        assert!(qlog_directory(file.join("traces").display().to_string()).is_err());
+        std::fs::remove_file(&file).unwrap();
+    }
 
     #[test]
     fn families_alternate_from_the_first() {

@@ -13,4 +13,8 @@ describe('nativeQuicTransport options', () => {
       );
     },
   );
+
+  it('throws a TypeError for a qlogDir that is not a string', () => {
+    expect(() => nativeQuicTransport({ qlogDir: 7 as never })).toThrow(TypeError);
+  });
 });
