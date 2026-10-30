@@ -39,6 +39,33 @@ By default a dial trusts the platform's root certificates.
   end-entity certificate must match one hash, and the adapter does not validate its chain. It still checks the
   handshake signature. Unlike a browser, the adapter does not require the certificate to be valid for 14 days or less.
 
+## Stream credit
+
+`anticipatedConcurrentIncomingUnidirectionalStreams` is how many unidirectional streams the relay may have open to the
+connection at once: the MAX_STREAMS credit this end grants (RFC 9000 §4.6). It is an integer from 1 to 65535, and the
+default is 1000. quinn's own default is 100. The relay sends each group on a stream of its own, so a voice track at 50
+frames a second takes 50 streams a second, and the credit for each closed stream returns over your uplink. In relay-dev's
+voice benchmark (finding P-06), a subscriber whose own upload queued its uplink for about 2 s ran out of credit at 100:
+locally, the median arrival delay was 2865 ms, and 21.5 ms with more credit. 1000 covers a 20 s stall of the uplink on
+one such track.
+
+quinn sets aside an entry per allowed stream up front, so a higher value costs memory on every connection. Unlike the
+W3C WebTransport option of the same name, which is a hint that the browser may round up, this is the exact limit. A
+value that is not an integer from 1 to 65535 throws a `RangeError` at once, before the addon loads. Bidirectional
+streams keep quinn's default of 100, because the relay opens one per request, not per object. `@caprid/relay/node` uses
+the default and takes no such option. To change it, build the factory yourself:
+
+```ts
+import { connectRelaySubscriber } from '@caprid/relay';
+import { nativeQuicTransport } from '@caprid/relay-quic';
+
+const subscriber = await connectRelaySubscriber({
+  url: 'https://relay.mux.global',
+  getToken: () => process.env.RELAY_TOKEN,
+  createTransport: nativeQuicTransport({ anticipatedConcurrentIncomingUnidirectionalStreams: 5000 }),
+});
+```
+
 ## Process lifetime
 
 An open session keeps the Node process alive, from the start of the dial until `closed` settles. After that the

@@ -496,6 +496,23 @@ class TestStreams:
         await asyncio.wait_for(session.create_unidirectional_stream(), 1)
         session.close()
 
+    async def test_the_peer_may_keep_hundreds_of_unidirectional_streams_open_at_once(self, peer: Peer) -> None:
+        # The relay sends each object of a voice track on a stream of its own (P-06). aioquic starts the peer at 128
+        # streams and doubles the limit whenever more than half is used, open or not, so unlike quinn's fixed 100 (which
+        # @caprid/relay-quic raises to 1000) the credit keeps ahead of a stream per object without an option.
+        session = await ready(*peer.dial())
+        count = 300
+        await peer.peer.openUnis(count, [7])
+
+        incoming = aiter(session.incoming_unidirectional_streams())
+        held = []
+        for _ in range(count):
+            stream = await asyncio.wait_for(anext(incoming), 5)
+            assert await asyncio.wait_for(stream.read(), 5) == bytes([7])
+            held.append(stream)
+        assert len(held) == count
+        session.close()
+
 
 class TestRelayConnection:
     async def test_ta6_client_setup_carries_the_endpoint_path_and_authority(self, peer: Peer) -> None:

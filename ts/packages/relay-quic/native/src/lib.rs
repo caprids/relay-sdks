@@ -32,6 +32,14 @@ const IDLE_TIMEOUT_MS: u32 = 30_000;
 const ATTEMPT_STAGGER: Duration = Duration::from_millis(250);
 /// How long `closed()` waits for the endpoint to put the CONNECTION_CLOSE on the wire.
 const CLOSE_FLUSH: Duration = Duration::from_secs(1);
+/// How many unidirectional streams the peer may have open to us at once, unless the options say
+/// otherwise: the MAX_STREAMS credit this end grants (RFC 9000 §4.6). The relay delivers each MoQ
+/// group on a stream of its own (draft-ietf-moq-transport-22 §11.3.2), so a voice track at 50
+/// frames a second needs 50 a second, and each closed stream's credit returns over our uplink.
+/// quinn's default of 100 is two seconds of one track: an uplink queued that long starved the relay
+/// of credit (relay-dev voice benchmark, P-06). 1,000 covers a 20 s stall of one track; quinn
+/// allocates an entry per allowed stream up front, so it is not set higher.
+const INCOMING_UNI_STREAMS: u32 = 1_000;
 
 /// What a [`Client`] trusts.
 #[napi(object)]
@@ -41,26 +49,42 @@ pub struct ClientOptions {
     /// SHA-256 hashes of accepted end-entity certificates; when any are given they replace chain
     /// validation.
     pub server_certificate_hashes: Vec<Uint8Array>,
+    /// How many unidirectional streams the peer may have open to a session at once (the MAX_STREAMS
+    /// credit it is granted); 1,000 when absent.
+    pub max_concurrent_uni_streams: Option<u32>,
 }
 
-/// One `nativeQuicTransport`'s TLS configuration. Every dial gets its own endpoint and socket.
+/// One `nativeQuicTransport`'s TLS and stream configuration. Every dial gets its own endpoint and
+/// socket.
 #[napi]
 pub struct Client {
     tls: Arc<rustls::ClientConfig>,
+    incoming_uni_streams: u32,
 }
 
 #[napi]
 impl Client {
-    /// Throws when a `ca` entry is not a PEM certificate or a hash is not 32 bytes.
+    /// Throws when a `ca` entry is not a PEM certificate, a hash is not 32 bytes, or
+    /// `max_concurrent_uni_streams` is 0.
     #[napi(constructor)]
     pub fn new(options: ClientOptions) -> Result<Self> {
+        let incoming_uni_streams = options.max_concurrent_uni_streams.unwrap_or(INCOMING_UNI_STREAMS);
+        if incoming_uni_streams == 0 {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "max_concurrent_uni_streams must be at least 1".to_string(),
+            ));
+        }
         let hashes: Vec<Vec<u8>> = options
             .server_certificate_hashes
             .iter()
             .map(|hash| hash.to_vec())
             .collect();
         let tls = tls::client_config(&options.ca, &hashes).map_err(|error| Error::new(Status::InvalidArg, error))?;
-        Ok(Self { tls: Arc::new(tls) })
+        Ok(Self {
+            tls: Arc::new(tls),
+            incoming_uni_streams,
+        })
     }
 
     /// Start dialing `host:port`, offering `protocols` as ALPN in order (TA-5). `server_name` is
@@ -73,6 +97,7 @@ impl Client {
         tls.alpn_protocols = protocols.into_iter().map(String::into_bytes).collect();
         Ok(Dial {
             tls,
+            incoming_uni_streams: self.incoming_uni_streams,
             host,
             port,
             server_name,
@@ -85,6 +110,7 @@ impl Client {
 #[napi]
 pub struct Dial {
     tls: rustls::ClientConfig,
+    incoming_uni_streams: u32,
     host: String,
     port: u16,
     server_name: String,
@@ -160,6 +186,7 @@ impl Dial {
         let mut transport = quinn::TransportConfig::default();
         transport.keep_alive_interval(Some(KEEP_ALIVE));
         transport.max_idle_timeout(Some(quinn::IdleTimeout::from(quinn::VarInt::from_u32(IDLE_TIMEOUT_MS))));
+        transport.max_concurrent_uni_streams(quinn::VarInt::from_u32(self.incoming_uni_streams));
         client.transport_config(Arc::new(transport));
         Ok(client)
     }

@@ -229,7 +229,10 @@ describe('@caprid/relay/node', () => {
 
 describe('@caprid/relay/node types', () => {
   it("declares the trust options as @caprid/relay-quic's own, without importing them", () => {
-    expectTypeOf<NodeEntry.RelayNodeTrustOptions>().toEqualTypeOf<NativeQuicTransportOptions>();
+    // The stream credit option is the adapter's alone: the entry point dials with its default, 1000.
+    expectTypeOf<NodeEntry.RelayNodeTrustOptions>().toEqualTypeOf<
+      Omit<NativeQuicTransportOptions, 'anticipatedConcurrentIncomingUnidirectionalStreams'>
+    >();
   });
 
   it('takes the trust options, or a createTransport, but not both', () => {

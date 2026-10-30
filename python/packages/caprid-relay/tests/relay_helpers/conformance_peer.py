@@ -436,6 +436,21 @@ class ConformancePeer:
         self._streams[send.stream_id] = _Stream(send=send)
         return send.stream_id
 
+    async def openUnis(self, count: int, data: list[int]) -> list[int]:
+        """Open ``count`` unidirectional streams and write ``data`` on each, finishing none: streams the dialer must
+        let stay open at once. aioquic holds any past the dialer's credit until the dialer raises it."""
+        opened = [await self.openUni() for _ in range(count)]
+        for stream in opened:
+            await self.write(stream, data)
+        return opened
+
+    async def dialerStreamCredit(self) -> dict[str, int]:
+        """The stream limits the dialer has granted this end so far (its MAX_STREAMS, RFC 9000 §4.6): the initial
+        transport parameters, raised by any MAX_STREAMS frame since."""
+        await self._current()
+        quic = self._require_protocol()._quic
+        return {"uni": quic._remote_max_streams_uni, "bidi": quic._remote_max_streams_bidi}
+
     async def openBi(self) -> int:
         stream = await (await self._current()).create_bidirectional_stream()
         stream_id = cast(_ReceiveHalf, stream.readable).stream_id
@@ -558,6 +573,8 @@ METHODS = {
     "acceptUni",
     "acceptBi",
     "openUni",
+    "openUnis",
+    "dialerStreamCredit",
     "openBi",
     "write",
     "finish",
