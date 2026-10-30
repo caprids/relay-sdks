@@ -72,8 +72,8 @@ const subscriber = await connectRelaySubscriber({
 the `RELAY_QUIC_QLOG_DIR` environment variable is read when the factory is made; an empty string turns qlog off. It is
 off by default. The directory is created if it is missing, and a failure to create it throws at once. Each connection
 attempt gets one file, `relay-quic-<unix ms>-<pid>-<n>.sqlog`: JSON text sequences, written by quinn's `qlog` feature.
-A trace holds each packet's number, type and size as it is sent and received, the packets declared lost, and the RTT,
-congestion window and bytes in flight as they change. quinn 0.11 logs no frames, so a trace holds no stream data and no
+A trace holds each packet's number and type as it is sent and received, the size of each packet sent, the packets
+declared lost, and the RTT, congestion window and bytes in flight as they change. quinn 0.11 logs no frames, so a trace holds no stream data and no
 token. A file that cannot be created is skipped, and the dial goes on. `@caprid/relay/node` takes no such option, but
 reads the environment variable, so `RELAY_QUIC_QLOG_DIR=/tmp/qlog node script.mjs` traces a script without changing it.
 

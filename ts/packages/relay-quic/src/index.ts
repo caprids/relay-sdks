@@ -51,9 +51,9 @@ export interface NativeQuicTransportOptions {
    * A directory to write a qlog trace of every connection into, one `relay-quic-<ms>-<pid>-<n>.sqlog` file (JSON text
    * sequences, qlog 0.3) per connection attempt, created if it does not exist. Absent, the `RELAY_QUIC_QLOG_DIR`
    * environment variable is read when the factory is made; an empty string turns qlog off. Off by default. A trace
-   * holds each packet's number, type and size, the packets lost, and the RTT and congestion window as they change;
-   * quinn 0.11 logs no frames, so it holds no stream data and no token. A file that cannot be created is skipped, and
-   * the dial goes on.
+   * holds each packet's number and type, the size of each packet sent, the packets lost, and the RTT and congestion
+   * window as they change; quinn 0.11 logs no frames, so it holds no stream data and no token. A file that cannot be
+   * created is skipped, and the dial goes on.
    */
   qlogDir?: string;
 }

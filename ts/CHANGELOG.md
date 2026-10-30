@@ -9,8 +9,8 @@ each section says what changed and what to do about it. How to cut a release is 
 
 - `@caprid/relay-quic`: `nativeQuicTransport({ qlogDir })`, or the `RELAY_QUIC_QLOG_DIR` environment variable, writes a
   qlog trace of every connection attempt into that directory, one `relay-quic-<ms>-<pid>-<n>.sqlog` file each, from
-  quinn's `qlog` feature. Off by default. A trace holds packet numbers, types and sizes, losses, and RTT and congestion
-  metrics, but no frames, stream data or token. A file that cannot be created is skipped and the dial goes on; a
+  quinn's `qlog` feature. Off by default. A trace holds packet numbers and types, sent packets' sizes, losses, and RTT and
+  congestion metrics, but no frames, stream data or token. A file that cannot be created is skipped and the dial goes on; a
   directory that cannot be created throws at once. The linux-x64-gnu addon grew from 2,766,896 to 2,912,848 bytes
   (+5.3%; gzip -9: 1,306,675 to 1,372,739 bytes). Nothing to change in an application.
 - `@caprid/relay-quic`: a native QUIC connection now lets the relay have 1000 unidirectional streams open at once, up
