@@ -14,7 +14,7 @@ bytes = "1"
 futures-util = { version = "0.3", default-features = false }
 napi = { version = "3", default-features = false, features = ["napi8", "async"] }
 napi-derive = "3"
-quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log"] }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring", "log", "qlog"] }
 ring = "0.17"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 rustls-native-certs = "0.8"

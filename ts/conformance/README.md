@@ -17,7 +17,7 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
 | `targets/websocket-lifetime.js` | The child Node process behind the WebSocket target's TA-25, TA-26 and cancelled-dial checks in Node. |
 | `targets/lifetime.js` | Runs a lifetime child and checks how it ended, for both Node adapters. |
 | `targets/remote-peer.js` | The peer methods as requests to the Python accepting end, for both targets that use it. |
-| `relay-quic.conformance.js` | The suite against `@caprid/relay-quic` under vitest, plus its trust checks (`ca`, an untrusted certificate, bad options) and its incoming stream credit checks (the credit granted by default and by option, and more than 100 streams held open at once). |
+| `relay-quic.conformance.js` | The suite against `@caprid/relay-quic` under vitest, plus its trust checks (`ca`, an untrusted certificate, bad options) and its incoming stream credit checks (the credit granted by default and by option, and more than 100 streams held open at once), and its qlog check (one trace per connection in `qlogDir`). |
 | `websocket.conformance.js` | The suite against `@caprid/relay-websocket` in Node under vitest, plus `withWebSocketFallback` where Node has no WebTransport. `vitest.websocket.config.js` makes the peer's certificate first, so Node trusts it from the start. |
 | `../scripts/test-conformance-websocket.mjs` | The browser launcher for the WebSocket target: Chromium, Firefox and WebKit through Playwright. |
 | `../scripts/websocket-peer.js` | The accepting end for QMux over WebSocket: `@moq/qmux`'s accepting role over `ws`, over TLS, speaking the Python accepting end's JSON lines. |

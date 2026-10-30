@@ -66,6 +66,21 @@ const subscriber = await connectRelaySubscriber({
 });
 ```
 
+## qlog
+
+`nativeQuicTransport({ qlogDir })` writes a qlog trace of every connection into that directory. Without the option,
+the `RELAY_QUIC_QLOG_DIR` environment variable is read when the factory is made; an empty string turns qlog off. It is
+off by default. The directory is created if it is missing, and a failure to create it throws at once. Each connection
+attempt gets one file, `relay-quic-<unix ms>-<pid>-<n>.sqlog`: JSON text sequences, written by quinn's `qlog` feature.
+A trace holds each packet's number, type and size as it is sent and received, the packets declared lost, and the RTT,
+congestion window and bytes in flight as they change. quinn 0.11 logs no frames, so a trace holds no stream data and no
+token. A file that cannot be created is skipped, and the dial goes on. `@caprid/relay/node` takes no such option, but
+reads the environment variable, so `RELAY_QUIC_QLOG_DIR=/tmp/qlog node script.mjs` traces a script without changing it.
+
+The feature has a cost in size. The linux-x64-gnu release addon grew from 2,766,896 to 2,912,848 bytes (+145,952 B,
++5.3%), and gzip -9 of it from 1,306,675 to 1,372,739 bytes (+66,064 B), built locally with Rust 1.97.1 from `main`
+and from this change. The sizes in the table under "Prebuilt binaries" are from before it.
+
 ## Process lifetime
 
 An open session keeps the Node process alive, from the start of the dial until `closed` settles. After that the
@@ -141,6 +156,6 @@ the crate. CI checks that it matches.
 | `src/streams.ts` | WHATWG streams over the addon's stream halves. |
 | `src/errors.ts` | The addon's failures as the contract's error shapes (TA-22). |
 | `src/addon.ts` | Finds and loads the addon for this platform: a local build, else the platform package. |
-| `native/` | The Rust crate: trust (`tls.rs`), stream halves (`stream.rs`), failures as data (`failure.rs`), the dial and the session (`lib.rs`). |
+| `native/` | The Rust crate: trust (`tls.rs`), stream halves (`stream.rs`), failures as data (`failure.rs`), the dial, qlog and the session (`lib.rs`). |
 | `npm/<platform>/` | The platform packages, one per `napi.targets` entry; CI puts each binary in its own. |
 | `scripts/pack.mjs`, `scripts/smoke.mjs` | Pack the release tarballs with their sizes; install and smoke-load them. |
