@@ -318,7 +318,7 @@ def _namespace_ended(cause: BaseException | None) -> RelayError:
 
 
 async def connect_relay_publisher(
-    url: str,
+    url: str | None = None,
     *,
     namespace: Sequence[str],
     get_token: TokenProvider | None = None,
@@ -330,7 +330,8 @@ async def connect_relay_publisher(
 
     Subscribers use :func:`connect_relay_subscriber`; publishing does not share their transport. One
     publisher connection serves one ``namespace`` and any number of tracks. A relay must solicit the
-    namespace and subscribe upstream before data can flow.
+    namespace and subscribe upstream before data can flow. With no ``url``, the connection dials
+    ``DEFAULT_ENDPOINT`` rooted at the token's ``root`` claim, which ``get_token`` must then supply.
     """
     # Arguments before anything else: an invalid namespace never reaches the token provider or the
     # transport factory.

@@ -428,7 +428,7 @@ class SupervisedSubscriber:
 
 
 async def connect_supervised_subscriber(
-    url: str,
+    url: str | None = None,
     *,
     get_token: TokenProvider | None = None,
     cancellation: CancellationToken | None = None,
@@ -449,12 +449,14 @@ async def connect_supervised_subscriber(
     ended the previous connection or failed the last attempt. ``rotate_before`` (seconds, default 60)
     is how long before the connection's credential expires (:attr:`RelaySubscriber.expires_at`) a
     replacement connection is opened, make-before-break; never earlier than halfway through the time
-    left. See ``spec/behavior.md``, "Supervised connections"; :func:`connect_relay_subscriber` never
+    left. With no ``url``, every connection dials the endpoint the first one rooted at its token's
+    root. See ``spec/behavior.md``, "Supervised connections"; :func:`connect_relay_subscriber` never
     reconnects or resubscribes.
     """
 
-    def connect(attempt: CancellationToken) -> Awaitable[RelaySubscriber]:
-        return connect_relay_subscriber(
+    async def connect(attempt: CancellationToken) -> RelaySubscriber:
+        nonlocal url
+        subscriber = await connect_relay_subscriber(
             url,
             get_token=get_token,
             cancellation=attempt,
@@ -462,6 +464,9 @@ async def connect_supervised_subscriber(
             request_timeout=request_timeout,
             create_transport=create_transport,
         )
+        if url is None:
+            url = subscriber._lifetime.endpoint
+        return subscriber
 
     return await _supervise_relay_subscriber(
         connect, cancellation=cancellation, reconnect=reconnect, rotate_before=rotate_before, on_status=on_status

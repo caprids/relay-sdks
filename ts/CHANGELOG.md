@@ -60,6 +60,17 @@ each section says what changed and what to do about it. How to cut a release is 
   the extension's `SETUP_OPTION.MAX_AGE` (`0x915C4`), never on FETCH, TRACK_STATUS or SUBSCRIBE_NAMESPACE, and leaves it
   off otherwise: moq-dev main declares it, moq-relay 0.17.x does not. `RelaySubscriber.maxAgeSupported` and
   `MoqtSession.maxAgeSupported` report whether the relay did. Nothing changes for an application that sets no `maxAge`.
+- `@caprid/relay`: `url` is optional on every connect call: `connectRelaySubscriber`, `connectRelayPublisher`,
+  `connectSupervisedSubscriber` and `connectSupervisedPublisher`, from `@caprid/relay` and `@caprid/relay/node`. Left
+  out, the connection dials `DEFAULT_ENDPOINT` rooted at the token's `root` claim, which it reads without verifying
+  the token: the URL `roomEndpoint` would build from that root (#374). A quickstart is now
+  `connectSupervisedSubscriber({ getToken })`, with namespaces relative to the token's root. `getToken` is then
+  required. A token that is not a JWT, has no string `root` claim, or has a root `roomEndpoint` refuses throws a
+  `TypeError` or `RangeError` before the transport is used. A supervisor keeps the endpoint its first connection
+  dialed for every reconnect and rotation. A call that passes `url` is unchanged.
+- `@caprid/relay`: a token's claims are read only from a JWT payload in unpadded base64url whose JSON starts at its
+  first byte. A padded payload, one in standard base64 with `+` or `/`, or one with a byte order mark has no claims,
+  so its `expiresAt` is `undefined` instead of its `exp`. The relay refuses such a token anyway.
 
 ## 0.2.0
 

@@ -63,6 +63,23 @@ describe('@caprid/relay/node', () => {
     expect(shared).toHaveBeenNthCalledWith(1, url, ['moqt-22', 'moqt-20']);
   });
 
+  it("dials the hosted Relay rooted at the token's root over the adapter when url is left out", async () => {
+    const { connectSupervisedSubscriber } = await entry();
+    const relay = hub();
+    const dialed: string[] = [];
+    quic.route = (url, protocols) => {
+      dialed.push(url);
+      return relay.connectSubscriber(url, protocols);
+    };
+    const payload = Buffer.from(JSON.stringify({ root: 'acme/rooms' })).toString('base64url');
+    const token = `e30.${payload}.sig`;
+
+    const subscriber = await connectSupervisedSubscriber({ getToken: () => token });
+    cleanup.push(() => subscriber.close());
+
+    expect(dialed).toEqual([`https://relay.mux.global/acme/rooms?jwt=${token}`]);
+  });
+
   it('gives a connection with trust options a factory of its own', async () => {
     const { connectRelaySubscriber } = await entry();
     quic.route = hub().connectSubscriber;

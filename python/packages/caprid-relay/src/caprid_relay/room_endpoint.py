@@ -1,15 +1,15 @@
-"""The room-rooted endpoint for a room ("Room-rooted endpoints" in ``spec/behavior.md``).
+"""Relay endpoints: the Endpoint rule every connect call checks, and the room-rooted endpoint for a room
+("Room-rooted endpoints" in ``spec/behavior.md``).
 
-Pure: it builds a string and connects nothing.
+Pure: it builds strings and connects nothing.
 """
 
 import re
 from collections.abc import Sequence
 from typing import overload
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlsplit, urlunsplit
 
 from ._validation import namespace_fields
-from .connect_session import _parse_endpoint
 
 # The characters a room field may hold: what a URL path carries unchanged in every parser and
 # moq-relay reads back as the same field. The relay does not percent-decode the path, so a field that
@@ -19,6 +19,52 @@ _ROOM_FIELD = re.compile(r"[A-Za-z0-9\-._~!$&'()+,;=:@]+")
 
 DEFAULT_ENDPOINT = "https://relay.mux.global"
 """The default Relay endpoint pinned in ``spec/protocol.json``."""
+
+
+def _parse_endpoint(url: object) -> tuple[str, bool]:
+    """Validate the endpoint and return it normalized, plus whether it already carries a ``jwt``.
+
+    Not a string, or not an absolute URL (no scheme, or an ``https`` URL with no host), is a
+    ``TypeError``: the wrong shape, as the TypeScript URL parser reports it. A URL that parses but
+    is not one Relay accepts is a ``ValueError``: a disallowed value.
+    """
+    if not isinstance(url, str):
+        raise TypeError("Relay endpoints must be a URL string")
+
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+    except ValueError as error:
+        raise TypeError("Relay endpoints must be a valid absolute URL") from error
+
+    if not parts.scheme:
+        raise TypeError("Relay endpoints must be a valid absolute URL")
+
+    if parts.scheme != "https":
+        raise ValueError("Relay endpoints must use HTTPS")
+
+    if parts.fragment or "@" in parts.netloc:
+        raise ValueError("Relay endpoints cannot contain fragments or userinfo")
+
+    if not hostname:
+        raise TypeError("Relay endpoints must name a host")
+
+    jwts = [value for key, value in parse_qsl(parts.query, keep_blank_values=True) if key == "jwt"]
+
+    # A present jwt wins over get_token, so an empty one would connect with no credential at all.
+    if "" in jwts:
+        raise ValueError(
+            "Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply get_token"
+        )
+
+    has_jwt = bool(jwts)
+    normalized = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
+
+    # urlunsplit drops an empty query, but `?` with nothing after it is a present query that PATH keeps (TA-6).
+    if not parts.query and "?" in url:
+        normalized += "?"
+
+    return normalized, has_jwt
 
 
 @overload

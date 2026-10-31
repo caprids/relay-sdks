@@ -17,8 +17,8 @@ The SDK does not interpret payloads, so you need no player, media catalog, or Vi
   [`@caprid/relay-websocket`](https://github.com/caprids/relay-sdks/blob/main/ts/packages/relay-websocket/README.md)'s `withWebSocketFallback()` or
   `createWebSocketTransport()` as `createTransport`. The connection then runs QMux over WebSocket on
   TCP 443 ([networks without UDP](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#networks-without-udp-qmux-over-websocket)).
-- A Relay endpoint and a short-lived Relay JWT authorized for the namespace you use. The SDK
-  consumes tokens. It does not issue them.
+- A short-lived Relay JWT authorized for the namespace you use, and the endpoint of any relay other
+  than the hosted one. The SDK consumes tokens. It does not issue them.
 
 ## Install
 
@@ -34,17 +34,16 @@ repository instead, see
 ## Publish and subscribe
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@caprid/relay';
+import { connectRelayPublisher, connectRelaySubscriber, readText } from '@caprid/relay';
 
-const url = roomEndpoint(['team']); // your token's root as the path, on https://relay.mux.global
-const namespace = ['quickstart', 'unique-run']; // relative to that root
-const getToken = () => token; // a Relay JWT allowed to publish and subscribe there
+const getToken = () => token; // a Relay JWT allowed to publish and subscribe under its root
+const namespace = ['quickstart', 'unique-run']; // relative to the token's root
 
-const publisher = await connectRelayPublisher({ url, namespace, getToken });
+const publisher = await connectRelayPublisher({ namespace, getToken });
 const ticker = publisher.registerTrack({ track: 'ticker' });
 await publisher.announced;
 
-const subscriber = await connectRelaySubscriber({ url, getToken });
+const subscriber = await connectRelaySubscriber({ getToken });
 let received: (text: string) => void;
 const arrived = new Promise<string>((resolve) => { received = resolve; });
 const subscription = subscriber.subscribe(
@@ -58,6 +57,11 @@ console.log(await arrived);
 subscriber.close();
 await publisher.close();
 ```
+
+With no `url`, each connection dials the hosted Relay, `https://relay.mux.global`, with the
+token's root as the path, so namespaces are relative to that root. Pass `url` for another relay,
+region or room; `roomEndpoint` builds one
+([endpoint and credentials](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#endpoint-and-credentials)).
 
 The [guide's full demo](https://github.com/caprids/relay-sdks/blob/main/ts/GUIDE.md#run-the-full-demo-from-a-checkout) runs the complete version of this, with
 credential handling, the subscribe retry, a deadline, and cleanup on failure.
@@ -91,17 +95,16 @@ Without the package or the binary, a connect call fails with `RelayError` code
 The code is the browser example's, with a different import:
 
 ```ts
-import { connectRelayPublisher, connectRelaySubscriber, readText, roomEndpoint } from '@caprid/relay/node';
+import { connectRelayPublisher, connectRelaySubscriber, readText } from '@caprid/relay/node';
 
-const url = roomEndpoint(['team']);
 const namespace = ['quickstart', 'unique-run'];
 const getToken = () => process.env.RELAY_TOKEN;
 
-const publisher = await connectRelayPublisher({ url, namespace, getToken });
+const publisher = await connectRelayPublisher({ namespace, getToken });
 const ticker = publisher.registerTrack({ track: 'ticker' });
 await publisher.announced;
 
-const subscriber = await connectRelaySubscriber({ url, getToken });
+const subscriber = await connectRelaySubscriber({ getToken });
 const subscription = subscriber.subscribe(
   { namespace, track: 'ticker' },
   { onObject: (object) => { if (object.status === 'normal') console.log(readText(object)); } },
