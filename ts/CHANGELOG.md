@@ -5,7 +5,7 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.3.0
 
 - `@caprid/relay-websocket`: `withWebSocketFallback()` races the two transports instead of waiting out WebTransport
   (#392). WebTransport dials first; if its handshake has not completed within the new `webSocketDelayMs` (default
