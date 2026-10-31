@@ -4,7 +4,7 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
-## Unreleased
+## 0.3.0
 
 - `caprid-relay`, `caprid-moq-media`: track replacement for barge-in, as in the TypeScript SDK.
   `caprid_relay.media.ReplaceableTrack(publisher, track=..., catalog_service=..., build_catalog=...)` publishes a track

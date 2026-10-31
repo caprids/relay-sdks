@@ -1,6 +1,6 @@
 {
   "name": "@caprid/relay-quic",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Native QUIC transport adapter for the Relay SDK in Node",
   "license": "Apache-2.0",
   "repository": {
