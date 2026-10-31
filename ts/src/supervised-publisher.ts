@@ -5,8 +5,8 @@
  * turn. Nothing written is replayed onto a new generation; a write made while no generation is up fails at once with
  * `RECONNECTING`. See spec/behavior.md, "Supervised connections".
  */
-import type { ConnectRelayOptions } from './connect-session.js';
-import { assertTimeoutMs } from './connect-session.js';
+import type { ConnectRelayOptions, RelaySessionHooks } from './connect-session.js';
+import { assertTimeoutMs, reportEndpoint } from './connect-session.js';
 import { RelayError } from './errors.js';
 import {
   type ConnectRelayPublisherOptions,
@@ -114,7 +114,7 @@ export function connectSupervisedPublisher(options: ConnectSupervisedPublisherOp
 }
 
 /** How a supervisor opens one generation's connection. */
-export type ConnectPublisher = (options: ConnectRelayPublisherOptions) => Promise<RelayPublisher>;
+export type ConnectPublisher = (options: ConnectRelayPublisherOptions & RelaySessionHooks) => Promise<RelayPublisher>;
 
 /** One generation as the supervisor holds it. */
 interface Generation {
@@ -272,6 +272,9 @@ export async function superviseRelayPublisher(
         ...connection,
         namespace,
         signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
+        [reportEndpoint]: (endpoint) => {
+          connection.url ??= endpoint;
+        },
       });
     } finally {
       attemptInProgress = undefined;

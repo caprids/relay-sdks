@@ -1,0 +1,46 @@
+{
+  "source": "spec/behavior.md, \"Token-rooted endpoint\" and the Token root row of the Arguments table; the root claim is moq-token's",
+  "note": "Each case is one connect call with no endpoint and the token its provider returns. `payload` is a JWT payload: the suite writes it as JSON, encodes it as UTF-8 base64url without padding, and puts it between a header and a signature, which the SDK does not read. `payloadText` is a payload written verbatim instead. `token` is what the provider returns: a string, or null for no token (undefined in TypeScript, None in Python). A case with `expected` dials exactly that URL, with the token added as its `jwt` query parameter. A case with `error` fails before the transport factory runs: `type` is TypeError in both languages; `range` is RangeError in TypeScript and ValueError in Python.",
+  "cases": [
+    { "name": "hosted token", "payload": { "root": "acme", "put": [""], "get": [""], "iat": 1761696000 }, "expected": "https://relay.mux.global/acme" },
+    { "name": "root of several fields", "payload": { "root": "acme/rooms/42" }, "expected": "https://relay.mux.global/acme/rooms/42" },
+    { "name": "leading and trailing slashes dropped", "payload": { "root": "/acme/rooms/" }, "expected": "https://relay.mux.global/acme/rooms" },
+    { "name": "several leading and trailing slashes dropped", "payload": { "root": "//acme//" }, "expected": "https://relay.mux.global/acme" },
+    { "name": "exp beside the root", "payload": { "root": "acme", "exp": 1900000000 }, "expected": "https://relay.mux.global/acme" },
+    { "name": "every allowed punctuation character", "payload": { "root": "a-._~!$&'()+,;=:@Z9" }, "expected": "https://relay.mux.global/a-._~!$&'()+,;=:@Z9" },
+    { "name": "empty root is the whole relay", "payload": { "root": "" }, "expected": "https://relay.mux.global/" },
+    { "name": "slash root is the whole relay", "payload": { "root": "/" }, "expected": "https://relay.mux.global/" },
+    { "name": "no token", "token": null, "error": "type" },
+    { "name": "empty token", "token": "", "error": "type" },
+    { "name": "opaque token", "token": "opaque-token", "error": "type" },
+    { "name": "two parts", "token": "abc.def", "error": "type" },
+    { "name": "payload not base64url", "token": "a.!!!.c", "error": "type" },
+    { "name": "payload with a character outside base64url", "token": "e30.eyJyb290IjoiYWNtZSJ9!!!!.sig", "error": "type" },
+    { "name": "payload in standard base64, with +", "token": "e30.eyJyb290IjoiYWNtZSIsIngiOiJ+fiJ9.sig", "error": "type" },
+    { "name": "payload in standard base64, with /", "token": "e30.eyJyb290IjoiYWNtZSIsIngiOiI/In0.sig", "error": "type" },
+    { "name": "padded payload", "token": "e30.eyJyb290IjoiYWNtIn0=.sig", "error": "type" },
+    { "name": "payload with a trailing newline", "token": "e30.eyJyb290IjoiYWNtIn0\n.sig", "error": "type" },
+    { "name": "payload not JSON", "payloadText": "{\"root\": ", "error": "type" },
+    { "name": "payload with NaN, which JSON does not have", "payloadText": "{\"root\": \"acme\", \"exp\": NaN}", "error": "type" },
+    { "name": "payload with a byte order mark before the JSON", "payloadText": "\ufeff{\"root\": \"acme\"}", "error": "type" },
+    { "name": "payload a JSON string", "payload": "acme", "error": "type" },
+    { "name": "payload a JSON array", "payload": [{ "root": "acme" }], "error": "type" },
+    { "name": "no root claim", "payload": { "put": [""], "get": [""] }, "error": "type" },
+    { "name": "number root", "payload": { "root": 42 }, "error": "type" },
+    { "name": "null root", "payload": { "root": null }, "error": "type" },
+    { "name": "list root", "payload": { "root": ["acme"] }, "error": "type" },
+    { "name": "empty field inside the root", "payload": { "root": "acme//rooms" }, "error": "type" },
+    { "name": "space in the root", "payload": { "root": "acme/a b" }, "error": "range" },
+    { "name": "percent in the root", "payload": { "root": "a%20b" }, "error": "range" },
+    { "name": "asterisk in the root", "payload": { "root": "acme/*" }, "error": "range" },
+    { "name": "non-ASCII root", "payload": { "root": "café" }, "error": "range" },
+    { "name": "dot-dot field", "payload": { "root": "acme/.." }, "error": "range" },
+    {
+      "name": "33 fields",
+      "payload": {
+        "root": "f01/f02/f03/f04/f05/f06/f07/f08/f09/f10/f11/f12/f13/f14/f15/f16/f17/f18/f19/f20/f21/f22/f23/f24/f25/f26/f27/f28/f29/f30/f31/f32/f33"
+      },
+      "error": "range"
+    }
+  ]
+}

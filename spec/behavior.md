@@ -23,6 +23,9 @@ against that file.
   (`?jwt=` or a bare `?jwt`), including one among several `jwt` parameters, is an argument error
   (see "Arguments") rather than a way to connect with no credential. The SDK does not treat it as
   absent. A whitespace-only value is not empty and is sent as given, as a token callback's would be.
+- The endpoint is optional. A connect call given none dials the hosted Relay rooted at its token's
+  root, the [token-rooted endpoint](#token-rooted-endpoint). A connection given an endpoint is
+  unchanged.
 - SDK-generated logs and error text do not include the token, and SDK tooling does not persist it
   to disk. Tooling redacts the supplied token from browser diagnostics it forwards. The browser
   itself is outside that guarantee: Chromium can log the full authenticated WebTransport URL on
@@ -179,6 +182,8 @@ container, copied once, and only then used. Both roles apply the same rules, so 
 publisher accepts is one the subscriber accepts. Arguments are checked before connection or slot
 state at every entry point: a bad argument is reported the same way on a closed connection or a busy
 track, and it never reaches the token provider, the transport factory, a request id or a stream. The
+token root is the exception: the provider supplies it, so it is checked after the provider runs, and
+still before the transport factory. The
 portable cases live in `vectors/arguments.json` and run in every SDK's suite. The table also lists
 the local checks that stay where they are consumed (deadlines, track registration, object status,
 event capacity). They follow the same class rule, and only track registration is checked after
@@ -189,7 +194,8 @@ connection state, because it depends on the connection's registry.
 | Namespace | 1 to 32 non-empty string fields in an array (TypeScript) or a list or tuple (Python); sent verbatim, never split or joined on `/`. The 32-field limit is `limits.maxNamespaceFields` in `protocol.json`. A discovery prefix follows the same rule. | any other container, including a single string; no fields; a field that is not a non-empty string | more than 32 fields | `connectRelayPublisher` / `connect_relay_publisher`; `subscribe`, `subscribeEvents` / `subscribe_events`, `trackSource.subscribe` / `track_source.subscribe`; the prefix of `namespaceEvents` / `namespace_events` |
 | Track name | A non-empty string, in both roles. | anything else | | `registerTrack` / `register_track`; the three subscriber entry points |
 | Properties | A list of `{type, value}` pairs. `type` is a non-negative integer; an even type carries a non-negative integer, an odd type carries bytes, which are copied. Integers are bounded by what the language's core varint carries: 2^53-1 in TypeScript, 2^64-1 in Python. Each byte value is at most `limits.maxPropertyValueBytes` (its 16-bit wire length). A track's properties encode to at most `limits.maxTrackPropertiesBytes` (65,525 bytes, the room SUBSCRIBE_OK leaves them), hold at most `relay.limits.maxTrackProperties` (64) pairs, and keep Default Publisher Priority (`0x0E`) at most 255 and Default Publisher Group Order (`0x22`) at 1 or 2 (`trackProperties`, draft-22 §10.4 and §10.5), because otherwise the track registers but every subscribe to it fails while the publisher's writes time out. An object's properties on `write` encode to at most `relay.limits.maxObjectPropertiesBytes` (64 KiB), because the relay drops a larger object without an error to either side. The SDK measures the encoding with the core's own encoder before any slot or stream is taken. | not a list; a pair without the shape; a type or integer value that is not a non-negative integer the varint carries; bytes where an integer belongs or an integer where bytes belong | a byte value longer than its wire length; a list whose encoding exceeds its bound; track properties with more than 64 pairs, or a `0x0E` or `0x22` value draft-22 rules out | `registerTrack` / `register_track`; `write` on a track or group writer |
-| Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. | not a string; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
+| Endpoint | A string holding an absolute `https` URL with a host and no fragment or userinfo. A `jwt` query parameter, when present, is not empty; this holds for every `jwt` parameter when there are several. Or no endpoint at all (`undefined` in TypeScript, `None` in Python), when the token roots it (Token root). | not a string, including `null` in TypeScript; a string that does not parse as an absolute URL, including an `https` URL with no host | another scheme; a fragment or userinfo; an empty `jwt` parameter | `connectRelaySubscriber` / `connect_relay_subscriber`, `connectRelayPublisher` / `connect_relay_publisher` |
+| Token root | With no endpoint, a token provider whose token is a JWT: three `.`-separated parts whose second is a JSON object in unpadded base64url, read without verifying the token. Its `root` claim is a string. The root without its leading and trailing `/`, split on `/`, follows the Room rule; an empty root roots nothing ([token-rooted endpoint](#token-rooted-endpoint)). Checked after the provider runs, before the transport factory. | no token provider; no token or an empty one; a token that is not such a JWT; a `root` claim missing or not a string; as Room, such as an empty field (`acme//rooms`) | as Room: a field with a character the Room rule refuses, `.` or `..`, or more than 32 fields | the four connect calls with no endpoint |
 | Room | The endpoint follows the Endpoint rule and the room the Namespace rule. Each room field is also made only of the characters a URL path carries unchanged and the relay reads back as the same field, `A`–`Z`, `a`–`z`, `0`–`9` and `-._~!$&'()+,;=:@`, and is not `.` or `..` ([room-rooted endpoints](#room-rooted-endpoints)). Checked endpoint first, then room. | as Endpoint and Namespace | as Endpoint and Namespace; a room field with any other character, such as a space, `%`, `/`, `*`, `?`, `#`, `\` or a non-ASCII character, or a field that is `.` or `..` | `roomEndpoint` / `room_endpoint` |
 | Deadline | A number in (0, 2147483647] milliseconds in TypeScript, (0, 2147483.647] seconds in Python: the largest delay a JavaScript timer holds, and the same bound in both SDKs. The connection, request and write deadlines share one check. | not a number, including a boolean | zero, negative, NaN, infinite, or above the bound | `connectTimeoutMs` / `connect_timeout` on both connect calls; `requestTimeoutMs` / `request_timeout`; `writeTimeoutMs` / `write_timeout` on `registerTrack` / `register_track` |
 | Track registration | A track name not yet registered on this publisher connection, including after its writer closed. Checked after the track name, properties and deadline, and after connection state. | | a name already registered | `registerTrack` / `register_track` |
@@ -229,7 +235,9 @@ Messages are not a compatibility contract. The class and the point of rejection 
   before connecting a publisher or sending a subscription.
 - `roomEndpoint(endpoint, room)` / `room_endpoint(endpoint, room)` builds the room-rooted endpoint,
   so an application does not assemble the URL itself. Given only the room, it roots
-  `DEFAULT_ENDPOINT` ([room-rooted endpoints](#room-rooted-endpoints)).
+  `DEFAULT_ENDPOINT` ([room-rooted endpoints](#room-rooted-endpoints)). A connect call given no
+  endpoint dials the room-rooted endpoint of its token's root on `DEFAULT_ENDPOINT`
+  ([token-rooted endpoint](#token-rooted-endpoint)), so the shortest call is the recommended form.
 - A known track can be subscribed directly. The SDK does not interpret payloads and does not
   assume a track carries audio, video, or timestamps.
 - Object callbacks run as the stream layer delivers objects. The callback path adds no application queue, no
@@ -419,6 +427,36 @@ token, opens no connection and changes nothing about `connect*`. The cases live 
 - **Query.** The endpoint's query is kept unchanged after the new path, including a present but
   empty `?`. A `jwt` parameter stays in the query, never in the path, and the connect calls read it
   there as usual. The endpoint has no fragment to keep, because the Endpoint rule refuses one.
+
+### Token-rooted endpoint
+
+A connect call given no endpoint (`url` left out in TypeScript, `None` in Python) dials the hosted
+Relay rooted at its token's root ([issue #374](https://github.com/muxinc/relay-sdks/issues/374)).
+This holds for `connectRelaySubscriber`, `connectRelayPublisher`, `connectSupervisedSubscriber` and
+`connectSupervisedPublisher`, and their Python spellings. The cases live in
+`vectors/token-rooted-endpoint.json` and run in every SDK's suite.
+
+- **Endpoint.** The connection runs the token provider as usual, then reads the token's `root`
+  claim without verifying the token. The relay verifies it, so a root the token was not signed
+  with fails at connect with `UNAUTHORIZED`, as a wrong path does. The root is a `/`-separated path:
+  without its leading and trailing `/`, its fields are the room, and the connection dials what
+  `roomEndpoint(DEFAULT_ENDPOINT, fields)` / `room_endpoint(DEFAULT_ENDPOINT, fields)` returns, with
+  the token in `jwt`. Namespaces are then relative to the root, as on any room-rooted endpoint. An
+  empty root, a grant of the whole relay, dials the bare `DEFAULT_ENDPOINT`: namespaces relative to
+  an empty root are absolute.
+- **Credential.** A `RelayCredential` roots the endpoint at its `token`'s root. The token's expiry
+  is read as on any connection ([credential lifetime](#credential-lifetime)).
+- **Failures.** A missing token provider, no token, a token that is not a JWT with a JSON object
+  payload, a `root` claim that is missing or not a string, and a root the Room rule refuses all
+  fail locally, before the transport factory runs, by the Token root row of the
+  [Arguments](#arguments) table. The message says to pass the endpoint instead.
+- **Supervisors.** A supervised connection given no endpoint keeps the endpoint its first
+  connection dialed once that connection is up, and every reconnect and [rotation](#rotation) dials
+  it with a fresh token. A later token whose grant does not cover that path fails `UNAUTHORIZED`
+  instead of moving the connection to another room. Until the first connection is up, nothing has
+  joined a room, so each attempt roots the endpoint at its own token.
+- **Scope.** `root` is moq-token's claim, which the hosted Relay's tokens carry. Any other relay, or
+  a room other than the token's root, takes an explicit endpoint, which the connection uses as given.
 
 ## Async subscription consumption
 
@@ -685,6 +723,9 @@ Both supervisors:
   attempt that is not retried (that failure). It never rejects. A [rotation](#rotation) reports
   nothing: the status stays `live`.
 - Replace their connection before its credential expires, make-before-break ([rotation](#rotation)).
+- Given no endpoint, dial the [token-rooted endpoint](#token-rooted-endpoint) their first connection
+  dialed, once it is up, for every later connection, so a later token whose grant does not cover it
+  fails `UNAUTHORIZED` instead of moving to another room.
 
 ### Rotation
 
@@ -1558,6 +1599,23 @@ Implemented in both SDKs.
   the group the frame was written to or that was reset on its behalf travels with it. Closing the
   writer FINs the open group, reports every waiting frame as dropped, and refuses further frames
   with `CLOSED`. The registered track stays the application's to close.
+- A replaceable track (`createReplaceableTrack` / `ReplaceableTrack`) publishes a track the
+  application can replace mid-stream, for interruptions ([track
+  replacement](media-layer.md#track-replacement)). It registers its first track under the given name
+  and lists it in the catalog (`catalog.service.update(catalog.build(name))` /
+  `catalog_service.update(build_catalog(name))`) at creation. Each replacement registers a new track,
+  `<name>-<n + 1>` for replacement `n` from 1 unless the application names it, updates the catalog
+  with that name, drops what the old track has not sent (frames still waiting resolve `dropped`, the
+  old frame writer closes) and closes the old track. The new track takes every frame written from the
+  call on. Registration or a catalog that fails leaves the current track in place, and a new track
+  registered before the catalog failed is closed; the failed attempt uses its name up, and the next
+  asks for the next. Closing retires the current track at once, so nothing waiting on it goes out
+  later, and finishes once every old track still closing has closed. Frames written to a replacement while the relay has
+  not subscribed to it wait, in order, until its first relay subscription or until the demand wait
+  (default 2 s, 0 for none) runs out, then go to the frame writer one at a time, so a listener that
+  subscribes once the new catalog reaches it misses none of the new reply. The first track never
+  waits. Closing drops what has not been sent and closes the current track; writes and replacements
+  are refused after it. Every frame still gets exactly one outcome.
 
 ## Media subscribing
 
@@ -1694,6 +1752,22 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   frame `resync`, so the backlog does not become lasting latency. It does so in a poll of its own:
   frames before it in the same poll are returned first, with a wait of 0.
   A lasting increase in delay therefore costs one target latency, not a black or silent player.
+- Timestamp playout (TypeScript only, frame grouping only, off by default): `timestampPlayout`
+  holds a frame that arrives ahead of its timestamp, for a talker that sends faster than real time
+  (a text-to-speech agent). A frame, and every one after it, waits until its timestamp is within
+  the lead (`leadUs`, default 100 ms; a function is read at every poll, and a value it returns that
+  is not a finite number from 0 up counts as the default) of the position; the poll's wait says when.
+  While the clock has no position, the first frame considered anchors one of the sequencer's own,
+  that frame's timestamp at the clock's local time, until the clock has a position or is reset. Only
+  a frame more than `horizonUs` (default 30 s) ahead of the position (or, before the clock has one, of
+  the sequencer's own) resyncs forward; one within it is held instead. Late drop, resync and catch-up are unchanged. The held bound grows to cover the
+  horizon at 2.5 ms frames. A frame held is counted once (`early`). The audio player input's
+  `playoutLeadUs` is the lead that keeps its jitter buffer at its target. The sequencer keeps the
+  least delay seen from the clock's position to its local time since the clock was last reset, with
+  the lead in force then; when the delay now exceeds it, less any growth of the lead since, by more
+  than 40 ms (underruns left the clock behind), held frames are released early by the excess beyond
+  those 40 ms, so the player's jitter buffer holds it and trims it back. A lead that changes while
+  the delay does not releases nothing early.
 - A want's Restart or Move restarts the sequencer: everything held is forgotten, group IDs start
   over, the clock is reset so the new timeline is not judged against the old anchor, and the next
   frame carries `restart`, even when nothing was delivered before and even when that frame comes
@@ -1715,7 +1789,12 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   each group as one subgroup, as the frame writer sends it. A want read through a reader keeps
   `drainMs` / `drain` at 0, the default: a drained old subscription's groups would arrive after the
   Move, indistinguishable from the new subscription's. Counters: delivered, late,
-  skipped groups, resyncs, untimed. The decisions are pinned by `vectors/frame-sequencer.json`.
+  skipped groups, resyncs, untimed, and in TypeScript early. The decisions are pinned by
+  `vectors/frame-sequencer.json`.
+- A listener follows a track replacement by the catalog: `findReplacementTrack` /
+  `find_replacement_track` returns nothing while a newer catalog still lists the track playing (its
+  namespace and name), and otherwise the first track listed with that track's namespace, role and
+  render group, or nothing when there is none (a removal, not a replacement).
 
 ## Package boundaries
 

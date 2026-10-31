@@ -403,6 +403,23 @@ def group_msf_tracks(tracks: Sequence[MsfCatalogTrack]) -> tuple[MsfTrackGroup, 
     )
 
 
+def find_replacement_track(current: MsfCatalogTrack, tracks: Sequence[MsfCatalogTrack]) -> MsfCatalogTrack | None:
+    """Find the track in a newer catalog that replaces ``current``, a track of an older one.
+
+    A publisher that replaces a track lists a new name in its place (msf-01 §5.3: a changed track is a
+    new Namespace|Name tuple), as a voice agent does to interrupt its own reply. While ``tracks`` still
+    lists ``current``'s namespace and name the answer is ``None``. Otherwise it is the first track listed
+    with ``current``'s namespace, role and render group, or ``None`` when there is none (the track was
+    removed, not replaced).
+    """
+    here = [track for track in tracks if track.namespace == current.namespace]
+    if any(track.name == current.name for track in here):
+        return None
+    return next(
+        (track for track in here if track.role == current.role and track.render_group == current.render_group), None
+    )
+
+
 def _reject_constant(name: str) -> object:
     # JSON.parse rejects NaN and Infinity; so does this reader.
     raise ValueError(f"MSF catalog is not valid JSON: {name}")

@@ -808,6 +808,101 @@ delivery timeouts. They derive from the same keyframe interval, about one interv
 the reader's two, so a publisher stops spending bandwidth on frames the reader would drop. Nothing
 links the two on the wire.
 
+#### Timestamp playout
+
+TypeScript only (the frame sequencer's `timestampPlayout`), off by default. A text-to-speech agent
+generates its reply faster than real time, and MoQ lets it send each frame as it is generated,
+stamped with its slot on the timeline, rather than pace it as WebRTC must. A player then has to hold
+what arrives early and play each frame at its timestamp. The sequencer without it does not: a frame
+more than the clock's target latency ahead of the position (`AUDIO_ONLY_TARGET_LATENCY_US`, 500 ms,
+for audio) resyncs it forward, as after a stall, which drops what the player holds and re-anchors on
+the newest frame, and the jitter buffer trims what it holds beyond its target. relay-dev's offline
+replay of bursty TTS traces through it discarded about 90% of the clip (moq-netbench
+`plans/README.md`, "Stage 4 wave 2's agent cells").
+
+```ts
+const input = player.addInput({ clock, decoderConfig });
+const sequencer = createFrameSequencer({
+  clock,
+  grouping: 'frame',
+  timestampPlayout: { leadUs: () => input.playoutLeadUs },
+});
+```
+
+- A frame, and every frame after it, waits until its timestamp is within `leadUs` of the clock's
+  position. The poll's `waitUs` says when, so a frame reader releases each frame on time.
+- The lead is what the player holds beyond what is audible: `input.playoutLeadUs`, the output delay
+  (`baseLatency + outputLatency + player.outputDelayUs`) plus the jitter target now, keeps the
+  jitter buffer at its target. A longer constant lead leaves more held than the target, and the
+  buffer's trim drops the excess every second; a shorter one leaves the buffer short of its target.
+  Default 100 ms, the player's default target and a 40 ms output delay.
+- While the clock has no position (nothing has played yet, or after a reset), the first frame
+  anchors a position of the sequencer's own on the clock's local time. The clock's takes over as
+  soon as the player reports.
+- Only a frame more than `horizonUs` (default 30 s) ahead of the position, the clock's or the
+  sequencer's own, resyncs forward, as a timeline jump. The
+  sequencer holds up to a horizon of frames (at 2.5 ms each), beyond the 1,024 it holds otherwise.
+- A live talker's frames are never early, so they play as without it: late drop, resync and
+  catch-up are unchanged. `stats.early` counts the frames held. A restart (a want's Restart or Move)
+  drops every frame held.
+- **Delay added by underruns is given back.** Each underrun leaves the clock further behind local
+  time, by the silence it played. Without timestamp playout, frames that then arrive early fill the
+  jitter buffer past its target and its trim gives that delay back. With it, frames reach the buffer
+  only a lead ahead, so the buffer never holds more than its target and never trims: a queue that
+  built and drained would leave its delay for good. So the sequencer keeps the least delay seen from
+  the clock's position to its local time since the clock was last reset, with the lead in force then,
+  and releases held frames early by however much the delay now exceeds it, less any growth of the
+  lead since (a jitter target that grew holds more on purpose), beyond 40 ms (a frame or two of report
+  noise). The buffer then holds that excess and trims it, as it does without timestamp playout. A TTS
+  talker whose frames came early all along has added nothing, and plays at its timestamps as before.
+
+**Measured on relay-dev's voice benchmark.** Stage 4ai-tts (relay-sdks build tag
+`netbench/stage4-ai`, 5a4bd33, the same code without the give-back above; moq-relay 0.17.9; runs
+run-20261029-054413-95db41, run-20261029-102627-5276c7, run-20261029-105904-7de8ee and
+run-20261029-112630-e14a13; finding C-3 in relay-dev `moq-netbench/results/voice/FINDINGS.md`): the
+agent's TTS fed at four times real time, each frame stamped with its slot. With timestamp playout
+the listener played 100% of the audio on a clean path, 99.7% with 60 ms loss bursts and 98.1% on
+LTE with a download (R 89.2, 87.9 and 71.6). Without it, the same player played 5% (R 11.2 clean):
+it resyncs on early frames. WebRTC fed the same bursts played 39.2% clean (38.3% on LTE) and dropped
+the rest, whatever its jitter buffer target; paced, it played 100%. Wave 2's agent cells (finding
+R-AG-01) had shown the player without it failing the same feed live: every clean round suspect, and
+on LTE 2,497 and 2,159 ms mouth-to-ear with 41.4 and 24.1 drops a minute, R 0.
+
+The same runs found the give-back's reason (finding A-16): on LTE with a download, a paced talker
+through timestamp playout sat at 960 ms mouth-to-ear (R 43.5), against 378 ms for the bursty talker
+and 540 ms for paced WebRTC; with 60 ms loss bursts, 252 against 146 ms. A simulation of the
+sequencer and the playout clock with a model of the jitter buffer (its grow, shrink, trim and hard
+bound; a paced 20 ms talker; a queue growing to 700 ms over 30 s, then draining) reproduces it: the
+median mouth-to-ear 10 to 30 s after the drain was 120 ms without timestamp playout and 840 ms with
+it, as the clock never caught up. With the give-back it is 140 ms. The bursty talker through the
+same queue played 98.1% at 300 ms after the drain without the give-back, 97.4% at 120 ms with it;
+on a path without a queue neither talker changed (bursty 100% played, paced 100 ms). The bench has
+not run the give-back yet.
+
+Measured locally on 2026-10-29 (relay-3cnp.399, before the give-back): moq-relay 0.17.9
+(`30fd9d450`) built from source and the talker in one network namespace of relay-dev's moq-netbench
+rig (`rig local`), the listener in the other behind the rig's profile (`rig apply`, the downlink
+shaped on the peer), both on this SDK over native QUIC. The listener is relay-sdks' own receive chain
+composed as the example listener (frame reader, frame sequencer, audio input, its worklet and the
+WASM Opus decoder), with Web Audio stood in for in real time (558-frame render callbacks, a 20 ms
+output delay); a frame counts as played when its decoded audio reaches the output. A TTS agent sends
+six 8 s turns, 2 s apart, each handed over at four times real time from its first frame's slot
+(2,400 frames of 20 ms), with and without `timestampPlayout` (`leadUs: () => input.playoutLeadUs`).
+Without it the player discarded about 91% of the clip on every link: the sequencer dropped most
+frames as late and the jitter buffer trimmed about 6 s, and what it did play came up to 5.9 s before
+its slot. With it, every frame that arrived played, at a constant delay from its slot within each
+turn (the listener's own delay plus the lead), with no trim and no resync; QUIC's resends on the
+lossy link arrived while their frames were still held. The one frame lost in a second lossy run was
+100 ms into the first turn, sent 75 ms ahead of its slot: too little lead for a resend over a 50 ms
+round trip, as for any frame a live talker sends.
+
+| Link (rig profile) | Played without it | Its losses | Played with it | Mouth-to-ear from the slot, with it |
+| --- | --- | --- | --- | --- |
+| Clean | 203 of 2,400 (91.5% dropped) | 1,938 late, 6.18 s trimmed | 2,400 of 2,400 | 40 ms (53 ms max) |
+| `loss-random-2` (50 ms RTT, 2% loss) | 206 (91.4%) | 1,942 late, 6.20 s trimmed | 2,400; 2,399 in a second run | 64 ms (77 ms) |
+| `narrow` (30 ms RTT, 2/1 Mbit/s, 500 ms FIFO) | 210 (91.2%) | 1,935 late, 6.16 s trimmed | 2,400 | 47 ms (60 ms) |
+| `narrow`, a bulk CUBIC download filling the FIFO | 215 (91.0%) | 1,921 late, 6.61 s trimmed, 12 resyncs | 2,398 (2 late, 1 underrun) | 473 ms (513 ms) |
+
 ### Audio player
 
 [Issue #314](https://github.com/muxinc/relay-sdks/issues/314). TypeScript only, in
@@ -1015,7 +1110,11 @@ first audio from the cut's start on is joined on without silence for the range c
 before the cut's start that was still decoding can land first and plays as usual, and a frame lost
 outside the range is still filled with silence. With no range it drops
 everything held. A talker's interrupt, read from the [interrupt track](#interrupt-track), is a cut
-range as it is.
+range as it is. The worklet reports at once on the quantum after it applies a cut, and
+`input.stats.cutHeardAtUs` then says when that quantum reaches the speaker (its render time plus the
+output delay, on the clock's time source), so the cut audio has stopped there; `onCutHeard(atUs)`
+says so as it happens. It is `null` from each `cut()` until the buffer has applied it. [Track
+replacement](#track-replacement) times a barge-in with it.
 
 **Echo cancellation.** Chromium's echo canceller takes only audio that WebRTC plays as its
 reference. `createEchoCancellationLoopback(context, player.output)` sends the output through two
@@ -1120,6 +1219,99 @@ test runs it over the in-memory hub. Against `sjc` on 2026-10-19, with the page 
 on a scripted microphone, over four runs of three turns each, every interrupt reached the page's
 player 32 to 50 ms after the bot's last audio, and each run cut 117 to 140 ms of held reply audio, with
 no underrun.
+
+## Track replacement
+
+The moq.dev post 'OpenAI still has a WebRTC Problem' (2026-10-27) proposes interruptions by
+replacing the audio track: the agent starts a new track for its new reply and drops the old one, and
+the player discards the old track's buffer and switches to the new one by timestamp. A text-to-speech
+reply is generated faster than real time, so a player can hold seconds of it, more than an
+[interrupt](#interrupt-track) has to cut. TypeScript and Python publish it; the TypeScript example
+listener follows it.
+
+**The publisher.** `createReplaceableTrack(publisher, { track, catalog, ... })` in
+`@caprid/relay/media`, `ReplaceableTrack(publisher, track=..., catalog_service=..., build_catalog=...)`
+in `caprid_relay.media`, wraps a frame writer (frame grouping by default) over the current track.
+`replace()` registers the next track, `audio-2`, `audio-3` and so on (or the application's `name(n)`),
+lists it in the catalog in the old one's place, drops what the old track has not sent and closes it. The
+drop happens synchronously in the call, before anything else runs, so no frame of the old track goes out after the switch.
+msf-01 §5.3 makes a changed track a new name, and a name is not reused on a connection, so a new
+track is the conforming way. A supervised publisher's new generation would replace the whole
+connection, so the track name it is. The listener subscribes to the new track once the new catalog
+reaches it, about a round trip, and a frame writer skips frames the relay has no subscription for,
+so frames written to a replacement wait, in order, for its first relay subscription (`demandWaitMs` /
+`demand_wait`, default 2 s), then go out.
+
+**The listener** keeps the catalog subscription open. When a catalog no longer lists the track it
+plays and lists another of the same role, render group and namespace (`findReplacementTrack` /
+`find_replacement_track`), it closes the old track's frame reader and subscription, restarts the
+frame sequencer (dropping every frame it holds; the clock resets), cuts everything the player
+holds (`input.cut()`), starts a new transcript (sequence numbers belong to one track), and subscribes
+to the new track, whose first frame then anchors the clock: the switch is by timestamp. A replacement
+that comes while the listener is still setting up is followed once it has started. The listener depends on
+the catalog subscription for this, so an error of it after the first catalog is reported (`onError`). A
+replacement whose subscription the relay rejects, which arrives asynchronously after the old track was
+closed, leaves the new track current and silent: the next catalog that still lists it subscribes to it
+again, the same steps without a replacement event. A listener that joins later takes the catalog's audio track whatever its
+name: it drops the subscription the quick join made by the conventional name `audio`, whose failure (a
+retired track) then fails nothing. The new track must have the old one's codec, since the input keeps its decoder. The example's
+`onTrackReplaced` reports three steps on the clock's time source: `seen` (the catalog arrived and the
+old audio was cut), `stopped` (`onCutHeard`: the old audio has stopped at the speaker) and `started`
+(the first clock report of the new track's audio, after the cut is heard). Until the cut is heard, after a
+replacement or a retried subscription alike, the listener passes no report to the clock: one the worklet posted before it applied the cut describes the
+old track's audio and would re-anchor the clock the restart reset.
+
+**Against the interrupt track.** An interrupt cuts a range of one track and leaves it open, so
+audio still in flight inside the range is dropped on arrival; a replacement stops reading the old
+track altogether, so nothing of it can arrive late, and its new reply needs no timestamp past the
+old one's end. Either stops the old audio once its message, the interrupt object or the catalog, has
+reached the listener.
+
+Measured locally on 2026-10-29 (relay-3cnp.399): moq-relay 0.17.9 (`30fd9d450`) built from source
+and the talker in one network namespace of relay-dev's moq-netbench rig (`rig local`), the listener
+in the other behind the rig's profile (`rig apply`, the downlink shaped on the peer), both on this
+branch's SDK over native QUIC. The talker is a TTS agent: 20 ms Opus frames handed over at four
+times real time, each stamped with its slot. The listener is relay-sdks' own receive chain composed
+as the example listener (frame reader, frame sequencer, audio input, its worklet and the WASM Opus
+decoder), plus timestamp playout in the sequencer (the frame sequencer's `timestampPlayout`, a separate
+opt-in change; it holds a reply that arrives faster than real time), with Web Audio stood in for in real time (558-frame render
+callbacks, a 20 ms output delay); a frame counts as played when its decoded audio reaches the output, read from markers the
+harness puts in place of the PCM. The harness is not in this repository (relay-3cnp.399's task
+directory).
+
+Each run replaces the reply eight times, each 1.7 s into a 20 s turn, when the listener holds about
+5.2 s of the old reply ahead of what it plays (6 s behind the full FIFO), nearly all of it in the
+sequencer (the jitter buffer held 23 to 80 ms). The new reply starts at the replace's own time, on
+`audio-2`, `audio-3` and so on, at the same speed. Times are from the talker's `replace()` call, median
+and greatest of the eight, on one host's clock; "stopped" and "first heard" are read from the
+output, the signals beside them from `onTrackReplaced`:
+
+| Link (rig profile) | Catalog seen | Old audio stopped | New audio first heard | `stopped` / `started` signals |
+| --- | --- | --- | --- | --- |
+| Clean | 2 ms (4 ms) | 31 ms (37 ms) | 43 ms (51 ms) | 26 / 30 ms |
+| `loss-random-2` (50 ms RTT, 2% loss) | 27 ms (28 ms) | 48 ms (56 ms) | 118 ms (124 ms) | 50 / 116 ms |
+| `narrow` (30 ms RTT, 2/1 Mbit/s, 500 ms FIFO) | 17 ms (19 ms) | 41 ms (47 ms) | 87 ms (92 ms) | 41 / 84 ms |
+| `narrow`, a bulk CUBIC download filling the FIFO | 447 ms (587 ms) | 478 ms (617 ms) | 919 ms (1,091 ms) | 474 / 911 ms |
+
+The old audio stops one way after the replace, the catalog's trip to the listener, plus at most a
+render callback and the output delay (31.6 ms here). The new audio starts about a round trip later:
+the subscription to the new track reaches the relay and the talker, whose waiting frames then travel
+the same way, and the jitter buffer fills to its target. In all 32 replacements the old track played
+only until the catalog arrived (1 to 3 frames after the call, 17 to 31 behind the full FIFO) and none
+of its remaining 5 s of held audio played later. A queue in front of the listener delays both by its
+depth, as it delays everything on that link. After the listener stopped passing reports from before the cut to the clock,
+a rerun gave the same numbers within a few milliseconds (clean: stopped 27 ms, first heard 43 ms;
+`loss-random-2`: 51 and 119 ms).
+
+Measured on the bench: relay-dev's voice benchmark, scenario 4ai-tts, on the build tagged
+`netbench/stage4-ai` (relay-sdks 5a4bd33; runs `run-20261029-054413-95db41`,
+`run-20261029-102627-5276c7`, `run-20261029-105904-7de8ee` and `run-20261029-112630-e14a13`), finding
+C-4. Its interrupt comes when the listener already has 5 s of the old reply. The listener following
+the replacement stopped the old audio a median 107 ms after the interrupt on the clean link (380 ms
+on LTE with a download), played at most 60 ms of stale audio, and started the new reply at 107 ms. A
+paced WebRTC agent did the same (96 ms, no stale audio; 560 ms on LTE against MoQ's 329), while WebRTC
+fed bursts through a 2 s jitter buffer played up to 540 ms of stale audio. The benchmark's listener
+also ran timestamp playout (a separate opt-in change), which track replacement does not need.
 
 ## Transcript track
 

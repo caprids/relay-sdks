@@ -13,6 +13,19 @@ each section says what changed and what to do about it. How to cut a release is 
   and the other is closed. On a network that silently drops UDP, a connect no longer waits 4 s. **Breaking:**
   `handshakeTimeoutMs` is gone, and passing it throws a `TypeError`; use `webSocketDelayMs`. `onFallback` now runs when
   a connection ends up on WebSocket, and the transport's `carrier` is undefined until a dial wins.
+- `@caprid/relay-quic`: `nativeQuicTransport({ qlogDir })`, or the `RELAY_QUIC_QLOG_DIR` environment variable, writes a
+  qlog trace of every connection attempt into that directory, one `relay-quic-<ms>-<pid>-<n>.sqlog` file each, from
+  quinn's `qlog` feature. Off by default. A trace holds packet numbers and types, sent packets' sizes, losses, and RTT and
+  congestion metrics, but no frames, stream data or token. A file that cannot be created is skipped and the dial goes on; a
+  directory that cannot be created throws at once. The linux-x64-gnu addon grew from 2,766,896 to 2,912,848 bytes
+  (+5.3%; gzip -9: 1,306,675 to 1,372,739 bytes). Nothing to change in an application.
+- `@caprid/relay-quic`: a native QUIC connection now lets the relay have 1000 unidirectional streams open at once, up
+  from quinn's default of 100, and the new `nativeQuicTransport` option
+  `anticipatedConcurrentIncomingUnidirectionalStreams` sets it. The relay sends each group on a stream of its own, and
+  the credit for a closed stream returns over the client's uplink: in relay-dev's voice benchmark (P-06), a subscriber
+  whose upload queued its uplink for about 2 s starved of stream credit at 100, and with more credit the median delay
+  went from 2865 ms to 21.5 ms locally. The option is the exact limit, an integer from 1 to 65535; any other value
+  throws a `RangeError` at once. Nothing to change in an application.
 - `@caprid/moq-media`: fixes to the Opus loss concealment that 0.1.1 turned on. A decoder reset clears the
   record that the last packet was CELT-only, so the next gap can use in-band FEC again (it stayed off until a
   non-CELT packet decoded). The audio worklet, not the main thread's report of the buffer, which is up to about 20 ms
@@ -30,12 +43,40 @@ each section says what changed and what to do about it. How to cut a release is 
   player at the start, subscribes to the audio with the catalog and holds the frames until the input exists. In
   relay-dev's voice benchmark, time to first audio on a clean path went from 627 to 249 ms (WebRTC 419; spec/media-layer.md,
   "Joining sooner").
+- `@caprid/moq-media`: timestamp playout, off by default. The frame sequencer's
+  `timestampPlayout: { leadUs: () => input.playoutLeadUs }` holds a frame that arrives ahead of its timestamp, as a
+  text-to-speech agent's bursts do, and releases it once its timestamp is within the lead of the playout clock; only a
+  frame more than `horizonUs` (30 s) ahead resyncs forward, where without it one more than the target latency does.
+  Delay that underruns added while a queue built is given back once frames come early again (held frames go out early
+  by it, less 40 ms, and the jitter buffer trims it). `stats.early` counts the frames held, and the audio input's
+  `playoutLeadUs` is the lead that keeps its jitter buffer at its target. In relay-dev's voice benchmark, bursty TTS
+  played 100% with it against 5% without (WebRTC fed the same bursts: 39%); spec/media-layer.md has the numbers.
+- `@caprid/relay`, `@caprid/moq-media`: track replacement for barge-in. `createReplaceableTrack(publisher, { track,
+  catalog: { service, build } })` in `@caprid/relay/media` publishes a track whose `replace()` registers `audio-2`,
+  `audio-3`, ..., lists it in the catalog in the old one's place, drops what the old track has not sent and closes it;
+  frames written to a replacement wait for the relay's first subscription (`demandWaitMs`, 2 s).
+  `findReplacementTrack(current, tracks)` finds the replacement in a newer catalog. The audio input's
+  `stats.cutHeardAtUs` and `onCutHeard(atUs)` say when a cut reaches the speaker (the worklet's report after a cut comes
+  at once and gains `cutId`). The WebCodecs example's `listenAudio` follows a replacement (`onTrackReplaced`, with the
+  phases `seen`, `stopped` and `started`, and `listener.track`). spec/media-layer.md has the local and bench
+  measurements.
 - `@caprid/moq-core`, `@caprid/relay`: `MessageParameters.maxAge` (milliseconds, 0 to 2^53−1) is the MoQ Timestamp
   extension's subscriber max age (parameter `0x915C6`): a publisher that honors it skips a group once a newer group has
   superseded it for that long. A session sends it on SUBSCRIBE and REQUEST_UPDATE only to a relay whose SETUP declared
   the extension's `SETUP_OPTION.MAX_AGE` (`0x915C4`), never on FETCH, TRACK_STATUS or SUBSCRIBE_NAMESPACE, and leaves it
   off otherwise: moq-dev main declares it, moq-relay 0.17.x does not. `RelaySubscriber.maxAgeSupported` and
   `MoqtSession.maxAgeSupported` report whether the relay did. Nothing changes for an application that sets no `maxAge`.
+- `@caprid/relay`: `url` is optional on every connect call: `connectRelaySubscriber`, `connectRelayPublisher`,
+  `connectSupervisedSubscriber` and `connectSupervisedPublisher`, from `@caprid/relay` and `@caprid/relay/node`. Left
+  out, the connection dials `DEFAULT_ENDPOINT` rooted at the token's `root` claim, which it reads without verifying
+  the token: the URL `roomEndpoint` would build from that root (#374). A quickstart is now
+  `connectSupervisedSubscriber({ getToken })`, with namespaces relative to the token's root. `getToken` is then
+  required. A token that is not a JWT, has no string `root` claim, or has a root `roomEndpoint` refuses throws a
+  `TypeError` or `RangeError` before the transport is used. A supervisor keeps the endpoint its first connection
+  dialed for every reconnect and rotation. A call that passes `url` is unchanged.
+- `@caprid/relay`: a token's claims are read only from a JWT payload in unpadded base64url whose JSON starts at its
+  first byte. A padded payload, one in standard base64 with `+` or `/`, or one with a byte order mark has no claims,
+  so its `expiresAt` is `undefined` instead of its `exp`. The relay refuses such a token anyway.
 
 ## 0.2.0
 

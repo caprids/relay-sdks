@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import type { MoqtObject } from '@caprid/moq-core';
-import { createFrameSequencer, createPlayoutClock, LOC_TIMESCALE, LOC_TIMESTAMP } from '@caprid/moq-media';
+import {
+  createFrameSequencer,
+  createPlayoutClock,
+  LOC_TIMESCALE,
+  LOC_TIMESTAMP,
+  type SequencedFrame,
+} from '@caprid/moq-media';
 import { describe, expect, it } from 'vitest';
 
 type Step = {
@@ -66,8 +72,10 @@ describe('spec/vectors/frame-sequencer.json', () => {
         expect(waitUs).toBe(step.poll.waitUs === null ? undefined : Number(step.poll.waitUs));
       }
       if (step.stats) {
-        expect(sequencer.stats).toEqual(
-          Object.fromEntries(Object.entries(step.stats).map(([key, value]) => [key, Number(value)])),
+        // The counters the vector lists; a TypeScript-only counter (`early`) is not in the shared vectors.
+        const listed = step.stats;
+        expect(Object.fromEntries(Object.keys(listed).map((key) => [key, sequencer.stats[key as 'late']]))).toEqual(
+          Object.fromEntries(Object.entries(listed).map(([key, value]) => [key, Number(value)])),
         );
       }
       if (step.targetLatency !== undefined) expect(clock.targetLatencyUs).toBe(Number(step.targetLatency));
@@ -878,5 +886,238 @@ describe('createFrameSequencer: missingGroups', () => {
     const { frames } = sequencer.poll();
     expect(frames).toEqual([expect.objectContaining({ groupId: 2, discontinuity: 'restart' })]);
     expect(frames[0]?.missingGroups).toBeUndefined();
+  });
+});
+
+describe('createFrameSequencer: timestampPlayout', () => {
+  const at = (groupId: number, timestampUs: number) =>
+    object(groupId, 0, [{ type: LOC_TIMESTAMP, value: timestampUs }]);
+  const ids = (frames: { groupId: number }[]) => frames.map((frame) => frame.groupId);
+  // A burst: `count` 20 ms frames from timestamp `fromUs`, groups from `firstGroup`, all arriving now.
+  const burst = (
+    sequencer: ReturnType<typeof createFrameSequencer>,
+    firstGroup: number,
+    fromUs: number,
+    count: number,
+  ) => {
+    for (let index = 0; index < count; index++) sequencer.object(at(firstGroup + index, fromUs + index * 20_000));
+  };
+
+  it('without it, a frame further ahead than the target latency resyncs forward', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame' });
+    burst(sequencer, 0, 0, 50);
+    // The frames up to the target latency, then a poll of its own for the resync.
+    expect(sequencer.poll()).toMatchObject({ waitUs: 0 });
+    now += 1;
+    const { frames } = sequencer.poll();
+    expect(frames[0]?.discontinuity).toBe('resync');
+    expect(sequencer.stats.resyncs).toBe(1);
+  });
+
+  it('holds frames that arrive early and releases each once its timestamp is within the lead', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 50_000 } });
+    // 3 s of audio at once, as a text-to-speech burst.
+    burst(sequencer, 0, 0, 150);
+    let poll = sequencer.poll();
+    // Timestamps 0, 20 and 40 ms are within 50 ms of position 0; 60 ms waits 10 ms.
+    expect(ids(poll.frames)).toEqual([0, 1, 2]);
+    expect(poll.waitUs).toBe(10_000);
+    expect(sequencer.stats).toMatchObject({ delivered: 3, late: 0, resyncs: 0, early: 1 });
+    now = 10_000;
+    poll = sequencer.poll();
+    expect(ids(poll.frames)).toEqual([3]);
+    expect(poll.waitUs).toBe(20_000);
+    // The audio player reports every 20 ms, 10 ms behind local time, and the reader polls as each wait ends.
+    const delivered: SequencedFrame[] = [];
+    while (now < 2_000_000) {
+      now += 10_000;
+      if (now % 20_000 === 0) clock.reportAudio(now - 10_000);
+      delivered.push(...sequencer.poll().frames);
+    }
+    expect(delivered.at(-1)?.timestampUs).toBe(2_040_000);
+    expect(delivered.every((frame) => frame.discontinuity === undefined)).toBe(true);
+    expect(sequencer.stats).toMatchObject({ delivered: 3 + 1 + delivered.length, late: 0, resyncs: 0 });
+    // Every frame that waited was counted once: group 3, those delivered since, and the next, waiting now.
+    expect(sequencer.stats.early).toBe(1 + delivered.length + 1);
+  });
+
+  it('anchors a position of its own while the clock has none, and gives way to the clock once it has one', () => {
+    let now = 1_000;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 40_000 } });
+    burst(sequencer, 0, 5_000_000, 100);
+    // The first frame anchors: 5 s at local 1 ms.
+    expect(ids(sequencer.poll().frames)).toEqual([0, 1, 2]);
+    now += 100_000;
+    expect(sequencer.poll().frames.at(-1)?.timestampUs).toBe(5_140_000);
+    // The player reports audio behind the sequencer's own position: nothing more until the clock catches up.
+    clock.reportAudio(5_000_000);
+    const poll = sequencer.poll();
+    expect(poll.frames).toEqual([]);
+    expect(poll.waitUs).toBe(5_160_000 - 5_040_000);
+  });
+
+  it('starts over on a clock reset and on a restart', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 0 } });
+    burst(sequencer, 0, 0, 10);
+    expect(ids(sequencer.poll().frames)).toEqual([0]);
+    sequencer.restart();
+    now = 7_000;
+    burst(sequencer, 0, 9_000_000, 10);
+    const poll = sequencer.poll();
+    expect(poll.frames.map((frame) => [frame.timestampUs, frame.discontinuity])).toEqual([[9_000_000, 'restart']]);
+    expect(poll.waitUs).toBe(20_000);
+  });
+
+  it('resyncs forward on a frame further ahead than the horizon', () => {
+    const clock = createPlayoutClock({ now: () => 0, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const options = { grouping: 'frame', timestampPlayout: { horizonUs: 10_000_000, leadUs: 0 } } as const;
+    const sequencer = createFrameSequencer({ clock, ...options });
+    sequencer.object(at(0, 0));
+    sequencer.object(at(1, 9_000_000));
+    expect(sequencer.poll()).toEqual({ frames: [expect.objectContaining({ groupId: 0 })], waitUs: 9_000_000 });
+    expect(sequencer.stats.resyncs).toBe(0);
+    const far = createFrameSequencer({ clock, ...options });
+    far.object(at(0, 11_000_000));
+    expect(far.poll().frames.map((frame) => [frame.groupId, frame.discontinuity])).toEqual([[0, 'resync']]);
+    expect(far.stats.resyncs).toBe(1);
+  });
+
+  it('still drops a late frame as late', () => {
+    const clock = createPlayoutClock({ now: () => 0, targetLatencyUs: 500_000 });
+    clock.reportAudio(1_000_000);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: true });
+    sequencer.object(at(0, 900_000));
+    sequencer.object(at(1, 1_000_000));
+    expect(ids(sequencer.poll().frames)).toEqual([1]);
+    expect(sequencer.stats).toMatchObject({ late: 1, early: 0 });
+  });
+
+  it('reads a lead function at every poll, a bad value counting as the default 100 ms', () => {
+    let lead: unknown = 20_000;
+    const clock = createPlayoutClock({ now: () => 0, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({
+      clock,
+      grouping: 'frame',
+      timestampPlayout: { leadUs: () => lead as number },
+    });
+    burst(sequencer, 0, 0, 20);
+    expect(ids(sequencer.poll().frames)).toEqual([0, 1]);
+    lead = 60_000;
+    expect(ids(sequencer.poll().frames)).toEqual([2, 3]);
+    lead = Number.NaN;
+    expect(ids(sequencer.poll().frames)).toEqual([4, 5]);
+  });
+
+  it('holds a whole horizon without dropping it', () => {
+    const clock = createPlayoutClock({ now: () => 0, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 0 } });
+    // 29 s of 20 ms frames, more than the 1024 frames held without it.
+    burst(sequencer, 0, 0, 1450);
+    expect(ids(sequencer.poll().frames)).toEqual([0]);
+    expect(sequencer.stats).toMatchObject({ late: 0, skippedGroups: 0 });
+  });
+
+  it('gives back delay that underruns added: frames go out early by it, less 40 ms, for the jitter buffer to trim', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 100_000 } });
+    // The least delay: position 0 at local 0.
+    sequencer.object(at(0, 0));
+    expect(ids(sequencer.poll().frames)).toEqual([0]);
+    // 1 s on, the player has fallen 300 ms behind local time (underruns while a queue built), and 2 s of frames
+    // arrive at once as the queue drains.
+    now = 1_000_000;
+    clock.reportAudio(700_000);
+    burst(sequencer, 1, 720_000, 100);
+    const poll = sequencer.poll();
+    // Released up to the position plus the lead plus 260 ms: 700 + 100 + 300 - 40 = 1,060 ms.
+    expect(poll.frames.at(-1)?.timestampUs).toBe(1_060_000);
+    expect(poll.waitUs).toBe(20_000);
+    // Once the buffer's trim has moved the clock up to where it was, frames wait for the lead alone again.
+    clock.reportAudio(1_000_000);
+    const after = sequencer.poll();
+    expect(after.frames.at(-1)?.timestampUs).toBe(1_100_000);
+    expect(after.waitUs).toBe(20_000);
+  });
+
+  it('gives back nothing while the delay stays within 40 ms of the least, nor after a clock reset', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 100_000 } });
+    sequencer.object(at(0, 0));
+    sequencer.poll();
+    now = 1_000_000;
+    clock.reportAudio(970_000);
+    burst(sequencer, 1, 980_000, 50);
+    // 30 ms behind: within the tolerance, so up to 970 + 100 ms.
+    expect(sequencer.poll().frames.at(-1)?.timestampUs).toBe(1_060_000);
+    // A reset forgets the least delay: the delay after it is the new least.
+    clock.reset();
+    now = 2_000_000;
+    clock.reportAudio(1_500_000);
+    burst(sequencer, 51, 1_600_000, 50);
+    expect(sequencer.poll().frames.at(-1)?.timestampUs).toBe(1_600_000);
+  });
+
+  it('gives back nothing when only the lead changes: a lead that grew and shrank moves no frame early', () => {
+    let lead = 100_000;
+    const clock = createPlayoutClock({ now: () => 0, targetLatencyUs: 500_000 });
+    clock.reportAudio(0);
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: () => lead } });
+    burst(sequencer, 0, 0, 50);
+    expect(sequencer.poll().frames.at(-1)?.timestampUs).toBe(100_000);
+    lead = 300_000;
+    expect(sequencer.poll().frames.at(-1)?.timestampUs).toBe(300_000);
+    lead = 100_000;
+    const poll = sequencer.poll();
+    expect(poll.frames).toEqual([]);
+    // The next held frame, 320 ms, waits for the 100 ms lead alone.
+    expect(poll.waitUs).toBe(220_000);
+  });
+
+  it('resyncs forward past the horizon on its own position too, before the player reports', () => {
+    let now = 0;
+    const clock = createPlayoutClock({ now: () => now, targetLatencyUs: 500_000 });
+    const sequencer = createFrameSequencer({ clock, grouping: 'frame', timestampPlayout: { leadUs: 0 } });
+    sequencer.object(at(0, 0));
+    expect(ids(sequencer.poll().frames)).toEqual([0]);
+    now = 20_000;
+    sequencer.object(at(1, 60_000_000));
+    const poll = sequencer.poll();
+    expect(poll.frames.map((frame) => [frame.groupId, frame.discontinuity])).toEqual([[1, 'resync']]);
+    expect(sequencer.stats.resyncs).toBe(1);
+    // Within the horizon it waits, as with the clock's position.
+    sequencer.object(at(2, 61_000_000));
+    expect(sequencer.poll()).toMatchObject({ frames: [], waitUs: 1_000_000 });
+  });
+
+  it('refuses keyframe grouping and bad options', () => {
+    const clock = createPlayoutClock({ now: () => 0 });
+    const make =
+      (timestampPlayout: unknown, grouping: 'frame' | 'keyframe' = 'frame') =>
+      () =>
+        createFrameSequencer({ clock, grouping, timestampPlayout: timestampPlayout as boolean });
+    expect(make(true, 'keyframe')).toThrow(RangeError);
+    expect(make({ horizonUs: 0 })).toThrow(RangeError);
+    expect(make({ horizonUs: Number.POSITIVE_INFINITY })).toThrow(RangeError);
+    expect(make({ leadUs: -1 })).toThrow(RangeError);
+    expect(make('yes')).toThrow(TypeError);
+    expect(make(null)).toThrow(TypeError);
+    expect(make(false, 'keyframe')).not.toThrow();
+    expect(make({})).not.toThrow();
   });
 });

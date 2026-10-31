@@ -413,7 +413,7 @@ class RelaySubscriber:
 
 
 async def connect_relay_subscriber(
-    url: str,
+    url: str | None = None,
     *,
     get_token: TokenProvider | None = None,
     cancellation: CancellationToken | None = None,
@@ -426,7 +426,9 @@ async def connect_relay_subscriber(
     One deadline (``connect_timeout``) covers token resolution and both handshakes. ``cancellation``
     controls the connection's entire lifetime. An explicit ``jwt`` query parameter on ``url`` takes
     precedence over ``get_token``, matching the Relay authentication convention; an empty one is a
-    ``ValueError``. Publishing uses a separate connection; see :func:`connect_relay_publisher`.
+    ``ValueError``. With no ``url``, the connection dials ``DEFAULT_ENDPOINT`` rooted at the token's
+    ``root`` claim, which ``get_token`` must then supply. Publishing uses a separate connection; see
+    :func:`connect_relay_publisher`.
     """
     # The request deadline is subscriber-only, so the subscriber checks it; the shared opener checks
     # the rest before anything connects.

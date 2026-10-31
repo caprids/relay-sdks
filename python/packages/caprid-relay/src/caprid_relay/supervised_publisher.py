@@ -682,7 +682,7 @@ class SupervisedPublisher:
 
 
 async def connect_supervised_publisher(
-    url: str,
+    url: str | None = None,
     *,
     namespace: Sequence[str],
     get_token: TokenProvider | None = None,
@@ -706,11 +706,13 @@ async def connect_supervised_publisher(
     connection or failed the last attempt. ``rotate_before`` (seconds, default 60) is how long before
     the connection's credential expires (:attr:`RelayPublisher.expires_at`) the next generation is
     brought up to replace it, make-before-break; never earlier than halfway through the time left.
-    See ``spec/behavior.md``, "Supervised connections"; :func:`connect_relay_publisher` never reconnects.
+    With no ``url``, every generation dials the endpoint the first one rooted at its token's root. See
+    ``spec/behavior.md``, "Supervised connections"; :func:`connect_relay_publisher` never reconnects.
     """
 
-    def connect(fields: tuple[str, ...], attempt: CancellationToken) -> Awaitable[RelayPublisher]:
-        return connect_relay_publisher(
+    async def connect(fields: tuple[str, ...], attempt: CancellationToken) -> RelayPublisher:
+        nonlocal url
+        publisher = await connect_relay_publisher(
             url,
             namespace=fields,
             get_token=get_token,
@@ -718,6 +720,9 @@ async def connect_supervised_publisher(
             connect_timeout=connect_timeout,
             create_transport=create_transport,
         )
+        if url is None:
+            url = publisher._lifetime.endpoint
+        return publisher
 
     return await _supervise_relay_publisher(
         connect,

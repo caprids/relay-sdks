@@ -17,7 +17,7 @@ The suite checks a transport adapter against the contract in `spec/transport-ada
 | `targets/websocket-lifetime.js` | The child Node process behind the WebSocket target's TA-25, TA-26 and cancelled-dial checks in Node. |
 | `targets/lifetime.js` | Runs a lifetime child and checks how it ended, for both Node adapters. |
 | `targets/remote-peer.js` | The peer methods as requests to the Python accepting end, for both targets that use it. |
-| `relay-quic.conformance.js` | The suite against `@caprid/relay-quic` under vitest, plus its trust checks (`ca`, an untrusted certificate, bad options). |
+| `relay-quic.conformance.js` | The suite against `@caprid/relay-quic` under vitest, plus its trust checks (`ca`, an untrusted certificate, bad options) and its incoming stream credit checks (the credit granted by default and by option, and more than 100 streams held open at once), and its qlog check (one trace per connection in `qlogDir`). |
 | `websocket.conformance.js` | The suite against `@caprid/relay-websocket` in Node under vitest, plus `withWebSocketFallback` where Node has no WebTransport. `vitest.websocket.config.js` makes the peer's certificate first, so Node trusts it from the start. |
 | `../scripts/test-conformance-websocket.mjs` | The browser launcher for the WebSocket target: Chromium, Firefox and WebKit through Playwright. |
 | `../scripts/websocket-peer.js` | The accepting end for QMux over WebSocket: `@moq/qmux`'s accepting role over `ws`, over TLS, speaking the Python accepting end's JSON lines. |
@@ -90,6 +90,8 @@ bytes are a `Uint8Array` going in and an array of numbers coming out, so a remot
 | --- | --- |
 | `acceptUni()`, `acceptBi()` | The id of the next stream the dialer opened. |
 | `openUni()`, `openBi()` | Open a stream to the dialer and return its id. |
+| `openUnis(count, bytes)` | Open `count` unidirectional streams to the dialer and write `bytes` on each, finishing none, so the dialer must let them stay open at once. Returns the ids. |
+| `dialerStreamCredit()` | Resolves `{ uni, bidi }`: the stream limits the dialer has granted the peer so far (its MAX_STREAMS, RFC 9000 §4.6). |
 | `write(id, bytes)`, `finish(id)` | Write on the peer's send half, then send the FIN. |
 | `reset(id, code, { wire })`, `stop(id, code, { wire })` | RESET_STREAM the peer's send half, or STOP_SENDING its receive half. With `wire` (`wireCodes`), `code` goes on the wire as it is, unencoded, and may be a decimal string above 2⁵³−1 (`largeCodes`). |
 | `read(id, { bytes, discard })` | Read until the FIN, a reset, or `bytes` bytes. Resolves `{ bytes, byteLength, fin, resetCode }`. `resetCode` is the dialer's code, or `null`. With `discard`, `bytes` comes back empty. |

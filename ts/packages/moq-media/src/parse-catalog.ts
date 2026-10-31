@@ -222,3 +222,23 @@ export function groupMsfTracks(tracks: readonly MsfCatalogTrack[]): MsfTrackGrou
 
   return groups;
 }
+
+/**
+ * The track in a newer catalog that replaces `current`, a track of an older one: a publisher that replaces a track
+ * lists a new name in its place (msf-01 §5.3: a changed track is a new Namespace|Name tuple), as a voice agent does to
+ * interrupt its own reply. `undefined` while the catalog still lists `current`'s namespace and name; otherwise the
+ * first track listed with `current`'s namespace, role and render group, or `undefined` when there is none (the track
+ * was removed, not replaced).
+ */
+export function findReplacementTrack(
+  current: MsfCatalogTrack,
+  tracks: readonly MsfCatalogTrack[]
+): MsfCatalogTrack | undefined {
+  const sameNamespace = (track: MsfCatalogTrack) =>
+    track.namespace.length === current.namespace.length &&
+    track.namespace.every((field, index) => field === current.namespace[index]);
+  if (tracks.some((track) => sameNamespace(track) && track.name === current.name)) return undefined;
+  return tracks.find(
+    (track) => sameNamespace(track) && track.role === current.role && track.renderGroup === current.renderGroup
+  );
+}

@@ -6,6 +6,11 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-relay`, `caprid-moq-media`: track replacement for barge-in, as in the TypeScript SDK.
+  `caprid_relay.media.ReplaceableTrack(publisher, track=..., catalog_service=..., build_catalog=...)` publishes a track
+  whose `replace()` registers `audio-2`, `audio-3`, ..., lists it in the catalog in the old one's place, drops what the
+  old track has not sent and closes it; frames written to a replacement wait for the relay's first subscription
+  (`demand_wait`, 2 s). `moq_media.find_replacement_track(current, tracks)` finds the replacement in a newer catalog.
 - `caprid-relay`, `caprid-moq-core`: `MessageParameters.max_age` (milliseconds, 0 to 2^53-1) is the MoQ Timestamp
   extension's subscriber max age (parameter `0x915C6`, as in the TypeScript SDK): a publisher that honors it skips a
   group once a newer group has superseded it for that long. A session sends it on SUBSCRIBE and REQUEST_UPDATE only to
@@ -13,6 +18,17 @@ is in [docs/releasing.md](../docs/releasing.md).
   SUBSCRIBE_NAMESPACE, and leaves it off otherwise: moq-dev main declares it, moq-relay 0.17.x does not.
   `RelaySubscriber.max_age_supported` and `MoqtSession.max_age_supported` report whether the relay did. Nothing changes
   for an application that sets no `max_age`.
+- `caprid-relay`: `url` is optional on every connect call: `connect_relay_subscriber`, `connect_relay_publisher`,
+  `connect_supervised_subscriber` and `connect_supervised_publisher`. Left out, the connection dials
+  `DEFAULT_ENDPOINT` rooted at the token's `root` claim, which it reads without verifying the token: the URL
+  `room_endpoint` would build from that root (#374). A quickstart is now `connect_supervised_subscriber(get_token=...)`,
+  with namespaces relative to the token's root. `get_token` is then required. A token that is not a JWT, has no string
+  `root` claim, or has a root `room_endpoint` refuses raises `TypeError` or `ValueError` before the transport is used.
+  A supervisor keeps the endpoint its first connection dialed for every reconnect and rotation. A call that passes
+  `url` is unchanged.
+- `caprid-relay`: a token's claims are read only from a JWT payload in unpadded base64url that is strict JSON, as in
+  TypeScript. A payload with padding or another character, or with `NaN` or `Infinity`, has no claims, so its
+  `expires_at` is `None` instead of its `exp`. The relay refuses such a token anyway.
 
 ## 0.2.0
 

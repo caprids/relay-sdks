@@ -51,3 +51,10 @@ export {
   mediaSubscribeParameters,
   mediaTrackProperties,
 } from './media-track-properties.js';
+export {
+  createReplaceableTrack,
+  type ReplaceableTrack,
+  type ReplaceableTrackCatalog,
+  type ReplaceableTrackOptions,
+  type TrackReplacement,
+} from './replaceable-track.js';

@@ -1,8 +1,8 @@
 /**
- * The room-rooted endpoint for a room: the endpoint with the room's fields appended to its path
- * ("Room-rooted endpoints" in spec/behavior.md). Pure: it builds a string and connects nothing.
+ * Relay endpoints: the Endpoint rule every connect call checks, and the room-rooted endpoint for a room, the endpoint
+ * with the room's fields appended to its path ("Room-rooted endpoints" in spec/behavior.md). Pure: it builds strings
+ * and connects nothing.
  */
-import { endpointUrl } from './connect-session.js';
 import { namespaceFields } from './validation.js';
 
 /**
@@ -15,6 +15,30 @@ const ROOM_FIELD = /^[A-Za-z0-9\-._~!$&'()+,;=:@]+$/;
 
 /** The hosted Relay endpoint, pinned in spec/protocol.json as `relay.defaultEndpoint`. */
 export const DEFAULT_ENDPOINT = 'https://relay.mux.global';
+
+/**
+ * Check an endpoint by the Endpoint rule in spec/behavior.md and return it parsed. Not a string, or
+ * not a URL at all (including an https URL with no host), is a TypeError: the wrong shape. A URL
+ * that parses but is not one Relay accepts is a RangeError: a disallowed value.
+ */
+export function endpointUrl(endpoint: unknown): URL {
+  if (typeof endpoint !== 'string') throw new TypeError('Relay endpoints must be a URL string');
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch (error) {
+    throw new TypeError('Relay endpoints must be a valid absolute URL', { cause: error });
+  }
+  if (url.protocol !== 'https:') throw new RangeError('Relay endpoints must use HTTPS');
+  if (url.hash || url.username || url.password)
+    throw new RangeError('Relay endpoints cannot contain fragments or userinfo');
+  // A present jwt wins over getToken, so an empty one would connect with no credential at all.
+  if (url.searchParams.getAll('jwt').some((value) => value.length === 0))
+    throw new RangeError(
+      'Relay endpoint has an empty jwt query parameter; put a token in it, or remove it and supply getToken',
+    );
+  return url;
+}
 
 /**
  * Root an endpoint at a room. The result is the endpoint with each room field appended to its

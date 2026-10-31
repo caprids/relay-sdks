@@ -9,9 +9,15 @@ export declare class BiStream {
   takeRecv(): RecvStream
 }
 
-/** One `nativeQuicTransport`'s TLS configuration. Every dial gets its own endpoint and socket. */
+/**
+ * One `nativeQuicTransport`'s TLS and stream configuration. Every dial gets its own endpoint and
+ * socket.
+ */
 export declare class Client {
-  /** Throws when a `ca` entry is not a PEM certificate or a hash is not 32 bytes. */
+  /**
+   * Throws when a `ca` entry is not a PEM certificate, a hash is not 32 bytes,
+   * `max_concurrent_uni_streams` is 0, or `qlog_dir` cannot be created.
+   */
   constructor(options: ClientOptions)
   /**
    * Start dialing `host:port`, offering `protocols` as ALPN in order (TA-5). `server_name` is
@@ -114,6 +120,13 @@ export interface ClientOptions {
    * validation.
    */
   serverCertificateHashes: Array<Uint8Array>
+  /**
+   * How many unidirectional streams the peer may have open to a session at once (the MAX_STREAMS
+   * credit it is granted); 1,000 when absent.
+   */
+  maxConcurrentUniStreams?: number
+  /** A directory to write one qlog file per connection attempt into; none when absent. */
+  qlogDir?: string
 }
 
 /** Why an operation failed. */

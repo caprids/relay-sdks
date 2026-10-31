@@ -52,6 +52,8 @@ without a row here is a bug.
 | Connect from Node over native QUIC, and the trust options that takes | `@caprid/relay/node`: the same exports, its connect functions taking `RelayNodeOptions<T>`: `RelayNodeTrustOptions` (`ca`, `serverCertificateHashes`, each hash a `RelayCertificateHash`) or `createTransport`, not both | not applicable: the Python SDK has its own QUIC stack |
 | Supply the transport | `createTransport(url, protocols)` returns `{ transport, ready, framing? }` (`RelayTransportFactory`); browser WebTransport by default | `create_transport(url, protocols)` returns `ConnectingTransport(transport, ready, framing="webtransport")` (`RelayTransportFactory`); `caprid_relay.quic.connect_quic`, the aioquic native QUIC factory, by default |
 | A transport factory that speaks native QUIC: MOQT on QUIC, ALPN `moqt-22` then `moqt-20`, PATH and AUTHORITY in SETUP | `nativeQuicTransport(options)` from `@caprid/relay-quic` | `caprid_relay.quic.connect_quic(url, protocols, configuration=...)`, the default `create_transport` |
+| How many unidirectional streams the relay may keep open to a native QUIC connection at once (the MAX_STREAMS credit granted) | `nativeQuicTransport({ anticipatedConcurrentIncomingUnidirectionalStreams })` from `@caprid/relay-quic`: 1000 by default, an integer from 1 to 65535 | not applicable: aioquic raises the limit itself as streams are used (128, doubled whenever more than half is used) |
+| Write a qlog trace per native QUIC connection | `nativeQuicTransport({ qlogDir })` from `@caprid/relay-quic`, or `RELAY_QUIC_QLOG_DIR` | not yet (TypeScript only) |
 | A transport factory that speaks QMux over WebSocket: subprotocols `qmux-01.moqt-22` then `qmux-01.moqt-20`, path and token in the upgrade URL, `framing: 'websocket'` | `createWebSocketTransport()` from `@caprid/relay-websocket` | not applicable: the Python SDK ships no WebSocket adapter (#321) |
 | WebTransport first, racing WebSocket after a head start, and its options | `withWebSocketFallback(options)` from `@caprid/relay-websocket`: `WebSocketFallbackOptions` (`webSocketDelayMs`, default 250; `onFallback`) | not applicable |
 | Consume one subscription as an async iterator | `subscriber.subscribeEvents(options, buffer?)` (`buffer`: `SubscriptionEventOptions`) returns `SubscriptionEvents` | `subscriber.subscribe_events(namespace, track, ...)` returns `SubscriptionEvents` |
@@ -322,6 +324,19 @@ the examples do); a trailing optional endpoint, `roomEndpoint(room, endpoint?)` 
 existing call, and an endpoint read before its path matches the URL it builds); an options object,
 `roomEndpoint(room, { endpoint })` (one optional value does not need a bag).
 
+A connect call given no `url` dials `DEFAULT_ENDPOINT` rooted at the token's `root` claim, the URL
+`roomEndpoint` builds from that root ([token-rooted endpoint](behavior.md#token-rooted-endpoint),
+[issue #374](https://github.com/muxinc/relay-sdks/issues/374)). It adds no name: `url` becomes
+optional. Like the rejected `room` option, it takes the URL out of application code. It was taken
+anyway because it removes the step quickstart users get wrong, copying their token's root into
+`roomEndpoint`, and the shortest call stays the recommended room-rooted form, with relative
+namespaces unchanged. A token that names no usable root fails before dialing with a message that
+says to pass `url`, and the relay still verifies the token. Not adopted: defaulting `url` to the bare
+`DEFAULT_ENDPOINT` (the shortest call would be the less recommended endpoint, and room-relative
+namespaces there fail far from the cause, as in
+[issue #119](https://github.com/muxinc/relay-sdks/issues/119)); the `room` option (the user would
+still copy the root in by hand).
+
 ## Switching tracks: `subscribeSwitchable`, `switchTo`, `onSwitched`
 
 A switchable subscription is the primitive for changing what a viewer receives
@@ -489,6 +504,7 @@ language-specific names of the original examples, and the table maps them.
 | Catalog as read | `MsfCatalog` | `MsfCatalog` |
 | Track description as read | `MsfCatalogTrack` | `MsfCatalogTrack` |
 | Sets of tracks a viewer picks one of | `groupMsfTracks` / `MsfTrackGroup` | `group_msf_tracks` / `MsfTrackGroup` |
+| The track a newer catalog lists in place of one playing (a track replacement) | `findReplacementTrack(current, tracks)` → `MsfCatalogTrack \| undefined` | `find_replacement_track(current, tracks)` → `MsfCatalogTrack \| None` |
 | Reader options | `ParseMsfCatalogOptions` | `parse_msf_catalog` keyword arguments |
 | LOC track properties | `locTrackProperties` | `loc_track_properties` |
 | LOC object properties from microseconds | `locProperties` / `LocPropertiesOptions` | `loc_properties` keyword arguments |
@@ -619,9 +635,10 @@ sequencer as an argument.
 | One frame in decode order | `SequencedFrame { groupId, objectId, timestampUs, key, payload, properties, discontinuity?, missingGroups? }` | `SequencedFrame(group_id, object_id, timestamp_us, key, payload, properties, discontinuity)` |
 | Groups of which nothing was delivered before this frame | `missingGroups`: `MissingGroups { firstGroupId, lastGroupId }`, inclusive | not yet (TypeScript only) |
 | One track's delivery policy | `lateDropUs`, `reorderWindowUs`, `catchUpAfterUs` on `FrameSequencerOptions` | not yet (TypeScript only) |
+| Hold early frames and release each at its timestamp, off unless used | `timestampPlayout: true` or `TimestampPlayoutOptions { horizonUs?, leadUs? }` on `FrameSequencerOptions` (frame grouping; `leadUs` a number or a function read at every poll) | — |
 | The sequencer asks for its subscription to be replaced | `SequencerPoll.catchUp`; the reader's `onCatchUp()` on `FrameReaderOptions` | not yet (TypeScript only) |
 | Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
-| Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
+| Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed, early }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
 | A media track's subscriber priority, as subscription parameters | `mediaSubscribeParameters(kind, overrides?)` → `MessageParameters` (`MediaKind`) | `media_subscribe_parameters(kind, overrides=None)` → `MessageParameters` (`MediaKind`) |
 | A subscription's or a want's handlers that read frames | `createFrameReader(sequencer, { onFrame })` → `FrameReader` (`FrameReaderOptions`); spread into `subscribe` or `want` handlers | `FrameReader(sequencer)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)`; `async for frame in reader` |
 | What a reader drives | `FrameReaderSequencer<F>` | `FrameReaderSequencer`, `FrameReaderPoll` (protocols) |
@@ -671,13 +688,15 @@ the format package still does not depend on the product package.
 | Frames kept for a consumer not ready yet, passed on in order | `createFrameHold()` → `FrameHold { push(frame), release(consumer), clear(), isReleased, stats }` (`FrameHoldStats { held, maxHeld, released }`) | — |
 | The mix, which the application routes | `player.output` (the context's own gain node type) | — |
 | Delay after the output that the context does not report | `player.outputDelayUs` (settable) | — |
-| One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, playbackRate, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
+| One track's playback, usually one speaker | `player.addInput({ clock, decoderConfig, gain, playbackRate, jitterTargetUs, minJitterTargetUs, maxJitterTargetUs, onError, onCutHeard })` → `AudioPlayerInput` (`AudioInputOptions`); `player.inputs` | — |
 | What an input calls on its clock; a `PlayoutClock` qualifies | `AudioInputClock { targetLatencyUs, localNow(), reportAudio(timestampUs, atUs, stats), stopAudio() }` | — |
 | Hand it a frame in decode order | `input.push(frame)` (`AudioPlayerFrame`: `timestampUs`, `payload`, `discontinuity?`; a `SequencedFrame` qualifies) | — |
 | Drop received audio in a timeline range | `input.cut({ fromUs?, untilUs? })` (`AudioCutRange`, which a parsed `Interrupt` is); `cut()` drops everything held | — |
+| How far ahead of the clock an input wants frames: a timestamp-playout sequencer's lead | `input.playoutLeadUs` (output delay plus jitter target) | — |
+| When the latest cut is heard at the speaker | `input.stats.cutHeardAtUs`; `onCutHeard(atUs)` on `AudioInputOptions` | — |
 | Per-input gain; stop | `input.gain`; `input.remove()`, `input.removed`; `player.close()` | — |
 | Held audio played per output frame, 0.5 to 2 | `input.playbackRate` (settable) | — |
-| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, playStarts, heldUntilUs, dryAtUs, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, synthesizedUs, recoveredUs, cutUs, reports }` | — |
+| Counters and buffer state | `input.stats`: `AudioInputStats { decoded, late, decoderResets, errors, underruns, playing, playStarts, heldUntilUs, dryAtUs, bufferedUs, jitterTargetUs, trimmedUs, concealedUs, synthesizedUs, recoveredUs, cutUs, cutHeardAtUs, reports }` | — |
 | What the player needs of Web Audio | `AudioPlayerContext`, `AudioPlayerNode`, `AudioPlayerGainNode` | — |
 | A catalog audio track's decoder config | `audioDecoderConfigFromTrack(track)` | — |
 | An Opus packet's duration from its TOC byte | `opusPacketDurationUs(packet)` | `opus_packet_duration_us(packet)` (`moq_media`; see below) |
@@ -815,6 +834,7 @@ TypeScript package's export test. TypeScript uses factories that return interfac
 | Documents accepted, and failures that were retried | `service.sends`, `service.failures` | `service.sends`, `service.failures` |
 | Serve a state-shaped track whose document the application replaces | `createDocumentService(track, document?, { retryDelayMs })` → `DocumentService` (`DocumentServiceOptions`); `serve`, `sends`, `failures` as above | `DocumentService(track, document=None, retry_delay=1.0)`; `serve()`, `sends`, `failures` as above |
 | Replace the document and send it while the relay is subscribed; the latest | `service.update(document)`; `service.document` | `service.update(document)`; `service.document` |
+| A track the publisher replaces mid-stream, listed in the catalog in the old one's place | `createReplaceableTrack(publisher, { track, catalog: { service, build }, name?, trackProperties?, writeTimeoutMs?, writer?, demandWaitMs? })` → `ReplaceableTrack { track, replacements, closed, write(frame), replace(), close() }` (`ReplaceableTrackOptions`, `ReplaceableTrackCatalog`); `replace()` → `TrackReplacement { from, to, replacements }` | `ReplaceableTrack(publisher, *, track, catalog_service, build_catalog, name=None, track_properties=None, write_timeout=None, writer_options=None, demand_wait=2.0)`: `track`, `replacements`, `closed`, `await write(frame)`, `await replace()` → `TrackReplacement(from_track, to_track, replacements)`, `await close()` |
 | Map encoded frames onto a track's groups | `createFrameWriter(track, { grouping, stale, maxBacklog, onKeyframeNeeded })` → `FrameWriter` (`FrameWriterOptions`); `grouping: 'frame'` for one group per frame (`FrameGrouping`) | `FrameWriter(track, grouping="keyframe", stale=None, max_backlog=None, on_keyframe_needed=None)`; `grouping="frame"` for one group per frame |
 | Send one frame if the relay wants it | `writer.write(frame)` → `Promise<FrameOutcome>`, callable without awaiting | `await writer.write(frame)` returns a `FrameOutcome`; concurrent calls are served in order |
 | What became of a frame | `FrameOutcome { kind, error?, groupId? }`, `kind` a `FrameOutcomeKind`: `'sent'`, `'skipped'`, `'stale'`, `'dropped'`, `'interrupted'`, `'ended'` | `FrameOutcome` with `kind` (a `FrameOutcomeKind`: `sent`, `skipped`, `stale`, `dropped`, `interrupted`, `ended`), `error`, `group_id` |

@@ -99,6 +99,8 @@ MEDIA_NAMES = [
     "FrameReaderSequencer",
     "FrameWriter",
     "MediaKind",
+    "ReplaceableTrack",
+    "TrackReplacement",
     "media_subscribe_parameters",
     "media_track_properties",
 ]

@@ -63,6 +63,23 @@ describe('@caprid/relay/node', () => {
     expect(shared).toHaveBeenNthCalledWith(1, url, ['moqt-22', 'moqt-20']);
   });
 
+  it("dials the hosted Relay rooted at the token's root over the adapter when url is left out", async () => {
+    const { connectSupervisedSubscriber } = await entry();
+    const relay = hub();
+    const dialed: string[] = [];
+    quic.route = (url, protocols) => {
+      dialed.push(url);
+      return relay.connectSubscriber(url, protocols);
+    };
+    const payload = Buffer.from(JSON.stringify({ root: 'acme/rooms' })).toString('base64url');
+    const token = `e30.${payload}.sig`;
+
+    const subscriber = await connectSupervisedSubscriber({ getToken: () => token });
+    cleanup.push(() => subscriber.close());
+
+    expect(dialed).toEqual([`https://relay.mux.global/acme/rooms?jwt=${token}`]);
+  });
+
   it('gives a connection with trust options a factory of its own', async () => {
     const { connectRelaySubscriber } = await entry();
     quic.route = hub().connectSubscriber;
@@ -229,7 +246,11 @@ describe('@caprid/relay/node', () => {
 
 describe('@caprid/relay/node types', () => {
   it("declares the trust options as @caprid/relay-quic's own, without importing them", () => {
-    expectTypeOf<NodeEntry.RelayNodeTrustOptions>().toEqualTypeOf<NativeQuicTransportOptions>();
+    // The stream credit and qlog options are the adapter's alone: the entry point dials with their defaults (1000
+    // streams, qlog from RELAY_QUIC_QLOG_DIR).
+    expectTypeOf<NodeEntry.RelayNodeTrustOptions>().toEqualTypeOf<
+      Omit<NativeQuicTransportOptions, 'anticipatedConcurrentIncomingUnidirectionalStreams' | 'qlogDir'>
+    >();
   });
 
   it('takes the trust options, or a createTransport, but not both', () => {
