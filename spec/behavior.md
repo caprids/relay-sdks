@@ -45,11 +45,12 @@ against that file.
 - The TypeScript SDK's opt-in `@caprid/relay-websocket` package carries MOQT on QMux over a WebSocket,
   TCP to the same host and port as the endpoint (`https:` becomes `wss:`), for networks that block
   UDP and browsers without a usable WebTransport. `createWebSocketTransport()` always dials it.
-- `withWebSocketFallback()` dials WebTransport first, and QMux over WebSocket when that handshake
-  fails or has not completed within `handshakeTimeoutMs` (default 4 s, about when Chromium itself gives
-  up on a silent handshake). The two dials run one after the other, never at once, and the abandoned
-  WebTransport dial is closed. Where the runtime has no WebTransport that can negotiate protocols, it
-  dials WebSocket at once. Each connection, a supervisor's reconnects and rotations included, decides
+- `withWebSocketFallback()` dials WebTransport first. If that handshake has not completed within
+  `webSocketDelayMs` (default 250 ms, the Connection Attempt Delay of Happy Eyeballs, RFC 8305), it
+  dials QMux over WebSocket alongside it, and a WebTransport handshake that fails sooner starts the
+  WebSocket dial at once. The first dial to be ready carries the session and the other is closed. The
+  connection fails only once both dials have failed, with the WebSocket dial's failure. Where the
+  runtime has no WebTransport that can negotiate protocols, it dials WebSocket at once. Each connection, a supervisor's reconnects and rotations included, decides
   afresh. Nothing is remembered between connections. A WebTransport session that comes up and is
   then refused (for example over its credentials) is not retried over WebSocket.
 - Both transports run the same session. The differences come from the relay and from TCP

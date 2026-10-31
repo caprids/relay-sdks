@@ -5,7 +5,7 @@
  * (`spec/transport-adapter.md`), with the deviations the contract records for it.
  *
  * - {@link createWebSocketTransport}: always WebSocket.
- * - {@link withWebSocketFallback}: WebTransport first, WebSocket when its handshake fails or times out.
+ * - {@link withWebSocketFallback}: WebTransport first, racing a WebSocket once it has had a 250 ms head start.
  *
  * Pass either factory as the SDK's `createTransport`.
  *
@@ -13,7 +13,7 @@
  */
 import type { MoqtTransport } from '@caprid/moq-core';
 import {
-  assertHandshakeTimeout,
+  assertFallbackOptions,
   type FallbackCarrier,
   FallbackTransport,
   toWebSocketUrl,
@@ -75,20 +75,21 @@ export interface FallbackConnection {
   /** Resolves once one of the dials is ready and its peer selected a protocol. */
   ready: Promise<void>;
   /**
-   * `'webtransport'` while the WebTransport dial is in progress or once it won, `'websocket'` once the dial fell back.
+   * `'webtransport'` while the dials are in progress or once WebTransport won, `'websocket'` once the WebSocket won.
    * Both carry the path and token in the URL, so the SDK's SETUP is the same either way.
    */
   readonly framing: FallbackCarrier;
 }
 
-/** Dials WebTransport, then QMux over WebSocket when that fails; see {@link withWebSocketFallback}. */
+/** Dials WebTransport, then races QMux over WebSocket against it; see {@link withWebSocketFallback}. */
 export type FallbackTransportFactory = (url: string, protocols: string[]) => FallbackConnection;
 
 /**
- * A transport factory for the SDK's `createTransport` option that dials the runtime's `WebTransport` first, and falls
- * back to QMux over WebSocket when that handshake fails or takes longer than `handshakeTimeoutMs` (default 4 s). Where
- * the runtime has no usable `WebTransport` (Safari before WebTransport, Node), it dials WebSocket at once. The dials
- * run one after the other, never both at once, and each connection decides afresh.
+ * A transport factory for the SDK's `createTransport` option that dials the runtime's `WebTransport` first and, unless
+ * that handshake completes within `webSocketDelayMs` (default 250 ms, as Happy Eyeballs, RFC 8305), dials QMux over
+ * WebSocket alongside it. The first ready carries the session and the other dial is closed; a WebTransport handshake
+ * that fails sooner starts the WebSocket at once. Where the runtime has no usable `WebTransport` (Safari before
+ * WebTransport, Node), it dials WebSocket at once. Each connection decides afresh.
  *
  * ```ts
  * import { connectRelayPublisher } from '@caprid/relay';
@@ -98,7 +99,7 @@ export type FallbackTransportFactory = (url: string, protocols: string[]) => Fal
  * ```
  */
 export function withWebSocketFallback(options: WebSocketFallbackOptions = {}): FallbackTransportFactory {
-  assertHandshakeTimeout(options.handshakeTimeoutMs);
+  assertFallbackOptions(options);
   return (url, protocols) => {
     const transport = new FallbackTransport(url, protocols, options);
     return {

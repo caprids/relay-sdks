@@ -478,7 +478,7 @@ changes unless you pass it as `createTransport`:
 import { connectRelayPublisher, connectRelaySubscriber } from '@caprid/relay';
 import { createWebSocketTransport, withWebSocketFallback } from '@caprid/relay-websocket';
 
-// WebTransport first; WebSocket when its handshake fails or takes longer than 4 s.
+// WebTransport first; WebSocket races it once WebTransport has had 250 ms.
 const subscriber = await connectRelaySubscriber({ url, getToken, createTransport: withWebSocketFallback() });
 
 // Or always WebSocket, in a browser or in Node.
@@ -486,15 +486,18 @@ const publisher = await connectRelayPublisher({ url, getToken, namespace, create
 ```
 
 The endpoint URL stays the `https://` one. The adapter dials `wss://` to the same host and port, with
-the path and token in the upgrade request. `withWebSocketFallback({ handshakeTimeoutMs, onFallback })`
-sets how long the WebTransport handshake may take, and tells you when a connection fell back. The
-timeout defaults to 4000 ms, about when Chromium gives up on a silent handshake. Where the runtime has
-no usable WebTransport, the fallback dials WebSocket at once.
+the path and token in the upgrade request. `withWebSocketFallback({ webSocketDelayMs, onFallback })`
+sets WebTransport's head start, and tells you when a connection ended up on WebSocket. If the
+WebTransport handshake has not completed within `webSocketDelayMs` (default 250 ms, as Happy
+Eyeballs), the WebSocket dial starts alongside it, and whichever is ready first carries the
+connection; the other is closed. A WebTransport handshake that fails sooner starts the WebSocket at
+once, and where the runtime has no usable WebTransport the fallback dials WebSocket straight away.
 
-The fallback runs the two dials one after the other, and decides again for every connection,
-including a supervisor's reconnects. On a network that silently drops UDP, every connect therefore
-waits out the timeout first. Where the network refuses UDP, the fallback costs a few milliseconds.
-Keep `connectTimeoutMs` well above the handshake timeout.
+The fallback decides again for every connection, including a supervisor's reconnects. On a network
+that silently drops UDP, every connect costs the head start plus the WebSocket connect. Where the
+network refuses UDP, it costs a few milliseconds. On a fast network where WebTransport usually needs
+longer than the head start, raise `webSocketDelayMs` so connections are not handed to the WebSocket
+needlessly.
 
 These things change over WebSocket:
 
