@@ -74,9 +74,11 @@ jobs:
           if-no-files-found: error
 
   # The macOS SDK is needed to link (the platform's root certificates come from Security.framework), so both darwin
-  # targets build on one arm64 runner.
+  # targets build on one arm64 runner. The runner sets only that SDK: the oldest macOS the addon runs on is Rust's
+  # deployment target (minos 11.0 arm64, 10.12 x64). Node 24 needs macOS 13.5, older than any image left, so this is the
+  # oldest image, as with Linux's glibc 2.28; pinned, not macos-latest, so that moving it is a deliberate change.
   macos:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v2
@@ -173,7 +175,7 @@ jobs:
 
   smoke-macos:
     needs: package
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v5
       - uses: jdx/mise-action@v2
