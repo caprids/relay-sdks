@@ -4,6 +4,19 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `caprid-relay`: a supervised subscriber's want follows a restarted publisher sooner, and no longer loops on a finished
+  track (`connect_supervised_subscriber().want()`; no API change). Measured through relay.mux.global (moq-relay 0.17.9), relay-sdks #402:
+  - A want on a fixed namespace that waits out its backoff watches the namespace (SUBSCRIBE_NAMESPACE) and
+    subscribes as soon as it is announced again: 60-145 ms after the new publisher announced, where the grown backoff
+    took 1.6-7.2 s. The backoff stays as the fallback. After PUBLISH_DONE `TRACK_ENDED` only an announcement after a
+    withdrawal wakes it, since the namespace may still be announced for the publisher that ended the track.
+  - A status object (the end-of-track marker a relay sends after replaying a finished track's last group) no longer
+    counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
+    re-subscribed about three times a second, receiving the track's last object again each time.
+  - A plain subscription is unchanged: it reports the done (`on_publisher_done`) and never subscribes again.
+
 ## 0.3.0
 
 - `caprid-relay`, `caprid-moq-media`: track replacement for barge-in, as in the TypeScript SDK.

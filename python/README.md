@@ -573,7 +573,9 @@ track treats `RECONNECTING` as an interruption and resumes at the next keyframe.
 
 `want(key, namespace, track, handlers, ...)` keeps one track subscribed until `unwant(key)`. It
 retries the announce race, and resubscribes after `PUBLISH_DONE` or after a rejection that waiting may
-fix, with backoff from 0.25 s up to 8 s. It also moves to the replacement connection. With
+fix, with backoff from 0.25 s up to 8 s, or as soon as its namespace is announced again (after
+`TRACK_ENDED`, announced again after a withdrawal), so a restarted publisher is picked up within about
+a round trip of its announcement. It also moves to the replacement connection. With
 `stale_after` in seconds, it resubscribes a track that went silent. Set that only for tracks that are
 never silent while live. With `generations=True`, it discovers the publisher's root and stays on the
 newest generation, moving as soon as a newer one is announced, with no application channel. A
