@@ -1040,6 +1040,203 @@ describe('callback failures and progress (#272)', () => {
     // The delays keep doubling (20-40, 40-80, 80-160 ms): nothing reset the backoff.
     expect(started[3]! - started[2]!).toBeGreaterThanOrEqual(80);
   });
+
+  it('counts no status object as progress: the end-of-track marker after a replayed group does not reset the backoff', async () => {
+    const { connections, connect } = subscribers();
+    const subscriber = await superviseRelaySubscriber(connect, { url });
+    cleanup.push(() => subscriber.close());
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 40, maxDelayMs: 1_000 } });
+    const started: number[] = [];
+    for (let count = 1; count <= 4; count++) {
+      await until(() => connections[0]!.subscriptions.length === count, `subscription ${count}`, 2_000);
+      started.push(performance.now());
+      // A finished track while its publisher stays connected: the cached last group, the end-of-track status object
+      // one group later, then TRACK_ENDED.
+      const subscription = connections[0]!.subscriptions.at(-1)!;
+      subscription.accept();
+      subscription.object(10);
+      subscription.handlers.onObject?.({
+        groupId: 11,
+        objectId: 0,
+        status: 'end-of-track',
+        properties: [],
+        payload: new Uint8Array(),
+      } as never);
+      subscription.done();
+    }
+    expect(started[3]! - started[2]!).toBeGreaterThanOrEqual(80);
+  });
+});
+
+describe('waking on the namespace announced again', () => {
+  const slow = { initialDelayMs: 10_000, maxDelayMs: 10_000 };
+  const done = (subscription: FakeSubscriber['subscriptions'][number], statusCode: number) =>
+    subscription.handlers.onPublisherDone?.({ statusCode, streamCount: 0, reason: 'done' } as never);
+
+  async function start() {
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: fast },
+    );
+    cleanup.push(() => subscriber.close());
+    return { subscriber, connections };
+  }
+
+  it('resubscribes at once when the namespace is announced after a done, not after the backoff', async () => {
+    const { subscriber, connections } = await start();
+    const restarted: string[] = [];
+    subscriber.want(
+      'v',
+      { namespace: ['room', 'alice'], track: 'v', retry: slow },
+      { onRestarted: (info) => restarted.push(info.reason) },
+    );
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    expect(fake().discoveries[0]!.prefix).toEqual(['room', 'alice']);
+    expect(fake().subscriptions).toHaveLength(1);
+    // Already announced as the watch starts, after INTERNAL_ERROR: the new publisher.
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice'] });
+    await until(() => fake().subscriptions.length === 2, 'resubscribed on the announcement');
+    expect(restarted).toEqual(['publisher-done']);
+  });
+
+  it('ignores a deeper namespace under the watched one', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: slow });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room', 'bob'] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fake().subscriptions).toHaveLength(1);
+  });
+
+  it('after TRACK_ENDED waits for the namespace to be withdrawn and announced again, not its announcement as the watch starts', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: slow });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    fake().subscriptions[0]!.done(); // TRACK_ENDED
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    const discovery = fake().discoveries[0]!;
+    // Still announced for the publisher that ended the track.
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(fake().subscriptions).toHaveLength(1);
+    discovery.push({ type: 'unannounced', namespace: ['room'] });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(fake().subscriptions).toHaveLength(1);
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => fake().subscriptions.length === 2, 'resubscribed on the return');
+  });
+
+  it('after TRACK_ENDED still resubscribes after the backoff, its slow fallback', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 60, maxDelayMs: 60 } });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    fake().subscriptions[0]!.done();
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room'] });
+    await until(() => fake().subscriptions.length === 2, 'resubscribed after the backoff');
+  });
+
+  it('holds one watch across refused attempts and wakes only on an announcement after the latest attempt', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: slow });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    const discovery = fake().discoveries[0]!;
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => fake().subscriptions.length === 2, 'woken');
+    // The announce race: refused, while the namespace stays announced.
+    fake().subscriptions[1]!.reject(UNROUTABLE);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The same announcement does not wake the next wait, and no second request was opened.
+    expect(fake().subscriptions).toHaveLength(2);
+    expect(fake().discoveries).toHaveLength(1);
+    expect(discovery.closed).toBe(false);
+    discovery.push({ type: 'unannounced', namespace: ['room'] });
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => fake().subscriptions.length === 3, 'woken again');
+    fake().subscriptions[2]!.accept();
+    fake().subscriptions[2]!.object(1);
+  });
+
+  it("does not wake on what another want's shared watch saw before this want's latest attempt", async () => {
+    const { subscriber, connections } = await start();
+    const fake = () => connections[0]!;
+    const of = (track: string) => fake().subscriptions.filter((s) => s.options.track === track);
+    subscriber.want('a', { namespace: ['room'], track: 'a', retry: slow });
+    await until(() => of('a').length === 1, 'a subscribed');
+    of('a')[0]!.accept();
+    done(of('a')[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'a watches the namespace');
+    const discovery = fake().discoveries[0]!;
+    // Withdrawn and announced again while want a waits: a return the watch saw.
+    discovery.push({ type: 'unannounced', namespace: ['room'] });
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => of('a').length === 2, 'a woken');
+    // Left unanswered, so want a keeps holding the watch.
+    // Want b's first attempt starts after that return; its TRACK_ENDED must wait for a later one.
+    subscriber.want('b', { namespace: ['room'], track: 'b', retry: slow });
+    await until(() => of('b').length === 1, 'b subscribed');
+    of('b')[0]!.accept();
+    of('b')[0]!.done();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(of('b')).toHaveLength(1);
+    expect(fake().discoveries).toHaveLength(1);
+    discovery.push({ type: 'unannounced', namespace: ['room'] });
+    discovery.push({ type: 'announced', namespace: ['room'] });
+    await until(() => of('b').length === 2, 'b woken by a later return');
+  });
+
+  it('falls back to the backoff when the watch fails', async () => {
+    const { subscriber, connections } = await start();
+    subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 60, maxDelayMs: 60 } });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    fake().discoveries[0]!.fail(new RelayError('PREFIX_OVERLAP', 'overlap', 'subscription'));
+    await until(() => fake().subscriptions.length === 2, 'resubscribed after the backoff');
+  });
+
+  it("gives way to a followed root's discovery: the overlapping watch closes and that want is not refused", async () => {
+    const { subscriber, connections } = await start();
+    const errors: unknown[] = [];
+    subscriber.want('v', { namespace: ['room', 'alice'], track: 'v', retry: slow });
+    const fake = () => connections[0]!;
+    await until(() => fake().subscriptions.length === 1, 'subscribed');
+    fake().subscriptions[0]!.accept();
+    done(fake().subscriptions[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'watching the namespace');
+    subscriber.want(
+      'g',
+      { namespace: ['room'], track: 'g', generations: true, retry: fast },
+      { onError: (error) => errors.push(error) },
+    );
+    await until(() => fake().discoveries.length === 2, 'the root discovered');
+    expect(fake().discoveries[0]!.closed).toBe(true);
+    expect(fake().discoveries[1]!.prefix).toEqual(['room']);
+    expect(errors).toEqual([]);
+  });
 });
 
 describe('make-before-break moves (#282)', () => {

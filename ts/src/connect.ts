@@ -94,8 +94,10 @@ export interface RelaySubscriptionHandlers {
    * resubscribe to a track the publisher ended. A done that follows this subscription's own
    * `update()` is different: moq-relay ends the subscription on any update, the track is still live,
    * and resubscribing is how to apply the change. After a publisher crash the done arrives only at
-   * the relay's QUIC idle timeout, about 11 s later on moq-relay 0.17.0. See spec/relay-interop.md,
-   * "Publisher restarts".
+   * the relay's QUIC idle timeout, as status 0 about 11 s later (10.8-13.1 s through relay.mux.global,
+   * moq-relay 0.17.9); a clean close arrives as status 2 within about 0.1 s. To follow a publisher
+   * that restarts, use the supervised subscriber's `want()`. See spec/relay-interop.md, "Publisher
+   * restarts".
    */
   onPublisherDone?(info: PublishDone): void;
   /**
