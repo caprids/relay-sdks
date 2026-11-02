@@ -318,22 +318,29 @@ describe('backlog', () => {
     expect(writer.keyframeNeeded).toBe(false);
   });
 
-  it('defaults to 8 frames under keyframe grouping and 25 under frame grouping', async () => {
-    for (const [grouping, bound] of [
-      ['keyframe', 8],
-      ['frame', 25],
-    ] as const) {
-      const track = slotTrack();
-      const writer = createFrameWriter(track.writer, { grouping });
-      track.stall();
-      const outcomes = [writer.write(key())];
-      for (let index = 0; index < bound; index++) outcomes.push(writer.write(key()));
-      expect(writer.backlog).toBe(bound);
-      outcomes.push(writer.write(key()));
-      expect(writer.backlog).toBeLessThanOrEqual(bound);
-      track.release();
-      expect(kinds(await Promise.all(outcomes))).toContain('dropped');
-    }
+  it('defaults to 8 frames under keyframe grouping', async () => {
+    const track = slotTrack();
+    const writer = createFrameWriter(track.writer, { grouping: 'keyframe' });
+    track.stall();
+    const outcomes = [writer.write(key())];
+    for (let index = 0; index < 8; index++) outcomes.push(writer.write(key()));
+    expect(writer.backlog).toBe(8);
+    outcomes.push(writer.write(key()));
+    expect(writer.backlog).toBeLessThanOrEqual(8);
+    track.release();
+    expect(kinds(await Promise.all(outcomes))).toContain('dropped');
+  });
+
+  it('has no default bound under frame grouping', async () => {
+    const track = slotTrack();
+    const writer = createFrameWriter(track.writer, { grouping: 'frame' });
+    track.stall();
+    const outcomes = Array.from({ length: 200 }, () => writer.write(key()));
+    expect(writer.backlog).toBe(199);
+    track.release();
+    const results = kinds(await Promise.all(outcomes));
+    expect(results).toHaveLength(200);
+    expect(results.every((kind) => kind === 'sent')).toBe(true);
   });
 });
 

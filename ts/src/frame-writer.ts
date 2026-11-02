@@ -52,7 +52,8 @@ export interface FrameWriterOptions<F extends Frame = Frame> {
   stale?: (frame: F) => boolean;
   /**
    * How many frames may wait behind the one being written before the writer drops. A positive integer; default 8
-   * under keyframe grouping, 25 under frame grouping.
+   * under keyframe grouping; no bound under frame grouping, where memory is then unbounded while delivery is blocked
+   * (see https://github.com/muxinc/relay-sdks/issues/412).
    */
   maxBacklog?: number;
   /**
@@ -104,7 +105,8 @@ interface Pending<F> {
   reject(error: unknown): void;
 }
 
-const DEFAULT_BACKLOG: Record<FrameGrouping, number> = { keyframe: 8, frame: 25 };
+/** Frame grouping has no default bound: a bound of its own dropped voice frames in outages of 2 s or more. */
+const DEFAULT_BACKLOG: Record<FrameGrouping, number> = { keyframe: 8, frame: Number.POSITIVE_INFINITY };
 
 /** A failure ends the track exactly when the SDK says so: `CLOSED`, or the track is closed afterwards. */
 const retired = (track: RelayTrackWriter, error: RelayError) => error.code === 'CLOSED' || track.closed;
@@ -115,8 +117,9 @@ const never = () => false;
  *
  * A frame the relay has no subscription for is `'skipped'` at once, because an encoder loop cannot block on the write
  * deadline; publishing resumes at the next keyframe. When the backlog is full the transport has fallen behind:
- * keyframe grouping drops the backlog and the open group, frame grouping drops the oldest frame. Under keyframe grouping
- * the writer watches the track's demand from now until it closes, and says when it needs a keyframe.
+ * keyframe grouping drops the backlog and the open group, frame grouping drops the oldest frame when `maxBacklog` is set
+ * (it has no bound by default). Under keyframe grouping the writer watches the track's demand from now until it
+ * closes, and says when it needs a keyframe.
  *
  * ```ts
  * const writer = createFrameWriter(track, { onKeyframeNeeded: () => (forceKeyframe = true) });
@@ -131,9 +134,10 @@ export function createFrameWriter<F extends Frame = Frame>(
   if (typeof options !== 'object' || options === null) throw new TypeError('options must be an object');
   const grouping = options.grouping ?? 'keyframe';
   if (grouping !== 'keyframe' && grouping !== 'frame') throw new TypeError("grouping must be 'keyframe' or 'frame'");
-  const maxBacklog = options.maxBacklog ?? DEFAULT_BACKLOG[grouping];
-  if (!Number.isSafeInteger(maxBacklog) || maxBacklog < 1)
+  const given = options.maxBacklog ?? undefined;
+  if (given !== undefined && (!Number.isSafeInteger(given) || given < 1))
     throw new RangeError('maxBacklog must be a positive integer');
+  const maxBacklog = given ?? DEFAULT_BACKLOG[grouping];
   if (options.stale !== undefined && typeof options.stale !== 'function')
     throw new TypeError('stale must be a function');
   if (options.onKeyframeNeeded !== undefined && typeof options.onKeyframeNeeded !== 'function') {

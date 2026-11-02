@@ -152,7 +152,8 @@ def _settle(turn: asyncio.Future[FrameOutcome | None], outcome: FrameOutcome) ->
 
 F = TypeVar("F", bound=Frame)
 
-_DEFAULT_BACKLOG: dict[Grouping, int] = {"keyframe": 8, "frame": 25}
+# Frame grouping has no default bound: a bound of its own dropped voice frames in outages of 2 s or more.
+_DEFAULT_BACKLOG: dict[Grouping, int | None] = {"keyframe": 8, "frame": None}
 
 
 class _BacklogDropped(Exception):
@@ -168,11 +169,13 @@ class FrameWriter(Generic[F]):
 
     :meth:`write` may be called again before the previous call returned, from any task: calls are
     served one at a time in call order, and the frames waiting meanwhile are the writer's backlog,
-    at most ``max_backlog`` of them (default 8 under keyframe grouping, 25 under frame grouping). A
-    frame arriving at a full backlog means the transport fell behind, and frames are ``dropped``
-    rather than queued: under keyframe grouping the backlog and the open group (with the frame being
-    written into it) go, and deltas are dropped until the next keyframe; under frame grouping the
-    oldest waiting frame goes.
+    at most ``max_backlog`` of them (default 8 under keyframe grouping; no bound under frame
+    grouping, where memory is then unbounded while delivery is blocked, see
+    https://github.com/muxinc/relay-sdks/issues/412). A frame arriving at a full backlog means the
+    transport fell behind, and frames are ``dropped`` rather than queued: under keyframe grouping
+    the backlog and the open group (with the frame being written into it) go, and deltas are dropped
+    until the next keyframe; under frame grouping, when ``max_backlog`` is set, the oldest waiting
+    frame goes.
 
     :meth:`write` never waits for relay demand. A frame the relay has no subscription for is
     ``skipped`` at once, because an encoder loop cannot block on the write deadline. Every relay
@@ -251,7 +254,7 @@ class FrameWriter(Generic[F]):
         self._track = track
         self._grouping: Grouping = grouping
         self._stale: Callable[[F], bool] = stale if stale is not None else _never
-        self._max_backlog = max_backlog if max_backlog is not None else _DEFAULT_BACKLOG[grouping]
+        self._max_backlog: int | None = max_backlog if max_backlog is not None else _DEFAULT_BACKLOG[grouping]
         self._on_keyframe_needed = on_keyframe_needed
         self._loop = loop
         self._group: _GroupWriter | None = None
@@ -329,7 +332,7 @@ class FrameWriter(Generic[F]):
             self._keyframe_needed = False
 
         if self._busy:
-            if len(self._backlog) >= self._max_backlog:
+            if self._max_backlog is not None and len(self._backlog) >= self._max_backlog:
                 dropped = self._overflow(frame)
 
                 if dropped is not None:
