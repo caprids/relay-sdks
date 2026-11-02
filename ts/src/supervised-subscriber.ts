@@ -1818,6 +1818,20 @@ function namespaceWake(connection: Connection, namespace: string[]): { watch: Na
   const key = JSON.stringify(namespace);
   let entry = connection.wakes.get(key);
   if (!entry) {
+    // A watch or a root's discovery kept for reuse but unused would hold an overlapping prefix and refuse this one.
+    for (const [heldKey, held] of connection.wakes) {
+      if (held.users === 0 && overlaps(JSON.parse(heldKey), namespace)) {
+        connection.wakes.delete(heldKey);
+        clearTimeout(held.linger);
+        held.close();
+      }
+    }
+    for (const [heldKey, held] of connection.roots) {
+      if ((held as RootWatch & { users: number }).users === 0 && overlaps(JSON.parse(heldKey), namespace)) {
+        connection.roots.delete(heldKey);
+        held.close();
+      }
+    }
     const forgetEnded = () => {
       if (connection.wakes.get(key) === entry) connection.wakes.delete(key);
     };

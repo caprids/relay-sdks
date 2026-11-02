@@ -1060,6 +1060,31 @@ async def test_does_not_wake_on_what_another_wants_shared_watch_saw_before_its_l
     await until(lambda: len(of("b")) == 2, "b woken by a later return")
 
 
+async def test_closes_an_unused_overlapping_watch_kept_for_reuse(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+
+    def of(track: str) -> list[FakeSubscription]:
+        return [sub for sub in s.first.subscriptions if sub.track == track]
+
+    subscriber.want("x", ["room"], "x", retry=WAKE_SLOW)
+    await until(lambda: len(of("x")) == 1, "x subscribed")
+    of("x")[0].accept()
+    done_with(of("x")[0], 0)
+    await until(lambda: len(s.first.discoveries) == 1, "x watches its namespace")
+    s.first.discoveries[0].push("announced", ["room"])
+    await until(lambda: len(of("x")) == 2, "x woken")
+    # Accepted: want x lets go of the watch, which is kept a moment for reuse.
+    of("x")[1].accept()
+    assert not s.first.discoveries[0].closed
+    subscriber.want("y", ["room", "alice"], "y", retry=WAKE_SLOW)
+    await until(lambda: len(of("y")) == 1, "y subscribed")
+    of("y")[0].accept()
+    done_with(of("y")[0], 0)
+    await until(lambda: len(s.first.discoveries) == 2, "y watches its namespace")
+    assert s.first.discoveries[0].closed
+    assert s.first.discoveries[1].prefix == ("room", "alice")
+
+
 async def test_falls_back_to_the_backoff_when_the_watch_fails(cleanup: list[Callable[[], object]]) -> None:
     subscriber, s = await start_subscriber(cleanup)
     subscriber.want("v", ["room"], "v", retry=SupervisionBackoff(initial_delay=0.06, max_delay=0.06))

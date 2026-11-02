@@ -1206,6 +1206,29 @@ describe('waking on the namespace announced again', () => {
     await until(() => of('b').length === 2, 'b woken by a later return');
   });
 
+  it('closes an unused overlapping watch kept for reuse rather than go without one', async () => {
+    const { subscriber, connections } = await start();
+    const fake = () => connections[0]!;
+    const of = (track: string) => fake().subscriptions.filter((s) => s.options.track === track);
+    subscriber.want('x', { namespace: ['room'], track: 'x', retry: slow });
+    await until(() => of('x').length === 1, 'x subscribed');
+    of('x')[0]!.accept();
+    done(of('x')[0]!, 0);
+    await until(() => fake().discoveries.length === 1, 'x watches its namespace');
+    fake().discoveries[0]!.push({ type: 'announced', namespace: ['room'] });
+    await until(() => of('x').length === 2, 'x woken');
+    // Accepted: want x lets go of the watch, which is kept a moment for reuse.
+    of('x')[1]!.accept();
+    expect(fake().discoveries[0]!.closed).toBe(false);
+    subscriber.want('y', { namespace: ['room', 'alice'], track: 'y', retry: slow });
+    await until(() => of('y').length === 1, 'y subscribed');
+    of('y')[0]!.accept();
+    done(of('y')[0]!, 0);
+    await until(() => fake().discoveries.length === 2, 'y watches its namespace');
+    expect(fake().discoveries[0]!.closed).toBe(true);
+    expect(fake().discoveries[1]!.prefix).toEqual(['room', 'alice']);
+  });
+
   it('falls back to the backoff when the watch fails', async () => {
     const { subscriber, connections } = await start();
     subscriber.want('v', { namespace: ['room'], track: 'v', retry: { initialDelayMs: 60, maxDelayMs: 60 } });

@@ -2014,6 +2014,18 @@ def _namespace_wake(connection: _Connection, namespace: tuple[str, ...]) -> tupl
     user leaves."""
     entry = connection.wakes.get(namespace)
     if entry is None:
+        # A watch or a root's discovery kept for reuse but unused would hold an overlapping prefix and refuse this one.
+        for held_namespace, held in list(connection.wakes.items()):
+            if held.users == 0 and _overlaps(held_namespace, namespace):
+                del connection.wakes[held_namespace]
+                if held.linger is not None:
+                    held.linger.cancel()
+                    held.linger = None
+                held.close()
+        for held_root, held_watch in list(connection.roots.items()):
+            if held_watch.users == 0 and _overlaps(held_root, namespace):
+                del connection.roots[held_root]
+                held_watch.close()
         created: list[_NamespaceWake] = []
 
         def forget_ended() -> None:
