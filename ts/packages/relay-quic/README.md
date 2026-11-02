@@ -94,8 +94,8 @@ packages do. A package manager installs only the one whose `os`, `cpu`, and `lib
 
 | Platform package | Built on | Packed | Installed |
 | --- | --- | --- | --- |
-| `@caprid/relay-quic-darwin-arm64` | macos-14 | 1.14 MiB | 2.62 MiB |
-| `@caprid/relay-quic-darwin-x64` | macos-14, cross | 1.21 MiB | 2.85 MiB |
+| `@caprid/relay-quic-darwin-arm64` | macos-15 | 1.14 MiB | 2.62 MiB |
+| `@caprid/relay-quic-darwin-x64` | macos-15, cross | 1.21 MiB | 2.85 MiB |
 | `@caprid/relay-quic-linux-arm64-gnu` | ubuntu-latest, zig | 1.19 MiB | 2.67 MiB |
 | `@caprid/relay-quic-linux-arm64-musl` | ubuntu-latest, zig | 1.19 MiB | 2.67 MiB |
 | `@caprid/relay-quic-linux-x64-gnu` | ubuntu-latest, zig | 1.26 MiB | 3.01 MiB |
