@@ -1,0 +1,67 @@
+name: Notify caprid-site
+
+# Tells caprids/caprid-site that docs it generates from this repository changed on main. caprid-site's own workflow
+# then runs its `pnpm sync` and opens a pull request with the regenerated docs. The dispatch is the whole contract:
+# event_type `source-updated`, client_payload { source, sha, run_url }.
+#
+# The paths are what caprid-site reads from here (its scripts/sources.mjs, scripts/sync.mjs and astro.config.mjs): the
+# Markdown pages, the files TypeDoc and griffe render the API references from, and the spec.
+#
+# Needs the repository secret CAPRID_SITE_DISPATCH_TOKEN: a fine-grained token (or GitHub App token) with Contents:
+# read and write on caprids/caprid-site only.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      # Markdown pages.
+      - 'ts/README.md'
+      - 'ts/GUIDE.md'
+      - 'ts/CHANGELOG.md'
+      - 'ts/packages/*/README.md'
+      - 'python/README.md'
+      - 'python/CHANGELOG.md'
+      - 'python/packages/*/README.md'
+      # The TypeScript API reference (TypeDoc over every package) and the SDK version on the landing page.
+      - 'ts/src/**'
+      - 'ts/packages/*/src/**'
+      - 'ts/package.json'
+      - 'ts/packages/*/package.json'
+      - 'ts/tsconfig*.json'
+      - 'ts/packages/*/tsconfig*.json'
+      - 'ts/typedoc*.json'
+      - 'ts/packages/*/typedoc.json'
+      # The Python API reference (griffe over each package's sources).
+      - 'python/packages/*/src/**'
+      # The spec pages and spec/protocol.json.
+      - 'spec/**'
+  workflow_dispatch:
+
+concurrency:
+  # One dispatch per burst: a newer merge supersedes a queued or running one, and the sync reads main's head anyway.
+  group: caprid-site-dispatch
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  dispatch:
+    # caprids/relay-sdks is a public mirror that receives main at release time; only the repository PRs merge into
+    # notifies, so a mirror push neither dispatches twice nor fails for want of the secret.
+    if: github.repository == 'muxinc/relay-sdks'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Send source-updated to caprids/caprid-site
+        env:
+          GH_TOKEN: ${{ secrets.CAPRID_SITE_DISPATCH_TOKEN }}
+          SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::The CAPRID_SITE_DISPATCH_TOKEN secret is not set. Add a fine-grained token with Contents: read and write on caprids/caprid-site."
+            exit 1
+          fi
+          jq -n --arg sha "$SHA" --arg run_url "$RUN_URL" \
+            '{event_type: "source-updated", client_payload: {source: "relay-sdks", sha: $sha, run_url: $run_url}}' |
+            gh api --method POST repos/caprids/caprid-site/dispatches --input -
+          echo "Dispatched source-updated for $SHA"
