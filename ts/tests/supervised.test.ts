@@ -602,7 +602,6 @@ describe('connectSupervisedSubscriber following generations (review fixes)', () 
       { namespace: ['room', 'alice'], track: 'v', generations: true },
       { onError: (e) => errors.push(e) },
     );
-    // The first root's request, kept a moment for reuse, covers the new root: it serves the replacement by filtering.
     const generation = newGeneration();
     connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice', generation] });
     await until(() => connections[0]!.subscriptions.length === 1, 'subscribe under the new root');

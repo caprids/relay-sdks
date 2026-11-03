@@ -105,7 +105,6 @@ else {
   }
 }
 
-/** One member: a supervised publisher on [...root, id] that the parent rotates, closes or kills. */
 async function runPublisher(id) {
   process.on('disconnect', () => process.exit(0));
   const at = () => performance.timeOrigin + performance.now();
@@ -169,7 +168,6 @@ async function runProbe() {
     for (const waiter of [...waiters]) waiter(event);
     return event;
   };
-  /** The first event from index `from` on that matches, or undefined after `timeoutMs`. */
   const waitFor = (match, timeoutMs, from = 0) => {
     const past = events.slice(from).find(match);
     if (past) return Promise.resolve(past);
@@ -190,7 +188,6 @@ async function runProbe() {
     return event;
   };
 
-  /** Ground truth: every publisher started, its generations, and how it departed. */
   const publishers = new Map();
   let nextIndex = 0;
   const startPublisher = () => {
@@ -221,7 +218,6 @@ async function runProbe() {
     return publisher;
   };
   const alive = () => [...publishers.values()].filter((publisher) => !publisher.departure);
-  /** Departures come from the newest members first, so p0 (the want's target) leaves last. */
   const pickDepartures = (n) => alive().reverse().slice(0, n);
   const depart = (publisher, kind) => {
     publisher.departure = { kind, from: events.length };
@@ -241,7 +237,6 @@ async function runProbe() {
       ),
     );
 
-  /** The subscriber's view as the probe observed it, and every join or leave the ground truth does not explain. */
   const present = new Set();
   const everJoined = new Set();
   const counts = { joined: 0, left: 0 };
@@ -266,10 +261,6 @@ async function runProbe() {
   process.on('exit', killChildren);
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => process.exit(130));
 
-  /**
-   * Open a subscriber and its view of the root. `sink` hears the view's loaded set and later joins and leaves; the
-   * primary view's transports are kept so the probe can rotate or cut them.
-   */
   let outageUntil = 0;
   const openView = async (sink, { primary = false } = {}) => {
     const dial = nativeQuicTransport(trust);

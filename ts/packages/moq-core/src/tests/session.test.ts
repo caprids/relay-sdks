@@ -1787,7 +1787,6 @@ describe('subscriber max age (MAX_AGE)', () => {
 describe('MoQ Active Count (ACTIVE_COUNT)', () => {
   const ACTIVE_COUNT: KeyValuePair = { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 };
 
-  /** A session whose own SETUP (`client`) and the server's (`server`) each may declare the extension. */
   async function activeCountHarness({ client = true, server = true } = {}) {
     const fake = createFakeTransport();
     const session = createMoqtSession(fake.transport, { setupOptions: client ? [ACTIVE_COUNT] : [] });
@@ -1797,7 +1796,6 @@ describe('MoQ Active Count (ACTIVE_COUNT)', () => {
     return { ...fake, session };
   }
 
-  /** Open a namespace subscription on `room` that records what it reports, in order. */
   async function recordNamespaces(harness: Awaited<ReturnType<typeof activeCountHarness>>) {
     const events: unknown[] = [];
 

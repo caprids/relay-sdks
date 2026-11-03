@@ -1,10 +1,3 @@
-/**
- * Who is present under a root, with no roster server: each namespace one field below the root is a member, and a
- * namespace one field further is that member's generation, as a supervised publisher announces it. A view follows the
- * root's discovery across the subscriber's reconnects and rotations and tells the application only when members join
- * or leave. `transition` decides everything; `openMembers` is the shell that turns its effects into watches, timers and
- * handler calls.
- */
 import { type DiscoveryIndex, type DiscoveryWatch, discoveryEnding, refusedForGood } from './discovery.js';
 import { SubscriptionConnectionClosedError } from './subscription.js';
 import { backoffDelay, RESUBSCRIBE_BACKOFF, sleep, whenAborted } from './supervision.js';
@@ -20,8 +13,7 @@ export interface Member {
 /** What `onChanged` receives: who joined and who left since the last call, and who is present now. */
 export interface MembersChange {
   /**
-   * Members who arrived. On the first call (`initial`), everyone present when the view loaded, possibly no one: the
-   * load is the change from nobody known, so one code path handles "a member is here".
+   * Members who arrived. On the first call (`initial`), everyone present when the view loaded, possibly no one.
    */
   readonly joined: readonly Member[];
   /** Members who went. Empty on the first call. */
@@ -74,14 +66,8 @@ export interface Members {
   close(): void;
 }
 
-/** Per member id, the fields announced under it: each generation, and '' for the member's own namespace. */
 export type Presence = Map<string, Set<string>>;
 
-/**
- * Which member a namespace under `root` is about, and the field it adds: '' for the member's own namespace (an
- * unsupervised publisher), the generation one field deeper. `undefined` for the root itself and anything deeper. ''
- * can never be a generation, since namespace fields are non-empty.
- */
 export function memberField(
   root: readonly string[],
   namespace: readonly string[],
@@ -93,10 +79,6 @@ export function memberField(
   return undefined;
 }
 
-/**
- * Apply one announce or withdrawal under `root` to `presence`. A member joins when its first field appears and leaves
- * when its last goes, so a make-before-break rotation ({g1}, {g1, g2}, {g2}) and a relay's repeat change nothing.
- */
 export function applyNamespace(
   presence: Presence,
   root: readonly string[],
@@ -123,7 +105,6 @@ function member(root: readonly string[], id: string): Member {
   return Object.freeze({ id, namespace: Object.freeze([...root, id]) });
 }
 
-/** The difference between what the application was told and what a freshly loaded discovery sees. */
 export function diffMembers(
   settled: ReadonlyMap<string, Member>,
   loaded: Presence,
@@ -134,40 +115,23 @@ export function diffMembers(
   return { joined, left };
 }
 
-/** What a view needs of a connection: its discovery, its end and its retirement by a rotation. */
 export interface MembersConnection {
   readonly discovery: DiscoveryIndex;
-  /** Aborts when the connection ends. */
   readonly signal: AbortSignal;
-  /** Aborts when a rotation replaced the connection. */
   readonly retiring: AbortSignal;
 }
 
-/** One discovery of the root the view follows or loads, on one connection, with the presence it has seen there. */
 export interface Source {
   readonly connection: MembersConnection;
-  /** Written only by `transition`, from this source's inputs. */
   readonly presence: Presence;
 }
 
 type Settled = ReadonlyMap<string, Member>;
-/** Ids in `settled` with no namespace left, each waiting out the grace before it is reported as left. */
 type Leaving = ReadonlySet<string>;
 
-/**
- * Where a view stands. `settled` is what the application was last told and the only copy: `Members.present` and
- * `Members.loaded` read it. While a source is followed live, settled's ids are its presence's ids plus `leaving`.
- */
 export type MembersPhase =
-  /** Nothing settled: no `onChanged` yet. `candidate` is the discovery loading, if any. */
   | { readonly kind: 'loading'; readonly candidate: Source | undefined; readonly failures: number }
-  /** Settled, following one loaded source's changes. */
   | { readonly kind: 'live'; readonly settled: Settled; readonly leaving: Leaving; readonly source: Source }
-  /**
-   * Settled view kept while `candidate` loads; at its load the difference is delivered. `source` is the old discovery
-   * still reporting changes during a rotation, `undefined` once it ended. `candidate` is `undefined` while waiting for
-   * a connection or a retry delay.
-   */
   | {
       readonly kind: 'replacing';
       readonly settled: Settled;
@@ -176,14 +140,10 @@ export type MembersPhase =
       readonly candidate: Source | undefined;
       readonly failures: number;
     }
-  /** Closed by `close()`, the supervisor stopping, or a failure no wait fixes. Keeps what was settled. */
   | { readonly kind: 'closed'; readonly settled: Settled | undefined };
 
-/** What can happen to a view, fed one at a time in arrival order. */
 export type MembersInput =
-  /** A live connection to load on: the first, the next after a reconnect, or the current one after a retry delay. */
   | { readonly kind: 'connection'; readonly connection: MembersConnection }
-  /** A rotation retired `connection`; `next` is the connection the supervisor made current. */
   | { readonly kind: 'retiring'; readonly connection: MembersConnection; readonly next: MembersConnection | undefined }
   | {
       readonly kind: 'namespace';
@@ -193,7 +153,6 @@ export type MembersInput =
     }
   | { readonly kind: 'loaded'; readonly source: Source }
   | { readonly kind: 'ended'; readonly source: Source; readonly error: unknown }
-  /** A leaving member's grace ran out. */
   | { readonly kind: 'leave-due'; readonly id: string }
   | { readonly kind: 'close' };
 
@@ -201,12 +160,9 @@ export type MembersEffect =
   | { readonly kind: 'open'; readonly source: Source }
   | { readonly kind: 'release'; readonly source: Source }
   | { readonly kind: 'emit'; readonly change: MembersChange }
-  /** Feed `leave-due` for `id` once the grace has passed. */
   | { readonly kind: 'schedule-leave'; readonly id: string }
   | { readonly kind: 'cancel-leave'; readonly id: string }
-  /** Wait for `after` to report its end, then feed the live connection. */
   | { readonly kind: 'await-connection'; readonly after: MembersConnection }
-  /** Wait out the retry backoff for `attempt`, then feed the live connection. */
   | { readonly kind: 'retry'; readonly attempt: number }
   | { readonly kind: 'error'; readonly error: unknown };
 
@@ -244,22 +200,16 @@ function sourcesOf(phase: MembersPhase): Source[] {
   }
 }
 
-/** Everything a closing view lets go of: its watches and its pending leaves, none of which is reported. */
 function abandon(phase: MembersPhase): MembersEffect[] {
   const leaving = phase.kind === 'live' || phase.kind === 'replacing' ? [...phase.leaving] : [];
   return [...sourcesOf(phase).map(release), ...leaving.map(cancelLeave)];
 }
 
-/** The connection a rotation moves `source` to, when `input` retires the one it is on. */
 function retiredTo(source: Source, input: Extract<MembersInput, { kind: 'retiring' }>): MembersConnection | undefined {
   if (source.connection !== input.connection || input.next === input.connection) return undefined;
   return input.next;
 }
 
-/**
- * A followed source's announce or withdrawal. A member's last namespace going starts its grace instead of reporting it;
- * a namespace of a leaving member coming back ends the grace, and nothing was reported either way.
- */
 function follow(
   phase: Live | Replacing,
   source: Source,
@@ -282,7 +232,6 @@ function follow(
   return { phase: { ...phase, settled }, effects: [emit([joined], [], settled)] };
 }
 
-/** A leaving member's grace ran out: report it as left unless `followed` holds a namespace of it again. */
 function leaveDue(phase: Live | Replacing, id: string, followed: Presence | undefined): Step {
   const gone = phase.settled.get(id);
   if (!gone || !phase.leaving.has(id) || followed?.has(id)) return stay(phase);
@@ -293,7 +242,6 @@ function leaveDue(phase: Live | Replacing, id: string, followed: Presence | unde
   return { phase: { ...phase, settled, leaving }, effects: [emit([], [gone], settled)] };
 }
 
-/** A discovery the view relied on ended: wait for the next connection, retry after the backoff, or fail. */
 function afterEnded(
   phase: Loading | Replacing,
   ended: Extract<MembersInput, { kind: 'ended' }>,
@@ -384,11 +332,6 @@ function fromLive(phase: Live, input: Arrival, root: readonly string[]): Step {
   }
 }
 
-/**
- * A new source loaded. Its snapshot is the relay's state at one instant, so the difference from what the application
- * was told is reported at once, in one change, and every pending leave is settled by it: a leaving member it shows
- * stays, one it does not show is in `left`.
- */
 function adopt(phase: Replacing, candidate: Source, root: readonly string[]): Step {
   const { joined, left } = diffMembers(phase.settled, candidate.presence, root);
   let settled = phase.settled;
@@ -417,7 +360,6 @@ function fromReplacing(phase: Replacing, input: Arrival, root: readonly string[]
       return { phase: { ...phase, candidate: next }, effects: [open(next)] };
     }
     case 'retiring': {
-      // A candidate's connection retiring in turn moves the candidate; with none, the old source's moves the view.
       const from = candidate ?? source;
       const to = from && retiredTo(from, input);
       if (!from || !to) return stay(phase);
@@ -435,7 +377,6 @@ function fromReplacing(phase: Replacing, input: Arrival, root: readonly string[]
       return source && input.source === source ? follow(phase, source, input, root) : stay(phase);
     }
     case 'leave-due':
-      // With no source followed, the last word on the member was its withdrawal.
       return leaveDue(phase, input.id, source?.presence);
     case 'loaded':
       return candidate && input.source === candidate ? adopt(phase, candidate, root) : stay(phase);
@@ -444,18 +385,12 @@ function fromReplacing(phase: Replacing, input: Arrival, root: readonly string[]
         return afterEnded({ ...phase, candidate: undefined }, input, [release(candidate)]);
       }
       if (!source || input.source !== source) return stay(phase);
-      // The candidate, if any, carries on: the view holds what it settled until it loads.
       if (candidate) return { phase: { ...phase, source: undefined }, effects: [release(source)] };
       return afterEnded({ ...phase, source: undefined }, input, [release(source)]);
     }
   }
 }
 
-/**
- * The view's transition: pure apart from advancing the presence of the source an input names, which only this
- * function writes. An input about a source the phase no longer holds changes nothing. Every `emit` comes last among a
- * step's effects, so a handler that closes the view leaves nothing of the step undone.
- */
 export function transition(phase: MembersPhase, input: MembersInput, root: readonly string[]): Step {
   if (phase.kind === 'closed') return stay(phase);
   if (input.kind === 'close') return { phase: { kind: 'closed', settled: settledOf(phase) }, effects: abandon(phase) };
@@ -477,13 +412,9 @@ export function transition(phase: MembersPhase, input: MembersInput, root: reado
  */
 const LEAVE_GRACE_MS = 100;
 
-/** What a view borrows from its supervisor. */
 export interface MembersDependencies {
-  /** The live connection, waiting for one while reconnecting; `undefined` once `scope` aborts or the supervisor stops. */
   liveConnection(scope: AbortSignal): Promise<MembersConnection | undefined>;
-  /** The connection the supervisor made current, which a rotation's `retiring` moves the view to. */
   current(): MembersConnection | undefined;
-  /** The view closed, for whatever reason. */
   onClosed(): void;
 }
 
@@ -498,7 +429,6 @@ function deliver(name: string, call: () => void): void {
   }
 }
 
-/** Open a view of `root`, whose fields the caller has admitted. No handler runs inside this call. */
 export function openMembers(deps: MembersDependencies, root: readonly string[], handlers: MembersHandlers): Members {
   let phase: MembersPhase = { kind: 'loading', candidate: undefined, failures: 0 };
   const inbox: MembersInput[] = [];
@@ -507,7 +437,6 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
   const opened = new Map<Source, { watch: DiscoveryWatch; unobserve(): void }>();
   const leaves = new Map<string, ReturnType<typeof setTimeout>>();
 
-  /** Feed `input`; `first` puts it ahead of what is queued. Inputs raised while one is processed wait their turn. */
   const feed = (input: MembersInput, first = false) => {
     if (first) inbox.unshift(input);
     else inbox.push(input);
@@ -546,7 +475,6 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
         onEnded: (error) => feed({ kind: 'ended', source, error }),
       });
     } catch (error) {
-      // Refused at the call: an argument no connection takes, or the connection ending before the supervisor heard.
       feed({
         kind: 'ended',
         source,
@@ -557,7 +485,6 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
     const retiring = () => feed({ kind: 'retiring', connection, next: deps.current() });
     connection.retiring.addEventListener('abort', retiring, { once: true });
     opened.set(source, { watch: held, unobserve: () => connection.retiring.removeEventListener('abort', retiring) });
-    // A request already open on the connection seeds the view as if it had just announced what it holds.
     for (const namespace of held.namespaces()) feed({ kind: 'namespace', source, type: 'announced', namespace });
     if (held.loaded) feed({ kind: 'loaded', source });
     if (connection.retiring.aborted) retiring();
@@ -598,7 +525,6 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
         deliver('onError', () => handlers.onError?.(effect.error));
         return;
       case 'await-connection':
-        // The request can see the end before the connection reports it; wait for that rather than spin on it.
         void connectAfter(Promise.race([whenAborted(effect.after.signal), sleep(1_000, scope.signal)]));
         return;
       case 'retry':

@@ -501,7 +501,6 @@ describe('encodeMessageParameters', () => {
     expect(decodeMessageParameters(new ByteReader(writer.toBytes()))).toEqual({ maxAge: 2 ** 53 - 1 });
   });
 
-  // MoQ Active Count's ACTIVE_COUNT (0x40B66): an even type, so a bare varint, and legal only on REQUEST_OK.
   it('frames ACTIVE_COUNT as a bare varint and decodes it from a REQUEST_OK', () => {
     expect(SETUP_OPTION.ACTIVE_COUNT).toBe(0x40b64);
     expect(PARAMETER_TYPE.ACTIVE_COUNT).toBe(0x40b66);

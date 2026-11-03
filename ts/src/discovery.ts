@@ -1,10 +1,6 @@
 /**
- * One connection's namespace discovery, shared by every want and members view on it. Draft-22 §9.15 allows one
- * SUBSCRIBE_NAMESPACE per prefix tree on a session, so the index keeps open requests whose prefixes never overlap: a
- * watch under an open request is served by filtering it, and a watch over open requests replaces them with one request
- * on its own prefix. A replaced request's view is held until the new one has loaded, so a watch it moved hears only
- * the differences. A request's ending belongs to the watches on its own prefix: a narrower watch it served is placed
- * again the same way, holding its view.
+ * Draft-22 §9.15 allows one SUBSCRIBE_NAMESPACE per prefix tree on a session, so the index keeps open requests whose
+ * prefixes never overlap.
  */
 import { isMoqtProtocolError } from '@caprid/moq-core';
 import { RelayError } from './errors.js';
@@ -16,69 +12,35 @@ import {
 } from './subscription.js';
 import { isPermanentRequestError } from './supervision.js';
 
-/**
- * The queue bound each request is opened with. The index reads every event as it arrives, so the queue only ever holds
- * one stream read's burst, and any finite bound would only move where a large snapshot overflows.
- */
 export const DISCOVERY_CAPACITY = Number.MAX_SAFE_INTEGER;
-/** How long a request stays open after its last watch is released, so a want that resubscribes at once reuses it. */
 export const DISCOVERY_LINGER_MS = 5_000;
 
-/** What a watch's owner hears, synchronously and in the order its request saw the events. */
 export interface DiscoveryWatchHandlers {
-  /** A namespace under the watch's prefix was announced. */
   onAnnounced?(namespace: string[]): void;
-  /** A namespace under the watch's prefix was withdrawn. */
   onUnannounced?(namespace: string[]): void;
-  /** Everything announced when the serving request was accepted has been reported. At most once per watch. */
   onLoaded?(): void;
-  /**
-   * The request on the watch's prefix ended, or the connection did; nothing follows. `error` is undefined for the
-   * relay's clean end. A wider request ending moves the watch instead.
-   */
   onEnded?(error: unknown): void;
 }
 
-/** One owner's view of a prefix on one connection. */
 export interface DiscoveryWatch {
-  /**
-   * Whether the watch's view is complete. Stays true when the watch moves to another request, as when a covering
-   * request replaces the one that served it: the owner then hears only the differences.
-   */
   readonly loaded: boolean;
-  /** How the serving request ended, once it has. */
   readonly ended: { error: unknown } | undefined;
-  /** The namespaces under the prefix as this connection sees them now, to seed the owner's own state. */
   namespaces(): string[][];
-  /** Stop hearing about the prefix. Idempotent. */
   release(): void;
 }
 
 export interface DiscoveryIndex {
-  /**
-   * Watch `prefix`, whose fields the caller has admitted. Throws what opening a request throws, and CLOSED once the
-   * index is closed. No handler runs inside this call.
-   */
   watch(prefix: readonly string[], handlers: DiscoveryWatchHandlers): DiscoveryWatch;
-  /** The connection ended: every watch ends with `SubscriptionConnectionClosedError`. Idempotent. */
   close(): void;
 }
 
-/** One open SUBSCRIBE_NAMESPACE. */
 interface DiscoveryRequest {
   readonly prefix: readonly string[];
-  /** The prefix's JSON: a field may hold any character, so a separator could collide. */
   readonly key: string;
   readonly events: NamespaceEvents;
   loaded: boolean;
-  /** What this request announced, by the namespace's JSON. */
   readonly announced: Map<string, string[]>;
-  /**
-   * What the requests it replaced showed and it has not confirmed yet. Its view is `announced` plus `held`; at its
-   * `loaded`, whatever is still held is withdrawn.
-   */
   readonly held: Map<string, string[]>;
-  /** Watches by their prefix's JSON, so a namespace reaches its watches with one lookup per field. */
   readonly watches: Map<string, Set<WatchRecord>>;
   linger: ReturnType<typeof setTimeout> | undefined;
 }
@@ -93,20 +55,13 @@ interface WatchRecord {
   readonly key: string;
   readonly handlers: DiscoveryWatchHandlers;
   state: WatchState;
-  /** Kept across a move to another request. */
   loaded: boolean;
 }
 
-/** Whether `prefix` covers `namespace` field by field: equal, or a leading part of it. */
 export function covers(prefix: readonly string[], namespace: readonly string[]): boolean {
   return prefix.length <= namespace.length && prefix.every((field, i) => field === namespace[i]);
 }
 
-/**
- * Where a watch on `prefix` goes among requests whose prefixes never overlap: under the one request that covers it, or
- * into a new request that replaces every request it covers (none for a disjoint prefix). Both cannot hold, since a
- * request under `prefix` and one over it would overlap each other.
- */
 export function placeWatch<R extends { readonly prefix: readonly string[] }>(
   open: Iterable<R>,
   prefix: readonly string[],
@@ -119,11 +74,6 @@ export function placeWatch<R extends { readonly prefix: readonly string[] }>(
   return { kind: 'open', replacing };
 }
 
-/**
- * What a discovery ending means for its owner, shared by wants and members views: the connection's end waits for the
- * next connection; the relay finishing the request, a REQUEST_ERROR a wait may fix, or a queue overflow is retried
- * after a backoff; anything else, such as a refusal of the credentials, is surfaced.
- */
 export function discoveryEnding(error: unknown): 'connection' | 'retry' | 'fatal' {
   if (error instanceof SubscriptionConnectionClosedError) return 'connection';
   if (error === undefined || error instanceof SubscriptionOverflowError) return 'retry';
@@ -131,17 +81,10 @@ export function discoveryEnding(error: unknown): 'connection' | 'retry' | 'fatal
   return 'fatal';
 }
 
-/**
- * Whether a request refused at the call, a subscribe or a discovery watch, is the caller's own fault, which no
- * connection fixes. Anything else thrown there (CLOSED, the connection's TRANSPORT_ERROR or GOAWAY) is the connection
- * ending before the supervisor has heard of it.
- */
 export function refusedForGood(error: unknown): boolean {
-  // The core's encoders refuse a request the wire cannot carry (a field too long to encode) the same way every time.
   return error instanceof TypeError || error instanceof RangeError || isMoqtProtocolError(error);
 }
 
-/** Open the index for one connection; `open` starts one namespace request. */
 export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents): DiscoveryIndex {
   const requests = new Map<string, DiscoveryRequest>();
   let closed = false;
@@ -170,7 +113,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
   const notify = (request: DiscoveryRequest, namespace: string[], type: 'announced' | 'unannounced') => {
     for (let length = request.prefix.length; length <= namespace.length; length++) {
       const set = request.watches.get(JSON.stringify(namespace.slice(0, length)));
-      // A handler may release a watch or open another: each one is checked as it comes up.
       for (const record of [...(set ?? [])]) {
         if (!serves(request, record)) continue;
         call(record, (handlers) =>
@@ -180,7 +122,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     }
   };
 
-  /** Tell the owner its watch ended, unless it released the watch first. */
   const announceEnd = (record: WatchRecord) => {
     const { state } = record;
     if (state.kind === 'ended') call(record, (handlers) => handlers.onEnded?.(state.error));
@@ -198,7 +139,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
       request.loaded = true;
       const gone = [...request.held.values()];
       request.held.clear();
-      // Withdrawn while the swap could not see them.
       for (const namespace of gone) notify(request, namespace, 'unannounced');
       for (const record of records(request)) {
         if (!serves(request, record) || record.loaded) continue;
@@ -209,7 +149,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     }
     const key = JSON.stringify(event.namespace);
     if (event.type === 'announced') {
-      // Every view already shows a held namespace: confirming it is not news.
       if (request.held.delete(key)) {
         request.announced.set(key, event.namespace);
         return;
@@ -222,11 +161,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     if (request.announced.delete(key)) notify(request, event.namespace, 'unannounced');
   };
 
-  /**
-   * Serve `record` from the request covering its prefix, or open a request on its prefix that replaces every request
-   * under it. The new request holds what the replaced requests and `ended`, a request that ended over the prefix,
-   * showed under it. If `open` throws, every watch it moved ends after the call, and the throw is rethrown.
-   */
   const place = (record: WatchRecord, ended?: DiscoveryRequest) => {
     const placed = placeWatch(requests.values(), record.prefix);
     if (placed.kind === 'covered') {
@@ -255,7 +189,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     try {
       events = open([...record.prefix]);
     } catch (error) {
-      // Only the caller's own prefix can be refused for its arguments: a moved watch lost its request to the call.
       for (const movedRecord of moved) movedRecord.state = { kind: 'ended', error: lostTo(error) };
       queueMicrotask(() => {
         for (const movedRecord of moved) announceEnd(movedRecord);
@@ -282,7 +215,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     let error: unknown;
     try {
       for await (const event of request.events) {
-        // Replaced or closed: its end is not news to the watches, which moved or ended already.
         if (requests.get(request.key) !== request) return;
         dispatch(request, event);
       }
@@ -296,8 +228,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
       end(records(request), error);
       return;
     }
-    // The ending is about the request's own prefix: a narrower watch, moved in or served by filtering, is placed again,
-    // shortest first so the rest can be served from its request.
     const rehomed = records(request)
       .filter((record) => record.key !== request.key)
       .sort((a, b) => a.prefix.length - b.prefix.length);
@@ -321,7 +251,6 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     set?.delete(record);
     if (set?.size === 0) request.watches.delete(record.key);
     if (request.watches.size > 0 || requests.get(request.key) !== request) return;
-    // Never narrowed while a watch uses it; closed only once nothing has watched it for a while.
     request.linger = setTimeout(() => {
       if (request.watches.size > 0 || requests.get(request.key) !== request) return;
       requests.delete(request.key);

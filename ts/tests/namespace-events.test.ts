@@ -218,7 +218,6 @@ it('cancels the request when the signal aborts, and break cancels it too', async
   expect(await second.next()).toMatchObject({ done: true });
 });
 
-/** Read every event `events` yields into `seen`, in the background, until it ends. */
 function collect(events: NamespaceEvents): NamespaceEvent[] {
   const seen: NamespaceEvent[] = [];
   void (async () => {

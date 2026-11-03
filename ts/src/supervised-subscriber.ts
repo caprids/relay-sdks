@@ -241,14 +241,12 @@ export type ConnectSubscriber = (
   options: ConnectRelaySubscriberOptions & RelaySessionHooks,
 ) => Promise<RelaySubscriber>;
 
-/** One live subscriber connection and the discovery it runs for followed roots and members views. */
 interface Connection {
   subscriber: RelaySubscriber;
   /** Aborts when this connection ends. */
   signal: AbortSignal;
   /** Aborts when a rotation replaced this connection: its wants move to the new one. */
   retiring: AbortSignal;
-  /** The connection's namespace discovery, shared by every want and members view on it. Closed when it ends. */
   discovery: DiscoveryIndex;
   /** Wants with a subscription still on this connection; a rotation closes it once none are left. */
   holds: number;
@@ -641,7 +639,6 @@ export async function superviseRelaySubscriber(
     want.controller.abort();
     if (wants.get(key) === want) wants.delete(key);
   };
-  /** The primitive's guard: a declared-async callback is refused, a returned promise is observed, never left unhandled. */
   const guard = <H extends object>(handlers: H, what: string): H => {
     if (typeof handlers !== 'object' || handlers === null) throw new TypeError(`${what} handlers must be an object`);
     const guarded: Record<string, (...args: unknown[]) => void> = {};
@@ -723,7 +720,6 @@ export async function superviseRelaySubscriber(
       }
       const safeHandlers = guard(handlers, 'members');
       const root = namespaceFields(membersOptions.root);
-      // A member and its generation must fit under the root.
       namespaceFields([...root, 'x', 'x']);
       if (stopped) throw new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
       const view: Members = openMembers(
@@ -804,7 +800,6 @@ async function superviseWant(
         return;
       }
       const started = await liveConnection(scope);
-      // A want replaced while waiting must not open anything: a request on its root could replace its replacement's.
       if (!started || scope.aborted) return;
       want.settledTarget = undefined;
       want.connection = started;
@@ -1617,18 +1612,12 @@ interface RootWatch {
   onChange(listener: () => void): () => void;
 }
 
-/**
- * The want's discovery of `root` on `connection`: one watch on the connection's index, which shares the request with
- * every other want and members view under the same prefix tree. A want never waits for the root to load: `newest()`
- * resolves on the first generation the watch holds. Throws what opening a request throws.
- */
 function rootWatch(connection: Connection, root: string[]): { watch: RootWatch; release(): void } {
   const generations = new Set<string>();
   const listeners = new Set<() => void>();
   const notify = () => {
     for (const listener of [...listeners]) listener();
   };
-  // Only one field below the root is a generation; anything deeper belongs to someone else.
   const generationOf = (namespace: string[]) =>
     namespace.length === root.length + 1 ? namespace[root.length] : undefined;
   const watch = connection.discovery.watch(root, {

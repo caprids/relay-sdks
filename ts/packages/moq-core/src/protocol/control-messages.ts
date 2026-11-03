@@ -797,7 +797,6 @@ export type FillParameters = Pick<
   'fillTimeout' | 'subscriberPriority' | 'locationFilter' | 'groupOrder' | 'rangeFilters'
 >;
 
-/** Where a parameter list sits: a message's own, REQUEST_OK's (which adds ACTIVE_COUNT), or FILL_PARAMETERS'. */
 type ParameterScope = 'message' | 'request-ok' | 'fill';
 
 const FILL_SCOPE_TYPES: ReadonlySet<number> = new Set([

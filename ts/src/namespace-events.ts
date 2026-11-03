@@ -44,10 +44,8 @@ export const SNAPSHOT_QUIET_MS = 50;
 /** Without MoQ Active Count, the latest `loaded` comes after the relay accepts, so a busy prefix still loads. */
 export const SNAPSHOT_LIMIT_MS = 1_000;
 
-/** Where one request stands on the relay's snapshot. */
 type Snapshot =
   | { kind: 'unanswered' }
-  /** MoQ Active Count negotiated: the core reports the end of the counted NAMESPACE messages. */
   | { kind: 'counted' }
   | { kind: 'quiet'; quiet: ReturnType<typeof setTimeout>; limit: ReturnType<typeof setTimeout> }
   | { kind: 'loaded' };
@@ -192,16 +190,12 @@ function openNamespaceRequest(
             heard();
           },
           onNamespaceDone: (suffix, { requestEnded }) => {
-            // The core's withdrawals for a request that ended arrive before the reason does; a failed stream's would
-            // read as everyone leaving when only the view stopped, so a clean end withdraws in onEnd instead.
             if (requestEnded) return;
             change('unannounced', suffix);
             heard();
           },
           onError: (error) => fail(error, isStreamFailure(error) && error.errorCode !== REQUEST_ERROR_CODE.TIMEOUT),
           onEnd: ({ error }) => {
-            // No entry follows the stream's end, so the snapshot cannot load; a failed stream ends the request only
-            // after the closure grace, and the quiet window must not close inside it.
             stopTimers();
             // A finished stream is the relay ending the request on purpose; a failed one may be a lost connection.
             if (error === undefined) {

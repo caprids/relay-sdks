@@ -520,22 +520,15 @@ interface NamespaceSubscriptionRecord extends RequestRecordBase {
   accepted?: boolean;
   /** Suffixes named by NAMESPACE and not yet withdrawn, keyed by their JSON. */
   active: Map<string, TrackNamespace>;
-  /** NAMESPACE messages still due in MoQ Active Count's counted set; 0 outside it. */
   owed: number;
 }
 
-/** Whether a SETUP's `options` declare the option `type`; an extension option's value is ignored on receipt. */
 function declares(options: readonly KeyValuePair[], type: number): boolean {
   return options.some((option) => option.type === type);
 }
 
-/** Which request a REQUEST_OK answers. */
 type RequestKind = 'subscribe' | 'fetch' | 'track-status' | 'subscribe-namespace';
 
-/**
- * MoQ Active Count's REQUEST_OK rules (draft-lcurley-moq-active-count, "Counting"): the violation, if any, of a
- * REQUEST_OK answering `answers` with `parameters` on a session that did or did not `negotiate` the extension.
- */
 function activeCountViolation(
   answers: RequestKind,
   negotiated: boolean,
@@ -552,13 +545,8 @@ function activeCountViolation(
   return undefined;
 }
 
-/** One thing that can happen on a subscribe-namespace stream after REQUEST_OK. */
 type CountedInput = 'namespace' | 'namespace-done' | 'goaway' | 'fin' | 'reset';
 
-/**
- * The counted set's grammar: exactly `owed` NAMESPACE messages before any other message on the stream, repeats
- * included, as moq-dev's own client enforces it. `owed` is 0 outside the counted set, where every input passes.
- */
 function countedStep(owed: number, input: CountedInput): { owed: number; synced: boolean } | { violation: string } {
   if (owed === 0) return { owed, synced: false };
 
@@ -572,7 +560,6 @@ function countedStep(owed: number, input: CountedInput): { owed: number; synced:
     case 'fin':
       return { violation: 'subscribe-namespace stream finished inside the ACTIVE_COUNT set' };
     case 'reset':
-      // The transport failing is not the peer breaking the grammar.
       return { owed, synced: false };
   }
 }
@@ -612,7 +599,6 @@ class MoqtSessionImpl implements MoqtSession {
   #receivedServerSetup = false;
   /** The server's SETUP declared SETUP_OPTION.MAX_AGE. */
   #maxAgeSupported = false;
-  /** Both SETUPs declared SETUP_OPTION.ACTIVE_COUNT: the one this session sent and the server's. */
   #activeCount = false;
   #receivedControlGoaway = false;
   #destroyed = false;
@@ -1064,7 +1050,6 @@ class MoqtSessionImpl implements MoqtSession {
       message,
       {
         onMessage: (msg) => {
-          // Every REQUEST_OK passes here, so no request kind can skip MoQ Active Count's rules.
           const violation =
             msg.kind === 'request-ok' ? activeCountViolation(kind, this.#activeCount, msg.parameters) : undefined;
 
@@ -1276,10 +1261,6 @@ class MoqtSessionImpl implements MoqtSession {
     }
   }
 
-  /**
-   * Apply `input` to `record`'s MoQ Active Count set: whether it completed the set, or `undefined` once it broke the
-   * set's grammar and closed the session.
-   */
   #count(record: NamespaceSubscriptionRecord, input: CountedInput): boolean | undefined {
     const step = countedStep(record.owed, input);
 

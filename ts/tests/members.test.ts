@@ -42,7 +42,6 @@ async function start(expiries: (Date | undefined)[] = []) {
     { url: 'https://relay.example.com/moq', reconnect: fast, rotateBeforeMs: 150 },
   );
   cleanup.push(() => subscriber.close());
-  /** The latest discovery request on connection `n`, once there is one. */
   const discovery = async (n = 0, count = 1) => {
     await until(() => (connections[n]?.discoveries.length ?? 0) >= count, `discovery ${count} on connection ${n}`);
     return connections[n]!.discoveries[count - 1]!;
@@ -132,7 +131,6 @@ describe('SupervisedSubscriber.members', () => {
     d.push({ type: 'loaded' });
     await until(() => changes.length === 1, 'load');
     const present = changes[0]!.present;
-    // Make before break: the new generation is announced before the old one is withdrawn.
     const replacement = newGeneration(2_000);
     d.push({ type: 'announced', namespace: at('alice', replacement) });
     d.push({ type: 'unannounced', namespace: at('alice', old) });
@@ -360,7 +358,6 @@ describe('a member leaving', () => {
     d.push({ type: 'loaded' });
     await until(() => changes.length === 1, 'load');
     d.push({ type: 'unannounced', namespace: at('alice', old) });
-    // Longer than the 0.2 ms measured, so only the grace, not the order of turns, can hide it.
     await pause(20);
     expect(view.present.has('alice')).toBe(true);
     d.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
@@ -462,7 +459,6 @@ describe('a member view over the relay wire, when the transport or the request s
     await first.send(encodeNamespace(['alice', 'g1']));
     await first.send(encodeNamespace(['bob', 'g1']));
     await until(() => changes.length === 1, 'load');
-    // A real transport can fail a request's stream a few tasks before it reports its closure.
     if (resetFirst) {
       first.reset(new Error('connection lost'));
       await pause(1);
@@ -496,7 +492,6 @@ describe('a member view over the relay wire, when the transport or the request s
     await first.send(encodeNamespace(['alice', 'g1']));
     await until(() => changes.length === 1, 'load');
     first.reset(new Error('relay reset the request stream'));
-    // The helper keeps a stream handed to a waiter in its queue: the first one comes back once more.
     expect(await fakes[0]!.nextRequestStream()).toBe(first);
     const second = await fakes[0]!.nextRequestStream();
     await second.firstMessage;
@@ -551,7 +546,6 @@ describe('one discovery per connection, shared by wants and members views', () =
     const covering = await discovery(0, 2);
     expect(covering.prefix).toEqual(ROOT);
     expect(narrow.closed).toBe(true);
-    // The want keeps its subscription through the swap.
     subscription.object(1);
     await pause();
     expect(subscription.cancelled).toBe(false);
@@ -620,8 +614,6 @@ describe('one discovery per connection, shared by wants and members views', () =
     const want = wantRecorder();
     subscriber.want('alice', { namespace: at('alice'), track: 'audio', generations: true, retry: fast }, want.handlers);
     const generation = newGeneration();
-    // A scripted relay: a request on the want's root shows its generation, one on the members root is refused with
-    // EXCESSIVE_LOAD, which a wait may fix, and each subscription is accepted and delivers at once.
     const served = new Set<object>();
     let refusals = 0;
     const relay = setInterval(() => {

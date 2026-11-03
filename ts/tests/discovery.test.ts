@@ -13,11 +13,9 @@ const settle = async () => {
   for (let i = 0; i < 10; i++) await Promise.resolve();
 };
 
-/** An index over a scripted connection that refuses an overlapping request, as `claimPrefix` does. */
 function scripted() {
   const fake = fakeSubscriber();
   const refuse = new Set<string>();
-  // A request holds its prefix until it is closed or ends.
   const claimed = new Set<FakeSubscriber['discoveries'][number]>();
   const index = createDiscoveryIndex((prefix): NamespaceEvents => {
     if (refuse.has(JSON.stringify(prefix))) throw new RelayError('CLOSED', 'Relay connection is closed', 'connection');

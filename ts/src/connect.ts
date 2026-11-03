@@ -196,8 +196,7 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
   } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
       implementationName: '@caprid/relay',
-      // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery"), and a
-      // relay that counts its snapshot says so on REQUEST_OK (MoQ Active Count).
+      // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
       setupOptions: [
         ...setupOptions,
         { type: SETUP_OPTION.SOLICIT, value: 1 },
