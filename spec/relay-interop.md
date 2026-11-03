@@ -273,6 +273,18 @@ includes routes learned from cluster peers.
   applications see the same rule against any relay.
 - The relay writes NAMESPACE again for a namespace it already advertised when that namespace's
   route changes, so entries are not edge-triggered on the wire. The SDKs drop those repeats.
+- Nothing on the wire marks the end of the initial snapshot. The relay writes REQUEST_OK and then
+  every namespace it already holds, back to back, before any later change. A probe on 2026-11-03
+  timestamped REQUEST_OK and each entry: with 12 namespaces on ord (0.17.x), every entry arrived
+  within 0.13 ms of REQUEST_OK in 20 of 20 trials, and with 60 namespaces published on ord and the
+  subscriber on fra, within 0.94 ms in 10 of 10. An empty prefix got REQUEST_OK and nothing. The
+  SDK's quiet-window estimate of `loaded` rests on this ([behavior.md](behavior.md#discovery)).
+- The relay also finishes a SUBSCRIBE_NAMESPACE stream on its own only when its origin goes away,
+  and then it first sends NAMESPACE_DONE for every namespace (`withdraw_requests` in `publisher.rs`
+  at `moq-relay-v0.17.7`).
+- No tag up to `moq-relay-v0.17.9` declares MoQ Active Count (setup option `0x40B64`, the REQUEST_OK
+  parameter `0x40B66`), so against these relays `loaded` is always the estimate. moq-dev main
+  declares it (`rs/moq-net/src/ietf/active_count.rs`), and then `loaded` is exact.
 - Measured on 2026-10-06 against sjc, and from fra for a publisher on sjc (TypeScript SDK, Node):
   the snapshot arrived one round trip after the request (~50 ms, ~110 ms). A new announce arrived
   ~50 ms (~140 ms) after the publisher's `announced`, and a clean close was withdrawn within

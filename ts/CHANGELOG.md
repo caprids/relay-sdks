@@ -5,6 +5,28 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/relay`: `SupervisedSubscriber.members({ root }, { onChanged, onError })` reports who is present under a
+  root, across reconnects and the subscriber's own rotations (#422). Each namespace one field below the root is a
+  member, and a supervised publisher's generations under it count as one member, so its rotations and reconnects
+  report nothing. The first `onChanged` is the load (`initial: true`, everyone present in `joined`, possibly nobody),
+  and `Members.loaded` tells "nobody here" from "not loaded yet". After a reconnect the view reports only who came
+  or went meanwhile. An application can build a room roster with no roster server.
+- `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
+  between every want that follows generations and every member view. A want under another want's or a view's root
+  no longer fails with `PREFIX_OVERLAP`. Nothing to change in an application.
+- `@caprid/relay`: `namespaceEvents` yields `{ type: 'loaded' }` once, after the namespaces already announced when the
+  relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET_MS`
+  (50 ms) with no entry, and never later than `SNAPSHOT_LIMIT_MS` (1 s) after REQUEST_OK; both are exported.
+  **Breaking (types):** `NamespaceEvent` is now a union; check `event.type` before reading `event.namespace`.
+- `@caprid/moq-core`: MoQ Active Count (draft-lcurley-moq-active-count): `SETUP_OPTION.ACTIVE_COUNT`,
+  `PARAMETER_TYPE.ACTIVE_COUNT` and `MessageParameters.activeCount` (decoded only on REQUEST_OK). A session that
+  declared the option and whose peer declared it too passes the count to `NamespaceSubscriptionHandlers.onOk({
+  activeCount })` and calls the new `onSynced()` after the counted NAMESPACE messages; the session closes with
+  PROTOCOL_VIOLATION when the peer breaks the extension's rules. `@caprid/relay`'s subscriber connection declares it.
+  No deployed moq-relay does, so nothing changes against them.
+
 ## 0.3.0
 
 - `@caprid/relay-websocket`: `withWebSocketFallback()` races the two transports instead of waiting out WebTransport

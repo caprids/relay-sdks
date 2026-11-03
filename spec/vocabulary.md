@@ -29,6 +29,7 @@ without a row here is a bug.
 | Move it, and learn of the cutover | `switchable.switchTo(track, SwitchOptions)` (`parameters`, `until`, `drainMs`, `signal`) resolves `SwitchedInfo` (`from`, `to`, `subscribed`); `onSwitched(info)`; `switchable.track`, `switchable.pending` | `switchable.switch_to(track, parameters=..., until=..., drain=..., cancellation=...)` returns `RelayAwaitable[SwitchedInfo]` (`from_track`, `to_track`, `subscribed`); `on_switched(info)`; `switchable.track`, `switchable.pending` |
 | Learn which namespaces under a prefix are announced | `subscriber.namespaceEvents({ prefix })` (`NamespaceEventOptions`) returns `NamespaceEvents`, yielding `NamespaceEvent` | `subscriber.namespace_events(prefix)` returns `NamespaceEvents`, yielding `NamespaceEvent` |
 | A namespace was announced, or its announce withdrawn | `{ type: 'announced' \| 'unannounced', namespace }` | `NamespaceEvent(type='announced' \| 'unannounced', namespace=...)` |
+| The relay's initial snapshot of a namespace request is complete | `{ type: 'loaded' }`; `SNAPSHOT_QUIET_MS`, `SNAPSHOT_LIMIT_MS` | not yet (TypeScript only) |
 | Register a track this publisher will serve | `publisher.registerTrack(options)` (`RegisterTrackOptions`, each track property a `PublishProperty`) returns `RelayTrackWriter` | `publisher.register_track(track, ...)` returns `RelayTrackWriter` |
 | Await the namespace announce reaching the wire | `publisher.announced` resolves `void` | `await publisher.announced` returns `None` |
 | Send one object as its own group | `writer.write(bytes, options)` | `await writer.write(payload, properties=...)` |
@@ -65,6 +66,9 @@ without a row here is a bug.
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
+| Follow who is present under a root, across reconnects and rotations | `subscriber.members(MembersOptions, MembersHandlers)` (`root`) returns `Members` (`loaded`, `present`, `close()`) | not yet (TypeScript only) |
+| One participant under a root | `Member` (`id`, `namespace`) | not yet (TypeScript only) |
+| A member view loaded, or members joined or left | `onChanged(change)` with `MembersChange` (`joined`, `left`, `present`, `initial`); `onError(error)` | not yet (TypeScript only) |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
 | Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | not yet (TypeScript only) |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |
@@ -76,7 +80,8 @@ without a row here is a bug.
 
 Casing is the only difference between languages: camelCase in TypeScript, snake_case in Python.
 Boolean state is a property (`hasDemand`, `closed`); observing change over time is a method that
-returns an async iterator (`demandChanges()`); everything that sends a request or bytes is a verb.
+returns an async iterator (`demandChanges()`); everything that sends a request or bytes is a verb. A
+standing request reports through synchronous handlers instead, as `subscribe`, `want` and `members` do.
 
 ## Connection roles: `connectRelaySubscriber`, `connectRelayPublisher`
 
@@ -291,11 +296,40 @@ The iterator ends with the subscription error classes (`SubscriptionRequestError
 subscription in the draft's terms, and a second set of classes with the same meanings would only
 add names. The prefix is a namespace prefix, matched field by field, never a string prefix.
 
+`loaded` marks the end of the relay's initial snapshot: the namespaces announced when the request was
+accepted have all been yielded, so an empty set means nobody is there, not that nothing has arrived.
+It is an event in the stream, not a promise, so it is ordered with the entries it ends. Not adopted:
+`synced` (MoQ Active Count's word, which promises an exact count that the quiet-window estimate
+cannot); `ready` (the connection's word for its SETUP); `snapshot` (it names what came before the
+marker, not the marker).
+
 Not adopted: `announcements()` (CONTEXT.md keeps "announcement" out because it names the act and
 the relay's state interchangeably); `watchNamespaces()` (a verb, where every other iterator is named
 for what it yields); `subscribeNamespace()` (the core's protocol name, which `trackSource` already
 keeps on the protocol side); `published` / `unpublished` (the draft's PUBLISH is a different
 message).
+
+## Members: `members`, `Member`, `onChanged`
+
+`subscriber.members({ root }, { onChanged })` reports who is present under a root
+([behavior.md](behavior.md#members)). A member is a participant, named by the field one below the
+root, and the word is the one a room's roster uses. The call is a noun for what it keeps, as `want`
+is, because it is a standing request on the supervisor, not a single request: it outlives
+connections and reports through synchronous handlers, as a want does. `onChanged` takes one
+`MembersChange` (`joined`, `left`, `present`, `initial`), so the load and every later change go
+through one handler: a caller that acts on "this member is here" has one place to do it, and cannot
+forget the initial members. `present` and `loaded` on the returned `Members` are state, read as
+properties.
+
+Not adopted: `memberChanges()` returning an async iterator with coalesced changes (it suits a consumer
+that awaits per member, but it reads the roster one async hop behind the want handlers it would
+drive, and the supervised layer reports through handlers); separate `onLoaded`, `onJoined` and
+`onLeft` (two entry points for one fact, and forgetting `onLoaded` silently drops everyone already
+there); `presence` (the per-member document a later helper adds on top); `roster` (the application's
+list, which may hold more than the relay knows); `participants` (longer, no gain); `watchMembers()`
+and `followMembers()` (CONTEXT.md lists "watch" and "follow" among the words to avoid for a standing
+request); a `depth` option (no
+caller needs a member deeper than one field, and it can be added without breaking this shape).
 
 ## Room-rooted endpoints: `roomEndpoint`
 
