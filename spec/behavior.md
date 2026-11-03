@@ -1847,7 +1847,8 @@ nobody watches sends nothing.
     `subscribed` (with the `namespace`), `publisher-done` (`statusCode`), `restarted` (`reason`),
     `switched` (`from` and `to`) or `error`. Its `wants` section has each want's `track`, whether it
     is `subscribed`, the `objects` delivered, its `restarts` and the last restart's reason. A want
-    that is unwanted or fails for good leaves the section.
+    that is unwanted or fails for good leaves the section, and every want leaves it when the
+    subscriber closes.
   - A frame writer, under the scope it is given: a `send` section with the track's `demand`, the
     writer's `objects`, `groups` and `backlog`, how many frames ended each way (`outcomes`), and
     `slowWrites`, writes that took over 100 ms from the call to the outcome. Removed when the writer
@@ -1855,8 +1856,9 @@ nobody watches sends nothing.
   - A frame reader, under the scope it is given: a `receive` section with the `objects` read, the
     `arrivalGaps` and `longestGapMs`, and the sequencer's `stats` when it has them; an
     `arrival-gap` event (`ms`) when the silence before an object is longer than 250 ms and than eight
-    times the moving average of the ordinary intervals. The silence around a Restart or Move is not
-    a gap. Removed when the reader closes.
+    times the moving average of the ordinary intervals. That average starts from the median of the
+    first four intervals, before which no gap is judged, so a slow cadence is learned rather than
+    reported. The silence around a Restart or Move is not a gap. Removed when the reader closes.
   - `watchAudioInput(diagnostics, input)`, for an audio player input: an `audio` section with the
     input's stats, and, from a look every 100 ms, one event per episode of filled audio (concealed
     or synthesized instead of received) once 300 ms pass with none: `audio-dropout` for 250 ms or

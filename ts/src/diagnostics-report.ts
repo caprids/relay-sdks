@@ -120,6 +120,10 @@ export function wantDiagnostics(diagnostics: Diagnostics) {
     forget(key: string) {
       wants.delete(key);
     },
+    /** The subscriber stopped: every want is gone. */
+    forgetAll() {
+      wants.clear();
+    },
   };
 }
 

@@ -121,6 +121,16 @@ describe('a supervised subscriber with diagnostics', () => {
     expect(diagnostics.snapshot()['roster/subscriber.wants']).toEqual({});
   });
 
+  it('empties the wants section when the subscriber closes', async () => {
+    const { diagnostics, subscriber, connections } = await start();
+    subscriber.want('p2/audio', { namespace: ['room', 'p2'], track: 'audio', retry: fast });
+    await until(() => connections[0]?.subscriptions.length === 1, 'subscribe');
+    connections[0]?.subscriptions[0]?.accept();
+    expect(Object.keys(diagnostics.snapshot()['roster/subscriber.wants'] as object)).toEqual(['p2/audio']);
+    subscriber.close();
+    expect(diagnostics.snapshot()['roster/subscriber.wants']).toEqual({});
+  });
+
   it('refuses a diagnostics option that is not a recorder', async () => {
     await expect(
       superviseRelaySubscriber(async () => fakeSubscriber(), { url, diagnostics: {} as never }),
@@ -218,6 +228,20 @@ describe('a frame reader with diagnostics', () => {
     });
     reader.close();
     expect(diagnostics.snapshot()).toEqual({});
+  });
+
+  it('learns a cadence slower than the 250 ms floor before judging, then still catches a stall', () => {
+    vi.useFakeTimers({ toFake: ['performance'] });
+    const diagnostics = createDiagnostics();
+    const reader = createFrameReader(sequencer(), { onFrame() {}, diagnostics });
+    for (let group = 0; group < 10; group++) {
+      reader.onObject(object(group));
+      vi.advanceTimersByTime(500);
+    }
+    expect(diagnostics.events()).toEqual([]);
+    vi.advanceTimersByTime(4_500);
+    reader.onObject(object(10));
+    expect(brief(diagnostics.events(), 'ms')).toEqual([[undefined, 'arrival-gap', 5_000]]);
   });
 
   it('allows a slow track its own interval: eight of them before a gap', () => {

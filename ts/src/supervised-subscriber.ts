@@ -371,6 +371,7 @@ export async function superviseRelaySubscriber(
     first = undefined;
     for (const want of wants.values()) want.controller.abort();
     wants.clear();
+    wantReport?.forgetAll();
     current?.subscriber.close();
     current = undefined;
     retiring?.subscriber.close();
