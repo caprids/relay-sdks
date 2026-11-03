@@ -1192,6 +1192,20 @@ diagnostics.event('app.joined', { participant: id });
 diagnostics.section('app.video', () => ({ layer, freezes }));
 ```
 
+The SDK reports into the recorder when you give it one: the supervised connections (their status,
+the transport they ended up on, generations, and every want's subscribe, restart, move and error),
+frame writers (what became of each frame), frame readers (arrival gaps and the sequencer's counters)
+and, through `watchAudioInput`, audio player inputs (their counters, and each stretch of concealed
+audio). Give each writer and reader a scope of its own, and a second subscriber too:
+
+```ts
+const subscriber = await connectSupervisedSubscriber({ getToken, diagnostics });
+const roster = await connectSupervisedSubscriber({ getToken, diagnostics: diagnostics.scope('roster') });
+const audio = createFrameWriter(track, { grouping: 'frame', diagnostics: diagnostics.scope('audio') });
+const reader = createFrameReader(sequencer, { onFrame: input.push, diagnostics: diagnostics.scope(`${peer}/audio`) });
+watchAudioInput(diagnostics.scope(`${peer}/audio`), input);
+```
+
 The recorder holds the last 10 minutes of events. `diag.events` carries them, and `diag.stats`
 carries a snapshot of every section once a second. When the relay subscribes to `diag.events`, the
 client first sends everything it holds, so a collector that starts following after a complaint

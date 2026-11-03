@@ -5,8 +5,11 @@
  * turn. Nothing written is replayed onto a new generation; a write made while no generation is up fails at once with
  * `RECONNECTING`. See spec/behavior.md, "Supervised connections".
  */
+
+import type { Diagnostics } from './client-diagnostics.js';
 import type { ConnectRelayOptions, RelaySessionHooks } from './connect-session.js';
 import { assertTimeoutMs, reportEndpoint } from './connect-session.js';
+import { diagnosticsOption, linkDiagnostics } from './diagnostics-report.js';
 import { RelayError } from './errors.js';
 import {
   type ConnectRelayPublisherOptions,
@@ -61,6 +64,12 @@ export interface ConnectSupervisedPublisherOptions extends ConnectRelayOptions {
    * with it. A throw reporting `closed` rejects the `close()` that caused it; `closed` resolves either way.
    */
   onStatus?(status: SupervisedStatus, error?: unknown): void;
+  /**
+   * A recorder, or a scope of one, from `@caprid/relay/diagnostics` (spec/behavior.md, "Client diagnostics"): the
+   * supervisor reports under its scope `publisher` a `link` event on each status change, a `generation` event for each
+   * generation it serves, and the `link` section. Publishing the recorder is `publishDiagnostics`, separately.
+   */
+  diagnostics?: Diagnostics;
 }
 
 /** One publisher generation: a connection and the namespace it serves. */
@@ -174,8 +183,11 @@ export async function superviseRelayPublisher(
     onGeneration,
     onStatus,
     signal,
+    diagnostics,
     ...connection
   } = options;
+  const reporting = diagnosticsOption(diagnostics)?.scope('publisher');
+  const linkReport = reporting && linkDiagnostics(reporting);
   const root = namespaceFields(given);
   // A generation field is always valid; check the whole namespace once so a root at the size limit fails here.
   namespaceFields([...root, newGeneration()]);
@@ -219,6 +231,7 @@ export async function superviseRelayPublisher(
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
     status = next;
+    linkReport?.status(next, error);
     onStatus?.(next, error);
   };
 
@@ -272,8 +285,9 @@ export async function superviseRelayPublisher(
         ...connection,
         namespace,
         signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
-        [reportEndpoint]: (endpoint) => {
+        [reportEndpoint]: (endpoint, framing) => {
           connection.url ??= endpoint;
+          linkReport?.carrier(framing);
         },
       });
     } finally {
@@ -302,6 +316,7 @@ export async function superviseRelayPublisher(
   };
 
   const report = (live: Generation) => {
+    linkReport?.generation(live.info.generation);
     onGeneration?.({ generation: live.info.generation, namespace: [...live.info.namespace] });
   };
 

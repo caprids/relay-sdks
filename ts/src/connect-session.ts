@@ -47,6 +47,9 @@ export type RelayTransportFactory = (
   framing?: 'webtransport' | 'native-quic' | 'websocket';
 };
 
+/** What carries a connection: a {@link RelayTransportFactory}'s `framing`. */
+export type TransportFraming = NonNullable<ReturnType<RelayTransportFactory>['framing']>;
+
 /**
  * A token together with when the relay stops honoring it. moq-relay ends a session at its grant's deadline, which is
  * the token's expiry, and a live session cannot take a new token; supervised connections replace theirs before then.
@@ -201,14 +204,15 @@ export const resolveTransport = Symbol('resolveTransport');
 
 /**
  * Internal to the supervisors, never part of the public options: told the endpoint a connection dialed, before the
- * provider's token was added, once the connection is up. A supervisor given no `url` dials it from then on.
+ * provider's token was added, and what carries it, once the connection is up. A supervisor given no `url` dials the
+ * endpoint from then on; one with diagnostics records the carrier.
  */
 export const reportEndpoint = Symbol('reportEndpoint');
 
 /** The options only the SDK's own entry points and supervisors pass: see {@link resolveTransport}, {@link reportEndpoint}. */
 export interface RelaySessionHooks {
   [resolveTransport]?: () => Promise<RelayTransportFactory>;
-  [reportEndpoint]?: (endpoint: string) => void;
+  [reportEndpoint]?: (endpoint: string, framing: TransportFraming) => void;
 }
 
 /** The options {@link openRelaySession} reads: the public ones, plus the internal hooks. */
@@ -299,7 +303,12 @@ export async function openRelaySession<T extends Session>(
   let setupReceived = false;
   const connectFailure = (error: unknown): RelayError =>
     setupReceived ? transportError(error, 'connecting') : connectingError(error, peerClose);
-  const establish = async (): Promise<{ session: T; transport: MoqtTransport; endpoint: string }> => {
+  const establish = async (): Promise<{
+    session: T;
+    transport: MoqtTransport;
+    endpoint: string;
+    framing: TransportFraming;
+  }> => {
     let issued: Issued | undefined;
     if (!given?.searchParams.has('jwt') && options.getToken) {
       const resolved = await options.getToken();
@@ -376,7 +385,7 @@ export async function openRelaySession<T extends Session>(
 
     await session.ready;
     assertOpen();
-    return { session, transport, endpoint };
+    return { session, transport, endpoint, framing: created.framing ?? 'webtransport' };
   };
 
   let connected: Awaited<ReturnType<typeof establish>>;
@@ -392,7 +401,7 @@ export async function openRelaySession<T extends Session>(
 
   clearTimeout(timer);
   established = true;
-  options[reportEndpoint]?.(connected.endpoint);
+  options[reportEndpoint]?.(connected.endpoint, connected.framing);
 
   return {
     session: connected.session,

@@ -383,6 +383,77 @@ export function followDiagnostics(
   };
 }
 
+/** What {@link watchAudioInput} reads: `@caprid/moq-media`'s `AudioPlayerInput` qualifies. */
+export interface WatchedAudioInput {
+  /** The input's cumulative counters; the four below are the ones episodes are measured with. */
+  readonly stats: {
+    /** Silence played in place of frames that never came, in microseconds. */
+    readonly concealedUs: number;
+    /** Audio synthesized in place of frames that never came, in microseconds. */
+    readonly synthesizedUs: number;
+    /** Times the buffer ran dry while playing. */
+    readonly underruns: number;
+    /** Frames dropped on arrival. */
+    readonly late: number;
+  };
+}
+
+/** How often {@link watchAudioInput} looks at the input, in milliseconds. */
+const AUDIO_WATCH_MS = 100;
+/** An episode ends once nothing was filled for this long. */
+const AUDIO_EPISODE_QUIET_MS = 300;
+/** Filled audio of at least this much is an `audio-conceal` event, and of at least the second an `audio-dropout`. */
+const AUDIO_CONCEAL_MS = 60;
+const AUDIO_DROPOUT_MS = 250;
+
+/**
+ * Watch an audio player input for diagnostics, under a scope such as `diagnostics.scope('p2/audio')`: an `audio`
+ * section with its stats, and an event for each episode of filled audio (concealed or synthesized instead of received),
+ * once the input has played received audio again for 300 ms: `audio-dropout` for 250 ms or more, `audio-conceal` for
+ * 60 ms or more. Returns the function that stops watching.
+ *
+ * ```ts
+ * const input = player.addInput({ clock, decoderConfig });
+ * const unwatch = watchAudioInput(diagnostics.scope(`${participant}/audio`), input);
+ * ```
+ */
+export function watchAudioInput(diagnostics: Diagnostics, input: WatchedAudioInput): () => void {
+  if (typeof input !== 'object' || input === null || typeof input.stats !== 'object') {
+    throw new TypeError('input must have stats, as an AudioPlayerInput does');
+  }
+  const removeSection = diagnostics.section('audio', () => ({ ...input.stats }));
+  let previous = { ...input.stats };
+  let episode: { since: number; grewAt: number; base: typeof previous } | undefined;
+  const timer = setInterval(() => {
+    const now = performance.now();
+    const stats = { ...input.stats };
+    const grew = stats.concealedUs + stats.synthesizedUs > previous.concealedUs + previous.synthesizedUs;
+    if (grew && !episode) episode = { since: now - AUDIO_WATCH_MS, grewAt: now, base: previous };
+    else if (grew && episode) episode.grewAt = now;
+    else if (episode && now - episode.grewAt > AUDIO_EPISODE_QUIET_MS) {
+      const { base, since, grewAt } = episode;
+      episode = undefined;
+      const concealedMs = (stats.concealedUs - base.concealedUs) / 1000;
+      const synthesizedMs = (stats.synthesizedUs - base.synthesizedUs) / 1000;
+      const filledMs = concealedMs + synthesizedMs;
+      if (filledMs >= AUDIO_CONCEAL_MS) {
+        diagnostics.event(filledMs >= AUDIO_DROPOUT_MS ? 'audio-dropout' : 'audio-conceal', {
+          ms: Math.round(grewAt - since),
+          concealedMs: Math.round(concealedMs),
+          synthesizedMs: Math.round(synthesizedMs),
+          underruns: stats.underruns - base.underruns,
+          late: stats.late - base.late,
+        });
+      }
+    }
+    previous = stats;
+  }, AUDIO_WATCH_MS);
+  return () => {
+    clearInterval(timer);
+    removeSection();
+  };
+}
+
 function parse<T>(object: MoqtObject, is: (value: unknown) => value is T): T | undefined {
   try {
     const value = readJSON(object);

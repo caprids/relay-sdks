@@ -13,6 +13,12 @@ each section says what changed and what to do about it. How to cut a release is 
   broadcast, sending nothing while nobody subscribes and replaying what it holds each time the relay subscribes;
   `followDiagnostics(subscriber, { namespace }, handlers)` reads them, each event once. TypeScript only, for clients
   that publish. Nothing to change in an application.
+- `@caprid/relay`: a `diagnostics` option on `connectSupervisedPublisher`, `connectSupervisedSubscriber`,
+  `createFrameWriter` and `createFrameReader` reports into a recorder (#435): connection status with the transport's
+  framing and generations, every want's subscribe, publisher done, restart, move and error, each frame writer's
+  outcomes, and each frame reader's arrival gaps and its sequencer's counters. `watchAudioInput` in
+  `@caprid/relay/diagnostics` reports an audio player input's counters and each episode of concealed audio. Without the
+  option nothing changes.
 
 ## 0.3.0
 

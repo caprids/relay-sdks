@@ -905,6 +905,8 @@ does not export.
 | Publish a recorder | `publishDiagnostics(diagnostics, publisher, { statsIntervalMs? })` → `DiagnosticsPublication { close }` | — |
 | What the tracks carry | `DiagnosticsEventsObject { instance, backlog?, events }`, `DiagnosticsStatsObject { instance, t, stats }` | — |
 | Read a client's diagnostics | `followDiagnostics(subscriber, { namespace, generations?, key?, eventsParameters? }, { onEvents, onStats, onError })` | — |
+| Have the SDK report into it | `diagnostics` on `connectSupervisedPublisher`, `connectSupervisedSubscriber`, `createFrameWriter` and `createFrameReader` | — |
+| Watch an audio player input | `watchAudioInput(diagnostics, input)` (`WatchedAudioInput`), returning the function that stops | — |
 
 "Diagnostics" over "telemetry" (which suggests a vendor pipeline and sampling) and "debug" (which
 suggests logging). `instance`, not `session`, since a session is a connection here and one recorder

@@ -1,3 +1,5 @@
+import type { Diagnostics } from './client-diagnostics.js';
+import { diagnosticsOption } from './diagnostics-report.js';
 import { RelayError } from './errors.js';
 import type { PublishProperty, RelayGroupWriter, RelayTrackWriter } from './publish.js';
 
@@ -60,6 +62,13 @@ export interface FrameWriterOptions<F extends Frame = Frame> {
    * {@link FrameWriter.keyframeNeeded}), so an encoder can force one. An exception from it goes to `console.error`.
    */
   onKeyframeNeeded?: () => void;
+  /**
+   * A scope from `@caprid/relay/diagnostics` (spec/behavior.md, "Client diagnostics"), such as
+   * `diagnostics.scope('audio')`: the writer reports a `send` section with the track's demand, its objects, groups and
+   * backlog, how many frames ended each way (`outcomes`), and how many writes took over 100 ms (`slowWrites`), until it
+   * closes. Give each writer its own scope.
+   */
+  diagnostics?: Diagnostics;
 }
 
 /**
@@ -105,6 +114,8 @@ interface Pending<F> {
 }
 
 const DEFAULT_BACKLOG: Record<FrameGrouping, number> = { keyframe: 8, frame: 25 };
+/** A write that takes longer than this, from the call to its outcome, counts as slow in the `send` section. */
+const SLOW_WRITE_MS = 100;
 
 /** A failure ends the track exactly when the SDK says so: `CLOSED`, or the track is closed afterwards. */
 const retired = (track: RelayTrackWriter, error: RelayError) => error.code === 'CLOSED' || track.closed;
@@ -139,6 +150,7 @@ export function createFrameWriter<F extends Frame = Frame>(
   if (options.onKeyframeNeeded !== undefined && typeof options.onKeyframeNeeded !== 'function') {
     throw new TypeError('onKeyframeNeeded must be a function');
   }
+  const diagnostics = diagnosticsOption(options.diagnostics);
   const stale: (frame: F) => boolean = options.stale ?? never;
   const onKeyframeNeeded = options.onKeyframeNeeded;
   const keyframes = grouping === 'keyframe';
@@ -429,9 +441,41 @@ export function createFrameWriter<F extends Frame = Frame>(
     return outcome;
   };
 
+  const outcomes: Record<FrameOutcomeKind, number> = {
+    sent: 0,
+    skipped: 0,
+    stale: 0,
+    dropped: 0,
+    interrupted: 0,
+    ended: 0,
+  };
+  let slowWrites = 0;
+  /** `write`, counting what became of each frame and how long it took. */
+  const countedWrite = (frame: F): Promise<FrameOutcome> => {
+    const startedAt = performance.now();
+    const outcome = write(frame);
+    outcome.then(
+      ({ kind }) => {
+        outcomes[kind]++;
+        if (performance.now() - startedAt > SLOW_WRITE_MS) slowWrites++;
+      },
+      () => {},
+    );
+    return outcome;
+  };
+  const removeSection = diagnostics?.section('send', () => ({
+    demand: track.hasDemand,
+    objects,
+    groups,
+    backlog: waiting.length,
+    outcomes: { ...outcomes },
+    slowWrites,
+  }));
+
   const close = async () => {
     if (closing) return idle;
     closing = true;
+    removeSection?.();
     for (const dropped of waiting.splice(0)) dropped.resolve({ kind: 'dropped' });
     stopWatching();
     idle = idle.then(async () => {
@@ -462,7 +506,7 @@ export function createFrameWriter<F extends Frame = Frame>(
   }
 
   return {
-    write,
+    write: diagnostics ? countedWrite : write,
     close,
     get closed() {
       return closing || ended !== undefined;

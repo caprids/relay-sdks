@@ -1,4 +1,6 @@
 import type { KeyValuePair, MoqtObject, SubscribeOk } from '@caprid/moq-core';
+import type { Diagnostics } from './client-diagnostics.js';
+import { diagnosticsOption } from './diagnostics-report.js';
 import type { WantSwitchedInfo } from './supervised-subscriber.js';
 
 /**
@@ -25,6 +27,8 @@ export interface FrameReaderSequencer<F> {
     /** The sequencer asks for the subscription to be replaced at the live edge: see `onCatchUp`. */
     catchUp?: boolean;
   };
+  /** Counters a reader with diagnostics reports, when the sequencer keeps them: a `FrameSequencer`'s do. */
+  readonly stats?: object;
 }
 
 /** Options for {@link createFrameReader}. */
@@ -41,6 +45,13 @@ export interface FrameReaderOptions<F> {
    * frames of the same poll; an exception from it goes to `console.error`.
    */
   onCatchUp?(): void;
+  /**
+   * A scope from `@caprid/relay/diagnostics` (spec/behavior.md, "Client diagnostics"), such as
+   * `diagnostics.scope('p2/audio')`: the reader reports a `receive` section with the objects it read, its arrival
+   * gaps and the longest, and the sequencer's `stats`, and an `arrival-gap` event when objects stop for longer than
+   * 250 ms, or eight times their usual interval if that is longer. Give each reader its own scope.
+   */
+  diagnostics?: Diagnostics;
 }
 
 /**
@@ -68,6 +79,9 @@ export interface FrameReader {
 
 /** Poll at least this often while a wait runs: another track may reset or re-anchor the shared clock meanwhile. */
 const CLOCK_RECHECK_US = 50_000;
+/** The shortest silence between objects that is an arrival gap, and how many usual intervals one must be. */
+const ARRIVAL_GAP_MIN_MS = 250;
+const ARRIVAL_GAP_INTERVALS = 8;
 
 /**
  * Read a track as frames: feed the sequencer every event, poll it after each, and again when a wait it reports ends
@@ -81,6 +95,7 @@ const CLOCK_RECHECK_US = 50_000;
  * ```
  */
 export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options: FrameReaderOptions<F>): FrameReader {
+  const arrivals = arrivalDiagnostics(sequencer, diagnosticsOption(options.diagnostics));
   let timer: ReturnType<typeof setTimeout> | undefined;
   let closed = false;
   // An onFrame that feeds the reader again (synchronously) must not interleave a second batch with the first, and a
@@ -145,6 +160,7 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
       if (!closed) sequencer.trackProperties = info.trackProperties;
     },
     onObject(object) {
+      if (!closed) arrivals?.arrived();
       event(() => sequencer.object(object));
     },
     onSubgroupEnd({ groupId }) {
@@ -154,9 +170,11 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
       event(() => sequencer.groupReset(groupId));
     },
     onRestarted() {
+      arrivals?.restarted();
       restart(() => sequencer.restart());
     },
     onSwitched(info) {
+      arrivals?.restarted();
       restart(() => {
         sequencer.restart();
         sequencer.trackProperties = info.subscribed.trackProperties;
@@ -164,8 +182,50 @@ export function createFrameReader<F>(sequencer: FrameReaderSequencer<F>, options
     },
     close() {
       closed = true;
+      arrivals?.close();
       if (timer !== undefined) clearTimeout(timer);
       timer = undefined;
+    },
+  };
+}
+
+/** A reader's arrival counting for diagnostics: objects, and gaps against the track's usual interval. */
+function arrivalDiagnostics(sequencer: FrameReaderSequencer<unknown>, diagnostics: Diagnostics | undefined) {
+  if (!diagnostics) return undefined;
+  let objects = 0;
+  let gaps = 0;
+  let longestGapMs = 0;
+  let lastAt: number | undefined;
+  let usualMs: number | undefined;
+  const removeSection = diagnostics.section('receive', () => ({
+    objects,
+    arrivalGaps: gaps,
+    longestGapMs: Math.round(longestGapMs),
+    ...(sequencer.stats ? { sequencer: { ...sequencer.stats } } : {}),
+  }));
+  return {
+    arrived() {
+      objects++;
+      const now = performance.now();
+      if (lastAt !== undefined) {
+        const interval = now - lastAt;
+        if (interval > Math.max(ARRIVAL_GAP_MIN_MS, ARRIVAL_GAP_INTERVALS * (usualMs ?? 0))) {
+          gaps++;
+          longestGapMs = Math.max(longestGapMs, interval);
+          diagnostics.event('arrival-gap', { ms: Math.round(interval) });
+        } else {
+          // A moving average of the ordinary intervals; a gap does not move it.
+          usualMs = usualMs === undefined ? interval : usualMs * 0.95 + interval * 0.05;
+        }
+      }
+      lastAt = now;
+    },
+    /** A replaced subscription: the silence around it is the restart, which the want reports. */
+    restarted() {
+      lastAt = undefined;
+    },
+    close() {
+      removeSection();
     },
   };
 }

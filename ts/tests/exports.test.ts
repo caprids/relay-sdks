@@ -106,13 +106,14 @@ describe('public vocabulary', () => {
 
 /** `@caprid/relay/diagnostics`: client diagnostics, which the root does not export (spec/vocabulary.md). */
 describe('diagnostics vocabulary', () => {
-  it('exports the recorder, its two track names, publishing and following, and nothing else', async () => {
+  it('exports the recorder, its two track names, publishing, following and the audio watch, and nothing else', async () => {
     const diagnostics = await import('../src/diagnostics.js');
     expect(Object.keys(diagnostics).sort()).toEqual([
       'DIAGNOSTICS_TRACKS',
       'createDiagnostics',
       'followDiagnostics',
       'publishDiagnostics',
+      'watchAudioInput',
     ]);
     expect(diagnostics.DIAGNOSTICS_TRACKS).toEqual({ events: 'diag.events', stats: 'diag.stats' });
     expect(relay).not.toHaveProperty('createDiagnostics');
@@ -151,6 +152,7 @@ describe('media vocabulary', () => {
       stale: true,
       maxBacklog: true,
       onKeyframeNeeded: true,
+      diagnostics: true,
     } satisfies Record<keyof FrameWriterOptions, true>;
     const kinds = {
       sent: true,

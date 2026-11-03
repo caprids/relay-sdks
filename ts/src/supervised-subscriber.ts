@@ -18,8 +18,10 @@ import {
   type PublishDone,
   type SubscribeOk,
 } from '@caprid/moq-core';
+import type { Diagnostics } from './client-diagnostics.js';
 import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelaySubscriber } from './connect.js';
 import { assertTimeoutMs, type RelaySessionHooks, reportEndpoint } from './connect-session.js';
+import { diagnosticsOption, linkDiagnostics, wantDiagnostics } from './diagnostics-report.js';
 import { RelayError } from './errors.js';
 import type { NamespaceEvents } from './namespace-events.js';
 import type { ProductSubscription, RelaySubscription, SubscriptionEnd } from './subscription.js';
@@ -66,6 +68,12 @@ export interface ConnectSupervisedSubscriberOptions extends ConnectRelaySubscrib
    * with it. A throw reporting `closed` is rethrown from the `close()` that caused it; `closed` resolves either way.
    */
   onStatus?(status: SupervisedStatus, error?: unknown): void;
+  /**
+   * A recorder, or a scope of one, from `@caprid/relay/diagnostics` (spec/behavior.md, "Client diagnostics"): the
+   * supervisor reports under its scope `subscriber` a `link` event on each status change, a `want` event at each turn
+   * of a want's life, and the `link` and `wants` sections. Give two subscribers their own scopes.
+   */
+  diagnostics?: Diagnostics;
 }
 
 /** What a want asks for. */
@@ -306,8 +314,11 @@ export async function superviseRelaySubscriber(
   if (typeof options !== 'object' || options === null) {
     throw new TypeError('connectSupervisedSubscriber takes an options object');
   }
-  const { reconnect, rotateBeforeMs: rotateBefore, onStatus, signal, ...connection } = options;
+  const { reconnect, rotateBeforeMs: rotateBefore, onStatus, signal, diagnostics, ...connection } = options;
   const backoff = backoffOptions('reconnect', reconnect, RECONNECT_BACKOFF);
+  const reporting = diagnosticsOption(diagnostics)?.scope('subscriber');
+  const linkReport = reporting && linkDiagnostics(reporting);
+  const wantReport = reporting && wantDiagnostics(reporting);
   const rotateBeforeMs = rotateBeforeOption(rotateBefore);
   signal?.throwIfAborted();
 
@@ -341,6 +352,7 @@ export async function superviseRelaySubscriber(
   const setStatus = (next: SupervisedStatus, error?: unknown) => {
     if (status === next && error === undefined) return;
     status = next;
+    linkReport?.status(next, error);
     onStatus?.(next, error);
   };
   let first: { resolve(): void; reject(error: unknown): void } | undefined;
@@ -399,8 +411,9 @@ export async function superviseRelaySubscriber(
       subscriber = await connect({
         ...connection,
         signal: signal ? AbortSignal.any([signal, attemptInProgress.signal]) : attemptInProgress.signal,
-        [reportEndpoint]: (endpoint) => {
+        [reportEndpoint]: (endpoint, framing) => {
           connection.url ??= endpoint;
+          linkReport?.carrier(framing);
         },
       });
     } finally {
@@ -627,7 +640,9 @@ export async function superviseRelaySubscriber(
 
   const forget = (key: string, want: Want) => {
     want.controller.abort();
-    if (wants.get(key) === want) wants.delete(key);
+    if (wants.get(key) !== want) return;
+    wants.delete(key);
+    wantReport?.forget(key);
   };
 
   return {
@@ -663,7 +678,7 @@ export async function superviseRelaySubscriber(
       const target = targetKey([], track, parameters);
       const existing = wants.get(key);
       if (existing && existing.source === source) {
-        existing.handlers = safeHandlers;
+        existing.handlers = wantReport ? wantReport.observe(key, track, safeHandlers) : safeHandlers;
         existing.retry = retryBackoff;
         existing.until = predicate;
         existing.drainMs = drainMs;
@@ -679,7 +694,7 @@ export async function superviseRelaySubscriber(
         options: { namespace, track, parameters, generations, staleAfterMs },
         source,
         target,
-        handlers: safeHandlers,
+        handlers: wantReport ? wantReport.observe(key, track, safeHandlers) : safeHandlers,
         retry: retryBackoff,
         until: predicate,
         drainMs,

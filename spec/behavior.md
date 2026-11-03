@@ -1832,6 +1832,33 @@ nobody watches sends nothing.
   delivered), and skips objects that are not valid JSON of these shapes.
 - Reading the tracks takes read access to the client's broadcast, which includes its media. A
   central collector with a credential that reads every client's broadcast is for debugging only.
+- What the SDK reports into a `diagnostics` option. An error in an event is a RelayError's code and
+  phase, or an error's name, then its message, with `jwt=` values and JWT-shaped strings redacted,
+  at most 300 characters.
+  - A supervised publisher, under its scope `publisher`, and a supervised subscriber, under
+    `subscriber`: a `link` event on each status change (`status`; `carrier`, the transport's
+    framing, when it goes live; `error`, what ended the last connection), and a `link` section
+    (`status`, `carrier`, `connects`, and the publisher's `generation`). The publisher adds a
+    `generation` event for each generation it serves.
+  - The supervised subscriber also reports a `want` event at each turn of a want's life: `what` is
+    `subscribed` (with the `namespace`), `publisher-done` (`statusCode`), `restarted` (`reason`),
+    `switched` (`from` and `to`) or `error`. Its `wants` section has each want's `track`, whether it
+    is `subscribed`, the `objects` delivered, its `restarts` and the last restart's reason. A want
+    that is unwanted or fails for good leaves the section.
+  - A frame writer, under the scope it is given: a `send` section with the track's `demand`, the
+    writer's `objects`, `groups` and `backlog`, how many frames ended each way (`outcomes`), and
+    `slowWrites`, writes that took over 100 ms from the call to the outcome. Removed when the writer
+    closes.
+  - A frame reader, under the scope it is given: a `receive` section with the `objects` read, the
+    `arrivalGaps` and `longestGapMs`, and the sequencer's `stats` when it has them; an
+    `arrival-gap` event (`ms`) when the silence before an object is longer than 250 ms and than eight
+    times the moving average of the ordinary intervals. The silence around a Restart or Move is not
+    a gap. Removed when the reader closes.
+  - `watchAudioInput(diagnostics, input)`, for an audio player input: an `audio` section with the
+    input's stats, and, from a look every 100 ms, one event per episode of filled audio (concealed
+    or synthesized instead of received) once 300 ms pass with none: `audio-dropout` for 250 ms or
+    more of filled audio, `audio-conceal` for 60 ms or more, with the episode's `ms`,
+    `concealedMs`, `synthesizedMs`, `underruns` and `late`.
 
 ## Package boundaries
 

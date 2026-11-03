@@ -30,4 +30,6 @@ export {
   followDiagnostics,
   type PublishDiagnosticsOptions,
   publishDiagnostics,
+  type WatchedAudioInput,
+  watchAudioInput,
 } from './client-diagnostics.js';
