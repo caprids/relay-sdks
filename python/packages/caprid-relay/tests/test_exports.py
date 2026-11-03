@@ -193,7 +193,6 @@ def test_the_audio_only_target_latency_is_exported_and_equals_the_typescript_con
 def test_the_snapshot_windows_are_exported_and_equal_the_typescript_constants(
     python: str, typescript: str, seconds: float
 ) -> None:
-    """``caprid_relay``'s snapshot windows are ``@caprid/relay``'s, by name and by value, in seconds (#422)."""
     source = (REPO / "ts" / "src" / "namespace-events.ts").read_text()
     declared = re.search(rf"export const {typescript} = ([\d_]+);", source)
     assert declared is not None, f"ts/src/namespace-events.ts no longer declares {typescript}"

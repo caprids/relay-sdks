@@ -1,7 +1,4 @@
-"""The supervised subscriber's per-connection discovery index.
-
-Mirrors ``ts/tests/discovery.test.ts``.
-"""
+"""The supervised subscriber's per-connection discovery index."""
 
 from __future__ import annotations
 
@@ -11,7 +8,7 @@ from collections.abc import Callable, Sequence
 from typing import cast
 
 import pytest
-from core_helpers.fake_transport import create_fake_transport
+from core_helpers.fake_transport import FakeTransport, create_fake_transport
 from relay_helpers.supervision_fakes import FakeDiscovery, FakeSubscriber, until
 
 from caprid_relay import (
@@ -179,10 +176,10 @@ async def test_moves_narrower_watches_to_a_request_of_their_own_when_theirs_ends
     assert deeper.seen == ["+r/a/g2", "loaded"]
 
 
-def _factory(fake: object) -> Callable[[str, Sequence[str]], ConnectingTransport]:
+def _factory(fake: FakeTransport) -> Callable[[str, Sequence[str]], ConnectingTransport]:
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     ready.set_result(None)
-    return lambda url, protocols: ConnectingTransport(transport=fake, ready=ready)  # ty: ignore[invalid-argument-type]
+    return lambda url, protocols: ConnectingTransport(transport=fake, ready=ready)
 
 
 async def test_moves_a_narrower_watch_holding_its_view_when_the_relay_finishes_the_covering_request() -> None:

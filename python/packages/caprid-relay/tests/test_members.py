@@ -1,8 +1,4 @@
-"""The supervised subscriber's member view.
-
-Mirrors ``ts/tests/members.test.ts``: the view over scripted connections, a member leaving, the view
-over the relay wire, discovery shared with wants, and the pure reducer and transition.
-"""
+"""The supervised subscriber's member view."""
 
 from __future__ import annotations
 
@@ -150,9 +146,6 @@ def request_error(code: int, reason: str) -> SubscriptionRequestError:
 
 def connection_lost() -> RelayError:
     return RelayError("idle", code="TRANSPORT_ERROR", phase="connection")
-
-
-# ------------------------------------------------------------------ SupervisedSubscriber.members
 
 
 async def test_loads_with_every_snapshot_member_in_joined_and_calls_nothing_before(
@@ -477,9 +470,6 @@ async def test_checks_its_arguments_at_once(cleanup: list[Callable[[], object]])
     subscriber.members(["f"] * 30, quiet()).close()
 
 
-# ------------------------------------------------------------------ a member leaving
-
-
 async def test_reports_nothing_when_a_rotation_withdraws_the_only_generation_just_before_announcing_the_next(
     cleanup: list[Callable[[], object]],
 ) -> None:
@@ -707,9 +697,6 @@ async def test_cancels_a_pending_leave_without_reporting_it_when_the_view_closes
     assert ids(view.present) == ["alice"]
 
 
-# ------------------------------------------------------------------ over the relay wire
-
-
 def _factory(fake: FakeTransport) -> Callable[[str, Sequence[str]], ConnectingTransport]:
     ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
     ready.set_result(None)
@@ -829,9 +816,6 @@ async def test_reports_nothing_for_an_unchanged_room_when_the_relay_finishes_the
     await second.send(encode_namespace(["alice", "g1"]))
     await pause(0.3)
     assert [summary(c) for c in r.changes] == [LOADED_ALICE]
-
-
-# ------------------------------------------------------------------ one discovery shared by wants and member views
 
 
 class WantRecorder:
@@ -1016,9 +1000,6 @@ async def test_reports_nothing_for_a_held_namespace_the_covering_request_confirm
     assert len(w.relay.connections[0].subscriptions) == 1
 
 
-# ------------------------------------------------------------------ the reducer
-
-
 def test_maps_a_namespace_to_a_member_and_the_field_it_adds() -> None:
     assert _member_field(ROOT, at("alice")) == ("alice", "")
     assert _member_field(ROOT, at("alice", "g1")) == ("alice", "g1")
@@ -1034,9 +1015,6 @@ def test_joins_a_member_on_its_first_field_and_leaves_it_on_its_last() -> None:
     assert _apply_namespace(presence, ROOT, "unannounced", at("alice", "g1")) is None
     assert _apply_namespace(presence, ROOT, "unannounced", at("alice", "g2")) == ("left", "alice")
     assert presence == {}
-
-
-# ------------------------------------------------------------------ the transition
 
 
 class StubConnection:

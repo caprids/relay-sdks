@@ -190,7 +190,6 @@ async def run_publisher(relay: Relay, member: str) -> None:
                 await publisher.close()
                 send({"type": "closed", "at": now_ms()})
                 os._exit(0)
-        # The probe went away.
         os._exit(0)
 
     commands = asyncio.ensure_future(follow_commands())
@@ -884,7 +883,7 @@ async def run_probe(relay: Relay, flags: argparse.Namespace, argv: Sequence[str]
         sys.stderr.write(json.dumps({"error": relay.describe(error), "stack": traceback.format_exc()}) + "\n")
         probe.kill_children()
         os._exit(1)
-    # Like the TypeScript probe's process.exit(0): closing connections need not finish.
+    # Exit without waiting for closing connections to finish.
     os._exit(0)
 
 

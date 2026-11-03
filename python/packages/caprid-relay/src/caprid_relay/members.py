@@ -57,10 +57,10 @@ class MembersHandlers:
     """The view loaded, or members joined or left. The first call is the load and runs once, even for
     an empty root; every later call names at least one member in ``joined`` or ``left``. A member
     whose last namespace is withdrawn leaves once it has had none for 0.1 s, so a rotation whose
-    withdrawal arrives just before the new generation's announce calls nothing. A member's
-    generations changing, the relay repeating an announce, and the subscriber's reconnects and
-    rotations call nothing; a reconnect, rotation or retry calls it once with the difference its new
-    discovery shows, if there is one, joins and departures together. The exception is a member the
+    withdrawal arrives just before the new generation's announce calls nothing, and neither do a
+    member's generations changing or the relay repeating an announce. After a reconnect, rotation or
+    retry, one call carries the difference the new discovery shows, if there is any, joins and
+    departures together. The exception is a member the
     new discovery misses but the old one still showed, or was giving its 0.1 s: it leaves in a later
     call, once the new discovery has shown it nothing for 0.1 s."""
     on_error: Callable[[BaseException], None] | None = None
@@ -111,7 +111,7 @@ def _member(root: Sequence[str], member_id: str) -> Member:
 
 @dataclass(frozen=True, slots=True, eq=False)
 class _Settled:
-    """What the view last reported: ``present`` is handed out as is, ``by_id`` looks members up."""
+    """What the view last reported; ``present`` is handed out unchanged so callers can compare it by identity."""
 
     present: tuple[Member, ...]
     by_id: Mapping[str, Member]
@@ -131,8 +131,6 @@ def _diff_members(
 
 
 class _MembersConnection(Protocol):
-    """What a view needs of one supervised connection."""
-
     discovery: DiscoveryIndex
     ended: CancellationToken
     retiring: CancellationToken

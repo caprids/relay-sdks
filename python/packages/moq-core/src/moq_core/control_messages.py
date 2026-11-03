@@ -122,8 +122,9 @@ class SETUP_OPTION(IntEnum):
 
     A REQUEST_OK answering SUBSCRIBE_NAMESPACE carries :attr:`PARAMETER_TYPE.ACTIVE_COUNT`, how many NAMESPACE messages
     come before the first change. Negotiated when both SETUPs declare it; the value is reserved (sent as ``1``, ignored
-    on receipt). moq-dev main declares it; no deployed moq-relay does. Declare it only on a subscribing session: the
-    publish session never sends a count, so declaring it in its ``setup_options`` would promise one it does not send.
+    on receipt). moq-dev main declares it; moq-relay through v0.17.11 does not. Declare it only on a subscribing
+    session: the publish session never sends a count, so declaring it in its ``setup_options`` would promise one it
+    does not send.
     """
 
 
@@ -153,7 +154,7 @@ class PARAMETER_TYPE(IntEnum):
     MAX_AGE = 0x915C6
     """MAX_AGE, the MoQ Timestamp extension's subscriber max age (SUBSCRIBE, REQUEST_UPDATE; not a draft-22 type)."""
     ACTIVE_COUNT = 0x40B66
-    """ACTIVE_COUNT, MoQ Active Count's count on a REQUEST_OK answering SUBSCRIBE_NAMESPACE (not a draft-22 type)."""
+    """MoQ Active Count's count on a REQUEST_OK answering SUBSCRIBE_NAMESPACE (not a draft-22 type)."""
 
 
 class TRACK_PROPERTY(IntEnum):

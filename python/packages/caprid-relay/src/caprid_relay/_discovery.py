@@ -92,7 +92,6 @@ class _Request:
     loaded: bool = False
     announced: dict[Namespace, None] = field(default_factory=dict)
     watches: dict[Namespace, dict[_Record, None]] = field(default_factory=dict)
-    """The watches it serves, by prefix."""
     linger: asyncio.TimerHandle | None = None
     reader: asyncio.Future[None] | None = None
 

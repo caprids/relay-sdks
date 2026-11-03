@@ -11,7 +11,7 @@ as ``switch_to`` makes one (issue #282): the replacement opens while the current
 delivering, and ``on_switched`` marks the cutover. Before the connection's credential expires, the
 supervisor rotates to a new connection the same way (issue #261): every want's subscription moves to
 it make-before-break, and a want that keeps its target sees no break and no repeat. Member views
-(:mod:`caprid_relay.members`, issue #422) follow who is present under a root from the same
+(:mod:`caprid_relay.members`) follow who is present under a root from the same
 per-connection discovery. See ``spec/behavior.md``, "Supervised connections". The counterpart of
 ``ts/src/supervised-subscriber.ts``.
 """
