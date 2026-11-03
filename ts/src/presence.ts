@@ -213,17 +213,17 @@ export interface PresenceView<T> {
  * ```
  */
 export function createPresenceView(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'closed'>,
+  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'status' | 'closed'>,
   options: PresenceViewOptions<unknown> & { parse?: undefined },
   handlers?: PresenceViewHandlers<unknown>,
 ): PresenceView<unknown>;
 export function createPresenceView<T>(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'closed'>,
+  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'status' | 'closed'>,
   options: PresenceViewOptions<T> & { parse(value: unknown): T },
   handlers?: PresenceViewHandlers<T>,
 ): PresenceView<T>;
 export function createPresenceView<T>(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'closed'>,
+  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'status' | 'closed'>,
   options: PresenceViewOptions<T>,
   handlers: PresenceViewHandlers<T> = {},
 ): PresenceView<T> {
@@ -248,6 +248,8 @@ export function createPresenceView<T>(
   let armedFor: number | undefined;
   /** Set by `close()` at once, so a step that `parse` closed from inside delivers nothing either. */
   let closing = false;
+  /** The subscriber's `close()` reaches `status` at once and `closed` only a microtask later. */
+  const ended = () => closing || subscriber.status === 'closed';
   /** What `onChanged` last delivered; `undefined` until the first. */
   let shown: ReadonlyMap<string, PresenceMember<T>> | undefined;
 
@@ -310,7 +312,7 @@ export function createPresenceView<T>(
   const run = (effect: PresenceEffect<T>) => {
     switch (effect.kind) {
       case 'want':
-        open(effect.member);
+        if (!ended()) open(effect.member);
         return;
       case 'unwant': {
         const key = wants.get(effect.id);
@@ -319,12 +321,12 @@ export function createPresenceView<T>(
         return;
       }
       case 'emit':
-        if (closing) return;
+        if (ended()) return;
         shown = effect.change.present;
         deliver('onChanged', () => onChanged?.(effect.change));
         return;
       case 'error':
-        if (!closing) deliver('onError', () => onError?.(effect.error));
+        if (!ended()) deliver('onError', () => onError?.(effect.error));
         return;
       case 'close-members':
         members.close();
@@ -340,11 +342,13 @@ export function createPresenceView<T>(
     },
   );
   // The supervisor closes the members view and drops the wants without calling either, so the view ends itself.
+  let unsubscribe = () => {};
   const stop = () => {
     closing = true;
+    unsubscribe();
     feed({ kind: 'close' }, true);
   };
-  void subscriber.closed.then(stop);
+  unsubscribe = whenClosed(subscriber, stop);
   return {
     get loaded() {
       return shown !== undefined;
@@ -357,6 +361,24 @@ export function createPresenceView<T>(
 }
 
 let views = 0;
+
+/** One `closed` listener per subscriber, so a closed view is not kept alive until its subscriber closes. */
+const stops = new WeakMap<object, Set<() => void>>();
+
+function whenClosed(subscriber: Pick<SupervisedSubscriber, 'closed'>, stop: () => void): () => void {
+  let pending = stops.get(subscriber);
+  if (!pending) {
+    const created = new Set<() => void>();
+    pending = created;
+    stops.set(subscriber, created);
+    void subscriber.closed.then(() => {
+      for (const each of [...created]) each();
+    });
+  }
+  const own = pending;
+  own.add(stop);
+  return () => own.delete(stop);
+}
 
 function handler<A extends unknown[]>(
   name: string,

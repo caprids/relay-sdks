@@ -15,7 +15,7 @@ import {
   type WantHandlers,
   type WantOptions,
 } from '../src/supervised-subscriber.js';
-import { newGeneration } from '../src/supervision.js';
+import { newGeneration, type SupervisedStatus } from '../src/supervision.js';
 import { settle } from './helpers/slot-track.js';
 import {
   type FakeSubscriber,
@@ -54,9 +54,13 @@ function fakeRoom() {
   let present = new Map<string, Member>();
   const opened: Opened[] = [];
   const unwanted: string[] = [];
+  let status: SupervisedStatus = 'live';
   let stop = () => {};
   const closed = new Promise<{ error?: unknown }>((resolve) => {
-    stop = () => resolve({});
+    stop = () => {
+      status = 'closed';
+      resolve({});
+    };
   });
   const room = {
     membersCalls: 0,
@@ -81,8 +85,11 @@ function fakeRoom() {
       unwant(key) {
         unwanted.push(key);
       },
+      get status() {
+        return status;
+      },
       closed,
-    } satisfies Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'closed'>,
+    } satisfies Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'status' | 'closed'>,
     /** The supervisor stops: it closes the members view and drops the wants without calling them, as `close()` does. */
     stop,
     change(joined: string[], left: string[] = [], initial = false) {
@@ -432,6 +439,32 @@ describe('createPresenceView', () => {
     expect(view.present.get('alice')!.document.name).toBe('Alice');
     vi.advanceTimersByTime(1);
     expect(changes.map(summary).at(-1)).toEqual({ stale: ['alice'] });
+  });
+
+  it('delivers nothing once parse closes the subscriber', async () => {
+    const room = fakeRoom();
+    const { changes, errors, handlers } = recorder();
+    const view = createPresenceView(
+      room.subscriber,
+      {
+        root: ROOT,
+        parse: (value) => {
+          room.stop();
+          return value;
+        },
+      },
+      handlers,
+    );
+    room.load('alice');
+    const alice = room.peer('alice');
+    alice.subscribed();
+    alice.object(0, { name: 'Alice' });
+    await Promise.resolve();
+    vi.advanceTimersByTime(60_000);
+    expect(changes).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(view.loaded).toBe(false);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it('delivers nothing after close() from inside parse', () => {
