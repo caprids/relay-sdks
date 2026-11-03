@@ -999,9 +999,11 @@ every want that follows generations and every member view.
   request already saw.
 - A root that covers open requests replaces them with one request on the root. Draft-22 §9.15
   forbids overlapping requests on one session, so the replacement is break-before-make. Each want and
-  view on a replaced request keeps what it saw while the new request loads. When it has loaded, only
-  the differences are reported: a want keeps its subscription, and a view reports nothing unless
-  someone came or went in between.
+  view on a replaced request keeps what it saw while the new request loads, and only the differences
+  are reported: a want keeps its subscription, and a view reports nothing unless someone came or went
+  in between. A view reports them one by one, not as one change: a newcomer as soon as the new
+  request announces it, and a member the load does not confirm once it has had no namespace for
+  100 ms after the load.
 - A request stays open 5 s after its last want or view goes, so one that resubscribes at once reuses
   it, and it never narrows while it is in use. `PREFIX_OVERLAP` therefore never arises between wants
   and views. `namespaceEvents` still refuses an overlapping prefix for an application's own
