@@ -66,9 +66,9 @@ without a row here is a bug.
 | Where a supervisor stands | `SupervisedStatus`: `'connecting' \| 'live' \| 'reconnecting' \| 'closed'`, reported to `onStatus(status, error)` | `SupervisedStatus`, the same strings, to `on_status(status, error)` |
 | Keep a track subscribed until told otherwise | `subscriber.want(key, WantOptions, WantHandlers)`, `subscriber.unwant(key)` | `subscriber.want(key, namespace, track, WantHandlers, ...)`, `subscriber.unwant(key)` |
 | Follow a supervised publisher's newest generation | `generations: true` on `WantOptions` | `generations=True` |
-| Follow who is present under a root, across reconnects and rotations | `subscriber.members(MembersOptions, MembersHandlers)` (`root`) returns `Members` (`loaded`, `present`, `close()`) | not yet (TypeScript only) |
-| One participant under a root | `Member` (`id`, `namespace`) | not yet (TypeScript only) |
-| A member view loaded, or members joined or left | `onChanged(change)` with `MembersChange` (`joined`, `left`, `present`, `initial`); `onError(error)` | not yet (TypeScript only) |
+| Follow who is present under a root, across reconnects and rotations | `subscriber.members(MembersOptions, MembersHandlers)` (`root`) returns `Members` (`loaded`, `present`, `close()`) | `subscriber.members(root, MembersHandlers)` returns `Members` (`loaded`, `present` as a tuple, `close()`) |
+| One participant under a root | `Member` (`id`, `namespace`) | `Member` (`id`, `namespace`) |
+| A member view loaded, or members joined or left | `onChanged(change)` with `MembersChange` (`joined`, `left`, `present`, `initial`); `onError(error)` | `on_changed(change)` with `MembersChange` (`joined`, `left`, `present`, `initial`); `on_error(error)` |
 | Resubscribe a track that went silent | `staleAfterMs` | `stale_after` (seconds) |
 | Replace a want's subscription at the live edge because it delivers too late | `subscriber.catchUp(key)`; `onRestarted` reason `'catch-up'` | not yet (TypeScript only) |
 | A want replaced its subscription; drop state that assumed continuity | `onRestarted({ reason, namespace })`, `RestartReason`; `onSubscribed(info, { namespace })` | `on_restarted(reason, namespace)`, `RestartReason`; `on_subscribed(info, namespace)` |

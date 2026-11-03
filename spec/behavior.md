@@ -656,17 +656,18 @@ The iterator owns the request, never the connection.
   refuses such a prefix itself, with `PREFIX_OVERLAP` in phase `subscription`, before anything is
   sent, and behaves the same against every relay. The prefix is free again once its iterator has
   ended. To watch both `['room']` and `['room', 'a']`, discover `['room']` and filter. A
-  TypeScript supervised subscriber does this itself ([shared discovery](#shared-discovery)).
+  supervised subscriber does this itself ([shared discovery](#shared-discovery)).
 - The subscriber connection's SETUP carries the SOLICIT option (`0x40B5A` = 1,
   draft-lcurley-moq-solicit-00), so the relay advertises namespaces only on these requests. Without
   it, moq-relay 0.17.0 pushes an unsolicited PUBLISH_NAMESPACE for everything in scope right after
   SETUP, and a SUBSCRIBE_NAMESPACE stream then carries nothing. The publisher connection does not
   send SOLICIT: it never asks for namespaces.
-- **The snapshot boundary.** In TypeScript the iterator yields `{ type: 'loaded' }` once, after the
-  `announced` events for the namespaces already announced when the relay accepted the request, and
-  before any later change. An application that tracks the `announced` set holds the relay's view at
-  that point, and an empty set then means nothing is announced, not that nothing has arrived yet.
-  Python follows in a later release.
+- **The snapshot boundary.** The iterator yields one `loaded` event, after the `announced` events
+  for the namespaces already announced when the relay accepted the request, and before any later
+  change. It is `{ type: 'loaded' }` in TS, and in Python a `NamespaceEvent` whose `type` is
+  `"loaded"` and whose `namespace` is `None`. An application that tracks the `announced` set holds
+  the relay's view at that point, and an empty set then means nothing is announced, not that nothing
+  has arrived yet.
   - With MoQ Active Count negotiated (draft-lcurley-moq-active-count), the boundary is exact. The
     subscriber connection's SETUP declares the option (`0x40B64` = 1). When the relay's SETUP declares
     it too, the REQUEST_OK answering SUBSCRIBE_NAMESPACE carries the count of NAMESPACE messages that
@@ -846,20 +847,16 @@ taken over.
   - **Surfaced, after which the want stops and is forgotten:** a rejection that no wait fixes.
     These are REQUEST_ERROR 0x1 `UNAUTHORIZED`, 0x3 `NOT_SUPPORTED`, 0x4 `MALFORMED_AUTH_TOKEN`,
     0x5 `EXPIRED_AUTH_TOKEN`, 0x11 `INVALID_RANGE` and 0x12 `MALFORMED_TRACK`, reported as
-    `SubscriptionRequestError`. Discovery refusing the root is surfaced the same way. In Python,
-    so is `PREFIX_OVERLAP` between two followed roots on one connection. TypeScript shares
-    discovery instead ([shared discovery](#shared-discovery)), and Python follows in a later release.
+    `SubscriptionRequestError`. Discovery refusing the root is surfaced the same way.
 - `staleAfterMs` / `stale_after` resubscribes when no object arrived for that long, measured from
   acceptance or the last object. It is for tracks that are never silent while live: after a
   publisher crash, moq-relay 0.17.0 can hold an accepted subscription on the dead publisher's
   cached object for about 11 s. Without it, silence is not a failure.
 - **Following generations.** With `generations: true`, the want's namespace is a supervised
   publisher's root. The supervisor discovers the root ([discovery](#discovery)) and subscribes on
-  the newest generation announced one field below it. Deeper namespaces are ignored. In
-  TypeScript, discovery is shared per connection ([shared discovery](#shared-discovery)). In Python,
-  one discovery per root per connection is shared by every want on that root, and Python follows in
-  a later release. The want subscribes as soon as it sees a generation, without waiting for the
-  snapshot to load. The want moves as soon as a newer
+  the newest generation announced one field below it. Deeper namespaces are ignored. Discovery is
+  shared per connection ([shared discovery](#shared-discovery)), and the want subscribes as soon as
+  it sees a generation, without waiting for the snapshot to load. The want moves as soon as a newer
   generation is announced, even while the old one is still announced, as a crashed publisher's is
   until the relay's idle timeout. It also moves when the current generation is withdrawn and an
   older one is still announced. With none announced, it waits. No application channel is needed.
@@ -938,8 +935,10 @@ taken over.
 
 A supervised subscriber can report who is present under a root, so an application can build a room
 roster with no server state beyond minting tokens ([issue #422](https://github.com/muxinc/relay-sdks/issues/422)).
-TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` returns
-`Members` (`loaded`, `present`, `close()`). Python follows in a later release.
+`subscriber.members({ root }, { onChanged, onError })` in TS and
+`subscriber.members(root, MembersHandlers(on_changed=..., on_error=...))` in Python return `Members`
+(`loaded`, `present`, `close()`). TS gives `present` as a map by id, Python as a tuple of `Member`
+in the same order.
 
 - **Who is a member.** Each namespace one field below the root is a member, named by that field
   (`Member`: `id`, and `namespace`, the root followed by `id`). A namespace two fields below the root
@@ -991,11 +990,12 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
 - **Handlers** must be synchronous, as a want's are. A throw from `onChanged` is logged and the view
   carries on. Handlers never run inside `members()` itself. `close()` is idempotent, and nothing is
   delivered after it.
-- **Arguments** are checked at once: an options object, and a root that follows the namespace rules
-  with room for the two fields under it (1 to 30 fields). The token must allow discovering the root.
-  A root outside the token's grant loads with nobody, since the relay accepts the request and sends
-  nothing ([namespace discovery](relay-interop.md#namespace-discovery)), and `onError` is never
-  called. An empty roster with no error can therefore mean the token does not grant the root.
+- **Arguments** are checked at once: an options object in TS, `MembersHandlers` with an `on_changed`
+  in Python, and a root that follows the namespace rules with room for the two fields under it (1 to
+  30 fields). The token must allow discovering the root. A root outside the token's grant loads with
+  nobody, since the relay accepts the request and sends nothing
+  ([namespace discovery](relay-interop.md#namespace-discovery)), and `onError` is never called. An
+  empty roster with no error can therefore mean the token does not grant the root.
 - **Limits.** Without MoQ Active Count the load is an estimate. A snapshot that loss splits by more
   than `SNAPSHOT_QUIET_MS` shows its late members as later joins on the first load, and as a `left`
   then a `joined` after a reconnect. A member who announces just before a subscriber rotation to
@@ -1004,9 +1004,7 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
 ### Shared discovery
 
 A supervised subscriber connection opens at most one SUBSCRIBE_NAMESPACE per prefix tree, shared by
-every want that follows generations and every member view. TypeScript has it now. Python follows in a
-later release: until then, a Python supervised subscriber opens one request per followed root and
-surfaces `PREFIX_OVERLAP` for a root that overlaps another one followed on the same connection.
+every want that follows generations and every member view.
 
 - A root under the prefix of an open request is served from that request by filtering, and nothing
   is sent. A want under a member view's root therefore subscribes on the generation the view's
