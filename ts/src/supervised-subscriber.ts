@@ -11,19 +11,19 @@
  * make-before-break, and a want that keeps its target sees no break and no repeat. See spec/behavior.md, "Supervised
  * connections".
  */
-import {
-  isMoqtProtocolError,
-  type MessageParameters,
-  type MoqtObject,
-  type PublishDone,
-  type SubscribeOk,
-} from '@caprid/moq-core';
+import type { MessageParameters, MoqtObject, PublishDone, SubscribeOk } from '@caprid/moq-core';
 import { type ConnectRelaySubscriberOptions, connectRelaySubscriber, type RelaySubscriber } from './connect.js';
 import { assertTimeoutMs, type RelaySessionHooks, reportEndpoint } from './connect-session.js';
+import {
+  createDiscoveryIndex,
+  DISCOVERY_CAPACITY,
+  type DiscoveryIndex,
+  discoveryEnding,
+  refusedForGood,
+} from './discovery.js';
 import { RelayError } from './errors.js';
-import type { NamespaceEvents } from './namespace-events.js';
 import type { ProductSubscription, RelaySubscription, SubscriptionEnd } from './subscription.js';
-import { SubscriptionConnectionClosedError, SubscriptionRequestError, synchronousCallback } from './subscription.js';
+import { SubscriptionRequestError, synchronousCallback } from './subscription.js';
 import {
   backoffDelay,
   backoffOptions,
@@ -238,8 +238,8 @@ interface Connection {
   signal: AbortSignal;
   /** Aborts when a rotation replaced this connection: its wants move to the new one. */
   retiring: AbortSignal;
-  /** One discovery per followed root, shared by every want on it. */
-  roots: Map<string, RootWatch>;
+  /** The connection's namespace discovery, shared by every want on it. Closed when it ends. */
+  discovery: DiscoveryIndex;
   /** Wants with a subscription still on this connection; a rotation closes it once none are left. */
   holds: number;
   /** Called whenever `holds` drops to zero. */
@@ -418,7 +418,7 @@ export async function superviseRelaySubscriber(
       subscriber,
       signal: ended.signal,
       retiring: retire.signal,
-      roots: new Map(),
+      discovery: createDiscoveryIndex((prefix) => subscriber.namespaceEvents({ prefix, capacity: DISCOVERY_CAPACITY })),
       holds: 0,
       rotateAt: rotationDeadline(subscriber.expiresAt, rotateBeforeMs),
     };
@@ -430,7 +430,7 @@ export async function superviseRelaySubscriber(
   /** The connection ended: release what it ran and stop anything still waiting on it. */
   const settleEnded = (opened: Opened) => {
     opened.ended.abort();
-    for (const watch of opened.live.roots.values()) watch.close();
+    opened.live.discovery.close();
   };
 
   /**
@@ -712,17 +712,6 @@ export async function superviseRelaySubscriber(
   };
 }
 
-/**
- * Whether a request refused at the call is the want's own fault, which no connection fixes: an argument, or a root
- * overlapping another followed root. Anything else thrown there (CLOSED, the connection's TRANSPORT_ERROR or GOAWAY)
- * is the connection ending before the supervisor has heard of it.
- */
-function refusedForGood(error: unknown): boolean {
-  // The core's encoders refuse a request the wire cannot carry (a field too long to encode) the same way every time.
-  if (error instanceof TypeError || error instanceof RangeError || isMoqtProtocolError(error)) return true;
-  return error instanceof RelayError && error.code === 'PREFIX_OVERLAP';
-}
-
 /** What ended one attempt, and what the want does next. */
 type AttemptOutcome =
   /** The want or the supervisor was cancelled. */
@@ -783,7 +772,7 @@ async function superviseWant(
         return;
       }
       const started = await liveConnection(scope);
-      // A want replaced while waiting must not open anything: its replacement may already hold an overlapping root.
+      // A want replaced while waiting must not open anything: a request on its root could replace its replacement's.
       if (!started || scope.aborted) return;
       want.settledTarget = undefined;
       want.connection = started;
@@ -852,7 +841,6 @@ async function backoff(want: Want, connection: Connection, delayMs: number): Pro
       // The attempt itself reports a discovery it cannot open.
     }
   }
-  // Released in the turn the want is cancelled, as in an attempt, so a replacement can claim an overlapping root.
   if (held) want.controller.signal.addEventListener('abort', held.release, { once: true });
   // Only a newer generation wakes the wait. A discovery that fails again does not: the next attempt reports it after
   // the delay, so failing discovery is retried no faster than the backoff.
@@ -909,7 +897,6 @@ async function attempt(
   if (options.generations) {
     try {
       ({ watch, release } = rootWatch(connection, options.namespace));
-      // Released in the turn the want is cancelled, so a replacement want can claim an overlapping root at once.
       scope.addEventListener('abort', release, { once: true });
     } catch (error) {
       // As for a subscribe: a connection ending under the call refuses the request with its own error.
@@ -1550,11 +1537,15 @@ function discoveryFailed(
   cancelledOrConnection: (accepted: boolean) => AttemptOutcome,
   accepted: boolean,
 ): AttemptOutcome {
-  if (scope.aborted || error instanceof SubscriptionConnectionClosedError) return cancelledOrConnection(accepted);
-  const retry: AttemptOutcome = { kind: 'retry', accepted, progressed: false, reason: 'generation' };
-  if (error === undefined) return retry;
-  if (error instanceof SubscriptionRequestError && !isPermanentRequestError(error.requestError)) return retry;
-  return { kind: 'fatal', error };
+  if (scope.aborted) return cancelledOrConnection(accepted);
+  switch (discoveryEnding(error)) {
+    case 'connection':
+      return cancelledOrConnection(accepted);
+    case 'retry':
+      return { kind: 'retry', accepted, progressed: false, reason: 'generation' };
+    case 'fatal':
+      return { kind: 'fatal', error };
+  }
 }
 
 /** What a subscription's own ending means for the want. */
@@ -1592,117 +1583,77 @@ interface RootWatch {
   failure(): { error: unknown } | undefined;
   /** Observe every change, discovery's end included; returns the removal. */
   onChange(listener: () => void): () => void;
-  close(): void;
 }
 
-/** Whether two namespace prefixes overlap field by field: equal, or one contains the other. */
-function overlaps(a: readonly string[], b: readonly string[]): boolean {
-  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
-  return shorter.every((field, i) => field === longer[i]);
-}
-
-/** The connection's watch for `root`, opened on first use and closed when its last user releases it. */
+/**
+ * The want's discovery of `root` on `connection`: one watch on the connection's index, which shares the request with
+ * every other want under the same prefix tree. A want never waits for the root to load: `newest()`
+ * resolves on the first generation the watch holds. Throws what opening a request throws.
+ */
 function rootWatch(connection: Connection, root: string[]): { watch: RootWatch; release(): void } {
-  const key = JSON.stringify(root);
-  let entry = connection.roots.get(key) as (RootWatch & { users: number }) | undefined;
-  if (!entry) {
-    // A watch kept for reuse but unused would hold its prefix and refuse an overlapping root: close it first.
-    for (const [heldKey, held] of connection.roots) {
-      if ((held as RootWatch & { users: number }).users === 0 && overlaps(JSON.parse(heldKey), root)) {
-        connection.roots.delete(heldKey);
-        held.close();
-      }
-    }
-    // An ended discovery leaves the map at once, so the next attempt asks the relay again.
-    const forgetEnded = () => {
-      if (connection.roots.get(key) === entry) connection.roots.delete(key);
-    };
-    entry = Object.assign(openRootWatch(connection.subscriber, root, forgetEnded), { users: 0 });
-    connection.roots.set(key, entry);
-  }
-  const watch = entry;
-  watch.users += 1;
-  let released = false;
-  return {
-    watch,
-    release() {
-      if (released) return;
-      released = true;
-      watch.users -= 1;
-      if (watch.users === 0) {
-        // Kept a moment so a want that resubscribes at once reuses the snapshot instead of asking again.
-        setTimeout(() => {
-          if (watch.users === 0 && connection.roots.get(key) === watch) {
-            connection.roots.delete(key);
-            watch.close();
-          }
-        }, 5_000);
-      }
-    },
-  };
-}
-
-function openRootWatch(subscriber: RelaySubscriber, root: string[], onEnd: () => void): RootWatch {
   const generations = new Set<string>();
   const listeners = new Set<() => void>();
-  let failure: { error: unknown } | undefined;
-  // Throws PREFIX_OVERLAP synchronously when another followed root overlaps this one.
-  const events: NamespaceEvents = subscriber.namespaceEvents({ prefix: root });
   const notify = () => {
     for (const listener of [...listeners]) listener();
   };
-  void (async () => {
-    try {
-      for await (const event of events) {
-        // Only one field below the root is a generation; anything deeper belongs to someone else.
-        if (event.type === 'loaded' || event.namespace.length !== root.length + 1) continue;
-        const generation = event.namespace[root.length] as string;
-        if (event.type === 'announced') generations.add(generation);
-        else generations.delete(generation);
-        notify();
-      }
-      // The relay ended the request, or the watch was closed: neither is a failure of the want.
-      failure = { error: undefined };
-    } catch (error) {
-      failure = { error };
-    }
-    onEnd();
-    notify();
-  })();
+  // Only one field below the root is a generation; anything deeper belongs to someone else.
+  const generationOf = (namespace: string[]) =>
+    namespace.length === root.length + 1 ? namespace[root.length] : undefined;
+  const watch = connection.discovery.watch(root, {
+    onAnnounced: (namespace) => {
+      const generation = generationOf(namespace);
+      if (generation === undefined) return;
+      generations.add(generation);
+      notify();
+    },
+    onUnannounced: (namespace) => {
+      const generation = generationOf(namespace);
+      if (generation === undefined) return;
+      generations.delete(generation);
+      notify();
+    },
+    onEnded: notify,
+  });
+  for (const namespace of watch.namespaces()) {
+    const generation = generationOf(namespace);
+    if (generation !== undefined) generations.add(generation);
+  }
   const current = () => {
     let newest: string | undefined;
     for (const generation of generations) if (newest === undefined || generation > newest) newest = generation;
     return newest;
   };
+  const failure = () => watch.ended;
   return {
-    current,
-    failure: () => failure,
-    async newest(scope) {
-      for (;;) {
-        if (failure) return { kind: 'failed', error: failure.error };
-        const found = current();
-        if (found !== undefined) return { kind: 'found', generation: found };
-        if (scope.aborted) return { kind: 'aborted' };
-        await new Promise<void>((resolve) => {
-          const remove = () => {
-            listeners.delete(wake);
-            scope.removeEventListener('abort', wake);
-          };
-          const wake = () => {
-            remove();
-            resolve();
-          };
-          listeners.add(wake);
-          scope.addEventListener('abort', wake, { once: true });
-        });
-      }
+    watch: {
+      current,
+      failure,
+      async newest(scope) {
+        for (;;) {
+          const ended = failure();
+          if (ended) return { kind: 'failed', error: ended.error };
+          const found = current();
+          if (found !== undefined) return { kind: 'found', generation: found };
+          if (scope.aborted) return { kind: 'aborted' };
+          await new Promise<void>((resolve) => {
+            const remove = () => {
+              listeners.delete(wake);
+              scope.removeEventListener('abort', wake);
+            };
+            const wake = () => {
+              remove();
+              resolve();
+            };
+            listeners.add(wake);
+            scope.addEventListener('abort', wake, { once: true });
+          });
+        }
+      },
+      onChange(listener) {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
     },
-    onChange(listener) {
-      listeners.add(listener);
-      return () => listeners.delete(listener);
-    },
-    close() {
-      void events.return();
-    },
+    release: () => watch.release(),
   };
 }

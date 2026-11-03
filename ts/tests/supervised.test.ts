@@ -602,8 +602,13 @@ describe('connectSupervisedSubscriber following generations (review fixes)', () 
       { namespace: ['room', 'alice'], track: 'v', generations: true },
       { onError: (e) => errors.push(e) },
     );
-    await until(() => connections[0]!.discoveries.length === 2, 'second discovery');
-    expect(connections[0]!.discoveries[0]!.closed).toBe(true);
+    // The first root's request, kept a moment for reuse, covers the new root: it serves the replacement by filtering.
+    const generation = newGeneration();
+    connections[0]!.discoveries[0]!.push({ type: 'announced', namespace: ['room', 'alice', generation] });
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe under the new root');
+    expect(connections[0]!.subscriptions[0]!.options.namespace).toEqual(['room', 'alice', generation]);
+    expect(connections[0]!.discoveries).toHaveLength(1);
+    expect(connections[0]!.discoveries[0]!.closed).toBe(false);
     expect(errors).toEqual([]);
   });
 
