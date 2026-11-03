@@ -209,13 +209,17 @@ export interface DiagnosticsStatsObject {
   stats: Record<string, unknown>;
 }
 
-/** Events per object when replaying what the recorder holds. */
+/** Events per object when replaying what the recorder holds, and the most objects a replay takes: past 6,400 events
+ * held, each object carries more, so a replay always fits the events writer's backlog with room for live events. */
 const BACKLOG_CHUNK = 200;
+const BACKLOG_OBJECTS = 32;
 
 /**
  * Publish a recorder on `diag.events` and `diag.stats` of the publisher's broadcast. Nothing is sent while the relay
  * has no subscription to a track. Each time the relay subscribes to `diag.events`, everything the recorder holds goes
- * first, marked `backlog`, then each event as it is recorded; a follower drops sequence numbers it has seen. A
+ * first, marked `backlog`, then each event as it is recorded; a follower drops sequence numbers it has seen. Right
+ * after the relay replaces its subscription a few live events can still arrive ahead of the replay, so a follower
+ * that needs them in order sorts by `seq`. A
  * snapshot goes on `diag.stats` once a second while it has demand. Track names are unique per publisher connection,
  * so publish one recorder per publisher.
  *
@@ -246,18 +250,24 @@ export function publishDiagnostics(
     // The writer reports what became of the object; a closed writer's rejection only means publishing has stopped.
     writer.write({ payload: encodeJSON(body), key: true }).catch(() => {});
   };
+  // Live events go out only once the relay's current subscription has had the replay, so a follower gets the held
+  // history first; an event recorded meanwhile is held, so the replay carries it.
+  let live = false;
   const unlisten = diagnostics.listen((event) => {
-    if (!closed && eventsTrack.hasDemand) send(events, { instance, events: [event] });
+    if (!closed && live && eventsTrack.hasDemand) send(events, { instance, events: [event] });
   });
   const changes = eventsTrack.demandChanges();
   const watching = (async () => {
     // The current state first, then a repeated `true` for each new or replacement relay subscription.
     for await (const demanded of changes) {
+      live = false;
       if (!demanded || closed) continue;
       const held = diagnostics.events();
-      for (let i = 0; i < held.length; i += BACKLOG_CHUNK) {
-        send(events, { instance, backlog: true, events: held.slice(i, i + BACKLOG_CHUNK) });
+      const chunk = Math.max(BACKLOG_CHUNK, Math.ceil(held.length / BACKLOG_OBJECTS));
+      for (let i = 0; i < held.length; i += chunk) {
+        send(events, { instance, backlog: true, events: held.slice(i, i + chunk) });
       }
+      live = true;
     }
   })().catch(() => {});
   const timer = setInterval(() => {
