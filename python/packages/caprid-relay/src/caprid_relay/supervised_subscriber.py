@@ -10,8 +10,10 @@ newer generation, or to another track or parameters on a re-want, is made before
 as ``switch_to`` makes one (issue #282): the replacement opens while the current subscription keeps
 delivering, and ``on_switched`` marks the cutover. Before the connection's credential expires, the
 supervisor rotates to a new connection the same way (issue #261): every want's subscription moves to
-it make-before-break, and a want that keeps its target sees no break and no repeat. See
-``spec/behavior.md``, "Supervised connections". The counterpart of ``ts/src/supervised-subscriber.ts``.
+it make-before-break, and a want that keeps its target sees no break and no repeat. Member views
+(:mod:`caprid_relay.members`, issue #422) follow who is present under a root from the same
+per-connection discovery. See ``spec/behavior.md``, "Supervised connections". The counterpart of
+``ts/src/supervised-subscriber.ts``.
 """
 
 from __future__ import annotations
@@ -83,6 +85,7 @@ from .connect_session import (
     TokenProvider,
     validate_timeout,
 )
+from .members import Members, MembersHandlers
 from .switchable import Until, _check_drain, _held_after, _HeldEvent, _hold, _until_predicate
 
 _log = logging.getLogger("caprid_relay")
@@ -156,7 +159,8 @@ class _Connection:
     retiring: CancellationToken = field(default_factory=CancellationToken)
     """Cancelled when a rotation replaced this connection: its wants move to the new one."""
     holds: int = 0
-    """Wants with a subscription still on this connection; a rotation closes it once none are left."""
+    """Wants with a subscription and member views with a discovery still on this connection; a rotation
+    closes it once none are left."""
     idle: asyncio.Future[None] | None = None
     """Set by a rotation; resolved whenever ``holds`` drops to zero."""
     rotate_at: float | None = None
@@ -224,7 +228,7 @@ class _Want:
             listener()
 
 
-def _guarded(handlers: WantHandlers) -> dict[str, Callable[..., None]]:
+def _guarded(handlers: WantHandlers | MembersHandlers) -> dict[str, Callable[..., None]]:
     """The primitive's guard on every handler: a declared-async callback is refused, a returned awaitable observed."""
     guarded: dict[str, Callable[..., None]] = {}
     for handler_field in fields(handlers):
@@ -240,6 +244,7 @@ def _guarded(handlers: WantHandlers) -> dict[str, Callable[..., None]]:
 @dataclass(slots=True, eq=False)
 class _State:
     wants: dict[str, _Want] = field(default_factory=dict)
+    views: set[Members] = field(default_factory=set)
     status: SupervisedStatus = "connecting"
     stopped: bool = False
     current: _Connection | None = None
@@ -390,8 +395,42 @@ class SupervisedSubscriber:
         if state.wake is not None and not state.wake.done():
             state.wake.set_result(None)
 
+    def members(self, root: Sequence[str], handlers: MembersHandlers) -> Members:
+        """Follow who is present under ``root``, across reconnects and rotations, with no roster server.
+
+        Each namespace one field below the root is a member, a supervised publisher's generations
+        under it count as one member, and a member leaves once its last namespace has been withdrawn
+        for 0.1 s (soon after a clean close, at the relay's idle timeout after a crash). The root
+        follows the namespace rules with room for the two fields under it (1 to 30 fields), and the
+        subscriber's token must allow discovering it. Shares the connection's discovery with every
+        want and view under the same prefix tree. Arguments are checked at once; handlers run from a
+        later turn on. See ``spec/behavior.md``, "Members".
+        """
+        if not isinstance(handlers, MembersHandlers):
+            raise TypeError("members handlers must be MembersHandlers")
+        guarded = _guarded(handlers)
+        on_changed = guarded.get("on_changed")
+        if on_changed is None:
+            raise TypeError("on_changed must be callable")
+        fields_ = namespace_fields(root)
+        namespace_fields((*fields_, "x", "x"))
+        state = self._state
+        if state.stopped:
+            raise supervisor_closed("subscriber")
+        view = Members(
+            fields_,
+            on_changed,
+            guarded.get("on_error"),
+            live_connection=self._live_connection,
+            current=lambda: state.current,
+            on_closed=lambda: state.views.discard(view),
+        )
+        state.views.add(view)
+        return view
+
     def close(self) -> None:
-        """Stop reconnecting, cancel every want and close the connection. Idempotent."""
+        """Stop reconnecting, cancel every want, close every members view without calling its handlers,
+        and close the connection. Idempotent."""
         self._close()
 
     async def __aenter__(self) -> Self:
@@ -519,6 +558,8 @@ async def _supervise_relay_subscriber(
         state.wants.clear()
         for want in wants:
             want.controller.cancel()
+        for view in list(state.views):
+            view.close()
         if state.current is not None:
             state.current.subscriber.close()
         state.current = None

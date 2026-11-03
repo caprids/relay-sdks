@@ -33,6 +33,7 @@ from .cancellation import CancellationToken, Cancelled
 from .connect import RelaySubscriber, RelaySubscriptionHandlers, connect_relay_subscriber
 from .connect_session import ConnectingTransport, RelayCredential, RelayTransportFactory
 from .errors import RelayError, RelayErrorCode, RelayErrorPhase
+from .members import Member, Members, MembersChange, MembersHandlers
 from .namespace_events import SNAPSHOT_LIMIT, SNAPSHOT_QUIET, NamespaceEvent, NamespaceEvents
 from .payload import read_json, read_text
 from .publish import RelayGroupWriter, RelayPublisher, RelayTrackWriter, connect_relay_publisher
@@ -74,6 +75,10 @@ __all__ = [
     "GoawayEvent",
     "KeyValuePair",
     "LocationFilter",
+    "Member",
+    "Members",
+    "MembersChange",
+    "MembersHandlers",
     "MessageParameters",
     "MoqTrackSource",
     "MoqtObject",
