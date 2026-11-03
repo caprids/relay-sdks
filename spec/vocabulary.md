@@ -638,7 +638,7 @@ sequencer as an argument.
 | Hold early frames and release each at its timestamp, off unless used | `timestampPlayout: true` or `TimestampPlayoutOptions { horizonUs?, leadUs? }` on `FrameSequencerOptions` (frame grouping; `leadUs` a number or a function read at every poll) | — |
 | The sequencer asks for its subscription to be replaced | `SequencerPoll.catchUp`; the reader's `onCatchUp()` on `FrameReaderOptions` | not yet (TypeScript only) |
 | Why a decoder resets before this frame | `FrameDiscontinuity`: `'gap'`, `'resync'`, `'restart'` | `FrameDiscontinuity`: `"gap"`, `"resync"`, `"restart"` |
-| Counters | `stats`: `FrameSequencerStats { delivered, late, skippedGroups, resyncs, untimed, early }` | `stats`: `FrameSequencerStats(delivered, late, skipped_groups, resyncs, untimed)` |
+| Counters | `stats`: `FrameSequencerStats { delivered, late, behind, skippedGroups, resyncs, untimed, early }` | `stats`: `FrameSequencerStats(delivered, late, behind, skipped_groups, resyncs, untimed)` |
 | A media track's subscriber priority, as subscription parameters | `mediaSubscribeParameters(kind, overrides?)` → `MessageParameters` (`MediaKind`) | `media_subscribe_parameters(kind, overrides=None)` → `MessageParameters` (`MediaKind`) |
 | A subscription's or a want's handlers that read frames | `createFrameReader(sequencer, { onFrame })` → `FrameReader` (`FrameReaderOptions`); spread into `subscribe` or `want` handlers | `FrameReader(sequencer)`; `subscription_handlers(on_error=, on_publisher_done=)`, `want_handlers(...)`; `async for frame in reader` |
 | What a reader drives | `FrameReaderSequencer<F>` | `FrameReaderSequencer`, `FrameReaderPoll` (protocols) |

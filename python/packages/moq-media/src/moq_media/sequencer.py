@@ -62,7 +62,11 @@ class FrameSequencerStats:
     delivered: int = 0
     """Frames returned by ``poll()``."""
     late: int = 0
-    """Frames discarded: too late, or behind what was already delivered."""
+    """Frames discarded as too late against the clock's position, and frames dropped when more were held than the
+    bound allows."""
+    behind: int = 0
+    """Frames discarded on arrival because a later frame was already delivered or their group was already passed over:
+    out of order."""
     skipped_groups: int = 0
     """Groups abandoned or passed over without being delivered whole."""
     resyncs: int = 0
@@ -152,7 +156,7 @@ class FrameSequencer:
                 self._bound_held()
             return
         if self._behind(obj.group_id, obj.object_id):
-            self.stats.late += 1
+            self.stats.behind += 1
             return
         group = self._group_of(obj.group_id)
         if obj.object_id in group.frames:

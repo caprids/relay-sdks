@@ -4,6 +4,13 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `caprid-moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
+  passed over in the new `stats.behind`, no longer in `stats.late` (#431), as in the TypeScript SDK. `late` keeps the
+  frames too late against the clock's position and those dropped past the held bound. A reader that reported `late`
+  as one number adds `behind` to keep the old total.
+
 ## 0.3.0
 
 - `caprid-relay`, `caprid-moq-media`: track replacement for barge-in, as in the TypeScript SDK.

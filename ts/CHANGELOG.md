@@ -5,6 +5,15 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
+  passed over in the new `stats.behind`, no longer in `stats.late` (#431). `late` keeps the frames too late against the
+  clock's position and those dropped past the held bound. The two need different fixes: `late` a deeper buffer or a
+  later target, `behind` a longer `reorderWindowUs`. In a two-browser call with frame-grouped audio and no reorder
+  window, nearly all of the 1.9% counted as late was frames swapped with the next one within 5 ms. A reader that
+  reported `late` as one number adds `behind` to keep the old total.
+
 ## 0.3.0
 
 - `@caprid/relay-websocket`: `withWebSocketFallback()` races the two transports instead of waiting out WebTransport
