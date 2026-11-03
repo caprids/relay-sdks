@@ -4,6 +4,37 @@ The Python packages release together at one version: `caprid-relay`, `caprid-moq
 1.0, a minor version can break the API; each section says what changed and what to do about it. How to cut a release
 is in [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `caprid-relay`: `SupervisedSubscriber.members(root, MembersHandlers(on_changed=..., on_error=...))` reports who is
+  present under a root, across reconnects and the subscriber's own rotations, as in the TypeScript SDK (#422). Each
+  namespace one field below the root is a member (`Member`: `id`, `namespace`), and a supervised publisher's
+  generations under it count as one member, so its rotations and reconnects report nothing. The first `on_changed` is
+  the load (`MembersChange.initial` true, everyone present in `joined`, possibly nobody), and `Members.loaded` tells
+  "nobody here" from "not loaded yet". After a reconnect the view reports only who came or went meanwhile, in one call.
+  An application can build a room roster with no roster server. `SupervisedSubscriber.close()` also closes every member
+  view, without calling its handlers.
+- `caprid-relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
+  between every want that follows generations and every member view. A want under another want's or a view's root no
+  longer fails with `PREFIX_OVERLAP`, and a view refused on its root leaves the wants under it alone. Nothing to change
+  in an application.
+- `caprid-relay`: `namespace_events` yields `NamespaceEvent(type="loaded")` once, after the namespaces already announced
+  when the relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET`
+  (0.05 s) with no entry, and never later than `SNAPSHOT_LIMIT` (1 s) after REQUEST_OK; both are exported.
+  **Breaking (types):** `NamespaceEvent.namespace` is now `tuple[str, ...] | None`, `None` for `loaded`; check
+  `event.type` before reading it.
+- `caprid-relay`: a namespace request whose stream fails no longer yields `unannounced` for every namespace before its
+  error, which made a lost connection read as everyone leaving. Every error ending still means every namespace is
+  withdrawn, and a clean end still yields `unannounced` for each one first.
+- `caprid-moq-core`: MoQ Active Count (draft-lcurley-moq-active-count): `SETUP_OPTION.ACTIVE_COUNT`,
+  `PARAMETER_TYPE.ACTIVE_COUNT` and `MessageParameters.active_count` (decoded only on REQUEST_OK). A session that
+  declared the option and whose peer declared it too passes the count to `NamespaceSubscriptionHandlers.on_ok` and calls
+  the new `on_synced()` after the counted NAMESPACE messages; the session closes with PROTOCOL_VIOLATION when the peer
+  breaks the extension's rules. `caprid-relay`'s subscriber connection declares it. No deployed moq-relay does, so
+  nothing changes against them. **Breaking:** `on_ok` now takes `active_count: int | None`, and `on_namespace_done`
+  takes a second argument, `request_ended`, true for the withdrawals the session reports itself when a request ends;
+  update handlers passed to `MoqtSession.subscribe_namespace`.
+
 ## 0.3.0
 
 - `caprid-relay`, `caprid-moq-media`: track replacement for barge-in, as in the TypeScript SDK.
