@@ -964,9 +964,10 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
     connection's discovery has loaded, then reports the difference, normally none.
   - A reconnect: the view keeps what it last reported (`present` and `loaded` unchanged) while no
     connection is up and while the next connection's discovery loads. Then it reports the
-    difference: newcomers at once, in one `joined`, and members who left meanwhile each as a `left`
-    once its 100 ms has passed with no namespace of it announced. Members still there report
-    nothing, whatever their generations did.
+    difference in one `onChanged`: members who left meanwhile in `left`, newcomers in `joined`, and
+    nothing for members still there, whatever their generations did. A loaded snapshot is the
+    relay's state at one moment, so the 100 ms leave delay applies only to withdrawals the view
+    follows live.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
     failure no wait fixes (a permanent REQUEST_ERROR, such as `UNAUTHORIZED`) calls `onError`, and
@@ -1000,8 +1001,12 @@ every want that follows generations and every member view.
   it, and it never narrows while it is in use. `PREFIX_OVERLAP` therefore never arises between wants
   and views. `namespaceEvents` still refuses an overlapping prefix for an application's own
   discovery.
-- A covering request follows the token's grant. Give the subscriber a token that allows discovering
-  the widest root it follows.
+- A request's ending belongs to the root it was opened for. When a covering request is refused or
+  ends, each want and view under it moves to a request of its own, keeping what it saw, as in a
+  replacement, so a member view's refusal never fails or restarts a want.
+- A covering request follows the token's grant, and moq-relay answers a prefix outside the grant
+  with REQUEST_OK and nothing. A want under such a root then loses its generation when the covering
+  request loads. Give the subscriber a token that allows discovering the widest root it follows.
 
 ## Publishing
 
