@@ -547,6 +547,23 @@ describe('a member view over the relay wire, when the transport or the request s
     await pause(300);
     expect(changes.map(summary)).toEqual([{ joined: ['alice'], left: [], present: ['alice'], initial: true }]);
   });
+
+  it('reports nothing for an unchanged room when the relay finishes the request with the connection up', async () => {
+    const { fakes, changes } = await startOverWire();
+    const first = await fakes[0]!.nextRequestStream();
+    await first.firstMessage;
+    await first.send(encodeRequestOk());
+    await first.send(encodeNamespace(['alice', 'g1']));
+    await until(() => changes.length === 1, 'load');
+    await first.fin();
+    expect(await fakes[0]!.nextRequestStream()).toBe(first);
+    const second = await fakes[0]!.nextRequestStream();
+    await second.firstMessage;
+    await second.send(encodeRequestOk());
+    await second.send(encodeNamespace(['alice', 'g1']));
+    await pause(300);
+    expect(changes.map(summary)).toEqual([{ joined: ['alice'], left: [], present: ['alice'], initial: true }]);
+  });
 });
 
 describe('one discovery per connection, shared by wants and members views', () => {

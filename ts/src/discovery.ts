@@ -4,7 +4,7 @@
  */
 import { isMoqtProtocolError } from '@caprid/moq-core';
 import { RelayError } from './errors.js';
-import type { NamespaceEvent, NamespaceEvents } from './namespace-events.js';
+import { isWithdrawnByEnd, type NamespaceEvent, type NamespaceEvents } from './namespace-events.js';
 import {
   SubscriptionConnectionClosedError,
   SubscriptionOverflowError,
@@ -147,6 +147,8 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
       }
       return;
     }
+    // The end that follows moves the narrower watches with what the request still shows.
+    if (isWithdrawnByEnd(event)) return;
     const key = JSON.stringify(event.namespace);
     if (event.type === 'announced') {
       if (request.held.delete(key)) {

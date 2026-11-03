@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { encodeNamespace, encodeRequestOk } from '../packages/moq-core/src/protocol/control-messages.js';
 import { covers, createDiscoveryIndex, DISCOVERY_LINGER_MS, type DiscoveryWatchHandlers } from '../src/discovery.js';
 import { RelayError } from '../src/errors.js';
-import type { NamespaceEvents } from '../src/namespace-events.js';
+import { connectRelaySubscriber } from '../src/index.js';
+import { type NamespaceEvents, SNAPSHOT_QUIET_MS } from '../src/namespace-events.js';
 import { SubscriptionConnectionClosedError, SubscriptionRequestError } from '../src/subscription.js';
-import { type FakeSubscriber, fakeSubscriber } from './helpers/supervision-fakes.js';
+import { createFakeTransport } from './helpers/relay.js';
+import { type FakeSubscriber, fakeSubscriber, until } from './helpers/supervision-fakes.js';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -161,6 +164,39 @@ describe('the discovery index', () => {
     await settle();
     expect(narrow.seen).toEqual(['+r/a/g1', 'loaded', '+r/a/g2', '-r/a/g1']);
     expect(deeper.seen).toEqual(['+r/a/g2', 'loaded']);
+  });
+
+  it('moves a narrower watch, holding its view, when the relay finishes the covering request without withdrawals', async () => {
+    const fake = createFakeTransport();
+    const connecting = connectRelaySubscriber({
+      url: 'https://relay.example.com/moq',
+      createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
+    });
+    fake.sendServerSetup();
+    const connection = await connecting;
+    try {
+      const index = createDiscoveryIndex((prefix) => connection.namespaceEvents({ prefix }));
+      const wide = heard();
+      index.watch(['r'], wide.handlers);
+      const narrow = heard();
+      const moved = index.watch(['r', 'a'], narrow.handlers);
+      const covering = await fake.nextRequestStream();
+      await covering.firstMessage;
+      await covering.send(encodeRequestOk());
+      await covering.send(encodeNamespace(['a', 'g1']));
+      await until(() => narrow.seen.includes('loaded'), 'the covering request loads');
+      await covering.fin();
+      const own = await fake.nextRequestStream();
+      expect(await own.firstMessage).toMatchObject({ trackNamespacePrefix: ['r', 'a'] });
+      expect(moved.namespaces()).toEqual([['r', 'a', 'g1']]);
+      await own.send(encodeRequestOk());
+      await own.send(encodeNamespace(['g1']));
+      await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_QUIET_MS * 2));
+      expect(wide.seen).toEqual(['+r/a/g1', 'loaded', 'ended undefined']);
+      expect(narrow.seen).toEqual(['+r/a/g1', 'loaded']);
+    } finally {
+      connection.close();
+    }
   });
 
   it('ends a narrower watch whose own request cannot open after the wider one ended', async () => {

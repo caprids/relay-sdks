@@ -44,6 +44,16 @@ export const SNAPSHOT_QUIET_MS = 50;
 /** Without MoQ Active Count, the latest `loaded` comes after the relay accepts, so a busy prefix still loads. */
 export const SNAPSHOT_LIMIT_MS = 1_000;
 
+const withdrawnByEnd = new WeakSet<NamespaceEvent>();
+
+/**
+ * Whether `event` is one of the withdrawals a clean end yields, not one the relay sent. The supervised subscriber's
+ * discovery reads them as the request's end, so a narrower root it moves keeps what it saw.
+ */
+export function isWithdrawnByEnd(event: NamespaceEvent): boolean {
+  return withdrawnByEnd.has(event);
+}
+
 type Snapshot =
   | { kind: 'unanswered' }
   | { kind: 'counted' }
@@ -160,12 +170,14 @@ function openNamespaceRequest(
     const grace = setTimeout(reject, CLOSURE_GRACE_MS);
     cancelGrace = () => clearTimeout(grace);
   };
-  const change = (type: 'announced' | 'unannounced', suffix: string[]) => {
+  const change = (type: 'announced' | 'unannounced', suffix: string[], byEnd = false) => {
     if (ended) return;
     const key = JSON.stringify(suffix);
     if (type === 'announced' ? announced.has(key) : !announced.delete(key)) return;
     if (type === 'announced') announced.add(key);
-    sink.event({ type, namespace: [...prefix, ...suffix] });
+    const event: NamespaceEvent = { type, namespace: [...prefix, ...suffix] };
+    if (byEnd) withdrawnByEnd.add(event);
+    sink.event(event);
   };
 
   removeClosed = deps.observeClosed((error) => finish(new SubscriptionConnectionClosedError(error)));
@@ -199,7 +211,7 @@ function openNamespaceRequest(
             stopTimers();
             // A finished stream is the relay ending the request on purpose; a failed one may be a lost connection.
             if (error === undefined) {
-              for (const key of [...announced]) change('unannounced', JSON.parse(key));
+              for (const key of [...announced]) change('unannounced', JSON.parse(key), true);
               finish();
             } else {
               const reason = error instanceof Error ? error.message : 'namespace request stream failed';

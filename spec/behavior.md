@@ -1006,6 +1006,8 @@ every want that follows generations and every member view.
 - A request's ending (a REQUEST_ERROR, or the relay finishing it) belongs to the wants and views on
   its own root. Each want or view under that root moves to a request on its own root the same way,
   keeping what it saw, so a member view refused on its root never fails or restarts a want under it.
+  The `unannounced` events `namespaceEvents` yields for a clean end are part of that ending, so no
+  want or view sees them as withdrawals.
 - A covering request follows the token's grant, and moq-relay answers a prefix outside the grant
   with REQUEST_OK and nothing. A want under such a root then loses its generation when the covering
   request loads. Give the subscriber a token that allows discovering the widest root it follows.
