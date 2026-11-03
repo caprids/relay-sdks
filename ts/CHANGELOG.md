@@ -15,6 +15,13 @@ each section says what changed and what to do about it. How to cut a release is 
   who came or went meanwhile, in one call. A member whose leave was already pending, or whom the old connection still
   showed, leaves in a later call once the new discovery has shown it nothing for 100 ms. An application can build a
   room roster with no roster server.
+- `@caprid/relay/media`: presence, a live room roster with no roster server (#422). Each participant calls
+  `publishPresence(publisher, document)` on its supervised publisher: the document (JSON) goes out on every relay
+  subscription and every change, and again every `PRESENCE_HEARTBEAT_MS` (2 s). Everyone calls
+  `createPresenceView(subscriber, { root }, { onChanged })`, which reports each member once its document arrives,
+  with `joined`, `left`, `updated`, `stale` (no new document for three heartbeats, before the relay's ~10 s
+  withdrawal of a frozen publisher) and `resumed`. Rotations and reconnects on either side report nothing. The track
+  convention is in spec/media-layer.md, "Presence track".
 - `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
   between every want that follows generations and every member view. A want under another want's or a view's root
   no longer fails with `PREFIX_OVERLAP`, and a view refused on its root leaves the wants under it alone. Nothing to
