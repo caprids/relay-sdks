@@ -1219,7 +1219,7 @@ describe('createMoqtSession', () => {
         harness.session.subscribeNamespace(
           { trackNamespacePrefix: ['room'] },
           {
-            onNamespaceDone: (suffix) => calls.push(['done', suffix]),
+            onNamespaceDone: (suffix, { requestEnded }) => calls.push(['done', suffix, requestEnded]),
             onEnd: (info) => calls.push(['end', 'error' in info]),
           }
         );
@@ -1235,8 +1235,8 @@ describe('createMoqtSession', () => {
 
         await vi.waitFor(() => expect(calls).toHaveLength(3));
         expect(calls).toEqual([
-          ['done', ['bob']],
-          ['done', ['alice']],
+          ['done', ['bob'], false],
+          ['done', ['alice'], true],
           ['end', ending === 'reset'],
         ]);
         harness.session.destroy();

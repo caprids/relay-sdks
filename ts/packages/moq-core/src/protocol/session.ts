@@ -306,10 +306,10 @@ export interface NamespaceSubscriptionHandlers {
   onNamespace?(trackNamespaceSuffix: TrackNamespace): void;
   /**
    * NAMESPACE_DONE (§9.17): a namespace the peer named is no longer available. Also called for each namespace still
-   * active when the accepted request ends (§9.15), just before `onEnd`. One for a namespace never named closes the
-   * session with PROTOCOL_VIOLATION (§9.15).
+   * active when the accepted request ends (§9.15), just before `onEnd`, with `requestEnded` true. One for a namespace
+   * never named closes the session with PROTOCOL_VIOLATION (§9.15).
    */
-  onNamespaceDone?(trackNamespaceSuffix: TrackNamespace): void;
+  onNamespaceDone?(trackNamespaceSuffix: TrackNamespace, info: { requestEnded: boolean }): void;
   /**
    * The accepted request ended: the peer finished its side of the stream (no `error`), or the stream failed (`error`
    * is the transport's). No entry follows. Not called for a local cancel or the session ending.
@@ -969,7 +969,7 @@ class MoqtSessionImpl implements MoqtSession {
       // §9.15: a FIN or reset on the response stream SHOULD read as NAMESPACE_DONE for each active namespace.
       const active = [...record.active.values()];
       record.active.clear();
-      for (const suffix of active) handlers.onNamespaceDone?.(suffix);
+      for (const suffix of active) handlers.onNamespaceDone?.(suffix, { requestEnded: true });
       handlers.onEnd?.(error === undefined ? {} : { error });
     };
 
@@ -1258,7 +1258,7 @@ class MoqtSessionImpl implements MoqtSession {
           record.handlers.onNamespace?.(message.trackNamespaceSuffix);
           if (synced && !record.cancelled) record.handlers.onSynced?.();
         } else if (record.active.delete(JSON.stringify(message.trackNamespaceSuffix))) {
-          record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix);
+          record.handlers.onNamespaceDone?.(message.trackNamespaceSuffix, { requestEnded: false });
         } else {
           // §9.15: NAMESPACE_DONE before the corresponding NAMESPACE MUST close the session.
           this.#fatal(

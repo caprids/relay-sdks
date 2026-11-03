@@ -138,6 +138,18 @@ it('withdraws what is still announced, then ends cleanly, when the relay finishe
   expect(await events.next()).toMatchObject({ done: true });
 });
 
+it('withdraws nothing when the request stream fails: the error ends it, and everything counts as withdrawn', async () => {
+  const { fake, connection } = await setup();
+  const events = connection.namespaceEvents({ prefix: ['room'] });
+  const request = await fake.nextRequestStream();
+  await request.firstMessage;
+  await request.send(encodeRequestOk());
+  await request.send(encodeNamespace(['alice']));
+  expect((await events.next()).value).toEqual({ type: 'announced', namespace: ['room', 'alice'] });
+  request.reset(new Error('gone'));
+  await expect(events.next()).rejects.toBeInstanceOf(SubscriptionRequestError);
+});
+
 it('refuses a prefix overlapping one this connection is discovering, until that one ends', async () => {
   const { fake, connection } = await setup();
   const first = connection.namespaceEvents({ prefix: ['room', 'a'] });

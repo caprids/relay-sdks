@@ -191,7 +191,10 @@ function openNamespaceRequest(
             change('announced', suffix);
             heard();
           },
-          onNamespaceDone: (suffix) => {
+          onNamespaceDone: (suffix, { requestEnded }) => {
+            // The core's withdrawals for a request that ended arrive before the reason does; a failed stream's would
+            // read as everyone leaving when only the view stopped, so a clean end withdraws in onEnd instead.
+            if (requestEnded) return;
             change('unannounced', suffix);
             heard();
           },
@@ -201,8 +204,10 @@ function openNamespaceRequest(
             // after the closure grace, and the quiet window must not close inside it.
             stopTimers();
             // A finished stream is the relay ending the request on purpose; a failed one may be a lost connection.
-            if (error === undefined) finish();
-            else {
+            if (error === undefined) {
+              for (const key of [...announced]) change('unannounced', JSON.parse(key));
+              finish();
+            } else {
               const reason = error instanceof Error ? error.message : 'namespace request stream failed';
               fail({ errorCode: REQUEST_ERROR_CODE.INTERNAL_ERROR, retryInterval: 0, reason }, true);
             }
