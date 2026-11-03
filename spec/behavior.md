@@ -1820,8 +1820,11 @@ nobody watches sends nothing.
   skipped. Each object is one group, sent as a keyframe, and its payload is UTF-8 JSON:
   - `diag.events`: `{ "instance", "backlog"?: true, "events": [event, ...] }`. Each time the relay
     subscribes to the track (its first subscription and every replacement), everything the
-    recorder holds goes first, in objects of at most 200 events marked `backlog`; after that each
-    event goes in an object of its own as it is recorded, while the track has demand.
+    recorder holds goes first, marked `backlog`, in objects of 200 events (more each when it holds
+    over 6,400, so a replay is at most 32 objects); after that each event goes in an object of its
+    own as it is recorded, while the track has demand. An event recorded before the replay is sent
+    rides in the replay. Right after a replacement subscription a few live events can still arrive
+    ahead of its replay, so a follower that needs order sorts by `seq`.
   - `diag.stats`: `{ "instance", "t", "stats": snapshot }`, once a second while the track has
     demand.
 - Demand is the relay's own subscription, shared by every follower, so a follower that subscribes

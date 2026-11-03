@@ -174,6 +174,40 @@ describe('publishDiagnostics', () => {
     await publication.close();
   });
 
+  it('holds back an event recorded as demand arrives, so the replay carries it first', async () => {
+    const publisher = fakePublisher({ demand: false });
+    const diagnostics = createDiagnostics();
+    diagnostics.event('before');
+    const publication = publishDiagnostics(diagnostics, publisher);
+    const events = publisher.tracks.get(DIAGNOSTICS_TRACKS.events);
+    await settle();
+    events?.demand(true);
+    // Before the publisher has seen the new demand: the track already has it, the replay has not gone out.
+    diagnostics.event('racing');
+    await settle();
+    diagnostics.event('after');
+    await settle();
+    const sent = bodies(events?.groups ?? []) as DiagnosticsEventsObject[];
+    expect(sent.map((body) => [body.backlog ?? false, body.events.map((event) => event.kind)])).toEqual([
+      [true, ['before', 'racing']],
+      [false, ['after']],
+    ]);
+    await publication.close();
+  });
+
+  it('replays a large hold in at most 32 objects, starting from the oldest event', async () => {
+    const publisher = fakePublisher();
+    const diagnostics = createDiagnostics({ keepEvents: 20_000 });
+    for (let i = 0; i < 20_000; i++) diagnostics.event('tick');
+    const publication = publishDiagnostics(diagnostics, publisher);
+    await settle(1_000);
+    const sent = bodies(publisher.tracks.get(DIAGNOSTICS_TRACKS.events)?.groups ?? []) as DiagnosticsEventsObject[];
+    expect(sent.length).toBeLessThanOrEqual(32);
+    expect(sent[0]?.events[0]?.seq).toBe(0);
+    expect(sent.reduce((total, body) => total + body.events.length, 0)).toBe(20_000);
+    await publication.close();
+  });
+
   it('sends a snapshot of every section each interval while diag.stats has demand', async () => {
     vi.useFakeTimers({ now: 5_000 });
     const publisher = fakePublisher();
