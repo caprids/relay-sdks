@@ -116,7 +116,7 @@ class _NamespaceRequest:
                 MoqtSubscribeNamespaceOptions(track_namespace_prefix=list(prefix)),
                 NamespaceSubscriptionHandlers(
                     on_namespace=lambda suffix: self._change("announced", suffix),
-                    on_namespace_done=lambda suffix: self._change("unannounced", suffix),
+                    on_namespace_done=lambda suffix, _request_ended: self._change("unannounced", suffix),
                     on_error=self._fail,
                     on_end=self._on_end,
                 ),

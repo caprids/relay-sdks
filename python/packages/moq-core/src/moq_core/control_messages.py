@@ -117,6 +117,14 @@ class SETUP_OPTION(IntEnum):
     ignored on receipt): the option's presence is the declaration. moq-dev main declares it; moq-relay 0.17.x does
     not. A session sends MAX_AGE only to a peer that declared it.
     """
+    ACTIVE_COUNT = 0x40B64
+    """MoQ Active Count (draft-lcurley-moq-active-count, in moq-dev main's ``drafts/``), not a draft-22 option.
+
+    A REQUEST_OK answering SUBSCRIBE_NAMESPACE carries :attr:`PARAMETER_TYPE.ACTIVE_COUNT`, how many NAMESPACE messages
+    come before the first change. Negotiated when both SETUPs declare it; the value is reserved (sent as ``1``, ignored
+    on receipt). moq-dev main declares it; no deployed moq-relay does. Declare it only on a subscribing session: the
+    publish session never sends a count, so declaring it in its ``setup_options`` would promise one it does not send.
+    """
 
 
 class PARAMETER_TYPE(IntEnum):
@@ -144,6 +152,8 @@ class PARAMETER_TYPE(IntEnum):
     INCLUDE_PROPERTIES = 0x35
     MAX_AGE = 0x915C6
     """MAX_AGE, the MoQ Timestamp extension's subscriber max age (SUBSCRIBE, REQUEST_UPDATE; not a draft-22 type)."""
+    ACTIVE_COUNT = 0x40B66
+    """ACTIVE_COUNT, MoQ Active Count's count on a REQUEST_OK answering SUBSCRIBE_NAMESPACE (not a draft-22 type)."""
 
 
 class TRACK_PROPERTY(IntEnum):
@@ -720,9 +730,16 @@ class MessageParameters:
     REQUEST_UPDATE only when the peer's SETUP declared ``SETUP_OPTION.MAX_AGE``, and never on FETCH, TRACK_STATUS or
     SUBSCRIBE_NAMESPACE; see ``MoqtSession.max_age_supported``.
     """
+    active_count: int | None = None
+    """ACTIVE_COUNT (0x40B66, MoQ Active Count; not a draft-22 parameter).
+
+    On a REQUEST_OK answering SUBSCRIBE_NAMESPACE, the number of NAMESPACE messages that follow it before any other
+    message on the stream. Decoded only from a REQUEST_OK; in any other message it is an unknown type. The session
+    checks the request it answers and the negotiation.
+    """
 
 
-ParameterScope: TypeAlias = Literal["message", "fill"]
+ParameterScope: TypeAlias = Literal["message", "request-ok", "fill"]
 
 _FILL_SCOPE_TYPES: frozenset[int] = frozenset(
     {
@@ -831,6 +848,9 @@ def _collect_parameter_entries(
             raise ValueError(f"max_age out of range (0 to 2^53-1 milliseconds): {max_age!r}")
 
         varint(PARAMETER_TYPE.MAX_AGE, max_age)
+
+    if parameters.active_count is not None:
+        varint(PARAMETER_TYPE.ACTIVE_COUNT, parameters.active_count)
 
     return entries
 
@@ -950,6 +970,11 @@ def decode_message_parameters(
                 raise MoqtProtocolError(f"MAX_AGE {max_age} exceeds 2^53-1")
 
             parameters.max_age = max_age
+        elif parameter_type == PARAMETER_TYPE.ACTIVE_COUNT:
+            if scope != "request-ok":
+                raise MoqtProtocolError(f"unknown message parameter type {parameter_type}")
+
+            parameters.active_count = reader.read_varint()
         elif parameter_type in _RANGE_FILTER_TYPES:
             value_bytes = reader.read_bytes(reader.read_varint())
 
@@ -1382,7 +1407,8 @@ def encode_request_ok(
     The subscriber sends this to accept an incoming PUBLISH (PUBLISH_OK). Track Properties are always
     empty in that role, and since draft-20 so are the parameters: a subscriber changes subscription
     parameters with REQUEST_UPDATE, not in PUBLISH_OK (§9.8). The parameter slot stays for the
-    publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK). Track Properties are
+    publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK) and for the ACTIVE_COUNT a
+    relay answers SUBSCRIBE_NAMESPACE with. Track Properties are
     populated only in TRACK_STATUS_OK, which the publish session sends; they are the rest of the
     message, so an empty sequence adds no bytes.
     """
@@ -1620,7 +1646,7 @@ def _decode_control_message_body(
         )
 
     if message_type == MESSAGE_TYPE.REQUEST_OK:
-        parameters = decode_message_parameters(reader, protocol)
+        parameters = decode_message_parameters(reader, protocol, "request-ok")
         return RequestOk(parameters=parameters, track_properties=decode_key_value_pairs(reader, end))
 
     if message_type == MESSAGE_TYPE.REQUEST_ERROR:
