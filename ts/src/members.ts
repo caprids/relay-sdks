@@ -42,8 +42,9 @@ export interface MembersHandlers {
    * leaves once it has had none for 100 ms, so a rotation whose withdrawal arrives just before the new generation's
    * announce calls nothing. A member's generations changing, the relay repeating an announce, and the subscriber's
    * reconnects and rotations call nothing; a reconnect, rotation or retry calls it once with the difference its new
-   * discovery shows, if there is one, joins and departures together. A member the new discovery misses but the old one
-   * still showed, or was giving its 100 ms, leaves once the new discovery has shown it nothing for 100 ms.
+   * discovery shows, if there is one, joins and departures together. The exception is a member the new discovery misses
+   * but the old one still showed, or was giving its 100 ms: it leaves in a later call, once the new discovery has shown
+   * it nothing for 100 ms.
    */
   onChanged?(change: MembersChange): void;
   /** A discovery failure no wait fixes, such as the token not allowing the root. The view is closed. */

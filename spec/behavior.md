@@ -981,8 +981,9 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
     with no 100 ms wait, since the new discovery's snapshot is the relay's state at one instant. A
     member whose 100 ms was running, or ran out while no discovery was followed, stays when the
     snapshot shows it. When the snapshot does not, its 100 ms starts again on the new discovery,
-    since a snapshot taken between a publisher rotation's withdrawal and its next announce misses
-    it. Members still there report nothing, whatever their generations did.
+    and its leave comes in a later `onChanged`, since a snapshot taken between a publisher
+    rotation's withdrawal and its next announce misses it. Members still there report nothing,
+    whatever their generations did.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
     failure no wait fixes (a permanent REQUEST_ERROR, such as `UNAUTHORIZED`) calls `onError`, and
