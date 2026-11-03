@@ -267,7 +267,7 @@ class FakeDiscovery:
     _queue: list[NamespaceEvent] = field(default_factory=list)
     _failure: list[BaseException] = field(default_factory=list)
     _wake: asyncio.Event = field(default_factory=asyncio.Event)
-    _marks: _RequestMarks = field(default_factory=_RequestMarks)
+    _marks: _RequestMarks = field(default_factory=lambda: _RequestMarks(lambda: False))
     """What the supervisor's discovery index reads of a real request beyond its events."""
 
     @property

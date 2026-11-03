@@ -77,6 +77,8 @@ when it ends. ``_Quiet``: the SDK estimates it from the stream's quiet window an
 class _RequestMarks:
     """What the supervised subscriber's discovery reads of one request beyond its public events."""
 
+    transport_ended: Callable[[], bool]
+    """The connection's own check, true before the session has reported the closure to the request."""
     stopped: bool = False
     withdrawn_by_end: dict[int, NamespaceEvent] = field(default_factory=dict)
     """The withdrawals a clean end yields, by identity; holding them keeps their ids unique."""
@@ -97,7 +99,8 @@ def _is_stopped(events: NamespaceEvents) -> bool:
     The supervised subscriber's discovery reads it so a member's leave grace does not run out on a
     stream that is gone.
     """
-    return events._marks.stopped
+    marks = events._marks
+    return marks.stopped or marks.transport_ended()
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +252,8 @@ class _NamespaceRequest:
         self._sink.event(NamespaceEvent("loaded"))
 
     def _heard(self) -> None:
+        if self._ended:
+            return
         snapshot = self._snapshot
         if isinstance(snapshot, _Quiet):
             snapshot.quiet.cancel()
@@ -327,7 +332,7 @@ class NamespaceEvents(BoundedEvents[NamespaceEvent]):
         capacity: int = 64,
         cancellation: CancellationToken | None = None,
     ) -> None:
-        self._marks = _RequestMarks()
+        self._marks = _RequestMarks(dependencies.transport_ended)
         super().__init__(
             lambda sink: _NamespaceRequest(dependencies, prefix, sink, self._marks),
             capacity=capacity,

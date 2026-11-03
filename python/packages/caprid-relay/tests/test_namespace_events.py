@@ -577,5 +577,6 @@ class TestDiscoveryMarks:
         await request.send(encode_namespace(["alice"]))
         assert await anext(events) == _announced("room", "alice")
         fake.drop_transport()
+        assert _is_stopped(events)
         await settle()
         assert _is_stopped(events)
