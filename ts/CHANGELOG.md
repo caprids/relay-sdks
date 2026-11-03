@@ -20,7 +20,9 @@ each section says what changed and what to do about it. How to cut a release is 
 - `@caprid/relay`: `namespaceEvents` yields `{ type: 'loaded' }` once, after the namespaces already announced when the
   relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET_MS`
   (50 ms) with no entry, and never later than `SNAPSHOT_LIMIT_MS` (1 s) after REQUEST_OK; both are exported.
-  **Breaking (types):** `NamespaceEvent` is now a union; check `event.type` before reading `event.namespace`.
+  **Breaking:** `NamespaceEvent` is now a union, and `loaded` has no `namespace`. TypeScript that reads
+  `event.namespace` without checking `event.type` no longer compiles, and JavaScript gets `undefined` on `loaded`; check
+  `event.type` first.
 - `@caprid/relay`: a namespace request whose stream fails no longer yields `unannounced` for every namespace before its
   error. It did when the stream failed before the connection's end was seen, which made a lost connection read as
   everyone leaving. Every error ending still means every namespace is withdrawn, and a clean end still yields
