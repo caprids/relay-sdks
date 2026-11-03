@@ -3,7 +3,8 @@
  * SUBSCRIBE_NAMESPACE per prefix tree on a session, so the index keeps open requests whose prefixes never overlap: a
  * watch under an open request is served by filtering it, and a watch over open requests replaces them with one request
  * on its own prefix. A replaced request's view is held until the new one has loaded, so a watch it moved hears only
- * the differences.
+ * the differences. A request's ending belongs to the watches on its own prefix: a narrower watch it served is placed
+ * again the same way, holding its view.
  */
 import { isMoqtProtocolError } from '@caprid/moq-core';
 import { RelayError } from './errors.js';
@@ -31,15 +32,18 @@ export interface DiscoveryWatchHandlers {
   onUnannounced?(namespace: string[]): void;
   /** Everything announced when the serving request was accepted has been reported. At most once per watch. */
   onLoaded?(): void;
-  /** The serving request ended; nothing follows. `error` is undefined for the relay's clean end. */
+  /**
+   * The request on the watch's prefix ended, or the connection did; nothing follows. `error` is undefined for the
+   * relay's clean end. A wider request ending moves the watch instead.
+   */
   onEnded?(error: unknown): void;
 }
 
 /** One owner's view of a prefix on one connection. */
 export interface DiscoveryWatch {
   /**
-   * Whether the watch's view is complete. Stays true when a covering request replaces the one that served it: the
-   * owner then hears only the differences.
+   * Whether the watch's view is complete. Stays true when the watch moves to another request, as when a covering
+   * request replaces the one that served it: the owner then hears only the differences.
    */
   readonly loaded: boolean;
   /** How the serving request ended, once it has. */
@@ -89,7 +93,7 @@ interface WatchRecord {
   readonly key: string;
   readonly handlers: DiscoveryWatchHandlers;
   state: WatchState;
-  /** Kept across a move to a covering request. */
+  /** Kept across a move to another request. */
   loaded: boolean;
 }
 
@@ -181,6 +185,8 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     const { state } = record;
     if (state.kind === 'ended') call(record, (handlers) => handlers.onEnded?.(state.error));
   };
+  const lostTo = (error: unknown) =>
+    error instanceof SubscriptionConnectionClosedError ? error : new SubscriptionConnectionClosedError(error);
   const end = (ending: WatchRecord[], error: unknown) => {
     for (const record of ending) record.state = { kind: 'ended', error };
     for (const record of ending) announceEnd(record);
@@ -216,6 +222,62 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     if (request.announced.delete(key)) notify(request, event.namespace, 'unannounced');
   };
 
+  /**
+   * Serve `record` from the request covering its prefix, or open a request on its prefix that replaces every request
+   * under it. The new request holds what the replaced requests and `ended`, a request that ended over the prefix,
+   * showed under it. If `open` throws, every watch it moved ends after the call, and the throw is rethrown.
+   */
+  const place = (record: WatchRecord, ended?: DiscoveryRequest) => {
+    const placed = placeWatch(requests.values(), record.prefix);
+    if (placed.kind === 'covered') {
+      const request = placed.by;
+      clearTimeout(request.linger);
+      request.linger = undefined;
+      record.loaded ||= request.loaded;
+      attach(request, record);
+      return;
+    }
+    // Break before make: §9.15 forbids the overlap, and the namespace request refuses it before sending.
+    const held = new Map<string, string[]>();
+    const moved: WatchRecord[] = [];
+    for (const replaced of placed.replacing) {
+      requests.delete(replaced.key);
+      clearTimeout(replaced.linger);
+      moved.push(...records(replaced));
+      replaced.events.close();
+    }
+    for (const shown of [...placed.replacing, ...(ended ? [ended] : [])]) {
+      for (const [key, namespace] of [...shown.announced, ...shown.held]) {
+        if (covers(record.prefix, namespace)) held.set(key, namespace);
+      }
+    }
+    let events: NamespaceEvents;
+    try {
+      events = open([...record.prefix]);
+    } catch (error) {
+      // Only the caller's own prefix can be refused for its arguments: a moved watch lost its request to the call.
+      for (const movedRecord of moved) movedRecord.state = { kind: 'ended', error: lostTo(error) };
+      queueMicrotask(() => {
+        for (const movedRecord of moved) announceEnd(movedRecord);
+      });
+      throw error;
+    }
+    const request: DiscoveryRequest = {
+      prefix: [...record.prefix],
+      key: record.key,
+      events,
+      loaded: false,
+      announced: new Map(),
+      held,
+      watches: new Map(),
+      linger: undefined,
+    };
+    for (const movedRecord of moved) attach(request, movedRecord);
+    attach(request, record);
+    requests.set(request.key, request);
+    void consume(request);
+  };
+
   const consume = async (request: DiscoveryRequest) => {
     let error: unknown;
     try {
@@ -230,7 +292,24 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
     if (requests.get(request.key) !== request) return;
     requests.delete(request.key);
     clearTimeout(request.linger);
-    end(records(request), error);
+    if (error instanceof SubscriptionConnectionClosedError) {
+      end(records(request), error);
+      return;
+    }
+    // The ending is about the request's own prefix: a narrower watch, moved in or served by filtering, is placed again,
+    // shortest first so the rest can be served from its request.
+    const rehomed = records(request)
+      .filter((record) => record.key !== request.key)
+      .sort((a, b) => a.prefix.length - b.prefix.length);
+    for (const record of rehomed) {
+      try {
+        place(record, request);
+      } catch (thrown) {
+        record.state = { kind: 'ended', error: lostTo(thrown) };
+      }
+    }
+    end([...(request.watches.get(request.key) ?? [])], error);
+    for (const record of rehomed) announceEnd(record);
   };
 
   const release = (record: WatchRecord) => {
@@ -277,52 +356,7 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
         state: { kind: 'released' },
         loaded: false,
       };
-      const placed = placeWatch(requests.values(), prefix);
-      if (placed.kind === 'covered') {
-        const request = placed.by;
-        clearTimeout(request.linger);
-        request.linger = undefined;
-        record.loaded = request.loaded;
-        attach(request, record);
-        return handle(record);
-      }
-      // Break before make: §9.15 forbids the overlap, and the namespace request refuses it before sending.
-      const held = new Map<string, string[]>();
-      const moved: WatchRecord[] = [];
-      for (const replaced of placed.replacing) {
-        requests.delete(replaced.key);
-        clearTimeout(replaced.linger);
-        for (const [key, namespace] of [...replaced.announced, ...replaced.held]) held.set(key, namespace);
-        moved.push(...records(replaced));
-        replaced.events.close();
-      }
-      let events: NamespaceEvents;
-      try {
-        events = open([...prefix]);
-      } catch (error) {
-        // Only the caller's own prefix can be refused for its arguments: a moved watch lost its request to the call.
-        const ending =
-          error instanceof SubscriptionConnectionClosedError ? error : new SubscriptionConnectionClosedError(error);
-        for (const record of moved) record.state = { kind: 'ended', error: ending };
-        queueMicrotask(() => {
-          for (const record of moved) announceEnd(record);
-        });
-        throw error;
-      }
-      const request: DiscoveryRequest = {
-        prefix: [...prefix],
-        key: record.key,
-        events,
-        loaded: false,
-        announced: new Map(),
-        held,
-        watches: new Map(),
-        linger: undefined,
-      };
-      for (const movedRecord of moved) attach(request, movedRecord);
-      attach(request, record);
-      requests.set(request.key, request);
-      void consume(request);
+      place(record);
       return handle(record);
     },
     close() {

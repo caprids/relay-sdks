@@ -498,6 +498,84 @@ describe('one discovery per connection, shared by wants and members views', () =
     expect(summary(members.changes[0]!)).toEqual({ joined: [], left: [], present: [], initial: true });
   });
 
+  const unauthorized = () =>
+    new SubscriptionRequestError({ errorCode: 0x1, retryInterval: 0, reason: 'token does not allow the room' });
+  const failures = (seen: string[]) => seen.filter((s) => s.startsWith('error') || s.startsWith('restarted'));
+
+  it('keeps a want under the root delivering when the covering members request is refused', async () => {
+    const { want, members, covering, subscription } = await wantThenMembers();
+    covering.fail(unauthorized());
+    await until(() => members.errors.length === 1, 'members onError');
+    await pause(100);
+    subscription.object(2);
+    await pause();
+    expect(failures(want.seen)).toEqual([]);
+    expect(want.seen.at(-1)).toBe('object 2');
+    expect(subscription.cancelled).toBe(false);
+  });
+
+  it('keeps a want served from a members request delivering when that request is refused', async () => {
+    const { subscriber, connections, discovery } = await start();
+    const members = recorder();
+    subscriber.members({ root: ROOT }, members.handlers);
+    const wide = await discovery();
+    wide.push({ type: 'announced', namespace: at('alice', newGeneration()) });
+    await pause();
+    const want = wantRecorder();
+    subscriber.want('alice', { namespace: at('alice'), track: 'audio', generations: true, retry: fast }, want.handlers);
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    const subscription = connections[0]!.subscriptions[0]!;
+    subscription.accept();
+    subscription.object(0);
+    await pause();
+    wide.fail(unauthorized());
+    await until(() => members.errors.length === 1, 'members onError');
+    await pause(100);
+    subscription.object(1);
+    await pause();
+    expect(failures(want.seen)).toEqual([]);
+    expect(want.seen.at(-1)).toBe('object 1');
+    expect(subscription.cancelled).toBe(false);
+    expect(connections[0]!.discoveries.map((d) => d.prefix)).toEqual([ROOT, at('alice')]);
+  });
+
+  it('never restarts a want under the root while the members request is refused again and again', async () => {
+    const { subscriber, connections } = await start();
+    const want = wantRecorder();
+    subscriber.want('alice', { namespace: at('alice'), track: 'audio', generations: true, retry: fast }, want.handlers);
+    const generation = newGeneration();
+    // A scripted relay: a request on the want's root shows its generation, one on the members root is refused with
+    // EXCESSIVE_LOAD, which a wait may fix, and each subscription is accepted and delivers at once.
+    const served = new Set<object>();
+    let refusals = 0;
+    const relay = setInterval(() => {
+      for (const d of connections[0]!.discoveries) {
+        if (d.closed || served.has(d)) continue;
+        served.add(d);
+        if (d.prefix.length === ROOT.length) {
+          refusals += 1;
+          d.fail(new SubscriptionRequestError({ errorCode: 0x9, retryInterval: 0, reason: 'excessive load' }));
+        } else {
+          d.push({ type: 'announced', namespace: at('alice', generation) });
+          d.push({ type: 'loaded' });
+        }
+      }
+      for (const s of connections[0]!.subscriptions) {
+        if (served.has(s)) continue;
+        served.add(s);
+        s.accept();
+        s.object(0);
+      }
+    }, 1);
+    cleanup.push(() => clearInterval(relay));
+    await until(() => connections[0]!.subscriptions.length === 1, 'subscribe');
+    subscriber.members({ root: ROOT });
+    await until(() => refusals >= 3, 'three refusals', 5_000);
+    await pause();
+    expect(failures(want.seen)).toEqual([]);
+    expect(connections[0]!.subscriptions).toHaveLength(1);
+  });
+
   it('reports nothing for a held namespace the covering request confirms', async () => {
     const { connections, want, members, covering, subscription, generation } = await wantThenMembers();
     covering.push({ type: 'announced', namespace: at('alice', generation) });

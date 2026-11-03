@@ -15,7 +15,8 @@ each section says what changed and what to do about it. How to cut a release is 
   or went meanwhile. An application can build a room roster with no roster server.
 - `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
   between every want that follows generations and every member view. A want under another want's or a view's root
-  no longer fails with `PREFIX_OVERLAP`. Nothing to change in an application.
+  no longer fails with `PREFIX_OVERLAP`, and a view refused on its root leaves the wants under it alone. Nothing to
+  change in an application.
 - `@caprid/relay`: `namespaceEvents` yields `{ type: 'loaded' }` once, after the namespaces already announced when the
   relay accepted the request. Without MoQ Active Count it is an estimate: REQUEST_OK, then `SNAPSHOT_QUIET_MS`
   (50 ms) with no entry, and never later than `SNAPSHOT_LIMIT_MS` (1 s) after REQUEST_OK; both are exported.

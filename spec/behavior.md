@@ -1001,9 +1001,9 @@ every want that follows generations and every member view.
   it, and it never narrows while it is in use. `PREFIX_OVERLAP` therefore never arises between wants
   and views. `namespaceEvents` still refuses an overlapping prefix for an application's own
   discovery.
-- A request's ending belongs to the root it was opened for. When a covering request is refused or
-  ends, each want and view under it moves to a request of its own, keeping what it saw, as in a
-  replacement, so a member view's refusal never fails or restarts a want.
+- A request's ending (a REQUEST_ERROR, or the relay finishing it) belongs to the wants and views on
+  its own root. Each want or view under that root moves to a request on its own root the same way,
+  keeping what it saw, so a member view refused on its root never fails or restarts a want under it.
 - A covering request follows the token's grant, and moq-relay answers a prefix outside the grant
   with REQUEST_OK and nothing. A want under such a root then loses its generation when the covering
   request loads. Give the subscriber a token that allows discovering the widest root it follows.

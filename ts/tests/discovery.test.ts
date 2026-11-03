@@ -130,6 +130,57 @@ describe('the discovery index', () => {
     expect(fake.discoveries).toHaveLength(2);
   });
 
+  it('moves the narrower watches a request served to a request of their own when it ends, holding their view', async () => {
+    const { fake, index } = scripted();
+    const narrow = heard();
+    const moved = index.watch(['r', 'a'], narrow.handlers);
+    fake.discoveries[0]!.push({ type: 'announced', namespace: ['r', 'a', 'g1'] });
+    fake.discoveries[0]!.push({ type: 'loaded' });
+    await settle();
+    const wide = heard();
+    index.watch(['r'], wide.handlers);
+    const deeper = heard();
+    const filtered = index.watch(['r', 'a', 'g2'], deeper.handlers);
+    const covering = fake.discoveries[1]!;
+    covering.push({ type: 'announced', namespace: ['r', 'a', 'g1'] });
+    covering.push({ type: 'announced', namespace: ['r', 'a', 'g2'] });
+    covering.push({ type: 'announced', namespace: ['r', 'b', 'g1'] });
+    await settle();
+    covering.fail(new SubscriptionRequestError({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' }));
+    await settle();
+    expect(wide.seen).toEqual(['+r/a/g2', '+r/b/g1', 'ended SubscriptionRequestError']);
+    expect(fake.discoveries.map((discovery) => discovery.prefix)).toEqual([['r', 'a'], ['r'], ['r', 'a']]);
+    expect(moved.ended).toBeUndefined();
+    expect(moved.loaded).toBe(true);
+    expect(moved.namespaces()).toEqual([
+      ['r', 'a', 'g1'],
+      ['r', 'a', 'g2'],
+    ]);
+    expect(filtered.loaded).toBe(false);
+    const rehomed = fake.discoveries[2]!;
+    rehomed.push({ type: 'announced', namespace: ['r', 'a', 'g2'] });
+    rehomed.push({ type: 'loaded' });
+    await settle();
+    expect(narrow.seen).toEqual(['+r/a/g1', 'loaded', '+r/a/g2', '-r/a/g1']);
+    expect(deeper.seen).toEqual(['+r/a/g2', 'loaded']);
+  });
+
+  it('ends a narrower watch whose own request cannot open after the wider one ended', async () => {
+    const { fake, index, refuse } = scripted();
+    const wide = heard();
+    index.watch(['r'], wide.handlers);
+    const narrow = heard();
+    const watch = index.watch(['r', 'a'], narrow.handlers);
+    refuse.add(JSON.stringify(['r', 'a']));
+    fake.discoveries[0]!.fail(
+      new SubscriptionRequestError({ errorCode: 0x1, retryInterval: 0, reason: 'unauthorized' }),
+    );
+    await settle();
+    expect(wide.seen).toEqual(['ended SubscriptionRequestError']);
+    expect(narrow.seen).toEqual(['ended SubscriptionConnectionClosedError']);
+    expect(watch.ended?.error).toBeInstanceOf(SubscriptionConnectionClosedError);
+  });
+
   it('keeps a request a while after its last watch, for reuse, then closes it', () => {
     vi.useFakeTimers();
     const { fake, index } = scripted();
