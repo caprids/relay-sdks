@@ -110,6 +110,13 @@ export const SETUP_OPTION = {
    * MAX_AGE only to a peer that declared it.
    */
   MAX_AGE: 0x915c4,
+  /**
+   * MoQ Active Count (draft-lcurley-moq-active-count, as moq-dev main carries it in `drafts/`), not a draft-22 option:
+   * a REQUEST_OK answering SUBSCRIBE_NAMESPACE carries `PARAMETER_TYPE.ACTIVE_COUNT`, how many NAMESPACE messages come
+   * before the first change. Negotiated when both SETUPs declare it; the value is reserved (sent as 1, ignored on
+   * receipt). moq-dev main declares it; no deployed moq-relay does.
+   */
+  ACTIVE_COUNT: 0x40b64,
 } as const;
 
 /** Message parameter types (§9.20, §16.7). */
@@ -136,6 +143,8 @@ export const PARAMETER_TYPE = {
   INCLUDE_PROPERTIES: 0x35,
   /** MAX_AGE, the MoQ Timestamp extension's subscriber max age on SUBSCRIBE and REQUEST_UPDATE (not a draft-22 type). */
   MAX_AGE: 0x915c6,
+  /** ACTIVE_COUNT, MoQ Active Count's count on a REQUEST_OK answering SUBSCRIBE_NAMESPACE (not a draft-22 type). */
+  ACTIVE_COUNT: 0x40b66,
 } as const;
 
 /**
@@ -773,6 +782,13 @@ export interface MessageParameters {
    * `SETUP_OPTION.MAX_AGE`, and never on FETCH, TRACK_STATUS or SUBSCRIBE_NAMESPACE; see `MoqtSession.maxAgeSupported`.
    */
   maxAge?: number;
+  /**
+   * ACTIVE_COUNT (`0x40B66`, MoQ Active Count; not a draft-22 parameter): on a REQUEST_OK answering SUBSCRIBE_NAMESPACE,
+   * the number of NAMESPACE messages that follow it before any other message on the stream. Decoded only from a
+   * REQUEST_OK; in any other message it is an unknown type. The session checks the request it answers and the
+   * negotiation.
+   */
+  activeCount?: number;
 }
 
 /** The parameters FILL_PARAMETERS may carry (§9.20.15, Table 7). */
@@ -781,7 +797,8 @@ export type FillParameters = Pick<
   'fillTimeout' | 'subscriberPriority' | 'locationFilter' | 'groupOrder' | 'rangeFilters'
 >;
 
-type ParameterScope = 'message' | 'fill';
+/** Where a parameter list sits: a message's own, REQUEST_OK's (which adds ACTIVE_COUNT), or FILL_PARAMETERS'. */
+type ParameterScope = 'message' | 'request-ok' | 'fill';
 
 const FILL_SCOPE_TYPES: ReadonlySet<number> = new Set([
   PARAMETER_TYPE.FILL_TIMEOUT,
@@ -880,6 +897,10 @@ function collectParameterEntries(parameters: MessageParameters, protocol: MoqtPr
   // An even type, so a bare varint; this codec's 2^53−1 ceiling is the extension's own bound.
   if (parameters.maxAge !== undefined) {
     push(PARAMETER_TYPE.MAX_AGE, (w) => w.writeVarint(parameters.maxAge!));
+  }
+
+  if (parameters.activeCount !== undefined) {
+    push(PARAMETER_TYPE.ACTIVE_COUNT, (w) => w.writeVarint(parameters.activeCount!));
   }
 
   return entries;
@@ -1027,6 +1048,11 @@ export function decodeMessageParameters(
       case PARAMETER_TYPE.MAX_AGE:
         // A value above 2^53−1 is malformed by the extension, and readVarint already refuses it.
         parameters.maxAge = reader.readVarint();
+        break;
+      case PARAMETER_TYPE.ACTIVE_COUNT:
+        if (scope !== 'request-ok') throw new MoqtProtocolError(`unknown message parameter type ${type}`);
+
+        parameters.activeCount = reader.readVarint();
         break;
       default: {
         if (RANGE_FILTER_TYPES.includes(type)) {
@@ -1275,9 +1301,9 @@ export function encodeGoaway(timeout = 0): Uint8Array {
  * REQUEST_OK (§9.3). The subscriber sends this to accept an incoming PUBLISH (PUBLISH_OK). Track Properties are always
  * empty in that role, and since draft-20 so are the parameters — a subscriber changes subscription parameters with
  * REQUEST_UPDATE, not in PUBLISH_OK (§9.8); the session driver's `accept()` therefore takes none. The parameter slot
- * stays for the publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK). Track Properties are
- * populated only in TRACK_STATUS_OK, which the publish session sends; they are the rest of the message, so an empty
- * list adds no bytes.
+ * stays for the publisher-side roles of REQUEST_OK (TRACK_STATUS_OK, REQUEST_UPDATE_OK) and for the ACTIVE_COUNT a
+ * relay answers SUBSCRIBE_NAMESPACE with. Track Properties are populated only in TRACK_STATUS_OK, which the publish
+ * session sends; they are the rest of the message, so an empty list adds no bytes.
  */
 export function encodeRequestOk(
   parameters: MessageParameters = {},
@@ -1678,7 +1704,7 @@ function decodeControlMessageBody(
       return { kind: 'subscribe-ok', trackAlias, parameters, trackProperties: decodeKeyValuePairs(reader, end) };
     }
     case MESSAGE_TYPE.REQUEST_OK: {
-      const parameters = decodeMessageParameters(reader, protocol);
+      const parameters = decodeMessageParameters(reader, protocol, 'request-ok');
 
       return { kind: 'request-ok', parameters, trackProperties: decodeKeyValuePairs(reader, end) };
     }

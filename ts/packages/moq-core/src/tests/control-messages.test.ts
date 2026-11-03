@@ -501,6 +501,29 @@ describe('encodeMessageParameters', () => {
     expect(decodeMessageParameters(new ByteReader(writer.toBytes()))).toEqual({ maxAge: 2 ** 53 - 1 });
   });
 
+  // MoQ Active Count's ACTIVE_COUNT (0x40B66): an even type, so a bare varint, and legal only on REQUEST_OK.
+  it('frames ACTIVE_COUNT as a bare varint and decodes it from a REQUEST_OK', () => {
+    expect(SETUP_OPTION.ACTIVE_COUNT).toBe(0x40b64);
+    expect(PARAMETER_TYPE.ACTIVE_COUNT).toBe(0x40b66);
+    expect(encodeParameters({ activeCount: 3 })).toEqual(Uint8Array.of(0x01, 0xc4, 0x0b, 0x66, 0x03));
+    expect(decodeAll(encodeRequestOk({ activeCount: 3 }))).toEqual([
+      { kind: 'request-ok', parameters: { activeCount: 3 }, trackProperties: [] },
+    ]);
+  });
+
+  it.each([
+    ['SUBSCRIBE_OK', () => encodeSubscribeOk(1, { activeCount: 0 })],
+    ['REQUEST_UPDATE', () => encodeRequestUpdate(2, { activeCount: 0 })],
+    ['a bare parameter list', () => encodeParameters({ activeCount: 0 })],
+  ])('refuses ACTIVE_COUNT in %s as an unknown parameter type', (where, encode) => {
+    const bytes = encode();
+    const decode =
+      where === 'a bare parameter list' ? () => decodeMessageParameters(new ByteReader(bytes)) : () => decodeAll(bytes);
+
+    expect(decode).toThrow(MoqtProtocolError);
+    expect(decode).toThrow(/unknown message parameter type/);
+  });
+
   it('encodes FILL_PARAMETERS as a nested parameter list', () => {
     const bytes = encodeParameters({
       fillParameters: { locationFilter: { type: 'relative-group', groupsBeforeNext: 1 } },
