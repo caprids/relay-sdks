@@ -46,10 +46,11 @@ export interface MembersOptions {
 export interface MembersHandlers {
   /**
    * The view loaded, or members joined or left. The first call is the load and runs once, even for an empty root;
-   * every later call names at least one member in `joined` or `left`. A member leaves once it has had no namespace
-   * for 100 ms, so a rotation whose withdrawal arrives just before the new generation's announce calls nothing. A
-   * member's generations changing, the relay repeating an announce, and the subscriber's reconnects and rotations call
-   * nothing; a reconnect calls it with the difference, if there is one.
+   * every later call names at least one member in `joined` or `left`. A member whose last namespace is withdrawn
+   * leaves once it has had none for 100 ms, so a rotation whose withdrawal arrives just before the new generation's
+   * announce calls nothing. A member's generations changing, the relay repeating an announce, and the subscriber's
+   * reconnects and rotations call nothing; a reconnect, rotation or retry calls it once with the difference its new
+   * discovery shows, if there is one, joins and departures together.
    */
   onChanged?(change: MembersChange): void;
   /** A discovery failure no wait fixes, such as the token not allowing the root. The view is closed. */
@@ -384,23 +385,25 @@ function fromLive(phase: Live, input: Arrival, root: readonly string[]): Step {
 }
 
 /**
- * A new source loaded: a member it shows that the application was not told of joins at once; one the application was
- * told of that it does not show starts its grace, as a live withdrawal would; one it shows again ends its grace.
+ * A new source loaded. Its snapshot is the relay's state at one instant, so the difference from what the application
+ * was told is reported at once, in one change, and every pending leave is settled by it: a leaving member it shows
+ * stays, one it does not show is in `left`.
  */
 function adopt(phase: Replacing, candidate: Source, root: readonly string[]): Step {
   const { joined, left } = diffMembers(phase.settled, candidate.presence, root);
-  const returning = [...phase.leaving].filter((id) => candidate.presence.has(id));
-  const departing = left.filter((gone) => !phase.leaving.has(gone.id));
-  const leaving: Leaving = new Set(left.map((gone) => gone.id));
-  const settled =
-    joined.length === 0 ? phase.settled : new Map([...phase.settled, ...joined.map((m) => [m.id, m] as const)]);
+  let settled = phase.settled;
+  if (joined.length > 0 || left.length > 0) {
+    const next = new Map(phase.settled);
+    for (const gone of left) next.delete(gone.id);
+    for (const arrived of joined) next.set(arrived.id, arrived);
+    settled = next;
+  }
   return {
-    phase: { kind: 'live', settled, leaving, source: candidate },
+    phase: { kind: 'live', settled, leaving: NOBODY_LEAVING, source: candidate },
     effects: [
       ...(phase.source ? [release(phase.source)] : []),
-      ...returning.map(cancelLeave),
-      ...departing.map((gone): MembersEffect => ({ kind: 'schedule-leave', id: gone.id })),
-      ...(joined.length === 0 ? [] : [emit(joined, [], settled)]),
+      ...[...phase.leaving].map(cancelLeave),
+      ...(settled === phase.settled ? [] : [emit(joined, left, settled)]),
     ],
   };
 }
@@ -467,9 +470,10 @@ export function transition(phase: MembersPhase, input: MembersInput, root: reado
 }
 
 /**
- * How long a member stays after its last namespace is withdrawn before it is reported as left. The relay orders
- * nothing across two sessions: with no demand on the rotating publisher, the old generation's withdrawal arrived before
- * the new generation's announce in 24 of 75 rotations measured on ord and fra (2026-11-03), by at most 0.2 ms.
+ * How long a member stays after its last namespace is withdrawn live before it is reported as left; a newly loaded
+ * discovery's snapshot needs none. The relay orders nothing across two sessions: with no demand on the rotating
+ * publisher, the old generation's withdrawal arrived before the new generation's announce in 24 of 75 rotations
+ * measured on ord and fra (2026-11-03), by at most 0.2 ms.
  */
 const LEAVE_GRACE_MS = 100;
 

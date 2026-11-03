@@ -12,7 +12,7 @@ each section says what changed and what to do about it. How to cut a release is 
   member, and a supervised publisher's generations under it count as one member, so its rotations and reconnects
   report nothing. The first `onChanged` is the load (`initial: true`, everyone present in `joined`, possibly nobody),
   and `Members.loaded` tells "nobody here" from "not loaded yet". After a reconnect the view reports only who came
-  or went meanwhile. An application can build a room roster with no roster server.
+  or went meanwhile, in one call. An application can build a room roster with no roster server.
 - `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
   between every want that follows generations and every member view. A want under another want's or a view's root
   no longer fails with `PREFIX_OVERLAP`, and a view refused on its root leaves the wants under it alone. Nothing to

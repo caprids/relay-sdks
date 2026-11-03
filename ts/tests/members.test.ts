@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { encodeNamespace, encodeRequestOk } from '../packages/moq-core/src/protocol/control-messages.js';
 import type { DiscoveryIndex } from '../src/discovery.js';
 import { RelayError } from '../src/errors.js';
+import { connectRelaySubscriber } from '../src/index.js';
 import {
   applyNamespace,
   type Member,
@@ -16,6 +18,7 @@ import {
 import { SubscriptionConnectionClosedError, SubscriptionRequestError } from '../src/subscription.js';
 import { superviseRelaySubscriber, type WantHandlers } from '../src/supervised-subscriber.js';
 import { newGeneration } from '../src/supervision.js';
+import { createFakeTransport, type FakeTransport } from './helpers/relay.js';
 import { type FakeSubscriber, fakeSubscriber, until } from './helpers/supervision-fakes.js';
 
 const fast = { initialDelayMs: 0, maxDelayMs: 0 };
@@ -388,30 +391,28 @@ describe('a member leaving', () => {
     expect(changes).toHaveLength(2);
   });
 
-  it('reports nothing when a member missing from a reconnect load reappears within the grace', async () => {
+  it("reports a reconnect's joins and departures in one change, with no grace", async () => {
     const { connections, subscriber, discovery } = await start();
     const { changes, handlers } = recorder();
     subscriber.members({ root: ROOT }, handlers);
     const first = await discovery();
-    first.push({ type: 'announced', namespace: at('alice', 'g1') });
-    first.push({ type: 'announced', namespace: at('bob') });
+    for (const id of ['alice', 'bob', 'carol']) first.push({ type: 'announced', namespace: at(id) });
     first.push({ type: 'loaded' });
     await until(() => changes.length === 1, 'load');
     connections[0]!.end(new RelayError('TRANSPORT_ERROR', 'idle', 'connection'));
     const next = await discovery(1);
-    next.push({ type: 'announced', namespace: at('bob') });
+    next.push({ type: 'announced', namespace: at('carol') });
+    next.push({ type: 'announced', namespace: at('dave') });
     next.push({ type: 'loaded' });
-    await pause(20);
-    next.push({ type: 'announced', namespace: at('alice', 'g2') });
-    await pause(150);
-    next.push({ type: 'announced', namespace: at('zed') });
-    await until(() => changes.length === 2, 'the marker join');
+    await until(() => changes.length === 2, 'the difference');
     expect(summary(changes[1]!)).toEqual({
-      joined: ['zed'],
-      left: [],
-      present: ['alice', 'bob', 'zed'],
+      joined: ['dave'],
+      left: ['alice', 'bob'],
+      present: ['carol', 'dave'],
       initial: false,
     });
+    await pause(150);
+    expect(changes).toHaveLength(2);
   });
 
   it('cancels a pending leave without reporting it when the view closes', async () => {
@@ -428,6 +429,81 @@ describe('a member leaving', () => {
     await pause(150);
     expect(changes).toHaveLength(1);
     expect([...view.present.keys()]).toEqual(['alice']);
+  });
+});
+
+describe('a member view over the relay wire, when the transport or the request stream is lost', () => {
+  async function startOverWire() {
+    const fakes: FakeTransport[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async (options) => {
+        const fake = createFakeTransport();
+        fakes.push(fake);
+        const connecting = connectRelaySubscriber({
+          ...options,
+          createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
+        });
+        fake.sendServerSetup();
+        return connecting;
+      },
+      { url: 'https://relay.example.com/moq' },
+    );
+    cleanup.push(() => subscriber.close());
+    const { changes, handlers } = recorder();
+    subscriber.members({ root: ROOT }, handlers);
+    return { fakes, changes };
+  }
+
+  async function reconnectUnchanged(resetFirst: boolean) {
+    const { fakes, changes } = await startOverWire();
+    const first = await fakes[0]!.nextRequestStream();
+    await first.firstMessage;
+    await first.send(encodeRequestOk());
+    await first.send(encodeNamespace(['alice', 'g1']));
+    await first.send(encodeNamespace(['bob', 'g1']));
+    await until(() => changes.length === 1, 'load');
+    // A real transport can fail a request's stream a few tasks before it reports its closure.
+    if (resetFirst) {
+      first.reset(new Error('connection lost'));
+      await pause(1);
+    }
+    fakes[0]!.dropTransport();
+    await until(() => fakes.length === 2, 'reconnect', 3_000);
+    const second = await fakes[1]!.nextRequestStream();
+    await second.firstMessage;
+    await second.send(encodeRequestOk());
+    await second.send(encodeNamespace(['alice', 'g1']));
+    await second.send(encodeNamespace(['bob', 'g1']));
+    await pause(300);
+    return changes.map(summary);
+  }
+
+  const loadedAliceAndBob = { joined: ['alice', 'bob'], left: [], present: ['alice', 'bob'], initial: true };
+
+  it('reports nothing for an unchanged room after the transport drops', async () => {
+    expect(await reconnectUnchanged(false)).toEqual([loadedAliceAndBob]);
+  });
+
+  it('reports nothing for an unchanged room when the request stream fails before the transport drops', async () => {
+    expect(await reconnectUnchanged(true)).toEqual([loadedAliceAndBob]);
+  });
+
+  it('reports nothing for an unchanged room when the request stream resets with the connection up', async () => {
+    const { fakes, changes } = await startOverWire();
+    const first = await fakes[0]!.nextRequestStream();
+    await first.firstMessage;
+    await first.send(encodeRequestOk());
+    await first.send(encodeNamespace(['alice', 'g1']));
+    await until(() => changes.length === 1, 'load');
+    first.reset(new Error('relay reset the request stream'));
+    // The helper keeps a stream handed to a waiter in its queue: the first one comes back once more.
+    expect(await fakes[0]!.nextRequestStream()).toBe(first);
+    const second = await fakes[0]!.nextRequestStream();
+    await second.firstMessage;
+    await second.send(encodeRequestOk());
+    await second.send(encodeNamespace(['alice', 'g1']));
+    await pause(300);
+    expect(changes.map(summary)).toEqual([{ joined: ['alice'], left: [], present: ['alice'], initial: true }]);
   });
 });
 
@@ -651,7 +727,7 @@ describe('the members transition', () => {
     expect(next).toEqual({ phase: step.phase, effects: [] });
   });
 
-  it('follows a rotation make-before-break; a member missing at the new load leaves after its grace', () => {
+  it('follows a rotation make-before-break; a member missing at the new load leaves in its one change', () => {
     const { on, source, step } = loaded('alice', 'bob');
     const to = connection();
     const retired = transition(step.phase, { kind: 'retiring', connection: on, next: to }, ROOT);
@@ -668,12 +744,39 @@ describe('the members transition', () => {
     expect(done.phase).toMatchObject({ kind: 'live', source: candidate });
     expect(done.effects).toEqual([
       { kind: 'release', source },
-      { kind: 'schedule-leave', id: 'bob' },
-    ]);
-    const due = transition(done.phase, { kind: 'leave-due', id: 'bob' }, ROOT);
-    expect(due.effects).toEqual([
       { kind: 'emit', change: expect.objectContaining({ joined: [], left: [expect.objectContaining({ id: 'bob' })] }) },
     ]);
+  });
+
+  it("settles every pending leave by a new load's snapshot: one it shows stays, one it does not is left", () => {
+    const { on, source, step } = loaded('alice', 'bob', 'carol');
+    const withdraw = (phase: MembersPhase, id: string) =>
+      transition(phase, { kind: 'namespace', source, type: 'unannounced', namespace: at(id) }, ROOT).phase;
+    const leaving = withdraw(withdraw(step.phase, 'alice'), 'bob');
+    const to = connection();
+    const retired = transition(leaving, { kind: 'retiring', connection: on, next: to }, ROOT);
+    const candidate = (retired.effects[0] as { source: Source }).source;
+    let phase = retired.phase;
+    for (const id of ['alice', 'carol']) {
+      phase = transition(
+        phase,
+        { kind: 'namespace', source: candidate, type: 'announced', namespace: at(id) },
+        ROOT,
+      ).phase;
+    }
+    const done = transition(phase, { kind: 'loaded', source: candidate }, ROOT);
+    expect(done.phase).toMatchObject({ kind: 'live', leaving: new Set() });
+    expect(done.effects).toEqual([
+      { kind: 'release', source },
+      { kind: 'cancel-leave', id: 'alice' },
+      { kind: 'cancel-leave', id: 'bob' },
+      {
+        kind: 'emit',
+        change: expect.objectContaining({ joined: [], left: [expect.objectContaining({ id: 'bob' })] }),
+      },
+    ]);
+    const emitted = done.effects.at(-1) as { change: MembersChange };
+    expect([...emitted.change.present.keys()]).toEqual(['alice', 'carol']);
   });
 
   it('holds a member whose last namespace went until its grace runs out, and cancels it if one comes back', () => {

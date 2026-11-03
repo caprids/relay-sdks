@@ -941,13 +941,14 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
   is one of the member's generations, as a supervised publisher announces them. A member with only
   its own namespace announced is an unsupervised publisher. Deeper namespaces, and the root itself,
   are ignored.
-- **Joining and leaving.** A member joins when its first namespace is announced. It leaves once it
-  has had no namespace for 100 ms, so a namespace announced within that time keeps it present with
-  nothing reported. A supervised publisher's rotation announces the next generation as the old one
-  goes, so it reports nothing, and neither do the relay's repeats. The 100 ms exists because the
-  relay does not order two sessions' messages: when the rotating publisher had no demand, the
-  subscriber saw the old generation withdrawn before the new one was announced in 24 of 75 rotations
-  on 2026-11-03, by at most 0.2 ms, on ord and from fra
+- **Joining and leaving.** A member joins when its first namespace is announced. When its last
+  namespace is withdrawn, it leaves once it has had none for 100 ms, so a namespace announced
+  within that time keeps it present with nothing reported. A supervised publisher's rotation
+  announces the next generation as the old one goes, so it reports nothing, and neither do the
+  relay's repeats. The 100 ms exists because the relay does not order two sessions' messages:
+  when the rotating publisher had no demand, the subscriber saw the old generation withdrawn before
+  the new one was announced in 24 of 75 rotations on 2026-11-03, by at most 0.2 ms, on ord and from
+  fra
   ([issue #424](https://github.com/muxinc/relay-sdks/issues/424)). A member leaves about 100 ms after
   its publisher's clean `close()` reaches the relay (about 105 ms on the same relay, 210 ms from
   another), and at the relay's idle timeout, about 10 to 12 s, after a crash.
@@ -964,10 +965,10 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
     connection's discovery has loaded, then reports the difference, normally none.
   - A reconnect: the view keeps what it last reported (`present` and `loaded` unchanged) while no
     connection is up and while the next connection's discovery loads. Then it reports the
-    difference in one `onChanged`: members who left meanwhile in `left`, newcomers in `joined`, and
-    nothing for members still there, whatever their generations did. A loaded snapshot is the
-    relay's state at one moment, so the 100 ms leave delay applies only to withdrawals the view
-    follows live.
+    difference in one `onChanged`: newcomers in `joined`, and members who left meanwhile in `left`,
+    with no 100 ms wait, since the new discovery's snapshot is the relay's state at one instant. A
+    member whose 100 ms was running is settled by the snapshot the same way. Members still there
+    report nothing, whatever their generations did.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
     failure no wait fixes (a permanent REQUEST_ERROR, such as `UNAUTHORIZED`) calls `onError`, and
