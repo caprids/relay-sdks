@@ -64,7 +64,11 @@ class MembersHandlers:
     new discovery misses but the old one still showed, or was giving its 0.1 s: it leaves in a later
     call, once the new discovery has shown it nothing for 0.1 s."""
     on_error: Callable[[BaseException], None] | None = None
-    """A discovery failure no wait fixes, such as the token not allowing the root. The view is closed."""
+    """A discovery failure no wait fixes: the relay refusing the request with a REQUEST_ERROR that does not
+    invite a retry, such as NOT_SUPPORTED from a relay without namespace discovery. The view is closed. A
+    root outside the token's grant is not one: moq-relay accepts the request and sends nothing, so the
+    roster loads empty and this is never called. An empty roster with no error can therefore mean the
+    token does not grant the root."""
 
 
 _Presence: TypeAlias = dict[str, set[str]]
