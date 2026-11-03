@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MoqtObject, SubscribeOk } from '../packages/moq-core/src/index.js';
-import type { Member, MembersChange, MembersHandlers } from '../src/members.js';
 import {
   createPresenceView,
   PRESENCE_HEARTBEAT_MS,
   type PresenceChange,
   type PresenceViewHandlers,
   publishPresence,
-} from '../src/presence.js';
+} from '../src/media.js';
+import type { Member, MembersChange, MembersHandlers } from '../src/members.js';
 import {
   type RestartReason,
   type SupervisedSubscriber,
