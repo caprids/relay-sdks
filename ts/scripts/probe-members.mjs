@@ -36,7 +36,9 @@
 // counts the presence events the ground truth does not explain: a join for a member already present or with a document
 // its publisher never sent, an update to anything but the current document, a stale for a publisher neither frozen nor
 // killed, a resume for one still frozen, a leave for one still up or resumed in time. Before --end, the probe waits for every listener's roster to
-// match the publishers and reports each roster and host set.
+// match the publishers and reports each roster and host set. After --rotate-publishers or --rotate-subscriber, every
+// publisher changes its name once and every listener must report it within 2 s (`rotationUpdates`), since a want lost
+// in a rotation keeps its cached document until the stale window runs out.
 //   --presence                               presence mode
 //   --presence-view helper|hand (default helper)  hand: connectRelaySubscriber + namespaceEvents, then a subscribe to
 //                                            each announced generation's `presence` track until its first object
@@ -45,7 +47,8 @@
 //   --host IDS                               comma list of ids whose document says host: true
 //   --update-member M                        after the load, M publishers change their name once
 //   --freeze-publisher M --freeze-ms MS      after the load and a heartbeat, SIGSTOP M publishers and SIGCONT them
-//                                            after MS (default 0: never, so the relay's idle timeout withdraws them)
+//                                            after MS (default 0: never, so the relay's idle timeout withdraws them);
+//                                            a listener that reported one stale must then report it resumed
 //   With --latency, joinMs runs from generation-up to the primary listener's presence-joined.
 //
 // Environment: RELAY_URL (a room-rooted endpoint), RELAY_SUB_URL (default RELAY_URL), RELAY_TOKEN or RELAY_ANONYMOUS=1,
@@ -75,6 +78,7 @@ const PRESENCE_SUBSCRIBER_PRIORITY = 32;
 const FROZEN_LEFT_WAIT_MS = 30_000;
 const LATE_LEFT_WATCH_MS = 5000;
 const CONVERGE_POLL_MS = 100;
+const ROTATION_UPDATE_MS = 2000;
 
 const { values: flags } = parseArgs({
   options: {
@@ -627,7 +631,9 @@ async function runProbe() {
         if (change.initial) resolveLoaded({ ids: change.joined.map(({ id }) => id) });
         sink.change?.(change);
       });
-      await page.exposeFunction('reportBrowser', (fields) => emit('browser-status', fields));
+      await page.exposeFunction('reportBrowser', (fields) =>
+        emit('browser-status', Object.fromEntries(Object.entries(fields).map(([key, value]) => [key, redact(value)]))),
+      );
       await page.goto(`http://127.0.0.1:${server.address().port}/`);
       await page.evaluate(`window.plainChange = ${plainChange.toString()}`);
       await page.evaluate(
@@ -769,6 +775,31 @@ async function runProbe() {
     await expect('want-subscribed', (e) => e.type === 'want-subscribed', settleMs);
   }
 
+  const sendUpdates = async (targets, label, timeoutMs) => {
+    const sent = targets.map((publisher) => {
+      const document = { ...publisher.document, name: `${publisher.document.name} (${label})` };
+      publisher.document = document;
+      publisher.sent.push(document);
+      const from = events.length;
+      const event = emit('update-sent', { id: publisher.id, document });
+      publisher.child.send({ cmd: 'update', document });
+      return { publisher, from, sent: event };
+    });
+    await Promise.all(
+      sent.flatMap(({ publisher, from }) =>
+        listeners.map((listener) =>
+          expect(
+            `updated ${publisher.id} at ${listener}`,
+            (e) => e.type === 'presence-updated' && e.id === publisher.id && e.listener === listener,
+            timeoutMs,
+            from,
+          ),
+        ),
+      ),
+    );
+    return sent;
+  };
+
   let publisherRotations = 0;
   for (let round = 1; round <= rotatePublishers; round++) {
     for (const publisher of alive()) {
@@ -808,6 +839,10 @@ async function runProbe() {
     emit('subscriber-rotated', { n, newUpMs, oldClosedMs });
     await sleep(ROTATE_SETTLE_MS);
   }
+  const rotationUpdates =
+    presence && (rotatePublishers || rotateSubscriber)
+      ? await sendUpdates(alive(), 'after rotation', ROTATION_UPDATE_MS)
+      : [];
 
   let reconnect = null;
   if (flags['reconnect-subscriber']) {
@@ -835,28 +870,7 @@ async function runProbe() {
   for (const publisher of closed) depart(publisher, 'close');
   await awaitLeft(closed);
 
-  const updates = [];
-  for (const publisher of alive().slice(0, updateCount)) {
-    const document = { ...publisher.document, name: `${publisher.document.name} (renamed)` };
-    publisher.document = document;
-    publisher.sent.push(document);
-    const from = events.length;
-    const sent = emit('update-sent', { id: publisher.id, document });
-    publisher.child.send({ cmd: 'update', document });
-    updates.push({ publisher, from, sent });
-  }
-  await Promise.all(
-    updates.flatMap(({ publisher, from }) =>
-      listeners.map((listener) =>
-        expect(
-          `updated ${publisher.id} at ${listener}`,
-          (e) => e.type === 'presence-updated' && e.id === publisher.id && e.listener === listener,
-          settleMs,
-          from,
-        ),
-      ),
-    ),
-  );
+  const updates = await sendUpdates(alive().slice(0, updateCount), 'renamed', settleMs);
 
   const frozenPublishers = [];
   if (freezeCount) {
@@ -875,14 +889,23 @@ async function runProbe() {
         publisher.child.kill('SIGCONT');
         publisher.freeze.resumed = emit('unfreeze', { id: publisher.id });
       }
+      // A freeze shorter than the stale window leaves the member fresh, with nothing to resume.
+      const staleAt = (publisher, listener) =>
+        events
+          .slice(publisher.freeze.from)
+          .some((e) => e.type === 'presence-stale' && e.id === publisher.id && e.listener === listener);
       await Promise.all(
-        frozenPublishers.map((publisher) =>
-          expect(
-            `resumed ${publisher.id}`,
-            primaryEvent('presence-resumed', publisher.id),
-            settleMs,
-            publisher.freeze.from,
-          ),
+        frozenPublishers.flatMap((publisher) =>
+          listeners
+            .filter((listener) => staleAt(publisher, listener))
+            .map((listener) =>
+              expect(
+                `resumed ${publisher.id} at ${listener}`,
+                (e) => e.type === 'presence-resumed' && e.id === publisher.id && e.listener === listener,
+                settleMs,
+                publisher.freeze.from,
+              ),
+            ),
         ),
       );
       await sleep(LATE_LEFT_WATCH_MS);
@@ -961,6 +984,20 @@ async function runProbe() {
     return { n: sorted.length, median: rank(0.5), p95: rank(0.95) };
   };
   const elapsed = (from, to) => (from && to ? Math.round((to.t - from.t) * 10) / 10 : null);
+  const updateTimes = ({ publisher, from, sent }) => ({
+    id: publisher.id,
+    sentToUpdatedMs: Object.fromEntries(
+      listeners.map((listener) => [
+        listener,
+        elapsed(
+          sent,
+          events
+            .slice(from)
+            .find((e) => e.type === 'presence-updated' && e.id === publisher.id && e.listener === listener),
+        ),
+      ]),
+    ),
+  });
   const presenceSummary = () => {
     const initialIds = initial.map(({ publisher }) => publisher.id);
     const held = new Set();
@@ -993,20 +1030,8 @@ async function runProbe() {
       listeners,
       events: counted,
       initialRosterMs: elapsed(reference, full),
-      updates: updates.map(({ publisher, from, sent }) => ({
-        id: publisher.id,
-        sentToUpdatedMs: Object.fromEntries(
-          listeners.map((listener) => [
-            listener,
-            elapsed(
-              sent,
-              events
-                .slice(from)
-                .find((e) => e.type === 'presence-updated' && e.id === publisher.id && e.listener === listener),
-            ),
-          ]),
-        ),
-      })),
+      updates: updates.map(updateTimes),
+      rotationUpdates: rotationUpdates.map(updateTimes),
       freezes: frozenPublishers.map(({ id, freeze, departure }) => {
         // A later close, such as --end close, is not the freeze's doing.
         const during = events.slice(
