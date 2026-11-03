@@ -427,6 +427,28 @@ describe('createPresenceView', () => {
     expect(changes.map(summary).at(-1)).toEqual({ stale: ['alice'] });
   });
 
+  it('delivers nothing after close() from inside parse', () => {
+    const room = fakeRoom();
+    const { changes, handlers } = recorder();
+    const view = createPresenceView(
+      room.subscriber,
+      {
+        root: ROOT,
+        parse: (value) => {
+          view.close();
+          return value;
+        },
+      },
+      handlers,
+    );
+    room.load('alice');
+    const alice = room.peer('alice');
+    alice.subscribed();
+    alice.object(0, { name: 'Alice' });
+    vi.advanceTimersByTime(WINDOW * 2);
+    expect(changes).toEqual([]);
+  });
+
   it('delivers nothing after close() from onChanged, and unwants every member and closes the members view', () => {
     const room = fakeRoom();
     const changes: PresenceChange<unknown>[] = [];
@@ -619,7 +641,7 @@ describe('publishPresence', () => {
     expect(sent(track)).toEqual(['{"name":"Ada","joinedAt":1}', '{"name":"Ada L.","joinedAt":1}']);
   });
 
-  it('resends the same bytes heartbeatMs after the last send, and nothing while nobody is subscribed', async () => {
+  it('resends the same bytes heartbeatMs after the last change or resend, and nothing while nobody is subscribed', async () => {
     const { me, track } = start({ name: 'Ada' }, { heartbeatMs: 1000 });
     track.setDemand(true);
     await settle();
@@ -661,8 +683,21 @@ describe('publishPresence', () => {
     expect(() => publishPresence(publisher, {}, { track: '' })).toThrow(TypeError);
     expect(() => publishPresence(publisher, {}, { heartbeatMs: 99 })).toThrow(RangeError);
     expect(publisher.tracks.size).toBe(0);
+    expect(() => publishPresence(publisher, { name: 'x'.repeat(16 * 1024 * 1024) })).toThrow(RangeError);
+    expect(publisher.tracks.size).toBe(0);
     const me = publishPresence(publisher, { name: 'Ada' });
     expect(() => me.update(undefined as never)).toThrow(TypeError);
+    expect(() => me.update({ name: 'x'.repeat(16 * 1024 * 1024) })).toThrow(RangeError);
     expect(me.document).toEqual({ name: 'Ada' });
+  });
+
+  it('keeps its heartbeat on the current document after refusing an oversized one', async () => {
+    const { me, track } = start({ name: 'Ada' }, { heartbeatMs: 1000 });
+    track.setDemand(true);
+    await settle();
+    expect(() => me.update({ name: 'x'.repeat(16 * 1024 * 1024) })).toThrow(RangeError);
+    await vi.advanceTimersByTimeAsync(1000);
+    await settle();
+    expect(sent(track)).toEqual(['{"name":"Ada"}', '{"name":"Ada"}']);
   });
 });

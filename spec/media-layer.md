@@ -1413,7 +1413,7 @@ any MoQ client can read the track:
 **The publisher** (`publishPresence`) serves the document with a document service. The document goes
 out on every relay subscription, including each new generation's, and on every change whose bytes
 differ. The publisher sends the unchanged document again `PRESENCE_HEARTBEAT_MS` (2000 ms) after its
-last send. With no relay subscription, a heartbeat sends nothing. A member leaves by closing its
+last change or heartbeat. With no relay subscription, a heartbeat sends nothing. A member leaves by closing its
 supervised publisher, and the withdrawal of its namespace is the goodbye.
 
 **The listener** (`createPresenceView`) follows the root's members and wants each member's presence

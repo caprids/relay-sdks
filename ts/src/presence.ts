@@ -3,7 +3,7 @@ import type { Member, MembersChange } from './members.js';
 import { synchronousCallback } from './subscription.js';
 import type { SupervisedPublisher } from './supervised-publisher.js';
 import type { RestartReason, SupervisedSubscriber } from './supervised-subscriber.js';
-import { DEFAULT_PUBLISHER_PRIORITY, trackName } from './validation.js';
+import { DEFAULT_PUBLISHER_PRIORITY, payloadBytes, trackName } from './validation.js';
 
 /** The presence track's default name. */
 export const PRESENCE_TRACK = 'presence';
@@ -31,7 +31,8 @@ export interface PublishPresenceOptions {
   /** The track name. Default {@link PRESENCE_TRACK}; listeners use the same. */
   track?: string;
   /**
-   * Resend an unchanged document this long after the last send, in milliseconds: an integer from 100 to 715827882.
+   * Resend an unchanged document this long after the last change or resend, in milliseconds: an integer from 100 to
+   * 715827882.
    * Default {@link PRESENCE_HEARTBEAT_MS}; listeners use the same.
    */
   heartbeatMs?: number;
@@ -42,8 +43,8 @@ export interface PresencePublisher<T> {
   /** The latest document given. */
   readonly document: T;
   /**
-   * Replace the document. It is encoded at once, and a `TypeError` leaves the current one in place; it is sent only
-   * if its JSON differs. Returns at once.
+   * Replace the document. It is encoded at once, and a `TypeError` or `RangeError` leaves the current one in place;
+   * it is sent only if its JSON differs. Returns at once.
    */
   update(document: T): void;
 }
@@ -51,9 +52,9 @@ export interface PresencePublisher<T> {
 /**
  * Publish this participant's presence: register `track` on the supervised publisher and serve `document` as compact
  * UTF-8 JSON, one group per send, on every relay subscription, on every change, and again `heartbeatMs` after the last
- * send, which keeps listeners from calling it stale. A heartbeat with nobody subscribed sends nothing. Presence ends
+ * change or resend, which keeps listeners from calling it stale. A heartbeat with nobody subscribed sends nothing. Presence ends
  * with the publisher: close the publisher to leave. Arguments are checked at once, and a document `JSON.stringify`
- * cannot encode is a `TypeError` before anything is registered.
+ * cannot encode is a `TypeError`, and one over the 16 MiB object limit a `RangeError`, before anything is registered.
  *
  * ```ts
  * const me = publishPresence(publisher, { name: 'Ada', joinedAt: Date.now() });
@@ -237,6 +238,8 @@ export function createPresenceView<T>(
   const wants = new Map<string, string>();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let armedFor: number | undefined;
+  /** Set by `close()` at once, so a step that `parse` closed from inside delivers nothing either. */
+  let closing = false;
 
   const arm = () => {
     const due = deadline(phase);
@@ -306,10 +309,10 @@ export function createPresenceView<T>(
         return;
       }
       case 'emit':
-        deliver('onChanged', () => onChanged?.(effect.change));
+        if (!closing) deliver('onChanged', () => onChanged?.(effect.change));
         return;
       case 'error':
-        deliver('onError', () => onError?.(effect.error));
+        if (!closing) deliver('onError', () => onError?.(effect.error));
         return;
       case 'close-members':
         members.close();
@@ -332,6 +335,7 @@ export function createPresenceView<T>(
       return presentOf(phase) ?? NOBODY;
     },
     close() {
+      closing = true;
       feed({ kind: 'close' }, true);
     },
   };
@@ -372,7 +376,7 @@ const DECODER = new TextDecoder('utf-8', { fatal: true });
 function presenceBytes(document: unknown): Uint8Array {
   const json: unknown = JSON.stringify(document);
   if (typeof json !== 'string') throw new TypeError('A presence document must be a value JSON.stringify can encode');
-  return ENCODER.encode(json);
+  return payloadBytes(ENCODER.encode(json));
 }
 
 function decoder<T>(parse: ((value: unknown) => T) | undefined): PresenceContext<T>['decode'] {
