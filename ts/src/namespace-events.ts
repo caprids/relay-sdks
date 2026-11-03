@@ -37,7 +37,8 @@ export type NamespaceEvent =
 /**
  * Without MoQ Active Count, how long the request's stream stays quiet after the relay accepts it before the relay's
  * snapshot counts as loaded. Each entry restarts it, so an empty prefix loads this long after acceptance. Provisional:
- * moq-relay 0.17.x wrote 60 entries within 0.94 ms of REQUEST_OK, cross-relay (probe 2026-11-03), a 50x margin.
+ * moq-relay 0.17.x wrote 60 entries within 0.94 ms of REQUEST_OK, cross-relay, a 50x margin (2026-11-03,
+ * https://github.com/muxinc/relay-sdks/issues/422#issuecomment-6599550554).
  */
 export const SNAPSHOT_QUIET_MS = 50;
 

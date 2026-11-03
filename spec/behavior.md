@@ -680,7 +680,8 @@ The iterator owns the request, never the connection.
     than `SNAPSHOT_LIMIT_MS` (1 s) after REQUEST_OK, so a root whose announces never pause still
     loads. moq-relay 0.17.x writes REQUEST_OK and then the whole snapshot back to back: on 2026-11-03
     every entry arrived within 0.13 ms of REQUEST_OK for 12 namespaces on ord (20 of 20 trials), and
-    within 0.94 ms for 60 namespaces with the subscriber on fra (10 of 10). A snapshot that loss
+    within 0.94 ms for 60 namespaces with the subscriber on fra (10 of 10)
+    ([measurement and probe](https://github.com/muxinc/relay-sdks/issues/422#issuecomment-6599550554)). A snapshot that loss
     splits by more than the window reports its late part as later `announced` events.
 - Discovery timing, measured on moq-relay 0.17.0 at `*.relay.mux.global` (2026-10-06):
 
