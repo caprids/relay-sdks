@@ -114,7 +114,8 @@ export const SETUP_OPTION = {
    * MoQ Active Count (draft-lcurley-moq-active-count, as moq-dev main carries it in `drafts/`), not a draft-22 option:
    * a REQUEST_OK answering SUBSCRIBE_NAMESPACE carries `PARAMETER_TYPE.ACTIVE_COUNT`, how many NAMESPACE messages come
    * before the first change. Negotiated when both SETUPs declare it; the value is reserved (sent as 1, ignored on
-   * receipt). moq-dev main declares it; no deployed moq-relay does.
+   * receipt). moq-dev main declares it; no deployed moq-relay does. Declare it only on a subscribing session: the
+   * publish session never sends a count, so declaring it in its `setupOptions` would promise one it does not send.
    */
   ACTIVE_COUNT: 0x40b64,
 } as const;

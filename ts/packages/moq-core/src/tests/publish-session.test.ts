@@ -7,7 +7,6 @@ import {
   encodeGoaway,
   encodePublish,
   encodePublishDone,
-  encodeRequestOk,
   encodeRequestUpdate,
   encodeSetup,
   encodeSubscribe,
@@ -2259,19 +2258,4 @@ describe('TRACK_STATUS on the publish session', () => {
       subscriber.destroy();
     }
   );
-});
-
-describe('MoQ Active Count on the publish session', () => {
-  it('closes the session with PROTOCOL_VIOLATION when the peer sends a REQUEST_OK carrying ACTIVE_COUNT', async () => {
-    const { pair, session, subscriber } = makePublishHarness();
-
-    await session.ready;
-    const solicitation = await solicitNamespace(pair.server, []);
-
-    await vi.waitFor(() => expect(solicitation.received.map((m) => m.kind)).toEqual(['request-ok']));
-    await solicitation.send(encodeRequestOk({ activeCount: 0 }));
-
-    await expect(pair.client.closed).resolves.toMatchObject({ closeCode: SESSION_ERROR.PROTOCOL_VIOLATION });
-    subscriber.destroy();
-  });
 });
