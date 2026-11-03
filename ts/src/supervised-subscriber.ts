@@ -22,6 +22,7 @@ import {
   refusedForGood,
 } from './discovery.js';
 import { RelayError } from './errors.js';
+import { type Members, type MembersHandlers, type MembersOptions, openMembers } from './members.js';
 import type { ProductSubscription, RelaySubscription, SubscriptionEnd } from './subscription.js';
 import { SubscriptionRequestError, synchronousCallback } from './subscription.js';
 import {
@@ -211,7 +212,16 @@ export interface SupervisedSubscriber {
    * after 10 seconds at most. A no-op while no connection is up.
    */
   rotate(): void;
-  /** Stop reconnecting, cancel every want and close the connection. Idempotent. */
+  /**
+   * Follow who is present under a root, across reconnects and rotations, with no roster server: each namespace one
+   * field below the root is a member, a supervised publisher's generations under it count as one member, and a member
+   * leaves once its last namespace has been withdrawn for 100 ms (soon after a clean close, at the relay's idle timeout
+   * after a crash).
+   * Shares the connection's discovery with every want and view under the same prefix tree. Arguments are checked at
+   * once; handlers run from the next turn on.
+   */
+  members(options: MembersOptions, handlers?: MembersHandlers): Members;
+  /** Stop reconnecting, cancel every want, close every members view and close the connection. Idempotent. */
   close(): void;
 }
 
@@ -231,14 +241,14 @@ export type ConnectSubscriber = (
   options: ConnectRelaySubscriberOptions & RelaySessionHooks,
 ) => Promise<RelaySubscriber>;
 
-/** One live subscriber connection and the discovery it runs for followed roots. */
+/** One live subscriber connection and the discovery it runs for followed roots and members views. */
 interface Connection {
   subscriber: RelaySubscriber;
   /** Aborts when this connection ends. */
   signal: AbortSignal;
   /** Aborts when a rotation replaced this connection: its wants move to the new one. */
   retiring: AbortSignal;
-  /** The connection's namespace discovery, shared by every want on it. Closed when it ends. */
+  /** The connection's namespace discovery, shared by every want and members view on it. Closed when it ends. */
   discovery: DiscoveryIndex;
   /** Wants with a subscription still on this connection; a rotation closes it once none are left. */
   holds: number;
@@ -312,6 +322,7 @@ export async function superviseRelaySubscriber(
   signal?.throwIfAborted();
 
   const wants = new Map<string, Want>();
+  const views = new Set<Members>();
   let status: SupervisedStatus = 'connecting';
   let stopped = false;
   let current: Connection | undefined;
@@ -359,6 +370,7 @@ export async function superviseRelaySubscriber(
     first = undefined;
     for (const want of wants.values()) want.controller.abort();
     wants.clear();
+    for (const view of [...views]) view.close();
     current?.subscriber.close();
     current = undefined;
     retiring?.subscriber.close();
@@ -629,6 +641,17 @@ export async function superviseRelaySubscriber(
     want.controller.abort();
     if (wants.get(key) === want) wants.delete(key);
   };
+  /** The primitive's guard: a declared-async callback is refused, a returned promise is observed, never left unhandled. */
+  const guard = <H extends object>(handlers: H, what: string): H => {
+    if (typeof handlers !== 'object' || handlers === null) throw new TypeError(`${what} handlers must be an object`);
+    const guarded: Record<string, (...args: unknown[]) => void> = {};
+    for (const [name, callback] of Object.entries(handlers)) {
+      if (callback === undefined) continue;
+      if (typeof callback !== 'function') throw new TypeError(`${name} must be a function`);
+      guarded[name] = synchronousCallback(name, callback, handlers);
+    }
+    return guarded as H;
+  };
 
   return {
     get status() {
@@ -640,15 +663,7 @@ export async function superviseRelaySubscriber(
       if (typeof wantOptions !== 'object' || wantOptions === null) {
         throw new TypeError('want takes an options object');
       }
-      if (typeof handlers !== 'object' || handlers === null) throw new TypeError('want handlers must be an object');
-      // The primitive's guard: a declared-async callback is refused, a returned promise is observed, never left unhandled.
-      const guarded: Record<string, (...args: unknown[]) => void> = {};
-      for (const [name, callback] of Object.entries(handlers)) {
-        if (callback === undefined) continue;
-        if (typeof callback !== 'function') throw new TypeError(`${name} must be a function`);
-        guarded[name] = synchronousCallback(name, callback, handlers);
-      }
-      const safeHandlers = guarded as WantHandlers;
+      const safeHandlers = guard(handlers, 'want');
       const { parameters, generations = false, staleAfterMs, retry, until, drainMs = 0 } = wantOptions;
       const namespace = namespaceFields(wantOptions.namespace);
       if (generations) namespaceFields([...namespace, 'x']);
@@ -701,6 +716,23 @@ export async function superviseRelaySubscriber(
     catchUp(key) {
       if (typeof key !== 'string') throw new TypeError('want key must be a string');
       wants.get(key)?.catchUp?.();
+    },
+    members(membersOptions, handlers = {}) {
+      if (typeof membersOptions !== 'object' || membersOptions === null) {
+        throw new TypeError('members takes an options object');
+      }
+      const safeHandlers = guard(handlers, 'members');
+      const root = namespaceFields(membersOptions.root);
+      // A member and its generation must fit under the root.
+      namespaceFields([...root, 'x', 'x']);
+      if (stopped) throw new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
+      const view: Members = openMembers(
+        { liveConnection, current: () => current, onClosed: () => views.delete(view) },
+        root,
+        safeHandlers,
+      );
+      views.add(view);
+      return view;
     },
     rotate() {
       requestRotation();
@@ -1587,7 +1619,7 @@ interface RootWatch {
 
 /**
  * The want's discovery of `root` on `connection`: one watch on the connection's index, which shares the request with
- * every other want under the same prefix tree. A want never waits for the root to load: `newest()`
+ * every other want and members view under the same prefix tree. A want never waits for the root to load: `newest()`
  * resolves on the first generation the watch holds. Throws what opening a request throws.
  */
 function rootWatch(connection: Connection, root: string[]): { watch: RootWatch; release(): void } {

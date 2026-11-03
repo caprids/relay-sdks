@@ -1,8 +1,9 @@
 /**
- * One connection's namespace discovery, shared by every want on it. Draft-22 §9.15 allows one SUBSCRIBE_NAMESPACE per
- * prefix tree on a session, so the index keeps open requests whose prefixes never overlap: a watch under an open
- * request is served by filtering it, and a watch over open requests replaces them with one request on its own prefix.
- * A replaced request's view is held until the new one has loaded, so a watch it moved hears only the differences.
+ * One connection's namespace discovery, shared by every want and members view on it. Draft-22 §9.15 allows one
+ * SUBSCRIBE_NAMESPACE per prefix tree on a session, so the index keeps open requests whose prefixes never overlap: a
+ * watch under an open request is served by filtering it, and a watch over open requests replaces them with one request
+ * on its own prefix. A replaced request's view is held until the new one has loaded, so a watch it moved hears only
+ * the differences.
  */
 import { isMoqtProtocolError } from '@caprid/moq-core';
 import { RelayError } from './errors.js';
@@ -115,9 +116,9 @@ export function placeWatch<R extends { readonly prefix: readonly string[] }>(
 }
 
 /**
- * What a discovery ending means for its owner: the connection's end waits for the next connection; the relay finishing
- * the request, a REQUEST_ERROR a wait may fix, or a queue overflow is retried after a backoff; anything else, such as a
- * refusal of the credentials, is surfaced.
+ * What a discovery ending means for its owner, shared by wants and members views: the connection's end waits for the
+ * next connection; the relay finishing the request, a REQUEST_ERROR a wait may fix, or a queue overflow is retried
+ * after a backoff; anything else, such as a refusal of the credentials, is surfaced.
  */
 export function discoveryEnding(error: unknown): 'connection' | 'retry' | 'fatal' {
   if (error instanceof SubscriptionConnectionClosedError) return 'connection';

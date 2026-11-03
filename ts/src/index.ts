@@ -23,6 +23,7 @@ export type {
 } from './connect.js';
 export { connectRelaySubscriber } from './connect.js';
 export { RelayError, type RelayErrorCode, type RelayErrorPhase } from './errors.js';
+export type { Member, Members, MembersChange, MembersHandlers, MembersOptions } from './members.js';
 export {
   type NamespaceEvent,
   type NamespaceEventOptions,
