@@ -373,12 +373,14 @@ class RelaySubscriber:
 
         Same ownership rules as :meth:`subscribe_events`: the iterator owns one SUBSCRIBE_NAMESPACE
         request, and ``close()``, leaving ``async with`` or ``cancellation`` cancels it. It first yields
-        ``announced`` for each namespace already announced, then one event per announce and
-        withdrawal; the relay sends no marker between the two. A relay rejection ends it with
-        :class:`SubscriptionRequestError`, the connection ending with
+        ``announced`` for each namespace already announced, then ``loaded`` once, then one event per
+        announce and withdrawal. A relay that negotiated MoQ Active Count marks where its snapshot
+        ends; against one that did not, ``loaded`` is the SDK's estimate (see :data:`SNAPSHOT_QUIET`
+        and :data:`SNAPSHOT_LIMIT`), so an announce that lands meanwhile can come before it. A relay
+        rejection ends it with :class:`SubscriptionRequestError`, the connection ending with
         :class:`SubscriptionConnectionClosedError`, a full queue with
-        :class:`SubscriptionOverflowError`; a relay that finishes the request ends it cleanly, after
-        the queued events and an ``unannounced`` for each namespace still announced. See
+        :class:`SubscriptionOverflowError`, with no withdrawals; a relay that finishes the request ends
+        it cleanly, after the queued events and an ``unannounced`` for each namespace still announced. See
         spec/behavior.md, "Discovery", for the timing. ``prefix`` follows the namespace rules; one that
         equals, contains or falls under a prefix this connection is already discovering raises a
         ``RelayError`` with code ``PREFIX_OVERLAP`` before anything is sent.

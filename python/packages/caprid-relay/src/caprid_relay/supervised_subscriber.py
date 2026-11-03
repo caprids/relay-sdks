@@ -1709,10 +1709,11 @@ class _RootWatch:
         depth = len(self._root)
         try:
             async for event in self._events:
+                namespace = event.namespace
                 # Only one field below the root is a generation; anything deeper belongs to someone else.
-                if len(event.namespace) != depth + 1:
+                if namespace is None or len(namespace) != depth + 1:
                     continue
-                generation = event.namespace[depth]
+                generation = namespace[depth]
                 if event.type == "announced":
                     self._generations.add(generation)
                 else:
