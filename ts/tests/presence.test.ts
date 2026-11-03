@@ -447,6 +447,8 @@ describe('createPresenceView', () => {
     alice.object(0, { name: 'Alice' });
     vi.advanceTimersByTime(WINDOW * 2);
     expect(changes).toEqual([]);
+    expect(view.loaded).toBe(false);
+    expect(view.present.size).toBe(0);
   });
 
   it('delivers nothing after close() from onChanged, and unwants every member and closes the members view', () => {

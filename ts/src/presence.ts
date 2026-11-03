@@ -240,6 +240,8 @@ export function createPresenceView<T>(
   let armedFor: number | undefined;
   /** Set by `close()` at once, so a step that `parse` closed from inside delivers nothing either. */
   let closing = false;
+  /** What `onChanged` last delivered; `undefined` until the first. */
+  let shown: ReadonlyMap<string, PresenceMember<T>> | undefined;
 
   const arm = () => {
     const due = deadline(phase);
@@ -309,7 +311,9 @@ export function createPresenceView<T>(
         return;
       }
       case 'emit':
-        if (!closing) deliver('onChanged', () => onChanged?.(effect.change));
+        if (closing) return;
+        shown = effect.change.present;
+        deliver('onChanged', () => onChanged?.(effect.change));
         return;
       case 'error':
         if (!closing) deliver('onError', () => onError?.(effect.error));
@@ -329,10 +333,10 @@ export function createPresenceView<T>(
   );
   return {
     get loaded() {
-      return presentOf(phase) !== undefined;
+      return shown !== undefined;
     },
     get present() {
-      return presentOf(phase) ?? NOBODY;
+      return shown ?? NOBODY;
     },
     close() {
       closing = true;
@@ -449,9 +453,8 @@ type ViewPhase<T> =
       readonly waiting: ReadonlySet<string>;
       readonly loadBy: number;
     }
-  | { readonly kind: 'live'; readonly states: States<T>; readonly present: ReadonlyMap<string, PresenceMember<T>> }
-  /** `present` is undefined when the view closed before it loaded. */
-  | { readonly kind: 'closed'; readonly present: ReadonlyMap<string, PresenceMember<T>> | undefined };
+  | { readonly kind: 'live'; readonly states: States<T> }
+  | { readonly kind: 'closed' };
 
 /** What reaches the reducer. `at` is `performance.now()`; `date` is `Date.now()`. */
 type PresenceInput =
@@ -648,20 +651,19 @@ function gather<T>(
   const present = reported(states);
   const joined = [...present.values()].map((member): Report<T> => ({ event: 'joined', member }));
   const loaded = changeOf(joined, present, true);
-  return { phase: { kind: 'live', states, present }, effects: [...effects, { kind: 'emit', change: loaded }] };
+  return { phase: { kind: 'live', states }, effects: [...effects, { kind: 'emit', change: loaded }] };
 }
 
 /**
- * The view's transition. Pure: times arrive on inputs and effects leave as data. `present` is rebuilt only when a
- * reported member changed, so its identity changes exactly when `onChanged` runs, and the emit comes last so a
- * `close()` from `onChanged` follows every other effect of the step.
+ * The view's transition. Pure: times arrive on inputs and effects leave as data. The emit comes last so a `close()`
+ * from `onChanged` follows every other effect of the step.
  */
 function transition<T>(phase: ViewPhase<T>, input: PresenceInput, ctx: PresenceContext<T>): Step<T> {
   if (phase.kind === 'closed') return stay(phase);
   if (input.kind === 'close' || input.kind === 'members-error') {
     const states = phase.kind === 'loading' ? NOBODY : phase.states;
     return {
-      phase: { kind: 'closed', present: phase.kind === 'live' ? phase.present : undefined },
+      phase: { kind: 'closed' },
       effects: [
         ...[...states.keys()].map((id): PresenceEffect<T> => ({ kind: 'unwant', id })),
         { kind: 'close-members' },
@@ -686,10 +688,9 @@ function transition<T>(phase: ViewPhase<T>, input: PresenceInput, ctx: PresenceC
     return gather(phase, states, input.kind === 'tick' ? input.at : undefined, effects);
   }
   if (reports.length === 0) return states === phase.states ? stay(phase) : { phase: { ...phase, states }, effects };
-  const present = reported(states);
   return {
-    phase: { kind: 'live', states, present },
-    effects: [...effects, { kind: 'emit', change: changeOf(reports, present, false) }],
+    phase: { kind: 'live', states },
+    effects: [...effects, { kind: 'emit', change: changeOf(reports, reported(states), false) }],
   };
 }
 
@@ -702,8 +703,4 @@ function deadline<T>(phase: ViewPhase<T>): number | undefined {
     if (next === undefined || state.clock.dueAt < next) next = state.clock.dueAt;
   }
   return next;
-}
-
-function presentOf<T>(phase: ViewPhase<T>): ReadonlyMap<string, PresenceMember<T>> | undefined {
-  return phase.kind === 'live' || phase.kind === 'closed' ? phase.present : undefined;
 }
