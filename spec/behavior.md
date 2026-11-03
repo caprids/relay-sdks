@@ -986,15 +986,16 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
     whatever their generations did.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
-    failure no wait fixes (a permanent REQUEST_ERROR, such as `UNAUTHORIZED`) calls `onError`, and
-    the view is closed.
+    failure no wait fixes (a permanent REQUEST_ERROR, such as `NOT_SUPPORTED` from a relay without
+    namespace discovery) calls `onError`, and the view is closed.
 - **Handlers** must be synchronous, as a want's are. A throw from `onChanged` is logged and the view
   carries on. Handlers never run inside `members()` itself. `close()` is idempotent, and nothing is
   delivered after it.
 - **Arguments** are checked at once: an options object, and a root that follows the namespace rules
   with room for the two fields under it (1 to 30 fields). The token must allow discovering the root.
   A root outside the token's grant loads with nobody, since the relay accepts the request and sends
-  nothing.
+  nothing ([namespace discovery](relay-interop.md#namespace-discovery)), and `onError` is never
+  called. An empty roster with no error can therefore mean the token does not grant the root.
 - **Limits.** Without MoQ Active Count the load is an estimate. A snapshot that loss splits by more
   than `SNAPSHOT_QUIET_MS` shows its late members as later joins on the first load, and as a `left`
   then a `joined` after a reconnect. A member who announces just before a subscriber rotation to
