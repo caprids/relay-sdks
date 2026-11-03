@@ -571,16 +571,25 @@ classes. It owns one request, never the connection.
 
 ```ts
 const roster = new Map<string, readonly string[]>();
+let loaded = false;
 for await (const event of subscriber.namespaceEvents({ prefix: ['rooms', 'lobby'], signal })) {
+  if (event.type === 'loaded') {
+    loaded = true; // an empty roster now means nobody is there
+    continue;
+  }
   const key = JSON.stringify(event.namespace); // e.g. ['rooms', 'lobby', 'alice']
   if (event.type === 'announced') roster.set(key, event.namespace);
   else roster.delete(key);
 }
 ```
 
-Namespaces already announced arrive first, about one round trip after the call, with no marker
-between them and later changes. A publisher's clean `close()` shows up as `unannounced` within a few
-hundred milliseconds. A crashed publisher shows up only at the relay's QUIC idle timeout, about 12 s
+Namespaces already announced arrive first, about one round trip after the call. Then
+`{ type: 'loaded' }` arrives once, before any later change, and has no `namespace`, so check
+`event.type` before reading it. Until `loaded`, an empty roster only means nothing has arrived yet.
+The relays deployed today do not mark the end of what was already announced, so `loaded` is an
+estimate there: it comes once no namespace has arrived for 50 ms (`SNAPSHOT_QUIET_MS`), and at most
+1 s (`SNAPSHOT_LIMIT_MS`) after the relay accepts the request. A publisher's clean `close()` shows
+up as `unannounced` within a few hundred milliseconds. A crashed publisher shows up only at the relay's QUIC idle timeout, about 12 s
 later. An announce on another relay of the cluster looks the same as a local one.
 
 A prefix matches whole fields. A prefix the token does not cover stays silent rather than being

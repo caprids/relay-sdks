@@ -123,6 +123,7 @@ export async function runRelayScenario({
     void (async () => {
       try {
         for await (const event of discovery) {
+          if (event.type === 'loaded') continue;
           if (event.type === 'announced') announcedNamespaces.add(JSON.stringify(event.namespace));
           if (JSON.stringify(event.namespace) === ours) {
             discovered.push({ type: event.type, ms: Math.round(performance.now() - discoveryStarted) });
