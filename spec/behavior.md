@@ -961,11 +961,12 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
   after the connection is up, or right after the counted snapshot with MoQ Active Count.
 - **Across connections.** A member view never reports the connection changing.
   - A [rotation](#rotation): the view follows the old connection's discovery until the new
-    connection's discovery has loaded, then reports the difference once, normally none.
+    connection's discovery has loaded, then reports the difference, normally none.
   - A reconnect: the view keeps what it last reported (`present` and `loaded` unchanged) while no
     connection is up and while the next connection's discovery loads. Then it reports the
-    difference once: members who left meanwhile in `left`, newcomers in `joined`, and nothing for
-    members still there, whatever their generations did.
+    difference: newcomers at once, in one `joined`, and members who left meanwhile each as a `left`
+    once its 100 ms has passed with no namespace of it announced. Members still there report
+    nothing, whatever their generations did.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
     failure no wait fixes (a permanent REQUEST_ERROR, such as `UNAUTHORIZED`) calls `onError`, and
