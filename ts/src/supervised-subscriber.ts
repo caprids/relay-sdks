@@ -248,7 +248,10 @@ interface Connection {
   /** Aborts when a rotation replaced this connection: its wants move to the new one. */
   retiring: AbortSignal;
   discovery: DiscoveryIndex;
-  /** Wants with a subscription still on this connection; a rotation closes it once none are left. */
+  /**
+   * Wants with a subscription and member views with a discovery still on this connection; a rotation closes it once
+   * none are left.
+   */
   holds: number;
   /** Called whenever `holds` drops to zero. */
   onIdle?: (() => void) | undefined;
@@ -723,7 +726,7 @@ export async function superviseRelaySubscriber(
       namespaceFields([...root, 'x', 'x']);
       if (stopped) throw new RelayError('CLOSED', 'Supervised subscriber is closed', 'connection');
       const view: Members = openMembers(
-        { liveConnection, current: () => current, onClosed: () => views.delete(view) },
+        { liveConnection, current: () => current, hold, onClosed: () => views.delete(view) },
         root,
         safeHandlers,
       );

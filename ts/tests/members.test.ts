@@ -177,6 +177,32 @@ describe('SupervisedSubscriber.members', () => {
     expect(summary(changes[1]!)).toEqual({ joined: ['zed'], left: [], present: ['alice', 'zed'], initial: false });
   });
 
+  it('follows the old discovery through rotate() until the new one loads, with no want holding the connection', async () => {
+    const { connections, subscriber, discovery } = await start();
+    const { changes, handlers } = recorder();
+    subscriber.members({ root: ROOT }, handlers);
+    const first = await discovery();
+    first.push({ type: 'announced', namespace: at('alice') });
+    first.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'load');
+    let oldClosed = false;
+    void connections[0]!.closed.then(() => {
+      oldClosed = true;
+    });
+    subscriber.rotate();
+    const next = await discovery(1);
+    await pause();
+    expect(oldClosed).toBe(false);
+    first.push({ type: 'announced', namespace: at('bob') });
+    await until(() => changes.length === 2, 'a join on the old discovery while the new one loads');
+    expect(summary(changes[1]!)).toEqual({ joined: ['bob'], left: [], present: ['alice', 'bob'], initial: false });
+    next.push({ type: 'announced', namespace: at('alice') });
+    next.push({ type: 'announced', namespace: at('bob') });
+    next.push({ type: 'loaded' });
+    await until(() => oldClosed, 'the old connection closes once the new discovery has loaded');
+    expect(changes).toHaveLength(2);
+  });
+
   it('reports nothing for a rotation before the credential expires', async () => {
     const { connections, subscriber, discovery } = await start([
       new Date(Date.now() + 600),

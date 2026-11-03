@@ -416,6 +416,8 @@ const LEAVE_GRACE_MS = 100;
 export interface MembersDependencies {
   liveConnection(scope: AbortSignal): Promise<MembersConnection | undefined>;
   current(): MembersConnection | undefined;
+  /** Keep `connection` open through a rotation until the returned release runs. */
+  hold(connection: MembersConnection): () => void;
   onClosed(): void;
 }
 
@@ -435,7 +437,7 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
   const inbox: MembersInput[] = [];
   let draining = false;
   const scope = new AbortController();
-  const opened = new Map<Source, { watch: DiscoveryWatch; unobserve(): void }>();
+  const opened = new Map<Source, { watch: DiscoveryWatch; detach(): void }>();
   const leaves = new Map<string, ReturnType<typeof setTimeout>>();
 
   const feed = (input: MembersInput, first = false) => {
@@ -483,9 +485,17 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
       });
       return;
     }
+    // A source holds its connection, so a rotation keeps the old discovery until the new one has loaded.
+    const release = deps.hold(connection);
     const retiring = () => feed({ kind: 'retiring', connection, next: deps.current() });
     connection.retiring.addEventListener('abort', retiring, { once: true });
-    opened.set(source, { watch: held, unobserve: () => connection.retiring.removeEventListener('abort', retiring) });
+    opened.set(source, {
+      watch: held,
+      detach: () => {
+        connection.retiring.removeEventListener('abort', retiring);
+        release();
+      },
+    });
     for (const namespace of held.namespaces()) feed({ kind: 'namespace', source, type: 'announced', namespace });
     if (held.loaded) feed({ kind: 'loaded', source });
     if (connection.retiring.aborted) retiring();
@@ -499,8 +509,8 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
       case 'release': {
         const entry = opened.get(effect.source);
         opened.delete(effect.source);
-        entry?.unobserve();
         entry?.watch.release();
+        entry?.detach();
         return;
       }
       case 'schedule-leave': {
