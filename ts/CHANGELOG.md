@@ -5,6 +5,15 @@ The TypeScript packages release together at one version: `@caprid/relay`, `@capr
 each section says what changed and what to do about it. How to cut a release is in
 [docs/releasing.md](../docs/releasing.md).
 
+## Unreleased
+
+- `@caprid/relay/diagnostics`, a new subpath: client diagnostics (#435). `createDiagnostics()` records events, each
+  with a sequence number, holding the last 10 minutes, and stats sections read at each snapshot.
+  `publishDiagnostics(diagnostics, publisher)` publishes them on `diag.events` and `diag.stats` of the client's own
+  broadcast, sending nothing while nobody subscribes and replaying what it holds each time the relay subscribes;
+  `followDiagnostics(subscriber, { namespace }, handlers)` reads them, each event once. TypeScript only, for clients
+  that publish. Nothing to change in an application.
+
 ## 0.3.0
 
 - `@caprid/relay-websocket`: `withWebSocketFallback()` races the two transports instead of waiting out WebTransport

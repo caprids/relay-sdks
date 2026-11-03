@@ -1796,6 +1796,43 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   namespace and name), and otherwise the first track listed with that track's namespace, role and
   render group, or nothing when there is none (a removal, not a replacement).
 
+## Client diagnostics
+
+TypeScript only (`@caprid/relay/diagnostics`), for clients that publish
+([issue #435](https://github.com/muxinc/relay-sdks/issues/435)). A client records what it saw and
+publishes it on two tracks of its own broadcast, sent only while something subscribes, so a client
+nobody watches sends nothing.
+
+- A recorder (`createDiagnostics`) holds events and stats sections. It has a random `instance` id,
+  twelve base-36 characters. An event is a JSON object with `t` (wall clock, milliseconds since the
+  epoch), `seq` (the recorder's sequence number, from 0) and `kind`, plus its own fields; the
+  recorder sets the first three and ignores them in the fields given. Events are held for 10 minutes
+  and at most 5,000 by default, oldest dropped first. Kinds the SDK records are plain words; an
+  application's start with `app.`. Fields carry ids and counters, never names, labels or media.
+- A stats section is a name and a function read at each snapshot. A snapshot is every section's
+  value by name; a section whose function throws reads `{ "error": message }`.
+- A scope (`scope(name)`) is the same recorder under a name: its events carry `source`, the name
+  (a scope of a scope joins the names with `/`), and its section names are prefixed with the name
+  and a dot. The SDK pieces that take a `diagnostics` option report into the recorder or scope they
+  are given.
+- `publishDiagnostics` registers `diag.events` and `diag.stats` on the publisher's broadcast and
+  writes them through a frame writer under frame grouping, so a write without relay demand is
+  skipped. Each object is one group, sent as a keyframe, and its payload is UTF-8 JSON:
+  - `diag.events`: `{ "instance", "backlog"?: true, "events": [event, ...] }`. Each time the relay
+    subscribes to the track (its first subscription and every replacement), everything the
+    recorder holds goes first, in objects of at most 200 events marked `backlog`; after that each
+    event goes in an object of its own as it is recorded, while the track has demand.
+  - `diag.stats`: `{ "instance", "t", "stats": snapshot }`, once a second while the track has
+    demand.
+- Demand is the relay's own subscription, shared by every follower, so a follower that subscribes
+  while another already does gets live events but no replay from the client; a location filter on
+  its subscription asks the relay for the groups it still holds.
+- `followDiagnostics` wants both tracks on a supervised subscriber (following generations when
+  asked), delivers each recorder's events once (a replay repeats sequence numbers already
+  delivered), and skips objects that are not valid JSON of these shapes.
+- Reading the tracks takes read access to the client's broadcast, which includes its media. A
+  central collector with a credential that reads every client's broadcast is for debugging only.
+
 ## Package boundaries
 
 - The optional TypeScript Mediabunny adapter depends on the media format package and declares

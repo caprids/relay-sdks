@@ -888,3 +888,25 @@ answer what the example's `finished` line asks); exceptions for interrupted and 
 above); `update()` on `CatalogService` (its document is fixed, and the media timeline, which
 changes, gets `DocumentService` instead of a mode). The `register_media` handle in
 [media-layer.md](media-layer.md) remains a proposal.
+
+## Client diagnostics: `createDiagnostics`, `publishDiagnostics`, `followDiagnostics`
+
+What a client saw, recorded and published on its own broadcast for a collector or an operator
+([issue #435](https://github.com/muxinc/relay-sdks/issues/435)); the contract is spec/behavior.md,
+"Client diagnostics". TypeScript only, in the `@caprid/relay/diagnostics` subpath, which the root
+does not export.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| The recorder | `createDiagnostics({ keepMs?, keepEvents? })` → `Diagnostics { instance, event, events, listen, section, snapshot, scope }` | — |
+| The same recorder under a name, for one link, reader or writer | `diagnostics.scope('roster')`: events carry `source`, sections are named `roster.<name>` | — |
+| One recorded event | `DiagnosticEvent { t, seq, kind, source?, ...fields }` | — |
+| The two track names | `DIAGNOSTICS_TRACKS` (`{ events: 'diag.events', stats: 'diag.stats' }`) | — |
+| Publish a recorder | `publishDiagnostics(diagnostics, publisher, { statsIntervalMs? })` → `DiagnosticsPublication { close }` | — |
+| What the tracks carry | `DiagnosticsEventsObject { instance, backlog?, events }`, `DiagnosticsStatsObject { instance, t, stats }` | — |
+| Read a client's diagnostics | `followDiagnostics(subscriber, { namespace, generations?, key?, eventsParameters? }, { onEvents, onStats, onError })` | — |
+
+"Diagnostics" over "telemetry" (which suggests a vendor pipeline and sampling) and "debug" (which
+suggests logging). `instance`, not `session`, since a session is a connection here and one recorder
+outlives several. `section`, not `metric`: a section is an object of counters read at snapshot time,
+not one number.

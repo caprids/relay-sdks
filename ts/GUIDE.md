@@ -1173,6 +1173,44 @@ const reply = createFrameReader(
 A live talker's frames are never early, so they play as without it. Delay that underruns add while a
 queue builds is given back once frames come early again, as without it.
 
+## Client diagnostics
+
+A client can record what it saw (links coming and going, subscriptions restarting, audio running
+dry) and publish it on its own broadcast, for a collector or an operator to read while it happens.
+It is TypeScript only, for clients that publish, in `@caprid/relay/diagnostics`. Nothing is sent
+while nobody subscribes.
+
+```ts
+import { createDiagnostics, publishDiagnostics } from '@caprid/relay/diagnostics';
+
+const diagnostics = createDiagnostics();
+const publisher = await connectSupervisedPublisher({ namespace, getToken });
+const publication = publishDiagnostics(diagnostics, publisher);
+
+// Your own events and counters, alongside the SDK's. Ids and counters only: they leave the client.
+diagnostics.event('app.joined', { participant: id });
+diagnostics.section('app.video', () => ({ layer, freezes }));
+```
+
+The recorder holds the last 10 minutes of events. `diag.events` carries them, and `diag.stats`
+carries a snapshot of every section once a second. When the relay subscribes to `diag.events`, the
+client first sends everything it holds, so a collector that starts following after a complaint
+still sees what led up to it. Another follower that joins while one already reads gets live events
+only; give its subscription a location filter to ask the relay for the groups it still holds.
+
+```ts
+import { followDiagnostics } from '@caprid/relay/diagnostics';
+
+const unfollow = followDiagnostics(subscriber, { namespace: clientRoot, generations: true }, {
+  onEvents: (events, { instance }) => events.forEach((event) => log(instance, event)),
+  onStats: (snapshot) => store(snapshot),
+});
+```
+
+Reading a client's diagnostics takes read access to its broadcast, which includes its media. A
+central collector whose credential reads every client's broadcast is for debugging, and should be
+off before anyone else's clients are on the relay.
+
 ## Errors and recovery
 
 Branch on `code` and `phase`, not on message wording. SDK lifecycle errors use these stable codes:
