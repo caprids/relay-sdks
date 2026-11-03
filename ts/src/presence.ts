@@ -187,7 +187,7 @@ export interface PresenceView<T> {
   readonly present: ReadonlyMap<string, PresenceMember<T>>;
   /**
    * Stop: unwant every member's presence track and close the members view. Idempotent; nothing is delivered after it,
-   * even when called from `onChanged`.
+   * even when called from `onChanged`. The view also stops on its own, reporting nothing, once the subscriber closes.
    */
   close(): void;
 }
@@ -196,7 +196,7 @@ export interface PresenceView<T> {
  * Follow the presence documents of everyone under a root: `subscriber.members({ root })` plus one want per member
  * that follows the member's supervised publisher to its newest generation. A member is reported once its first
  * readable document arrives, and goes stale after three heartbeats with nothing new while the view's subscription is
- * up. Arguments are checked at once; handlers run from the next turn on.
+ * up. The view ends with the subscriber. Arguments are checked at once; handlers run from the next turn on.
  *
  * ```ts
  * const room = createPresenceView(subscriber, { root: ['room', id], parse: parseProfile }, {
@@ -205,17 +205,17 @@ export interface PresenceView<T> {
  * ```
  */
 export function createPresenceView(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant'>,
+  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'closed'>,
   options: PresenceViewOptions<unknown> & { parse?: undefined },
   handlers?: PresenceViewHandlers<unknown>,
 ): PresenceView<unknown>;
 export function createPresenceView<T>(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant'>,
+  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'closed'>,
   options: PresenceViewOptions<T> & { parse(value: unknown): T },
   handlers?: PresenceViewHandlers<T>,
 ): PresenceView<T>;
 export function createPresenceView<T>(
-  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant'>,
+  subscriber: Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'closed'>,
   options: PresenceViewOptions<T>,
   handlers: PresenceViewHandlers<T> = {},
 ): PresenceView<T> {
@@ -331,6 +331,12 @@ export function createPresenceView<T>(
       onError: (error) => feed({ kind: 'members-error', error }),
     },
   );
+  // The supervisor closes the members view and drops the wants without calling either, so the view ends itself.
+  const stop = () => {
+    closing = true;
+    feed({ kind: 'close' }, true);
+  };
+  void subscriber.closed.then(stop);
   return {
     get loaded() {
       return shown !== undefined;
@@ -338,10 +344,7 @@ export function createPresenceView<T>(
     get present() {
       return shown ?? NOBODY;
     },
-    close() {
-      closing = true;
-      feed({ kind: 'close' }, true);
-    },
+    close: stop,
   };
 }
 

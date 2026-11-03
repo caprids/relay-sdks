@@ -54,6 +54,10 @@ function fakeRoom() {
   let present = new Map<string, Member>();
   const opened: Opened[] = [];
   const unwanted: string[] = [];
+  let stop = () => {};
+  const closed = new Promise<{ error?: unknown }>((resolve) => {
+    stop = () => resolve({});
+  });
   const room = {
     membersCalls: 0,
     membersClosed: false,
@@ -77,7 +81,10 @@ function fakeRoom() {
       unwant(key) {
         unwanted.push(key);
       },
-    } satisfies Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant'>,
+      closed,
+    } satisfies Pick<SupervisedSubscriber, 'members' | 'want' | 'unwant' | 'closed'>,
+    /** The supervisor stops: it closes the members view and drops the wants without calling them, as `close()` does. */
+    stop,
     change(joined: string[], left: string[] = [], initial = false) {
       present = new Map(present);
       for (const id of left) present.delete(id);
@@ -482,6 +489,17 @@ describe('createPresenceView', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('ends with its subscriber, delivering nothing after it and leaving no timer', async () => {
+    const { room, view, changes, errors } = liveRoom('alice', 'bob');
+    room.stop();
+    await Promise.resolve();
+    vi.advanceTimersByTime(60_000);
+    expect(changes).toEqual([]);
+    expect(errors).toEqual([]);
+    expect(vi.getTimerCount()).toBe(0);
+    expect([...view.present.keys()]).toEqual(['alice', 'bob']);
+  });
+
   it("closes and reports the members view's failure, and delivers nothing after it", () => {
     const { room, view, changes, errors } = liveRoom('alice');
     const failure = new Error('token does not allow the room');
@@ -605,6 +623,41 @@ describe('createPresenceView over a supervised subscriber', () => {
     } finally {
       subscriber.close();
     }
+  });
+
+  it('reports nothing once the subscriber is closed, not even a member going stale', async () => {
+    vi.useRealTimers();
+    const connections: FakeSubscriber[] = [];
+    const subscriber = await superviseRelaySubscriber(
+      async () => {
+        const fake = fakeSubscriber();
+        connections.push(fake);
+        return fake;
+      },
+      { url: 'https://relay.example.com/moq', reconnect: { initialDelayMs: 0, maxDelayMs: 0 } },
+    );
+    const { changes, errors, handlers } = recorder();
+    createPresenceView(subscriber, { root: ROOT, heartbeatMs: 100 }, handlers);
+    await until(() => (connections[0]?.discoveries.length ?? 0) > 0, 'discovery');
+    const discovery = connections[0]!.discoveries[0]!;
+    discovery.push({ type: 'announced', namespace: [...ROOT, 'alice', newGeneration()] });
+    discovery.push({ type: 'loaded' });
+    await until(() => (connections[0]?.subscriptions.length ?? 0) > 0, 'the presence subscription');
+    const subscription = connections[0]!.subscriptions[0]!;
+    subscription.accept();
+    subscription.handlers.onObject?.({
+      groupId: 0,
+      objectId: 0,
+      subgroupId: 0,
+      status: 'normal',
+      properties: [],
+      payload: encode({ name: 'alice' }),
+    } as MoqtObject);
+    await until(() => changes.length === 1, 'the load');
+    subscriber.close();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(changes.map(summary)).toEqual([{ initial: true, joined: ['alice'] }]);
+    expect(errors).toEqual([]);
   });
 });
 

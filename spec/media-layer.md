@@ -1436,6 +1436,7 @@ track with `generations: true` and subscriber priority 32.
 - *Changes.* One synchronous `onChanged` reports `joined`, `left`, `updated` (the document's bytes
   changed), `stale` and `resumed`, with `present` and `initial` as in `MembersChange`. Heartbeats,
   cached copies, publisher rotations, and the listener's own reconnects and rotations report nothing.
+- *End.* The view ends when its subscriber closes, with nothing reported, as the members view does.
 
 **No timestamp or sequence number.** The transport orders one member's documents, and only that
 member's documents are ever compared. A sender clock would have to be compared with the listener's
