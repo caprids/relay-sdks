@@ -10,17 +10,26 @@ import { RelayError } from './errors.js';
 import { CLOSURE_GRACE_MS, SubscriptionConnectionClosedError, SubscriptionRequestError } from './subscription.js';
 import { type BoundedEventSink, createBoundedEvents, type SubscriptionEventOptions } from './subscription-events.js';
 
-/** One change in which namespaces under the prefix are announced. */
-export interface NamespaceEvent {
-  /**
-   * `announced`: a publisher announced the namespace, or it was already announced when the request
-   * was accepted. `unannounced`: its announce was withdrawn. Each namespace alternates between the
-   * two; the relay's repeats are not passed on.
-   */
-  type: 'announced' | 'unannounced';
-  /** The full namespace: the prefix's fields followed by the rest, without splitting or joining. */
-  namespace: string[];
-}
+/** One change in which namespaces under the prefix are announced, or the end of the relay's initial snapshot. */
+export type NamespaceEvent =
+  | {
+      /**
+       * `announced`: a publisher announced the namespace, or it was already announced when the request
+       * was accepted. `unannounced`: its announce was withdrawn. Each namespace alternates between the
+       * two; the relay's repeats are not passed on.
+       */
+      type: 'announced' | 'unannounced';
+      /** The full namespace: the prefix's fields followed by the rest, without splitting or joining. */
+      namespace: string[];
+    }
+  | {
+      /**
+       * Every namespace announced when the relay accepted the request has been yielded: an application that tracks
+       * the announced set now holds the relay's view, and an empty set means nothing is announced. Yielded once, before
+       * any later change.
+       */
+      type: 'loaded';
+    };
 
 /** Options for `namespaceEvents`: the prefix, the iterator's queue bound and its own cancellation. */
 export interface NamespaceEventOptions extends SubscriptionEventOptions {

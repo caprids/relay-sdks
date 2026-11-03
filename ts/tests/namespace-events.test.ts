@@ -195,7 +195,7 @@ it('cancels the request when the signal aborts, and break cancels it too', async
   await secondRequest.send(encodeRequestOk());
   await secondRequest.send(encodeNamespace(['alice']));
   for await (const event of second) {
-    expect(event.namespace).toEqual(['room', 'alice']);
+    expect(event).toEqual({ type: 'announced', namespace: ['room', 'alice'] });
     break;
   }
   expect(await second.next()).toMatchObject({ done: true });

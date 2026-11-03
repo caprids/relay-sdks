@@ -1655,7 +1655,7 @@ function openRootWatch(subscriber: RelaySubscriber, root: string[], onEnd: () =>
     try {
       for await (const event of events) {
         // Only one field below the root is a generation; anything deeper belongs to someone else.
-        if (event.namespace.length !== root.length + 1) continue;
+        if (event.type === 'loaded' || event.namespace.length !== root.length + 1) continue;
         const generation = event.namespace[root.length] as string;
         if (event.type === 'announced') generations.add(generation);
         else generations.delete(generation);
