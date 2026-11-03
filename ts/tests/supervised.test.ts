@@ -592,7 +592,7 @@ describe('connectSupervisedSubscriber following generations (review fixes)', () 
     expect(connections[0]!.subscriptions[0]!.cancelled).toBe(true);
   });
 
-  it('lets an overlapping root replace one whose last want just went away', async () => {
+  it('serves a want on a narrower root from the request its last want left behind', async () => {
     const { subscriber, connections } = await start();
     const errors: unknown[] = [];
     subscriber.want('a', { namespace: ['room'], track: 'v', generations: true }, { onError: (e) => errors.push(e) });

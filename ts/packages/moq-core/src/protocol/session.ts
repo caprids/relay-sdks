@@ -545,7 +545,7 @@ function activeCountViolation(
   return undefined;
 }
 
-type CountedInput = 'namespace' | 'namespace-done' | 'goaway' | 'fin' | 'reset';
+type CountedInput = 'namespace' | 'namespace-done' | 'goaway' | 'fin' | 'stream-failed';
 
 function countedStep(owed: number, input: CountedInput): { owed: number; synced: boolean } | { violation: string } {
   if (owed === 0) return { owed, synced: false };
@@ -559,7 +559,7 @@ function countedStep(owed: number, input: CountedInput): { owed: number; synced:
       return { violation: 'GOAWAY inside the ACTIVE_COUNT set' };
     case 'fin':
       return { violation: 'subscribe-namespace stream finished inside the ACTIVE_COUNT set' };
-    case 'reset':
+    case 'stream-failed':
       return { owed, synced: false };
   }
 }
@@ -599,7 +599,7 @@ class MoqtSessionImpl implements MoqtSession {
   #receivedServerSetup = false;
   /** The server's SETUP declared SETUP_OPTION.MAX_AGE. */
   #maxAgeSupported = false;
-  #activeCount = false;
+  #activeCountNegotiated = false;
   #receivedControlGoaway = false;
   #destroyed = false;
 
@@ -948,7 +948,7 @@ class MoqtSessionImpl implements MoqtSession {
 
     // Once only, and never after REQUEST_ERROR answered the request: that removes the record first.
     const end = (error?: unknown) => {
-      if (this.#count(record, error === undefined ? 'fin' : 'reset') === undefined) return;
+      if (this.#count(record, error === undefined ? 'fin' : 'stream-failed') === undefined) return;
       if (!this.#namespaceSubscriptions.delete(requestId)) return;
       // A failed stream is dropped here: session teardown only reaches the records it still holds.
       if (error !== undefined) record.stream?.cancel(error);
@@ -1051,7 +1051,9 @@ class MoqtSessionImpl implements MoqtSession {
       {
         onMessage: (msg) => {
           const violation =
-            msg.kind === 'request-ok' ? activeCountViolation(kind, this.#activeCount, msg.parameters) : undefined;
+            msg.kind === 'request-ok'
+              ? activeCountViolation(kind, this.#activeCountNegotiated, msg.parameters)
+              : undefined;
 
           if (violation === undefined) onMessage(msg);
           else this.#fatal(new MoqtProtocolError(violation));
@@ -1381,7 +1383,7 @@ class MoqtSessionImpl implements MoqtSession {
     this.#receivedServerSetup = true;
     // The option's value is reserved and ignored on receipt: its presence is the declaration.
     this.#maxAgeSupported = declares(setup.options, SETUP_OPTION.MAX_AGE);
-    this.#activeCount =
+    this.#activeCountNegotiated =
       declares(this.#config.setupOptions ?? [], SETUP_OPTION.ACTIVE_COUNT) &&
       declares(setup.options, SETUP_OPTION.ACTIVE_COUNT);
     this.#resolveReady();
