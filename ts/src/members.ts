@@ -47,7 +47,12 @@ export interface MembersHandlers {
    * it nothing for 100 ms.
    */
   onChanged?(change: MembersChange): void;
-  /** A discovery failure no wait fixes, such as the token not allowing the root. The view is closed. */
+  /**
+   * A discovery failure no wait fixes: the relay refusing the request with a REQUEST_ERROR that does not invite a
+   * retry, such as NOT_SUPPORTED from a relay without namespace discovery. The view is closed. A root outside the
+   * token's grant is not one: moq-relay accepts the request and sends nothing, so the roster loads empty and this is
+   * never called. An empty roster with no error can therefore mean the token does not grant the root.
+   */
   onError?(error: unknown): void;
 }
 
