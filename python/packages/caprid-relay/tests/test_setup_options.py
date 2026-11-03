@@ -93,6 +93,28 @@ async def client_setup(role: str, vector: dict[str, Any]) -> tuple[str | None, s
     return option_value(options, SETUP_OPTION.PATH), option_value(options, SETUP_OPTION.AUTHORITY), factory.urls[0]
 
 
+async def client_setup_options(role: str) -> list[KeyValuePair]:
+    fake = create_fake_transport()
+    owner = CancellationToken()
+    connecting = asyncio.ensure_future(
+        ROLES[role]("https://relay.example.com/moq", cancellation=owner, create_transport=_Factory(fake))
+    )
+    try:
+        return await asyncio.wait_for(read_client_setup(await fake.client_control_stream()), 5)
+    finally:
+        owner.cancel()
+        await asyncio.wait({connecting})
+
+
+@pytest.mark.parametrize(
+    ("role", "declared"), [("subscriber", [KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1)]), ("publisher", [])]
+)
+async def test_declares_moq_active_count_on_the_subscriber_setup_only(role: str, declared: list[KeyValuePair]) -> None:
+    options = await client_setup_options(role)
+
+    assert [option for option in options if option.type == SETUP_OPTION.ACTIVE_COUNT] == declared
+
+
 @pytest.mark.parametrize("role", list(ROLES))
 class TestClientSetup:
     @pytest.mark.parametrize("vector", VECTORS, ids=[vector["name"] for vector in VECTORS])

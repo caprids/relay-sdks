@@ -450,9 +450,13 @@ async def connect_relay_subscriber(
             transport,
             MoqtSessionConfig(
                 implementation_name=IMPLEMENTATION_NAME,
-                # Namespaces arrive only on a namespace_events request, never pushed unasked
-                # (spec/behavior.md, "Discovery").
-                setup_options=[*setup_options, KeyValuePair(SETUP_OPTION.SOLICIT, 1)],
+                # Namespaces arrive only on a namespace_events request, never pushed unasked, and a relay
+                # with MoQ Active Count marks where each request's snapshot ends (spec/behavior.md, "Discovery").
+                setup_options=[
+                    *setup_options,
+                    KeyValuePair(SETUP_OPTION.SOLICIT, 1),
+                    KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1),
+                ],
                 request_timeout=request_timeout,
                 callbacks=MoqtSessionCallbacks(on_closed=callbacks.on_closed, on_goaway=callbacks.on_goaway),
             ),

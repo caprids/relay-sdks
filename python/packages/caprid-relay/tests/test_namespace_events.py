@@ -32,6 +32,7 @@ from moq_core.control_messages import (
     SETUP_OPTION,
     ControlMessageFrame,
     KeyValuePair,
+    MessageParameters,
     Setup,
     SubscribeNamespace,
     decode_control_message,
@@ -474,6 +475,47 @@ class TestLoadedWithoutActiveCount:
             request.reset(RuntimeError("gone"))
             with pytest.raises(SubscriptionRequestError):
                 await anext(events)
+
+
+ACTIVE_COUNT = KeyValuePair(SETUP_OPTION.ACTIVE_COUNT, 1)
+
+
+class TestLoadedWithActiveCount:
+    async def test_yields_loaded_right_after_the_counted_namespace_a_repeat_counted_never_from_a_window(
+        self,
+    ) -> None:
+        fake, connection = await _connect(server_setup=[ACTIVE_COUNT])
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok(MessageParameters(active_count=3)))
+            await request.send(encode_namespace(["alice"]))
+            await request.send(encode_namespace(["alice"]))
+            assert await anext(events) == _announced("room", "alice")
+            pending = asyncio.ensure_future(anext(events))
+            await asyncio.sleep(SNAPSHOT_LIMIT + SNAPSHOT_QUIET)
+            assert not pending.done()
+
+            await request.send(encode_namespace(["bob"]))
+            await request.send(encode_namespace(["carol"]))
+            assert [await pending, await anext(events), await anext(events)] == [
+                _announced("room", "bob"),
+                LOADED,
+                _announced("room", "carol"),
+            ]
+        connection.close()
+
+    async def test_yields_loaded_at_once_on_a_count_of_0(self) -> None:
+        fake, connection = await _connect(server_setup=[ACTIVE_COUNT])
+        loop = asyncio.get_running_loop()
+        async with connection.namespace_events(["room"]) as events:
+            request = await fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok(MessageParameters(active_count=0)))
+            accepted = loop.time()
+            assert await anext(events) == LOADED
+            assert loop.time() - accepted < SNAPSHOT_QUIET
+        connection.close()
 
 
 class TestDiscoveryMarks:
