@@ -92,7 +92,7 @@ def _is_withdrawn_by_end(events: NamespaceEvents, event: NamespaceEvent) -> bool
 
 
 def _is_stopped(events: NamespaceEvents) -> bool:
-    """Whether the request has failed and its ending is still pending: nothing more arrives.
+    """Whether the request has failed or ended, though its reader may not have seen it yet: nothing more arrives.
 
     The supervised subscriber's discovery reads it so a member's leave grace does not run out on a
     stream that is gone.
@@ -203,6 +203,8 @@ class _NamespaceRequest:
         if self._ended:
             return False
         self._ended = True
+        # Set before the iterator's reader resumes: a leave timer due in the same loop turn must see the end.
+        self._marks.stopped = True
         self._release_prefix()
         self._remove_closed()
         self._stop_timers()

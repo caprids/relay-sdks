@@ -545,7 +545,7 @@ class TestDiscoveryMarks:
         assert [_is_withdrawn_by_end(events, event) for event in seen] == [False, False, False, False, True, True]
         assert not _is_withdrawn_by_end(events, NamespaceEvent("unannounced", ("room", "alice")))
 
-    async def test_marks_a_request_whose_stream_failed_as_stopped_and_a_live_or_closed_one_not(
+    async def test_marks_a_request_whose_stream_failed_or_that_ended_as_stopped_and_a_live_one_not(
         self, connected: tuple[FakeTransport, RelaySubscriber]
     ) -> None:
         fake, connection = connected
@@ -564,4 +564,18 @@ class TestDiscoveryMarks:
         closed = connection.namespace_events(["room"])
         await fake.next_request_stream()
         closed.close()
-        assert not _is_stopped(closed)
+        assert _is_stopped(closed)
+
+    async def test_marks_a_request_stopped_in_the_turn_its_connection_ends_before_its_reader_resumes(
+        self, connected: tuple[FakeTransport, RelaySubscriber]
+    ) -> None:
+        fake, connection = connected
+        events = connection.namespace_events(["room"])
+        request = await fake.next_request_stream()
+        await request.first_message
+        await request.send(encode_request_ok())
+        await request.send(encode_namespace(["alice"]))
+        assert await anext(events) == _announced("room", "alice")
+        fake.drop_transport()
+        await settle()
+        assert _is_stopped(events)
