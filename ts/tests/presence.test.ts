@@ -6,6 +6,7 @@ import {
   PRESENCE_HEARTBEAT_MS,
   type PresenceChange,
   type PresenceViewHandlers,
+  publishPresence,
 } from '../src/presence.js';
 import {
   type RestartReason,
@@ -15,7 +16,14 @@ import {
   type WantOptions,
 } from '../src/supervised-subscriber.js';
 import { newGeneration } from '../src/supervision.js';
-import { type FakeSubscriber, fakeSubscriber, until } from './helpers/supervision-fakes.js';
+import { settle } from './helpers/slot-track.js';
+import {
+  type FakeSubscriber,
+  type FakeTrack,
+  fakePublisher,
+  fakeSubscriber,
+  until,
+} from './helpers/supervision-fakes.js';
 
 const ROOT = ['room', 'p'];
 const WINDOW = 3 * PRESENCE_HEARTBEAT_MS;
@@ -573,5 +581,88 @@ describe('createPresenceView over a supervised subscriber', () => {
     } finally {
       subscriber.close();
     }
+  });
+});
+
+describe('publishPresence', () => {
+  const sent = (track: FakeTrack) => track.writes.map((bytes) => new TextDecoder().decode(bytes));
+
+  function start(document: unknown = { name: 'Ada', joinedAt: 1 }, options = {}) {
+    const publisher = fakePublisher([...ROOT, 'alice']);
+    const me = publishPresence(publisher, document, options);
+    const track = publisher.tracks.get('presence')!;
+    return { publisher, me, track };
+  }
+
+  it('serves the document as compact JSON on the presence track, at a priority between audio and video', async () => {
+    const { me, track } = start();
+    expect(track.options).toEqual({ track: 'presence', trackProperties: [{ type: 0x0e, value: 32 }] });
+    await settle();
+    expect(sent(track)).toEqual([]);
+    track.setDemand(true);
+    await settle();
+    expect(sent(track)).toEqual(['{"name":"Ada","joinedAt":1}']);
+    expect(me.document).toEqual({ name: 'Ada', joinedAt: 1 });
+  });
+
+  it('sends a changed document once and an equal one not at all', async () => {
+    const { me, track } = start();
+    track.setDemand(true);
+    await settle();
+    const copy = { ...(me.document as object) };
+    me.update(copy);
+    await settle();
+    expect(sent(track)).toHaveLength(1);
+    expect(me.document).toBe(copy);
+    me.update({ name: 'Ada L.', joinedAt: 1 });
+    await settle();
+    expect(sent(track)).toEqual(['{"name":"Ada","joinedAt":1}', '{"name":"Ada L.","joinedAt":1}']);
+  });
+
+  it('resends the same bytes heartbeatMs after the last send, and nothing while nobody is subscribed', async () => {
+    const { me, track } = start({ name: 'Ada' }, { heartbeatMs: 1000 });
+    track.setDemand(true);
+    await settle();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(sent(track)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(sent(track)).toEqual(['{"name":"Ada"}', '{"name":"Ada"}']);
+    await vi.advanceTimersByTimeAsync(500);
+    me.update({ name: 'Ada L.' });
+    await settle();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(sent(track)).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);
+    await settle();
+    expect(sent(track).slice(2)).toEqual(['{"name":"Ada L."}', '{"name":"Ada L."}']);
+    track.setDemand(false);
+    await vi.advanceTimersByTimeAsync(5000);
+    await settle();
+    expect(sent(track)).toHaveLength(4);
+  });
+
+  it('stops its heartbeat when the publisher closes', async () => {
+    const { publisher, me } = start();
+    expect(vi.getTimerCount()).toBe(1);
+    publisher.end();
+    await settle();
+    expect(vi.getTimerCount()).toBe(0);
+    me.update({ name: 'after close' });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('refuses a document JSON cannot encode before registering anything, and keeps the current one on update', () => {
+    const publisher = fakePublisher([...ROOT, 'alice']);
+    expect(() => publishPresence(publisher, undefined)).toThrow(TypeError);
+    expect(() => publishPresence(publisher, () => {})).toThrow(TypeError);
+    expect(() => publishPresence(publisher, { joinedAt: 1n })).toThrow(TypeError);
+    expect(() => publishPresence(publisher, {}, null as never)).toThrow(TypeError);
+    expect(() => publishPresence(publisher, {}, { track: '' })).toThrow(TypeError);
+    expect(() => publishPresence(publisher, {}, { heartbeatMs: 99 })).toThrow(RangeError);
+    expect(publisher.tracks.size).toBe(0);
+    const me = publishPresence(publisher, { name: 'Ada' });
+    expect(() => me.update(undefined as never)).toThrow(TypeError);
+    expect(me.document).toEqual({ name: 'Ada' });
   });
 });

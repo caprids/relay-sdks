@@ -1,7 +1,9 @@
+import { createDocumentService } from './document-service.js';
 import type { Member, MembersChange } from './members.js';
 import { synchronousCallback } from './subscription.js';
+import type { SupervisedPublisher } from './supervised-publisher.js';
 import type { RestartReason, SupervisedSubscriber } from './supervised-subscriber.js';
-import { trackName } from './validation.js';
+import { DEFAULT_PUBLISHER_PRIORITY, trackName } from './validation.js';
 
 /** The presence track's default name. */
 export const PRESENCE_TRACK = 'presence';
@@ -23,6 +25,89 @@ const STALE_HEARTBEATS = 3;
 const MIN_HEARTBEAT_MS = 100;
 /** Three heartbeats, the stale window, must fit a timer. */
 const MAX_HEARTBEAT_MS = 715_827_882;
+
+/** Options for {@link publishPresence}. */
+export interface PublishPresenceOptions {
+  /** The track name. Default {@link PRESENCE_TRACK}; listeners use the same. */
+  track?: string;
+  /**
+   * Resend an unchanged document this long after the last send, in milliseconds: an integer from 100 to 715827882.
+   * Default {@link PRESENCE_HEARTBEAT_MS}; listeners use the same.
+   */
+  heartbeatMs?: number;
+}
+
+/** This participant's presence document, served on its supervised publisher. It lasts as long as the publisher. */
+export interface PresencePublisher<T> {
+  /** The latest document given. */
+  readonly document: T;
+  /**
+   * Replace the document. It is encoded at once, and a `TypeError` leaves the current one in place; it is sent only
+   * if its JSON differs. Returns at once.
+   */
+  update(document: T): void;
+}
+
+/**
+ * Publish this participant's presence: register `track` on the supervised publisher and serve `document` as compact
+ * UTF-8 JSON, one group per send, on every relay subscription, on every change, and again `heartbeatMs` after the last
+ * send, which keeps listeners from calling it stale. A heartbeat with nobody subscribed sends nothing. Presence ends
+ * with the publisher: close the publisher to leave. Arguments are checked at once, and a document `JSON.stringify`
+ * cannot encode is a `TypeError` before anything is registered.
+ *
+ * ```ts
+ * const me = publishPresence(publisher, { name: 'Ada', joinedAt: Date.now() });
+ * me.update({ ...me.document, name: 'Ada L.' });
+ * ```
+ */
+export function publishPresence<T>(
+  publisher: Pick<SupervisedPublisher, 'registerTrack' | 'closed'>,
+  document: T,
+  options: PublishPresenceOptions = {},
+): PresencePublisher<T> {
+  if (typeof options !== 'object' || options === null) throw new TypeError('options must be an object');
+  const track = trackName(options.track ?? PRESENCE_TRACK);
+  const heartbeatMs = heartbeatOption(options.heartbeatMs);
+  let current = document;
+  let bytes = presenceBytes(document);
+  const service = createDocumentService(
+    publisher.registerTrack({
+      track,
+      trackProperties: [{ type: DEFAULT_PUBLISHER_PRIORITY, value: PRESENCE_PRIORITY }],
+    }),
+    bytes,
+  );
+  // The service ends with the track, and the track with the publisher.
+  void service.serve().catch(() => {});
+  let stopped = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const beat = () => {
+    clearTimeout(timer);
+    if (stopped) return;
+    timer = setTimeout(() => {
+      service.update(bytes);
+      beat();
+    }, heartbeatMs);
+  };
+  beat();
+  void publisher.closed.then(() => {
+    stopped = true;
+    clearTimeout(timer);
+  });
+  return {
+    get document() {
+      return current;
+    },
+    update(next) {
+      const encoded = presenceBytes(next);
+      current = next;
+      if (sameBytes(encoded, bytes)) return;
+      bytes = encoded;
+      service.update(bytes);
+      beat();
+    },
+  };
+}
 
 /** One member with a presence document, as a view reports it. Replaced, never changed, when anything in it changes. */
 export interface PresenceMember<T> extends Member {
@@ -281,7 +366,14 @@ function heartbeatOption(value: unknown): number {
   return value;
 }
 
+const ENCODER = new TextEncoder();
 const DECODER = new TextDecoder('utf-8', { fatal: true });
+
+function presenceBytes(document: unknown): Uint8Array {
+  const json: unknown = JSON.stringify(document);
+  if (typeof json !== 'string') throw new TypeError('A presence document must be a value JSON.stringify can encode');
+  return ENCODER.encode(json);
+}
 
 function decoder<T>(parse: ((value: unknown) => T) | undefined): PresenceContext<T>['decode'] {
   return (payload) => {
