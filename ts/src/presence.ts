@@ -117,8 +117,9 @@ export interface PresenceMember<T> extends Member {
   /** `Date.now()` when the view first read the member's document; kept across updates, staleness and rotations. */
   readonly since: number;
   /**
-   * No new document for three heartbeats while the view's subscription to it was up. The member is still announced;
-   * most UIs hide it.
+   * No new document for three heartbeats. The count pauses only while the view's own connection is down (the member's
+   * want restarted for `connection`), and the next subscription starts a full window; any other restart leaves it
+   * running. The member is still announced; most UIs hide it.
    */
   readonly stale: boolean;
 }
@@ -129,7 +130,10 @@ export interface PresenceChange<T> {
   readonly joined: readonly PresenceMember<T>[];
   /** Reported members that left, as last reported. A member that never had a document leaves unreported. */
   readonly left: readonly PresenceMember<T>[];
-  /** Members whose document JSON changed. A stale member with a changed document is in `resumed` too. */
+  /**
+   * Members whose document bytes changed and parsed, even when `parse` returned a value equal to the old one. A stale
+   * member with a changed document is in `resumed` too.
+   */
   readonly updated: readonly PresenceMember<T>[];
   /** Members that went stale. */
   readonly stale: readonly PresenceMember<T>[];
@@ -157,7 +161,8 @@ export interface PresenceViewOptions<T> {
   heartbeatMs?: number;
   /**
    * Check a peer's parsed JSON and return its document, or throw. A throw skips that document: the member keeps the
-   * one it had, or stays unreported. Without it, documents are the parsed JSON, typed `unknown`.
+   * one it had, or stays unreported. The view reports refusals nowhere, so log inside `parse` to see them. Without it,
+   * documents are the parsed JSON, typed `unknown`.
    */
   parse?(value: unknown): T;
 }
@@ -172,7 +177,10 @@ export interface PresenceViewHandlers<T> {
    * reconnects and rotations call nothing.
    */
   onChanged?(change: PresenceChange<T>): void;
-  /** The members view failed in a way no wait fixes, such as the token not allowing the root. The view is closed. */
+  /**
+   * The members view failed in a way no wait fixes, as `MembersHandlers.onError` describes. The view is closed. A root
+   * outside the token's grant is not one: the roster loads empty and this is never called.
+   */
   onError?(error: unknown): void;
 }
 
@@ -195,8 +203,8 @@ export interface PresenceView<T> {
 /**
  * Follow the presence documents of everyone under a root: `subscriber.members({ root })` plus one want per member
  * that follows the member's supervised publisher to its newest generation. A member is reported once its first
- * readable document arrives, and goes stale after three heartbeats with nothing new while the view's subscription is
- * up. The view ends with the subscriber. Arguments are checked at once; handlers run from the next turn on.
+ * readable document arrives, and goes stale after three heartbeats with nothing new (see `PresenceMember.stale`). The
+ * view ends with the subscriber. Arguments are checked at once; handlers run from the next turn on.
  *
  * ```ts
  * const room = createPresenceView(subscriber, { root: ['room', id], parse: parseProfile }, {

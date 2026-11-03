@@ -1424,13 +1424,14 @@ track with `generations: true` and subscriber priority 32.
   write, and generations sort by their start time. A relay's cached copy repeats a group the
   listener has read, and an out-of-order group carries a smaller one, so neither counts. A stale
   member also takes a document from an older generation, because its publisher came back, possibly
-  on a clock that is behind its last run.
+  on a clock that is behind its last run. A live listener ignores a publisher restarted on such a
+  clock until the member goes stale, so it shows as stale and then resumed.
 - *Roster.* A member is on the roster from its first document that counts and parses until the
   members view reports it gone. A member that never sends one is never shown.
 - *Stale.* A member is stale when no document counted for 3 × `heartbeatMs` (6 s), which is before
-  the relay withdraws a frozen publisher. Its next document that counts clears it. The count runs
-  only while the listener's subscription to the member is up. A want restart for the listener's own
-  connection pauses it, and the next subscription starts a full window.
+  the relay withdraws a frozen publisher. Its next document that counts clears it. The count pauses
+  only for the listener's own connection: a want restart for `connection` pauses it, and the next
+  subscription starts a full window. Any other restart leaves it running.
 - *Load.* The roster loads once the members view has loaded and every member present then has a
   document, or 1 s after the members view loaded. A document that arrives later is a join.
 - *Changes.* One synchronous `onChanged` reports `joined`, `left`, `updated` (the document's bytes

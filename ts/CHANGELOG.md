@@ -20,8 +20,9 @@ each section says what changed and what to do about it. How to cut a release is 
   subscription and every change, and again every `PRESENCE_HEARTBEAT_MS` (2 s). Everyone calls
   `createPresenceView(subscriber, { root }, { onChanged })`, which reports each member once its document arrives,
   with `joined`, `left`, `updated`, `stale` (no new document for three heartbeats, before the relay's ~10 s
-  withdrawal of a frozen publisher) and `resumed`. Rotations and reconnects on either side report nothing. The track
-  convention is in spec/media-layer.md, "Presence track".
+  withdrawal of a frozen publisher) and `resumed`. A publisher's rotations and the subscriber's own reconnects and
+  rotations report nothing. A publisher's reconnect is not make-before-break, so it can show as `left` then `joined`,
+  or as `stale` then `resumed`. The track convention is in spec/media-layer.md, "Presence track".
 - `@caprid/relay`: a supervised subscriber connection now opens one namespace request per prefix tree and shares it
   between every want that follows generations and every member view. A want under another want's or a view's root
   no longer fails with `PREFIX_OVERLAP`, and a view refused on its root leaves the wants under it alone. Nothing to
