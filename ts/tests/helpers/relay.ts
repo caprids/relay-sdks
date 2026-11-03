@@ -56,8 +56,8 @@ export interface FakeTransport {
   clientSetupOptions(): Promise<KeyValuePair[]>;
   /** Wait for the next client-initiated request stream. */
   nextRequestStream(): Promise<ServerRequestStream>;
-  /** Open the server's control stream and send its SETUP. */
-  sendServerSetup(): void;
+  /** Open the server's control stream and send its SETUP, declaring `options` (none by default). */
+  sendServerSetup(options?: KeyValuePair[]): void;
   /** Open a unidirectional data stream to the client. */
   openDataStream(bytes: Uint8Array): void;
   /** Open a unidirectional data stream the test writes to (and may reset). */
@@ -178,12 +178,12 @@ export function createFakeTransport({ protocol = 'moqt-22' }: FakeTransportOptio
 
       return new Promise((resolve) => requestWaiters.push(resolve));
     },
-    /** Open the server's control stream and send its SETUP. */
-    sendServerSetup(): void {
+    /** Open the server's control stream and send its SETUP, declaring `options` (none by default). */
+    sendServerSetup(options: KeyValuePair[] = []): void {
       const pipe = new TransformStream<Uint8Array, Uint8Array>();
       const writer = pipe.writable.getWriter();
 
-      void writer.write(encodeSetup([]));
+      void writer.write(encodeSetup(options));
       incomingUni.push(pipe.readable);
     },
     /** Open a unidirectional data stream to the client. */

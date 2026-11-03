@@ -23,7 +23,13 @@ export type {
 } from './connect.js';
 export { connectRelaySubscriber } from './connect.js';
 export { RelayError, type RelayErrorCode, type RelayErrorPhase } from './errors.js';
-export type { NamespaceEvent, NamespaceEventOptions, NamespaceEvents } from './namespace-events.js';
+export {
+  type NamespaceEvent,
+  type NamespaceEventOptions,
+  type NamespaceEvents,
+  SNAPSHOT_LIMIT_MS,
+  SNAPSHOT_QUIET_MS,
+} from './namespace-events.js';
 export { readJSON, readText } from './payload.js';
 export type {
   ConnectRelayPublisherOptions,

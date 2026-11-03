@@ -142,10 +142,13 @@ export interface RelaySubscriber {
    * Discover which namespaces under a prefix are announced, as bounded async events with the same
    * ownership rules as `subscribeEvents`: the iterator owns one SUBSCRIBE_NAMESPACE request, and
    * break/return, `close()` or the signal cancels it. It first yields `announced` for each namespace
-   * already announced, then one event per announce and withdrawal. The relay sends no marker between
-   * the two. A relay rejection ends it with `SubscriptionRequestError`, the connection ending with
-   * `SubscriptionConnectionClosedError`, a full queue with `SubscriptionOverflowError`; a relay that
-   * finishes the request ends it cleanly. See spec/behavior.md, "Discovery", for the timing.
+   * already announced, then `loaded` once, then one event per announce and withdrawal. A relay that
+   * negotiated MoQ Active Count marks where its snapshot ends; against one that did not, `loaded` is
+   * the SDK's estimate (see `SNAPSHOT_QUIET_MS` and `SNAPSHOT_LIMIT_MS`), so an announce that lands
+   * meanwhile can come before it. A relay rejection ends it with `SubscriptionRequestError`, the
+   * connection ending with `SubscriptionConnectionClosedError`, a full queue with
+   * `SubscriptionOverflowError`; a relay that finishes the request ends it cleanly. See
+   * spec/behavior.md, "Discovery", for the timing.
    */
   namespaceEvents(options: NamespaceEventOptions): NamespaceEvents;
   /**
@@ -193,8 +196,13 @@ export async function connectRelaySubscriber(options: ConnectRelaySubscriberOpti
   } = await openRelaySession(options, (transport, callbacks, setupOptions) =>
     createMoqtSession(transport, {
       implementationName: '@caprid/relay',
-      // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery").
-      setupOptions: [...setupOptions, { type: SETUP_OPTION.SOLICIT, value: 1 }],
+      // Namespaces arrive only on a namespaceEvents request, never pushed unasked (spec/behavior.md, "Discovery"), and a
+      // relay that counts its snapshot says so on REQUEST_OK (MoQ Active Count).
+      setupOptions: [
+        ...setupOptions,
+        { type: SETUP_OPTION.SOLICIT, value: 1 },
+        { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 },
+      ],
       requestTimeoutMs: options.requestTimeoutMs,
       callbacks,
     }),

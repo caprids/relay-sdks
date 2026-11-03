@@ -1,16 +1,21 @@
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   encodeNamespace,
   encodeNamespaceDone,
   encodeRequestError,
   encodeRequestOk,
+  type KeyValuePair,
   REQUEST_ERROR_CODE,
   SETUP_OPTION,
 } from '../packages/moq-core/src/protocol/control-messages.js';
 import {
   connectRelayPublisher,
   connectRelaySubscriber,
+  type NamespaceEvent,
+  type NamespaceEvents,
   type RelaySubscriber,
+  SNAPSHOT_LIMIT_MS,
+  SNAPSHOT_QUIET_MS,
   SubscriptionConnectionClosedError,
   SubscriptionOverflowError,
   SubscriptionRequestError,
@@ -22,14 +27,14 @@ afterEach(() => {
   for (const connection of connections.splice(0)) connection.close();
 });
 
-async function setup() {
+async function setup({ requestTimeoutMs = 30, serverSetup = [] as KeyValuePair[] } = {}) {
   const fake = createFakeTransport();
   const connecting = connectRelaySubscriber({
     url: 'https://relay.example.com/moq',
-    requestTimeoutMs: 30,
+    requestTimeoutMs,
     createTransport: () => ({ transport: fake.transport, ready: Promise.resolve() }),
   });
-  fake.sendServerSetup();
+  fake.sendServerSetup(serverSetup);
   const connection: RelaySubscriber = await connecting;
   connections.push(connection);
   return { fake, connection };
@@ -199,4 +204,196 @@ it('cancels the request when the signal aborts, and break cancels it too', async
     break;
   }
   expect(await second.next()).toMatchObject({ done: true });
+});
+
+/** Read every event `events` yields into `seen`, in the background, until it ends. */
+function collect(events: NamespaceEvents): NamespaceEvent[] {
+  const seen: NamespaceEvent[] = [];
+  void (async () => {
+    for await (const event of events) seen.push(event);
+  })().catch(() => {});
+  return seen;
+}
+
+/**
+ * Let the fake relay's bytes reach the iterator without moving time: the stream pipeline is all microtasks, and
+ * `vi.waitFor` would advance fake timers while it polls.
+ */
+const delivered = () => new Promise((resolve) => setImmediate(resolve));
+
+const LOADED: NamespaceEvent = { type: 'loaded' };
+const announced = (...namespace: string[]): NamespaceEvent => ({ type: 'announced', namespace });
+
+it('declares MoQ Active Count on the subscriber setup and not on the publisher setup', async () => {
+  const { fake } = await setup();
+  expect((await fake.clientSetupOptions()).filter((option) => option.type === SETUP_OPTION.ACTIVE_COUNT)).toEqual([
+    { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 },
+  ]);
+
+  const publisherFake = createFakeTransport();
+  const owner = new AbortController();
+  void connectRelayPublisher({
+    url: 'https://relay.example.com/moq',
+    namespace: ['room'],
+    signal: owner.signal,
+    createTransport: () => ({ transport: publisherFake.transport, ready: Promise.resolve() }),
+  }).catch(() => {});
+  const options = await publisherFake.clientSetupOptions();
+  owner.abort();
+  expect(options.some((option) => option.type === SETUP_OPTION.ACTIVE_COUNT)).toBe(false);
+});
+
+describe("'loaded' without MoQ Active Count", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("yields 'loaded' after the snapshot's entries once the stream stays quiet, and once only", async () => {
+    const { fake, connection } = await setup();
+    const seen = collect(connection.namespaceEvents({ prefix: ['room'] }));
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestOk());
+    await request.send(encodeNamespace(['alice']));
+    await request.send(encodeNamespace(['bob']));
+    await delivered();
+    expect(seen).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_QUIET_MS - 1);
+    expect(seen).toEqual([announced('room', 'alice'), announced('room', 'bob')]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(seen).toEqual([announced('room', 'alice'), announced('room', 'bob'), LOADED]);
+
+    await request.send(encodeNamespace(['carol']));
+    await delivered();
+    expect(seen).toHaveLength(4);
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_LIMIT_MS);
+    expect(seen).toEqual([announced('room', 'alice'), announced('room', 'bob'), LOADED, announced('room', 'carol')]);
+  });
+
+  it("yields 'loaded' alone on an empty prefix: REQUEST_OK, then nothing", async () => {
+    const { fake, connection } = await setup();
+    const seen = collect(connection.namespaceEvents({ prefix: ['room'] }));
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestOk());
+
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_QUIET_MS);
+    expect(seen).toEqual([LOADED]);
+  });
+
+  it("yields no 'loaded' before REQUEST_OK", async () => {
+    const { fake, connection } = await setup({ requestTimeoutMs: 10 * SNAPSHOT_LIMIT_MS });
+    const seen = collect(connection.namespaceEvents({ prefix: ['room'] }));
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+
+    await vi.advanceTimersByTimeAsync(2 * SNAPSHOT_LIMIT_MS);
+    expect(seen).toEqual([]);
+    await request.send(encodeRequestOk());
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_QUIET_MS);
+    expect(seen).toEqual([LOADED]);
+  });
+
+  it('restarts the quiet window on each entry inside it', async () => {
+    const { fake, connection } = await setup();
+    const seen = collect(connection.namespaceEvents({ prefix: ['room'] }));
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestOk());
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_QUIET_MS - 10);
+    await request.send(encodeNamespace(['alice']));
+    await delivered();
+    expect(seen).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_QUIET_MS - 1);
+    expect(seen).toEqual([announced('room', 'alice')]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(seen).toEqual([announced('room', 'alice'), LOADED]);
+  });
+
+  it("yields 'loaded' no later than SNAPSHOT_LIMIT_MS after REQUEST_OK under steady churn", async () => {
+    const { fake, connection } = await setup();
+    const seen = collect(connection.namespaceEvents({ prefix: ['room'], capacity: 1_000 }));
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestOk());
+
+    const step = SNAPSHOT_QUIET_MS - 10;
+    let elapsed = 0;
+    while (!seen.some((event) => event.type === 'loaded') && elapsed <= SNAPSHOT_LIMIT_MS) {
+      const entries = seen.length;
+      await request.send(elapsed % (2 * step) === 0 ? encodeNamespace(['alice']) : encodeNamespaceDone(['alice']));
+      await delivered();
+      expect(seen.length).toBeGreaterThan(entries);
+      await vi.advanceTimersByTimeAsync(step);
+      await delivered();
+      elapsed += step;
+    }
+    expect(seen.filter((event) => event.type === 'loaded')).toHaveLength(1);
+    expect(elapsed).toBeGreaterThanOrEqual(SNAPSHOT_LIMIT_MS);
+    expect(elapsed).toBeLessThan(SNAPSHOT_LIMIT_MS + step);
+  });
+
+  it("yields no 'loaded' once the stream fails inside the quiet window", async () => {
+    const { fake, connection } = await setup();
+    const events = connection.namespaceEvents({ prefix: ['room'] });
+    const seen = collect(events);
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestOk());
+    await request.send(encodeNamespace(['alice']));
+    await delivered();
+    expect(seen).toHaveLength(1);
+    request.reset(new Error('gone'));
+
+    await vi.advanceTimersByTimeAsync(SNAPSHOT_LIMIT_MS);
+    expect(seen.some((event) => event.type === 'loaded')).toBe(false);
+  });
+});
+
+describe("'loaded' with MoQ Active Count", () => {
+  const ACTIVE_COUNT: KeyValuePair = { type: SETUP_OPTION.ACTIVE_COUNT, value: 1 };
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("yields 'loaded' right after the Count-th NAMESPACE, a repeat counted, and never from the quiet window", async () => {
+    const { fake, connection } = await setup({ serverSetup: [ACTIVE_COUNT] });
+    const seen = collect(connection.namespaceEvents({ prefix: ['room'] }));
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestOk({ activeCount: 3 }));
+    await request.send(encodeNamespace(['alice']));
+    await request.send(encodeNamespace(['alice']));
+    await delivered();
+    expect(seen).toHaveLength(1);
+
+    await vi.advanceTimersByTimeAsync(2 * SNAPSHOT_LIMIT_MS);
+    expect(seen).toEqual([announced('room', 'alice')]);
+
+    await request.send(encodeNamespace(['bob']));
+    await request.send(encodeNamespace(['carol']));
+    await delivered();
+    expect(seen).toHaveLength(4);
+    expect(seen).toEqual([announced('room', 'alice'), announced('room', 'bob'), LOADED, announced('room', 'carol')]);
+  });
+
+  it("yields 'loaded' at once on a count of 0", async () => {
+    const { fake, connection } = await setup({ serverSetup: [ACTIVE_COUNT] });
+    const seen = collect(connection.namespaceEvents({ prefix: ['room'] }));
+    const request = await fake.nextRequestStream();
+    await request.firstMessage;
+    await request.send(encodeRequestOk({ activeCount: 0 }));
+
+    await delivered();
+    expect(seen).toEqual([LOADED]);
+  });
 });

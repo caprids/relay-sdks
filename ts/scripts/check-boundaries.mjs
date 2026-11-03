@@ -130,6 +130,8 @@ const sdkExports = await import('../dist/index.js');
 assert.deepEqual(Object.keys(sdkExports).sort(), [
   'DEFAULT_ENDPOINT',
   'RelayError',
+  'SNAPSHOT_LIMIT_MS',
+  'SNAPSHOT_QUIET_MS',
   'SubscriptionConnectionClosedError',
   'SubscriptionOverflowError',
   'SubscriptionRequestError',
