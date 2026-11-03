@@ -366,18 +366,19 @@ let views = 0;
 const stops = new WeakMap<object, Set<() => void>>();
 
 function whenClosed(subscriber: Pick<SupervisedSubscriber, 'closed'>, stop: () => void): () => void {
-  let pending = stops.get(subscriber);
-  if (!pending) {
-    const created = new Set<() => void>();
-    pending = created;
-    stops.set(subscriber, created);
-    void subscriber.closed.then(() => {
-      for (const each of [...created]) each();
-    });
-  }
-  const own = pending;
-  own.add(stop);
-  return () => own.delete(stop);
+  const pending = stops.get(subscriber) ?? listen(subscriber);
+  pending.add(stop);
+  return () => pending.delete(stop);
+}
+
+/** Its own function, so the listener's closure holds the set and no view's `stop`. */
+function listen(subscriber: Pick<SupervisedSubscriber, 'closed'>): Set<() => void> {
+  const pending = new Set<() => void>();
+  stops.set(subscriber, pending);
+  void subscriber.closed.then(() => {
+    for (const stop of [...pending]) stop();
+  });
+  return pending;
 }
 
 function handler<A extends unknown[]>(

@@ -1,3 +1,5 @@
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MoqtObject, SubscribeOk } from '../packages/moq-core/src/index.js';
 import {
@@ -439,6 +441,29 @@ describe('createPresenceView', () => {
     expect(view.present.get('alice')!.document.name).toBe('Alice');
     vi.advanceTimersByTime(1);
     expect(changes.map(summary).at(-1)).toEqual({ stale: ['alice'] });
+  });
+
+  it('lets a closed view be collected while its subscriber lives on', async () => {
+    vi.useRealTimers();
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc') as () => void;
+    const room = fakeRoom();
+    const collected: string[] = [];
+    const registry = new FinalizationRegistry<string>((name) => collected.push(name));
+    const open = (name: string) => {
+      const handlers = { onChanged: () => {} };
+      createPresenceView(room.subscriber, { root: ROOT }, handlers).close();
+      registry.register(handlers, name);
+    };
+    open('first');
+    open('second');
+    // The fake keeps the newest members handlers, which holds the last view; the real supervisor drops them on close.
+    open('last');
+    for (let round = 0; round < 10 && collected.length < 2; round++) {
+      gc();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(collected.sort()).toEqual(['first', 'second']);
   });
 
   it('delivers nothing once parse closes the subscriber', async () => {
