@@ -922,3 +922,29 @@ answer what the example's `finished` line asks); exceptions for interrupted and 
 above); `update()` on `CatalogService` (its document is fixed, and the media timeline, which
 changes, gets `DocumentService` instead of a mode). The `register_media` handle in
 [media-layer.md](media-layer.md) remains a proposal.
+
+## Presence: `publishPresence`, `createPresenceView`, `PRESENCE_TRACK`
+
+The [presence track](media-layer.md#presence-track) convention and its TypeScript helpers in
+`@caprid/relay/media` ([issue #422](https://github.com/muxinc/relay-sdks/issues/422)). Presence is
+the per-member document that the members section above leaves to a later helper. The publisher side
+is a verb, because the call starts serving at once and has no `serve()` to run. The listener side is
+a factory that returns a view, as the other media helpers do, and it reports through one synchronous
+`onChanged`, as `members` does.
+
+| Concept | TypeScript | Python |
+| --- | --- | --- |
+| The presence track's default name | `PRESENCE_TRACK` (`'presence'`) | not yet (TypeScript only) |
+| The default heartbeat | `PRESENCE_HEARTBEAT_MS` (2000) | not yet (TypeScript only) |
+| Serve this member's presence document on its supervised publisher | `publishPresence(publisher, document, { track, heartbeatMs })` → `PresencePublisher` (`document`, `update(document)`; `PublishPresenceOptions`) | not yet (TypeScript only) |
+| Follow who is present under a root and what each member says | `createPresenceView(subscriber, { root, track, heartbeatMs, parse }, { onChanged, onError })` → `PresenceView` (`loaded`, `present`, `close()`; `PresenceViewOptions`, `PresenceViewHandlers`) | not yet (TypeScript only) |
+| One member on the roster | `PresenceMember` (`id`, `namespace`, `document`, `since`, `stale`) | not yet (TypeScript only) |
+| The roster loaded or changed | `onChanged(change)` with `PresenceChange` (`joined`, `left`, `updated`, `stale`, `resumed`, `present`, `initial`) | not yet (TypeScript only) |
+
+Not adopted: `createPresenceService` (a service in this package is something whose `serve()` the
+caller runs); `memberPresence()` and `presence()` (they name the data, not the view the call
+returns); `roster` (the application's list, which may hold more than the relay knows); a
+`PresenceFormat` codec (presence is JSON, and `parse` is the typed boundary); an envelope with a
+sequence number, a sender time or the heartbeat interval (the transport orders a member's
+documents already, and the fields would be wire rules every port must keep); `generation` on
+`PresenceMember` (it changes on every rotation, which reports nothing).

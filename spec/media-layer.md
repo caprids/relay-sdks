@@ -25,7 +25,9 @@ the [interrupt track](#interrupt-track)'s format helpers
 ([issue #320](https://github.com/muxinc/relay-sdks/issues/320)), and the
 [Media Timeline track](#media-timeline-track)'s format helpers and timeline accumulator
 ([issues #291](https://github.com/muxinc/relay-sdks/issues/291) and
-[#292](https://github.com/muxinc/relay-sdks/issues/292)), which both examples publish. The WebCodecs
+[#292](https://github.com/muxinc/relay-sdks/issues/292)), which both examples publish. The
+[presence track](#presence-track)'s helpers ship in `@caprid/relay/media` only
+([issue #422](https://github.com/muxinc/relay-sdks/issues/422)). The WebCodecs
 example publishes audio on the shared timeline, measured live in browsers
 ([issue #288](https://github.com/muxinc/relay-sdks/issues/288)). [vocabulary.md](vocabulary.md)
 records the public names of the implemented stages.
@@ -1388,6 +1390,63 @@ audio played (14 segments; the first of a run is not measured, while the clock i
 appeared with its audio, and every reply the user talked over was shown marked cut, with no
 underrun. The margin is about the jitter buffer's depth, since the bot sends the text just before
 the audio: a talker that knows its text earlier, as a TTS does, can send it sooner.
+
+## Presence track
+
+[Issue #422](https://github.com/muxinc/relay-sdks/issues/422). Who is in a room and what each member
+says about itself, such as a display name, a join time or a host flag, with no roster server. A
+[members view](behavior.md#members) says who is announced under a root, but not who they are. A
+frozen or crashed publisher also stays announced until the relay's idle timeout, about 10 s on
+`ord`. The presence track gives each member a document that names it and keeps proving that the
+member is alive. TypeScript ships its helpers in `@caprid/relay/media`. Python has none yet.
+
+**The track.** A data track in each member's generation namespace (`<root>/<member>/<generation>`),
+named `presence` by default (`PRESENCE_TRACK`), with Default Publisher Priority 32 (`0x0E`), between
+audio (16) and video (96). Each object is the member's whole document, compact UTF-8 JSON, in a group
+of its own. The payload is the application's JSON and nothing else. The helpers add no fields, so
+any MoQ client can read the track:
+
+```json
+{"name":"Ada","joinedAt":1762160400000}
+```
+
+**The publisher** (`publishPresence`) serves the document with a document service. The document goes
+out on every relay subscription, including each new generation's, and on every change whose bytes
+differ. The publisher sends the unchanged document again `PRESENCE_HEARTBEAT_MS` (2000 ms) after its
+last send. With no relay subscription, a heartbeat sends nothing. A member leaves by closing its
+supervised publisher, and the withdrawal of its namespace is the goodbye.
+
+**The listener** (`createPresenceView`) follows the root's members and wants each member's presence
+track with `generations: true` and subscriber priority 32.
+
+- *Order.* A document counts when it comes from the generation the listener read last with a larger
+  group ID, or from a newer generation. Group IDs start at 0 in each generation and grow by one per
+  write, and generations sort by their start time. A relay's cached copy repeats a group the
+  listener has read, and an out-of-order group carries a smaller one, so neither counts. A stale
+  member also takes a document from an older generation, because its publisher came back, possibly
+  on a clock that is behind its last run.
+- *Roster.* A member is on the roster from its first document that counts and parses until the
+  members view reports it gone. A member that never sends one is never shown.
+- *Stale.* A member is stale when no document counted for 3 × `heartbeatMs` (6 s), which is before
+  the relay withdraws a frozen publisher. Its next document that counts clears it. The count runs
+  only while the listener's subscription to the member is up. A want restart for the listener's own
+  connection pauses it, and the next subscription starts a full window.
+- *Load.* The roster loads once the members view has loaded and every member present then has a
+  document, or 1 s after the members view loaded. A document that arrives later is a join.
+- *Changes.* One synchronous `onChanged` reports `joined`, `left`, `updated` (the document's bytes
+  changed), `stale` and `resumed`, with `present` and `initial` as in `MembersChange`. Heartbeats,
+  cached copies, publisher rotations, and the listener's own reconnects and rotations report nothing.
+
+**No timestamp or sequence number.** The transport orders one member's documents, and only that
+member's documents are ever compared. A sender clock would have to be compared with the listener's
+clock to tell the age of a document, which needs clocks that agree.
+
+**What it does not do.** A document is its member's own claim. Authority, such as who hosts or who
+was removed, comes from a namespace that only an authorized token can publish, as Huddle's `host`
+control document does. The first document a listener reads for a member carries no age, so a frozen
+publisher's cached copy shows the member live for one stale window, then stale. A listener whose
+connection drops silently, before the transport declares it dead, can see members go stale and then
+resume.
 
 ## Media Timeline track
 
