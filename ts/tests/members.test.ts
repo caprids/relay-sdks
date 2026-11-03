@@ -412,6 +412,27 @@ describe('a member leaving', () => {
     expect(changes).toHaveLength(2);
   });
 
+  it('holds a leave whose grace runs out during an outage for the new load to settle', async () => {
+    const { connections, subscriber, discovery } = await start();
+    const { changes, handlers } = recorder();
+    subscriber.members({ root: ROOT }, handlers);
+    const first = await discovery();
+    const old = newGeneration(1_000);
+    first.push({ type: 'announced', namespace: at('alice', old) });
+    first.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'load');
+    first.push({ type: 'unannounced', namespace: at('alice', old) });
+    await pause(20);
+    connections[0]!.end(new RelayError('TRANSPORT_ERROR', 'idle', 'connection'));
+    const next = await discovery(1);
+    await pause(150);
+    next.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
+    next.push({ type: 'loaded' });
+    next.push({ type: 'announced', namespace: at('zed') });
+    await until(() => changes.length === 2, 'the marker join');
+    expect(summary(changes[1]!)).toEqual({ joined: ['zed'], left: [], present: ['alice', 'zed'], initial: false });
+  });
+
   it('cancels a pending leave without reporting it when the view closes', async () => {
     const { subscriber, discovery } = await start();
     const { changes, handlers } = recorder();

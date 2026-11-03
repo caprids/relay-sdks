@@ -967,8 +967,8 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
     connection is up and while the next connection's discovery loads. Then it reports the
     difference in one `onChanged`: newcomers in `joined`, and members who left meanwhile in `left`,
     with no 100 ms wait, since the new discovery's snapshot is the relay's state at one instant. A
-    member whose 100 ms was running is settled by the snapshot the same way. Members still there
-    report nothing, whatever their generations did.
+    member whose 100 ms was running, or ran out while no discovery was followed, is settled by the
+    snapshot the same way. Members still there report nothing, whatever their generations did.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
     failure no wait fixes (a permanent REQUEST_ERROR, such as `UNAUTHORIZED`) calls `onError`, and

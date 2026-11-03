@@ -232,9 +232,9 @@ function follow(
   return { phase: { ...phase, settled }, effects: [emit([joined], [], settled)] };
 }
 
-function leaveDue(phase: Live | Replacing, id: string, followed: Presence | undefined): Step {
+function leaveDue(phase: Live | Replacing, id: string, followed: Presence): Step {
   const gone = phase.settled.get(id);
-  if (!gone || !phase.leaving.has(id) || followed?.has(id)) return stay(phase);
+  if (!gone || !phase.leaving.has(id) || followed.has(id)) return stay(phase);
   const settled = new Map(phase.settled);
   settled.delete(id);
   const leaving = new Set(phase.leaving);
@@ -377,7 +377,8 @@ function fromReplacing(phase: Replacing, input: Arrival, root: readonly string[]
       return source && input.source === source ? follow(phase, source, input, root) : stay(phase);
     }
     case 'leave-due':
-      return leaveDue(phase, input.id, source?.presence);
+      // With no discovery followed, the next load's snapshot settles the leave.
+      return source ? leaveDue(phase, input.id, source.presence) : stay(phase);
     case 'loaded':
       return candidate && input.source === candidate ? adopt(phase, candidate, root) : stay(phase);
     case 'ended': {
