@@ -1003,6 +1003,15 @@ in earlier releases. The buffer stays under 400 ms, and under the clock's target
 output delay and 40 ms. `input.stats` holds the underruns, the buffer depth and target, the frames
 dropped as late, and the audio that was trimmed, concealed with silence, or cut.
 
+A floor below the path's delay spread makes the buffer saw: it gives back down to the floor between
+delay spikes, underruns on the next one, grows, and later trims what it no longer needs. In a
+two-browser call through one relay (measured, one machine), arrival delay spread from 80 to 200 ms.
+At the 20 ms floor the buffer underran 6.5 times a minute and trimmed 3 s in 15 minutes; with
+`minJitterTargetUs: 80_000` it underran 0.5 times a minute and trimmed 0.5 s, holding about 40 ms
+more. Side by side on two other paths, a 60 ms floor underran about 15% more often than 80 ms and
+held 15 to 20 ms less. A call whose `stats.underruns` keeps climbing while `stats.jitterTargetUs`
+keeps coming back to the floor wants a higher one.
+
 The player fills a lost Opus frame rather than playing silence. It decodes Opus with libopus
 compiled to WebAssembly, which rebuilds the frame from the next frame's in-band FEC when the
 publisher's encoder sent one, and otherwise conceals it (`stats.recoveredUs`, `stats.synthesizedUs`).
@@ -1127,7 +1136,7 @@ group is that old), not a queue further down the path: see spec/relay-interop.md
 ```ts
 // subscriber is a supervised subscriber (connectSupervisedSubscriber).
 const voice = createFrameReader(
-  createFrameSequencer({ clock, grouping: 'frame', lateDropUs: 60_000, catchUpAfterUs: 300_000 }),
+  createFrameSequencer({ clock, grouping: 'frame', lateDropUs: 60_000, reorderWindowUs: 60_000, catchUpAfterUs: 300_000 }),
   { onFrame: input.push, onCatchUp: () => subscriber.catchUp('voice') },
 );
 subscriber.want(
@@ -1136,6 +1145,16 @@ subscriber.want(
   { ...voice, onError },
 );
 ```
+
+Give a listener a short reorder window as well. Under frame grouping each audio frame is a group of
+its own, and the relay sends each group on a stream of its own, so two neighbouring frames can arrive
+swapped. With no window the sequencer drops the second to arrive as behind, and the player conceals
+it. In a 20-minute two-browser call through one relay (measured, one machine), the sequencer dropped
+1.9% of audio frames this way, nearly all within 5 ms of the frame that overtook them, and the player
+synthesized 22 s of audio in their place. With `reorderWindowUs: 60_000` it dropped 0.01% and
+synthesized under 1 s. The window holds frames only while an earlier group is missing, so audio that
+arrives in order is not delayed; a frame after a real loss waits up to the window, then plays with
+`gap`.
 
 **To an agent** (a person's voice to speech-to-text), the goal is every word, soon after the person
 stops. Completeness comes from the person's publisher and the reorder window, not from FETCH. Give
