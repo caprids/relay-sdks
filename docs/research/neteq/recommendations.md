@@ -20,10 +20,10 @@ Ranked by what a listener would gain for the cost and risk, given the evidence w
 | Rank | Take from NetEQ | What a listener gets | Cost | Risk |
 | --- | --- | --- | --- | --- |
 | 1 | Its statistics: per-frame buffer delay, target over time, concealment events, interruptions, arrival delay (neteq.md §9) | Nothing directly; every change below becomes measurable, and comparable with WebRTC's `getStats` in the same rounds | small | low |
-| 2 | A missing frame is waited for until its audio is due, then concealed (neteq.md §5) | No frame dropped for arriving 5 ms after its neighbour; no underrun from waiting longer than the buffer holds | small | low |
+| 2 | A missing frame is waited for until shortly before its audio is due, then concealed (neteq.md §5) | Frames that arrive a few ms after their neighbour play whenever the buffer holds more than that; no underrun from waiting longer than the buffer holds | small | low |
 | 3 | The target set from measured arrival delay, not only from underruns (neteq.md §3.1-3.3) | Far fewer underruns where the path's delay spread is wider than the 20 ms floor | medium | medium: earlier tries did not win on the bench |
 | 4 | Concealment and fades at every discontinuity; resume after a short dropout without refilling the whole target (neteq.md §2.5) | No clicks at underruns, trims and cuts; shorter silences after an underrun | small to medium | low |
-| 5 | Encoded frames buffered and decoded just in time (neteq.md §1, §2.3) | Late frames usable up to their deadline; no underruns from a busy main thread | high | medium |
+| 5 | Encoded frames buffered and decoded just in time (neteq.md §1, §2.3) | Late frames usable up to their deadline; less main-thread work between arrival and the worklet | high | medium |
 | 6 | Time stretching instead of trims (neteq.md §4, §3.5) | Delay shed without cutting audio, if it can be shown to score fairly | medium | high: measured worse once (R-S4A-01) |
 
 The first three to build are at the end. Ideas that do not fit MoQ are listed before them.
@@ -119,9 +119,9 @@ and vocabulary entries. Low risk: reports stay cumulative, as now.
 ### 2. Wait for a missing frame until its audio is due
 
 **What NetEQ does** (neteq.md §2.3, §2.5, §5). Packets sit in timestamp order. A reordered packet is
-not late until the audio before it has been played, so there is no reorder window: the window is
-whatever audio is ahead of it. When the expected packet is missing and a later one is buffered,
-NetEQ conceals exactly the missing slot when it comes due and merges into the later packet
+not late until the audio before it has been decoded, shortly before it plays, so there is no
+reorder window: the window is whatever audio is ahead of it. When the expected packet is missing
+and a later one is buffered, NetEQ conceals exactly the missing slot when it comes due and merges into the later packet
 (`decision_logic.cc:288-311`); the missing packet, if it turns up after that, is discarded. It stops
 waiting early only if the buffer is 50 ms above target (`decision_logic.cc:293-298`).
 
@@ -135,16 +135,27 @@ retransmission the newer frames wait the whole window even if the player holds l
 runs dry. With 60 ms at the 20 ms floor the calls kept 6.1 to 6.5 underruns a minute (#433), which
 the window may or may not share in; nothing separates the two today.
 
-**The change.** Make the window what the player holds less a margin, read when the wait starts:
-`max(0, bufferedUs − margin)`, with a margin for one report's staleness (about 20 ms) and one render
-quantum. When it runs out the newer frame goes out with `gap`, and the player fills the missing slot
-from that frame's FEC or with concealment (`audio-player.ts:671-705`), which is NetEQ's merge. Ways
-to wire it: let `reorderWindowUs` take a function, as closed #358 did for `lateDropUs`, and have the
-listener pass `() => input.stats.bufferedUs - margin`; or give the sequencer the input itself. A
-listener with a player could then default to it, since frame grouping always reorders.
+**The change.** End the wait at the missing audio's deadline rather than after a fixed time. The
+missing audio starts where the last delivered frame ended; the worklet reaches that timestamp after
+about `missing timestamp − clock position − output delay`, since the clock's position is what is
+audible and the worklet reads one output delay ahead of it. Wait until that, less a margin for the
+decode, the post to the worklet and one render quantum (a few milliseconds). The clock extrapolates
+between reports, so this does not go stale the way a snapshot of `bufferedUs` would. When the wait
+ends the newer frame goes out with `gap`, and the player fills the missing slot from that frame's FEC
+or with concealment (`audio-player.ts:671-705`), which is NetEQ's merge. The sequencer already has
+the clock; it needs the output delay, which the input's `playoutLeadUs` contains, or a function-valued
+`reorderWindowUs` (closed #358 made `lateDropUs` and `reorderWindowUs` accept functions). A listener
+with a player could then default to it, since frame grouping always reorders.
 
-**What it does for a listener.** Frames that arrive a few milliseconds out of order always play.
-A frame that comes too late costs one concealed slot, never a dry buffer.
+The limit is the buffer itself: when the player holds less than the swap delay plus the margin, there
+is nothing to wait with, and the earlier frame is still dropped as behind. At the 20 ms floor that is
+a real case. A small fixed least wait (5 ms covered nearly all of Huddle's swaps) would trade one late
+frame for a few milliseconds of risk of running dry; whether that pays is for the paired calls to
+show.
+
+**What it does for a listener.** Frames that arrive a few milliseconds out of order play whenever the
+player holds more audio than that, which is most of the time above the floor. A frame that comes too
+late costs one concealed slot, not a dry buffer.
 
 **How to measure it.** Sequencer `late` and `behind` (#432), player `synthesizedUs`, `recoveredUs`
 and `underruns`. Huddle soak, paired: window 0, 60 ms and the deadline window, at the 20 ms and 80 ms
@@ -185,9 +196,9 @@ both:
   section 2, "The adaptive buffer").
 - Closed #358's `percentile` adaptation measured arrival delay in the worklet on the render clock,
   as NetEQ does, and refused to give back below its 95th percentile over 5 s, with a faster give-back
-  (every 250 ms). In stage 4a it was level with the reference (handover R 87.4 against 87.2, LTE 84 against 85.2 with 5.7 against 3.6 drops
-  a minute; FINDINGS.md, R-S4A-01's table), and in the retune its pairing with RED failed the drops
-  clause (R-T1-01). The bench's profiles did not include a steady spread like Huddle's.
+  (every 250 ms). In stage 4a it was level with the reference (handover R 87.4 against 87.2, LTE 84
+  against 85.2 with 5.7 against 3.6 drops a minute; FINDINGS.md, R-S4A-01's table), and in the
+  retune its pairing with RED failed the drops clause (R-T1-01). The bench's profiles did not include a steady spread like Huddle's.
 
 **The change.** Use the arrival-delay estimate as the floor the underrun rule cannot shrink below,
 and as the start target, not as the whole controller:
@@ -269,8 +280,8 @@ only after a short dropout.
 ### 5. Keep frames encoded and decode just in time
 
 **What NetEQ does** (neteq.md §1, §2.3, §7). Packets wait encoded; decoding, FEC and concealment are
-chosen at the 10 ms tick that needs them, so a reordered packet, a duplicate or the primary that
-outruns its FEC copy can still take its place until the last moment.
+chosen at the 10 ms tick that decodes them, shortly before they play, so a reordered packet, a
+duplicate or the primary that outruns its FEC copy can still take its place until then.
 
 **What we do today.** The main thread decodes on arrival (`audio-player.ts:901-952`, through
 `audio-player.ts:707-743`) and posts PCM to the worklet, deciding FEC and concealment when the frame
@@ -283,21 +294,26 @@ busy pages to raise the floor (ts/GUIDE.md, "Playing audio").
 timestamp-ordered queue of encoded frames, decoding a frame or two ahead of the read position.
 Recommendations 2 and 4 then become decisions at playout time, as in NetEQ.
 
-**What it does for a listener.** Fewer underruns on busy pages; every frame usable up to its deadline.
+**What it does for a listener.** Every frame usable up to its deadline, and FEC or concealment chosen
+when the audio is due rather than a buffer early. Decoding leaves the main thread, but frames still
+reach the worklet through it, so a stalled main thread still delays them: removing that too would
+mean receiving and sequencing off the main thread (a transport in a worker), a separate change.
 
 **How to measure it.** Underruns under a synthetic main-thread load; Huddle soak; worklet CPU per
 quantum; time to first audio (relay-dev's join measurements, spec/media-layer.md, "Joining sooner").
 
-**Cost and risk.** High: libopus in the worklet (the worklet ships as a function's source, `audio-worklet.ts:1-6`, and
-libopus as embedded base64, spec/media-layer.md, "Loss concealment"), the WebCodecs path stays on the main thread, and a 128-frame quantum at
-48 kHz leaves about 2.7 ms for everything. Best done after 2 to 4 show what the decisions should be.
+**Cost and risk.** High: libopus in the worklet (the worklet ships as a function's source,
+`audio-worklet.ts:1-6`, and libopus as embedded base64, spec/media-layer.md, "Loss concealment"), the
+WebCodecs path stays on the main thread, and a 128-frame quantum at 48 kHz leaves about 2.7 ms for
+everything. Best done after 2 to 4 show what the decisions should be.
 
 ### 6. Time stretching, only once it can be scored fairly
 
 **What NetEQ does** (neteq.md §3.5, §4). WSOLA on 30 ms blocks: remove or insert one pitch period
 where two periods correlate above 0.9, or anywhere in quiet audio. It accelerates only when the
 playout delay is above the target plus the largest relative delay of the last 2 s plus 20 ms, with
-at least 50 ms between stretches, about 100 ms of change a second at most.
+at least 50 ms between stretches (about 100 ms of change a second), except at four times that
+threshold, where it accelerates without the spacing (neteq.md §3.5).
 
 **What we do today.** The player trims rather than time-stretches (settled reading of 2026-11-03;
 `audio-worklet.ts:394-401`); `playbackRate` resamples with a pitch shift for applications that own
@@ -316,7 +332,7 @@ stretch as neither a drop nor a jump, and then NetEQ's dead band and rate limit 
 low-water trigger.
 
 **Cost and risk.** Medium to high. P-12 is the reason for caution: our trim gives back a deep queue
-at once, where stretching at 100 ms a second would take seconds.
+at once, where stretching at NetEQ's in-band rate of about 100 ms a second would take seconds.
 
 ## Ideas that do not fit MoQ
 
@@ -348,8 +364,9 @@ at once, where stretching at 100 ms a second would take seconds.
 ## An answer the register asked for
 
 The voice findings register's open question 7 asks where NetEQ's late cut-off is. In the code there
-is none (neteq.md §5): a packet is discarded only once audio after it has been played, that is, when a
-later packet was already buffered as its slot came due and NetEQ concealed the slot and moved on;
+is none (neteq.md §5): a packet is discarded only once audio after it has been decoded, shortly
+before it would play, that is, when a later packet was already buffered as its slot came due and NetEQ
+concealed the slot and moved on;
 when the buffer is flushed (200 packets, or smart flushing under its field trial); or when NetEQ stops
 waiting because the buffer is 50 ms above target. A late packet with nothing newer behind it is played,
 late. So "about 30 ms" is not a NetEQ constant; the words WebRTC lost behind a loaded uplink would be

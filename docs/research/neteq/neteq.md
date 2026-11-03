@@ -50,8 +50,9 @@ towards a target. The target is set from how late packets have been arriving. **
 Three shapes follow from that job, and the rest of this page is their detail:
 
 - **It buffers encoded packets and decodes just in time.** A packet stays encoded in the packet
-  buffer until the 10 ms tick that needs it, so a packet that arrives out of order, a duplicate, or
-  the forward error correction (FEC) copy of a lost one can still take its place at the last moment.
+  buffer until the 10 ms tick that decodes it, shortly before it plays, so a packet that arrives out
+  of order, a duplicate, or the forward error correction (FEC) copy of a lost one can still take its
+  place until then.
   Only a few tens of milliseconds of decoded audio wait in the sync buffer. **[code]**
 - **Every decision is made at playout time, once per 10 ms.** Insertion only stores and measures.
   Decoding, concealment and time stretching are chosen in `GetAudio`, from the state at that moment.
@@ -125,10 +126,15 @@ audio device ◄── 10 ms ◄── SyncBuffer ◄── algorithm buffer ◄
   (`packet_buffer.cc:187-203`). Priority orders `codec_level` first, then `red_level`, lower being
   better (`packet.h:47-54`). So a primary packet always wins over an FEC or RED copy of the same
   audio, whichever arrived first.
-- **Too old.** Packets older than the playout point are discarded at the start of each decision
-  (`neteq_impl.cc:914-918` calling `packet_buffer.cc:268-278`, with a 5 s horizon against timestamp
-  wrap) and after each extraction (`neteq_impl.cc:1892-1898`). This is the only "late drop":
-  a packet is usable until the audio before it has been played, however late it arrived.
+- **Too old.** Packets older than the *decode frontier*, the sync buffer's end timestamp (the end
+  of the audio already decoded, not of the audio already played), are discarded at the start of each
+  decision (`neteq_impl.cc:914-918` calling `packet_buffer.cc:268-278`, with a 5 s horizon against
+  timestamp wrap) and after each extraction (`neteq_impl.cc:1892-1898`). This is the only "late
+  drop": a packet is usable until the audio before it has been decoded, however late it arrived.
+  [inferred] The frontier runs ahead of playout by the decoded audio still in the sync buffer: the
+  rest of the last packet (10 ms of a 20 ms packet, for example), or up to 30 ms when a stretch has
+  decoded ahead (section 2.4). So "until its turn to be decoded" means until shortly before it would
+  play, not until the moment it plays.
 - **Full.** At `max_number_of_packets_` (200 by default, `api/neteq/neteq.h:135`) the whole buffer is
   flushed (`packet_buffer.cc:162-179`), counted in `packet_buffer_flushes`
   (`statistics_calculator.cc:331-334`).
@@ -211,7 +217,8 @@ The operations: **[code]**
   (`expand.h:78`). If the decoder offers its own PLC, `DoCodecPlc` uses it instead
   (`neteq_impl.cc:743-747`, `neteq_impl.cc:1446-1486`); for Opus that is off unless the field trial
   `WebRTC-Audio-OpusGeneratePlc` is set (`modules/audio_coding/codecs/opus/audio_decoder_opus.cc:34`,
-  `modules/audio_coding/codecs/opus/audio_decoder_opus.cc:134-150`), so by default Opus loss is concealed by NetEQ's own expand.
+  `modules/audio_coding/codecs/opus/audio_decoder_opus.cc:134-150`), so by default Opus loss is
+  concealed by NetEQ's own expand.
 - **Merge** (`neteq_impl.cc:1414-1444`, `merge.cc:51-167`): the first packet after a gap that
   expansion covered. It generates more expansion, finds the lag at which the new audio best
   correlates with it (`merge.cc:90-101`), scales the new audio to the expansion's energy and ramps
@@ -356,13 +363,17 @@ expand are chosen. **[code]**
 - `low = target`; `high = target + the largest relative delay in the 2 s history + 20 ms`
   (`decision_logic.cc:269-272`). The 20 ms is `kDelayAdjustmentGranularityMs`: one stretch moves the
   delay by up to 15 ms, rounded up to the 10 ms clock (`decision_logic.cc:35-37`).
-- Playout delay at or above `4 × high`: fast accelerate (`decision_logic.cc:273-275`), which only
-  takes effect when the embedder enabled it (`neteq_impl.cc:752-758`); off in a browser
-  (section 10).
+- Playout delay at or above `4 × high`: fast accelerate (`decision_logic.cc:273-275`). This branch
+  comes before the rate limit below, so it is not spaced. Fast mode itself (several periods at a
+  lower correlation, section 4) needs the embedder to enable it; when it is off, as in a browser
+  (section 10), the operation runs as an ordinary accelerate (`neteq_impl.cc:752-758`). [inferred]
+  So far above the band NetEQ accelerates at every decision that has the 30 ms it needs, one pitch
+  period at a time, without the 50 ms spacing.
 - Otherwise, and only if 5 ticks (50 ms) have passed since the last successful stretch
   (`decision_logic.h:112-113`, `decision_logic.h:136-140`, `decision_logic.cc:111-114`): at or above
   `high`, accelerate; below `low`, preemptive expand (`decision_logic.cc:276-283`). The header
-  comment puts the resulting ceiling at "about 100 ms/s" of stretching.
+  comment puts the resulting ceiling at "about 100 ms/s" of stretching, which holds inside
+  `4 × high`.
 - In between: normal. [inferred] The band is wide on purpose. While packets keep arriving up to
   `max delay` late, playing that much above the target is what the next late packet will use, so
   NetEQ does not shave it off only to stretch it back. This is the article's "better way" (section
@@ -413,13 +424,14 @@ The removed and inserted samples are counted (`neteq_impl.cc:1551`, `neteq_impl.
 
 All **[code]** unless marked.
 
-- **A reordered packet is not late until its audio has been played.** It is inserted in timestamp
-  order (section 2.3) and decoded when its turn comes. There is no reorder window: the window is
-  however much audio is ahead of it.
+- **A reordered packet is not late until the audio before it has been decoded.** It is inserted in
+  timestamp order (section 2.3) and decoded when its turn comes, which is shortly before it plays
+  (the decode frontier of section 2.3). There is no reorder window: the window is however much audio
+  is ahead of it, less what is already decoded.
 - **A missing packet with a later one buffered is a loss, decided at its playout time.** NetEQ
   expands for exactly the missing duration (`decision_logic.cc:288-300`), then merges with the later
   packet (`decision_logic.cc:308-311`). The timeline is kept. If the missing packet arrives after
-  that, it is older than the playout point and is discarded (`packet_buffer.cc:268-278`), counted in
+  that, it is behind the decode frontier and is discarded (`packet_buffer.cc:268-278`), counted in
   `packetsDiscarded` (`packet_buffer.cc:354-360`).
 - **A missing packet with nothing buffered is a delay.** NetEQ expands for as long as it takes. When
   the expected packet arrives it is played normally after the expansion
@@ -458,9 +470,10 @@ All **[code]** unless marked.
 
 - **Opus in-band FEC** becomes a secondary packet at insertion (section 2.2). It sits in the packet
   buffer at the lost frame's timestamp and is decoded only if the primary for that timestamp has not
-  arrived when that audio is due; if the primary arrives first or later, the primary replaces it
-  (`packet_buffer.cc:187-203`). [inferred] FEC therefore works only when the next packet has arrived
-  before the lost one's playout time, which the 20 ms least target allows for one 20 ms frame.
+  arrived when its turn to be decoded comes. A primary that arrives before then, earlier or later than
+  the copy, takes its place (`packet_buffer.cc:187-203`). [inferred] FEC therefore works only when
+  the next packet has arrived before the lost one's turn to be decoded, which the 20 ms least
+  target allows for one 20 ms frame.
 - A secondary packet is decoded through `DecodeRedundant`
   (`modules/audio_coding/codecs/opus/audio_decoder_opus.cc:81-100`), counted as
   `secondary_decoded_samples` (`neteq_impl.cc:1851-1854`) and in `fecPacketsReceived`; one dropped
@@ -491,7 +504,7 @@ All **[code]** unless marked.
   cells with it off by default and saw no retransmissions until it was turned on (finding C-1; not
   read in code here).
 - **NetEQ does not wait for a retransmission as such.** A retransmitted packet is an ordinary late or
-  reordered packet: it plays if it arrives before its audio is due (section 5), and its lateness
+  reordered packet: it plays if it arrives before its turn to be decoded (section 5), and its lateness
   feeds the reorder optimizer, which may raise the target. The article says the same; the code has
   not changed that, only moved the tracker. **[article]**, checked **[code]**
 
@@ -517,8 +530,12 @@ and the stats collector exposes on `RTCInboundRtpStreamStats` (`pc/rtc_stats_col
 | `interruptionCount` / `totalInterruptionDuration` | concealment events of at least 150 ms | `statistics_calculator.cc:35`, `statistics_calculator.cc:199-216` |
 | (not in the spec) `relativePacketArrivalDelay`, `delayedPacketOutageSamples` | the sum of section 3.1's delays; expansion that ended in a late packet rather than a loss | `statistics_calculator.cc:340-353`, `audio/audio_receive_stream.cc:324-325` |
 
-Nothing is counted until decoded audio has first played (`decoded_output_played_`,
-`statistics_calculator.cc:159-161`), so a slow start is not concealment. `jitterBufferDelay` covers
+The output counters (samples received, concealment, stretching, generated noise, interruptions)
+count nothing until decoded audio has first played (`decoded_output_played_`,
+`statistics_calculator.cc:159-161`), so a slow start is not concealment. The packet counters
+(discarded, FEC), the relative arrival delay and `jitterBufferDelay` have no such guard
+(`statistics_calculator.cc:272-283`, `statistics_calculator.cc:312-325`,
+`statistics_calculator.cc:340-342`). `jitterBufferDelay` covers
 only the packet buffer, not the decoded audio in the sync buffer nor the device. [inferred]
 
 ## 10. Defaults a browser call runs with
@@ -528,7 +545,7 @@ only the packet buffer, not the decoded audio in the sync buffer nor the device.
 | Setting | Default | Where |
 | --- | --- | --- |
 | Packet buffer | 200 packets; a PeerConnection's `audio_jitter_buffer_max_packets` default, never below 20 | `api/neteq/neteq.h:135`, `api/peer_connection_interface.h:496`, `media/engine/webrtc_voice_engine.cc:2309-2311` |
-| Fast accelerate | off | `api/neteq/neteq.h:138`, `api/peer_connection_interface.h:500` |
+| Fast accelerate | fast mode off; the `4 × high` branch still accelerates, unspaced (section 3.5) | `api/neteq/neteq.h:138`, `api/peer_connection_interface.h:500` |
 | Muted state | off | `api/neteq/neteq.h:139` |
 | Quantile, forget factor, resampling, reorder optimizer | 0.95, 0.983, 500 ms, on (0.9993, 20 ms per %); field trial `WebRTC-Audio-NetEqDelayManagerConfig` | `delay_manager.h:28-40`, `delay_manager.cc:41-51` |
 | Start target, least target | 80 ms, 20 ms | `delay_manager.cc:27`, `underrun_optimizer.cc:64` |
@@ -549,7 +566,7 @@ the controlled quantity. Where the pinned code differs:
 | The underrun histogram is updated per packet; with 20 ms packets the 0.983 forget factor lets a new 20 ms target take over from 140 ms in about 3.5 s (175 packets) | Updated once per 500 ms with that interval's largest delay (`underrun_optimizer.cc:39-56`), so the forget factor acts per 500 ms: memory about 29 s, a full take-over about 87 s (section 3.2) | Already so at the article's date (`delay_manager.h` at `8e2442f1`, 2025-06-03, has `resample_interval_ms = 500`) |
 | The underrun histogram covers "the entire session" | It forgets, with about 29 s of memory | Already so |
 | Reorder cost `delay_ms + 20ms * loss_percent`, `loss_percent` defaulting to 20 | Cost is the delay above the underrun target plus `ms_per_loss_percent` (20) per percent late (`reorder_optimizer.cc:51-75`) | Already so; a misreading |
-| Decision logic accelerates when the playout delay is above the target and decelerates below it | Accelerates only above `target + max relative delay in 2 s + 20 ms`, fast-accelerates at 4 times that if enabled, with 50 ms between stretches (`decision_logic.cc:264-286`) | Already so; simplified |
+| Decision logic accelerates when the playout delay is above the target and decelerates below it | Accelerates only above `target + max relative delay in 2 s + 20 ms`, with 50 ms between stretches, and without that spacing at 4 times the threshold (fast mode only if enabled) (`decision_logic.cc:264-286`) | Already so; simplified |
 | `delay_manager` takes the target from the two histograms | Still, but the delay manager is now behind `DelayManagerInterface` and replaceable | 2025-06-27, `1542bb18` |
 | NetEQ requests retransmissions with RTCP NACK | The NACK tracker lives in `ChannelReceive`; fixed delay mode (missing packets asked for while less than 1 s old) is the default and the only mode | 2025-11-03 `3d6d0104`; 2026-02-05 `770eedbe`; 2026-04-16 `871e440c` |
 | A full buffer is flushed | Still the default; smart flushing to the target exists behind a field trial | 2026-06-17, `732e3439` |
