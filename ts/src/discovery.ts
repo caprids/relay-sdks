@@ -4,7 +4,7 @@
  */
 import { isMoqtProtocolError } from '@caprid/moq-core';
 import { RelayError } from './errors.js';
-import { isWithdrawnByEnd, type NamespaceEvent, type NamespaceEvents } from './namespace-events.js';
+import { isStopped, isWithdrawnByEnd, type NamespaceEvent, type NamespaceEvents } from './namespace-events.js';
 import {
   SubscriptionConnectionClosedError,
   SubscriptionOverflowError,
@@ -18,12 +18,15 @@ export const DISCOVERY_LINGER_MS = 5_000;
 export interface DiscoveryWatchHandlers {
   onAnnounced?(namespace: string[]): void;
   onUnannounced?(namespace: string[]): void;
+  /** The request serving the watch has loaded: first, and again after each move to a new request. */
   onLoaded?(): void;
   onEnded?(error: unknown): void;
 }
 
 export interface DiscoveryWatch {
   readonly loaded: boolean;
+  /** The serving request has loaded and is still delivering: false while a move's request loads or a stream failed. */
+  readonly following: boolean;
   readonly ended: { error: unknown } | undefined;
   namespaces(): string[][];
   release(): void;
@@ -141,7 +144,7 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
       request.held.clear();
       for (const namespace of gone) notify(request, namespace, 'unannounced');
       for (const record of records(request)) {
-        if (!serves(request, record) || record.loaded) continue;
+        if (!serves(request, record)) continue;
         record.loaded = true;
         call(record, (handlers) => handlers.onLoaded?.());
       }
@@ -263,6 +266,10 @@ export function createDiscoveryIndex(open: (prefix: string[]) => NamespaceEvents
   const handle = (record: WatchRecord): DiscoveryWatch => ({
     get loaded() {
       return record.loaded;
+    },
+    get following() {
+      const { state } = record;
+      return state.kind === 'served' && state.request.loaded && !isStopped(state.request.events);
     },
     get ended() {
       return record.state.kind === 'ended' ? { error: record.state.error } : undefined;

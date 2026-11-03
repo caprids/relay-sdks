@@ -95,13 +95,15 @@ describe('the discovery index', () => {
       ['r', 'a', 'g2'],
     ]);
     expect(moved.loaded).toBe(true);
+    expect(moved.following).toBe(false);
     const second = fake.discoveries[1]!;
     second.push({ type: 'announced', namespace: ['r', 'a', 'g1'] });
     second.push({ type: 'announced', namespace: ['r', 'a', 'g3'] });
     second.push({ type: 'loaded' });
     await settle();
-    expect(narrow.seen).toEqual(['+r/a/g1', '+r/a/g2', 'loaded', '+r/a/g3', '-r/a/g2']);
+    expect(narrow.seen).toEqual(['+r/a/g1', '+r/a/g2', 'loaded', '+r/a/g3', '-r/a/g2', 'loaded']);
     expect(wide.seen).toEqual(['+r/a/g3', '-r/a/g2', 'loaded']);
+    expect(moved.following).toBe(true);
   });
 
   it('ends the watches it moved, after the call, when the covering request cannot open', async () => {
@@ -162,7 +164,7 @@ describe('the discovery index', () => {
     rehomed.push({ type: 'announced', namespace: ['r', 'a', 'g2'] });
     rehomed.push({ type: 'loaded' });
     await settle();
-    expect(narrow.seen).toEqual(['+r/a/g1', 'loaded', '+r/a/g2', '-r/a/g1']);
+    expect(narrow.seen).toEqual(['+r/a/g1', 'loaded', '+r/a/g2', '-r/a/g1', 'loaded']);
     expect(deeper.seen).toEqual(['+r/a/g2', 'loaded']);
   });
 
@@ -193,7 +195,7 @@ describe('the discovery index', () => {
       await own.send(encodeNamespace(['g1']));
       await new Promise((resolve) => setTimeout(resolve, SNAPSHOT_QUIET_MS * 2));
       expect(wide.seen).toEqual(['+r/a/g1', 'loaded', 'ended undefined']);
-      expect(narrow.seen).toEqual(['+r/a/g1', 'loaded']);
+      expect(narrow.seen).toEqual(['+r/a/g1', 'loaded', 'loaded']);
     } finally {
       connection.close();
     }

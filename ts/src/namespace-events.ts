@@ -54,6 +54,16 @@ export function isWithdrawnByEnd(event: NamespaceEvent): boolean {
   return withdrawnByEnd.has(event);
 }
 
+const stopped = new WeakSet<NamespaceEvents>();
+
+/**
+ * Whether the request's stream has failed and its ending waits out the closure grace: nothing more arrives. The
+ * supervised subscriber's discovery reads it so a member's 100 ms does not run out on a stream that is gone.
+ */
+export function isStopped(events: NamespaceEvents): boolean {
+  return stopped.has(events);
+}
+
 type Snapshot =
   | { kind: 'unanswered' }
   | { kind: 'counted' }
@@ -110,13 +120,18 @@ export function createNamespaceEvents(
   prefix: string[],
   options: SubscriptionEventOptions,
 ): NamespaceEvents {
-  return createBoundedEvents<NamespaceEvent>((sink) => openNamespaceRequest(deps, prefix, sink), options);
+  const events = createBoundedEvents<NamespaceEvent>(
+    (sink) => openNamespaceRequest(deps, prefix, sink, () => stopped.add(events)),
+    options,
+  );
+  return events;
 }
 
 function openNamespaceRequest(
   deps: NamespaceRequestDependencies,
   prefix: string[],
   sink: BoundedEventSink<NamespaceEvent>,
+  onStopped: () => void,
 ): { cancel(reason?: unknown): void } {
   let ended = false;
   let core: { cancel(reason?: unknown): void } | undefined;
@@ -167,6 +182,7 @@ function openNamespaceRequest(
       queueMicrotask(reject);
       return;
     }
+    onStopped();
     const grace = setTimeout(reject, CLOSURE_GRACE_MS);
     cancelGrace = () => clearTimeout(grace);
   };

@@ -951,7 +951,10 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
   fra
   ([issue #424](https://github.com/muxinc/relay-sdks/issues/424)). A member leaves about 100 ms after
   its publisher's clean `close()` reaches the relay (about 105 ms on the same relay, 210 ms from
-  another), and at the relay's idle timeout, about 10 to 12 s, after a crash.
+  another), and at the relay's idle timeout, about 10 to 12 s, after a crash. The 100 ms counts
+  only while the view's discovery is delivering. While its request is replaced by a covering one
+  ([shared discovery](#shared-discovery)), or after its stream has failed, a pending leave waits for
+  the next load, which settles it or starts the 100 ms again.
 - **`onChanged(change)`.** The first call is the load: `initial` is true and `joined` lists everyone
   present, possibly nobody. It runs once, even for an empty root. Every later call names at least one
   member in `joined` or `left`. `present` is everyone after the change, by id, in the order the view

@@ -153,7 +153,7 @@ export type MembersInput =
     }
   | { readonly kind: 'loaded'; readonly source: Source }
   | { readonly kind: 'ended'; readonly source: Source; readonly error: unknown }
-  | { readonly kind: 'leave-due'; readonly id: string }
+  | { readonly kind: 'leave-due'; readonly id: string; readonly following: (source: Source) => boolean }
   | { readonly kind: 'close' };
 
 export type MembersEffect =
@@ -242,6 +242,10 @@ function leaveDue(phase: Live | Replacing, id: string, followed: Presence): Step
   return { phase: { ...phase, settled, leaving }, effects: [emit([], [gone], settled)] };
 }
 
+function resume(phase: Live | Replacing): Step {
+  return { phase, effects: [...phase.leaving].map((id): MembersEffect => ({ kind: 'schedule-leave', id })) };
+}
+
 function afterEnded(
   phase: Loading | Replacing,
   ended: Extract<MembersInput, { kind: 'ended' }>,
@@ -302,7 +306,9 @@ function fromLive(phase: Live, input: Arrival, root: readonly string[]): Step {
     case 'namespace':
       return input.source === source ? follow(phase, source, input, root) : stay(phase);
     case 'leave-due':
-      return leaveDue(phase, input.id, source.presence);
+      return input.following(source) ? leaveDue(phase, input.id, source.presence) : stay(phase);
+    case 'loaded':
+      return input.source === source ? resume(phase) : stay(phase);
     case 'retiring': {
       const to = retiredTo(source, input);
       if (!to) return stay(phase);
@@ -327,7 +333,6 @@ function fromLive(phase: Live, input: Arrival, root: readonly string[]): Step {
         [release(source)],
       );
     case 'connection':
-    case 'loaded':
       return stay(phase);
   }
 }
@@ -377,10 +382,10 @@ function fromReplacing(phase: Replacing, input: Arrival, root: readonly string[]
       return source && input.source === source ? follow(phase, source, input, root) : stay(phase);
     }
     case 'leave-due':
-      // With no discovery followed, the next load's snapshot settles the leave.
-      return source ? leaveDue(phase, input.id, source.presence) : stay(phase);
+      return source && input.following(source) ? leaveDue(phase, input.id, source.presence) : stay(phase);
     case 'loaded':
-      return candidate && input.source === candidate ? adopt(phase, candidate, root) : stay(phase);
+      if (candidate && input.source === candidate) return adopt(phase, candidate, root);
+      return source && input.source === source ? resume(phase) : stay(phase);
     case 'ended': {
       if (candidate && input.source === candidate) {
         return afterEnded({ ...phase, candidate: undefined }, input, [release(candidate)]);
@@ -407,9 +412,11 @@ export function transition(phase: MembersPhase, input: MembersInput, root: reado
 
 /**
  * How long a member stays after its last namespace is withdrawn live before it is reported as left; a newly loaded
- * discovery's snapshot needs none. The relay orders nothing across two sessions: with no demand on the rotating
- * publisher, the old generation's withdrawal arrived before the new generation's announce in 24 of 75 rotations
- * measured on ord and fra (2026-11-03), by at most 0.2 ms.
+ * discovery's snapshot needs none. It counts only while the followed discovery delivers: one that runs out while the
+ * request is replaced or its stream has failed waits for the next load, which settles it or starts it again. The relay
+ * orders nothing across two sessions: with no demand on the rotating publisher, the old generation's withdrawal
+ * arrived before the new generation's announce in 24 of 75 rotations measured on ord and fra (2026-11-03), by at most
+ * 0.2 ms.
  */
 const LEAVE_GRACE_MS = 100;
 
@@ -439,6 +446,7 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
   const scope = new AbortController();
   const opened = new Map<Source, { watch: DiscoveryWatch; detach(): void }>();
   const leaves = new Map<string, ReturnType<typeof setTimeout>>();
+  const following = (source: Source) => opened.get(source)?.watch.following ?? false;
 
   const feed = (input: MembersInput, first = false) => {
     if (first) inbox.unshift(input);
@@ -520,7 +528,7 @@ export function openMembers(deps: MembersDependencies, root: readonly string[], 
           id,
           setTimeout(() => {
             leaves.delete(id);
-            feed({ kind: 'leave-due', id });
+            feed({ kind: 'leave-due', id, following });
           }, LEAVE_GRACE_MS),
         );
         return;
