@@ -42,7 +42,8 @@ export interface MembersHandlers {
    * leaves once it has had none for 100 ms, so a rotation whose withdrawal arrives just before the new generation's
    * announce calls nothing. A member's generations changing, the relay repeating an announce, and the subscriber's
    * reconnects and rotations call nothing; a reconnect, rotation or retry calls it once with the difference its new
-   * discovery shows, if there is one, joins and departures together.
+   * discovery shows, if there is one, joins and departures together. A member the new discovery misses but the old one
+   * still showed, or was giving its 100 ms, leaves once the new discovery has shown it nothing for 100 ms.
    */
   onChanged?(change: MembersChange): void;
   /** A discovery failure no wait fixes, such as the token not allowing the root. The view is closed. */
@@ -337,8 +338,16 @@ function fromLive(phase: Live, input: Arrival, root: readonly string[]): Step {
   }
 }
 
+/**
+ * A member the new snapshot misses leaves at once only when nothing else shows it. One the old discovery still shows,
+ * or one already in its grace, may have announced just after the snapshot was taken, so it gets the grace against the
+ * new discovery instead.
+ */
 function adopt(phase: Replacing, candidate: Source, root: readonly string[]): Step {
-  const { joined, left } = diffMembers(phase.settled, candidate.presence, root);
+  const { joined, left: missing } = diffMembers(phase.settled, candidate.presence, root);
+  const doubtful = (id: string) => phase.leaving.has(id) || (phase.source?.presence.has(id) ?? false);
+  const left = missing.filter((gone) => !doubtful(gone.id));
+  const leaving: Leaving = new Set(missing.filter((gone) => doubtful(gone.id)).map((gone) => gone.id));
   let settled = phase.settled;
   if (joined.length > 0 || left.length > 0) {
     const next = new Map(phase.settled);
@@ -347,10 +356,11 @@ function adopt(phase: Replacing, candidate: Source, root: readonly string[]): St
     settled = next;
   }
   return {
-    phase: { kind: 'live', settled, leaving: NOBODY_LEAVING, source: candidate },
+    phase: { kind: 'live', settled, leaving, source: candidate },
     effects: [
       ...(phase.source ? [release(phase.source)] : []),
-      ...[...phase.leaving].map(cancelLeave),
+      ...[...phase.leaving].filter((id) => !leaving.has(id)).map(cancelLeave),
+      ...[...leaving].map((id): MembersEffect => ({ kind: 'schedule-leave', id })),
       ...(settled === phase.settled ? [] : [emit(joined, left, settled)]),
     ],
   };

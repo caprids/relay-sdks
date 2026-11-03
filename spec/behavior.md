@@ -965,14 +965,19 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
   after the connection is up, or right after the counted snapshot with MoQ Active Count.
 - **Across connections.** A member view never reports the connection changing.
   - A [rotation](#rotation): the view follows the old connection's discovery until the new
-    connection's discovery has loaded, then reports the difference, normally none. The view keeps
-    the old connection open meanwhile, as a want's subscription does, for at most the 10 s overlap.
+    connection's discovery has loaded, then reports the difference, normally none. Newcomers join at
+    once. A member the old discovery still shows but the new snapshot does not leaves only once the
+    new discovery has shown it no namespace for 100 ms, since a member who announced just after the
+    new snapshot was taken reaches the old session first. The view keeps the old connection open
+    meanwhile, as a want's subscription does, for at most the 10 s overlap.
   - A reconnect: the view keeps what it last reported (`present` and `loaded` unchanged) while no
     connection is up and while the next connection's discovery loads. Then it reports the
     difference in one `onChanged`: newcomers in `joined`, and members who left meanwhile in `left`,
     with no 100 ms wait, since the new discovery's snapshot is the relay's state at one instant. A
-    member whose 100 ms was running, or ran out while no discovery was followed, is settled by the
-    snapshot the same way. Members still there report nothing, whatever their generations did.
+    member whose 100 ms was running, or ran out while no discovery was followed, stays when the
+    snapshot shows it. When the snapshot does not, its 100 ms starts again on the new discovery,
+    since a snapshot taken between a publisher rotation's withdrawal and its next announce misses
+    it. Members still there report nothing, whatever their generations did.
   - A discovery that ends while its connection stays up (the relay finished it, or a REQUEST_ERROR a
     wait may fix) is asked again after the want retry backoff, with the view held the same way. A
     failure no wait fixes (a permanent REQUEST_ERROR, such as `UNAUTHORIZED`) calls `onError`, and
@@ -986,8 +991,8 @@ TypeScript has it now: `subscriber.members({ root }, { onChanged, onError })` re
   nothing.
 - **Limits.** Without MoQ Active Count the load is an estimate. A snapshot that loss splits by more
   than `SNAPSHOT_QUIET_MS` shows its late members as later joins on the first load, and as a `left`
-  then a `joined` after a reconnect. A member who announces within the propagation delay of a
-  subscriber rotation to another relay can do the same.
+  then a `joined` after a reconnect. A member who announces just before a subscriber rotation to
+  another relay can do the same when the new relay learns of it more than 100 ms after its snapshot.
 
 ### Shared discovery
 

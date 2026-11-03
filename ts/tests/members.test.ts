@@ -924,7 +924,7 @@ describe('the members transition', () => {
     expect(next).toEqual({ phase: step.phase, effects: [] });
   });
 
-  it('follows a rotation make-before-break; a member missing at the new load leaves in its one change', () => {
+  it('follows a rotation make-before-break; a member the old discovery shows and the new load misses leaves after its grace', () => {
     const { on, source, step } = loaded('alice', 'bob');
     const to = connection();
     const retired = transition(step.phase, { kind: 'retiring', connection: on, next: to }, ROOT);
@@ -938,14 +938,18 @@ describe('the members transition', () => {
       ROOT,
     ).phase;
     const done = transition(phase, { kind: 'loaded', source: candidate }, ROOT);
-    expect(done.phase).toMatchObject({ kind: 'live', source: candidate });
+    expect(done.phase).toMatchObject({ kind: 'live', source: candidate, leaving: new Set(['bob']) });
     expect(done.effects).toEqual([
       { kind: 'release', source },
+      { kind: 'schedule-leave', id: 'bob' },
+    ]);
+    const due = transition(done.phase, { kind: 'leave-due', id: 'bob', following: () => true }, ROOT);
+    expect(due.effects).toEqual([
       { kind: 'emit', change: expect.objectContaining({ joined: [], left: [expect.objectContaining({ id: 'bob' })] }) },
     ]);
   });
 
-  it("settles every pending leave by a new load's snapshot: one it shows stays, one it does not is left", () => {
+  it("settles every pending leave by a new load's snapshot: one it shows stays, one it does not keeps its grace", () => {
     const { on, source, step } = loaded('alice', 'bob', 'carol');
     const withdraw = (phase: MembersPhase, id: string) =>
       transition(phase, { kind: 'namespace', source, type: 'unannounced', namespace: at(id) }, ROOT).phase;
@@ -962,18 +966,42 @@ describe('the members transition', () => {
       ).phase;
     }
     const done = transition(phase, { kind: 'loaded', source: candidate }, ROOT);
-    expect(done.phase).toMatchObject({ kind: 'live', leaving: new Set() });
+    expect(done.phase).toMatchObject({ kind: 'live', leaving: new Set(['bob']) });
     expect(done.effects).toEqual([
       { kind: 'release', source },
       { kind: 'cancel-leave', id: 'alice' },
-      { kind: 'cancel-leave', id: 'bob' },
+      { kind: 'schedule-leave', id: 'bob' },
+    ]);
+    const due = transition(done.phase, { kind: 'leave-due', id: 'bob', following: () => true }, ROOT);
+    const emitted = due.effects.at(-1) as { change: MembersChange };
+    expect(ids(emitted.change.left)).toEqual(['bob']);
+    expect([...emitted.change.present.keys()]).toEqual(['alice', 'carol']);
+  });
+
+  it('on a reconnect, reports a member shown when the old discovery ended as left at once, and holds one in its grace', () => {
+    const { source, step } = loaded('alice', 'bob');
+    const withdrawn = transition(
+      step.phase,
+      { kind: 'namespace', source, type: 'unannounced', namespace: at('bob') },
+      ROOT,
+    ).phase;
+    const ended = transition(
+      withdrawn,
+      { kind: 'ended', source, error: new SubscriptionConnectionClosedError() },
+      ROOT,
+    );
+    expect(ended.phase).toMatchObject({ kind: 'replacing', source: undefined });
+    const opened = transition(ended.phase, { kind: 'connection', connection: connection() }, ROOT);
+    const candidate = (opened.effects[0] as { source: Source }).source;
+    const done = transition(opened.phase, { kind: 'loaded', source: candidate }, ROOT);
+    expect(done.phase).toMatchObject({ kind: 'live', leaving: new Set(['bob']) });
+    expect(done.effects).toEqual([
+      { kind: 'schedule-leave', id: 'bob' },
       {
         kind: 'emit',
-        change: expect.objectContaining({ joined: [], left: [expect.objectContaining({ id: 'bob' })] }),
+        change: expect.objectContaining({ joined: [], left: [expect.objectContaining({ id: 'alice' })] }),
       },
     ]);
-    const emitted = done.effects.at(-1) as { change: MembersChange };
-    expect([...emitted.change.present.keys()]).toEqual(['alice', 'carol']);
   });
 
   it('holds a member whose last namespace went until its grace runs out, and cancels it if one comes back', () => {
