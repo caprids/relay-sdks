@@ -442,6 +442,82 @@ describe('a member leaving', () => {
     expect(changes).toHaveLength(2);
   });
 
+  it('reports nothing for a member the old discovery still shows when the new snapshot misses its announce', async () => {
+    const { subscriber, discovery } = await start();
+    const { changes, handlers } = recorder();
+    subscriber.members({ root: ROOT }, handlers);
+    const first = await discovery();
+    first.push({ type: 'announced', namespace: at('alice') });
+    first.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'load');
+    subscriber.rotate();
+    const next = await discovery(1);
+    first.push({ type: 'announced', namespace: at('bob') });
+    await until(() => changes.length === 2, 'bob joins on the old discovery');
+    next.push({ type: 'announced', namespace: at('alice') });
+    next.push({ type: 'loaded' });
+    await pause(5);
+    next.push({ type: 'announced', namespace: at('bob') });
+    await pause(150);
+    next.push({ type: 'announced', namespace: at('zed') });
+    await until(() => changes.length === 3, 'the marker join');
+    expect(summary(changes[2]!)).toEqual({
+      joined: ['zed'],
+      left: [],
+      present: ['alice', 'bob', 'zed'],
+      initial: false,
+    });
+  });
+
+  it('reports a member the old discovery still shows as left after the grace when the new one never does', async () => {
+    const { subscriber, discovery } = await start();
+    const { changes, handlers } = recorder();
+    subscriber.members({ root: ROOT }, handlers);
+    const first = await discovery();
+    first.push({ type: 'announced', namespace: at('alice') });
+    first.push({ type: 'announced', namespace: at('bob') });
+    first.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'load');
+    subscriber.rotate();
+    const next = await discovery(1);
+    next.push({ type: 'announced', namespace: at('alice') });
+    next.push({ type: 'announced', namespace: at('carol') });
+    const loaded = Date.now();
+    next.push({ type: 'loaded' });
+    await until(() => changes.length === 2, 'the join at the load');
+    expect(summary(changes[1]!)).toEqual({
+      joined: ['carol'],
+      left: [],
+      present: ['alice', 'bob', 'carol'],
+      initial: false,
+    });
+    await until(() => changes.length === 3, 'the leave');
+    expect(Date.now() - loaded).toBeGreaterThanOrEqual(90);
+    expect(summary(changes[2]!)).toEqual({ joined: [], left: ['bob'], present: ['alice', 'carol'], initial: false });
+  });
+
+  it("reports nothing when a reconnect's snapshot falls between a rotation's withdrawal and its announce", async () => {
+    const { connections, subscriber, discovery } = await start();
+    const { changes, handlers } = recorder();
+    subscriber.members({ root: ROOT }, handlers);
+    const first = await discovery();
+    const old = newGeneration(1_000);
+    first.push({ type: 'announced', namespace: at('alice', old) });
+    first.push({ type: 'loaded' });
+    await until(() => changes.length === 1, 'load');
+    first.push({ type: 'unannounced', namespace: at('alice', old) });
+    await pause(20);
+    connections[0]!.end(new RelayError('TRANSPORT_ERROR', 'idle', 'connection'));
+    const next = await discovery(1);
+    next.push({ type: 'loaded' });
+    await pause(5);
+    next.push({ type: 'announced', namespace: at('alice', newGeneration(2_000)) });
+    await pause(150);
+    next.push({ type: 'announced', namespace: at('zed') });
+    await until(() => changes.length === 2, 'the marker join');
+    expect(summary(changes[1]!)).toEqual({ joined: ['zed'], left: [], present: ['alice', 'zed'], initial: false });
+  });
+
   it('holds a leave whose grace runs out during an outage for the new load to settle', async () => {
     const { connections, subscriber, discovery } = await start();
     const { changes, handlers } = recorder();
