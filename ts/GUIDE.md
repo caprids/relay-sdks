@@ -1289,8 +1289,9 @@ So the viewer does the dropping:
 
 A message that must arrive, such as a command, is not latest-wins. Await a `track.write()` or
 `writeJSON()` for each one. A concurrent write rejects, so queue commands in your own code. A write
-waits for relay demand and sends once the relay subscribes. It fails with `WRITE_TIMEOUT` only if
-no subscription arrives within the write deadline (10 s by default). Commands can also arrive out of order, so number them in
+waits for relay demand and sends once the relay subscribes. The write deadline (10 s by default)
+covers both the wait and the transport write, so a `WRITE_TIMEOUT` does not prove the command was
+never delivered. Check its `phase`: only `'waiting-for-demand'` means no bytes went out. Commands can also arrive out of order, so number them in
 the payload if order matters. Nothing confirms that a viewer acted on a command. If you need that,
 have the viewer reply on its own track.
 
