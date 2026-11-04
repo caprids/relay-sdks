@@ -1010,7 +1010,12 @@ At the 20 ms floor the buffer underran 6.5 times a minute and trimmed 3 s in 15 
 `minJitterTargetUs: 80_000` it underran 0.5 times a minute and trimmed 0.5 s, holding about 40 ms
 more. Side by side on two other paths, a 60 ms floor underran about 15% more often than 80 ms and
 held 15 to 20 ms less. A call whose `stats.underruns` keeps climbing while `stats.jitterTargetUs`
-keeps coming back to the floor wants a higher one.
+keeps coming back to the floor wants a higher one, if it can spend the delay. On a voice benchmark's
+emulated paths (measured, Chrome, moq-relay 0.17.9, four rounds a setting), an 80 ms floor
+(`minJitterTargetUs: 80_000`, no reorder window) cut underruns from 12.5 to 5 a round on busy Wi-Fi
+and from 8.5 to 0.8 at 2% random loss, and audible drops from 4.1 to 2.9 a minute and from 5.7 to
+5.1, for about 50 ms more mouth-to-ear delay (166 against 115 ms, 177 against 127 ms): 60 to 90%
+fewer underruns for about 50 ms.
 
 The player fills a lost Opus frame rather than playing silence. It decodes Opus with libopus
 compiled to WebAssembly, which rebuilds the frame from the next frame's in-band FEC when the
@@ -1136,7 +1141,7 @@ group is that old), not a queue further down the path: see spec/relay-interop.md
 ```ts
 // subscriber is a supervised subscriber (connectSupervisedSubscriber).
 const voice = createFrameReader(
-  createFrameSequencer({ clock, grouping: 'frame', lateDropUs: 60_000, reorderWindowUs: 60_000, catchUpAfterUs: 300_000 }),
+  createFrameSequencer({ clock, grouping: 'frame', lateDropUs: 60_000, catchUpAfterUs: 300_000 }),
   { onFrame: input.push, onCatchUp: () => subscriber.catchUp('voice') },
 );
 subscriber.want(
@@ -1146,15 +1151,34 @@ subscriber.want(
 );
 ```
 
-Give a listener a short reorder window as well. Under frame grouping each audio frame is a group of
-its own, and the relay sends each group on a stream of its own, so two neighbouring frames can arrive
-swapped. With no window the sequencer drops the second to arrive as behind, and the player conceals
-it. In a 20-minute two-browser call through one relay (measured, one machine), the sequencer dropped
-1.9% of audio frames this way, nearly all within 5 ms of the frame that overtook them, and the player
-synthesized 22 s of audio in their place. With `reorderWindowUs: 60_000` it dropped 0.01% and
-synthesized under 1 s. The window holds frames only while an earlier group is missing, so audio that
-arrives in order is not delayed; a frame after a real loss waits up to the window, then plays with
-`gap`.
+Leave a listener's reorder window at its default, none. Under frame grouping each audio frame is a
+group of its own, and the relay sends each group on a stream of its own, so two neighbouring frames
+can arrive swapped. With no window the sequencer drops the second to arrive as behind
+(`stats.behind`), and the player conceals it. A window would wait for it, but it holds every later
+frame while an earlier one is missing, and on a path with real loss most missing frames are lost, or
+resent too late to use: each costs the whole window, the player underruns, and its buffer grows and
+keeps the delay. Set a window only when `stats.behind` makes up most of the sequencer's discards
+(against `stats.late`) on a path with little loss, and size it just over the gap between a swapped
+frame and the one that overtook it, not to a resend. Audio that arrives in order is never held; a
+frame after a real loss waits up to the window, then plays with `gap`.
+
+On a path with little loss a window pays. In a 20-minute call between two browsers through one
+relay, on one machine (measured), the sequencer dropped 1.9% of audio frames as behind, nearly all
+within 5 ms of the frame that overtook them, and the player synthesized 22 s of audio in their
+place. With `reorderWindowUs: 60_000` it dropped 0.01% and synthesized under 1 s.
+
+On a path with real loss it costs more than it recovers. A voice benchmark (measured: emulated
+network paths, Chrome, moq-relay 0.17.9, four rounds a setting) compared windows with none, the
+default, with late drop at its default 40 ms. At 2% random loss, a 60 ms window with
+`lateDropUs: 60_000` had 8.4 audible drops a minute at 195 ms mouth-to-ear, against 5.5 at 129 ms
+with the defaults: it underran 21 times a round against 8, ended with a 108 ms buffer target against
+38 ms, and recovered only 25 of 272 discarded frames, because most resends arrived after 60 ms. On a
+busy Wi-Fi path the same window did recover swaps (12 frames discarded against 91), for 4.1 drops a
+minute against 4.9, but at 157 ms against 119 ms. On a clean, distant path it went from 0.1 to 1.0
+drops a minute. Shorter windows did no better: in a separate
+run, 15 and 20 ms windows (late drop at the default 40 ms) discarded more frames and underran more
+often than none, with 4.4 and 6.4 drops a minute at 141 and 146 ms on busy Wi-Fi against 4.1 at
+115 ms, and 7.1 and 7.6 at 154 and 157 ms at 2% loss against 5.7 at 127 ms.
 
 **To an agent** (a person's voice to speech-to-text), the goal is every word, soon after the person
 stops. Completeness comes from the person's publisher and the reorder window, not from FETCH. Give
