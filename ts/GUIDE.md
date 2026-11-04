@@ -1168,13 +1168,14 @@ within 5 ms of the frame that overtook them, and the player synthesized 22 s of 
 place. With `reorderWindowUs: 60_000` it dropped 0.01% and synthesized under 1 s.
 
 On a path with real loss it costs more than it recovers. A voice benchmark (measured: emulated
-network paths, Chrome, moq-relay 0.17.9, four rounds a setting) compared windows with none. At 2%
-random loss, a 60 ms window with `lateDropUs: 60_000` had 8.4 audible drops a minute at 195 ms
-mouth-to-ear, against 5.5 at 129 ms with no window: it underran 21 times a round against 8, ended
-with a 108 ms buffer target against 38 ms, and recovered only 25 of 272 discarded frames, because
-most resends arrived after 60 ms. On a busy Wi-Fi path the same window did recover swaps (12 frames
-discarded against 91), for 4.1 drops a minute against 4.9, but at 157 ms against 119 ms. On a clean,
-distant path it went from 0.1 to 1.0 drops a minute. Shorter windows did no better: in a separate
+network paths, Chrome, moq-relay 0.17.9, four rounds a setting) compared windows with none, the
+default, with late drop at its default 40 ms. At 2% random loss, a 60 ms window with
+`lateDropUs: 60_000` had 8.4 audible drops a minute at 195 ms mouth-to-ear, against 5.5 at 129 ms
+with the defaults: it underran 21 times a round against 8, ended with a 108 ms buffer target against
+38 ms, and recovered only 25 of 272 discarded frames, because most resends arrived after 60 ms. On a
+busy Wi-Fi path the same window did recover swaps (12 frames discarded against 91), for 4.1 drops a
+minute against 4.9, but at 157 ms against 119 ms. On a clean, distant path it went from 0.1 to 1.0
+drops a minute. Shorter windows did no better: in a separate
 run, 15 and 20 ms windows (late drop at the default 40 ms) discarded more frames and underran more
 often than none, with 4.4 and 6.4 drops a minute at 141 and 146 ms on busy Wi-Fi against 4.1 at
 115 ms, and 7.1 and 7.6 at 154 and 157 ms at 2% loss against 5.7 at 127 ms.
