@@ -1695,7 +1695,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
 - When the next group ID has not been seen, the lowest group holding its keyframe waits while that
   keyframe is not yet due (its timestamp ahead of the position), since the missing group may still
   arrive or may never have been sent (a failed group's ID is not reused). Groups and objects behind
-  what was delivered or passed over, or below the group being delivered, are dropped as late.
+  what was delivered or passed over, or below the group being delivered, are dropped as behind.
 - Frame grouping (audio): every frame stands alone and goes out at once in group and object order. A
   group may hold several frames, one per object, as a group opened with `openGroup()` /
   `open_group()` writes them. The position is then a group and an object, so a group's later objects
@@ -1703,7 +1703,7 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   object ID skips within the last delivered group, or that opens a newer group past its object 0,
   carries `gap`. A frame more than the clock's `lateDropUs` behind the position is dropped, so a
   burst after a stall cannot build a lasting backlog in the player. One behind what was delivered
-  (an earlier group, or an earlier object of the same group) is dropped too. Nothing waits
+  (an earlier group, or an earlier object of the same group) is dropped as behind. Nothing waits
   unless a reorder window is set (below).
 - Per-track delivery policy is TypeScript only. Python keeps the defaults. Three sequencer options
   tune one track without touching the clock its other tracks share. Each default leaves the
@@ -1790,8 +1790,9 @@ that drive a sequencer and poll it when a wait ends. It knows no format. Impleme
   iterated and takes one frame per read, so a slow reader gets fresh frames, not a backlog. Both treat
   each group as one subgroup, as the frame writer sends it. A want read through a reader keeps
   `drainMs` / `drain` at 0, the default: a drained old subscription's groups would arrive after the
-  Move, indistinguishable from the new subscription's. Counters: delivered, late,
-  skipped groups, resyncs, untimed, and in TypeScript early. The decisions are pinned by
+  Move, indistinguishable from the new subscription's. Counters: delivered, late (too late against
+  the clock's position, or dropped past the held bound), behind (arrived behind what was delivered or
+  passed over), skipped groups, resyncs, untimed, and in TypeScript early. The decisions are pinned by
   `vectors/frame-sequencer.json`.
 - A listener follows a track replacement by the catalog: `findReplacementTrack` /
   `find_replacement_track` returns nothing while a newer catalog still lists the track playing (its
