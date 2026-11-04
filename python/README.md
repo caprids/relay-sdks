@@ -923,8 +923,8 @@ Send each value as a group of its own, holding one object. `track.write()` does 
 document service. `caprid_relay.media.DocumentService(track)` is the simplest latest-wins publisher.
 `update(value)` replaces the value it holds. While a write is in progress, later updates replace one
 another, so only the newest is sent next. The service also sends the current value again on every
-relay subscription. That matters because a write made while the relay has no subscription reaches no
-one. After a failed write, it waits `retry_delay` seconds (1 by default) before it sends again, so
+relay subscription. That matters because an update made while the relay has no subscription is only
+held, not sent. After a failed write, it waits `retry_delay` seconds (1 by default) before it sends again, so
 pass a smaller value for a value that changes quickly.
 
 Make each value complete, not a change to the previous one. A viewer that joins late starts at the
@@ -932,7 +932,11 @@ relay's latest group ([late subscribers](../spec/relay-interop.md#late-subscribe
 and the viewer drops values that arrive superseded.
 
 **Under congestion, the relay drops nothing.** When the viewer's downlink is too slow for the track,
-moq-relay keeps sending every group, however late, and you cannot ask it to drop superseded ones. In
+moq-relay 0.17 keeps sending every group, however late, and you cannot ask it to drop superseded
+ones. A relay that declares the MoQ Timestamp extension's max age (`RelaySubscriber.max_age_supported`)
+skips groups that a newer one has superseded for longer than the
+`MessageParameters(max_age=...)` (milliseconds) you subscribe with. The SDK sends it only to such a
+relay, so it is safe to set ([subscriber max age](../spec/relay-interop.md#subscriber-max-age-max_age)). In
 a run against production on 2026-11-04, a viewer limited to 300 kbit/s received 700 of 700
 one-object groups from a 400 kbit/s track. The p50 was 2.7 s late and the latest 15.6 s late. About
 600 of them arrived before an older group, because each group travels on a stream of its own. The
@@ -957,8 +961,8 @@ So the viewer does the dropping:
 
 A message that must arrive, such as a command, is not latest-wins. Await a `track.write()` or
 `write_json()` for each one. A concurrent write raises `WRITE_PENDING`, so queue commands in your own
-code. A write waits for relay demand only until `write_timeout` (10 s by default), so a command sent
-while no one is subscribed raises `WRITE_TIMEOUT`. Commands can also arrive out of order, so number
+code. A write waits for relay demand and sends once the relay subscribes. It raises `WRITE_TIMEOUT`
+only if no subscription arrives within `write_timeout` (10 s by default). Commands can also arrive out of order, so number
 them in the payload if order matters. Nothing confirms that a viewer acted on a command. If you need
 that, have the viewer reply on its own track.
 
@@ -968,7 +972,7 @@ The publisher and the viewer set different things, under similar names:
 
 | Setting | Side | What it does |
 | --- | --- | --- |
-| `PlayoutClock(target_latency_us=...)` | viewer | How far behind live the viewer plays, and how late a frame may be before the sequencer drops it. The default is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([moq-media](packages/moq-media/README.md)). |
+| `PlayoutClock(target_latency_us=...)` | viewer | How far behind live the viewer plays. Under keyframe grouping (video) it is also how late a frame may be before the sequencer drops it. Frame-grouped audio is dropped once it is later than the clock's `late_drop_us` (40 ms by default) instead. The default target is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([moq-media](packages/moq-media/README.md)). |
 | Resync | viewer, automatic | When frames have stayed late for a whole target latency, or the next keyframe is more than one target latency ahead, the `FrameSequencer` re-anchors the clock and marks the frame `resync`. A lasting delay then costs one target latency, not a stall. |
 | `stale_after` on `want` | viewer | Resubscribes a track that has been silent that many seconds. The want restarts with reason `"stale"`. Use it only for tracks that are never silent while live. |
 | `media_track_properties(kind, target_latency_us=...)` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |

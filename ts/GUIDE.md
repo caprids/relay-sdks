@@ -1140,7 +1140,7 @@ below the clock's target latency, or a resync re-anchors on the late audio first
 own delivery timeout goes on the SUBSCRIBE as well, for a relay that honours it. moq-relay 0.17.5 and
 0.17.7 ignore it, and so does moq-dev main, which honours `maxAge` instead (the MoQ Timestamp
 extension's subscriber max age, in milliseconds). The SDK sends `maxAge` only to a relay whose SETUP
-declared it (`subscriber.maxAgeSupported`), so it is safe to set against any relay. It bounds what the
+declared it (`maxAgeSupported` on a `connectRelaySubscriber` connection), so it is safe to set against any relay. It bounds what the
 relay still holds for this subscriber (a group it has not sent or not yet had acknowledged once a newer
 group is that old), not a queue further down the path: see spec/relay-interop.md, "Subscriber max age".
 
@@ -1252,8 +1252,8 @@ Send each value as a group of its own, holding one object. `track.write()` does 
 document service. `createDocumentService(track)` from `@caprid/relay/media` is the simplest
 latest-wins publisher. `update(value)` replaces the value it holds. While a write is in progress,
 later updates replace one another, so only the newest is sent next. The service also sends the
-current value again on every relay subscription. That matters because a write made while the relay
-has no subscription reaches no one. After a failed write, it waits `retryDelayMs` (1 s by default)
+current value again on every relay subscription. That matters because an update made while the relay
+has no subscription is only held, not sent. After a failed write, it waits `retryDelayMs` (1 s by default)
 before it sends again, so pass a smaller value for a value that changes quickly.
 
 Make each value complete, not a change to the previous one. A viewer that joins late starts at the
@@ -1261,7 +1261,10 @@ relay's latest group ([late subscribers](../spec/relay-interop.md#late-subscribe
 and the viewer drops values that arrive superseded.
 
 **Under congestion, the relay drops nothing.** When the viewer's downlink is too slow for the track,
-moq-relay keeps sending every group, however late, and you cannot ask it to drop superseded ones. In
+moq-relay 0.17 keeps sending every group, however late, and you cannot ask it to drop superseded
+ones. A relay that declares the MoQ Timestamp extension's max age (`maxAgeSupported` on a `connectRelaySubscriber` connection)
+skips groups that a newer one has superseded for longer than the `maxAge` you subscribe with. The SDK
+sends `maxAge` only to such a relay, so it is safe to set ([voice](#voice-delivery-per-direction)). In
 a run against production on 2026-11-04, a viewer limited to 300 kbit/s received 700 of 700
 one-object groups from a 400 kbit/s track. The p50 was 2.7 s late and the latest 15.6 s late. About
 600 of them arrived before an older group, because each group travels on a stream of its own. The
@@ -1286,8 +1289,8 @@ So the viewer does the dropping:
 
 A message that must arrive, such as a command, is not latest-wins. Await a `track.write()` or
 `writeJSON()` for each one. A concurrent write rejects, so queue commands in your own code. A write
-waits for relay demand only until the write deadline (10 s by default), so a command sent while no
-one is subscribed fails with `WRITE_TIMEOUT`. Commands can also arrive out of order, so number them in
+waits for relay demand and sends once the relay subscribes. It fails with `WRITE_TIMEOUT` only if
+no subscription arrives within the write deadline (10 s by default). Commands can also arrive out of order, so number them in
 the payload if order matters. Nothing confirms that a viewer acted on a command. If you need that,
 have the viewer reply on its own track.
 
@@ -1297,7 +1300,7 @@ The publisher and the viewer set different things, under similar names:
 
 | Setting | Side | What it does |
 | --- | --- | --- |
-| `createPlayoutClock({ targetLatencyUs })` | viewer | How far behind live the viewer plays, and how late a frame may be before the sequencer drops it. The default is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([subscribing to media](#subscribing-to-media)). |
+| `createPlayoutClock({ targetLatencyUs })` | viewer | How far behind live the viewer plays. Under keyframe grouping (video) it is also how late a frame may be before the sequencer drops it. Frame-grouped audio is dropped once it is later than the clock's `lateDropUs` (40 ms by default) instead. The default target is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([subscribing to media](#subscribing-to-media)). |
 | Resync | viewer, automatic | When frames have stayed late for a whole target latency, or the next keyframe is more than one target latency ahead, the sequencer re-anchors the clock and marks the frame `resync`. A lasting delay then costs one target latency, not a stall. |
 | `catchUpAfterUs` with `catchUp(key)` | viewer | Replaces the subscription at the live edge once frames keep arriving late. The want restarts with reason `'catch-up'` ([voice](#voice-delivery-per-direction)). |
 | `staleAfterMs` on `want` | viewer | Resubscribes a track that has been silent that long. The want restarts with reason `'stale'`. Use it only for tracks that are never silent while live. |
