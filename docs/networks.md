@@ -17,7 +17,7 @@ each, and says which are TypeScript only.
 | [Forward error correction](#forward-error-correction) | Opus in-band FEC only, decoded by the TypeScript audio player. No packet-level FEC. |
 | [Loss concealment and jitter buffering](#audio-concealment-and-jitter-buffer) | Yes, in the TypeScript audio player. |
 | [Encoding adaptation](#encoding-adaptation) | Building blocks: backlog and keyframe signals, renditions in the catalog, make-before-break track switching. No built-in bandwidth estimate or ABR policy. |
-| [Connection loss](#connection-loss) | Supervised connections reconnect and resubscribe. A WebSocket fallback covers networks without UDP. |
+| [Connection loss](#connection-loss) | Supervised connections reconnect and resubscribe, but do not replay what was lost. An opt-in WebSocket fallback (TypeScript) covers networks without UDP. |
 
 Measured figures below come from emulated paths and from production relays. Each links to its
 measurements. The relay is [moq-relay](https://github.com/moq-dev/moq). Where its behavior matters,
@@ -26,18 +26,27 @@ the release is named.
 ## Retransmission
 
 MOQT runs over QUIC: WebTransport in the browser, native QUIC in Node and Python. QUIC detects lost
-packets and resends their data, and runs congestion control, so every object that is still wanted
-eventually arrives. Neither is configurable from a web page: the browser's QUIC stack owns the
-connection ([browser transport limits](../ts/GUIDE.md#browser-transport-limits)).
+packets and resends their data, and runs congestion control. Neither is configurable from a web
+page: the browser's QUIC stack owns the connection
+([browser transport limits](../ts/GUIDE.md#browser-transport-limits)).
+
+Resending is not a delivery guarantee. A stream reset by a [delivery timeout](#lateness-drop-instead-of-stall)
+or a lost connection takes its unsent data with it, and a write that completed can still be lost
+without an error. The publisher keeps nothing to replay, and a reconnect restores subscriptions, not
+missing objects ([publishing](../spec/behavior.md#publishing)). Where every message matters, number them and have
+the receiver reply ([control and telemetry](../ts/GUIDE.md#control-and-telemetry)).
 
 Each group travels on its own QUIC stream. A packet lost from one group's stream holds up only that
 group. Later groups keep arriving, so a viewer can see them out of order, and the SDK's
 [frame sequencer](#lateness-drop-instead-of-stall) puts them back in order or drops what is too late.
 
-On a network that blocks UDP, the SDK can carry MOQT on QMux over a WebSocket instead
-([networks without UDP](../ts/GUIDE.md#networks-without-udp-qmux-over-websocket)). That is TCP: it
-still resends, but every track shares one ordered byte stream, so one lost packet holds up all of
-them until TCP resends it.
+On a network that blocks UDP, the TypeScript SDK can carry MOQT on QMux over a WebSocket instead,
+if you opt in with the `@caprid/relay-websocket` package
+([networks without UDP](../ts/GUIDE.md#networks-without-udp-qmux-over-websocket)). The Python SDK has
+no equivalent. That is TCP: it still resends, but every track shares one ordered byte stream, so one
+lost packet holds up all of them until TCP resends it. The relay's acknowledgements are not visible
+there either, so the publisher's delivery timeouts cannot bound TCP resending of data already handed
+to the socket.
 
 Nothing uses QUIC datagrams. All media is sent reliably, and lateness is handled by dropping, as below,
 rather than by unreliable delivery.
@@ -65,12 +74,19 @@ A relay that supports the MoQ Timestamp extension's max age drops, for each view
 one has superseded for longer than the viewer's `maxAge`. The SDK sends it only to a relay that
 declares it, so it is safe to set now ([subscriber max age](../spec/relay-interop.md#subscriber-max-age-max_age)).
 
-**The publisher** bounds how long its own transport keeps resending. `mediaTrackProperties` gives
-media tracks delivery timeouts (500 ms for audio; for video, the target latency less the keyframe
-interval), after which the publisher abandons a group the relay has not acknowledged. This bounds only
-the publisher's link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
-Where every object must arrive, such as a person's speech going to speech-to-text, raise the
-timeout so the transport keeps resending through loss
+**The publisher** bounds how long its own transport keeps resending a finished group.
+`mediaTrackProperties` gives media tracks a subgroup delivery timeout: 500 ms for audio, and for
+video the target latency less the keyframe interval, but never less than the interval. The timer
+starts when a group's end is handed to the transport, and the publisher then resets a group the
+relay has not acknowledged in time. It is not a bound on a frame's age: an open video group has no
+timer until the next keyframe closes it, so its frames can wait out a stall. It also bounds only the
+publisher's link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
+
+Where every object must arrive, such as a person's speech going to speech-to-text, both ends change.
+The publisher raises the audio timeout to 1 to 2 s so its transport keeps resending through loss.
+The receiver drops nothing as late (`lateDropUs: Infinity`) and waits for a missing group at least
+as long as that timeout (`reorderWindowUs`), since a resent group can arrive after the ones that
+follow it. These sequencer options are TypeScript only
 ([voice: delivery per direction](../ts/GUIDE.md#voice-delivery-per-direction)).
 
 ## Prioritization
@@ -94,10 +110,13 @@ When there is not enough bandwidth for everything, audio should go first.
 There is no packet-level FEC (no redundant packets that rebuild lost ones). QUIC recovers loss by
 resending, which costs a round trip.
 
-For voice, Opus in-band FEC is supported end to end in the browser. The encoder puts a low-bitrate
-copy of each frame into the next packet. The TypeScript audio player decodes Opus with libopus
-(WebAssembly) and rebuilds a lost frame from that copy, with no added delay. To use it, turn it on
-in the publisher's encoder, with an expected loss above 0. With WebCodecs:
+For voice, Opus in-band FEC is supported end to end in the browser. With it on, the encoder can put a
+low-bitrate copy of a frame (LBRR) into the next packet; it decides per packet, and packets coded
+in CELT mode carry none. The TypeScript audio player decodes Opus with libopus (WebAssembly) and,
+when the packet after a loss carries a copy, rebuilds the lost frame from it without waiting for
+anything more. Rebuilt audio that would arrive after the buffer has already run dry is dropped, as
+it would only add delay. To use it, turn it on in the publisher's encoder, with an expected loss
+above 0. With WebCodecs:
 
 ```ts
 encoder.configure({ codec: 'opus', sampleRate: 48_000, numberOfChannels: 1, opus: { useinbandfec: true, packetlossperc: 10 } });
@@ -143,15 +162,22 @@ encoder. What they provide:
   while nobody watches.
 
 A rising backlog or repeated drops is your cue to lower the encoder's bitrate, frame rate, or
-resolution, and to raise them again once writes stay clear.
+resolution. A clear backlog does not prove the network has recovered, though. It counts only frames
+waiting in the SDK, not data in the transport's buffers or the viewers' bandwidth: in Chromium,
+writes completed in under 1 ms through a 2 s blackout, and a group reset later by its delivery
+timeout reports nothing to the writer ([media publishing](../spec/behavior.md#media-publishing)). Raise quality again
+cautiously, and prefer viewer-side signals (below) for the rendition each viewer gets.
 
 **For viewers**, publish several renditions as separate tracks (`video-hi`, `video-lo`) and mark
 them in the catalog as alternates of one another with `altGroup`
 ([catalogs](../ts/packages/moq-media/README.md#catalogs)). Each viewer then chooses its own
 rendition, and `subscribeSwitchable` with `switchTo` moves it between them make-before-break: the
-new track is subscribed while the old one keeps playing, and the cut-over happens at a matching
-frame ([switching tracks](../ts/GUIDE.md#switching-tracks)). A supervised subscriber's `want()`
-switches the same way when you want a key again with another track. When to switch is yours. Useful
+new track is subscribed while the old one keeps playing, and it cuts over on the first new-track
+object that passes your `until` test. Give it one that compares your media timestamps with what was
+already shown: the default, the first object, can be a stale cached group or skip media, and group
+IDs do not line up across tracks ([switching tracks](../ts/GUIDE.md#switching-tracks)). A supervised
+subscriber's `want()` switches the same way, with the same `until`, when you want a key again with
+another track. When to switch is yours. Useful
 signals are the frame sequencer's `stats` (late frames, skipped groups, resyncs) and the audio
 player's underruns.
 
@@ -164,12 +190,15 @@ published.
   with backoff, register your tracks again on each new connection, and resubscribe what you asked for
   ([stay connected](../ts/GUIDE.md#stay-connected-supervised-connections)). `staleAfterMs` resubscribes a
   track that went silent.
-- **Browser limits.** A browser closes a QUIC connection that hears nothing for about 5 s with data
-  outstanding, even if the network has come back. Longer outages need a new connection, which a
-  supervised connection opens for you ([publisher recovery](../spec/publisher-recovery.md)).
-- **Networks without UDP.** `withWebSocketFallback()` races a WebSocket against WebTransport after
-  250 ms, so a network that blocks UDP still connects, with the
-  [costs above](#retransmission).
+- **Browser limits.** Chromium 147 closed a QUIC connection that heard nothing for about 5 s with
+  data outstanding, even after the network came back; other browsers are untested
+  ([browser transport limits](../ts/GUIDE.md#browser-transport-limits)). Longer outages need a new
+  connection, which a supervised connection opens for you
+  ([publisher recovery](../spec/publisher-recovery.md)).
+- **Networks without UDP.** In TypeScript, opt in with `withWebSocketFallback()` from
+  `@caprid/relay-websocket`. It races a WebSocket against WebTransport after 250 ms, so a network
+  that blocks UDP still connects, with the [costs above](#retransmission). Default connections never
+  fall back, and Python has no WebSocket transport.
 
 ## Not available yet
 
@@ -178,4 +207,5 @@ published.
 - Relay-side dropping of late groups on moq-relay 0.17 (it ignores subscriber delivery timeouts;
   [moq-dev/moq#5881](https://github.com/moq-dev/moq/issues/5881)). The viewer drops them instead.
 - Send-order prioritization from Chromium and from the Python publisher.
-- An FEC option on the Python `OpusEncoder`, and an audio player in Python.
+- In Python: an FEC option on `OpusEncoder`, an audio player, the per-track delivery policy
+  (`lateDropUs`, `reorderWindowUs`, `catchUp`), and a WebSocket transport.
