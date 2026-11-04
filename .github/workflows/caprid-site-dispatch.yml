@@ -22,6 +22,7 @@ on:
       - 'python/README.md'
       - 'python/CHANGELOG.md'
       - 'python/packages/*/README.md'
+      - 'docs/networks.md'
       # The TypeScript API reference (TypeDoc over every package) and the SDK version on the landing page.
       - 'ts/src/**'
       - 'ts/packages/*/src/**'

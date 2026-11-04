@@ -16,6 +16,8 @@ The shared protocol pins, behavior contract, and test vectors live in [spec](../
 [root README](../README.md) describes the whole repository. Before 1.0, a minor version can break the
 API, and [CHANGELOG.md](CHANGELOG.md) says what changed. This guide follows the `main` branch, which
 can be ahead of the latest release.
+For what the SDKs do about loss, delay, and low bandwidth, see
+[unreliable networks](../docs/networks.md).
 
 ## First round trip
 

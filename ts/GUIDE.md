@@ -10,6 +10,8 @@ package (see the [README's Node section](README.md#node)). Other runtimes must s
 This is the TypeScript SDK in the Relay SDKs repository. The shared protocol pins, behavior
 contract, and test vectors live in [spec](../spec/README.md), and the [root README](../README.md)
 describes the suite. The packages are on npm as `@caprid/*` ([install](README.md#install)).
+For what the SDKs do about loss, delay, and low bandwidth, see
+[unreliable networks](../docs/networks.md).
 
 ## First round trip
 
