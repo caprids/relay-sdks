@@ -900,6 +900,17 @@ which turns encoded chunks into LOC payloads without a muxer or media engine. Fo
 files, the optional [Mediabunny adapter](packages/moq-mediabunny/README.md) maps demuxed packets. See
 the [file publishing example](examples/mediabunny/README.md).
 
+Serve the catalog before you gate encoding on demand. Viewers read the catalog first, and only then
+subscribe to the video track, which is what gives it demand. If the catalog waits for the encoder's
+first output, and the encoder waits for `track.hasDemand`, neither ever starts, and no viewer gets
+video. Either build the catalog from the encoder configuration you already know, or encode
+regardless of demand until the first decoder configuration arrives, as the WebCodecs example does:
+
+```ts
+// Encode until the catalog exists (`video` holds its decoder config), then only while the track has demand.
+if (!video || track.hasDemand) encoder.encode(frame, { keyFrame });
+```
+
 ## Subscribing to media
 
 A player reads the same tracks back. Read the catalog first. `parseMsfCatalog` from
@@ -1191,6 +1202,107 @@ const reply = createFrameReader(
 
 A live talker's frames are never early, so they play as without it. Delay that underruns add while a
 queue builds is given back once frames come early again, as without it.
+
+## Control and telemetry
+
+Apps that send media often send small data beside it. A robot reports telemetry, and a remote
+cockpit sends it controls. Most of this data is **latest-wins**: a newer value makes the older one
+useless. Some of it is not, such as an emergency stop that must arrive even when a newer message
+follows. Choose the pattern per track.
+
+### Each side publishes its own track
+
+A publisher connection serves one namespace. So each side of a two-way app has its own publisher,
+and subscribes to the other side's namespace with a subscriber. The robot publishes `video` and
+`telemetry` under `['room', 'robot']`, and subscribes to `control` under `['room', 'cockpit']`. The
+cockpit does the reverse. Each side's token must grant publishing under its own namespace and
+subscribing under the other's.
+
+```ts
+import { connectRelayPublisher, connectSupervisedSubscriber, readJSON } from '@caprid/relay';
+import { createDocumentService } from '@caprid/relay/media';
+
+// On the robot.
+const publisher = await connectRelayPublisher({ url, getToken, namespace: ['room', 'robot'] });
+const telemetry = createDocumentService(publisher.registerTrack({ track: 'telemetry' }));
+telemetry.serve({ signal }).catch(onError);
+setInterval(() => telemetry.update(new TextEncoder().encode(JSON.stringify(readSensors()))), 50);
+
+const subscriber = await connectSupervisedSubscriber({ url, getToken });
+let newest = -1; // the newest control group applied
+subscriber.want(
+  'control',
+  { namespace: ['room', 'cockpit'], track: 'control', parameters: { subscriberPriority: 0 } },
+  {
+    onObject(object) {
+      if (object.groupId <= newest) return; // superseded: a newer value already arrived
+      newest = object.groupId;
+      applyControl(readJSON(object));
+    },
+    onRestarted: () => (newest = -1), // the new subscription numbers its groups afresh
+    onSwitched: () => (newest = -1),
+    onError,
+  },
+);
+```
+
+### Latest-wins values
+
+Send each value as a group of its own, holding one object. `track.write()` does this, and so does a
+document service. `createDocumentService(track)` from `@caprid/relay/media` is the simplest
+latest-wins publisher. `update(value)` replaces the value it holds. While a write is in progress,
+later updates replace one another, so only the newest is sent next. The service also sends the
+current value again on every relay subscription. That matters because a write made while the relay
+has no subscription reaches no one. After a failed write, it waits `retryDelayMs` (1 s by default)
+before it sends again, so pass a smaller value for a value that changes quickly.
+
+Make each value complete, not a change to the previous one. A viewer that joins late starts at the
+relay's latest group ([late subscribers](../spec/relay-interop.md#late-subscribers-and-location-filters)),
+and the viewer drops values that arrive superseded.
+
+**Under congestion, the relay drops nothing.** When the viewer's downlink is too slow for the track,
+moq-relay keeps sending every group, however late, and you cannot ask it to drop superseded ones. In
+a run against production on 2026-11-04, a viewer limited to 300 kbit/s received 700 of 700
+one-object groups from a 400 kbit/s track. The p50 was 2.7 s late and the latest 15.6 s late. About
+600 of them arrived before an older group, because each group travels on a stream of its own. The
+same happened with 100 ms subscriber delivery timeouts and with group order descending
+([measurements](../spec/relay-interop.md#voice-delivery-on-0175-deadlines-fetch-and-group-order)).
+Delivery timeouts do not change this. The relay ignores the subscriber's, and the publisher's only
+bound the publisher's own link to the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)).
+So the viewer does the dropping:
+
+- Ignore any group older than the newest one applied, as in the example above. Group IDs rise within
+  one subscription. They start over when a want restarts or moves to a new generation, so reset the
+  marker in `onRestarted` and `onSwitched`.
+- To know when a value is too old to act on, put the time it was taken in the payload. Comparing
+  that time with the viewer's clock assumes the two machines' clocks agree. When every value arrives
+  too late, call the supervised subscriber's `catchUp(key)`. It replaces the subscription at the live
+  edge, which drops the relay's backlog, and runs `onRestarted` with reason `'catch-up'`.
+  `staleAfterMs` does not help here, because a backlog is not silence.
+- Give control and telemetry a subscriber priority ahead of the video on the same connection. The
+  relay orders what it sends you by your subscriber priority alone, where a lower number is more
+  urgent ([measured](../spec/relay-interop.md#subscription-parameters)). The media defaults are 16
+  for audio and 96 for video ([subscribing to media](#subscribing-to-media)).
+
+A message that must arrive, such as a command, is not latest-wins. Await a `track.write()` or
+`writeJSON()` for each one. A concurrent write rejects, so queue commands in your own code. A write
+waits for relay demand only until the write deadline (10 s by default), so a command sent while no
+one is subscribed fails with `WRITE_TIMEOUT`. Commands can also arrive out of order, so number them in
+the payload if order matters. Nothing confirms that a viewer acted on a command. If you need that,
+have the viewer reply on its own track.
+
+### Latency and staleness: where each is set
+
+The publisher and the viewer set different things, under similar names:
+
+| Setting | Side | What it does |
+| --- | --- | --- |
+| `createPlayoutClock({ targetLatencyUs })` | viewer | How far behind live the viewer plays, and how late a frame may be before the sequencer drops it. The default is twice the longest recent keyframe interval, or 2 s before there is one. The audio-only constant is 500 ms ([subscribing to media](#subscribing-to-media)). |
+| Resync | viewer, automatic | When frames have stayed late for a whole target latency, or the next keyframe is more than one target latency ahead, the sequencer re-anchors the clock and marks the frame `resync`. A lasting delay then costs one target latency, not a stall. |
+| `catchUpAfterUs` with `catchUp(key)` | viewer | Replaces the subscription at the live edge once frames keep arriving late. The want restarts with reason `'catch-up'` ([voice](#voice-delivery-per-direction)). |
+| `staleAfterMs` on `want` | viewer | Resubscribes a track that has been silent that long. The want restarts with reason `'stale'`. Use it only for tracks that are never silent while live. |
+| `mediaTrackProperties(kind, { targetLatencyUs })` | publisher | Sizes only the publisher's subgroup delivery timeout for video: the target latency less the keyframe interval, never less than the interval. It does not set the viewer's latency. |
+| Delivery timeouts (`0x02`, `0x06`) | publisher | The publisher fails an object that waited too long to reach its transport (`0x02`), and resets a group whose end the relay has not acknowledged in time (`0x06`). On moq-relay 0.17.7 and earlier they have no effect past the relay ([delivery timeouts](../spec/behavior.md#delivery-timeouts)). |
 
 ## Errors and recovery
 

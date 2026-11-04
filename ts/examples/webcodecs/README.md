@@ -140,7 +140,10 @@ the catalog. A changed decoder configuration stops the example. To change it, st
 publisher. Encoded output order and presentation timestamps are preserved.
 
 The example encodes enough to obtain the initial configuration, then skips capture while the video
-track has no demand. It also skips capture while two frames wait in the encoder or any encoded chunk
+track has no demand. The order matters. Viewers subscribe to the video track only after reading the
+catalog, and the catalog needs that first configuration. A publisher that encodes only with demand
+from the start never serves a catalog, so no viewer ever creates demand for video. That is why the
+capture loop checks `!video || track.hasDemand`. It also skips capture while two frames wait in the encoder or any encoded chunk
 waits in the frame writer's backlog. It requests a keyframe at least every second of active capture.
 Demand loss resets the group, and new or replacement demand requests a keyframe.
 
