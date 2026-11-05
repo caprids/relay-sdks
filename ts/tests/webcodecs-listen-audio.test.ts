@@ -4,6 +4,7 @@ import {
   buildInterrupt,
   buildMsfCatalog,
   buildTranscriptSegment,
+  createPlayoutClock,
   INTERRUPT_TRACK,
   LOC_TIMESTAMP,
   TRANSCRIPT_TRACK,
@@ -871,5 +872,35 @@ it('keeps a report posted before the cut from re-anchoring the clock when a fail
   report(1920, 9_000_000, 1);
   expect(listener.clock.mode).toBe('audio');
   expect(listener.clock.position()).toBeGreaterThanOrEqual(9_000_000);
+  await listener.stop();
+});
+
+it('reports audio to a clock passed in, as a video watcher shares its own', async () => {
+  FakeWorkletNode.instances.length = 0;
+  const fake = fakeSubscriber();
+  const clock = createPlayoutClock();
+  const listener = await listen(fake, audioCatalog(), { clock });
+  expect(listener.clock).toBe(clock);
+  const node = FakeWorkletNode.instances[0] as FakeWorkletNode;
+  node.port.onmessage?.({
+    data: {
+      frame: 0,
+      rendered: 128,
+      timestampUs: 5_000_000,
+      playing: true,
+      playStarts: 1,
+      heldUntilUs: null,
+      dryAtUs: null,
+      bufferedFrames: 0,
+      targetFrames: 2880,
+      underruns: 0,
+      trimmedFrames: 0,
+      concealedFrames: 0,
+      cutFrames: 0,
+      cutId: null,
+    },
+  });
+  expect(clock.mode).toBe('audio');
+  expect(clock.position()).toBeGreaterThanOrEqual(5_000_000);
   await listener.stop();
 });
