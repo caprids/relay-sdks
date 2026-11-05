@@ -678,6 +678,48 @@ and nothing is lost or repeated. Call `rotate()` to rotate now, for example afte
 In a local test with 12 s tokens, 989 objects written every 40 ms over 9 rotations all arrived, with
 no gap longer than 42 ms. See [rotation](../spec/behavior.md#rotation).
 
+### Test recovery by dropping the transport
+
+To check how your application handles a lost connection, close the transport under it on purpose.
+`webTransport()` returns the factory the connect functions use when `createTransport` is left out.
+Wrap it, keep each transport it opens, and close them when you want a drop:
+
+```ts
+import {
+  connectSupervisedPublisher,
+  connectSupervisedSubscriber,
+  type MoqtTransport,
+  type RelayTransportFactory,
+  webTransport,
+} from '@caprid/relay';
+
+const dial = webTransport();
+const open = new Set<MoqtTransport>();
+const createTransport: RelayTransportFactory = (url, protocols) => {
+  const connection = dial(url, protocols);
+  open.add(connection.transport);
+  const forget = () => open.delete(connection.transport);
+  connection.transport.closed.then(forget, forget);
+  return connection;
+};
+
+/** Drop every open connection, as a network loss would. */
+function dropConnections() {
+  for (const transport of open) transport.close({ closeCode: 0, reason: 'chaos: dropped' });
+}
+
+const publisher = await connectSupervisedPublisher({ url, namespace, getToken, createTransport });
+const subscriber = await connectSupervisedSubscriber({ url, getToken, createTransport });
+```
+
+After `dropConnections()`, each supervisor reports `reconnecting` and then `live` through
+`onStatus`. The publisher comes back as a new generation, and each want resubscribes on the new
+connection. The wrapper keeps the default's checks: a runtime with no `WebTransport`, or one that
+cannot negotiate protocols, still fails with `TRANSPORT_UNAVAILABLE`. It needs no casts. To drop
+other transports, wrap `nativeQuicTransport()` from `@caprid/relay-quic` (on Node) or
+`withWebSocketFallback()` from `@caprid/relay-websocket` the same way. The Python SDK does the same
+by wrapping `caprid_relay.quic.connect_quic`.
+
 ## Publishing lifecycle
 
 A dedicated publisher connection serves one namespace with multiple tracks. It uses a separate

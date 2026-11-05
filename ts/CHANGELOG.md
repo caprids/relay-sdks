@@ -7,6 +7,10 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/relay`: `webTransport()` returns the transport factory the connect functions use when `createTransport` is
+  left out (#445). Wrap it to watch or close the transports a connection opens, for example to test recovery
+  ([Test recovery by dropping the transport](GUIDE.md#test-recovery-by-dropping-the-transport)), instead of
+  re-implementing it. The wrapper keeps the default's `TRANSPORT_UNAVAILABLE` checks and needs no casts.
 - `@caprid/moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
   passed over in the new `stats.behind`, no longer in `stats.late` (#431). `late` keeps the frames too late against the
   clock's position and those dropped past the held bound. The two need different fixes: `late` a deeper buffer or a

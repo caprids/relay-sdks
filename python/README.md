@@ -617,6 +617,43 @@ move. When the want's target is unchanged, the cutover is invisible: no callback
 lost or repeated. Call `rotate()` to rotate now, for example after you revoke a token. See
 [rotation](../spec/behavior.md#rotation).
 
+### Test recovery by dropping the transport
+
+To check how your application handles a lost connection, close the transport under it on purpose.
+`caprid_relay.quic.connect_quic` is the factory the connect functions use when `create_transport`
+is left out. Wrap it, keep each transport it opens, and close them when you want a drop:
+
+```python
+from caprid_relay import connect_supervised_publisher, connect_supervised_subscriber
+from caprid_relay.quic import connect_quic
+
+opened = []
+
+
+def create_transport(url, protocols):
+    connecting = connect_quic(url, protocols)
+    opened.append(connecting.transport)
+    return connecting
+
+
+def drop_connections():
+    """Drop every open connection, as a network loss would."""
+    for transport in opened:
+        transport.close(0, "chaos: dropped")
+    opened.clear()
+
+
+publisher = await connect_supervised_publisher(
+    url, namespace=namespace, get_token=get_token, create_transport=create_transport
+)
+subscriber = await connect_supervised_subscriber(url, get_token=get_token, create_transport=create_transport)
+```
+
+After `drop_connections()`, each supervisor reports `reconnecting` and then `live` through
+`on_status`. The publisher comes back as a new generation, and each want resubscribes on the new
+connection. Against `ord.relay.mux.global`, a want following generations was receiving again about
+1 s after the drop.
+
 ## Publishing lifecycle
 
 A publisher connection serves one namespace with any number of tracks. It uses a separate transport
