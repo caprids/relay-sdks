@@ -72,7 +72,7 @@ export interface VideoWatcher {
  *
  * For sound in sync, pass one clock to both this and `listenAudio`: audio is the master. Until audio reports reach the
  * clock, video plays on wall pacing, so it starts before any user gesture and keeps playing while the `AudioContext`
- * is suspended; once audio plays, video follows it.
+ * is suspended; once audio plays, video follows it. Start `listenAudio` once the context runs (`whenRunning`).
  */
 export async function watchVideo(
   subscriber: RelaySubscriber,
