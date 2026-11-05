@@ -263,7 +263,11 @@ export async function runWatchVideoScenario(options: ScenarioOptions) {
     // Close the phase running, make the change, and start the next one.
     const begin = async (phase: string, change?: () => Promise<void>) => {
       check();
-      if (marks.length > 0) ends.push({ modes, longestGapUs, contextState: context.state });
+      if (marks.length > 0) {
+        // A freeze still open at the phase's end counts too: no frame has closed it yet.
+        const openGapUs = lastShownUs === undefined ? 0 : performance.now() * 1000 - lastShownUs;
+        ends.push({ modes, longestGapUs: Math.max(longestGapUs, openGapUs), contextState: context.state });
+      }
       await change?.();
       modes = {};
       longestGapUs = 0;

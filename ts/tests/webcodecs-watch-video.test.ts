@@ -39,15 +39,26 @@ class FakeDecoder {
     FakeDecoder.instances.push(this);
   }
   configure(config: VideoDecoderConfig) {
+    this.throwIfClosed();
     this.configs.push(config);
     this.state = 'configured';
   }
   decode(chunk: Chunk) {
+    this.throwIfClosed();
     this.chunks.push(chunk);
   }
   reset() {
+    this.throwIfClosed();
     this.resets++;
     this.state = 'unconfigured';
+  }
+  private throwIfClosed() {
+    if (this.state === 'closed') throw new DOMException('The decoder is closed', 'InvalidStateError');
+  }
+  /** Fail as a real decoder does: it closes, then calls the error callback. */
+  fail(error: DOMException) {
+    this.state = 'closed';
+    this.init.error(error);
   }
   close() {
     this.state = 'closed';
@@ -229,7 +240,7 @@ it('draws each decoded frame when the clock says it is due, and drops frames aud
   await watcher.stop();
 });
 
-it('keeps at most sixteen decoded frames waiting and drops the oldest past that', async () => {
+it('keeps at most sixteen decoded frames waiting and draws the oldest early past that', async () => {
   const fake = fakeSubscriber();
   const clock = clockAtNow();
   const { canvas, drawn } = fakeCanvas();
@@ -239,8 +250,8 @@ it('keeps at most sixteen decoded frames waiting and drops the oldest past that'
   // Audio is half a second behind every frame, and no timer runs, as in a hidden tab.
   clock.reportAudio(timestampOf(0, 0) - 500_000);
   for (let objectId = 0; objectId < 20; objectId++) decoder().emit(timestampOf(0, objectId));
-  expect(drawn).toEqual([]);
-  expect(watcher.stats.overflowed).toBe(4);
+  expect(drawn).toEqual([0, 1, 2, 3].map((objectId) => timestampOf(0, objectId)));
+  expect(watcher.stats).toMatchObject({ shown: 4, overflowed: 4, lastOffsetUs: 500_000 + 3 * FRAME_US });
   expect(FakeFrame.closed).toBe(4);
   // The sixteen newest are what is left to draw.
   nowUs += 500_000;
@@ -249,7 +260,48 @@ it('keeps at most sixteen decoded frames waiting and drops the oldest past that'
     await vi.advanceTimersByTimeAsync(FRAME_US / 1000);
     nowUs += FRAME_US;
   }
-  expect(drawn).toEqual(Array.from({ length: 16 }, (_, index) => timestampOf(0, index + 4)));
+  expect(drawn.slice(4)).toEqual(Array.from({ length: 16 }, (_, index) => timestampOf(0, index + 4)));
+  await watcher.stop();
+});
+
+it('keeps the picture moving when audio lags by more than the bound can wait for', async () => {
+  const fake = fakeSubscriber();
+  const clock = clockAtNow();
+  const { canvas, drawn } = fakeCanvas();
+  const watching = watchVideo(fake.subscriber, NAMESPACE, canvas, { clock });
+  fake.deliverCatalog();
+  const watcher = await watching;
+  // Audio plays 600 ms behind the frames as they decode, more than sixteen frames cover.
+  for (let objectId = 0; objectId < 60; objectId++) {
+    clock.reportAudio(timestampOf(0, objectId) - 600_000);
+    decoder().emit(timestampOf(0, objectId));
+    await vi.advanceTimersByTimeAsync(FRAME_US / 1000);
+    nowUs += FRAME_US;
+  }
+  expect(drawn).toEqual(Array.from({ length: 44 }, (_, objectId) => timestampOf(0, objectId)));
+  expect(watcher.stats).toMatchObject({ late: 0, overflowed: 44 });
+  await watcher.stop();
+});
+
+it('closes each frame and carries on when onShown throws', async () => {
+  const fake = fakeSubscriber();
+  const clock = clockAtNow();
+  const { canvas, drawn } = fakeCanvas();
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const onShown = vi.fn(() => {
+    throw new Error('app bug');
+  });
+  const watching = watchVideo(fake.subscriber, NAMESPACE, canvas, { clock, onShown });
+  fake.deliverCatalog();
+  const watcher = await watching;
+  clock.reportAudio(timestampOf(0, 1));
+  decoder().emit(timestampOf(0, 0));
+  decoder().emit(timestampOf(0, 1));
+  expect(drawn).toEqual([timestampOf(0, 0), timestampOf(0, 1)]);
+  expect(onShown).toHaveBeenCalledTimes(2);
+  expect(FakeFrame.closed).toBe(2);
+  expect(consoleError).toHaveBeenCalledTimes(2);
+  expect(consoleError.mock.calls[0]?.[0]).toMatchObject({ cause: new Error('app bug') });
   await watcher.stop();
 });
 
@@ -282,6 +334,19 @@ it('cancels both subscriptions and rejects when aborted before the catalog arriv
   expect(FakeDecoder.instances).toHaveLength(0);
 });
 
+it('rejects when aborted after the catalog arrived but before the decoder is set up', async () => {
+  const fake = fakeSubscriber();
+  const abort = new AbortController();
+  const watching = watchVideo(fake.subscriber, NAMESPACE, fakeCanvas().canvas, { signal: abort.signal });
+  const reason = new Error('Gave up');
+  fake.deliverCatalog();
+  abort.abort(reason);
+  await expect(watching).rejects.toBe(reason);
+  expect(fake.byTrack('catalog').cancel).toHaveBeenCalledTimes(1);
+  expect(fake.byTrack('video').cancel).toHaveBeenCalledTimes(1);
+  expect(FakeDecoder.instances).toHaveLength(0);
+});
+
 it('rejects when the catalog lists no video track, after cancelling both subscriptions', async () => {
   const fake = fakeSubscriber();
   const watching = watchVideo(fake.subscriber, NAMESPACE, fakeCanvas().canvas);
@@ -299,8 +364,9 @@ it('reports a decoder failure to onError and decodes again from the next keyfram
   fake.deliverCatalog();
   const watcher = await watching;
   fake.deliverVideo(0, 0);
-  const failure = new Error('decode failed');
-  decoder().init.error(failure as DOMException);
+  decoder().emit(timestampOf(0, 0));
+  const failure = new DOMException('decode failed', 'EncodingError');
+  decoder().fail(failure);
   expect(onError).toHaveBeenCalledWith(failure);
   fake.deliverVideo(0, 1);
   fake.endGroup(0);
@@ -308,4 +374,40 @@ it('reports a decoder failure to onError and decodes again from the next keyfram
   expect(FakeDecoder.instances).toHaveLength(2);
   expect(decoded()).toEqual([['key', timestampOf(1, 0)]]);
   await watcher.stop();
+});
+
+it.each([
+  ['does not support the codec', new DOMException('Unsupported codec', 'NotSupportedError'), true],
+  ['fails before its first frame', new DOMException('decode failed', 'EncodingError'), false],
+])('stops decoding for good when the decoder %s, after one onError', async (_, failure, afterOutput) => {
+  const fake = fakeSubscriber();
+  const onError = vi.fn();
+  const watching = watchVideo(fake.subscriber, NAMESPACE, fakeCanvas().canvas, { clock: clockAtNow(), onError });
+  fake.deliverCatalog();
+  const watcher = await watching;
+  fake.deliverVideo(0, 0);
+  if (afterOutput) decoder().emit(timestampOf(0, 0));
+  decoder().fail(failure);
+  fake.deliverVideo(0, 1);
+  fake.endGroup(0);
+  fake.byTrack('video').handlers.onSubgroupReset?.({ groupId: 1 } as never);
+  fake.deliverVideo(2, 0);
+  expect(onError.mock.calls).toEqual([[failure]]);
+  expect(FakeDecoder.instances).toHaveLength(1);
+  await watcher.stop();
+});
+
+it('creates no new decoder when onError stops the watcher', async () => {
+  const fake = fakeSubscriber();
+  let watcher: Awaited<ReturnType<typeof watchVideo>> | undefined;
+  const onError = vi.fn(() => watcher?.stop());
+  const watching = watchVideo(fake.subscriber, NAMESPACE, fakeCanvas().canvas, { clock: clockAtNow(), onError });
+  fake.deliverCatalog();
+  watcher = await watching;
+  fake.deliverVideo(0, 0);
+  decoder().emit(timestampOf(0, 0));
+  decoder().fail(new DOMException('decode failed', 'EncodingError'));
+  expect(onError).toHaveBeenCalledTimes(1);
+  expect(FakeDecoder.instances).toHaveLength(1);
+  expect(fake.byTrack('video').cancel).toHaveBeenCalledTimes(1);
 });

@@ -101,7 +101,8 @@ H.264 track carries it. A frame reader orders the frames, a `VideoDecoder` decod
 playout clock decides when to draw each one. The decoder starts at a keyframe. At each
 `discontinuity` it resets and waits for the next keyframe. At most 16 decoded frames wait for their
 time, so a hidden tab, whose timers the browser throttles, cannot hold the decoder's frames open and
-stall it. Like `listenAudio`, it subscribes to the video track by its conventional name together
+stall it. Past that the oldest is drawn early, so when audio lags further the video runs ahead of it
+rather than freezing. Like `listenAudio`, it subscribes to the video track by its conventional name together
 with the catalog and holds the frames until the decoder exists, which saves the catalog's round trip.
 
 For sound in sync, pass one playout clock to `watchVideo` and `listenAudio`. Audio is the master.

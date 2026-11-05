@@ -15,6 +15,8 @@ import { readCatalog } from './read-catalog.js';
  * Decoded frames waiting for their time, at most: a hidden tab throttles timers, so the pump falls behind the decoder,
  * and a decoder whose frames the app keeps open can stall. Video waits for audio by the audio player's jitter buffer and
  * output delay, up to about 450 ms, which is 14 frames at 30 fps (4 measured with a 50 ms buffer on a clean network).
+ * Past the bound the oldest frame is drawn early rather than dropped: when audio lags by more, every frame would
+ * otherwise be dropped before its time and the picture would freeze.
  */
 const MAX_DECODED_FRAMES = 16;
 /** Ask the clock again at least this often while a frame waits: an audio report can move its position meanwhile. */
@@ -24,7 +26,11 @@ const CLOCK_RECHECK_MS = 50;
 export interface WatchVideoOptions {
   /** The playout clock that paces the video; pass the same one to `listenAudio`. Default: a new one. */
   clock?: PlayoutClock;
-  /** A failure after the watcher started: the video subscription ended with an error, or the decoder failed. */
+  /**
+   * A failure after the watcher started: the video subscription ended with an error, or the decoder failed. A decoder
+   * that fails before its first frame, or that does not support the codec, fails for good: the watcher decodes nothing
+   * more. Otherwise a new decoder starts at the next keyframe.
+   */
   onError?(error: unknown): void;
   /** A frame was drawn: its timestamp on the broadcast timeline, and its offset from the clock (positive is early). */
   onShown?(timestampUs: number, offsetUs: number): void;
@@ -41,7 +47,7 @@ export interface VideoWatcherStats {
   shown: number;
   /** Decoded frames dropped because audio had moved past them. */
   late: number;
-  /** Decoded frames dropped because more were waiting than the bound allows. */
+  /** Decoded frames drawn early because more were waiting than the bound allows. */
   overflowed: number;
   /** Frames after which the decoder was reset: a gap, a resync, or a restart. */
   discontinuities: number;
@@ -132,6 +138,7 @@ export async function watchVideo(
     const { tracks, subscription: catalog } = await reading;
     catalog.cancel();
     catalogCancelled = true;
+    options.signal?.throwIfAborted();
     const track =
       tracks.find((candidate) => candidate.name === VIDEO_TRACK) ??
       tracks.find((candidate) => candidate.role === 'video');
@@ -155,6 +162,24 @@ export async function watchVideo(
     const queue: VideoFrame[] = [];
     let timer: ReturnType<typeof setTimeout> | undefined;
     let stopped = false;
+    const show = (frame: VideoFrame, offsetUs: number) => {
+      try {
+        if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
+          canvas.width = frame.displayWidth;
+          canvas.height = frame.displayHeight;
+        }
+        draw.drawImage(frame, 0, 0);
+        stats.shown++;
+        stats.lastOffsetUs = offsetUs;
+        try {
+          options.onShown?.(frame.timestamp, offsetUs);
+        } catch (error) {
+          console.error(new Error('onShown threw; the watcher carries on', { cause: error }));
+        }
+      } finally {
+        frame.close();
+      }
+    };
     const pump = () => {
       timer = undefined;
       for (let frame = queue[0]; frame; frame = queue[0]) {
@@ -164,18 +189,11 @@ export async function watchVideo(
           return;
         }
         queue.shift();
-        if (decision.action === 'drop') stats.late++;
+        if (decision.action === 'show') show(frame, decision.offsetUs);
         else {
-          if (canvas.width !== frame.displayWidth || canvas.height !== frame.displayHeight) {
-            canvas.width = frame.displayWidth;
-            canvas.height = frame.displayHeight;
-          }
-          draw.drawImage(frame, 0, 0);
-          stats.shown++;
-          stats.lastOffsetUs = decision.offsetUs;
-          options.onShown?.(frame.timestamp, decision.offsetUs);
+          stats.late++;
+          frame.close();
         }
-        frame.close();
       }
     };
     const dropQueued = () => {
@@ -185,23 +203,30 @@ export async function watchVideo(
     };
     // After configure and after every reset, the decoder can start only at a keyframe.
     let needsKey = true;
+    let failedForGood = false;
     const createDecoder = () => {
+      let producedOutput = false;
       const created = new VideoDecoder({
         output(frame) {
+          producedOutput = true;
           if (stopped) {
             frame.close();
             return;
           }
           queue.push(frame);
-          if (queue.length > MAX_DECODED_FRAMES) {
-            queue.shift()?.close();
-            stats.overflowed++;
-          }
           if (timer === undefined) pump();
+          if (queue.length > MAX_DECODED_FRAMES) {
+            const oldest = queue.shift() as VideoFrame;
+            stats.overflowed++;
+            show(oldest, clock.due(oldest.timestamp).offsetUs);
+          }
         },
         error(error) {
           if (stopped) return;
+          // A new decoder with the same config would fail the same way, again and again.
+          failedForGood = !producedOutput || error.name === 'NotSupportedError';
           options.onError?.(error);
+          if (stopped || failedForGood) return;
           // A decoder that failed is closed: decode again from the next keyframe with a new one.
           decoder = createDecoder();
           needsKey = true;
@@ -213,6 +238,7 @@ export async function watchVideo(
     let decoder = createDecoder();
     release.push(() => decoder.close());
     const decode = (frame: SequencedFrame) => {
+      if (failedForGood) return;
       if (frame.discontinuity) {
         stats.discontinuities++;
         // A resync or a restart moved the timeline: what waits was decoded for the old one.
