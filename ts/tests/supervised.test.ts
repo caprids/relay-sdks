@@ -1646,6 +1646,36 @@ describe('rotation before the credential expires (#261)', () => {
     await writer.close();
   });
 
+  it('reports a keyframe dropped when its keyframe request overflows the backlog and resets its group', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!.tracks.get('video')!;
+    old.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    let writer: ReturnType<typeof createFrameWriter> | undefined;
+    const forced: Promise<unknown>[] = [];
+    // An encoder that answers the request with a keyframe at once, from inside the callback.
+    writer = createFrameWriter(track, {
+      maxBacklog: 1,
+      onKeyframeNeeded: () => forced.push(writer!.write({ payload: Uint8Array.of(3), key: true })),
+    });
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const opening = old.writer.openGroup.bind(old.writer);
+    old.writer.openGroup = async (options) => {
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return opening(options);
+    };
+    const first = writer.write({ payload: Uint8Array.of(1), key: true });
+    const queued = writer.write({ payload: Uint8Array.of(2), key: false });
+    expect([(await first).kind, (await queued).kind]).toEqual(['dropped', 'dropped']);
+    expect(forced).toHaveLength(1);
+    expect(await forced[0]).toMatchObject({ kind: 'sent' });
+    expect(connections[1]!.tracks.get('video')!.writes).toEqual([Uint8Array.of(3)]);
+    await writer.close();
+  });
+
   it('moves a track with no demand on the old generation at once', async () => {
     const { publisher, connections } = await publishers([]);
     const writer = publisher.registerTrack({ track: 'audio' });

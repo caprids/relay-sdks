@@ -294,7 +294,11 @@ export function createFrameWriter<F extends Frame = Frame>(
       group = opened;
       // The track moved to another generation while this keyframe opened its group on the old one, and no keyframe
       // waiting opens one there.
-      if (!reaching(opened) && !waiting.some(({ frame }) => frame.key)) needKeyframe();
+      if (!reaching(opened) && !waiting.some(({ frame }) => frame.key)) {
+        needKeyframe();
+        // A callback that wrote its keyframe at once can overflow the backlog, which resets this group.
+        if (droppedUnder()) return { kind: 'dropped', groupId: opened.groupId };
+      }
       if (stale(frame)) {
         // Opening the group took long enough that its keyframe is too old: a reset costs less than a late GOP.
         recovering = 'stale';
