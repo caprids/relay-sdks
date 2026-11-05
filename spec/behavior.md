@@ -755,7 +755,10 @@ taken over.
   to the new one when it is announced, which creates its demand. `hasDemand` and `demandChanges()`
   follow the generation the writer is on, and report no `false` when demand carries over. They report
   `true` again on the move, as they do when the relay replaces its upstream subscription, so state an
-  application writes on demand (a catalog) reaches the new generation. When the
+  application writes on demand (a catalog) reaches the new generation. A frame writer on the track
+  needs a keyframe on the move, though its open group keeps finishing on the old generation, so its
+  encoder can start the new generation's first group at once instead of at its next natural keyframe
+  ([#444](https://github.com/muxinc/relay-sdks/issues/444)). When the
   overlap runs out, every track moves regardless of demand, and the old generation closes as
   `close()` closes it.
 - **Subscriber.** The replacement is a new connection, and every want **moves** its subscription to
@@ -1521,7 +1524,8 @@ Implemented in both SDKs.
   finds it ended at the next frame, even one written before it has seen the change, and skips deltas
   until the next keyframe. The open group is not replayed.
 - Under keyframe grouping a writer says when it needs a keyframe (`keyframeNeeded` /
-  `keyframe_needed`): from its start until a keyframe arrives, and again from each demand change,
+  `keyframe_needed`): from its start until a keyframe arrives, and again from each demand change
+  (a supervised track's [move](#rotation) to a new generation among them, which ends no group),
   interruption, stale or discontinuous frame, or drop until the next keyframe arrives. A keyframe
   arrives when `write` is called with it, whether or not it is later sent. The optional
   `onKeyframeNeeded` / `on_keyframe_needed` callback runs synchronously on every entry into that

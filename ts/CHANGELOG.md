@@ -7,6 +7,10 @@ each section says what changed and what to do about it. How to cut a release is 
 
 ## Unreleased
 
+- `@caprid/relay`: a frame writer on a supervised publisher's track asks for a keyframe (`onKeyframeNeeded`) when a
+  rotation moves the track to the new generation (#444). Before, it waited for the encoder's next natural keyframe,
+  so viewers switched up to one keyframe interval late, and with keyframes made only on request only when the 10 s
+  overlap ran out. The open group still finishes on the old generation, so its viewers lose nothing.
 - `@caprid/moq-media`: the frame sequencer counts a frame dropped for arriving behind what was already delivered or
   passed over in the new `stats.behind`, no longer in `stats.late` (#431). `late` keeps the frames too late against the
   clock's position and those dropped past the held bound. The two need different fixes: `late` a deeper buffer or a

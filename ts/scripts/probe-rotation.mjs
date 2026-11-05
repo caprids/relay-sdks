@@ -30,7 +30,8 @@ const runMs = Number(env.ROTATION_RUN_S ?? 32) * 1000;
 const everyMs = Number(env.ROTATION_EVERY_MS ?? 5000);
 const keyframeMs = Number(env.ROTATION_KEYFRAME_MS ?? 1000);
 const forceKeyframe = env.ROTATION_FORCE_KEYFRAME === '1';
-const subscriberOffsetMs = env.ROTATION_SUBSCRIBER_OFFSET_MS === undefined ? undefined : Number(env.ROTATION_SUBSCRIBER_OFFSET_MS);
+const subscriberOffsetMs =
+  env.ROTATION_SUBSCRIBER_OFFSET_MS === undefined ? undefined : Number(env.ROTATION_SUBSCRIBER_OFFSET_MS);
 const getToken = () => token;
 const root = [...(env.RELAY_NAMESPACE_PREFIX ?? 'relay-sdk-probe').split('/').filter(Boolean), randomUUID()];
 const frameMs = 1000 / 30;
@@ -109,9 +110,11 @@ const videoTimer = setInterval(() => {
     lastKeyAt = now;
     keyframeRequested = false;
   }
-  void writer.write({ payload: stamp(frame++), key, properties: locProperties(Math.round(now * 1000)) }).then(({ kind }) => {
-    outcomes[kind] = (outcomes[kind] ?? 0) + 1;
-  });
+  void writer
+    .write({ payload: stamp(frame++), key, properties: locProperties(Math.round(now * 1000)) })
+    .then(({ kind }) => {
+      outcomes[kind] = (outcomes[kind] ?? 0) + 1;
+    });
 }, frameMs);
 let tick = 0;
 const telemetryTimer = setInterval(async () => {
@@ -158,5 +161,7 @@ for (const rotatedAt of rotations) {
     }),
   );
 }
-console.log(JSON.stringify({ forceKeyframe, keyframeMs, subscriberOffsetMs, generations: generations.length, outcomes }));
+console.log(
+  JSON.stringify({ forceKeyframe, keyframeMs, subscriberOffsetMs, generations: generations.length, outcomes }),
+);
 process.exit(0);
