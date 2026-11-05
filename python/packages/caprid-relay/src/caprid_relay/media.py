@@ -667,6 +667,10 @@ class FrameWriter(Generic[F]):
             if not _reaching(group) and not any(waiting.key for waiting, _ in self._backlog):
                 self._need_keyframe()
 
+                if self._drop_epoch != epoch:
+                    # A callback whose keyframe write ran at once overflowed the backlog, which reset this group.
+                    return FrameOutcome("dropped", group_id=group.group_id)
+
             if self._stale(frame):
                 # Opening the group took long enough that its keyframe is too old: a reset costs less than a late GOP.
                 self._recovering = True
