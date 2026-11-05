@@ -86,14 +86,15 @@ from .switchable import Until, _check_drain, _held_after, _HeldEvent, _hold, _un
 
 _log = logging.getLogger("caprid_relay")
 
-RestartReason: TypeAlias = Literal["publisher-done", "stale", "generation", "connection", "terminated"]
+RestartReason: TypeAlias = Literal["publisher-done", "stale", "generation", "connection", "terminated", "catch-up"]
 """Why a want replaced its subscription.
 
 ``publisher-done``: the relay sent PUBLISH_DONE. ``stale``: no object arrived for ``stale_after``.
 ``generation``: the current generation was withdrawn with none newer, or a move to a newer one
 could not be made before the break. ``connection``:
 the subscriber connection ended and was replaced. ``terminated``: the relay ended the subscription
-with REQUEST_ERROR after accepting it.
+with REQUEST_ERROR after accepting it. ``catch-up``: the application called ``catch_up(key)`` because the
+subscription delivered too late to use.
 """
 
 _DISCOVERY_CAPACITY = 1024
@@ -232,6 +233,8 @@ class _Want:
     announcement between two attempts is heard (spec/behavior.md, "Supervised connections")."""
     wake_mark: tuple[_NamespaceWake, int] | None = None
     """The watch's count of changes when the latest attempt started: only an announcement after it wakes a wait."""
+    catch_up: Callable[[], None] | None = None
+    """Ends the running attempt for a catch-up; set while an attempt runs."""
 
     def call(self, name: str, *args: object) -> None:
         """Deliver to one handler; nothing reaches a want after it was cancelled, except its own ``on_error``."""
@@ -394,6 +397,22 @@ class SupervisedSubscriber:
         want = self._state.wants.get(key)
         if want is not None:
             self._forget(key, want)
+
+    def catch_up(self, key: str) -> None:
+        """Replace a want's accepted subscription at once, break-before-make, because it delivers too late to use.
+
+        It cancels the subscription, which makes the relay drop what it still holds queued for it, and subscribes
+        again with the same options, so a want without a location filter starts at the newest group.
+        ``on_restarted`` reports ``"catch-up"``. A latest-value reader's ``on_catch_up`` is the usual caller. The new
+        subscription opens without delay when the old one had moved past its first group, and otherwise after the
+        want's ``retry`` backoff, so a link too slow for the track cannot make it spin. Ignored for an unknown key and
+        while no subscription is accepted.
+        """
+        if not isinstance(key, str):
+            raise TypeError("want key must be a string")
+        want = self._state.wants.get(key)
+        if want is not None and want.catch_up is not None:
+            want.catch_up()
 
     def rotate(self) -> None:
         """Replace the connection make-before-break, as happens on its own ``rotate_before`` before the
@@ -912,6 +931,11 @@ async def _supervise_want(
                 continue
             # on_restarted is application code: it may have wanted another target.
             if outcome.kind != "retry" or (want.options.track, want.options.parameters) != asked:
+                continue
+            # A catch-up replaces a subscription that was delivering: the replacement is wanted now, not after a
+            # backoff.
+            if outcome.reason == "catch-up" and outcome.progressed:
+                failures = 0
                 continue
             # Cached objects followed by a done are not progress: only a later group resets the backoff.
             if outcome.progressed:
@@ -1702,6 +1726,12 @@ async def _follow(
         watch_stale()
         reconcile()
 
+    def catch_up() -> None:
+        if over() or not accepted():
+            return
+        settle(_Outcome("retry", accepted=True, progressed=active.progressed, reason="catch-up"))
+
+    want.catch_up = catch_up
     watch_stale()
     want.changes.append(changed)
     unwatch = watch.on_change(reconcile) if watch is not None else None
@@ -1714,6 +1744,8 @@ async def _follow(
     finally:
         # Settles the attempt, so nothing reaches the handlers from here on.
         settle(_CANCELLED)
+        if want.catch_up is catch_up:
+            want.catch_up = None
         if stale_task is not None:
             stale_task.cancel()
         clear_retry()

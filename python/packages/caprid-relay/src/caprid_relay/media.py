@@ -20,7 +20,8 @@ implement.
 
 On the subscribing side, :class:`FrameReader` reads a subscription or a want as frames in decode order. It drives a
 sequencer it is given (``moq_media.FrameSequencer``), which knows the format and the deadlines; the "Media
-subscribing" section of ``spec/behavior.md`` is its contract.
+subscribing" section of ``spec/behavior.md`` is its contract. :class:`LatestValueReader` reads a latest-wins track,
+such as telemetry or a control, delivering only values newer than the last one judged ("Latest-value reading").
 """
 
 from __future__ import annotations
@@ -35,6 +36,7 @@ from typing import Any, Generic, Literal, Protocol, TypeVar
 from moq_core import KeyValuePair, MessageParameters, ObjectStatus
 
 from ._frame_reader import FrameReader, FrameReaderPoll, FrameReaderSequencer
+from ._latest_value_reader import LatestValueReader, LatestValueStats
 from ._validation import DEFAULT_PUBLISHER_PRIORITY, MAX_DEFAULT_PUBLISHER_PRIORITY, payload_bytes
 from ._write_slot import SUBGROUP_DELIVERY_TIMEOUT
 from .errors import RelayError
@@ -1440,6 +1442,8 @@ __all__ = [
     "FrameReaderPoll",
     "FrameReaderSequencer",
     "FrameWriter",
+    "LatestValueReader",
+    "LatestValueStats",
     "MediaKind",
     "ReplaceableTrack",
     "TrackReplacement",

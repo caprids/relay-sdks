@@ -6,6 +6,17 @@ is in [docs/releasing.md](../docs/releasing.md).
 
 ## Unreleased
 
+- `caprid-relay`: `SupervisedSubscriber.catch_up(key)` replaces a want's accepted subscription at the live edge,
+  break-before-make, when it delivers too late to use (#447), as in the TypeScript SDK. The relay drops what it still
+  held queued for the cancelled subscription, `on_restarted` reports the new reason `"catch-up"`, and the replacement
+  opens at once when the cancelled one had moved past its first group, otherwise after the `retry` backoff. Code that
+  matches every `RestartReason` gains a case.
+- `caprid-relay`: `caprid_relay.media.LatestValueReader(on_value, *, late=None, on_catch_up=None)` reads a latest-wins
+  track such as telemetry or a control (#447), as in the TypeScript SDK. Pass its `subscription_handlers()` or
+  `want_handlers()`; it drops values older than the newest it judged and those the `late` predicate rejects, calls
+  `on_catch_up` once per run of late values (usually `subscriber.catch_up(key)`), and counts them in `stats`
+  (`LatestValueStats`). It replaces a hand-written "newest group applied" marker.
+
 - `caprid-relay`: a `FrameWriter` on a supervised publisher's track asks for a keyframe (`on_keyframe_needed`) when a
   rotation moves the track to the new generation (#444), as in the TypeScript SDK. Before, it waited for the
   encoder's next scheduled keyframe. The open group still finishes on the old generation.

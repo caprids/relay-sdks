@@ -2981,3 +2981,190 @@ async def test_does_not_restart_a_followed_rotation_when_a_move_was_waiting_to_b
     replacement.accept()
     replacement.send_object(0)
     assert seen == ["object 5", "switched to b", "object 0"]
+
+
+# ------------------------------------------------------------------ catch-up (#447)
+
+
+async def test_catch_up_replaces_a_subscription_that_moved_past_its_first_group_at_once(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    first.accept()
+    for group in (3, 4, 5):
+        first.send_object(group)
+    subscriber.catch_up("video")
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribe without delay")
+    assert first.cancelled
+    second = s.first.latest
+    assert (second.namespace, second.track) == (("room",), "video")
+    second.accept()
+    second.send_object(9)
+    second.send_object(10)
+    assert r.seen == [
+        "subscribed room",
+        "object 3",
+        "object 4",
+        "object 5",
+        "restarted catch-up",
+        "subscribed room",
+        "object 9",
+        "object 10",
+    ]
+
+
+async def test_catch_up_keeps_replacing_at_once_while_each_subscription_progresses(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=SLOW)
+    for round_ in range(3):
+        await until(lambda round_=round_: len(s.first.subscriptions) == round_ + 1, f"subscribe {round_}")
+        current = s.first.subscriptions[round_]
+        current.accept()
+        current.send_object(round_ * 10)
+        current.send_object(round_ * 10 + 1)
+        subscriber.catch_up("video")
+    await until(lambda: len(s.first.subscriptions) == 4, "fourth subscription")
+    assert r.seen.count("restarted catch-up") == 3
+
+
+async def test_catch_up_waits_out_the_backoff_when_the_subscription_never_left_its_first_group(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=SupervisionBackoff(initial_delay=0.3, max_delay=0.3))
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    first.accept()
+    first.send_object(3)
+    first.send_object(3, 1)
+    subscriber.catch_up("video")
+    # The backoff draws from its upper half: at least 150 ms.
+    await asyncio.sleep(0.1)
+    assert first.cancelled
+    assert len(s.first.subscriptions) == 1
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribe after the backoff", 2.0)
+    s.first.latest.accept()
+    s.first.latest.send_object(8)
+    assert r.seen == ["subscribed room", "object 3", "object 3", "restarted catch-up", "subscribed room", "object 8"]
+
+
+async def test_catch_up_is_ignored_for_a_key_that_is_not_wanted_or_was_forgotten(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    first.accept()
+    first.send_object(1)
+    first.send_object(2)
+    subscriber.catch_up("audio")
+    await asyncio.sleep(0.03)
+    assert not first.cancelled
+    assert len(s.first.subscriptions) == 1
+    subscriber.unwant("video")
+    subscriber.catch_up("video")
+    await asyncio.sleep(0.03)
+    assert len(s.first.subscriptions) == 1
+    assert r.seen == ["subscribed room", "object 1", "object 2"]
+
+
+async def test_catch_up_raises_a_type_error_for_a_key_that_is_not_a_string(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, _s = await start_subscriber(cleanup)
+    for key in (None, 7, b"video"):
+        with pytest.raises(TypeError):
+            subscriber.catch_up(cast(str, key))
+
+
+async def test_catch_up_does_nothing_before_the_subscription_is_accepted(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=FAST)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    subscriber.catch_up("video")
+    await asyncio.sleep(0.03)
+    assert not first.cancelled
+    assert len(s.first.subscriptions) == 1
+    first.accept()
+    first.send_object(1)
+    assert r.seen == ["subscribed room", "object 1"]
+
+
+async def test_catch_up_ignores_a_second_call_while_the_want_waits_to_resubscribe(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("video", ["room"], "video", r.handlers, retry=SupervisionBackoff(initial_delay=0.3, max_delay=0.3))
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe")
+    first = s.first.latest
+    first.accept()
+    first.send_object(1)
+    subscriber.catch_up("video")
+    subscriber.catch_up("video")
+    await until(lambda: len(s.first.subscriptions) == 2, "resubscribe after the backoff", 2.0)
+    await asyncio.sleep(0.03)
+    assert len(s.first.subscriptions) == 2
+    assert r.seen.count("restarted catch-up") == 1
+    # The replacement is not accepted yet: a call now does nothing to it.
+    subscriber.catch_up("video")
+    await asyncio.sleep(0.03)
+    assert not s.first.subscriptions[1].cancelled
+    assert len(s.first.subscriptions) == 2
+
+
+async def test_catch_up_leaves_the_other_wants_alone(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    audio_seen: list[str] = []
+    subscriber.want("video", ["room"], "video", r.handlers, retry=FAST)
+    subscriber.want(
+        "audio",
+        ["room"],
+        "audio",
+        WantHandlers(on_restarted=lambda reason, _namespace: audio_seen.append(reason)),
+        retry=FAST,
+    )
+    await until(lambda: len(s.first.subscriptions) == 2, "both subscribe")
+    video, audio = s.first.subscriptions
+    video.accept()
+    audio.accept()
+    video.send_object(1)
+    video.send_object(2)
+    subscriber.catch_up("video")
+    await until(lambda: len(s.first.subscriptions) == 3, "video resubscribes")
+    assert video.cancelled
+    assert not audio.cancelled
+    assert audio_seen == []
+
+
+async def test_catch_up_during_a_move_ends_both_subscriptions(cleanup: list[Callable[[], object]]) -> None:
+    subscriber, s = await start_subscriber(cleanup)
+    r = Recorder()
+    subscriber.want("v", ["room"], "a", r.handlers, retry=SLOW)
+    await until(lambda: len(s.first.subscriptions) == 1, "subscribe a")
+    old = s.first.latest
+    old.accept()
+    old.send_object(1)
+    old.send_object(2)
+    subscriber.want("v", ["room"], "b", r.handlers, retry=SLOW)
+    await until(lambda: len(s.first.subscriptions) == 2, "move to b")
+    pending = s.first.latest
+    subscriber.catch_up("v")
+    await until(lambda: len(s.first.subscriptions) == 3, "resubscribe b")
+    assert old.cancelled
+    assert pending.cancelled
+    assert s.first.latest.track == "b"
+    assert r.seen == ["subscribed room", "object 1", "object 2", "restarted catch-up"]
