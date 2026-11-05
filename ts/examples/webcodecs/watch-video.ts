@@ -225,7 +225,11 @@ export async function watchVideo(
           if (stopped) return;
           // A new decoder with the same config would fail the same way, again and again.
           failedForGood = !producedOutput || error.name === 'NotSupportedError';
-          options.onError?.(error);
+          try {
+            options.onError?.(error);
+          } catch (thrown) {
+            console.error(new Error('onError threw; the watcher carries on', { cause: thrown }));
+          }
           if (stopped || failedForGood) return;
           // A decoder that failed is closed: decode again from the next keyframe with a new one.
           decoder = createDecoder();

@@ -27,6 +27,9 @@ const report = (value) => console.log(redact(typeof value === 'string' ? value :
 const LIMIT_MS = 45;
 const EARLY_MEAN_LIMIT_MS = 5;
 const MAX_STALL_MS = 100;
+// When audio takes over from wall pacing, video holds once by how far audio is behind it: at most the audio player's
+// 400 ms jitter ceiling plus the output delay. A longer pause after resume is a stall.
+const MAX_TAKEOVER_STALL_MS = 500;
 const ticks = (modes) => Object.values(modes).reduce((sum, count) => sum + count, 0);
 const verdicts = {
   // No audio reaches the clock while the context is suspended: wall pacing, and video moves.
@@ -43,7 +46,8 @@ const verdicts = {
     phase.sync.count >= 5 &&
     phase.sync.max <= LIMIT_MS &&
     phase.sync.min >= -LIMIT_MS &&
-    phase.sync.mean >= -EARLY_MEAN_LIMIT_MS,
+    phase.sync.mean >= -EARLY_MEAN_LIMIT_MS &&
+    phase.longestGapMs <= MAX_TAKEOVER_STALL_MS,
   // Muted by gain: reports keep flowing, so audio stays the master, and video keeps moving.
   muted: (phase) =>
     (phase.modes.wall ?? 0) === 0 &&

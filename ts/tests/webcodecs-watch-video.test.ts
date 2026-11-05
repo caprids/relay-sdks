@@ -376,6 +376,26 @@ it('reports a decoder failure to onError and decodes again from the next keyfram
   await watcher.stop();
 });
 
+it('recovers from a decoder failure when onError throws', async () => {
+  const fake = fakeSubscriber();
+  const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  const onError = vi.fn(() => {
+    throw new Error('app bug');
+  });
+  const watching = watchVideo(fake.subscriber, NAMESPACE, fakeCanvas().canvas, { clock: clockAtNow(), onError });
+  fake.deliverCatalog();
+  const watcher = await watching;
+  fake.deliverVideo(0, 0);
+  decoder().emit(timestampOf(0, 0));
+  decoder().fail(new DOMException('decode failed', 'EncodingError'));
+  expect(consoleError.mock.calls[0]?.[0]).toMatchObject({ cause: new Error('app bug') });
+  fake.endGroup(0);
+  fake.deliverVideo(1, 0);
+  expect(FakeDecoder.instances).toHaveLength(2);
+  expect(decoded()).toEqual([['key', timestampOf(1, 0)]]);
+  await watcher.stop();
+});
+
 it.each([
   ['does not support the codec', new DOMException('Unsupported codec', 'NotSupportedError'), true],
   ['fails before its first frame', new DOMException('decode failed', 'EncodingError'), false],

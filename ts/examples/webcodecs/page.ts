@@ -167,6 +167,8 @@ async function watch() {
       if (current.muted) current.listener.input.gain = 0;
       say('audio playing');
     })();
+    // Stopping before video starts skips the await below, and closing the context then rejects whenRunning.
+    audio.catch(() => {});
     current.watcher = await retry('video', stop.signal, (signal) =>
       watchVideo(subscriber, namespace, watched, { clock, onError, signal }),
     );
