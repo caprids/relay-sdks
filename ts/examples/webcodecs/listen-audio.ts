@@ -25,7 +25,7 @@ import {
   warmAudioPlayer,
 } from '@caprid/moq-media';
 import type { RelaySubscriber, RelaySubscription } from '@caprid/relay';
-import { createFrameReader, type FrameReader } from '@caprid/relay/media';
+import { createFrameReader, type FrameReader, mediaSubscribeParameters } from '@caprid/relay/media';
 import { type LaterCatalogs, readCatalog } from './read-catalog.js';
 
 /**
@@ -161,7 +161,7 @@ export async function listenAudio(
       };
       try {
         subscribed.subscription = subscriber.subscribe(
-          { namespace: [...namespace], track: name },
+          { namespace: [...namespace], track: name, parameters: mediaSubscribeParameters('audio') },
           {
             ...reader,
             onError(error) {
