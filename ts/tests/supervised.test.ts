@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { RelayError } from '../src/errors.js';
+import { createFrameWriter } from '../src/frame-writer.js';
 import type { ConnectRelayPublisherOptions } from '../src/publish.js';
 import { SubscriptionConnectionClosedError } from '../src/subscription.js';
 import { type SupervisedPublisher, superviseRelayPublisher } from '../src/supervised-publisher.js';
@@ -1786,6 +1787,113 @@ describe('rotation before the credential expires (#261)', () => {
     connections[1]!.tracks.get('video')!.setDemand(false);
     expect((await changes.next()).value).toBe(false);
     await changes.return?.();
+  });
+
+  it('asks a frame writer for a keyframe when its track moves, and finishes the open group on the old generation', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!;
+    old.tracks.get('video')!.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(track, { onKeyframeNeeded });
+    const frame = (byte: number, key = false) => ({ payload: Uint8Array.of(byte), key });
+    expect((await writer.write(frame(1, true))).kind).toBe('sent');
+
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const next = connections[1]!.tracks.get('video')!;
+    next.setDemand(true);
+    await until(() => onKeyframeNeeded.mock.calls.length === 1, 'a keyframe asked for on the move');
+    expect(writer.keyframeNeeded).toBe(true);
+    // The old generation's viewers keep their GOP until the keyframe comes.
+    expect((await writer.write(frame(2))).kind).toBe('sent');
+    expect((await writer.write(frame(3, true))).kind).toBe('sent');
+    expect(old.tracks.get('video')!.writes).toEqual([Uint8Array.of(1), Uint8Array.of(2)]);
+    expect(next.writes).toEqual([Uint8Array.of(3)]);
+    expect(writer.keyframeNeeded).toBe(false);
+    await until(() => old.closeCalls === 1, 'old generation closed once its group finished');
+    expect(onKeyframeNeeded).toHaveBeenCalledTimes(1);
+    await writer.close();
+  });
+
+  it('asks a frame writer for a keyframe when its track moves while a keyframe opens a group on the old generation', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!.tracks.get('video')!;
+    old.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(track, { onKeyframeNeeded });
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const opening = old.writer.openGroup.bind(old.writer);
+    old.writer.openGroup = async (options) => {
+      // The viewer reaches the next generation while the keyframe's group is opening here.
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return opening(options);
+    };
+    expect((await writer.write({ payload: Uint8Array.of(1), key: true })).kind).toBe('sent');
+    expect(old.writes).toEqual([Uint8Array.of(1)]);
+    expect(onKeyframeNeeded).toHaveBeenCalledTimes(1);
+    expect(writer.keyframeNeeded).toBe(true);
+    await writer.close();
+  });
+
+  it('asks for no keyframe when one waits behind a keyframe that opened its group on the old generation', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!.tracks.get('video')!;
+    old.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(track, { onKeyframeNeeded });
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const opening = old.writer.openGroup.bind(old.writer);
+    old.writer.openGroup = async (options) => {
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return opening(options);
+    };
+    const first = writer.write({ payload: Uint8Array.of(1), key: true });
+    const second = writer.write({ payload: Uint8Array.of(2), key: true });
+    expect([(await first).kind, (await second).kind]).toEqual(['sent', 'sent']);
+    expect(connections[1]!.tracks.get('video')!.writes).toEqual([Uint8Array.of(2)]);
+    expect(onKeyframeNeeded).not.toHaveBeenCalled();
+    expect(writer.keyframeNeeded).toBe(false);
+    await writer.close();
+  });
+
+  it('reports a keyframe dropped when its keyframe request overflows the backlog and resets its group', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!.tracks.get('video')!;
+    old.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    let writer: ReturnType<typeof createFrameWriter> | undefined;
+    const forced: Promise<unknown>[] = [];
+    // An encoder that answers the request with a keyframe at once, from inside the callback.
+    writer = createFrameWriter(track, {
+      maxBacklog: 1,
+      onKeyframeNeeded: () => forced.push(writer!.write({ payload: Uint8Array.of(3), key: true })),
+    });
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const opening = old.writer.openGroup.bind(old.writer);
+    old.writer.openGroup = async (options) => {
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return opening(options);
+    };
+    const first = writer.write({ payload: Uint8Array.of(1), key: true });
+    const queued = writer.write({ payload: Uint8Array.of(2), key: false });
+    expect([(await first).kind, (await queued).kind]).toEqual(['dropped', 'dropped']);
+    expect(forced).toHaveLength(1);
+    expect(await forced[0]).toMatchObject({ kind: 'sent' });
+    expect(connections[1]!.tracks.get('video')!.writes).toEqual([Uint8Array.of(3)]);
+    await writer.close();
   });
 
   it('moves a track with no demand on the old generation at once', async () => {

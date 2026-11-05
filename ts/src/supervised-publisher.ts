@@ -33,7 +33,7 @@ import {
   sleep,
 } from './supervision.js';
 import { namespaceFields, objectPropertyPairs, payloadBytes, trackName, trackPropertyPairs } from './validation.js';
-import { CALL_STARTED_AT, type CallStarted, now } from './write-slot.js';
+import { CALL_STARTED_AT, type CallStarted, type MaybeMovedOff, MOVED_OFF, now } from './write-slot.js';
 
 /** Options for `connectSupervisedPublisher`: the shared connection options, the root namespace and the policy. */
 export interface ConnectSupervisedPublisherOptions extends ConnectRelayOptions {
@@ -682,7 +682,13 @@ class SupervisedTrack {
           // A group its signal aborted is closed without the wrapper hearing of it: release then, or now if already so.
           if (group.closed) release();
           else signal?.addEventListener('abort', onAbort, { once: true });
-          return supervisedGroup(group, () => track.#closed, generation, release);
+          return supervisedGroup(
+            group,
+            () => track.#closed,
+            generation,
+            release,
+            () => track.#binding?.generation !== generation,
+          );
         });
       },
       write: async (payload, options?: WriteOptions) => {
@@ -904,7 +910,8 @@ function supervisedGroup(
   trackClosed: () => boolean,
   generation: Generation,
   release: () => void,
-): RelayGroupWriter {
+  movedOff: () => boolean,
+): RelayGroupWriter & MaybeMovedOff {
   let aborted = false;
   const mapped = async <T>(operation: () => Promise<T>): Promise<T> => {
     try {
@@ -918,6 +925,9 @@ function supervisedGroup(
     }
   };
   return {
+    get [MOVED_OFF]() {
+      return movedOff();
+    },
     get groupId() {
       return group.groupId;
     },

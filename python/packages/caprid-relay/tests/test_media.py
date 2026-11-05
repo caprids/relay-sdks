@@ -916,6 +916,28 @@ class TestKeyframeNeeded:
         assert await kinds(writer, [key(1)]) == ["skipped"], "no demand, but the keyframe arrived all the same"
         assert not writer.keyframe_needed and calls == []
 
+    async def test_a_keyframe_handed_the_turn_covers_a_demand_change_seen_before_it_resumes(self) -> None:
+        calls: list[bool] = []
+        replaced: list[bool] = []
+        track = FakeTrackWriter()
+
+        def stale(frame: Sample) -> bool:
+            # The relay replaces its subscription just after the first keyframe opened its group, so the
+            # writer's watcher wakes after the turn passed to the keyframe waiting behind it.
+            if track.groups and not replaced:
+                replaced.append(True)
+                track.bind(True)
+            return False
+
+        writer: FrameWriter[Sample] = FrameWriter(track, stale=stale, on_keyframe_needed=lambda: calls.append(True))
+        first = asyncio.ensure_future(writer.write(key(0)))
+        second = asyncio.ensure_future(writer.write(key(1)))
+        assert [(await first).kind, (await second).kind] == ["sent", "sent"]
+        await settle()
+
+        assert calls == []
+        assert not writer.keyframe_needed
+
     async def test_every_relay_demand_change_resets_the_gop_and_asks_for_a_keyframe(self) -> None:
         calls: list[bool] = []
         track = FakeTrackWriter()

@@ -680,6 +680,17 @@ and nothing is lost or repeated. Call `rotate()` to rotate now, for example afte
 In a local test with 12 s tokens, 989 objects written every 40 ms over 9 rotations all arrived, with
 no gap longer than 42 ms. See [rotation](../spec/behavior.md#rotation).
 
+For video, viewers keep the old generation's picture until the new generation's first keyframe. A
+frame writer asks for that keyframe through `onKeyframeNeeded` as soon as viewers subscribe to the
+new generation, so honor it. In a test on ORD with 30 fps video and `rotate()` every 5 s, no viewer
+went more than one frame interval without a picture, and video switched 46 to 206 ms after
+`rotate()`. An encoder that ignores the request switches at its next scheduled keyframe, up to one
+keyframe interval later. An encoder that makes keyframes only on request and ignores it switches
+only when the 10 s overlap runs out. The move also reports `true` from `demandChanges()` while
+demand carries over. Force a keyframe on it, but don't restart the encoder. moq-relay can't give a
+live connection a new token today, so every rotation opens a new connection and generation
+([#261](https://github.com/muxinc/relay-sdks/issues/261)).
+
 ### Test recovery by dropping the transport
 
 To check how your application handles a lost connection, close the transport under it on purpose.

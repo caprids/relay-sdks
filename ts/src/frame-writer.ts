@@ -1,5 +1,6 @@
 import { RelayError } from './errors.js';
 import type { PublishProperty, RelayGroupWriter, RelayTrackWriter } from './publish.js';
+import { type MaybeMovedOff, MOVED_OFF } from './write-slot.js';
 
 /**
  * How a {@link FrameWriter} maps frames onto groups. `'keyframe'` is the LOC mapping for video: a keyframe FINs the
@@ -111,6 +112,9 @@ const DEFAULT_BACKLOG: Record<FrameGrouping, number> = { keyframe: 8, frame: Num
 /** A failure ends the track exactly when the SDK says so: `CLOSED`, or the track is closed afterwards. */
 const retired = (track: RelayTrackWriter, error: RelayError) => error.code === 'CLOSED' || track.closed;
 const never = () => false;
+/** Whether the track's subscribers get the rest of `group`. A supervised track can move to another generation under it. */
+const reaching = (group: RelayGroupWriter | undefined): boolean =>
+  group !== undefined && !group.closed && !(group as MaybeMovedOff)[MOVED_OFF];
 
 /**
  * Map encoded frames onto a registered track's groups (spec/behavior.md, "Media publishing").
@@ -288,6 +292,13 @@ export function createFrameWriter<F extends Frame = Frame>(
       }
       // Held before the predicate runs, so a predicate that throws still has the group reset.
       group = opened;
+      // The track moved to another generation while this keyframe opened its group on the old one, and no keyframe
+      // waiting opens one there.
+      if (!reaching(opened) && !waiting.some(({ frame }) => frame.key)) {
+        needKeyframe();
+        // A callback that wrote its keyframe at once can overflow the backlog, which resets this group.
+        if (droppedUnder()) return { kind: 'dropped', groupId: opened.groupId };
+      }
       if (stale(frame)) {
         // Opening the group took long enough that its keyframe is too old: a reset costs less than a late GOP.
         recovering = 'stale';
@@ -459,7 +470,8 @@ export function createFrameWriter<F extends Frame = Frame>(
         // A new or replacement relay subscription, or its end. The write slot has already ended the open group, which
         // the next frame finds closed; the new subscription needs a keyframe. Unless it has one: the change closed every
         // group open at the time, so a group still open came after it, and a keyframe waiting or in progress opens one.
-        const recovered = (group && !group.closed) || keyOpening || waiting.some(({ frame }) => frame.key);
+        // A supervised track's move to another generation closes nothing: the open group finishes on the old one.
+        const recovered = reaching(group) || keyOpening || waiting.some(({ frame }) => frame.key);
         if (!recovered) needKeyframe();
       }
     })().catch(() => {});

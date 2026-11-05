@@ -144,6 +144,12 @@ def _never(frame: object) -> bool:
     return False
 
 
+def _reaching(group: _GroupWriter | None) -> bool:
+    """Whether the track's subscribers get the rest of `group`. A supervised track can move to another
+    generation under it."""
+    return group is not None and not group.closed and not getattr(group, "_moved_off", False)
+
+
 def _settle(turn: asyncio.Future[FrameOutcome | None], outcome: FrameOutcome) -> None:
     """Give a waiting frame its outcome, unless its caller was cancelled and the turn is already done."""
     if not turn.done():
@@ -430,7 +436,7 @@ class FrameWriter(Generic[F]):
     def _next_turn(self) -> None:
         """The frame being written is done: hand the turn to the oldest waiting frame."""
         while self._backlog:
-            _, turn = self._backlog.popleft()
+            waiting, turn = self._backlog.popleft()
 
             if turn.cancelled():
                 # Its caller was cancelled before the handler could leave the backlog: the gap is here.
@@ -439,9 +445,13 @@ class FrameWriter(Generic[F]):
                 continue
 
             if not turn.done():
+                # The frame is served from here, though its caller resumes later: a keyframe covers a demand
+                # change the watcher sees in between.
+                self._key_opening = waiting.key
                 turn.set_result(None)
                 return
 
+        self._key_opening = False
         self._busy = False
         self._idle.set()
 
@@ -504,12 +514,9 @@ class FrameWriter(Generic[F]):
             # A new or replacement relay subscription, or its end. The write slot has already ended the
             # open group, which the next frame finds closed; a keyframe is needed for the new subscription.
             # Unless it has one: the change closed every group open at the time, so a group still open
-            # came after it, and a keyframe waiting or in progress opens one.
-            recovered = (
-                (self._group is not None and not self._group.closed)
-                or self._key_opening
-                or any(frame.key for frame, _ in self._backlog)
-            )
+            # came after it, and a keyframe waiting or in progress opens one. A supervised track's move to
+            # another generation closes nothing: the open group finishes on the old one.
+            recovered = _reaching(self._group) or self._key_opening or any(frame.key for frame, _ in self._backlog)
 
             if not recovered:
                 self._need_keyframe()
@@ -655,6 +662,14 @@ class FrameWriter(Generic[F]):
 
             # Held before the predicate runs, so a predicate that raises still has the group reset.
             self._group = group
+            # The track moved to another generation while this keyframe opened its group on the old one,
+            # and no keyframe waiting opens one there.
+            if not _reaching(group) and not any(waiting.key for waiting, _ in self._backlog):
+                self._need_keyframe()
+
+                if self._drop_epoch != epoch:
+                    # A callback whose keyframe write ran at once overflowed the backlog, which reset this group.
+                    return FrameOutcome("dropped", group_id=group.group_id)
 
             if self._stale(frame):
                 # Opening the group took long enough that its keyframe is too old: a reset costs less than a late GOP.

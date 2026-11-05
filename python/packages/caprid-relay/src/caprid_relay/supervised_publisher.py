@@ -520,6 +520,13 @@ class _SupervisedGroupWriter(RelayGroupWriter):
         return self._group.closed
 
     @property
+    def _moved_off(self) -> bool:
+        """True once a rotation moved the track to another generation: the group finishes, but no longer
+        reaches the track's subscribers. Read by the frame writer."""
+        binding = self._track._binding
+        return binding is None or binding.generation is not self._generation
+
+    @property
     def object_count(self) -> int:
         return self._group.object_count
 

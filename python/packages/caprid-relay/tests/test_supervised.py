@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import sys
 import time
 import warnings
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 
@@ -31,6 +33,7 @@ from caprid_relay import (
     supervised_publisher,
 )
 from caprid_relay._supervision import RESUBSCRIBE_BACKOFF, _Backoff, backoff_delay, new_generation, wait_any
+from caprid_relay.media import FrameWriter
 from caprid_relay.supervised_publisher import _supervise_relay_publisher
 from caprid_relay.supervised_subscriber import _supervise_relay_subscriber
 from moq_core import KeyValuePair, MessageParameters, MoqtObject, PublishDone, SubgroupEnd
@@ -1621,6 +1624,146 @@ async def test_rotation_moves_a_track_once_it_has_demand_on_the_next_generation(
     p.connections[1].tracks["video"].set_demand(False)
     assert await asyncio.wait_for(anext(changes), 1) is False
     await changes.aclose()  # ty: ignore[unresolved-attribute]
+
+
+@dataclass(frozen=True, slots=True)
+class _Frame:
+    payload: bytes
+    key: bool = False
+    properties: tuple[KeyValuePair, ...] = ()
+    discontinuity: bool = False
+
+
+async def test_rotation_asks_a_frame_writer_for_a_keyframe_and_finishes_the_open_group_on_the_old_generation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    asked: list[None] = []
+    writer = FrameWriter(track, on_keyframe_needed=lambda: asked.append(None))
+    assert (await writer.write(_Frame(b"\x01", key=True))).kind == "sent"
+
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    following = p.connections[1].tracks["video"]
+    following.set_demand(True)
+    await until(lambda: len(asked) == 1, "a keyframe asked for on the move")
+    assert writer.keyframe_needed
+    # The old generation's viewers keep their GOP until the keyframe comes.
+    assert (await writer.write(_Frame(b"\x02"))).kind == "sent"
+    assert (await writer.write(_Frame(b"\x03", key=True))).kind == "sent"
+    assert [group.objects for group in old.groups] == [[b"\x02"]]
+    assert len(following.groups) == 1
+    assert not writer.keyframe_needed
+    await until(lambda: p.connections[0].close_calls == 1, "old generation closed once its group finished")
+    assert len(asked) == 1
+    await writer.close()
+
+
+async def test_rotation_asks_a_frame_writer_for_a_keyframe_when_the_move_lands_while_one_opens_its_group(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    asked: list[None] = []
+    writer = FrameWriter(track, on_keyframe_needed=lambda: asked.append(None))
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    old_writer = p.connections[0].tracks["video"].writer
+    opening = old_writer.open_group
+
+    async def open_group(payload: bytes | None = None, **options: Any) -> Any:
+        # The viewer reaches the next generation while the keyframe's group is opening here.
+        p.connections[1].tracks["video"].set_demand(True)
+        await asyncio.sleep(0.005)
+        return await opening(payload, **options)
+
+    old_writer.open_group = open_group  # ty: ignore[invalid-assignment]
+    assert (await writer.write(_Frame(b"\x01", key=True))).kind == "sent"
+    assert len(old.groups) == 1
+    assert len(asked) == 1
+    assert writer.keyframe_needed
+    await writer.close()
+
+
+async def test_rotation_asks_for_no_keyframe_when_one_waits_behind_a_keyframe_opened_on_the_old_generation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    asked: list[None] = []
+    writer = FrameWriter(track, on_keyframe_needed=lambda: asked.append(None))
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    old_writer = old.writer
+    opening = old_writer.open_group
+
+    async def open_group(payload: bytes | None = None, **options: Any) -> Any:
+        p.connections[1].tracks["video"].set_demand(True)
+        await asyncio.sleep(0.005)
+        return await opening(payload, **options)
+
+    old_writer.open_group = open_group  # ty: ignore[invalid-assignment]
+    first = asyncio.ensure_future(writer.write(_Frame(b"\x01", key=True)))
+    second = asyncio.ensure_future(writer.write(_Frame(b"\x02", key=True)))
+    assert [(await first).kind, (await second).kind] == ["sent", "sent"]
+    assert len(old.groups) == 1
+    assert len(p.connections[1].tracks["video"].groups) == 1
+    assert asked == []
+    assert not writer.keyframe_needed
+    await writer.close()
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="eager tasks came in Python 3.12")
+async def test_rotation_reports_a_keyframe_dropped_when_its_keyframe_request_overflows_the_backlog(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    forced: list[asyncio.Task[Any]] = []
+    writer: FrameWriter[_Frame] = FrameWriter(
+        track,
+        max_backlog=1,
+        on_keyframe_needed=lambda: forced.append(asyncio.create_task(writer.write(_Frame(b"\x03", key=True)))),
+    )
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    old_writer = old.writer
+    opening = old_writer.open_group
+
+    async def open_group(payload: bytes | None = None, **options: Any) -> Any:
+        p.connections[1].tracks["video"].set_demand(True)
+        await asyncio.sleep(0.005)
+        return await opening(payload, **options)
+
+    old_writer.open_group = open_group  # ty: ignore[invalid-assignment]
+    first = asyncio.ensure_future(writer.write(_Frame(b"\x01", key=True)))
+    queued = asyncio.ensure_future(writer.write(_Frame(b"\x02")))
+    loop = asyncio.get_running_loop()
+    factory = loop.get_task_factory()
+    # An encoder that answers the request with a keyframe at once: an eager task runs up to its first wait.
+    loop.set_task_factory(cast(Any, asyncio).eager_task_factory)
+    try:
+        outcomes = [(await first).kind, (await queued).kind]
+    finally:
+        loop.set_task_factory(factory)
+    assert outcomes == ["dropped", "dropped"]
+    assert len(forced) == 1
+    assert (await forced[0]).kind == "sent"
+    assert len(p.connections[1].tracks["video"].groups) == 1
+    await writer.close()
 
 
 async def test_rotation_moves_a_track_without_demand_at_once(cleanup: list[Callable[[], object]]) -> None:

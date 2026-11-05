@@ -132,6 +132,15 @@ export const CALL_STARTED_AT: unique symbol = Symbol('callStartedAt');
 /** Options carrying {@link CALL_STARTED_AT}. */
 export type CallStarted = { readonly [CALL_STARTED_AT]?: number };
 
+/**
+ * An internal property of a supervised publisher's group writer: true once a rotation moved the group's track to
+ * another generation. The group still finishes on its own, but it no longer reaches the track's subscribers.
+ */
+export const MOVED_OFF: unique symbol = Symbol('movedOff');
+
+/** A group writer that may carry {@link MOVED_OFF}. */
+export type MaybeMovedOff = { readonly [MOVED_OFF]?: boolean };
+
 export function createWriteSlot(deps: WriteSlotDependencies): WriteSlot {
   const {
     openSubgroup,
