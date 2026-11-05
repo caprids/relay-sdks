@@ -97,6 +97,25 @@ export interface AudioListener {
 }
 
 /**
+ * Resolve once `context` is running, as after a user gesture resumes it. Start `listenAudio` then: the player takes
+ * every frame that arrives, and a suspended context plays none of them, so a listener started earlier holds all the
+ * audio since it started and spends seconds trimming it once the context resumes, with the clock (and any video on
+ * it) following that backlog. Rejects if the context closes first.
+ */
+export function whenRunning(context: BaseAudioContext): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const check = () => {
+      if (context.state !== 'running' && context.state !== 'closed') return;
+      context.removeEventListener('statechange', check);
+      if (context.state === 'running') resolve();
+      else reject(new Error('The AudioContext closed before it ran'));
+    };
+    context.addEventListener('statechange', check);
+    check();
+  });
+}
+
+/**
  * Play the audio track of the broadcast at `namespace`, such as the WebCodecs example's microphone: the catalog gives
  * the decoder config, a frame reader orders the frames, and the audio player buffers and plays them. With no video,
  * the playout clock is created for audio only, so it does not wait 2 s for keyframes that never come; with
