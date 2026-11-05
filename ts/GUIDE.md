@@ -884,20 +884,21 @@ one stream instead of waiting for a FIN on every frame. Pass the first object to
 wait for the stream, which a bare `openGroup()` has no object to charge.
 
 ```ts
-import { RelayError } from '@caprid/relay';
+import { RelayError, type RelayGroupWriter } from '@caprid/relay';
 
 const video = publisher.registerTrack({ track: 'video', writeTimeoutMs: 10_000 });
 const lifetime = new AbortController();
-const group = await video.openGroup({ signal: lifetime.signal });
+let group: RelayGroupWriter | undefined;
 try {
+  group = await video.openGroup({ signal: lifetime.signal });
   for (const frame of encodedGop) {
     await group.write(frame.bytes, { properties: frame.properties });
   }
   await group.close();
 } catch (error) {
-  group.abort(error);
-  // The relay replaced or ended its subscription mid-group, as when the first viewer is on another relay (below):
-  // the group is gone, and the track carries on. Start the next group at the next keyframe.
+  group?.abort(error);
+  // The relay replaced or ended its subscription while the group opened or was written, as when the first viewer is
+  // on another relay (below): the group is gone, and the track carries on. Start the next group at the next keyframe.
   if (!(error instanceof RelayError && error.code === 'SUBSCRIPTION_CHANGED')) throw error;
 }
 ```
