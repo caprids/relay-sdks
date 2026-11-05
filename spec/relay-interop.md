@@ -195,6 +195,27 @@ over native QUIC, three runs per case (relay-sdks #402, comment "Validation: fol
   numbering in 42 runs, at the relay, across the mesh, or in a subscriber (comment "Validation:
   Group IDs"): each publisher connection is a route of its own, and the next subscription starts on
   a fresh cache.
+- **The crash gap is the relay's.** After a crash a want waits until moq-relay ends the dead
+  publisher's session at its QUIC idle timeout, and only then does the replacement's announcement
+  reach it. The done(0) came 10.8-13.1 s after the kill in the validation, and 11.1-13.0 s in the
+  probes of #402's description, even when the replacement had announced 0.5 s after the kill.
+  Draft-20 §9.5 (draft-22 §7.6, draft-23 §7.7) says that a relay that receives an authorized
+  PUBLISH_NAMESPACE matching existing subscriptions to other upstream sessions MUST send the new
+  publisher a SUBSCRIBE for each of them, which would carry them to the replacement as soon as it
+  announces. moq-relay 0.17.x does not appear to. That is inferred from #402's measurements, not
+  read in moq-relay's code. No subscriber logic shortens the gap, because nothing reaches a
+  subscriber before the done. Only the publisher can, by ending its session before it goes: a clean
+  close gave done(2) 47-134 ms later. A GOAWAY from the publisher (draft-20 §10.4) announces the end
+  too, but the SDKs do not send one, and it was not measured.
+- **Restarting under the same name.** A replacement that publishes the same track and numbers its
+  groups from 0 again works on moq-relay, as above, but is outside the spec's model. Draft-20 §2.4.3
+  (draft-22 and draft-23 §2.5) says that a publisher that loses state and resumes on the same track
+  risks colliding with objects published before. It offers three ways out: a new track name or
+  namespace, as the supervised publisher's generations do; a first Group ID larger than any used
+  before, for example one based on the current time; or TRACK_STATUS, to learn the largest Group ID
+  published. Against a relay other than moq-relay, a publisher that restarts under the same name
+  should use time-based Group IDs. The SDKs number each track's groups from 0 and cannot do that
+  today, so restart under a new namespace there.
 
 ## Duplicate announce
 

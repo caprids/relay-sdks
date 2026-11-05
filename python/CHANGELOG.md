@@ -30,6 +30,14 @@ is in [docs/releasing.md](../docs/releasing.md).
     counts as progress. Before, it reset the backoff, so a want whose publisher ended a track but stayed connected
     re-subscribed about three times a second, receiving the track's last object again each time.
   - A plain subscription is unchanged: it reports the done (`on_publisher_done`) and never subscribes again.
+- Docs only, no code change:
+  - The README points at caprid.com's [credentials guide](https://www.caprid.com/docs/guides/credentials/) for
+    Client tokens.
+  - `SequencedFrame.key` is described as set on a group's first frame; under frame grouping that is every frame only
+    when each group holds one.
+  - `spec/relay-interop.md` adds two notes on publisher restarts: after a crash, the gap until a want reaches the
+    replacement is moq-relay's idle timeout, 10.8-13.1 s through relay.mux.global; and restarting a track under the
+    same name with Group IDs from 0 is outside the draft's model on other relays.
 
 ## 0.3.0
 
