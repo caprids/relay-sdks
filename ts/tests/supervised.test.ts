@@ -1621,6 +1621,31 @@ describe('rotation before the credential expires (#261)', () => {
     await writer.close();
   });
 
+  it('asks for no keyframe when one waits behind a keyframe that opened its group on the old generation', async () => {
+    const { publisher, connections } = await publishers([]);
+    const track = publisher.registerTrack({ track: 'video' });
+    const old = connections[0]!.tracks.get('video')!;
+    old.setDemand(true);
+    await until(() => track.hasDemand, 'demand on the first generation');
+    const onKeyframeNeeded = vi.fn();
+    const writer = createFrameWriter(track, { onKeyframeNeeded });
+    publisher.rotate();
+    await until(() => connections[1]?.tracks.has('video') === true, 'track registered on the next generation');
+    const opening = old.writer.openGroup.bind(old.writer);
+    old.writer.openGroup = async (options) => {
+      connections[1]!.tracks.get('video')!.setDemand(true);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return opening(options);
+    };
+    const first = writer.write({ payload: Uint8Array.of(1), key: true });
+    const second = writer.write({ payload: Uint8Array.of(2), key: true });
+    expect([(await first).kind, (await second).kind]).toEqual(['sent', 'sent']);
+    expect(connections[1]!.tracks.get('video')!.writes).toEqual([Uint8Array.of(2)]);
+    expect(onKeyframeNeeded).not.toHaveBeenCalled();
+    expect(writer.keyframeNeeded).toBe(false);
+    await writer.close();
+  });
+
   it('moves a track with no demand on the old generation at once', async () => {
     const { publisher, connections } = await publishers([]);
     const writer = publisher.registerTrack({ track: 'audio' });

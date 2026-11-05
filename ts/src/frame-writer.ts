@@ -292,8 +292,9 @@ export function createFrameWriter<F extends Frame = Frame>(
       }
       // Held before the predicate runs, so a predicate that throws still has the group reset.
       group = opened;
-      // The track moved to another generation while this keyframe opened its group on the old one.
-      if (!reaching(opened)) needKeyframe();
+      // The track moved to another generation while this keyframe opened its group on the old one, and no keyframe
+      // waiting opens one there.
+      if (!reaching(opened) && !waiting.some(({ frame }) => frame.key)) needKeyframe();
       if (stale(frame)) {
         // Opening the group took long enough that its keyframe is too old: a reset costs less than a late GOP.
         recovering = 'stale';

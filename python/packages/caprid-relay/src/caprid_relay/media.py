@@ -658,8 +658,9 @@ class FrameWriter(Generic[F]):
 
             # Held before the predicate runs, so a predicate that raises still has the group reset.
             self._group = group
-            # The track moved to another generation while this keyframe opened its group on the old one.
-            if not _reaching(group):
+            # The track moved to another generation while this keyframe opened its group on the old one,
+            # and no keyframe waiting opens one there.
+            if not _reaching(group) and not any(waiting.key for waiting, _ in self._backlog):
                 self._need_keyframe()
 
             if self._stale(frame):

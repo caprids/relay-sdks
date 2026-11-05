@@ -1489,6 +1489,37 @@ async def test_rotation_asks_a_frame_writer_for_a_keyframe_when_the_move_lands_w
     await writer.close()
 
 
+async def test_rotation_asks_for_no_keyframe_when_one_waits_behind_a_keyframe_opened_on_the_old_generation(
+    cleanup: list[Callable[[], object]],
+) -> None:
+    publisher, p = await start_rotating_publisher(cleanup, [])
+    track = publisher.register_track("video")
+    old = p.connections[0].tracks["video"]
+    old.set_demand(True)
+    await until(lambda: track.has_demand, "demand on the first generation")
+    asked: list[None] = []
+    writer = FrameWriter(track, on_keyframe_needed=lambda: asked.append(None))
+    publisher.rotate()
+    await until(lambda: len(p.connections) == 2 and "video" in p.connections[1].tracks, "registered on the next")
+    old_writer = old.writer
+    opening = old_writer.open_group
+
+    async def open_group(payload: bytes | None = None, **options: Any) -> Any:
+        p.connections[1].tracks["video"].set_demand(True)
+        await asyncio.sleep(0.005)
+        return await opening(payload, **options)
+
+    old_writer.open_group = open_group  # ty: ignore[invalid-assignment]
+    first = asyncio.ensure_future(writer.write(_Frame(b"\x01", key=True)))
+    second = asyncio.ensure_future(writer.write(_Frame(b"\x02", key=True)))
+    assert [(await first).kind, (await second).kind] == ["sent", "sent"]
+    assert len(old.groups) == 1
+    assert len(p.connections[1].tracks["video"].groups) == 1
+    assert asked == []
+    assert not writer.keyframe_needed
+    await writer.close()
+
+
 async def test_rotation_moves_a_track_without_demand_at_once(cleanup: list[Callable[[], object]]) -> None:
     publisher, p = await start_rotating_publisher(cleanup, [])
     writer = publisher.register_track("audio")

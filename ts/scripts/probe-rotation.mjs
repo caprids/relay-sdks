@@ -70,9 +70,10 @@ const played = [];
 const clock = createPlayoutClock();
 const reader = createFrameReader(createFrameSequencer({ clock }), {
   onFrame(frame) {
-    // No decoder: the clock paces by wall time from the first frame shown.
-    clock.due(frame.timestampUs);
-    played.push(at());
+    // No decoder: the clock paces by wall time from the first frame shown. A held frame is shown when its wait ends.
+    const decision = clock.due(frame.timestampUs);
+    if (decision.action === 'show') played.push(at());
+    else if (decision.action === 'wait') played.push(at() + decision.waitUs / 1000);
   },
 });
 const switches = [];
@@ -140,13 +141,13 @@ reader.close();
 await subscriber.close();
 await publisher.close();
 
+/** The longest silence in [from, to], counting from the last time before it and through to its end. */
 const longestGap = (times, from, to) => {
+  const sorted = [...times].sort((a, b) => a - b);
+  const points = [sorted.findLast((t) => t < from) ?? from, ...sorted.filter((t) => t >= from && t <= to), to];
   let longest = 0;
-  for (let i = 1; i < times.length; i++) {
-    if (times[i] < from || times[i - 1] > to) continue;
-    longest = Math.max(longest, times[i] - times[i - 1]);
-  }
-  return longest;
+  for (let i = 1; i < points.length; i++) longest = Math.max(longest, points[i] - points[i - 1]);
+  return Math.round(longest);
 };
 for (const rotatedAt of rotations) {
   const window = [rotatedAt, rotatedAt + everyMs - 500];

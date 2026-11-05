@@ -681,7 +681,7 @@ no gap longer than 42 ms. See [rotation](../spec/behavior.md#rotation).
 For video, viewers keep the old generation's picture until the new generation's first keyframe. A
 frame writer asks for that keyframe through `onKeyframeNeeded` as soon as viewers subscribe to the
 new generation, so honor it. Measured on ORD with 30 fps video and `rotate()` every 5 s, no viewer
-went more than one frame interval without a picture. Video switched 56–181 ms after `rotate()`.
+went more than one frame interval without a picture. Video switched 47–206 ms after `rotate()`.
 An encoder that ignores the request switches at its next natural keyframe, up to one keyframe
 interval later. With keyframes made only on request, it switched only when the 10 s overlap ran
 out. The move also reports `true` from `demandChanges()` while demand carries over. Force a keyframe
