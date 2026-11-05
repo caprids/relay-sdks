@@ -68,12 +68,23 @@ const outcomes = {};
 const arrivals = { video: [], telemetry: [] };
 const played = [];
 const clock = createPlayoutClock();
+/** Frames held for a `wait` decision; a switch discards them, as a player would. */
+const held = new Set();
+const present = (timestampUs) => {
+  const decision = clock.due(timestampUs);
+  if (decision.action === 'show') played.push(at());
+  else if (decision.action === 'wait') {
+    const timer = setTimeout(() => {
+      held.delete(timer);
+      present(timestampUs);
+    }, decision.waitUs / 1000);
+    held.add(timer);
+  }
+};
 const reader = createFrameReader(createFrameSequencer({ clock }), {
   onFrame(frame) {
-    // No decoder: the clock paces by wall time from the first frame shown. A held frame is shown when its wait ends.
-    const decision = clock.due(frame.timestampUs);
-    if (decision.action === 'show') played.push(at());
-    else if (decision.action === 'wait') played.push(at() + decision.waitUs / 1000);
+    // No decoder: the clock paces by wall time from the first frame shown.
+    present(frame.timestampUs);
   },
 });
 const switches = [];
@@ -95,7 +106,11 @@ for (const name of ['video', 'telemetry']) {
       onSwitched: (info) => {
         switches.push([at(), name]);
         cutting.add(name);
-        if (name === 'video') reader.onSwitched(info);
+        if (name === 'video') {
+          for (const timer of held) clearTimeout(timer);
+          held.clear();
+          reader.onSwitched(info);
+        }
       },
       onError: (error) => console.error(name, error),
     },

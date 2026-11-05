@@ -436,7 +436,7 @@ class FrameWriter(Generic[F]):
     def _next_turn(self) -> None:
         """The frame being written is done: hand the turn to the oldest waiting frame."""
         while self._backlog:
-            _, turn = self._backlog.popleft()
+            waiting, turn = self._backlog.popleft()
 
             if turn.cancelled():
                 # Its caller was cancelled before the handler could leave the backlog: the gap is here.
@@ -445,9 +445,13 @@ class FrameWriter(Generic[F]):
                 continue
 
             if not turn.done():
+                # The frame is served from here, though its caller resumes later: a keyframe covers a demand
+                # change the watcher sees in between.
+                self._key_opening = waiting.key
                 turn.set_result(None)
                 return
 
+        self._key_opening = False
         self._busy = False
         self._idle.set()
 
