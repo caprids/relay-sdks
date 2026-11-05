@@ -1,6 +1,8 @@
 """Subscribe-side session driver tests, ported from the Video.js MOQT session tests (Apache-2.0)."""
 
 import asyncio
+import gc
+import weakref
 from typing import Any
 
 import pytest
@@ -703,6 +705,76 @@ class TestCreateMoqtSession:
 
         await wait_for(lambda: on_reset.called)
         assert not on_end.called
+
+        harness.session.destroy()
+
+    # #419: a fetch whose data stream had ended stayed in the session, so its handlers, and every payload they
+    # kept, lived as long as the session did. With nothing else pointing at them, they must be collectable once it
+    # ends.
+    async def test_holds_nothing_of_a_fetch_once_its_data_stream_ends_or_resets(self) -> None:
+        class Payloads(list[Any]):
+            """A list that can be weakly referenced."""
+
+        class Witness:
+            """What a fetch's handlers keep: the payloads they collect, and a signal for the end."""
+
+            def __init__(self) -> None:
+                self.payloads = Payloads()
+                self.finished = asyncio.Event()
+
+            def on_entry(self, entry: FetchStreamEntry) -> None:
+                if isinstance(entry, FetchObject):
+                    self.payloads.append(entry.payload)
+
+            def on_end(self) -> None:
+                self.finished.set()
+
+            def on_reset(self, _reset: Any) -> None:
+                self.finished.set()
+
+        harness = create_session_harness()
+        harness.fake.send_server_setup()
+        await harness.session.ready
+        held: list[weakref.ref[Any]] = []
+
+        async def fetch_once(end: str) -> None:
+            witness = Witness()
+            held.extend([weakref.ref(witness), weakref.ref(witness.payloads)])
+
+            # The handle is dropped too: only the session could keep the fetch.
+            request_id = harness.session.fetch(
+                options(["live"], "video", MessageParameters(location_filter=CURRENT_GROUP)),
+                FetchHandlers(on_entry=witness.on_entry, on_end=witness.on_end, on_reset=witness.on_reset),
+            ).request_id
+            request = await harness.fake.next_request_stream()
+            await request.first_message
+            await request.send(encode_request_ok())
+            # The relay then FINs the request stream, as moq-relay 0.17.9 did on every FETCH measured for #419;
+            # a stream left open would keep its reader, and so the fetch, alive by itself.
+            await request.fin()
+
+            data = fetch_stream_bytes(request_id, b"\0" * 1024)
+            if end == "fin":
+                harness.fake.open_data_stream(data)
+                await asyncio.wait_for(witness.finished.wait(), 5)
+                return
+
+            data_stream = harness.fake.open_controlled_data_stream()
+            await data_stream.write(data)
+            await wait_for(lambda: len(witness.payloads) == 1)
+            reason = RuntimeError("reset mid-replay")
+            data_stream.reset(reason)
+            await asyncio.wait_for(witness.finished.wait(), 5)
+            # The fake transport keeps its pipes, and each pipe the error it was reset with; the traceback that
+            # error picked up while being raised would pin the fetch's frames, and so the fetch.
+            reason.__traceback__ = None
+
+        for _ in range(4):
+            await fetch_once("fin")
+            await fetch_once("reset")
+
+        gc.collect()
+        assert [ref for ref in held if ref() is not None] == []
 
         harness.session.destroy()
 

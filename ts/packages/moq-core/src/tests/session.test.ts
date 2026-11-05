@@ -1,3 +1,6 @@
+import { setFlagsFromString } from 'node:v8';
+import { runInNewContext } from 'node:vm';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import { ByteWriter, StreamReader, utf8Encode } from '../protocol/bytes.js';
@@ -999,6 +1002,81 @@ describe('createMoqtSession', () => {
 
     await vi.waitFor(() => expect(onReset).toHaveBeenCalled());
     expect(onEnd).not.toHaveBeenCalled();
+
+    harness.session.destroy();
+  });
+
+  // #419: a fetch whose data stream had ended stayed in the session, so its handlers, and every payload they kept,
+  // lived as long as the session did. With nothing else pointing at them, they must be collectable once it ends.
+  it('holds nothing of a fetch once its data stream ends or resets', async () => {
+    setFlagsFromString('--expose-gc');
+    const gc = runInNewContext('gc') as () => void;
+    const harness = createSessionHarness();
+    const held: WeakRef<object>[] = [];
+
+    harness.sendServerSetup();
+    await harness.session.ready;
+
+    const fetchOnce = async (end: 'fin' | 'reset') => {
+      const payloads: Uint8Array[] = [];
+      let done!: () => void;
+      const finished = new Promise<void>((resolve) => {
+        done = resolve;
+      });
+      const handlers = {
+        onEntry: (entry: { kind: string; payload?: Uint8Array }) => {
+          if (entry.payload) payloads.push(entry.payload);
+        },
+        onEnd: () => done(),
+        onReset: () => done(),
+      };
+
+      held.push(new WeakRef(handlers), new WeakRef(payloads));
+      // The handle is dropped too: only the session could keep the fetch.
+      const { requestId } = harness.session.fetch(
+        { trackNamespace: ['live'], trackName: 'video', parameters: { locationFilter: CURRENT_GROUP } },
+        handlers
+      );
+      const request = await harness.nextRequestStream();
+
+      await request.firstMessage;
+      await request.send(encodeRequestOk());
+
+      const writer = new ByteWriter();
+
+      writer.writeVarint(0x05);
+      writer.writeVarint(requestId);
+      writer.writeVarint(0x1c); // group delta + object delta + priority present
+      writer.writeVarint(41);
+      writer.writeVarint(0);
+      writer.writeUint8(128);
+      writer.writeVarint(1024);
+      writer.writeBytes(new Uint8Array(1024));
+
+      if (end === 'fin') {
+        harness.openDataStream(writer.toBytes());
+      } else {
+        const data = harness.openControlledDataStream();
+
+        await data.write(writer.toBytes());
+        await vi.waitFor(() => expect(payloads).toHaveLength(1));
+        data.reset(new Error('reset mid-replay'));
+      }
+
+      await finished;
+    };
+
+    for (let i = 0; i < 4; i++) {
+      await fetchOnce('fin');
+      await fetchOnce('reset');
+    }
+
+    expect(held).toHaveLength(16);
+
+    // WeakRef targets stay alive until the current job ends, so collect from a later one.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    gc();
+    expect(held.filter((ref) => ref.deref() !== undefined)).toHaveLength(0);
 
     harness.session.destroy();
   });

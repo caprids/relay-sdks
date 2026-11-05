@@ -1409,6 +1409,10 @@ class MoqtSessionImpl implements MoqtSession {
       // A reset mid-replay means entries may be missing — never report it
       // as the clean FIN `onEnd` promises.
       record.handlers.onReset?.({ error });
+    } finally {
+      // The data stream was the fetch's last event, so the session forgets it here (#419): kept, the record's
+      // handlers held everything they had collected for the session's life.
+      this.#fetches.delete(requestId);
     }
   }
 

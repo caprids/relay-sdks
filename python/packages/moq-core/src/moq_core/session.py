@@ -1337,6 +1337,10 @@ class MoqtSession:
         except Exception as error:  # a reset mid-replay means entries may be missing
             # Never report it as the clean FIN `on_end` promises.
             _call(record.handlers.on_reset, FetchReset(error=error))
+        finally:
+            # The data stream was the fetch's last event, so the session forgets it here (#419): kept,
+            # the record's handlers held everything they had collected for the session's life.
+            self._fetches.pop(request_id, None)
 
     # --------------------------------------------------------------------------
     # Incoming bidirectional streams (server-initiated requests)
